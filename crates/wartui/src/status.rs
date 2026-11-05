@@ -5,7 +5,7 @@
 //! answers is listening, and one that does not is either wedged or not there.
 //!
 //! `dropped_tx` is the number worth watching: frames the bridge threw away because
-//! they arrived faster than the host drained the USB endpoint — a host not reading,
+//! they arrived faster than the host drained the link — a host not reading,
 //! or a burst too big to queue — so observations lost on this side of the radio
 //! rather than on the air.
 //!
@@ -84,6 +84,7 @@ pub async fn run(args: Args) -> Result<()> {
         rx_oversize,
         queues,
         radio_link,
+        host_uart_errors,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -97,7 +98,7 @@ pub async fn run(args: Args) -> Result<()> {
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.
     println!("heap free  {} bytes", info.heap_free);
-    for line in diagnostic_lines(&queues, radio_link.as_ref()) {
+    for line in diagnostic_lines(&queues, radio_link.as_ref(), host_uart_errors) {
         println!("{line}");
     }
 
@@ -106,7 +107,7 @@ pub async fn run(args: Args) -> Result<()> {
         // attached drops everything it hears — so a large number is not a fault.
         println!(
             "\n{dropped_tx} frames were discarded over those {}, because a host was \n\
-             not reading or a burst arrived faster than USB could drain it. That \n\
+             not reading or a burst arrived faster than the link could drain it. That \n\
              includes any time the bridge spent powered with nothing attached. \n\
              `wartui run` reports drops from the moment it connects, which is the \n\
              number that says whether a capture lost data.",
@@ -132,8 +133,13 @@ fn radio_line(radio: &RadioInfo) -> String {
     )
 }
 
-/// One line per reported queue, then the UART link's counters when it has any.
-fn diagnostic_lines(queues: &QueueStats, radio_link: Option<&RadioLinkStats>) -> Vec<String> {
+/// One line per reported queue, the UART link's counters when it has any, then the host link's
+/// line errors.
+fn diagnostic_lines(
+    queues: &QueueStats,
+    radio_link: Option<&RadioLinkStats>,
+    host_uart_errors: u32,
+) -> Vec<String> {
     let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
     if let Some(s) = radio_link {
         lines.push(format!(
@@ -150,6 +156,7 @@ fn diagnostic_lines(queues: &QueueStats, radio_link: Option<&RadioLinkStats>) ->
             s.radio_uart_errors,
         ));
     }
+    lines.push(format!("  host link   uart_errors {host_uart_errors}"));
     lines
 }
 
@@ -300,19 +307,20 @@ mod tests {
             })
             .expect("room");
         assert_eq!(
-            diagnostic_lines(&queues, None),
+            diagnostic_lines(&queues, None, 0),
             [
                 "  queue host-bulk  1024/262144 bytes  dropped 0",
                 "  queue radio-send-jobs  3/8 entries  dropped 2",
                 "  queue radio-jobs  20/32 entries  dropped 0",
                 "  queue radio-up-priority  96/8192 bytes  dropped 0",
+                "  host link   uart_errors 0",
             ]
         );
     }
 
     #[test]
-    fn status_prints_nothing_extra_when_queues_empty() {
-        assert!(diagnostic_lines(&QueueStats::new(), None).is_empty());
+    fn status_prints_only_host_link_when_queues_empty() {
+        assert_eq!(diagnostic_lines(&QueueStats::new(), None, 3), ["  host link   uart_errors 3"]);
     }
 
     #[test]
@@ -363,6 +371,7 @@ mod tests {
             rx_oversize: 0,
             queues: QueueStats::new(),
             radio_link: None,
+            host_uart_errors: 0,
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

@@ -795,6 +795,7 @@ def bridge(db, ctx):
               f"{rel(longest_flat[1])} (rx_count flat, bridge up)")
     bridge_queues(queues)
     bridge_radio_link(db, lives)
+    bridge_host_uart(db)
 
 
 # Mirrors QueueId::unit in crates/wartui-proto/src/link/mod.rs.
@@ -883,6 +884,26 @@ def bridge_radio_link(db, lives):
         flag("WARN", "bridge",
              "UART link errors between P4 and C6: "
              + ", ".join(f"{c} {n}" for c, n in errors.items()) + beyond, sql)
+
+
+def bridge_host_uart(db):
+    """P4 host-link reads that saw one or more line errors or overflows over the capture: host
+    bytes lost or corrupted.
+
+    A P4 count, so it rebases only when it falls, as `BridgeLoss::host_uart_errors` does. The P4
+    loses host bytes while it writes its own flash, which only `flash-bridge` makes it do.
+    """
+    rows = db.q("SELECT host_uart_errors FROM bridge_status ORDER BY id")
+    if not rows:
+        return
+    total = sum(since_boot_delta(cur[0], prev[0], False) for prev, cur in zip(rows, rows[1:]))
+    print(f"  host link  host_uart_errors {total}")
+    if total:
+        flag("WARN", "bridge",
+             f"{total} P4 host-link reads saw line errors or overflows: host frames were lost "
+             "or corrupted "
+             "on the way in, which nothing but the P4's own flash work should cause",
+             "SELECT id, rx_at, uptime_ms, host_uart_errors FROM bridge_status ORDER BY id")
 
 
 def host(db, ctx):

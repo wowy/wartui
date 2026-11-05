@@ -98,7 +98,7 @@ fn stat(queue: QueueId, dropped: u32) -> QueueStat {
 fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
     let mut pair = pair();
     assert_eq!(pair.ready(10), None);
-    assert_eq!(pair.usb_serial_mac(), None);
+    assert_eq!(pair.bridge_mac(), None);
     assert_eq!(pair.on_tick(RADIO_WAIT_MS - 1), PairEvent::None);
     assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
     match pair.ready(1_000) {
@@ -110,7 +110,7 @@ fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
         }
         other => panic!("not a Ready: {other:?}"),
     }
-    assert_eq!(pair.usb_serial_mac(), Some(C6_MAC));
+    assert_eq!(pair.bridge_mac(), Some(C6_MAC));
     assert_eq!(pair.fault(), None);
 }
 
@@ -165,7 +165,7 @@ fn pair_rejects_sends_and_reports_when_link_revision_differs() {
     let fault = pair.fault().unwrap();
     assert!(fault.contains(&(LINK_REVISION + 1).to_string()));
     assert!(fault.contains(&LINK_REVISION.to_string()));
-    assert_eq!(pair.usb_serial_mac(), Some(C6_MAC));
+    assert_eq!(pair.bridge_mac(), Some(C6_MAC));
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn pair_status_sums_host_and_radio_drops() {
     };
     let host = [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 6)];
     let down = stat(QueueId::RadioDown, 1);
-    match pair.status(3_000, host, down, radio_link, 6) {
+    match pair.status(3_000, host, down, radio_link, 6, 9) {
         BridgeToHost::Status {
             peer_count,
             rx_count,
@@ -228,8 +228,10 @@ fn pair_status_sums_host_and_radio_drops() {
             rx_oversize,
             queues,
             radio_link: Some(radio_link),
+            host_uart_errors,
         } => {
             assert_eq!((peer_count, rx_count, rx_oversize), (3, 40, 2));
+            assert_eq!(host_uart_errors, 9);
             // The host's 6 and both of the C6's rings toward the P4, 4 and 2.
             assert_eq!(dropped_tx, 12);
             assert_eq!(uptime_ms, 2_900);
@@ -276,6 +278,7 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
         [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 0)],
         stat(QueueId::RadioDown, 0),
         radio_link_zero(),
+        0,
         0,
     ) {
         BridgeToHost::Status { peer_count, .. } => assert_eq!(peer_count, 3),
@@ -449,7 +452,7 @@ fn pair_updates_and_refuses_commands_when_digest_differs() {
     assert!(matches!(pair.state(), RadioState::Updating(_)));
     assert!(!pair.bridges());
     // The host still gets a Ready naming the C6, so it sees the fault.
-    assert_eq!(pair.usb_serial_mac(), Some(C6_MAC));
+    assert_eq!(pair.bridge_mac(), Some(C6_MAC));
     assert!(pair.ready(1_000).is_some());
     assert!(matches!(pair.route(&send(7)), Route::Refuse(Some(_))));
     assert_eq!(pair.route(&HostToBridge::AddPeer { mac: [2; 6] }), Route::Refuse(None));

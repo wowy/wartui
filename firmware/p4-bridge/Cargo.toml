@@ -5,7 +5,7 @@
 
 [package]
 name = "wartui-p4-bridge-fw"
-description = "The host half of the wartui P4 split bridge: USB high speed to the host, a UART link to the ESP32-P4-WIFI6's ESP32-C6."
+description = "The host half of the wartui P4 split bridge: a UART link to the host through the board's CH343, and one to the ESP32-P4-WIFI6's ESP32-C6."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -26,18 +26,15 @@ gps = ["wartui-firmware/gps"]
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }
 esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }
-# The executor and time driver `embassy-usb` runs on. No allocator: nothing here
-# spawns a thread or allocates.
+# The executor and time driver. No allocator: nothing here spawns a thread or allocates.
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp32p4"] }
 # `embassy-executor`, `embassy-futures`, `embassy-sync` and `embassy-time` stay at the minor
 # versions `esp-hal` and `esp-rtos` build against; Dependabot takes only their patch releases.
-# `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning. `embassy-usb` is
-# outside that rule; its 0.6 shares `embassy-usb-driver` 0.2 with esp-hal's OTG driver.
+# `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
-embassy-usb = { version = "0.6.0", default-features = false }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the other
 # bridges, the updates on flash the node and the C6 use, and the GPS reader with `gps`.

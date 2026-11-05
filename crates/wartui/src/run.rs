@@ -261,8 +261,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     let pool = pool(config.pool);
     // Seeded from the file, and saved back by the view when the transport changes it. The
-    // simulator never changes it, so a simulated run leaves `[bridge] mac` as it found it.
-    let memory = BridgeMemory::holding(config.bridge.mac);
+    // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
+    let memory = BridgeMemory::holding(config.bridge.mac).on_port(config.bridge.serial.clone());
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
     let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
 

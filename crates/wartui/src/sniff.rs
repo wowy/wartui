@@ -487,6 +487,7 @@ mod tests {
             rx_oversize: 0,
             queues: wartui_proto::link::QueueStats::new(),
             radio_link: None,
+            host_uart_errors: 0,
         };
         assert!(heard(LinkEvent::Message(status)));
     }

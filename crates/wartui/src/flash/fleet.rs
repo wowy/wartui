@@ -1,7 +1,7 @@
 //! `wartui flash-fleet` — one node image onto every attached ESP32-C5.
 //!
-//! **No bridge has to be known.** A P4 bridge is told apart by its USB IDs, skipped and never
-//! probed, so this command reads no `wartui.toml`. Every other attached Espressif native-USB
+//! **No bridge has to be known.** A P4 bridge's CH343 is told apart by its USB IDs, skipped and
+//! never probed, so this command reads no `wartui.toml`. Every other attached Espressif native-USB
 //! ESP32-C5 gets node firmware, including any other C5 board on the host: `--skip` is what keeps
 //! one, and any other chip fails the cross-check below.
 //!
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::Args as ClapArgs;
-use wartui_bridge::ports::{PortCandidate, SERIAL_JTAG_PID, is_p4_bridge};
+use wartui_bridge::ports::{PortCandidate, SERIAL_JTAG_PID, is_ch343};
 use wartui_bridge::serial::discover_ports;
 use wartui_proto::mac::Mac;
 
@@ -191,7 +191,7 @@ fn select(candidates: &[PortCandidate], skips: &[Mac]) -> Vec<Verdict> {
     candidates
         .iter()
         .map(|candidate| {
-            let skip = if is_p4_bridge(candidate) {
+            let skip = if is_ch343(candidate) {
                 Some(Skip::P4Bridge)
             } else if candidate.pid != Some(SERIAL_JTAG_PID) {
                 Some(Skip::NotSerialJtag(candidate.pid))
@@ -281,7 +281,7 @@ fn in_parallel<T: Sync, R: Send>(
 mod tests {
     use std::path::Path;
 
-    use wartui_bridge::ports::{ESPRESSIF_VID, TEST_PID, TEST_VID, candidate};
+    use wartui_bridge::ports::{CH343_PID, CH343_VID, ESPRESSIF_VID, candidate};
 
     use super::super::normalize;
     use super::super::release_asset;
@@ -311,18 +311,15 @@ mod tests {
 
     #[test]
     fn flash_fleet_skips_board_when_it_is_a_p4_bridge() {
-        let mut p4 = candidate("/dev/ttyACM3", Some(TEST_VID), Some(TEST_PID), None);
-        p4.product = Some("wartui p4 bridge".to_owned());
-        let verdicts = select(&[p4.clone()], &[]);
+        let p4 = candidate("/dev/ttyACM3", Some(CH343_VID), Some(CH343_PID), None);
+        let verdicts = select(std::slice::from_ref(&p4), &[]);
         assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge)]);
         assert!(Skip::P4Bridge.to_string().contains("wartui flash-bridge"));
     }
 
     #[test]
     fn flash_fleet_skips_p4_bridge_and_probes_node_when_no_bridge_is_known() {
-        let mut p4 =
-            candidate("/dev/ttyACM0", Some(TEST_VID), Some(TEST_PID), Some("10:BD:A3:EC:44:C0"));
-        p4.product = Some("wartui p4 bridge".to_owned());
+        let p4 = candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), Some("5CF7153520"));
         let node = board("/dev/ttyACM1", Some(&NODE_MAC));
         let verdicts = select(&[p4.clone(), node.clone()], &[]);
         assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge), Verdict::Probe(node)]);

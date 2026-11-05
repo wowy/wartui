@@ -19,7 +19,7 @@ fn bridge_memory_recalls_seeded_mac_when_built_holding_one() {
 #[test]
 fn bridge_memory_recalls_mac_when_remembered() {
     let memory = BridgeMemory::none();
-    memory.remember(address());
+    memory.remember_on(address(), None);
     assert_eq!(memory.recall(), Some(address()));
 }
 
@@ -36,7 +36,7 @@ fn bridge_memory_recalls_nothing_when_forget_is_called() {
 fn bridge_memory_recalls_nothing_when_disabled() {
     let memory = BridgeMemory::none();
     memory.set_enabled(false);
-    memory.remember(address());
+    memory.remember_on(address(), None);
     assert_eq!(memory.recall(), None);
 }
 
@@ -44,7 +44,7 @@ fn bridge_memory_recalls_nothing_when_disabled() {
 fn bridge_memory_ignores_remember_when_disabled() {
     let memory = BridgeMemory::none();
     memory.set_enabled(false);
-    memory.remember(address());
+    memory.remember_on(address(), None);
     memory.set_enabled(true);
     assert_eq!(memory.recall(), None, "nothing was held while off");
 }
@@ -65,12 +65,12 @@ fn bridge_memory_shares_slot_and_switch_when_cloned() {
     // to reach the view that saves it.
     let memory = BridgeMemory::none();
     let transport = memory.clone();
-    transport.remember(address());
+    transport.remember_on(address(), None);
     assert_eq!(memory.recall(), Some(address()));
     memory.set_enabled(false);
     assert!(!transport.is_enabled());
     assert_eq!(transport.recall(), None);
-    transport.remember(address());
+    transport.remember_on(address(), None);
     memory.set_enabled(true);
     assert!(transport.is_enabled());
     assert_eq!(memory.recall(), None);
@@ -81,6 +81,59 @@ fn bridge_memory_recalls_again_when_reenabled_after_remember() {
     let memory = BridgeMemory::none();
     memory.set_enabled(false);
     memory.set_enabled(true);
-    memory.remember(address());
+    memory.remember_on(address(), None);
     assert_eq!(memory.recall(), Some(address()));
+}
+
+#[test]
+fn bridge_memory_recalls_serial_when_remembered_on_a_port() {
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    assert_eq!(memory.recall(), Some(address()));
+    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
+    let seeded = BridgeMemory::holding(Some(address())).on_port(Some("5CF7153520".to_owned()));
+    assert_eq!(seeded.recall_serial().as_deref(), Some("5CF7153520"));
+}
+
+#[test]
+fn bridge_memory_drops_serial_when_another_address_is_remembered_without_port() {
+    // A port held for another address would put the wrong board first.
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    let other = mac::parse("A0:F2:62:10:9D:24").expect("an address");
+    memory.remember_on(other, None);
+    assert_eq!(memory.recall(), Some(other));
+    assert_eq!(memory.recall_serial(), None);
+}
+
+#[test]
+fn bridge_memory_keeps_serial_when_same_address_is_remembered_without_port() {
+    // A caller that does not know the port has not learned that it moved.
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), None);
+    assert_eq!(memory.recall(), Some(address()));
+    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
+}
+
+#[test]
+fn bridge_memory_matches_when_given_exactly_what_it_recalls() {
+    let memory = BridgeMemory::none();
+    assert!(memory.matches(None, None));
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    assert!(memory.matches(Some(address()), Some("5CF7153520")));
+    assert!(!memory.matches(Some(address()), None));
+    assert!(!memory.matches(None, Some("5CF7153520")));
+    memory.set_enabled(false);
+    assert!(memory.matches(None, None), "off holds nothing");
+}
+
+#[test]
+fn bridge_memory_forgets_serial_when_disabled() {
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.set_enabled(false);
+    assert_eq!(memory.recall_serial(), None);
+    memory.set_enabled(true);
+    assert_eq!(memory.recall_serial(), None, "off cleared it");
 }

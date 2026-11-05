@@ -51,7 +51,7 @@
 //! and the radio link counters are since-boot counts, rebased like the bridge's own: a restart
 //! between two rows is the reply's uptime falling at any row between them. That uptime is the C6's.
 //! The link's `packets`, `crc_fail`, `bad_magic`, `seq_gap` and `uart_errors` are the P4's and run on
-//! through a C6 restart, so they rebase only when they fall, and the `radio_*` counters follow the
+//! through a C6 restart, so they rebase only when they fall, as `host_uart_errors` does, and the `radio_*` counters follow the
 //! uptime. A P4 reboot whose counters regrow past the last row reads as no reboot, which is rare and
 //! only undercounts. Queues follow the same split, by [`QueueId::on_p4`].
 //!
@@ -122,6 +122,9 @@ pub struct BridgeLoss {
     pub queues: Vec<QueueLoss>,
     /// The radio link's errors, or `None` when no reply carried them, as off the P4 split bridge.
     pub radio_link: Option<RadioLinkLoss>,
+    /// The P4's host-link reads that saw one or more line errors or overflows: host bytes lost
+    /// or corrupted on the way in.
+    pub host_uart_errors: u64,
 }
 
 /// How full one of the bridge's queues got, and what it dropped during the capture.
@@ -446,7 +449,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
                 s.radio_link_packets, s.radio_link_crc_fail, s.radio_link_bad_magic,
                 s.radio_link_seq_gap, s.radio_link_uart_errors, s.radio_link_radio_crc_fail,
                 s.radio_link_radio_bad_magic,
-                s.radio_link_radio_seq_gap, s.radio_link_radio_uart_errors,
+                s.radio_link_radio_seq_gap, s.radio_link_radio_uart_errors, s.host_uart_errors,
                 q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
          FROM bridge_status s LEFT JOIN bridge_queue q ON q.status_id = s.id
          ORDER BY s.id, q.rowid",
@@ -457,6 +460,8 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut status_id: Option<i64> = None;
     // The previous status row's figures. The first row is only a baseline.
     let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
+    // The previous status row's host UART errors, a P4 count that runs on through a C6 restart.
+    let mut prev_host_uart: Option<u64> = None;
     // The radio link counters of the last status row that carried them, and the restarts seen by
     // then.
     let mut prev_radio_link: Option<(RadioLinkLoss, u64)> = None;
@@ -485,6 +490,9 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
                 loss.host_read += host_frames.saturating_sub(prev_host);
             }
             prev = Some((received, dropped, uptime, host_frames, oversize));
+            let host_uart = count(row.get("host_uart_errors")?);
+            loss.host_uart_errors += advance_since_boot(host_uart, prev_host_uart, false);
+            prev_host_uart = Some(host_uart);
 
             if let Some(now) = RadioLinkLoss::read(row)? {
                 let sums = loss.radio_link.get_or_insert_default();

@@ -18,13 +18,15 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `sniff`        | Print every wartui frame the bridge hears, decoded, a line per record               |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
-| `ports`        | List the Espressif boards and P4 bridges attached, and the address of each          |
+| `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
 Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
 or clear frame. So `sniff` on a second bridge on the channel hears every heartbeat and no sightings.
+`sniff` also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
+for one, since the P4 stops writing to a host it has not heard from in 15 s.
 If the attached bridge is swapped mid-run, `run` re-sends every assignment so each node learns the
 new address. The same bridge reconnecting or rebooting sends nothing; nodes already address it.
 
@@ -324,6 +326,7 @@ node = "AA:BB:CC:DD:EE:FF"
 [bridge]
 remember = true
 mac = "AA:BB:CC:DD:EE:FF"
+serial = "5CF7153520"
 
 [gps]
 bridge-rate-hz = 5
@@ -342,20 +345,21 @@ wdgwars = ""
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
 | `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
 | `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
+| `[bridge] serial`      | —       | The USB serial number of the CH343 that bridge answered on                     |
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
-file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, either beside
-its table's `remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed
-twice is refused too, naming the file and key. `status`, `sniff`, `reset` and `ota` read only
-`[bridge] mac`, and treat a broken file as no bridge remembered, so it cannot stop them.
-`flash-bridge` reads only `[bridge] mac` too, but refuses a broken file, since it decides which
-board gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save, `b` writes the
-Bluetooth node, and `run` writes `[bridge] mac` when the bridge it remembers changes; see "Keyboard
-commands" and "When nothing arrives". `flash-bridge` writes `[bridge] mac` for a board it found and
-flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
+file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, any of them
+or `serial` beside its table's `remember = false`, or an `excluded-ssids` entry that is empty, over
+32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset` and
+`ota` read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
+cannot stop them. `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it
+decides which board gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the
+whole file on save, `b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when
+the bridge it remembers changes; see "Keyboard commands" and "When nothing arrives". `flash-bridge`
+writes both for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
 under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
@@ -415,14 +419,14 @@ wartui flash-fleet --skip 10:BD:A3:EC:44:C0
 | `--jobs N`              | `4`            | How many boards to probe or flash at once                                  |
 | `--dry-run`             | off            | Probe and report; build, fetch and flash nothing                           |
 
-**No bridge has to be known.** A P4 bridge is told apart by its USB IDs and skipped, so the run
-reads no `wartui.toml`. Every attached Espressif native-USB ESP32-C5 that isn't named with `--skip` gets
+**No bridge has to be known.** A P4 bridge's CH343 is told apart by its USB IDs and skipped, so
+the run reads no `wartui.toml`. Every attached Espressif native-USB ESP32-C5 that isn't named with `--skip` gets
 node firmware, including any other C5 board on the host.
 
 A board is flashed only when all five hold; otherwise it is skipped and listed with the reason:
 
-1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A P4
-   bridge is skipped with its own reason: `flash-bridge` updates it.
+1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A
+   CH343 is skipped with its own reason: it is the P4 bridge's port, which `flash-bridge` updates.
 2. It is not named with `--skip`.
 3. `espflash board-info` reads an ESP32-C5.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
@@ -458,8 +462,8 @@ candidate once, since `board-info` does.
 
 ### Flashing the bridge
 
-`flash-bridge` updates the P4 bridge over the USB link it bridges on, so after its first flash
-(`firmware/p4-bridge/README.md` § "First flash") the CH343 is not needed.
+`flash-bridge` updates the P4 bridge over the link it bridges on: the Type-C cable to its CH343,
+the one its first flash used (`firmware/p4-bridge/README.md` § "First flash").
 
 ```sh
 wartui flash-bridge --dry-run                       # which board, and the image's source
@@ -470,27 +474,29 @@ wartui flash-bridge --bridge 71:F4
 | Flag                 | Default        | What it is                                                            |
 |----------------------|----------------|-----------------------------------------------------------------------|
 | `--features LIST`    | —              | The firmware's features, for a build; a release has the default set   |
-| `--bridge PATH\|MAC` | see below      | The P4 bridge to update, which must be attached; `71:F4` works too    |
+| `--bridge PATH\|MAC` | see below      | The P4 bridge to update, which must answer; `71:F4` works too         |
 | `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
 | `--image BIN`        | —              | Send this app-only image rather than building or fetching one         |
 | `--firmware-dir DIR` | the checkout's | Build the image from the P4 bridge firmware here                      |
-| `--dry-run`          | off            | Report the board and the image's source; build, fetch and send nothing |
+| `--dry-run`          | off            | Report the board and the image's source; build, fetch and send no image |
 
-**The board is chosen before anything is sent**, among the attached P4 bridges, from the first that
+**The board is chosen before any image is sent.** Each attached CH343 is asked which bridge it is,
+as `wartui ports` asks, and the choice is made among those that answered, from the first that
 applies. A node beside the bridge changes nothing.
 
 1. The board `--bridge` names.
-2. The bridge remembered in `wartui.toml`, which must be attached.
-3. With none remembered, the only P4 bridge attached.
+2. The bridge remembered in `wartui.toml`, which must answer.
+3. With none remembered, the only P4 bridge that answered.
 
 The run is refused when:
 
-- The remembered bridge is not attached, because the board present is known not to be it.
-- The remembered bridge is attached but is not a P4 bridge. Name the P4 bridge with `--bridge`.
-- `--bridge` matches no attached P4 bridge, or several. Naming a node is the first of these.
-- Several P4 bridges are attached and none is known. The refusal lists their addresses; pick one
-  with `--bridge`.
-- No P4 bridge is attached. A blank P4 shows up only as its CH343, and takes its first flash by hand.
+- The remembered bridge does not answer, because the bridge present is known not to be it.
+- The remembered address is a node's. Name the P4 bridge with `--bridge`.
+- `--bridge` matches no P4 bridge that answered, or several. Naming a node is the first of these.
+- Several P4 bridges answer and none is known. The refusal lists their addresses; pick one with
+  `--bridge`.
+- No P4 bridge answers. A blank P4 is a CH343 that does not answer, and takes its first flash by
+  hand.
 
 A board found without `--bridge` is saved to `wartui.toml` as the bridge once updated, so `run` and
 the next `flash-bridge` open it first; with `remember bridge` off, nothing is saved. A board
@@ -504,8 +510,10 @@ The image comes from the same three sources as `flash-fleet`'s, with `firmware/p
 and it fits the P4's 1920 KiB app slot.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
-The P4 checks it, switches slots and reboots into it on trial; the run waits up to 120 s for it to
-come back, and the connection's first frame confirms it. When the new image carries a new C6
+The P4 checks it, switches slots and reboots into it on trial. The connection holds through the
+reboot, and the run asks for a status every second, since a rebooted P4 says nothing until it hears
+a host. It waits up to 120 s for the P4 to come back, and the first frame after the C6 answers
+confirms the image. When the new image carries a new C6
 image, the P4 then updates its C6, and the run prints that progress for up to 30 s. A P4 already
 running the image is left alone. The board prints, by its last two octets:
 
@@ -928,19 +936,20 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 
 ## When nothing arrives
 
-**wartui finds the bridge by asking.** It opens each attached P4 bridge in turn, and never a node,
+**wartui finds the bridge by asking.** It opens each attached CH343 in turn, and never a node,
 and keeps the first that answers the link protocol. `run` saves that address to
-`wartui.toml` as `[bridge] mac`, so later runs open only that port. A capture given `--bridge` saves
+`wartui.toml` as `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only
+that port. A capture given `--bridge` saves
 the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
 the board it found and flashed. `status`, `sniff`, `reset` and `ota` read it and save nothing, so
 questioning a board changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
 unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
 
-Deleting the `mac` line is always safe, costs one slower start, and fixes wartui opening the wrong
-board. It also self-corrects: an answering board replaces it, and the remembered board is dropped
+Deleting the `mac` and `serial` lines is always safe, costs one slower start, and fixes wartui
+opening the wrong board. It also self-corrects: an answering board replaces it, and the remembered board is dropped
 if, opened with no other to try, it stays silent, as a reflashed bridge does. A board merely passed
 over in a sweep is kept; being slower than its neighbor proves nothing. With `remember bridge` off
-(settings, or `[bridge] remember = false`), `run` drops `mac`, saves no bridge, and sweeps on every
+(settings, or `[bridge] remember = false`), `run` drops both, saves no bridge, and sweeps on every
 start.
 
 The header's `waiting for a bridge to announce itself` has three causes; the fault box names it:
@@ -948,12 +957,12 @@ The header's `waiting for a bridge to announce itself` has three causes; the fau
 - **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
   it opens each new CDC-ACM device for a few seconds to ask whether it is a modem.
-- **No fault**: the port opened and the dongle is not answering, or a program that took no lock on
-  the port, such as `cat`, is reading its answers.
-- **`swept N boards and none answered`**: no attached P4 bridge answered.
+- **No fault**: the port opened and the bridge is not answering, or a program that took no lock on
+  the port, such as `cat`, is reading its answers. A P4 that is still booting misses the one
+  question; the next attempt asks again.
+- **`swept N boards and none answered`**: no attached CH343 answered.
 
-With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A reboot can move
-`ttyACM0` to `ttyACM1`; `--bridge 10:BD:A3:EC:44:C0` names the board either way. A power cycle is
+With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A power cycle is
 the fallback for a bridge that answers nothing.
 
 ```sh
@@ -973,23 +982,30 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`radio link  …`**: the UART link's packets from the C6 and its error counters at each end;
   the `radio_` counters are the C6's. Every error count means corrupted or lost packets, and one
   bad packet can move more than one count. A C6 restart reads as one `seq_gap`.
+- **`host link  uart_errors N`**: host-link reads since boot that saw one or more line errors or
+  overflows on the P4's UART from the host. Each is host bytes lost or corrupted, as while the P4
+  writes its own flash during `flash-bridge`; the update rewinds over them. Outside an update it
+  should stay 0.
 - **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
 
-`wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is
-for answers nothing, so it transmits before anything has identified itself. A board that is not
-reading takes one packet and queues the rest, and closing the port waits for them.
+`wartui reset` takes about thirty seconds to fail on a node named by path. The board it is for
+answers nothing, so it transmits before anything has identified itself. A node that is not reading
+takes one packet and queues the rest, and closing the port waits for them.
 
-`run` never pays this cost. It asks with one frame, however long it then waits.
+`run` never pays this cost. It asks a CH343 every 500 ms until the bridge answers, since a CH343
+drains whatever it is sent, and any other port with one frame. Once the bridge has answered, it
+sends a status poll whenever 10 s pass without a frame, since the P4 stops writing to a host it has
+not heard from in 15 s.
 
 `wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
-goes to the `--bridge` board, else the remembered one, else the only one attached. With
-several and none known, it asks for `--bridge` rather than guessing. An address no attached P4
-bridge carries is refused before anything is opened. A board with an address is opened by it, so
-the command finds a P4 that comes back on another device node. One named by path is waited for on
-that path until it has announced itself.
+goes to the `--bridge` board, else the CH343 the bridge was remembered on, else the only CH343
+attached. With several and none known, it asks for `--bridge` rather than guessing. An address is
+matched by asking each CH343, except the remembered bridge's own, which goes to its remembered port
+unasked; one no CH343 answers with is refused before anything is opened. The P4 comes back on the
+same port, since its CH343 stays on the bus.
 
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,
@@ -1020,26 +1036,29 @@ nothing about which board it reaches. `wartui ports` names them:
 
 ```
 $ wartui ports
-/dev/serial/by-id/usb-wartui_wartui_p4_bridge_10:BD:A3:EC:44:C0-if00
-  10:BD:A3:EC:44:C0     wartui p4 bridge  (1209:0001)
+/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00
+  98:A3:16:81:96:C4     P4 bridge on a CH343  (1a86:55d3)
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
 
-The P4 bridge enumerates as `1209:0001`, product `wartui p4 bridge`. Its serial number is its C6's
-MAC, the address nodes see as the bridge, or the P4's own MAC when the C6 never answered.
+**A node's USB serial number is its MAC**, so the OS already pairs each node's device node with
+its radio's address: nothing opened, no `esp` tool, no reflash. It is also why each board has its
+own `by-id` name, built by udev from the serial. Other USB devices carry a manufacturing serial;
+one reporting none reads `address not reported` and is named by its socket.
 
-**An ESP32's USB serial number is its MAC**, so the OS already pairs each device node with its
-radio's address: nothing opened, no `esp` tool, no reflash. The command rests on that, on Linux and
-macOS alike. It is also why each board has its own `by-id` name, built by udev from the serial.
-Other USB devices carry a manufacturing serial; one reporting none reads `address not reported` and
-is named by its socket.
+**The P4 bridge is reached through its board's CH343** (`1a86:55d3`), whose serial number is the
+CH343's own. So `wartui ports` asks each CH343, every 500 ms for up to 3 s, and prints the address
+its `Ready` names: the C6's MAC, the address nodes see as the bridge, or the P4's own MAC when the
+C6 never answered. A CH343 that does not answer reads `not answering`, as a blank P4 does, and one another
+program holds reads `busy or refused`.
 
 The bridge is the row with the address the fleet table shows for the bridge; a node is a row whose
 heartbeats `wartui sniff` attributes to its address. Across board generations the OUI differs too.
 Either name works as `--bridge`, as does an address's last one to five octets (two hex digits each)
-when exactly one P4 bridge matches. An address names only a P4 bridge, and a path is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several
-matches are refused with a list, never guessed. Keep the address: a device node moves when the board
+when exactly one bridge answers with it. An address names only a bridge that answers, and a path
+is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several matches
+are refused with a list, never guessed. Keep the address: a device node moves when the board
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 
 ```sh

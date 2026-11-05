@@ -1,4 +1,4 @@
-//! The host-to-bridge USB framing.
+//! The host link's framing.
 //!
 //! Both sample sets carry one case per variant and panic rather than `ok()` on a full
 //! vector: a push that failed silently would drop a variant out of every round trip
@@ -140,6 +140,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         rx_oversize: 2,
         queues: QueueStats::new(),
         radio_link: None,
+        host_uart_errors: 0,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -532,6 +533,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         rx_oversize: 0xDEAD_BEEF,
         queues: QueueStats::new(),
         radio_link: None,
+        host_uart_errors: 0,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -607,6 +609,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
             radio_seq_gap: 7,
             radio_uart_errors: 8,
         }),
+        host_uart_errors: 9,
     };
     assert_eq!(round_trip(&status), status);
 }

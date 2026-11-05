@@ -185,10 +185,13 @@ CREATE TABLE IF NOT EXISTS observation (
 -- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is
 -- how many frames of ours this host had read off the link when the reply arrived, taken with
 -- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
--- difference less the `host_frames` difference is frames lost on USB plus the bridge's
+-- difference less the `host_frames` difference is frames lost on the host link plus the bridge's
 -- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
 -- The `radio_link_*` columns are the P4 split bridge's UART link counters since boot, named as
--- `RadioLinkStats` names them, and NULL for a bridge without that link.
+-- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` counts
+-- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
+-- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
+-- flash.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -206,7 +209,8 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   radio_link_radio_crc_fail INTEGER,
   radio_link_radio_bad_magic INTEGER,
   radio_link_radio_seq_gap INTEGER,
-  radio_link_radio_uart_errors INTEGER
+  radio_link_radio_uart_errors INTEGER,
+  host_uart_errors INTEGER NOT NULL
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
@@ -1241,8 +1245,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         rx_oversize, radio_link_packets, radio_link_crc_fail,
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
-                        radio_link_radio_seq_gap, radio_link_radio_uart_errors)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1261,6 +1265,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     radio_link.map(|s| s.radio_bad_magic),
                     radio_link.map(|s| s.radio_seq_gap),
                     radio_link.map(|s| s.radio_uart_errors),
+                    status.host_uart_errors,
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1354,6 +1359,7 @@ mod tests {
             rx_oversize: 0,
             queues: Default::default(),
             radio_link: None,
+            host_uart_errors: 0,
         })
     }
 

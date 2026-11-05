@@ -1,6 +1,6 @@
 [package]
 name = "wartui-bridge"
-description = "Host-side link to the USB ESP-NOW bridge dongle, plus a node simulator."
+description = "Host-side link to the ESP-NOW bridge, plus a node simulator."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

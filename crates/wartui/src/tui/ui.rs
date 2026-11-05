@@ -38,7 +38,7 @@ pub(super) struct Ui {
     upload: Upload,
     /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
     /// the next change rather than repeating every frame.
-    bridge_tried: Option<Option<Mac>>,
+    bridge_tried: Option<(Option<Mac>, Option<String>)>,
 }
 
 /// How long a notice replaces the footer's key help and totals.
@@ -253,17 +253,21 @@ impl Ui {
     /// Silent, since nothing the operator did changed it: a failure is logged at `debug`
     /// and tried again only once the bridge changes.
     pub(super) fn poll_bridge(&mut self) {
-        let current = self.settings.bridge_memory.recall();
-        if current == self.settings.saved.bridge.mac {
+        // Compared in place, since this runs every frame; cloned only once it has changed.
+        let memory = &self.settings.bridge_memory;
+        let saved = &self.settings.saved.bridge;
+        if memory.matches(saved.mac, saved.serial.as_deref()) {
             // In step with the file, so a bridge whose save failed is tried again when it
             // comes back.
             self.bridge_tried = None;
             return;
         }
-        if self.bridge_tried == Some(current) {
+        if let Some((mac, serial)) = &self.bridge_tried
+            && memory.matches(*mac, serial.as_deref())
+        {
             return;
         }
-        self.bridge_tried = Some(current);
+        self.bridge_tried = Some((memory.recall(), memory.recall_serial()));
         if let Err(error) = save_bridge(&mut self.settings) {
             tracing::debug!(error = error.trim_start_matches("; "), "could not save the bridge");
         }

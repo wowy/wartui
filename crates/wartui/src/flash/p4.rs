@@ -1,10 +1,11 @@
-//! `wartui flash-bridge` on a P4 bridge: its app image, sent over the USB link it bridges on.
+//! `wartui flash-bridge` on a P4 bridge: its app image, sent over the link it bridges on.
 //!
-//! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343, a
-//! second cable, so only the first flash uses it
+//! **The cable the host already holds carries the update.** The board's Type-C reaches the P4's
+//! UART0 through a CH343, the port the first flash also uses
 //! (`firmware/p4-bridge/README.md` § "First flash"). After that the P4 takes its app image as
 //! `HostToBridge::Update` ops: the `radio_link::update` layout it sends its own C6, driven by the
-//! same `Sender`, on a [`TICK`] and on each status.
+//! same `Sender`, on a [`TICK`] and on each status. Host bytes the P4 loses while it writes a
+//! sector cost nothing: the sender waits for each sector's status and rewinds on what it says.
 //!
 //! **The image is checked before it is sent**: the P4's chip, an app-only layout, the
 //! descriptor's project name ([`PROJECT`]), the segment checksum and appended SHA-256
@@ -16,19 +17,23 @@
 //! restarts, since `Ready.uptime_ms` is the C6's. While sending, a `Ready` naming the image the
 //! P4 ran before is that, and the send goes on: a P4 that did reboot dropped the session, which
 //! the sender notices. One naming another image means the P4 is no longer running the image the
-//! send began against, so the send stops. After `Install`, only a `Ready` after the link drops is
-//! the new life ([`on_ready`]).
+//! send began against, so the send stops. After `Install`, the next new life is the P4's
+//! ([`on_ready`]): its CH343 stays on the bus, so the connection holds through the reboot, and
+//! the transport reports the new life by its uptime falling.
 //!
-//! **`Ready.image` names the outcome.** The P4 installs, reboots into the new image on trial,
-//! and the transport reconnects; its `Identify` is the first host frame, which confirms the
-//! image. A `Ready` carrying the new digest is installed. One carrying the old is a rollback: the
-//! P4's trial watchdog resets a hung image twice, and the third boot returns it to the old one,
-//! which is why the wait is [`COME_BACK`].
+//! **`Ready.image` names the outcome.** The P4 installs and reboots into the new image on trial,
+//! which writes nothing until a host frame arrives. So from the install on, the host sends a
+//! `GetStatus` every [`POLL`]; the first frame after the C6's hello confirms the image. A `Ready`
+//! carrying the new digest is installed. One carrying the old is a rollback: the P4's trial
+//! watchdog resets a hung image twice, and the third boot returns it to the old one, which is why
+//! the wait is [`COME_BACK`]. The bootloader's log after each reset arrives as garbage, which a
+//! held connection passes over.
 //!
-//! **The confirm is reported, not assumed.** The P4 says whether the `Identify` confirmed its
+//! **The confirm is reported, not assumed.** The P4 says whether a host frame confirmed its
 //! image in a line after its `Ready`, in the text `wartui_proto::link` holds for both ends. Only
 //! that line is "confirmed": an image whose confirm failed, or whose line never came, is still on
-//! trial and rolls back unless a host confirms it.
+//! trial and rolls back unless a host confirms it. The polls go on until the C6's update is
+//! followed, so the P4's gate stays open for its lines.
 //!
 //! **Then the C6.** A new P4 image carries its C6's image, which the P4 sends the C6 at boot.
 //! Its progress arrives as error lines, printed until the C6's new life, or until [`QUIET`]
@@ -54,13 +59,14 @@ use wartui_proto::link::{
     BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED,
     RADIO_UPDATING, UpdateOp,
 };
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
 use wartui_proto::radio_link::update::{Failure, OP_MAX, Op, Sender, Stage};
 
 use super::bridge::Args;
 use super::{
-    Chip, P4_BRIDGE_APP, RELEASE_TAG, Source, app, check_image, espflash_present, name, obtain,
-    read, source,
+    Chip, P4_BRIDGE_APP, RELEASE_TAG, Source, app, check_image, espflash_present, obtain, read,
+    source,
 };
 
 /// The project name the P4 bridge's app descriptor carries: its crate's name.
@@ -73,7 +79,11 @@ const SLOT_LEN: usize = 0x1E_0000;
 /// How often the sender is asked for its next op, besides on each status.
 const TICK: Duration = Duration::from_millis(50);
 
-/// The longest to wait for the P4's `Ready`. It enumerates once its C6 answers, or after 2 s
+/// How often the host sends a `GetStatus` from the install on: a rebooted P4 writes nothing
+/// until a host frame arrives, and its gate closes after 15 s without one.
+const POLL: Duration = Duration::from_secs(1);
+
+/// The longest to wait for the P4's `Ready`. It announces once its C6 answers, or after 2 s
 /// without. The transport's first failure ends the wait sooner: a held port at once, and a silent
 /// lone board after the transport's 6 s.
 const READY_WAIT: Duration = Duration::from_secs(10);
@@ -82,8 +92,9 @@ const READY_WAIT: Duration = Duration::from_secs(10);
 /// watchdog ends and the third that rolls back, with room for each boot.
 const COME_BACK: Duration = Duration::from_secs(120);
 
-/// How long after the new image's `Ready` to wait for the line saying whether the host's
-/// `Identify` confirmed it. The P4 sends it right behind the `Ready`.
+/// How long after the new image's `Ready` to wait for the line saying whether a host frame
+/// confirmed it. The P4 sends it behind the `Ready`, or behind the next poll when its C6 had not
+/// yet said hello.
 const CONFIRM_WAIT: Duration = Duration::from_secs(3);
 
 /// The longest the C6's update is followed after the P4 comes back.
@@ -95,8 +106,14 @@ const QUIET: Duration = Duration::from_secs(5);
 /// The README section that covers a wired flash.
 pub(crate) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
-/// Update the P4 bridge `board` over its link.
-pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -> Result<()> {
+/// Update the P4 bridge on `board`, which answered as `expected`, over its link.
+pub(super) async fn run(
+    args: &Args,
+    features: &[&str],
+    board: &PortCandidate,
+    expected: Mac,
+) -> Result<()> {
+    let label = mac::short(&expected).to_string();
     let source = source(
         &P4_BRIDGE_APP,
         args.image.as_deref(),
@@ -110,7 +127,7 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
         if let Source::File(path) = &source {
             check_app(&read(path)?).with_context(|| format!("checking {}", path.display()))?;
         }
-        println!("{:<6} would update over its link", name(board));
+        println!("{label:<6} would update over its link");
         return Ok(());
     }
     if matches!(source, Source::Build(_)) {
@@ -125,8 +142,9 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
         bail!("{} carries no appended digest, which names the image to the P4", path.display());
     };
 
-    let expected = board.mac().context("a P4 bridge reports its address")?;
-    let mut link = SerialTransport::with_spec(BridgeSpec::Mac(expected))
+    // By path: the probe that chose it has already asked, and the reboot leaves the CH343 where
+    // it is.
+    let mut link = SerialTransport::with_spec(BridgeSpec::Path(board.path.clone()))
         .remember_in(BridgeMemory::none())
         .start()
         .context("opening the link")?;
@@ -134,38 +152,33 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     let info = match tokio::time::timeout(READY_WAIT, wait_for_ready(&mut link, &mut garbled)).await
     {
         Ok(Ok(info)) => info,
-        Ok(Err(why)) => bail!("{}", no_ready_text(&name(board), &board.path, &why, garbled)),
+        Ok(Err(why)) => bail!("{}", no_ready_text(&label, &board.path, &why, garbled)),
         Err(_) => {
             let why = format!("no answer in {} s", READY_WAIT.as_secs());
-            bail!("{}", no_ready_text(&name(board), &board.path, &why, garbled))
+            bail!("{}", no_ready_text(&label, &board.path, &why, garbled))
         }
     };
-    ensure!(
-        info.chip == LinkChip::Esp32P4,
-        "{} answered as {:?}, not a P4",
-        name(board),
-        info.chip
-    );
-    ensure!(info.mac == expected, "{} answered with another address", name(board));
+    ensure!(info.chip == LinkChip::Esp32P4, "{label} answered as {:?}, not a P4", info.chip);
+    ensure!(info.mac == expected, "{label} answered with another address");
     if info.image == Some(digest) {
-        println!("{:<6} already runs this image", name(board));
+        println!("{label:<6} already runs this image");
         return Ok(());
     }
 
-    let mut progress = ProgressLine::new(name(board));
+    let mut progress = ProgressLine::new(label.clone());
     let mut update = Update::new(&image, sha256, &digest, info.image);
     update.send(&mut link, &mut progress).await?;
     progress.say("installing; waiting for the bridge to come back");
     let back = update.come_back(&mut link, &mut progress).await?;
     match judge(&digest, info.image, back.image) {
         Outcome::Installed => {}
-        Outcome::RolledBack => bail!("{} did not boot the new image; rolled back", name(board)),
-        Outcome::Other => bail!("{} came back running another image", name(board)),
+        Outcome::RolledBack => bail!("{label} did not boot the new image; rolled back"),
+        Outcome::Other => bail!("{label} came back running another image"),
     }
     let confirm = await_confirm(&mut link, &mut progress).await;
     match confirm_text(&confirm) {
         Ok(text) => progress.say(text),
-        Err(text) => bail!("{} {text}", name(board)),
+        Err(text) => bail!("{label} {text}"),
     }
     follow_radio(&mut link, &mut progress).await;
     Ok(())
@@ -221,8 +234,8 @@ fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
 enum Phase {
     /// Sending the image.
     Sending,
-    /// `Install` sent; `dropped` once the link has dropped since.
-    Installing { dropped: bool },
+    /// `Install` sent.
+    Installing,
 }
 
 /// What a `Ready` means to the update.
@@ -245,8 +258,9 @@ fn on_ready(
     match phase {
         Phase::Sending if image == before => OnReady::Ignore,
         Phase::Sending => OnReady::Abort,
-        Phase::Installing { dropped: false } => OnReady::Ignore,
-        Phase::Installing { dropped: true } => OnReady::Back,
+        // The transport reports a new life only when the uptime falls, and the P4 reboots on
+        // the `Install` it accepts, so this is its life after the install.
+        Phase::Installing => OnReady::Back,
     }
 }
 
@@ -307,8 +321,8 @@ impl<'a> Update<'a> {
         }
     }
 
-    /// Wait out the reboot: `Install` again until the link drops, then the new life's
-    /// `Ready`. A `Ready` before the drop is the C6 restarting, and is passed over.
+    /// Wait out the reboot: `Install` again until the new life's `Ready`, with a poll every
+    /// [`POLL`] so the rebooted P4 hears a host.
     async fn come_back(
         &mut self,
         link: &mut LinkHandle,
@@ -316,26 +330,26 @@ impl<'a> Update<'a> {
     ) -> Result<BridgeInfo> {
         let wait = async {
             let mut tick = tokio::time::interval(TICK);
-            let mut dropped = false;
+            let mut poll = tokio::time::interval(POLL);
             loop {
-                if !dropped {
-                    self.pump(link)?;
-                }
+                self.pump(link)?;
                 if let Stage::Failed(failure) = self.sender.stage() {
                     bail!("{}", self.failed(failure));
                 }
                 tokio::select! {
-                    _ = tick.tick(), if !dropped => {}
+                    _ = tick.tick() => {}
+                    _ = poll.tick() => poll_status(link),
                     event = link.recv() => match event {
                         Some(LinkEvent::Connected(info)) => {
-                            let phase = Phase::Installing { dropped };
-                            if on_ready(phase, self.before, info.image) == OnReady::Back {
+                            if on_ready(Phase::Installing, self.before, info.image)
+                                == OnReady::Back
+                            {
                                 return Ok(info);
                             }
                         }
                         Some(LinkEvent::Message(message)) => self.take(message, progress),
-                        Some(LinkEvent::Disconnected { .. }) => dropped = true,
-                        Some(LinkEvent::Garbled(_)) => {}
+                        // The transport reopens the port on its own.
+                        Some(LinkEvent::Disconnected { .. } | LinkEvent::Garbled(_)) => {}
                         None => bail!("the link closed"),
                     },
                 }
@@ -374,13 +388,35 @@ impl<'a> Update<'a> {
     }
 }
 
+/// Ask for a status, so the P4 hears a host. Dropped when the queue is full: the next poll
+/// asks again.
+fn poll_status(link: &LinkHandle) {
+    let _ = link.send_bulk(HostToBridge::GetStatus);
+}
+
+/// The next event, polling every [`POLL`] while waiting, or `None` at `until`.
+async fn next_event(
+    link: &mut LinkHandle,
+    poll: &mut tokio::time::Interval,
+    until: tokio::time::Instant,
+) -> Option<Option<LinkEvent>> {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(until) => return None,
+            _ = poll.tick() => poll_status(link),
+            event = link.recv() => return Some(event),
+        }
+    }
+}
+
 /// Print what the C6's update says, until its new life or [`QUIET`] without a line about it.
 async fn follow_radio(link: &mut LinkHandle, progress: &mut ProgressLine) {
     let deadline = tokio::time::Instant::now() + FOLLOW;
     let mut quiet_until = tokio::time::Instant::now() + QUIET;
+    let mut poll = tokio::time::interval(POLL);
     loop {
         let until = quiet_until.min(deadline);
-        let Ok(event) = tokio::time::timeout_at(until, link.recv()).await else {
+        let Some(event) = next_event(link, &mut poll, until).await else {
             if until == deadline {
                 progress.say("the radio's update is still running; `wartui status` shows its end");
             }
@@ -412,7 +448,7 @@ fn is_radio_update(message: &BridgeToHost) -> bool {
 /// What the P4 said about confirming its new image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Confirm {
-    /// The host's `Identify` confirmed it.
+    /// A host frame confirmed it.
     Confirmed,
     /// Confirming failed, for this reason.
     Failed(String),
@@ -424,8 +460,9 @@ enum Confirm {
 /// line on the way.
 async fn await_confirm(link: &mut LinkHandle, progress: &mut ProgressLine) -> Confirm {
     let deadline = tokio::time::Instant::now() + CONFIRM_WAIT;
+    let mut poll = tokio::time::interval(POLL);
     loop {
-        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
+        let Some(event) = next_event(link, &mut poll, deadline).await else {
             return Confirm::Unseen;
         };
         match event {
@@ -650,17 +687,10 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_ignores_ready_when_link_has_not_dropped_since_install() {
-        let phase = Phase::Installing { dropped: false };
-        assert_eq!(on_ready(phase, Some(OLD), Some(OLD)), OnReady::Ignore);
-        assert_eq!(on_ready(phase, Some(OLD), Some(NEW)), OnReady::Ignore);
-    }
-
-    #[test]
-    fn flash_p4_takes_ready_as_new_life_when_link_dropped_after_install() {
-        let phase = Phase::Installing { dropped: true };
-        assert_eq!(on_ready(phase, Some(OLD), Some(NEW)), OnReady::Back);
-        assert_eq!(on_ready(phase, Some(OLD), Some(OLD)), OnReady::Back);
+    fn flash_p4_takes_ready_as_new_life_when_it_follows_install() {
+        // The connection holds through the reboot, so a new life is the only sign of it.
+        assert_eq!(on_ready(Phase::Installing, Some(OLD), Some(NEW)), OnReady::Back);
+        assert_eq!(on_ready(Phase::Installing, Some(OLD), Some(OLD)), OnReady::Back);
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! too, and none of them creates or saves the file.
 //!
 //! **The remembered bridge is the one value other commands read.** `status`, `sniff`,
-//! `reset` and `ota` take `[bridge] mac` through [`remembered_bridge`] to pick or order
-//! boards, and a missing or broken file is no bridge remembered there, so a bad
+//! `reset` and `ota` take `[bridge] mac` and `serial` through [`remembered_bridge`] to pick
+//! or order boards, and a missing or broken file is no bridge remembered there, so a bad
 //! `wartui.toml` cannot stop a command that checks the link. `flash-bridge` takes it
 //! through [`load`] and refuses a broken file: which board it writes firmware over
 //! depends on it. `flash-fleet` never reads the file.
@@ -108,7 +108,8 @@ impl Bluetooth {
 /// The `[bridge]` table: whether `run` and `flash-bridge` remember the bridge, and the
 /// bridge remembered, so the next start opens that board rather than sweeping.
 /// `remember` absent means on. `mac` is written the way `wartui ports` prints a MAC, and
-/// is refused beside `remember = false`, which forgets it.
+/// `serial` is the USB serial number of the CH343 it answered on, which the OS reports
+/// before anything is opened. Both are refused beside `remember = false`, which forgets them.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Bridge {
@@ -121,12 +122,14 @@ pub struct Bridge {
         deserialize_with = "read_bridge_mac"
     )]
     pub mac: Option<Mac>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
 }
 
 impl Bridge {
-    /// Whether neither key is set, so `save` writes no `[bridge]` table at all.
+    /// Whether no key is set, so `save` writes no `[bridge]` table at all.
     fn is_empty(&self) -> bool {
-        self.remember.is_none() && self.mac.is_none()
+        self.remember.is_none() && self.mac.is_none() && self.serial.is_none()
     }
 }
 
@@ -214,6 +217,9 @@ impl Config {
         if self.bridge.remember == Some(false) && self.bridge.mac.is_some() {
             bail!("bridge.mac is set while bridge.remember = false, which forgets it");
         }
+        if self.bridge.remember == Some(false) && self.bridge.serial.is_some() {
+            bail!("bridge.serial is set while bridge.remember = false, which forgets it");
+        }
         for (index, ssid) in self.excluded_ssids.iter().enumerate() {
             match check_excluded_ssid(ssid, &self.excluded_ssids[..index]) {
                 Ok(()) => {}
@@ -285,7 +291,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config> {
 /// [`load`]'s error for a missing `--config` file is none here. `remember = false` is
 /// none either, since `load` refuses a `mac` beside it.
 #[must_use]
-pub fn remembered_bridge(explicit: Option<&Path>) -> Option<Mac> {
+pub fn remembered_bridge(explicit: Option<&Path>) -> Bridge {
     remembered_bridge_from(explicit, default_path)
 }
 
@@ -294,12 +300,12 @@ pub fn remembered_bridge(explicit: Option<&Path>) -> Option<Mac> {
 fn remembered_bridge_from(
     explicit: Option<&Path>,
     default: impl FnOnce() -> Option<PathBuf>,
-) -> Option<Mac> {
+) -> Bridge {
     match load_from(explicit, default) {
-        Ok(config) => config.bridge.mac,
+        Ok(config) => config.bridge,
         Err(error) => {
             tracing::debug!(error = format_args!("{error:#}"), "no remembered bridge");
-            None
+            Bridge::default()
         }
     }
 }
@@ -752,7 +758,11 @@ mod tests {
             excluded_ssids: vec!["HomeNet".to_owned(), "Pixel 9".to_owned()],
             tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
-            bridge: Bridge { remember: Some(true), mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
+            bridge: Bridge {
+                remember: Some(true),
+                mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]),
+                serial: Some("5CF7153520".to_owned()),
+            },
             gps: Gps { bridge_rate_hz: Some(2) },
             api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
         }
@@ -899,8 +909,10 @@ mod tests {
     fn config_save_writes_bridge_table_that_reloads_when_remember_is_off() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let config =
-            Config { bridge: Bridge { remember: Some(false), mac: None }, ..Config::default() };
+        let config = Config {
+            bridge: Bridge { remember: Some(false), ..Bridge::default() },
+            ..Config::default()
+        };
 
         save(&target, &config).unwrap();
 
@@ -942,6 +954,7 @@ mod tests {
             text.contains("[bridge]\nremember = true\nmac = \"AA:BB:CC:01:02:03\""),
             "as `wartui ports` prints it: {text}"
         );
+        assert_eq!(saved.bridge.serial.as_deref(), Some("5CF7153520"));
     }
 
     #[test]
@@ -962,15 +975,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\n").unwrap();
-        assert_eq!(remembered_bridge_from(None, || Some(path)), Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
+        assert_eq!(
+            remembered_bridge_from(None, || Some(path)).mac,
+            Some([0xAA, 0xBB, 0xCC, 1, 2, 3])
+        );
     }
 
     #[test]
     fn config_remembered_bridge_returns_none_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("wartui.toml");
-        assert_eq!(remembered_bridge_from(None, || Some(missing)), None);
-        assert_eq!(remembered_bridge_from(None, || None), None);
+        assert_eq!(remembered_bridge_from(None, || Some(missing)).mac, None);
+        assert_eq!(remembered_bridge_from(None, || None).mac, None);
     }
 
     #[test]
@@ -980,7 +996,7 @@ mod tests {
         let path = dir.path().join("wartui.toml");
         for text in ["this is [not toml\n", "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\ntypo = 1\n"] {
             std::fs::write(&path, text).unwrap();
-            assert_eq!(remembered_bridge_from(None, || Some(path.clone())), None, "{text:?}");
+            assert_eq!(remembered_bridge_from(None, || Some(path.clone())).mac, None, "{text:?}");
         }
     }
 
@@ -991,7 +1007,7 @@ mod tests {
         let default = dir.path().join("wartui.toml");
         std::fs::write(&named, "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\n").unwrap();
         std::fs::write(&default, "[bridge]\nmac = \"10:BD:A3:EC:44:C0\"\n").unwrap();
-        let found = remembered_bridge_from(Some(&named), || Some(default));
+        let found = remembered_bridge_from(Some(&named), || Some(default)).mac;
         assert_eq!(found, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
     }
 
@@ -999,7 +1015,7 @@ mod tests {
     fn config_remembered_bridge_returns_none_when_explicit_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.toml");
-        assert_eq!(remembered_bridge_from(Some(&missing), || None), None);
+        assert_eq!(remembered_bridge_from(Some(&missing), || None).mac, None);
     }
 
     #[test]
@@ -1007,7 +1023,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[bridge]\nremember = false\n").unwrap();
-        assert_eq!(remembered_bridge_from(None, || Some(path)), None);
+        assert_eq!(remembered_bridge_from(None, || Some(path)).mac, None);
+    }
+
+    #[test]
+    fn config_remembered_bridge_returns_serial_when_file_holds_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let text = "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\nserial = \"5CF7153520\"\n";
+        std::fs::write(&path, text).unwrap();
+        let bridge = remembered_bridge_from(None, || Some(path));
+        assert_eq!(bridge.serial.as_deref(), Some("5CF7153520"));
+    }
+
+    #[test]
+    fn config_loader_rejects_bridge_serial_when_remember_is_off() {
+        let chain = load_error("[bridge]\nremember = false\nserial = \"5CF7153520\"\n");
+        assert!(chain.contains("bridge.serial"), "{chain}");
     }
 
     #[test]
