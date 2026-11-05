@@ -9,10 +9,10 @@
 //!
 //! **The image is checked before any board is touched.** `write-bin` writes whatever bytes it is
 //! handed, so the chip ID in the bootloader's image header is compared with the chip being
-//! flashed, and the image is fetched or built before the first reset. A merged image holds flash from
-//! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5 or a
-//! P4, with erased flash (`0xFF`) ahead of it. An app-only image starts with its own header. A
-//! node's and a P4 bridge's images are made with their `partitions.csv`.
+//! flashed, and the image is fetched or built before the first reset. A merged image holds flash
+//! from address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5
+//! or a P4, with erased flash (`0xFF`) ahead of it. An app-only image starts with its own header.
+//! A node's and a P4 bridge's images are made with their `partitions.csv`.
 //!
 //! **A release pins its images by tag.** The host, the fleet and the bridge are flashed from one
 //! tree, and the crate version does not move before 1.0, so the version cannot name a tree and the
@@ -81,11 +81,15 @@ struct Firmware {
     elf: &'static str,
     /// What the firmware runs on, for messages.
     what: &'static str,
+    /// The chip it is built for, and the only one its images are flashed to.
+    chip: Chip,
     /// The partition table its images are made with, relative to `dir`.
     partition_table: &'static str,
     /// Whether its images are merged (bootloader, partition table and app, from address 0)
     /// rather than the app alone, as one app slot holds it.
     merged: bool,
+    /// The release asset of its image. Must match `release.yml`.
+    asset: &'static str,
 }
 
 /// The node firmware's merged images, which `flash-fleet` writes.
@@ -93,18 +97,14 @@ const NODE: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/node"),
     elf: "target/riscv32imac-unknown-none-elf/release/wartui-node-fw",
     what: "node",
+    chip: Chip::Esp32c5,
     partition_table: "partitions.csv",
     merged: true,
+    asset: "wartui-node-fw-esp32c5.bin",
 };
 
-/// The release asset of the node's merged image. Must match `release.yml`.
-const NODE_ASSET: &str = "wartui-node-fw-esp32c5.bin";
-
 /// The node firmware's app-only images, which an over-the-air update carries.
-const NODE_APP: Firmware = Firmware { merged: false, ..NODE };
-
-/// The release asset of the node's app-only image. Must match `release.yml`.
-const NODE_APP_ASSET: &str = "wartui-node-app-esp32c5.bin";
+const NODE_APP: Firmware = Firmware { merged: false, asset: "wartui-node-app-esp32c5.bin", ..NODE };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
     mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
@@ -374,48 +374,38 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Where an image comes from, short of naming a release asset.
-pub(super) enum Local<'t> {
-    /// A file named, or a build.
-    Chosen(Source),
-    /// The release this binary was built for, by its tag; the caller names the asset.
-    Release(&'t str),
-}
-
-/// Choose the image's source short of a release: a file named, else a build when asked for one or
-/// when this binary is a checkout's. Otherwise the release this binary was built for.
-fn local_source<'t>(
+/// Choose the image's source: a file named, else a build when asked for one or when this binary
+/// is a checkout's. Otherwise `firmware`'s asset from the release this binary was built for.
+fn source(
     firmware: &Firmware,
     image: Option<&Path>,
     firmware_dir: Option<&Path>,
-    tag: Option<&'t str>,
-) -> Local<'t> {
+    tag: Option<&str>,
+) -> Source {
     if let Some(image) = image {
-        return Local::Chosen(Source::File(image.to_owned()));
+        return Source::File(image.to_owned());
     }
     let tag = tag.filter(|tag| !tag.is_empty());
     match tag.filter(|_| firmware_dir.is_none()) {
-        Some(tag) => Local::Release(tag),
-        None => {
-            Local::Chosen(Source::Build(normalize(firmware_dir.unwrap_or(Path::new(firmware.dir)))))
-        }
+        Some(tag) => Source::Release { tag: tag.to_owned(), asset: firmware.asset },
+        None => Source::Build(normalize(firmware_dir.unwrap_or(Path::new(firmware.dir)))),
     }
 }
 
-/// Get the image onto disk and check it is for `chip`, merged or app-only as `firmware` makes
-/// it.
-fn obtain(firmware: &Firmware, source: &Source, chip: Chip) -> Result<PathBuf> {
-    let path = fetch(firmware, source, chip)?;
-    check_image(&read(&path)?, chip, firmware.merged)
+/// Get the image onto disk and check it is for `firmware`'s chip, merged or app-only as
+/// `firmware` makes it.
+fn obtain(firmware: &Firmware, source: &Source) -> Result<PathBuf> {
+    let path = fetch(firmware, source)?;
+    check_image(&read(&path)?, firmware.chip, firmware.merged)
         .with_context(|| format!("checking {}", path.display()))?;
     Ok(path)
 }
 
 /// Get the image onto disk: named, built or downloaded.
-fn fetch(firmware: &Firmware, source: &Source, chip: Chip) -> Result<PathBuf> {
+fn fetch(firmware: &Firmware, source: &Source) -> Result<PathBuf> {
     match source {
         Source::File(path) => Ok(path.clone()),
-        Source::Build(dir) => build_image(firmware, dir, chip),
+        Source::Build(dir) => build_image(firmware, dir),
         Source::Release { tag, asset } => {
             let cache =
                 state_dir().unwrap_or_else(|| std::env::temp_dir().join("wartui")).join("images");
@@ -481,7 +471,7 @@ fn check_image(image: &[u8], chip: Chip, merged: bool) -> Result<()> {
 
 /// Build the firmware in `dir` with `cargo build --release`, and save its image beside the ELF:
 /// merged, or the app alone as `<elf>.app.bin`.
-fn build_image(firmware: &Firmware, dir: &Path, chip: Chip) -> Result<PathBuf> {
+fn build_image(firmware: &Firmware, dir: &Path) -> Result<PathBuf> {
     let mut cargo = Command::new("cargo");
     cargo.current_dir(dir).args(["build", "--release"]);
     // The firmware directory's `rust-toolchain.toml` and `.cargo/config.toml` decide the
@@ -499,11 +489,12 @@ fn build_image(firmware: &Firmware, dir: &Path, chip: Chip) -> Result<PathBuf> {
     let elf = dir.join(firmware.elf);
     let bin = elf.with_extension(if firmware.merged { "bin" } else { "app.bin" });
     let merge: &[&str] = if firmware.merged { &["--merge", "--skip-padding"] } else { &[] };
-    let mut args: Vec<String> = ["save-image", "--skip-update-check", "--chip", chip.name()]
-        .into_iter()
-        .chain(merge.iter().copied())
-        .map(str::to_owned)
-        .collect();
+    let mut args: Vec<String> =
+        ["save-image", "--skip-update-check", "--chip", firmware.chip.name()]
+            .into_iter()
+            .chain(merge.iter().copied())
+            .map(str::to_owned)
+            .collect();
     args.push("--partition-table".to_owned());
     args.push(dir.join(firmware.partition_table).to_string_lossy().into_owned());
     args.push(elf.to_string_lossy().into_owned());
@@ -890,10 +881,7 @@ mod tests {
         assert_eq!(normalize(Path::new("./fw/./node/")), Path::new("fw/node"));
         assert_eq!(normalize(Path::new("../fw/x/..")), Path::new("../fw"));
         assert_eq!(normalize(Path::new("/../fw")), Path::new("/fw"));
-        let Local::Chosen(dir) = local_source(&NODE, None, Some(Path::new("/x/y/../fw")), None)
-        else {
-            panic!("not chosen")
-        };
+        let dir = source(&NODE, None, Some(Path::new("/x/y/../fw")), None);
         assert_eq!(dir, Source::Build("/x/fw".into()));
     }
 

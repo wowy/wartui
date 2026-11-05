@@ -33,13 +33,10 @@ use wartui_proto::mac::Mac;
 
 use super::boot::seen_booting;
 use super::{
-    Chip, Local, NODE, NODE_ASSET, RELEASE_TAG, Ran, Skip, Source, check_image, erase_otadata_args,
-    espflash, espflash_present, flash_args, judge_node_flash, judge_probe, local_source, mac_arg,
-    name, obtain, probe_args, read, reset_args,
+    NODE, RELEASE_TAG, Ran, Skip, Source, check_image, erase_otadata_args, espflash,
+    espflash_present, flash_args, judge_node_flash, judge_probe, mac_arg, name, obtain, probe_args,
+    read, reset_args, source,
 };
-
-/// The chip a node runs on, and the only one flashed.
-const CHIP: Chip = Chip::Esp32c5;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -67,29 +64,20 @@ pub struct Args {
     pub dry_run: bool,
 }
 
-/// Where the node's merged image comes from: a file named, a build, or [`NODE_ASSET`] from the
-/// release tagged `tag`.
-fn source(image: Option<&Path>, firmware_dir: Option<&Path>, tag: Option<&str>) -> Source {
-    match local_source(&NODE, image, firmware_dir, tag) {
-        Local::Chosen(found) => found,
-        Local::Release(tag) => Source::Release { tag: tag.to_owned(), asset: NODE_ASSET },
-    }
-}
-
 pub fn run(args: Args) -> Result<()> {
     espflash_present()?;
-    let source = source(args.image.as_deref(), args.firmware_dir.as_deref(), RELEASE_TAG);
+    let source = source(&NODE, args.image.as_deref(), args.firmware_dir.as_deref(), RELEASE_TAG);
     println!("image  {}", source.describe(args.dry_run));
 
     let image = if args.dry_run {
         // A file named on the command line costs nothing to read, and a wrong one is worth
         // hearing about before the real run.
         if let Source::File(path) = &source {
-            check_image(&read(path)?, CHIP, NODE.merged)?;
+            check_image(&read(path)?, NODE.chip, NODE.merged)?;
         }
         None
     } else {
-        Some(obtain(&NODE, &source, CHIP)?)
+        Some(obtain(&NODE, &source)?)
     };
 
     let found = discover_ports().context("listing serial ports")?;
@@ -104,7 +92,7 @@ pub fn run(args: Args) -> Result<()> {
     let jobs = usize::from(args.jobs);
     let probed = in_parallel(&probe, jobs, |candidate| {
         let expected = candidate.mac().expect("select probes only boards with an address");
-        judge_probe(expected, CHIP, &espflash(&probe_args(&candidate.path)))
+        judge_probe(expected, NODE.chip, &espflash(&probe_args(&candidate.path)))
             .and_then(|info| judge_node_flash(&info))
     });
     let mut verified = Vec::new();
@@ -157,18 +145,18 @@ const BOOT_WAIT: Duration = Duration::from_secs(10);
 fn flash_node(candidate: &PortCandidate, image: &Path) -> Outcome {
     let address = candidate.mac().expect("select probes only boards with an address");
     let port = candidate.path.as_str();
-    let written = espflash(&flash_args(port, CHIP, image));
+    let written = espflash(&flash_args(port, NODE.chip, image));
     if !written.ok {
         return Outcome::Failed(written);
     }
-    let erased = espflash(&erase_otadata_args(port, CHIP));
+    let erased = espflash(&erase_otadata_args(port, NODE.chip));
     if !erased.ok {
         return Outcome::Failed(erased);
     }
     if seen_booting(address, BOOT_WAIT) {
         return Outcome::Flashed;
     }
-    let reset = espflash(&reset_args(port, CHIP));
+    let reset = espflash(&reset_args(port, NODE.chip));
     if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted(reset) }
 }
 
@@ -321,23 +309,26 @@ mod tests {
     fn flash_fleet_chooses_source_when_given_each_combination() {
         let image = Path::new("fw.bin");
         let dir = Path::new("fw");
-        assert_eq!(source(Some(image), None, Some("v1")), Source::File(image.to_owned()));
-        assert_eq!(source(None, Some(dir), Some("v1")), Source::Build(dir.to_owned()));
+        assert_eq!(source(&NODE, Some(image), None, Some("v1")), Source::File(image.to_owned()));
+        assert_eq!(source(&NODE, None, Some(dir), Some("v1")), Source::Build(dir.to_owned()));
         let checkout = Source::Build(normalize(Path::new(NODE.dir)));
-        assert_eq!(source(None, None, None), checkout);
-        assert_eq!(source(None, None, Some("")), checkout);
+        assert_eq!(source(&NODE, None, None, None), checkout);
+        assert_eq!(source(&NODE, None, None, Some("")), checkout);
     }
 
     #[test]
     fn flash_fleet_fetches_release_asset_when_built_for_a_release() {
         // The name `release.yml` publishes the node's merged image under.
         let asset = "wartui-node-fw-esp32c5.bin";
-        assert_eq!(source(None, None, Some("v1")), Source::Release { tag: "v1".to_owned(), asset });
+        assert_eq!(
+            source(&NODE, None, None, Some("v1")),
+            Source::Release { tag: "v1".to_owned(), asset }
+        );
     }
 
     #[test]
     fn flash_fleet_shows_default_firmware_dir_without_parent_segments_when_building() {
-        let Source::Build(dir) = source(None, None, None) else { panic!("not a build") };
+        let Source::Build(dir) = source(&NODE, None, None, None) else { panic!("not a build") };
         assert!(dir.ends_with("firmware/node"), "{}", dir.display());
         assert!(
             !dir.components().any(|c| c == std::path::Component::ParentDir),

@@ -20,8 +20,7 @@ path = "src/main.rs"
 [features]
 default = ["esp32c5"]
 
-# A feature because it forwards the chip to the `esp-*` crates. A build that turns the
-# defaults off names it again.
+# A feature because it forwards the chip to the `esp-*` crates.
 esp32c5 = [
   "esp-alloc/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
