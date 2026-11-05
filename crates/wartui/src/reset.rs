@@ -1,13 +1,9 @@
 //! `wartui reset` — reboot the bridge without reaching for `espflash`.
 //!
-//! The failure this answers is transmit-only: the USB Serial/JTAG transmit endpoint
-//! can stop draining while the receive endpoint carries on, so the bridge goes on
-//! reading commands it has no way to answer. From the host that is
-//! indistinguishable from a dead board, but the receive path is never the problem —
-//! a single `Reset` frame down the same wire reboots a wedged board
-//! (`docs/phase-3-findings.md`). So this is the first thing to reach for, and
-//! `espflash`, which drives DTR/RTS and does not care whether the firmware is
-//! alive, is what is left when even this does not answer.
+//! A bridge that has stopped answering may still be reading: from the host, one with
+//! no way to answer is indistinguishable from a dead board, and a single `Reset` frame
+//! down the same wire reboots it. So this is the first thing to reach for, and a power
+//! cycle is what is left when even this does not answer.
 //!
 //! Transmitting before anything has identified itself is what makes this command
 //! work and what makes it the one command that must never be pointed at a guess.
@@ -15,8 +11,8 @@
 //! not reading its USB endpoint absorbs one: the rest sit in the tty's output queue
 //! until `close` gives up on them thirty seconds later, so `wartui reset` aimed at a
 //! node takes about that long to say it failed. That is the cost of asking a board
-//! that answers nothing, and the reason `run`'s sweep — which asks with one frame
-//! and may be pointed at anything — is not allowed to share this command's license.
+//! that answers nothing, and the reason `run`'s connection, which asks with one frame,
+//! does not share this command's license.
 //!
 //! Rebooting is confirmed by uptime and by uptime alone; [`rebooted`] is the rule.
 //! [`FRESH_UPTIME_MS`] covers the one case with no earlier figure to compare
@@ -26,9 +22,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
-use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_bridge::serial::{self, BridgeSpec, discover_bridges};
+use wartui_bridge::{BridgeInfo, LinkEvent, TransportError};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 
@@ -72,25 +69,12 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     // Resolved to one board here rather than left to the transport, which sweeps.
-    // A sweep sends this command's `Reset` into every Espressif board attached
-    // until one answers, and a node that receives one reboots — losing the
-    // addresses it was holding back, which is a node's own memory and survives a
-    // session (`crates/wartui-proto/src/dedup.rs`). So this command gets an
-    // unambiguous board or none, and says which it wanted. A board named by the end
-    // of its address is resolved here for the same reason: a tail several boards
-    // share is refused before anything is opened, rather than left to a transport
-    // that would wait out the whole timeout saying nothing.
+    // A sweep sends this command's `Reset` into every P4 bridge attached until one
+    // answers, and with two attached that reboots another fleet's bridge. So this
+    // command gets an unambiguous board or none, and says which it wanted. It opens that board
+    // by address, so the transport follows it to wherever the reboot re-enumerates it.
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
-    let board = match args.bridge.as_deref() {
-        Some(named) => match super::spec(named) {
-            tail @ BridgeSpec::Tail(_) => serial::resolve(&tail)?,
-            _ => named.to_owned(),
-        },
-        None => serial::unambiguous_bridge(
-            &discover_ports().context("listing serial ports")?,
-            remembered,
-        )?,
-    };
+    let board = board_to_reset(args.bridge.as_deref(), remembered, discover_bridges)?;
     let mut link = super::open(Some(&board), None, BridgeMemory::holding(remembered))?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
@@ -105,7 +89,31 @@ pub async fn run(args: Args) -> Result<()> {
             Ok(())
         }
         Ok(Err(err)) => Err(err),
-        Err(_) => bail!("{}", unreachable_notice(Some(&board))),
+        Err(_) => bail!("{}", unreachable_notice(&board)),
+    }
+}
+
+/// The one board to send `Reset` to, as the name to open it by.
+///
+/// An address, whole or its end, is checked here against the P4 bridges `list` reads. One no
+/// attached P4 bridge carries, a node's included, or a tail several share is refused before
+/// anything is opened, rather than left to a transport that would wait out the whole timeout
+/// saying nothing.
+///
+/// The answer is the board's full address wherever it has one, because a P4's reset re-enumerates
+/// USB and can bring it back on another device node: a transport given an address follows the
+/// board, and one given a path waits on that path. A tail is not passed on, since it could later
+/// match another board. A path is opened as given, with nothing listed: whether it exists is the
+/// question the open asks.
+fn board_to_reset(
+    named: Option<&str>,
+    remembered: Option<mac::Mac>,
+    list: impl FnOnce() -> Result<Vec<PortCandidate>, TransportError>,
+) -> Result<String, TransportError> {
+    match named.map(super::spec) {
+        Some(BridgeSpec::Path(path)) => Ok(path),
+        Some(spec) => serial::named_board(&list()?, &spec).map(PortCandidate::label),
+        None => serial::unambiguous_bridge(&list()?, remembered).map(PortCandidate::label),
     }
 }
 
@@ -202,26 +210,14 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
     }
 }
 
-/// What to say when even a reset frame goes unanswered.
-///
-/// `espflash` takes a path and nothing else, so a board named by its address is
-/// resolved to one here rather than quoted into a line that will not run.
-fn unreachable_notice(bridge: Option<&str>) -> String {
+/// What to say when even a reset frame goes unanswered, given the address or path it went to.
+fn unreachable_notice(board: &str) -> String {
     let seconds = RECOVERY_TIMEOUT.as_secs();
-    let device = bridge.and_then(|named| super::named_device(named).ok());
-    let (where_, espflash) = match (bridge, device.as_deref()) {
-        (Some(_), Some(path)) => (format!("on {path}"), format!("espflash reset --port {path}")),
-        (Some(name), None) => (
-            format!("named {name}, which no attached board answers to"),
-            "espflash reset".to_owned(),
-        ),
-        (None, _) => ("on the board that was detected".to_owned(), "espflash reset".to_owned()),
-    };
     [
-        format!("the bridge {where_} did not come back within {seconds}s."),
+        format!("the bridge {board} did not come back within {seconds}s."),
         "A reset frame reaches the bridge through its receive path, so this means that".to_owned(),
         "path is not running either — the firmware is hung, or this is not a bridge.".to_owned(),
-        format!("Reset it over USB instead, which needs no firmware at all: {espflash}"),
+        "Power-cycle it, which needs no firmware at all.".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
     ]
@@ -230,7 +226,93 @@ fn unreachable_notice(bridge: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRESH_UPTIME_MS, rebooted, unreachable_notice};
+    use wartui_bridge::TransportError;
+    use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, TEST_PID, TEST_VID, candidate};
+    use wartui_bridge::serial::{BridgeSpec, bridges_among};
+    use wartui_proto::mac;
+
+    use super::{FRESH_UPTIME_MS, board_to_reset, rebooted, unreachable_notice};
+
+    const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+    const TWIN_MAC: &str = "38:44:BE:12:44:C0";
+    const NODE_MAC: &str = "02:00:5E:10:9D:24";
+
+    fn p4(path: &str, serial: Option<&str>) -> PortCandidate {
+        let mut p4 = candidate(path, Some(TEST_VID), Some(TEST_PID), serial);
+        p4.product = Some("wartui p4 bridge".to_owned());
+        p4
+    }
+
+    /// What `discover_bridges` reads with a P4 bridge and a node attached.
+    fn attached() -> Result<Vec<PortCandidate>, TransportError> {
+        let node = candidate("/dev/ttyACM1", Some(ESPRESSIF_VID), Some(0x1001), Some(NODE_MAC));
+        Ok(bridges_among(vec![p4("/dev/ttyACM0", Some(BRIDGE_MAC)), node]))
+    }
+
+    /// What `discover_bridges` reads with two P4 bridges attached that share a tail.
+    fn twins() -> Result<Vec<PortCandidate>, TransportError> {
+        Ok(vec![p4("/dev/ttyACM0", Some(BRIDGE_MAC)), p4("/dev/ttyACM1", Some(TWIN_MAC))])
+    }
+
+    #[test]
+    fn reset_cmd_keeps_full_address_when_p4_bridge_is_named_in_full() {
+        let board = board_to_reset(Some(BRIDGE_MAC), None, attached).expect("that bridge");
+        assert_eq!(board, BRIDGE_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_resolves_tail_to_full_address_when_one_p4_bridge_ends_with_it() {
+        let board = board_to_reset(Some("44:c0"), None, attached).expect("that bridge");
+        assert_eq!(board, BRIDGE_MAC);
+        // `open` reads the answer back, and it has to come back as an address to be followed.
+        let address = mac::parse(BRIDGE_MAC).expect("an address");
+        assert_eq!(super::super::spec(&board), BridgeSpec::Mac(address));
+    }
+
+    #[test]
+    fn reset_cmd_refuses_tail_when_several_p4_bridges_end_with_it() {
+        let refused = board_to_reset(Some("44:C0"), None, twins).expect_err("ambiguous");
+        assert!(matches!(refused, TransportError::AmbiguousName { .. }), "{refused}");
+    }
+
+    #[test]
+    fn reset_cmd_picks_full_address_when_sole_p4_bridge_is_not_named() {
+        let board = board_to_reset(None, None, attached).expect("the only bridge");
+        assert_eq!(board, BRIDGE_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_picks_full_address_when_remembered_p4_bridge_is_among_several() {
+        let board = board_to_reset(None, mac::parse(TWIN_MAC), twins).expect("the remembered one");
+        assert_eq!(board, TWIN_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_falls_back_to_path_when_sole_p4_bridge_reports_no_address() {
+        let list = || Ok(vec![p4("/dev/ttyACM0", None)]);
+        assert_eq!(board_to_reset(None, None, list).expect("the only bridge"), "/dev/ttyACM0");
+    }
+
+    #[test]
+    fn reset_cmd_refuses_address_when_only_a_node_carries_it() {
+        // Sending to it would reboot the node.
+        let refused = board_to_reset(Some(NODE_MAC), None, attached).expect_err("not a bridge");
+        assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
+        assert!(refused.to_string().contains(NODE_MAC), "{refused}");
+    }
+
+    #[test]
+    fn reset_cmd_refuses_address_when_nothing_attached_carries_it() {
+        let refused =
+            board_to_reset(Some("AA:BB:CC:DD:EE:FF"), None, attached).expect_err("not attached");
+        assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
+    }
+
+    #[test]
+    fn reset_cmd_keeps_path_without_listing_when_named_by_path() {
+        let board = board_to_reset(Some("/dev/ttyACM9"), None, || panic!("nothing to list"));
+        assert_eq!(board.expect("the path as given"), "/dev/ttyACM9");
+    }
 
     #[test]
     fn reset_cmd_identifies_reboot_when_uptime_decreases_relative_to_previous_state() {
@@ -251,17 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_cmd_formats_unreachable_notice_with_port_when_board_is_named() {
-        let notice = unreachable_notice(Some("/dev/ttyACM0"));
-        assert!(notice.contains("on /dev/ttyACM0 did not come back within 10s"), "{notice}");
-        assert!(notice.contains("espflash reset --port /dev/ttyACM0"), "{notice}");
-    }
-
-    #[test]
-    fn reset_cmd_formats_unreachable_notice_without_port_when_board_is_unnamed() {
-        let notice = unreachable_notice(None);
-        assert!(notice.contains("on the board that was detected"), "{notice}");
-        // No dangling `--port` with nothing after it.
-        assert!(!notice.contains("--port"), "{notice}");
+    fn reset_cmd_formats_unreachable_notice_with_board_when_board_goes_silent() {
+        let notice = unreachable_notice(BRIDGE_MAC);
+        assert!(notice.contains(&format!("{BRIDGE_MAC} did not come back within 10s")), "{notice}");
+        assert!(notice.contains("Power-cycle"), "{notice}");
     }
 }

@@ -8,17 +8,33 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use wartui_core::engine::{Snapshot, TailEntry};
-use wartui_proto::mac;
-// Shared with the bridge's panel, so the two cannot show different numbers for one
-// estimate.
-use wartui_core::panel::approx;
 use wartui_proto::air::RecordKind;
+use wartui_proto::mac;
 
 use super::bignum::big;
 use super::format::clock;
 
 /// Rows the big counts take.
 const TOTALS_HEIGHT: u16 = 3;
+
+/// A count rendered short for a narrow line. Three significant figures, because these are estimates
+/// with about 0.8% standard error ([`wartui_core::distinct`]), so later digits are noise.
+fn approx(n: u64) -> String {
+    if n < 10_000 {
+        return n.to_string();
+    }
+    let (k, m) = (n as f64 / 1e3, n as f64 / 1e6);
+    // Each unit is judged on the figure as it would be printed, not the raw count, so one
+    // that rounds up past its unit's range (99,950 to "100.0k") moves on to the next.
+    for (value, digits, below, unit) in [(k, 1, 100.0, "k"), (k, 0, 1000.0, "k"), (m, 2, 10.0, "M")]
+    {
+        let text = format!("{value:.digits$}");
+        if text.parse::<f64>().is_ok_and(|shown| shown < below) {
+            return format!("{text}{unit}");
+        }
+    }
+    format!("{m:.1}M")
+}
 
 pub(super) fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let header = Row::new(["time", "node", "bssid", "ch", "rssi", "ssid"])
@@ -138,6 +154,21 @@ mod tests {
     use crate::tui::draw;
     use crate::tui::fixtures::*;
     use crate::tui::ui::Ui;
+
+    #[test]
+    fn approx_shortens_to_three_figures_when_count_has_more() {
+        assert_eq!(approx(0), "0");
+        assert_eq!(approx(9_999), "9999");
+        assert_eq!(approx(12_345), "12.3k");
+        assert_eq!(approx(506_360), "506k");
+        assert_eq!(approx(2_350_000), "2.35M");
+        assert_eq!(approx(23_500_000), "23.5M");
+        // Each unit judged on the printed figure, so these move up rather than
+        // reading as "100.0k" and "1000k".
+        assert_eq!(approx(99_950), "100k");
+        assert_eq!(approx(999_500), "1.00M");
+        assert_eq!(approx(9_999_999), "10.0M");
+    }
 
     fn screen(snapshot: &Snapshot, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");

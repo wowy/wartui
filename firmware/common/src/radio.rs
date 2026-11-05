@@ -1,10 +1,9 @@
 //! The ESP-NOW half of a bridge: what the radio is told and what it hears, with no
 //! knowledge of the link that carries either to the host.
 //!
-//! One copy for every firmware that owns a radio and bridges it. The single-chip bridge
-//! connects it to its USB link in memory; a radio chip behind a P4 connects it to the SPI
-//! link. Two copies would drift, and the rules here — the broadcast-slot give-up, the
-//! 24 Mbps rate, which status a send earns — are ones the host reads meaning into.
+//! The radio chip behind a P4 connects it to the SPI link. The rules here — the
+//! broadcast-slot give-up, the 24 Mbps rate, which status a send earns — are ones the host
+//! reads meaning into.
 //!
 //! The functions return what to say as a [`Said`] rather than saying it, because each
 //! caller has its own way to reach the host.
@@ -308,9 +307,8 @@ pub async fn run_jobs<const N: usize, const P: usize>(
                 // Stamped *after* the transmit callback, not before the send, but only when
                 // this future is next polled: at the caller's next await. The bridge's loop
                 // awaits when it idles, and on a busy pass only while a job waits, so under a
-                // burst the stamp trails the callback until the loop next idles. A
-                // T-Dongle-C5 repaint adds up to 36 ms. Against the `rx_us` of the heartbeat
-                // that opened the window, this bounds from above the time from "the node is
+                // burst the stamp trails the callback until the loop next idles. Against the
+                // `rx_us` of the heartbeat that opened the window, this bounds from above the time from "the node is
                 // listening" to "the radio says it has it".
                 Done::Sent(SendDone { id, status, done_at: Instant::now() })
             }

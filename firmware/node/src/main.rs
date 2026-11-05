@@ -118,8 +118,17 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     reboot()
 }
 
-// No watchdog here either; `firmware/bridge/src/main.rs` gives the reason. The gap
-// costs more on this end, because a hung node reads as `no heartbeat` and so does
+// There is no watchdog here, having built one and measured that it cannot work.
+// `esp_hal::init` disables every watchdog on the chip
+// (`esp-hal-1.2.2/src/lib.rs:768-778`), and the RWDT that would close the gap
+// provably never resets these parts: it counts, unfed, and `WDT_PROCPU_RESET_EN`
+// is the one enable that will not be written (`docs/phase-3-findings.md` has the
+// register dumps, taken on esp-hal 1.1.2).
+//
+// So a genuine hang in the loop below has nothing behind it and the board has to
+// be unplugged: a real gap, left deliberately open, because a safety net that
+// provably catches nothing is worse than an absent one. It will be trusted. The gap
+// costs a lot on this end, because a hung node reads as `no heartbeat` and so does
 // one out of range or with a flat battery.
 
 /// Everything that changes while the node runs.
@@ -326,8 +335,11 @@ fn main() -> ! {
     // which sets the power each assignment carries (`drain_admin`). `README.md`
     // § "What it does differently" has why this node sniffs rather than scans.
     //
-    // `US` rather than `esp-radio`'s default, which silently costs a C5 channels
-    // 100-144 — `firmware/bridge/src/main.rs` has the detail.
+    // `US` rather than `esp-radio`'s default, China under `WIFI_COUNTRY_POLICY_MANUAL`,
+    // which refuses 5 GHz 100-144 outright and so silently costs a C5 those channels on
+    // every sweep. The bridge's C6 only ever sits on `CONTROL_CHANNEL` and would never
+    // notice, but it passes `US` too: two halves of one fleet disagreeing about what is
+    // legal is a trap.
     let mut controller = WifiController::new(
         peripherals.WIFI,
         ControllerConfig::default().with_country_info(*b"US"),

@@ -1,4 +1,4 @@
-# Its own workspace, for the same reasons as `firmware/bridge`: a different
+# Its own workspace: a different
 # target, a different toolchain pin and a lockfile that must not be resolved
 # together with the host crates. The path dependency on wartui-proto reaches up
 # into the other workspace, which is why the wire types — and now the beacon
@@ -42,7 +42,7 @@ log = ["dep:esp-println"]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
-# `firmware/bridge/README.md` § "Dependency versions".
+# `firmware/p4-radio/README.md` § "Dependency versions".
 esp-alloc = "0.11.0"
 esp-bootloader-esp-idf = "0.6.0"
 esp-hal = { version = "1.2.2", features = ["unstable"] }
@@ -65,7 +65,7 @@ esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"] }
 esp-sync = "0.3.0"
 # IDF's own bindings, for the transmit-power read in `radio::tx_power`, which
 # `esp-radio` does not wrap. Held at the version `esp-radio` links;
-# `firmware/bridge/README.md` § "Dependency versions".
+# `firmware/p4-radio/README.md` § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, and the flash half of over-the-air updates, which

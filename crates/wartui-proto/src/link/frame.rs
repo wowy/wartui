@@ -2,8 +2,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
     BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION,
-    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
-    UPDATE_STATUS_MAX,
+    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, UPDATE_STATUS_MAX,
 };
 use crate::ota::image::DIGEST_LEN;
 use crate::spi::update::OP_MAX;
@@ -13,7 +12,7 @@ use crate::spi::update::OP_MAX;
 // bytes cover the framing. Checked here so a payload that outgrew the buffer is a build
 // error, not a silent truncation. Each `+ 32` below is room for the message's other
 // fields, its variant index, and the body's version byte and CRC.
-pub(crate) const MAX_BODY: usize = MAX_FRAME - 8;
+const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // The same for the host-to-bridge direction, whose longest frame is a full v2 send.
 // COBS adds one byte per 254, so 16 covers it with the terminator.
@@ -25,15 +24,6 @@ const _: () = assert!(GPS_WRITE_MAX + 32 < MAX_HOST_BODY);
 // An update op for a P4's own image, a full chunk at most, and the status answering it.
 const _: () = assert!(OP_MAX + 32 < MAX_HOST_BODY);
 const _: () = assert!(UPDATE_STATUS_MAX + 32 < MAX_BODY);
-// The other frame worth checking. A panel push carries every row every time, so its
-// worst case is fixed: `PANEL_ROWS` lines of a full `ShortStr`, each with a severity
-// byte and a length prefix, plus the variant index and the vector's length. A panel that
-// grew a row or a wider `ShortStr` is then a build error, not a bridge silently losing
-// the bottom of its screen.
-const _: () = assert!(
-    PANEL_ROWS * (32 + 2) + 2 < MAX_BODY,
-    "a whole-panel push must fit one frame, or a bridge would silently lose rows"
-);
 // The two replies that grew with the split bridge, at their fullest.
 const _: () = assert!(
     // variant index, `peer_count`, four `u32`s, then 8 queues of a tag and three `u32`s,
@@ -45,10 +35,9 @@ const _: () = assert!(
 const _: () = assert!(
     // Two `ShortStr`s behind their lengths, two MACs, the bridge's and the radio's, and the
     // image digest. `8 * 5` bounds eight varint `u32`s, against three today: `heap_free`,
-    // `uptime_ms` and the radio's `uptime_ms`. `24` bounds the one-byte fields, against 14
+    // `uptime_ms` and the radio's `uptime_ms`. `24` bounds the one-byte fields, against 11
     // today: the variant index, `chip`, `proto_version`, `reset_cause`, `last_phase`, `gps`,
-    // the panel's tag, `cols` and `rows`, the radio's tag, `chip`, `reset_cause` and
-    // `last_phase`, and the image's tag. The slack lets either grow a little without moving
+    // the radio's tag, `chip`, `reset_cause` and `last_phase`, and the image's tag. The slack lets either grow a little without moving
     // the sum.
     2 * (32 + 1) + 2 * 6 + DIGEST_LEN + 8 * 5 + 24 < MAX_BODY,
     "a Ready with radio info must fit one frame"
@@ -184,7 +173,7 @@ fn encode_frame_in<T: Serialize, const B: usize>(
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the body.
-pub(crate) fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
+fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
     let (version, payload) = out.split_first_mut().ok_or(LinkError::BufferTooSmall)?;
     *version = LINK_PROTO_VERSION;
     let used = postcard::to_slice(msg, payload).map_err(|_| LinkError::BufferTooSmall)?.len();
@@ -197,11 +186,9 @@ pub(crate) fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize
 /// COBS-encodes a frame body a piece at a time, terminator included, producing exactly
 /// what [`cobs::encode`] and a `0x00` would. Every frame this crate encodes goes through it.
 ///
-/// It holds positions and never the body, which the caller passes on every call: the
-/// outbox keeps the body in a ring slot that eviction may copy elsewhere, same bytes at
-/// the same indices.
+/// It holds positions and never the body, which the caller passes on every call.
 #[derive(Debug)]
-pub(crate) struct CobsStream {
+struct CobsStream {
     /// The next body byte to read.
     at: usize,
     step: CobsStep,
@@ -225,7 +212,7 @@ const COBS_RUN: usize = 254;
 
 impl CobsStream {
     /// A stream at the start of a body.
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self { at: 0, step: CobsStep::Code }
     }
 
@@ -234,7 +221,7 @@ impl CobsStream {
     /// writes nothing.
     ///
     /// `body` must be the same bytes on every call, and `out` must not be empty.
-    pub(crate) fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
+    fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
         debug_assert!(!out.is_empty(), "an empty `out` makes no progress");
         let mut n = 0;
         while n < out.len() {
@@ -283,7 +270,7 @@ impl CobsStream {
     }
 
     /// Whether the terminator has been written.
-    pub(crate) const fn is_done(&self) -> bool {
+    const fn is_done(&self) -> bool {
         matches!(self.step, CobsStep::Done)
     }
 }
@@ -315,8 +302,8 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 /// Both ends use this. A zero byte ends a frame, so the accumulator recovers on its own
 /// from a reset banner, a half-written frame or an unplugged cable. The junk is
 /// discarded at the next terminator, and the stream carries on. Without a terminator of
-/// the sender's own, that is the next frame's, so the bridge writes one at boot (see
-/// [`crate::outbox`]), and the host leads each connection's first frame with one.
+/// the sender's own, that is the next frame's, so the host leads each connection's first
+/// frame with one.
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],
@@ -341,16 +328,6 @@ impl<const N: usize> FrameAccumulator<N> {
     pub const fn reset(&mut self) {
         self.len = 0;
         self.overflowed = false;
-    }
-
-    /// Whether no frame is part-way in.
-    ///
-    /// A frame that overran the buffer is still arriving until its terminator, so it
-    /// counts as part-way in. The bridge reads this to stay on the link while a host
-    /// frame is crossing it ([`LinkBurst`](super::LinkBurst)).
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0 && !self.overflowed
     }
 
     /// Feed one byte.

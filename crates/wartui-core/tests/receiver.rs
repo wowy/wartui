@@ -24,7 +24,7 @@ fn uart(device: &str) -> PortCandidate {
 }
 
 fn board(device: &str) -> PortCandidate {
-    candidate(device, Some(ESPRESSIF_VID), Some(ports::BRIDGE_PID), Some("10:BD:A3:EC:44:C0"))
+    candidate(device, Some(ESPRESSIF_VID), Some(ports::SERIAL_JTAG_PID), Some("10:BD:A3:EC:44:C0"))
 }
 
 #[test]

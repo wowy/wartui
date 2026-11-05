@@ -159,9 +159,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// The nodes heard on another major or minor, as the panel and the header name them:
+    /// The nodes heard on another major or minor, as the header names them:
     /// `2 need update`, `1 host behind`, or `3 undrivable` for both. `None` when there are none.
-    /// Short enough for the panel's seventeen columns.
     #[must_use]
     pub fn undrivable_text(&self) -> Option<String> {
         match (self.needs_update, self.host_behind) {

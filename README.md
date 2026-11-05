@@ -91,18 +91,20 @@ wartui ota        # update node firmware over the air
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
-| [`firmware/bridge`](firmware/bridge/README.md)           | The bridge: COBS framing and `esp-radio` calls, no protocol knowledge                                         |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: USB link and SPI master, no protocol knowledge                        |
+| [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The bridge's radio half, on the board's ESP32-C6: `esp-radio` calls, no protocol knowledge                    |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture                                                        |
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
 | `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                      |
 
 The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now), which
-most laptops can't. wartui uses a USB-attached ESP32 as a radio bridge. It tracks the nodes, assigns
+most laptops can't. wartui uses a USB-attached ESP32-P4 board as a radio bridge. It tracks the nodes, assigns
 their channels, and stores everything they see.
 
-The nodes run `firmware/node` and the bridge runs `firmware/bridge`, both in this repository. A node
-is a C5, for its 5 GHz radio. A bridge can be a C5 or a C6: it stays on 2.4 GHz channel 6 for
+The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firmware/p4-radio`, all
+in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4 board:
+the P4 talks to the host, and its on-board C6 runs the radio. It stays on 2.4 GHz channel 6 for
 control messages, so it never needs 5 GHz.
 
 Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Both
@@ -193,8 +195,9 @@ cargo fmt --check
 cargo test -p wartui-core --test engine                     # one test binary
 cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
-cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
-cd firmware/node   && cargo clippy --release
+cd firmware/node      && cargo clippy --release
+cd firmware/p4-radio  && cargo clippy --release --features esp32c6
+cd firmware/p4-bridge && cargo clippy --release
 ```
 
 `wartui-proto` is `no_std` so both firmwares can use it. That's also why the node's beacon parser,

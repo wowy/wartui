@@ -882,7 +882,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
 
 #[test]
 fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
-    // 1,000 received, 10 of them evicted from the bridge's outbox and never sent, and 985
+    // 1,000 received, 10 of them evicted from the bridge's host queue and never sent, and 985
     // read: 5 were lost on USB.
     let (_dir, conn) = capture(vec![
         read_status(0, 10_000, 100, 60_000, 9_000),

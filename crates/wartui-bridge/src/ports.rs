@@ -7,11 +7,11 @@
 //! is `no_std` and cannot hold `serialport`, and `wartui-core` already depends on
 //! this crate, so this module is reachable from either without inverting a layer.
 //!
-//! **An ESP32's USB serial number is its MAC.** The C5's and C6's native USB
-//! Serial/JTAG reports the address the radio transmits from, so the OS has
-//! already paired a device node with the board's identity before anything is
-//! opened. [`PortCandidate::mac`] is that fact, and it is what lets one board be
-//! told from another without a probe, a reflash or an `esp` tool.
+//! **An ESP32's USB serial number is its MAC.** A node's native USB Serial/JTAG
+//! reports the address its radio transmits from, and the P4 bridge reports its C6's,
+//! so the OS has already paired a device node with the board's identity before
+//! anything is opened. [`PortCandidate::mac`] is that fact, and it is what lets one
+//! board be told from another without a probe, a reflash or an `esp` tool.
 //!
 //! **Never set DTR or RTS on a port, and never ask `serialport` to.** Opening a
 //! board is safe only by accident of how the two lines move together. The kernel's
@@ -24,16 +24,22 @@
 //! routing through (1,1) to avoid the other. Leave both alone, and set
 //! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
 //!
-//! **What a device is for is decided by vendor ID, plus one exact pair.**
-//! Espressif's vendor ID, or the test pair [`TEST_VID`]:[`TEST_PID`] whose product
-//! string starts with [`P4_PRODUCT_PREFIX`] (the P4 bridge, until it is granted a
-//! PID of its own). [`could_be_a_bridge`] and [`could_be_a_receiver`] are
-//! complements, so the two sets cannot overlap however either is called. That
-//! matters because looking for a bridge means *writing* into what is opened: the
-//! sweep sends `Identify` frames down every candidate until one answers, so
-//! widening that set past Espressif's vendor ID and the P4's exact pair would mean
-//! transmitting into whatever else is plugged in. Exclusive opening is a backstop
-//! against two readers, not a substitute for that.
+//! **What a device is for is decided by vendor ID, plus one exact pair.** The test
+//! pair [`TEST_VID`]:[`TEST_PID`] whose product string starts with
+//! [`P4_PRODUCT_PREFIX`] is the P4 bridge, until it is granted a PID of its own, and
+//! Espressif's vendor ID is a node. Three questions are asked of that, and each answer
+//! is one predicate:
+//!
+//! - [`could_be_a_bridge`] is the P4 bridge alone. Looking for a bridge means *writing*
+//!   into what is opened: the sweep sends `Identify` down every candidate until one
+//!   answers, and a node is never one of them, so finding a bridge writes to no node.
+//!   Widening this set past the P4's exact pair would mean transmitting into whatever
+//!   else is plugged in. Exclusive opening is a backstop against two readers, not a
+//!   substitute for that.
+//! - [`is_wartui_board`] is the P4 bridge and every node: what `wartui ports` lists, and
+//!   `flash-fleet` and `flash-bridge` choose from.
+//! - [`could_be_a_receiver`] is everything else, so the GPS search, which listens to
+//!   what it opens, never opens one of the fleet's boards.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -42,17 +48,15 @@ use wartui_proto::mac::{self, Mac};
 
 use crate::TransportError;
 
-/// Espressif's USB vendor ID, shared by the C5's and C6's native USB Serial/JTAG.
+/// Espressif's USB vendor ID, which a node's native USB Serial/JTAG reports.
 pub const ESPRESSIF_VID: u16 = 0x303A;
 
-/// The product ID that native USB Serial/JTAG reports.
+/// The product ID every node reports: an ESP32's native USB Serial/JTAG.
 ///
-/// Every board in this fleet is one, so it separates nothing on its own. It orders
-/// a sweep: a board behind a USB-to-UART bridge chip carries the chip's vendor ID
-/// rather than Espressif's and never reaches the list at all, so anything here that
-/// is *not* this is an Espressif device of some other kind and is worth trying last.
-/// The P4 bridge ([`is_p4_bridge`]) ranks with these despite its own pair.
-pub const BRIDGE_PID: u16 = 0x1001;
+/// A board behind a USB-to-UART bridge chip carries the chip's vendor ID rather than
+/// Espressif's and is never listed at all, so an Espressif device that is *not* this is of
+/// some other kind, and `flash-fleet` leaves it alone.
+pub const SERIAL_JTAG_PID: u16 = 0x1001;
 
 /// The pid.codes test vendor ID the P4 bridge enumerates under until Espressif grants it a PID.
 pub const TEST_VID: u16 = 0x1209;
@@ -142,20 +146,25 @@ pub fn is_p4_bridge(candidate: &PortCandidate) -> bool {
         && candidate.product.as_deref().is_some_and(|p| p.starts_with(P4_PRODUCT_PREFIX))
 }
 
-/// Whether this port could be the bridge — or a node, which looks identical.
+/// Whether this port could be the bridge.
 #[must_use]
 pub fn could_be_a_bridge(candidate: &PortCandidate) -> bool {
-    (candidate.vid == Some(ESPRESSIF_VID) || is_p4_bridge(candidate))
-        && is_usable_path(&candidate.path)
+    is_p4_bridge(candidate) && is_usable_path(&candidate.path)
+}
+
+/// Whether this is one of the fleet's boards: a node, or the P4 bridge.
+#[must_use]
+pub fn is_wartui_board(candidate: &PortCandidate) -> bool {
+    candidate.vid == Some(ESPRESSIF_VID) || is_p4_bridge(candidate)
 }
 
 /// Whether this port could be an NMEA receiver.
 ///
-/// The complement of [`could_be_a_bridge`] over usable paths, and that is the whole rule: a
-/// receiver is recognized by what it says when read, not by what it is called.
+/// Every usable path but the fleet's boards, and that is the whole rule: a receiver is
+/// recognized by what it says when read, not by what it is called.
 #[must_use]
 pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
-    is_usable_path(&candidate.path) && !could_be_a_bridge(candidate)
+    is_usable_path(&candidate.path) && !is_wartui_board(candidate)
 }
 
 /// On macOS every USB serial device appears twice. `/dev/tty.*` is the callout
@@ -305,11 +314,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ports_scanner_partitions_bridge_and_gps_ports_when_enumerating_usb_devices() {
-        let bridge = candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x1001), None);
+    fn ports_scanner_partitions_bridge_node_and_gps_ports_when_enumerating_usb_devices() {
+        let bridge = p4(Some("wartui p4 bridge"));
+        let node = candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x1001), None);
         let puck = candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None);
-        assert!(could_be_a_bridge(&bridge) && !could_be_a_receiver(&bridge));
+        assert!(could_be_a_bridge(&bridge) && is_wartui_board(&bridge));
+        assert!(!could_be_a_receiver(&bridge));
+        // Finding a bridge writes, so a node is never a candidate, and the GPS search never
+        // opens it either: it stays listed only as one of the fleet's boards.
+        assert!(!could_be_a_bridge(&node) && is_wartui_board(&node));
+        assert!(!could_be_a_receiver(&node));
         assert!(could_be_a_receiver(&puck) && !could_be_a_bridge(&puck));
+        assert!(!is_wartui_board(&puck));
     }
 
     fn p4(product: Option<&str>) -> PortCandidate {
@@ -329,6 +345,7 @@ mod tests {
         for product in [None, Some("Other"), Some("Wartui p4")] {
             let c = p4(product);
             assert!(!is_p4_bridge(&c) && !could_be_a_bridge(&c) && could_be_a_receiver(&c));
+            assert!(!is_wartui_board(&c));
         }
         let mut wrong_pid = p4(Some("wartui p4 bridge"));
         wrong_pid.pid = Some(0x0002);
@@ -336,22 +353,23 @@ mod tests {
     }
 
     #[test]
-    fn ports_bridge_and_receiver_stay_complements() {
+    fn ports_keeps_bridge_and_receiver_apart_when_given_any_port() {
         let mut tty = p4(Some("wartui p4 bridge"));
         tty.path = "/dev/tty.usbmodem1".to_owned();
         let table = [
             p4(Some("wartui p4 bridge")),
             p4(None),
             tty,
-            candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+            candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), None),
             candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None),
             candidate("/dev/ttyACM3", None, None, None),
-            candidate("/dev/tty.usbmodem2", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+            candidate("/dev/tty.usbmodem2", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), None),
         ];
         for c in &table {
             let usable = is_usable_path(&c.path);
-            assert_eq!(could_be_a_receiver(c), usable && !could_be_a_bridge(c), "{c:?}");
+            assert_eq!(could_be_a_receiver(c), usable && !is_wartui_board(c), "{c:?}");
             assert!(!(could_be_a_bridge(c) && could_be_a_receiver(c)), "{c:?}");
+            assert!(!could_be_a_bridge(c) || is_wartui_board(c), "{c:?}");
         }
     }
 }

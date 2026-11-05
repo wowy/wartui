@@ -16,8 +16,8 @@
 //! [`HostToBridge::SendEspNow`] holds up to [`MAX_ESPNOW_V2_PAYLOAD`] (1470) bytes, so an
 //! update chunk fits, and travels in a frame of up to [`MAX_HOST_FRAME`]. Bridge to host, a
 //! [`BridgeToHost::Rx`] holds at most [`MAX_NODE_PAYLOAD`] (1024), because nothing a node
-//! sends is longer, and travels in a frame of up to [`MAX_FRAME`], which is also the size
-//! of each of the bridge's outbox slots. See `docs/espnow-v2-findings.md`.
+//! sends is longer, and travels in a frame of up to [`MAX_FRAME`]. See
+//! `docs/espnow-v2-findings.md`.
 
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
@@ -26,17 +26,12 @@ use crate::spi::update::OP_MAX;
 use heapless::{String, Vec};
 use serde::Serialize;
 
-mod burst;
 mod bytes;
 mod frame;
-mod panel;
 
-pub use burst::{BURST_BUDGET_US, BURST_GAP_US, LinkBurst};
-pub(crate) use frame::{CobsStream, MAX_BODY, encode_body};
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
 };
-pub use panel::{PANEL_ROWS, Panel, PanelLine, PanelLines, Severity};
 
 /// The revision of this protocol both ends must agree on.
 ///
@@ -80,8 +75,8 @@ pub type ShortStr = String<32>;
 pub type LogStr = String<96>;
 
 /// The most receiver bytes one [`BridgeToHost::Gps`] carries. The bridge batches several
-/// I2C reads into one frame, since each frame takes a whole slot of the outbox's bulk ring
-/// (`firmware/common/src/gps.rs`). An epoch's GGA and RMC fit with room to spare.
+/// I2C reads into one frame, so a frame per read cannot push sightings out of its bulk
+/// ring (`firmware/common/src/gps.rs`). An epoch's GGA and RMC fit with room to spare.
 pub const GPS_FRAME: usize = 512;
 
 /// Bytes read from the GPS receiver, in transit to the host.
@@ -131,41 +126,26 @@ pub enum Chip {
     Esp32P4,
 }
 
-/// Where the bridge's main loop was when it last stopped making progress.
+/// What a bridge chip's firmware last marked before it reset.
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],
-/// because the interesting resets are the ones nobody was watching. Alone it is a hint:
-/// the loop visits most phases ten times a second. Paired with a
-/// [`ResetCause::Watchdog`] or [`ResetCause::Software`], it names the blocking call that
-/// did not come back.
+/// because the interesting resets are the ones nobody was watching. It is only a hint. Each
+/// chip's futures share one task and one marker, and the SPI link's marks it on every
+/// transfer, so it says what ran last, not what stopped the chip. A future parked on an
+/// `await` leaves the others running, so only a call that never yields holds the marker
+/// where it hung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum LoopPhase {
     /// Nothing to report: a power-on, or a reset that did not preserve the marker.
     Unknown,
-    /// Still in `main` before the loop started.
+    /// Still in `main`, before its futures started.
     Boot,
-    /// Draining the radio's receive queue.
-    DrainRadio,
     /// Reading and decoding host commands.
     DrainLink,
-    /// Carrying out a host command other than a transmit.
+    /// Carrying out a host command.
     Command,
-    /// Inside an ESP-NOW send, waiting on the transmit callback.
-    ///
-    /// No firmware in this tree marks it, since sends run beside the main loop. It stays for
-    /// older builds, whose phase marker or hello can still name it, and because removing it
-    /// would shift every later variant's index.
-    Transmit,
     /// Writing queued frames to the USB endpoint.
     Pump,
-    /// Idle, with neither radio nor link asking for anything.
-    Idle,
-    /// The transmit path stopped draining while the host was still talking, so the
-    /// bridge reset itself. See [`crate::stall`].
-    TxStalled,
-    /// Pushing pixels at the panel, the other call in the loop that blocks for longer
-    /// than a memcpy.
-    Render,
     /// Waiting on a transfer over the P4–C6 SPI link.
     SpiTransfer,
 }
@@ -201,7 +181,7 @@ pub enum SendStatus {
 /// Commands the host sends to the bridge.
 ///
 /// The bridge understands framing and the radio, and nothing about what the bytes mean;
-/// see `firmware/bridge/src/main.rs`.
+/// see `firmware/p4-radio/README.md`.
 // The payload variants dwarf the rest, but boxing them would need an allocator in the
 // bridge firmware, which this crate avoids. These values are built, serialized and
 // dropped, never stored in bulk.
@@ -210,10 +190,9 @@ pub enum SendStatus {
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// Sent the moment the host opens the port. A bridge that does not
-    /// [speak first](ResetCause::speaks_first) says nothing until a host frame decodes.
-    /// One that does announced at boot, possibly to a host long gone. Either way, a new
-    /// connection that did not ask would wait forever.
+    /// Sent the moment the host opens the port. The P4's transmit opens on DTR and nothing
+    /// queues before it (`firmware/p4-bridge/src/usb.rs`), so a new connection that did not
+    /// ask would wait forever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
@@ -242,18 +221,6 @@ pub enum HostToBridge {
     GetStatus,
     /// Reboot the bridge.
     Reset,
-    /// Lines to display, already laid out by the host.
-    ///
-    /// Every line, every time, so a push is idempotent. A bridge that reboots
-    /// mid-session repaints correctly on the next push, with no resync protocol to get
-    /// wrong. That costs a few hundred bytes a second at the host's redraw rate.
-    ///
-    /// The host composes the text and picks each line's [`Severity`]; the bridge blits
-    /// it. A change to what the panel says then costs a `cargo run`, not a reflash.
-    ShowPanel {
-        /// One per row, top to bottom. Never more than the [`Panel`] announced.
-        lines: PanelLines,
-    },
     /// Set the bridge radio's Wi-Fi transmit power in ESP-IDF quarter-dBm units.
     ///
     /// Sent with every status poll, so a bridge that restarted under a running host is
@@ -280,42 +247,14 @@ pub enum HostToBridge {
     Update(#[serde(with = "bytes")] UpdateOp),
 }
 
-impl HostToBridge {
-    /// Whether the bridge answers this command with a frame of its own.
-    ///
-    /// For [`crate::stall::StallWatch`], which times a transmit path that refuses bytes
-    /// while a host *waits*. Only a command that asks for a reply leaves a host waiting.
-    /// A command that may log or report an error does not ask: the host is not owed
-    /// that answer.
-    ///
-    /// [`Self::Update`] does not ask. The P4 answers a sector's last chunk and not the chunks
-    /// before it, and runs no stall watch; the single-chip bridge, which does, answers it only
-    /// with the error that it takes no update.
-    ///
-    /// Exhaustive on purpose, so a new command has to say which it is.
-    #[must_use]
-    pub const fn asks_for_reply(&self) -> bool {
-        match self {
-            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } => true,
-            Self::AddPeer { .. }
-            | Self::RemovePeer { .. }
-            | Self::Reset
-            | Self::ShowPanel { .. }
-            | Self::SetTxPower { .. }
-            | Self::GpsWrite { .. }
-            | Self::Update(_) => false,
-        }
-    }
-}
-
 /// Events and replies the bridge sends to the host.
 // Unboxed for the reason `HostToBridge` gives.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
-    /// Sent at startup when the life [speaks first](ResetCause::speaks_first), and in
-    /// answer to [`HostToBridge::Identify`]. The host checks `proto_version` and refuses
-    /// a bridge it does not understand.
+    /// Sent in answer to [`HostToBridge::Identify`], and when a new life begins while a host
+    /// holds DTR (`firmware/p4-bridge/src/usb.rs`). The host checks `proto_version` and
+    /// refuses a bridge it does not understand.
     Ready {
         /// Which chip this is.
         chip: Chip,
@@ -340,19 +279,13 @@ pub enum BridgeToHost {
         /// the USB device, so both arrive on one connection, and nothing else in the
         /// frame separates them. See `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
-        /// The screen this bridge has, if it has one.
-        ///
-        /// `None` for a board with no screen, which is then sent no
-        /// [`HostToBridge::ShowPanel`]. See [`Panel`].
-        panel: Option<Panel>,
         /// Whether this board was built with a GPS port.
         ///
-        /// A board fact, like `panel`. It does not mean a receiver answered: a missing
-        /// receiver is reported as an [`Self::Error`] instead.
+        /// A board fact. It does not mean a receiver answered: a missing receiver is
+        /// reported as an [`Self::Error`] instead.
         gps: bool,
-        /// The ESP32-C6 radio behind a bridge that has none of its own, as the C6 reported
-        /// it. `None` for a bridge with its own radio, and for a split bridge whose C6
-        /// has not answered yet.
+        /// The ESP32-C6 radio behind the bridge, as the C6 reported it. `None` while the C6
+        /// has not answered.
         radio: Option<RadioInfo>,
         /// The digest appended to the booted image ([`crate::ota::image`]), from a bridge
         /// that takes updates over this link. `None` from one that does not. The host reads
@@ -393,7 +326,7 @@ pub enum BridgeToHost {
         /// counted in `rx_oversize` instead, and frames without [`crate::air::MAGIC`]
         /// are not counted.
         rx_count: u32,
-        /// Frames the outbox dropped. See [`crate::outbox`].
+        /// Frames the host queue dropped. See [`crate::host_queue`].
         dropped_tx: u32,
         /// Bridge uptime.
         uptime_ms: u32,

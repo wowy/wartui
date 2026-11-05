@@ -333,10 +333,8 @@ fn pair_ready_reports_gps_when_built_with_it() {
 }
 
 #[test]
-fn pair_routes_panel_and_gps_local() {
+fn pair_routes_gps_local() {
     for pair in [pair(), up_pair()] {
-        let panel = HostToBridge::ShowPanel { lines: Vec::new() };
-        assert_eq!(pair.route(&panel), Route::Local);
         let gps = HostToBridge::GpsWrite { bytes: Vec::from_slice(&[0xb5, 0x62]).unwrap() };
         assert_eq!(pair.route(&gps), Route::Local);
     }

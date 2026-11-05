@@ -2,8 +2,8 @@
 //!
 //! SDA is GPIO7 and SCL is GPIO8, the pins the board pulls up with 2.2 kΩ. The board's
 //! ES8311 codec shares the bus at its own address, and this firmware never addresses it.
-//! The protocol, polling and batching are shared with the T-Dongle-C5
-//! ([`wartui_firmware::gps`]); what is here is how this firmware runs them.
+//! The protocol, polling and batching are [`wartui_firmware::gps`]; what is here is how
+//! this firmware runs them.
 //!
 //! **The reader is two more joined futures**, the shared loop and [`forward`], so it needs
 //! no task and no interrupt executor. Everything on the P4 awaits, so the loop gets the

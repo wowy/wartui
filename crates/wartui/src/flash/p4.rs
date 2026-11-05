@@ -1,7 +1,7 @@
 //! `wartui flash-bridge` on a P4 bridge: its app image, sent over the USB link it bridges on.
 //!
-//! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343
-//! that needs BOOT held on one board, so only the first flash uses it
+//! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343, a
+//! second cable, so only the first flash uses it
 //! (`firmware/p4-bridge/README.md` § "First flash"). After that the P4 takes its app image as
 //! `HostToBridge::Update` ops: the `spi::update` layout it sends its own C6, driven by the same
 //! `Sender`, on a [`TICK`] and on each status.
@@ -73,8 +73,9 @@ const SLOT_LEN: usize = 0x1E_0000;
 /// How often the sender is asked for its next op, besides on each status.
 const TICK: Duration = Duration::from_millis(50);
 
-/// How long to wait for the P4's `Ready`. It enumerates once its C6 answers, or after 2 s
-/// without, and the transport waits 6 s for a lone board.
+/// The longest to wait for the P4's `Ready`. It enumerates once its C6 answers, or after 2 s
+/// without. The transport's first failure ends the wait sooner: a held port at once, and a silent
+/// lone board after the transport's 6 s.
 const READY_WAIT: Duration = Duration::from_secs(10);
 
 /// How long to wait for the P4 to come back after the install: two trial boots that the 30 s
@@ -92,11 +93,10 @@ const FOLLOW: Duration = Duration::from_secs(30);
 const QUIET: Duration = Duration::from_secs(5);
 
 /// The README section that covers a wired flash.
-const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
+pub(crate) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
 /// Update the P4 bridge `board` over its link.
 pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -> Result<()> {
-    refuse_chip_features(features)?;
     let source = source(
         &P4_BRIDGE_APP,
         args.image.as_deref(),
@@ -186,18 +186,6 @@ fn check_app(image: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Refuse features that name a single-chip bridge's chip: they build another firmware.
-fn refuse_chip_features(features: &[&str]) -> Result<()> {
-    if let Some(chip) = Chip::FEATURED.into_iter().find(|chip| features.contains(&chip.name())) {
-        bail!(
-            "--features names {}, and a P4 bridge is built with its own; leave --features out \
-             for its release image",
-            chip.name()
-        );
-    }
-    Ok(())
-}
-
 /// Wait for the link's `Ready`, setting `garbled` when a frame arrives that does not decode.
 async fn wait_for_ready(link: &mut LinkHandle, garbled: &mut bool) -> Result<BridgeInfo, String> {
     loop {
@@ -222,10 +210,8 @@ fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
         )
     } else {
         format!(
-            "{board} on {path} did not announce itself within {} s ({why}). Another program may \
-             hold the port, such as a running `wartui run`, or the bridge is still starting; \
-             try again",
-            READY_WAIT.as_secs()
+            "{board} on {path} did not announce itself ({why}). Another program may hold the \
+             port, such as a running `wartui run`, or the bridge is still starting; try again"
         )
     }
 }
@@ -705,16 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_refuses_features_when_they_name_a_single_chip_bridge() {
-        for chip in ["esp32c5", "esp32c6"] {
-            let error = refuse_chip_features(&["gps", chip]).unwrap_err().to_string();
-            assert!(error.contains(chip), "{error}");
-        }
-        refuse_chip_features(&[]).unwrap();
-        refuse_chip_features(&["gps"]).unwrap();
-    }
-
-    #[test]
     fn flash_p4_names_wired_flash_when_bridge_predates_link_updates() {
         let text = failure_text(Failure::Silent, false);
         assert!(text.contains("predates") && text.contains(FIRST_FLASH), "{text}");
@@ -746,6 +722,20 @@ mod tests {
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", false);
         assert!(text.contains("wartui run") && text.contains("still starting"), "{text}");
         assert!(!text.contains("predates") && !text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_claims_no_wait_beyond_the_reason_when_port_fails_at_once() {
+        // A held port fails at about 0 s, so the text's only figure is the one in the reason.
+        let text = no_ready_text("71:F4", "/dev/ttyACM0", "could not open /dev/ttyACM0", false);
+        assert!(text.contains("(could not open /dev/ttyACM0)"), "{text}");
+        assert!(!text.contains(" s "), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_names_same_section_when_bridge_crate_describes_no_firmware() {
+        // `wartui-bridge` sits below this crate, so it spells the section out.
+        assert!(wartui_bridge::NO_FIRMWARE_P4.contains(FIRST_FLASH));
     }
 
     fn log(text: &str) -> BridgeToHost {

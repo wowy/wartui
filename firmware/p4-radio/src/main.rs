@@ -5,8 +5,8 @@
 //! radio commands the P4 relays. It never talks USB. The two talk over the board's SDIO
 //! traces, with this chip as a 40 MHz SPI slave (`src/link.rs`).
 //!
-//! The ESP-NOW half is [`wartui_firmware::radio`], the single-chip bridge's own, so the two
-//! bridges cannot drift. Updates arrive from the P4 over the link and boot on trial, through
+//! The ESP-NOW half is [`wartui_firmware::radio`], kept apart from this chip's link. Updates
+//! arrive from the P4 over the link and boot on trial, through
 //! [`wartui_firmware::ota`], the flash code a node uses. Three futures share one task: the
 //! radio's jobs, `hear_loop` draining the receive queue, and the link. Each waits on an
 //! interrupt rather than polling, but for the one call `src/link.rs` names.
@@ -133,7 +133,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     // `US` rather than `esp-radio`'s default, as every wartui firmware passes;
-    // `firmware/bridge/src/main.rs` has why.
+    // `firmware/node/src/main.rs` has why.
     let mut controller = WifiController::new(
         peripherals.WIFI,
         ControllerConfig::default().with_country_info(*b"US"),

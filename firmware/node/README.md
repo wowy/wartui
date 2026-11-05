@@ -225,7 +225,7 @@ an update taken on trial would write over the only slot known to work.
 so nothing on the air overrides it. China's 5 GHz allocation excludes 5470–5725, and the driver
 refuses those channels outright. A C5 left on the default silently loses 100–144 every sweep. The
 host can't tell that from a node whose radio didn't tune. So `src/main.rs` passes `US`, and
-`firmware/bridge` does the same. This is not a preference.
+`firmware/p4-radio` does the same. This is not a preference.
 
 Otherwise, channel limits belong to the controller, not here. The node transmits only on the
 control channel, so where it dwells is a coverage decision rather than a legal one. This firmware
@@ -331,8 +331,8 @@ would fill with copies of the loudest network and drop the ones not yet seen.
 
 ## Dependency versions
 
-Same set as the bridge, pinned by the same thing. See
-[`firmware/bridge/README.md`](../bridge/README.md).
+Same set as the bridge's radio, pinned by the same thing. See
+[`firmware/p4-radio/README.md`](../p4-radio/README.md#dependency-versions).
 
 `esp-println` is the one thing outside that set, and brings in nothing of it. It depends on
 `esp-sync` only through its `critical-section` feature, a default that `Cargo.toml` turns off, so

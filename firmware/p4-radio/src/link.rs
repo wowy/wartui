@@ -254,8 +254,8 @@ impl Link {
         }
     }
 
-    /// Microseconds since boot, wrapping after roughly 71 minutes, as the single-chip
-    /// bridge stamps them. The host only subtracts one from another.
+    /// Microseconds since boot, wrapping after roughly 71 minutes. The host only subtracts
+    /// one from another.
     fn us_since_boot(&self, at: Instant) -> u32 {
         (at - self.boot).as_micros() as u32
     }

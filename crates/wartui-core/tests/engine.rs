@@ -253,7 +253,7 @@ fn connected_with_gps() -> Event {
 
 fn connected_bridge(mac: Mac, gps: bool) -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
-        chip: Chip::Esp32C6,
+        chip: Chip::Esp32P4,
         mac,
         fw_version: "0.1.0".to_owned(),
         // An ordinary connect. The engine draws no conclusions from these, but a
@@ -262,9 +262,6 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
         last_phase: LoopPhase::Unknown,
         heap_free: 65_536,
         uptime_ms: 1_000,
-        // The ordinary bridge: a board with no screen. Nothing in the engine reads
-        // this — the panel is composed in `runtime` from the snapshot.
-        panel: None,
         gps,
         radio: None,
         image: None,
@@ -1455,7 +1452,7 @@ fn engine_records_bridge_when_connected() {
         panic!("expected a bridge record, got {:?}", batch.records)
     };
     assert_eq!(bridge.mac, [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
-    assert_eq!(bridge.chip, "Esp32C6");
+    assert_eq!(bridge.chip, "Esp32P4");
     assert_eq!(bridge.fw_version, "0.1.0");
 }
 

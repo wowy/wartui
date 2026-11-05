@@ -17,9 +17,7 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel, RadioInfo,
-};
+use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -61,20 +59,13 @@ pub struct BridgeInfo {
     /// Small means this connection is talking to a bridge that has just restarted;
     /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
-    /// The screen this bridge has, if it has one.
-    ///
-    /// Carried up so the host formats to the geometry that is there and pushes
-    /// nothing at a bridge without a screen. `None` is the ordinary case: it is a
-    /// board fact, not a chip fact, and most boards have no panel.
-    pub panel: Option<Panel>,
     /// Whether this bridge was built with a GPS port.
     ///
-    /// A board fact, like `panel`: it says the bridge forwards a receiver's bytes, not
-    /// that a receiver answered.
+    /// A board fact: it says the bridge forwards a receiver's bytes, not that a receiver
+    /// answered.
     pub gps: bool,
-    /// The radio coprocessor behind a split bridge, as it described itself. Its reset
-    /// cause is the only record of a radio crash under a running bridge. `None` on a
-    /// single-chip bridge.
+    /// The C6 behind the P4, as it described itself. Its reset cause is the only record of
+    /// a radio crash under a running bridge. `None` until it answers.
     pub radio: Option<RadioInfo>,
     /// The digest appended to the booted image, from a bridge that takes updates over the
     /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.
@@ -105,33 +96,46 @@ pub enum LinkEvent {
     Garbled(LinkError),
 }
 
+/// What the host sees of a P4 with no firmware, and where its first flash is described.
+///
+/// Here rather than in `wartui` because [`TransportError::NoBridgeFound`] says it too, and this
+/// crate sits below that one.
+pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware shows up only as its CH343; see \
+     firmware/p4-bridge/README.md § \"First flash\".";
+
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    /// No serial port looked like an Espressif device.
-    #[error("no bridge found; name one with --bridge")]
+    /// No P4 bridge is attached. A board not listed has no address to name it by.
+    #[error(
+        "no bridge found; one `wartui ports` does not list is reached only by its path: \
+         --bridge PATH. {}",
+        NO_FIRMWARE_P4
+    )]
     NoBridgeFound,
-    /// A bridge was named and nothing attached answers to that name.
-    #[error("no board attached is {spec}")]
+    /// A bridge was named by its address, and no attached P4 bridge has it.
+    #[error("no attached P4 bridge is {spec}")]
     NoSuchBridge {
-        /// The path or address that was asked for.
+        /// The address that was asked for.
         spec: String,
     },
-    /// Several boards are attached and nothing says which of them is the bridge.
+    /// Several P4 bridges are attached and nothing says which of them is the bridge.
     #[error(
-        "several boards are attached and none is known to be the bridge ({boards}); \
+        "several P4 bridges are attached and none is known to be the bridge ({boards}); \
              name one with --bridge"
     )]
     AmbiguousBridge {
-        /// The boards that were found, by address where they report one.
+        /// The P4 bridges that were found, by address where they report one.
         boards: String,
     },
-    /// A bridge was named by the end of its address, and several boards end that way.
-    #[error("several attached boards end with {spec} ({boards}); name one by more of its address")]
+    /// A bridge was named by the end of its address, and several P4 bridges end that way.
+    #[error(
+        "several attached P4 bridges end with {spec} ({boards}); name one by more of its address"
+    )]
     AmbiguousName {
         /// The octets that were asked for.
         spec: String,
-        /// The boards that end with them.
+        /// The P4 bridges that end with them.
         boards: String,
     },
     /// The OS refused the port.

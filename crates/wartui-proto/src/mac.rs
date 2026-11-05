@@ -1,6 +1,6 @@
 //! One text form for an address: uppercase hex, colon-separated.
 //!
-//! The host, the node's logs, the bridge's panel and the WiGLE export all print it, so an
+//! The host, the node's logs and the WiGLE export all print it, so an
 //! address greps across every one of them, and changing it changes the export. What it
 //! prints pastes back in as `--bridge`.
 //!

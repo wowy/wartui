@@ -10,7 +10,6 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
-use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -234,10 +233,6 @@ fn dbm(quarter_dbm: i8) -> String {
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
 fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
-    // Ahead of the cause, because it is more specific: the bridge reset itself.
-    if matches!(bridge.last_phase, LoopPhase::TxStalled) {
-        return Some("bridge rebooted itself: USB transmit had stalled".to_owned());
-    }
     let reason = match bridge.reset_cause {
         ResetCause::PowerOn => None,
         ResetCause::Software => Some("bridge rebooted (firmware reset)"),
@@ -621,31 +616,30 @@ mod tests {
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.
-    fn with_restart(reset_cause: ResetCause, last_phase: LoopPhase) -> Snapshot {
+    fn with_restart(reset_cause: ResetCause) -> Snapshot {
         let mut snapshot = busy();
         snapshot.counters = Counters::default();
         snapshot.store.dropped = 0;
         snapshot.bridge_status.as_mut().expect("busy() has a bridge").dropped_since_attach = 0;
         let bridge = snapshot.bridge.as_mut().expect("busy() has a bridge");
         bridge.reset_cause = reset_cause;
-        bridge.last_phase = last_phase;
         snapshot
     }
 
     #[test]
     fn view_reports_bridge_reboot_when_reset_cause_is_watchdog() {
-        let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
+        let screen = rendered(&with_restart(ResetCause::Watchdog));
         assert!(screen.contains("watchdog"), "{screen}");
 
         // Every capture starts with a powered-on bridge. Matched on the full phrase,
         // because nodes have their own `rebooted` state.
-        let screen = rendered(&with_restart(ResetCause::PowerOn, LoopPhase::Unknown));
+        let screen = rendered(&with_restart(ResetCause::PowerOn));
         assert!(!screen.contains("bridge rebooted"), "{screen}");
     }
 
     /// A capture with no fault of its own, for the node faults to stand alone in.
     fn quiet() -> Snapshot {
-        with_restart(ResetCause::PowerOn, LoopPhase::Unknown)
+        with_restart(ResetCause::PowerOn)
     }
 
     /// `quiet()` with node `57:84` reporting `reported` against an assignment of `assigned`.
@@ -695,12 +689,6 @@ mod tests {
         assert!(!screen.contains("transmit power"), "{screen}");
         assert!(!screen.contains("dBm, assigned"), "{screen}");
         assert!(!screen.contains("restarted:"), "{screen}");
-    }
-
-    #[test]
-    fn view_reports_usb_tx_stall_when_bridge_reboots_due_to_tx_stalled() {
-        let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
-        assert!(screen.contains("USB transmit had stalled"), "{screen}");
     }
 
     #[test]

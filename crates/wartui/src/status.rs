@@ -51,7 +51,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an
-    // answer: it names the port and what to do about each of the three causes.
+    // answer: it names the port and what to do about each cause.
     let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
         Ok(ready) => ready?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
@@ -66,13 +66,6 @@ pub async fn run(args: Args) -> Result<()> {
     // A split bridge's radio restarts on its own, and this is where its reason shows.
     if let Some(radio) = &info.radio {
         println!("{}", radio_line(radio));
-    }
-    // A board fact rather than a chip fact, and the one that decides whether `wartui
-    // run` pushes anything at a screen. Said either way, so an absent line never has
-    // to be interpreted.
-    match info.panel {
-        Some(panel) => println!("panel      {} x {} characters", panel.cols, panel.rows),
-        None => println!("panel      none"),
     }
 
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;

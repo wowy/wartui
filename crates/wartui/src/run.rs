@@ -236,10 +236,10 @@ pub async fn run(args: Args) -> Result<()> {
         let config = match &choice {
             GpsChoice::Port(port) => GpsConfig::pinned(port),
             // A `--bridge` given as a path is opened as given, whatever it is, so
-            // the search is told to leave it alone. Espressif boards are already
-            // outside the search: `ports::could_be_a_receiver` is the complement of
-            // what the bridge sweeps by, which is what keeps a node from being read
-            // by one half of wartui while the other half transmits into it.
+            // the search is told to leave it alone. The fleet's boards are already
+            // outside the search: `ports::could_be_a_receiver` leaves out
+            // `ports::is_wartui_board`, so neither a node nor the bridge is ever read as
+            // a receiver.
             _ => GpsConfig::search().reserving(args.bridge.iter().cloned().collect()),
         };
         let config = match args.gps_baud {

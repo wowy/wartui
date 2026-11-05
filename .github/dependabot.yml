@@ -13,23 +13,29 @@ updates:
   # hand. `esp-radio` itself is deliberately not ignored — a pull request there
   # is the signal that the set can move.
   # The same holds for the crates `esp-rtos` and `esp-hal` themselves build
-  # against: `embassy-executor`, `embassy-sync`, `embassy-time`, `embedded-io-async`.
+  # against: `embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`,
+  # `embedded-io-async`.
   # And for `esp-bootloader-esp-idf`, which fixes the `esp-storage` version.
-  # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
+  # `firmware/p4-bridge` has no `esp-radio` of its own and is held to the same set,
+  # because it builds against the same `firmware/common`.
+  # `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
-      - "/firmware/bridge"
       - "/firmware/node"
+      - "/firmware/p4-radio"
+      - "/firmware/p4-bridge"
       - "/firmware/common"
     schedule:
       interval: "daily"
     # Minor and major only, which for a 0.x crate is the whole of what is
     # semver-incompatible. A patch release stays inside what `esp-radio` asks
     # for, so it moves the one copy rather than adding a second, and each
-    # firmware's CI job counts the versions before it builds. Those are worth
-    # taking — an `esp-hal` patch release is a fix this firmware can have.
+    # firmware's CI job counts the versions before it builds. Those
+    # are worth taking — an `esp-hal` patch release is a fix this firmware can have.
     ignore:
       - dependency-name: "embassy-executor"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "embassy-futures"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "embassy-sync"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]

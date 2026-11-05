@@ -53,8 +53,8 @@ jobs:
 
       # Every crate `esp-radio` also depends on must resolve to exactly one
       # version: a second copy is a duplicate symbol under fat LTO or a second,
-      # empty heap. `firmware/bridge/README.md` § "Dependency versions" has the
-      # reasoning, and `firmware-bridge.yml` the same check.
+      # empty heap. `README.md` § "Dependency versions" has the reasoning, and
+      # `firmware-node.yml` the same check.
       - name: One copy of each esp-radio-pinned crate
         run: |
           pushd firmware/p4-radio

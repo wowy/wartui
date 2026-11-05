@@ -12,8 +12,7 @@
 //! name, and the image is fetched or built before the first reset. A merged image holds flash from
 //! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5 or a
 //! P4, with erased flash (`0xFF`) ahead of it. An app-only image starts with its own header. A
-//! node's and a P4 bridge's images are made with their `partitions.csv`, and a single-chip
-//! bridge's with espflash's default table.
+//! node's and a P4 bridge's images are made with their `partitions.csv`.
 //!
 //! **A release pins its images by tag.** The host, the fleet and the bridge are flashed from one
 //! tree, and the crate version does not move before 1.0, so the version cannot name a tree and the
@@ -23,11 +22,12 @@
 //! share one cache directory per tag. A build without the tag is a checkout, and builds the
 //! firmware beside it.
 //!
-//! **The remembered bridge is read strictly.** Both commands decide which board gets firmware
-//! from `[bridge] mac`, so a `wartui.toml` that does not load stops them ([`remembered_bridge`]),
-//! where `status` and the like read it as no bridge remembered.
+//! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware
+//! from `[bridge] mac`, so a `wartui.toml` that does not load stops it ([`remembered_bridge`]),
+//! where `status` and the like read it as no bridge remembered. `flash-fleet` never reads the
+//! file: a P4 bridge's USB IDs tell it apart.
 //!
-//! **espflash flashes every board, and resets each one on purpose.** The one port opened here is a
+//! **espflash flashes every node, and resets each one on purpose.** The one port opened here is a
 //! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
 //! touching DTR or RTS (`ports.rs`).
 
@@ -86,9 +86,8 @@ struct Firmware {
     chips: &'static [Chip],
     /// What the firmware runs on, for messages.
     what: &'static str,
-    /// The partition table its images are made with, relative to `dir`, or `None` for
-    /// espflash's default.
-    partition_table: Option<&'static str>,
+    /// The partition table its images are made with, relative to `dir`.
+    partition_table: &'static str,
     /// Whether its images are merged (bootloader, partition table and app, from address 0)
     /// rather than the app alone, as one app slot holds it.
     merged: bool,
@@ -100,7 +99,7 @@ const NODE: Firmware = Firmware {
     variants: &[(&["esp32c5"], "wartui-node-fw-esp32c5.bin")],
     chips: &[Chip::Esp32c5],
     what: "node",
-    partition_table: Some("partitions.csv"),
+    partition_table: "partitions.csv",
     merged: true,
 };
 
@@ -117,28 +116,8 @@ const P4_BRIDGE_APP: Firmware = Firmware {
     variants: &[(&[], "wartui-p4-bridge-app-esp32p4.bin")],
     chips: &[Chip::Esp32p4],
     what: "P4 bridge",
-    partition_table: Some("partitions.csv"),
+    partition_table: "partitions.csv",
     merged: false,
-};
-
-const BRIDGE: Firmware = Firmware {
-    dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/bridge"),
-    elf: "target/riscv32imac-unknown-none-elf/release/wartui-bridge-fw",
-    variants: &[
-        (&["esp32c5"], "wartui-bridge-fw-esp32c5.bin"),
-        (&["esp32c5", "t-dongle-c5"], "wartui-bridge-fw-esp32c5-t-dongle.bin"),
-        (&["esp32c5", "t-dongle-c5-gps"], "wartui-bridge-fw-esp32c5-t-dongle-gps.bin"),
-        (
-            &["esp32c5", "t-dongle-c5", "t-dongle-c5-gps"],
-            "wartui-bridge-fw-esp32c5-t-dongle-panel-gps.bin",
-        ),
-        (&["esp32c6"], "wartui-bridge-fw-esp32c6.bin"),
-        (&["esp32c6", "xiao-external-antenna"], "wartui-bridge-fw-esp32c6-xiao.bin"),
-    ],
-    chips: &[Chip::Esp32c5, Chip::Esp32c6],
-    what: "bridge",
-    partition_table: None,
-    merged: true,
 };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
@@ -154,7 +133,7 @@ enum Chip {
 }
 
 impl Chip {
-    /// The chips `--features` names: a node's, or a single-chip bridge's.
+    /// The chips `--features` can name, so a wrong one is refused by name.
     const FEATURED: [Self; 2] = [Self::Esp32c5, Self::Esp32c6];
 
     /// Every chip an image header here may name.
@@ -235,7 +214,6 @@ fn canonical(spec: BridgeSpec) -> BridgeSpec {
 /// Why a board was left alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Skip {
-    Bridge,
     P4Bridge,
     NotSerialJtag(Option<u16>),
     NoAddress,
@@ -250,7 +228,6 @@ enum Skip {
 impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bridge => f.write_str("the bridge"),
             Self::P4Bridge => f.write_str("a P4 bridge, which `wartui flash-bridge` updates"),
             Self::NotSerialJtag(Some(pid)) => {
                 write!(f, "not native USB Serial/JTAG (product {pid:04x})")
@@ -602,10 +579,8 @@ fn build_image(
         .chain(merge.iter().copied())
         .map(str::to_owned)
         .collect();
-    if let Some(table) = firmware.partition_table {
-        args.push("--partition-table".to_owned());
-        args.push(dir.join(table).to_string_lossy().into_owned());
-    }
+    args.push("--partition-table".to_owned());
+    args.push(dir.join(firmware.partition_table).to_string_lossy().into_owned());
     args.push(elf.to_string_lossy().into_owned());
     args.push(bin.to_string_lossy().into_owned());
     let ran = espflash(&args);
@@ -725,7 +700,7 @@ fn espflash<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Ran {
 /// Fixtures the tests of every flashing command share.
 #[cfg(test)]
 mod testing {
-    use wartui_bridge::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
+    use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate};
     use wartui_proto::mac::{self, Mac};
 
     use super::Ran;
@@ -768,7 +743,7 @@ Chip ID: 23
 
     pub(super) fn board(device: &str, address: Option<&Mac>) -> PortCandidate {
         let serial = address.map(|a| mac::full(a).to_string());
-        candidate(device, Some(ESPRESSIF_VID), Some(BRIDGE_PID), serial.as_deref())
+        candidate(device, Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), serial.as_deref())
     }
 
     pub(super) fn c5_image() -> Vec<u8> {
@@ -823,29 +798,19 @@ mod tests {
     fn flash_refuses_features_when_no_chip_or_both_chips_are_named() {
         assert!(chip_of(&NODE, &features("log")).is_err());
         assert!(chip_of(&NODE, &features("")).is_err());
-        let error = chip_of(&BRIDGE, &features("esp32c5,esp32c6")).unwrap_err().to_string();
-        assert!(error.contains("a bridge is built for one"), "{error}");
-    }
-
-    #[test]
-    fn flash_refuses_single_chip_bridge_when_features_are_omitted() {
-        // A bridge can be either chip, so it has no default to fall back on.
-        let error = chip_of(&BRIDGE, &features("")).unwrap_err().to_string();
-        assert!(error.contains("add esp32c5 or esp32c6"), "{error}");
+        let error = chip_of(&NODE, &features("esp32c5,esp32c6")).unwrap_err().to_string();
+        assert!(error.contains("a node is built for one"), "{error}");
     }
 
     #[test]
     fn flash_refuses_chip_when_firmware_does_not_run_on_it() {
         let error = chip_of(&NODE, &features("esp32c6")).unwrap_err().to_string();
         assert_eq!(error, "a node runs on esp32c5, not esp32c6");
-        assert_eq!(chip_of(&BRIDGE, &features("esp32c6")).unwrap(), Chip::Esp32c6);
     }
 
     #[test]
     fn flash_resolves_chip_when_features_carry_extras() {
         assert_eq!(chip_of(&NODE, &features(" esp32c5 , log")).unwrap(), Chip::Esp32c5);
-        let chip = chip_of(&BRIDGE, &features("esp32c6,xiao-external-antenna")).unwrap();
-        assert_eq!(chip, Chip::Esp32c6);
     }
 
     #[test]
@@ -1044,19 +1009,6 @@ mod tests {
         let release = Source::Release { tag: "v1".to_owned(), asset: "x.bin" };
         assert_eq!(release.describe(false), "x.bin from release v1");
         assert_eq!(Source::File("fw.bin".into()).describe(false), "fw.bin");
-    }
-
-    #[test]
-    fn flash_finds_gps_bridge_assets_when_features_are_in_any_order() {
-        assert_eq!(
-            release_asset(&BRIDGE, &["t-dongle-c5-gps", "esp32c5"]),
-            Some("wartui-bridge-fw-esp32c5-t-dongle-gps.bin")
-        );
-        assert_eq!(
-            release_asset(&BRIDGE, &["t-dongle-c5-gps", "esp32c5", "t-dongle-c5"]),
-            Some("wartui-bridge-fw-esp32c5-t-dongle-panel-gps.bin")
-        );
-        assert_eq!(release_asset(&BRIDGE, &["esp32c6", "t-dongle-c5-gps"]), None);
     }
 
     #[test]

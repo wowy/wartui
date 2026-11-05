@@ -5,8 +5,8 @@
 //! link, and change whenever the work needs. [`LINK_REVISION`] names the encoding, and the
 //! hello carries it so a P4 never bridges with a C6 that encodes them differently.
 //!
-//! The P4 relays the USB link's own messages whole, so the C6 runs the single-chip
-//! bridge's command handling and nothing is translated in between. The only additions are
+//! The P4 relays the USB link's own messages whole, so the C6 runs the link's command
+//! handling and nothing is translated in between. The only additions are
 //! the C6's own status, which the P4 folds into what it reports to the host.
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
@@ -24,7 +24,7 @@ use crate::link::{BridgeToHost, HostToBridge, QueueStat};
 ///
 /// Not frozen. Bump it whenever this module's types or the link enums they carry change
 /// shape; `spi_link_revision_golden_bytes` in `tests/spi.rs` fails until the bump.
-pub const LINK_REVISION: u16 = 2;
+pub const LINK_REVISION: u16 = 3;
 
 /// P4 to C6.
 // Unboxed for the reason `HostToBridge` gives.

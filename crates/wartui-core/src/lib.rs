@@ -5,9 +5,7 @@
 //! front ends over one implementation, and the fleet's behavior is testable without either.
 //!
 //! [`engine`] is a pure state machine, [`runtime`] owns the clock and does what it asks, [`store`]
-//! is the system of record, and [`export`] and [`analyze`] are views of it. [`panel`] views a
-//! snapshot instead. It lives here because it is formatting with a rule in it, and rules belong
-//! where `cargo test` reaches.
+//! is the system of record, and [`export`] and [`analyze`] are views of it.
 //!
 //! wartui transmits to a node only in the 100 ms admin window it holds open after a heartbeat:
 //! channel assignments and dedup-ring clears. [`ota`] is the exception, and only after its first
@@ -22,7 +20,6 @@ pub mod gps;
 pub mod health;
 pub mod nmea;
 pub mod ota;
-pub mod panel;
 pub mod position;
 pub mod record;
 pub mod runtime;
