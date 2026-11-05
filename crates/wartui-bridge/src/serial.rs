@@ -966,7 +966,7 @@ fn read_frames<R: Read>(
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
     // Local rather than shared: a property of one connection, not of the link.
-    let mut last_uptime: Option<u32> = None;
+    let mut last_ready: Option<(u32, Instant)> = None;
 
     while !state.stop.load(Ordering::Relaxed) {
         let read = match port.read(&mut buf) {
@@ -1025,13 +1025,16 @@ fn read_frames<R: Read>(
                     // rebooted and was asked again by the next host frame, while the
                     // CH343 stayed on the bus — and that has to be reported, or the
                     // engine keeps the dead life's `BridgeInfo` and goes on believing
-                    // in a peer table the restart emptied. An uptime that went
-                    // backwards is the second case and cannot be the first.
-                    let fresh_life = is_a_new_life(uptime_ms, last_uptime);
-                    if last_uptime.is_none() && *skipped > 0 {
+                    // in a peer table the restart emptied. A second answer's uptime
+                    // keeps pace with the host's clock since the last `Ready`; a new
+                    // life's falls well behind it, even when it is above the last
+                    // `Ready`'s, as when a C6 restarts seconds after a P4 reboot.
+                    let now = Instant::now();
+                    let fresh_life = is_a_new_life(uptime_ms, now, last_ready);
+                    if last_ready.is_none() && *skipped > 0 {
                         tracing::debug!("skipped {skipped} frames from before this connection");
                     }
-                    last_uptime = Some(uptime_ms);
+                    last_ready = Some((uptime_ms, now));
                     if !fresh_life {
                         continue;
                     }
@@ -1070,7 +1073,7 @@ fn read_frames<R: Read>(
                     // stale: a heartbeat seconds old reads as a host behind the air. A
                     // rebooted bridge's `Ready` on a connection already announced changes
                     // nothing here.
-                    if last_uptime.is_none() {
+                    if last_ready.is_none() {
                         *skipped += 1;
                         continue;
                     }
@@ -1201,18 +1204,35 @@ fn patience(alone: bool) -> u32 {
     if alone { SETTLE_TICKS } else { PROBE_TICKS }
 }
 
-/// Whether a `Ready` came from a life that started after the last one seen.
+/// How far a `Ready` may fall short of the last life's projected uptime and still be
+/// that life.
 ///
-/// The first is always a new life. After that, the only thing separating a reboot
-/// from a second answer to an `Identify` already in flight is that the reboot's
-/// clock started again. See the call site for why both arrive on one connection.
-fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
-    last_seen.is_none_or(|previous| uptime_ms < previous)
+/// It absorbs delivery delay: a second answer to one `Identify`, read late behind a
+/// backlog, falls short by the time it waited. The bridge sends `Ready` ahead of its queue
+/// and the host's measured lag is well under this. The cost is that a restart within this
+/// long of the last `Ready` reads as the same life.
+const READY_SLACK: Duration = Duration::from_secs(2);
+
+/// Whether a `Ready` arriving at `now` came from a life that started after the last one
+/// seen, which `last_seen` gives as its uptime and the host's time it arrived.
+///
+/// The first is always a new life. After that, a `Ready` is a new life when its uptime is
+/// below the last life's projected uptime, the last uptime plus the time since it arrived,
+/// by more than [`READY_SLACK`]. A falling uptime is not enough: the case this exists for
+/// is a C6 that restarts under a held connection seconds after a `Ready` carried the
+/// uptime of a C6 reset with the P4, and the new life's uptime is above that one. See the
+/// call site for why both lives arrive on one connection.
+fn is_a_new_life(uptime_ms: u32, now: Instant, last_seen: Option<(u32, Instant)>) -> bool {
+    last_seen.is_none_or(|(previous, arrived)| {
+        let projected = u128::from(previous) + now.saturating_duration_since(arrived).as_millis();
+        u128::from(uptime_ms) + READY_SLACK.as_millis() < projected
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
     use wartui_proto::link::{
@@ -1322,23 +1342,53 @@ mod tests {
 
     #[test]
     fn serial_link_recognizes_new_life_when_receiving_initial_ready_frame() {
-        assert!(is_a_new_life(0, None));
-        assert!(is_a_new_life(10_800_000, None), "attaching to one already up for hours");
+        let now = Instant::now();
+        assert!(is_a_new_life(0, now, None));
+        assert!(is_a_new_life(10_800_000, now, None), "attaching to one already up for hours");
     }
 
     #[test]
     fn serial_link_ignores_duplicate_ready_frame_when_uptime_advances() {
         // Two `Identify` frames in flight, answered two milliseconds apart.
-        assert!(!is_a_new_life(1_202, Some(1_200)));
-        assert!(!is_a_new_life(1_200, Some(1_200)), "the same millisecond counts as the same life");
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_millis(2);
+        assert!(!is_a_new_life(1_202, now, Some((1_200, t0))));
+        assert!(
+            !is_a_new_life(1_200, t0, Some((1_200, t0))),
+            "the same millisecond counts as the same life"
+        );
+    }
+
+    #[test]
+    fn serial_link_ignores_duplicate_ready_frame_when_read_late_within_slack() {
+        // The second answer was written 2 ms after the first but read a second later,
+        // behind a backlog, so its uptime falls short of the projection by about 1 s.
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_secs(1);
+        assert!(!is_a_new_life(1_202, now, Some((1_200, t0))));
     }
 
     #[test]
     fn serial_link_reports_reboot_event_when_bridge_uptime_decreases() {
         // What a restart of either chip produces: the CH343 stays on the bus, so this
         // arrives on the connection the old life was announced on.
-        assert!(is_a_new_life(180, Some(10_800_000)), "a restart after hours of service");
-        assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_millis(500);
+        assert!(
+            is_a_new_life(180, now, Some((10_800_000, t0))),
+            "a restart after hours of service"
+        );
+        assert!(is_a_new_life(0, now, Some((3_100, t0))), "and one only seconds into a life");
+    }
+
+    #[test]
+    fn serial_link_reports_new_life_when_c6_restarts_with_higher_uptime_than_last_ready() {
+        // `flash-bridge` updating both chips: the P4's `Ready` carries the uptime of a C6
+        // reset with it, and the C6 restarts into its new image 5 s later. The new life's
+        // uptime is above the old `Ready`'s, but far below that life's projection.
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_secs(5);
+        assert!(is_a_new_life(400, now, Some((60, t0))));
     }
 
     /// Hands out its bytes, then fails the read, which ends [`read_loop`].
