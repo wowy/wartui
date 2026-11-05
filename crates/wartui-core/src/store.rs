@@ -188,9 +188,10 @@ CREATE TABLE IF NOT EXISTS observation (
 -- difference less the `host_frames` difference is frames lost on the host link plus the bridge's
 -- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
 -- The `radio_link_*` columns are the P4 split bridge's UART link counters since boot, named as
--- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` is the
--- P4's line errors since boot on the UART the host's frames arrive over: each is host bytes lost
--- or corrupted, as while the P4 writes its own flash.
+-- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` counts
+-- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
+-- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
+-- flash.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,

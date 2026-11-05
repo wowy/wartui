@@ -300,24 +300,24 @@ edit stops; follow the pointer before changing the rule.
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens CH343s and
   nothing else, which means finding a bridge never writes to a node, and `wartui reset` — which
   transmits before anything has identified itself — never sweeps at all. A CH343 reports a serial
-  number of its own, so the bridge's address is learned only by asking: any CH343 gets one
-  `Identify` (`serial::probe`), for `wartui ports`, `flash-bridge` and an address `--bridge` names,
-  and the CH343's serial number is remembered beside the address so a run opens that port first.
+  number of its own, so the bridge's address is learned only by asking: any CH343 gets
+  `Identify` every 500 ms for up to 3 s (`serial::probe`), for `wartui ports`, `flash-bridge` and
+  an address `--bridge` names, and the CH343's serial number is remembered beside the address so
+  a run opens that port first.
   The GPS search is the other side: it opens everything but the fleet's boards (any CH343 and any
   Espressif vendor ID), and writes to none of them. `discover_ports` lists those boards for
   `flash-fleet`, `flash-bridge`, boot watching and `wartui ports`, and `discover_bridges` is what the
   sweep, the probe and `reset` read.
   → `crates/wartui-bridge/src/ports.rs` `//!`, `serial::probe` /
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks once and then only waits, until a `Ready` proves the board.** A CH343 may
-  reach something that is not a bridge, and a path named with `--bridge` is opened whatever it
-  reaches: a node that is not reading its USB endpoint absorbs exactly one packet and NACKs the
-  rest, and they sit in the tty's output queue through a `close` that no signal can interrupt —
-  30 s measured against a node, during which the process cannot exit. A P4 still booting loses
-  the one `Identify`, and the next connection asks again. Once proven, a connection that has
-  written nothing for 5 s sends a `GetStatus`, since the P4 stops writing to a host it has not
-  heard from in 15 s. → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm and
-  `KEEPALIVE`
+- **A connection asks a CH343 every 500 ms, and any other port once, until a `Ready` proves the
+  board.** A CH343 drains its UART, and a P4 booting behind it loses the first `Identify`. A path
+  named with `--bridge` that is not a listed CH343 may be a node, and a node that is not reading
+  its USB endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output
+  queue through a `close` that no signal can interrupt — 30 s measured against a node, during
+  which the process cannot exit. Once proven, a connection that has written nothing for 10 s
+  sends a `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s.
+  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm and `KEEPALIVE`
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
   real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one

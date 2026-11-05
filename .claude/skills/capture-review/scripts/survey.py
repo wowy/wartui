@@ -887,7 +887,8 @@ def bridge_radio_link(db, lives):
 
 
 def bridge_host_uart(db):
-    """Line errors on the P4's host UART over the capture: host bytes lost or corrupted.
+    """P4 host-link reads that saw one or more line errors or overflows over the capture: host
+    bytes lost or corrupted.
 
     A P4 count, so it rebases only when it falls, as `BridgeLoss::host_uart_errors` does. The P4
     loses host bytes while it writes its own flash, which only `flash-bridge` makes it do.
@@ -899,7 +900,8 @@ def bridge_host_uart(db):
     print(f"  host link  host_uart_errors {total}")
     if total:
         flag("WARN", "bridge",
-             f"{total} line errors on the P4's host UART: host frames were lost or corrupted "
+             f"{total} P4 host-link reads saw line errors or overflows: host frames were lost "
+             "or corrupted "
              "on the way in, which nothing but the P4's own flash work should cause",
              "SELECT id, rx_at, uptime_ms, host_uart_errors FROM bridge_status ORDER BY id")
 

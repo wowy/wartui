@@ -208,7 +208,10 @@ fn ports_scanner_strictly_separates_bridge_and_gps_devices_when_filtering() {
 fn serial_discovery_resolves_board_path_when_specified_by_mac_address() {
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", OTHER_BRIDGE_MAC)];
     let spec: BridgeSpec = OTHER_BRIDGE_MAC.parse().expect("parsing cannot fail");
-    assert_eq!(serial::resolve_in(&probed, &spec).expect("that board"), "/dev/ttyACM1");
+    assert_eq!(
+        serial::named_board(&probed, &spec).expect("that board").candidate.path,
+        "/dev/ttyACM1"
+    );
 }
 
 #[test]
@@ -217,17 +220,27 @@ fn serial_discovery_rejects_unattached_mac_address_when_resolving_bridge() {
     // whole capture to the wrong fleet, and say nothing about having done so.
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), silent("/dev/ttyACM1")];
     let spec: BridgeSpec = OTHER_BRIDGE_MAC.parse().expect("parsing cannot fail");
-    let refused = serial::resolve_in(&probed, &spec).expect_err("no such board");
+    let refused = serial::named_board(&probed, &spec).expect_err("no such board");
     assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
     assert!(refused.to_string().contains(OTHER_BRIDGE_MAC), "{refused}");
 }
 
 #[test]
-fn serial_discovery_accepts_raw_path_verbatim_when_specified_by_path() {
-    // Whether it exists is the question the open asks, and the OS answers it
-    // better than a list does — so a path is never checked against one.
-    let spec: BridgeSpec = "/dev/ttyACM9".parse().expect("parsing cannot fail");
-    assert_eq!(serial::resolve_in(&[], &spec).expect("the path as given"), "/dev/ttyACM9");
+fn serial_discovery_carries_listed_serial_when_named_path_is_an_attached_ch343() {
+    // The serial number is what a connection remembers the bridge on, so a run named by
+    // path must not save the bridge without one. Either name for the device finds it.
+    let by_id = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00";
+    let mut listed = ch343("/dev/ttyACM0", BRIDGE_SERIAL);
+    listed.path = by_id.to_owned();
+    let boards = [listed, ch343("/dev/ttyACM1", OTHER_BRIDGE_SERIAL)];
+    for named in [by_id, "/dev/ttyACM0"] {
+        let spec: BridgeSpec = named.parse().expect("parsing cannot fail");
+        let order = serial::select(&boards, Some(&spec), None);
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0].path, named, "opened as given");
+        assert_eq!(order[0].serial.as_deref(), Some(BRIDGE_SERIAL), "{named}");
+        assert!(ports::is_ch343(&order[0]), "{named}");
+    }
 }
 
 #[test]
@@ -269,6 +282,7 @@ fn serial_discovery_restricts_candidate_to_named_path_when_explicitly_given() {
     let order = serial::select(&boards, Some(&spec), Some(BRIDGE_SERIAL));
     assert_eq!(order.len(), 1);
     assert_eq!(order[0].path, "/dev/ttyACM9", "even one that is not attached");
+    assert_eq!(order[0].serial, None, "and carrying nothing it was not listed with");
 }
 
 #[test]
@@ -285,7 +299,10 @@ fn serial_discovery_asks_every_ch343_when_bridge_is_named_by_address() {
 fn serial_discovery_resolves_board_path_when_tail_matches_one_board() {
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", OTHER_BRIDGE_MAC)];
     let spec: BridgeSpec = "9d:24".parse().expect("parsing cannot fail");
-    assert_eq!(serial::resolve_in(&probed, &spec).expect("that board"), "/dev/ttyACM1");
+    assert_eq!(
+        serial::named_board(&probed, &spec).expect("that board").candidate.path,
+        "/dev/ttyACM1"
+    );
     let named = serial::named_board(&probed, &spec).expect("that board");
     assert_eq!(named, &probed[1]);
 }
@@ -294,7 +311,7 @@ fn serial_discovery_resolves_board_path_when_tail_matches_one_board() {
 fn serial_discovery_rejects_tail_when_no_attached_board_ends_with_it() {
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", OTHER_BRIDGE_MAC)];
     let spec: BridgeSpec = "00:08".parse().expect("parsing cannot fail");
-    let refused = serial::resolve_in(&probed, &spec).expect_err("no such board");
+    let refused = serial::named_board(&probed, &spec).expect_err("no such board");
     assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
     assert!(refused.to_string().contains("00:08"), "{refused}");
 }
@@ -307,13 +324,16 @@ fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
     let twin = "38:44:BE:12:44:C0";
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", twin)];
     let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
-    let refused = serial::resolve_in(&probed, &spec).expect_err("ambiguous");
+    let refused = serial::named_board(&probed, &spec).expect_err("ambiguous");
     assert!(matches!(refused, TransportError::AmbiguousName { .. }), "{refused}");
     let message = refused.to_string();
     assert!(message.contains(BRIDGE_MAC) && message.contains(twin), "{message}");
     // One more octet settles it.
     let spec: BridgeSpec = "EC:44:C0".parse().expect("parsing cannot fail");
-    assert_eq!(serial::resolve_in(&probed, &spec).expect("that board"), "/dev/ttyACM0");
+    assert_eq!(
+        serial::named_board(&probed, &spec).expect("that board").candidate.path,
+        "/dev/ttyACM0"
+    );
 }
 
 #[test]
@@ -324,7 +344,7 @@ fn serial_discovery_refuses_address_when_only_a_node_carries_it() {
     assert_eq!(serial::bridges_among(listed).len(), 1);
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC)];
     let spec: BridgeSpec = "9D:24".parse().expect("parsing cannot fail");
-    let refused = serial::resolve_in(&probed, &spec).expect_err("no bridge");
+    let refused = serial::named_board(&probed, &spec).expect_err("no bridge");
     assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
 }
 

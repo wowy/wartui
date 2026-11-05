@@ -188,7 +188,7 @@ fn logging(
 /// and sits on an adjacent device node, so a path says nothing about which node it
 /// reaches — while a node's USB serial number *is* its MAC, so the OS has already
 /// answered, with nothing opened and no `esp` tool. A CH343's serial number is its own,
-/// so each is asked with one `Identify` (`serial::probe`), and the row names the bridge
+/// so each is asked with `Identify` (`serial::probe`), and the row names the bridge
 /// that answered. A node is the row `wartui sniff` attributes heartbeats to.
 async fn ports() -> Result<()> {
     let found = discover_ports().context("listing serial ports")?;

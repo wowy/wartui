@@ -31,9 +31,9 @@
 //! Three questions are asked of that, and each answer is one predicate:
 //!
 //! - [`could_be_a_bridge`] is every CH343. Looking for a bridge means *writing* into what
-//!   is opened: the sweep and the probe send one `Identify` down each CH343 until one
+//!   is opened: the sweep and the probe send `Identify` down each CH343 until one
 //!   answers. Nothing the OS reports tells a P4 bridge's CH343 from another, so asking is
-//!   the only way, and one frame is the least a question can write. A node is never a
+//!   the only way, and a CH343 drains its UART, so asking again costs nothing. A node is never a
 //!   candidate, so finding a bridge writes to no node. Exclusive opening is a backstop
 //!   against two readers, not a substitute for that.
 //! - [`is_wartui_board`] is every CH343 and every node: what `wartui ports` lists, and

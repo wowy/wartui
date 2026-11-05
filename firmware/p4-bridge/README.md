@@ -130,10 +130,11 @@ measured: 4 Mbaud is the fastest the CH343 carries cleanly.
 
 **The P4 writes to the host only while it hears one.** Any host frame that decodes opens the
 gate, clears both host queues and announces the bridge; 15 s without one closes it. A host
-connection that sends nothing for 5 s sends a status poll, so a reading host keeps it open.
+connection that sends nothing for 10 s sends a status poll, so a reading host keeps it open.
 
 **Host bytes are lost while the P4 writes its own flash**, with interrupts off for about 40 ms.
-`Status.host_uart_errors` counts each overrun. Only an update writes flash, and its sender waits
+`Status.host_uart_errors` counts the host-link reads that saw one or more line errors or
+overflows. Only an update writes flash, and its sender waits
 for each sector's status and rewinds over the loss.
 
 **The bootloader prints on UART0 at every boot**, at 115200 baud, which the host reads as

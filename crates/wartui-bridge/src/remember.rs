@@ -95,18 +95,33 @@ impl BridgeMemory {
         self.slot().serial.clone()
     }
 
-    /// Hold `mac`, with no port, in place of whatever was there. Nothing changes while
-    /// remembering is off.
-    pub fn remember(&self, mac: Mac) {
-        self.remember_on(mac, None);
+    /// Whether this handle recalls exactly `mac` and `serial`, compared under the lock rather
+    /// than cloned out. Nothing held while remembering is off, as [`Self::recall`] says.
+    #[must_use]
+    pub fn matches(&self, mac: Option<Mac>, serial: Option<&str>) -> bool {
+        if !self.is_enabled() {
+            return mac.is_none() && serial.is_none();
+        }
+        let slot = self.slot();
+        slot.mac == mac && slot.serial.as_deref() == serial
     }
 
     /// Hold `mac`, answering on the CH343 with `serial`, in place of whatever was there.
     /// Nothing changes while remembering is off.
+    ///
+    /// No `serial` for the address already held keeps the port held with it: a caller that
+    /// does not know the port has not learned it moved. For another address it holds no port,
+    /// since the old one would put the wrong board first.
     pub fn remember_on(&self, mac: Mac, serial: Option<String>) {
-        if self.is_enabled() {
-            *self.slot() = Slot { mac: Some(mac), serial };
+        if !self.is_enabled() {
+            return;
         }
+        let mut slot = self.slot();
+        let serial = match serial {
+            None if slot.mac == Some(mac) => slot.serial.take(),
+            serial => serial,
+        };
+        *slot = Slot { mac: Some(mac), serial };
     }
 
     /// Forget whatever was there, so the next connection sweeps instead.

@@ -122,7 +122,8 @@ pub struct BridgeLoss {
     pub queues: Vec<QueueLoss>,
     /// The radio link's errors, or `None` when no reply carried them, as off the P4 split bridge.
     pub radio_link: Option<RadioLinkLoss>,
-    /// Line errors on the P4's host UART: host bytes lost or corrupted on the way in.
+    /// The P4's host-link reads that saw one or more line errors or overflows: host bytes lost
+    /// or corrupted on the way in.
     pub host_uart_errors: u64,
 }
 

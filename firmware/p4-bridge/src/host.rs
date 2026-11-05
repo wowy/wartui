@@ -22,7 +22,8 @@
 //! for about 40 ms, the armed buffer lasts about 10 ms, and then the FIFO overflows. The link
 //! needs no flow control for it: the only flash work a host causes is an update of the P4's own
 //! image, and `wartui_proto::radio_link::update::Sender` waits for each sector's status and
-//! rewinds on `next_offset` and on silence. Each overflow counts in `Status.host_uart_errors`.
+//! rewinds on `next_offset` and on silence. `Status.host_uart_errors` counts the reads that saw
+//! one or more line errors or overflows, not the errors themselves.
 //!
 //! **The gate opens on any host frame that decodes and closes after [`HOST_SILENCE`] without
 //! one.** The P4 cannot see the CH343's DTR, so a frame is the only sign that someone reads.

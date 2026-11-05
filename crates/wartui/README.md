@@ -25,7 +25,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
 or clear frame. So `sniff` on a second bridge on the channel hears every heartbeat and no sightings.
-`sniff` also prints a `# status` line every 5 s: a connection that has sent nothing for 5 s asks
+`sniff` also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
 for one, since the P4 stops writing to a host it has not heard from in 15 s.
 If the attached bridge is swapped mid-run, `run` re-sends every assignment so each node learns the
 new address. The same bridge reconnecting or rebooting sends nothing; nodes already address it.
@@ -982,9 +982,10 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`radio link  …`**: the UART link's packets from the C6 and its error counters at each end;
   the `radio_` counters are the C6's. Every error count means corrupted or lost packets, and one
   bad packet can move more than one count. A C6 restart reads as one `seq_gap`.
-- **`host link  uart_errors N`**: line errors on the P4's UART from the host since boot. Each is
-  host bytes lost or corrupted, as while the P4 writes its own flash during `flash-bridge`; the
-  update rewinds over them. Outside an update it should stay 0.
+- **`host link  uart_errors N`**: host-link reads since boot that saw one or more line errors or
+  overflows on the P4's UART from the host. Each is host bytes lost or corrupted, as while the P4
+  writes its own flash during `flash-bridge`; the update rewinds over them. Outside an update it
+  should stay 0.
 - **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
@@ -994,9 +995,10 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 answers nothing, so it transmits before anything has identified itself. A node that is not reading
 takes one packet and queues the rest, and closing the port waits for them.
 
-`run` never pays this cost. It asks with one frame until the bridge answers. Once it has, it sends
-a status poll whenever 5 s pass without a frame, since the P4 stops writing to a host it has not
-heard from in 15 s.
+`run` never pays this cost. It asks a CH343 every 500 ms until the bridge answers, since a CH343
+drains whatever it is sent, and any other port with one frame. Once the bridge has answered, it
+sends a status poll whenever 10 s pass without a frame, since the P4 stops writing to a host it has
+not heard from in 15 s.
 
 `wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
 goes to the `--bridge` board, else the CH343 the bridge was remembered on, else the only CH343
@@ -1046,9 +1048,9 @@ own `by-id` name, built by udev from the serial. Other USB devices carry a manuf
 one reporting none reads `address not reported` and is named by its socket.
 
 **The P4 bridge is reached through its board's CH343** (`1a86:55d3`), whose serial number is the
-CH343's own. So `wartui ports` asks each CH343 with one frame and prints the address its `Ready`
-names: the C6's MAC, the address nodes see as the bridge, or the P4's own MAC when the C6 never
-answered. A CH343 that does not answer reads `not answering`, as a blank P4 does, and one another
+CH343's own. So `wartui ports` asks each CH343, every 500 ms for up to 3 s, and prints the address
+its `Ready` names: the C6's MAC, the address nodes see as the bridge, or the P4's own MAC when the
+C6 never answered. A CH343 that does not answer reads `not answering`, as a blank P4 does, and one another
 program holds reads `busy or refused`.
 
 The bridge is the row with the address the fleet table shows for the bridge; a node is a row whose

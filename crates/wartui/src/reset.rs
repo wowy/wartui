@@ -12,8 +12,8 @@
 //! one: the rest sit in the tty's output queue until `close` gives up on them thirty
 //! seconds later, so `wartui reset` aimed at a node takes about that long to say it
 //! failed. That is the cost of asking a board
-//! that answers nothing, and the reason `run`'s connection, which asks with one frame,
-//! does not share this command's license.
+//! that answers nothing, and the reason `run`'s connection, which asks a port that is not a
+//! CH343 with one frame, does not share this command's license.
 //!
 //! **The P4 comes back on the same port, deaf until asked.** Its CH343 stays on the bus,
 //! so the connection holds through the reboot and reads the bootloader's log as garbage.
@@ -109,9 +109,9 @@ pub async fn run(args: Args) -> Result<()> {
 /// address, whole or its end, is matched by asking each CH343 `list` reads (`probe`). One no
 /// attached bridge answers with, a node's included, or a tail several share is refused before
 /// anything is opened, rather than left to a transport that would wait out the whole timeout
-/// saying nothing. A wedged bridge answers no probe, so the remembered bridge's whole address
-/// goes to its remembered CH343 without one. A path is opened as given, with nothing listed:
-/// whether it exists is the question the open asks.
+/// saying nothing. A wedged bridge answers no probe, so an address or tail that names the
+/// remembered bridge goes to its remembered CH343 without one. A path is opened as given, with
+/// nothing listed: whether it exists is the question the open asks.
 async fn board_to_reset<Probe, Asked>(
     named: Option<&str>,
     remembered: &crate::config::Bridge,
@@ -126,9 +126,10 @@ where
         Some(BridgeSpec::Path(path)) => Ok(path),
         Some(spec) => {
             let attached = list()?;
-            if let (BridgeSpec::Mac(wanted), Some(serial)) = (&spec, &remembered.serial)
-                && remembered.mac == Some(*wanted)
-                && let Some(port) = attached.iter().find(|c| c.serial.as_ref() == Some(serial))
+            if remembered.mac.is_some_and(|mac| spec.matches_address(&mac))
+                && let Some(port) = attached
+                    .iter()
+                    .find(|c| serial::is_remembered_port(c, remembered.serial.as_deref()))
             {
                 return Ok(port.path.clone());
             }
@@ -333,6 +334,22 @@ mod tests {
         let known = remembered(BRIDGE_MAC, "5CF7153999");
         let board = board_to_reset(Some(BRIDGE_MAC), &known, twins, unasked).await;
         assert_eq!(board.expect("the remembered port"), "/dev/ttyACM1");
+    }
+
+    #[tokio::test]
+    async fn reset_cmd_opens_remembered_port_without_probe_when_bridge_is_named_by_tail() {
+        // How an operator names the bridge, and a wedged one answers no probe either way.
+        let known = remembered(BRIDGE_MAC, "5CF7153999");
+        let board = board_to_reset(Some("44:C0"), &known, twins, unasked).await;
+        assert_eq!(board.expect("the remembered port"), "/dev/ttyACM1");
+    }
+
+    #[tokio::test]
+    async fn reset_cmd_probes_when_tail_does_not_end_remembered_address() {
+        let known = remembered(BRIDGE_MAC, "5CF7153999");
+        let probe = answers(&[Some(TWIN_MAC), None]);
+        let board = board_to_reset(Some("12:44:C0"), &known, twins, probe).await;
+        assert_eq!(board.expect("the twin"), "/dev/ttyACM0");
     }
 
     #[tokio::test]

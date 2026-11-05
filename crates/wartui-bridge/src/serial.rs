@@ -25,8 +25,9 @@ use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 /// Long enough not to spin, short enough that shutdown feels immediate.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// How long one tick of the patience below is. The first tick of a tokio interval
-/// fires immediately, which is when the single `Identify` goes out.
+/// How long one tick of the patience below is, and how often a CH343 is asked again. The
+/// first tick of a tokio interval fires immediately, which is when the first `Identify` goes
+/// out.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long to wait for a board when there is no other to try, in ticks of
@@ -68,10 +69,11 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 /// The P4 writes to a host only while it hears one, and stops 15 s after the last frame
 /// (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an operator's
 /// answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
-/// connection that has written nothing for this long sends a `GetStatus`, and the engine's own
-/// poll, on the same interval, keeps a running capture from ever needing one. Never before the
-/// first `Ready`: until then the board is unproven, and is asked once ([`connect`]).
-const KEEPALIVE: Duration = Duration::from_secs(5);
+/// connection that has written nothing for this long sends a `GetStatus`. Twice the engine's
+/// 5 s status poll, so a running capture never needs one: the engine checks for a due poll
+/// only on its tick, and a keepalive on the same interval would usually fire first and double
+/// the polls. Never before the first `Ready`: until then the board is unproven ([`connect`]).
+const KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// Slowest retry after a sweep that opened several boards and found no bridge.
 ///
@@ -131,7 +133,7 @@ impl BridgeSpec {
     ///
     /// A path names no address, so it matches none: whether a path reaches a board is
     /// a question for the OS, not for a list. A tail matching here is not yet a board
-    /// named — several may match, and [`resolve_in`] is where that is refused.
+    /// named — several may match, and [`named_board`] is where that is refused.
     #[must_use]
     pub fn matches_address(&self, mac: &Mac) -> bool {
         match self {
@@ -173,8 +175,12 @@ impl std::fmt::Display for BridgeSpec {
     }
 }
 
-/// How long a probe waits for `Ready`: the same 1.5 s a sweep gives a board with company.
-const PROBE_WAIT: Duration = Duration::from_millis(1_500);
+/// How long a probe waits for `Ready`, asking again every [`IDENTIFY_INTERVAL`].
+///
+/// Longer than the P4's boot silence: it announces nothing until its C6 answers or
+/// `wartui_proto::split::RADIO_WAIT_MS` (2 s) passes, behind about 250 ms of bootloader. A
+/// probe right after a reset or a replug would otherwise read a booting bridge as absent.
+const PROBE_WAIT: Duration = Duration::from_secs(3);
 
 /// A CH343 asked which bridge it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,12 +201,12 @@ impl Probed {
     }
 }
 
-/// Ask the board on `candidate` which bridge it is: open it, send one `Identify`, and wait
-/// up to 1.5 s for its `Ready`.
+/// Ask the board on `candidate` which bridge it is: open it, send `Identify` every
+/// `IDENTIFY_INTERVAL`, and wait up to `PROBE_WAIT` for its `Ready`.
 ///
 /// The one way to learn a P4 bridge's address, since its CH343 reports a serial number of its
-/// own (`ports`). One frame, for the reason the sweep sends one: the CH343 may reach something
-/// that is not a bridge. A P4 that is still booting misses it and reads as not answering.
+/// own (`ports`). Only CH343s are probed, and a CH343 always drains its UART, so asking again
+/// costs nothing and reaches a P4 that lost the first `Identify` while booting.
 pub async fn probe(candidate: PortCandidate) -> Probed {
     let path = candidate.path.clone();
     let asked = tokio::task::spawn_blocking(move || probe_port(&path)).await;
@@ -225,25 +231,33 @@ fn probe_port(path: &str) -> (bool, Option<Mac>) {
         .flow_control(serialport::FlowControl::None)
         .open();
     let Ok(mut port) = opened else { return (false, None) };
-    let mac = identify(&mut port, PROBE_WAIT);
+    let mac = identify(&mut port, PROBE_WAIT, IDENTIFY_INTERVAL);
     if mac.is_none() {
         tracing::debug!(port = %path, "probed, and nothing answered");
     }
     (true, mac)
 }
 
-/// Write one `Identify` behind a lone `0x00` into `port`, and read for up to `wait` until a
-/// `Ready` names an address.
+/// Write `Identify` into `port`, the first behind a lone `0x00` and again every `every`, and
+/// read for up to `wait` until a `Ready` names an address.
 ///
 /// Generic over the port only so a test can stand in for one.
-fn identify<P: Read + Write>(port: &mut P, wait: Duration) -> Option<Mac> {
+fn identify<P: Read + Write>(port: &mut P, wait: Duration, every: Duration) -> Option<Mac> {
     let mut frame = [0u8; MAX_HOST_FRAME + 1];
-    let len = encode_for_wire(&HostToBridge::Identify, true, &mut frame).ok()?;
-    port.write_all(&frame[..len]).ok()?;
-    let deadline = Instant::now() + wait;
+    let first = encode_for_wire(&HostToBridge::Identify, true, &mut frame).ok()?;
+    port.write_all(&frame[..first]).ok()?;
+    let mut again = [0u8; MAX_HOST_FRAME + 1];
+    let again_len = encode_for_wire(&HostToBridge::Identify, false, &mut again).ok()?;
+    let started = Instant::now();
+    let deadline = started + wait;
+    let mut next_ask = started + every;
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
     while Instant::now() < deadline {
+        if Instant::now() >= next_ask {
+            port.write_all(&again[..again_len]).ok()?;
+            next_ask += every;
+        }
         let read = match port.read(&mut buf) {
             Ok(n) => n,
             Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => continue,
@@ -260,7 +274,8 @@ fn identify<P: Read + Write>(port: &mut P, wait: Duration) -> Option<Mac> {
     None
 }
 
-/// The port a spec names, out of `probed`.
+/// The one board in `probed` an address or tail names. A path names no board in a list, so
+/// it is refused like an address nothing answered with.
 ///
 /// Callers probe [`discover_bridges`], the list the sweep uses, so an address that only a node
 /// carries names nothing and a node sharing a P4 bridge's tail does not make it ambiguous.
@@ -271,20 +286,6 @@ fn identify<P: Read + Write>(port: &mut P, wait: Duration) -> Option<Mac> {
 /// different one is how a capture ends up attributed to the wrong fleet. A tail
 /// that several boards end with is refused for the same reason: two P4 bridges can share
 /// their last octets, and guessing between them is transmitting into another fleet's bridge.
-///
-/// # Errors
-/// [`TransportError::NoSuchBridge`] if nothing in `probed` answered as that board, or
-/// [`TransportError::AmbiguousName`] if several did.
-pub fn resolve_in(probed: &[Probed], spec: &BridgeSpec) -> Result<String, TransportError> {
-    if let BridgeSpec::Path(path) = spec {
-        return Ok(path.clone());
-    }
-    named_board(probed, spec).map(|board| board.candidate.path.clone())
-}
-
-/// The one board in `probed` an address or tail names, for a caller that wants more of it
-/// than its path. A path names no board in a list, so it is refused like an address nothing
-/// answered with.
 ///
 /// # Errors
 /// [`TransportError::NoSuchBridge`] if nothing in `probed` answered as that board, or
@@ -311,7 +312,9 @@ fn named_in<'a>(probed: &'a [Probed], spec: &BridgeSpec) -> Vec<&'a Probed> {
 /// The boards to try, in the order they are worth trying.
 ///
 /// A path is the only candidate there is, however many are attached: an operator who named
-/// one meant that one. An address or tail is matched by asking, so every board is a
+/// one meant that one. It is opened as given, and carries what the OS lists for its device, so
+/// a CH343 named by path is remembered on its serial number and asked like any other CH343
+/// (`connect`). An address or tail is matched by asking, so every board is a
 /// candidate for the [`probe`] that finds it. Otherwise the order puts the CH343 the bridge
 /// answered on last first, by its `remembered` serial number — so the ordinary run opens one
 /// port and no others — and after that is simply deterministic, which is what makes a sweep
@@ -323,17 +326,31 @@ pub fn select(
     remembered: Option<&str>,
 ) -> Vec<PortCandidate> {
     match spec {
-        // Not matched against the enumeration: a path is opened as given, and the
-        // OS says better than a list whether anything is there.
-        Some(BridgeSpec::Path(path)) => vec![ports::candidate(path, None, None, None)],
+        // Opened as given whether or not it is listed: the OS says better than a list
+        // whether anything is there.
+        Some(BridgeSpec::Path(path)) => vec![listed_as(candidates, path)],
         Some(BridgeSpec::Mac(_) | BridgeSpec::Tail(_)) | None => {
             let mut ordered = candidates.to_vec();
             ordered.sort_by_key(|candidate| {
-                (!is_remembered(candidate, remembered), candidate.path.clone())
+                (!is_remembered_port(candidate, remembered), candidate.path.clone())
             });
             ordered
         }
     }
+}
+
+/// `path` as a candidate, with the IDs and serial number the OS lists for its device, or none
+/// when it is not listed. Matched by device node, so a `by-id` link and the `ttyACM` it
+/// resolves to name the same listing.
+fn listed_as(candidates: &[PortCandidate], path: &str) -> PortCandidate {
+    let device = std::fs::canonicalize(path)
+        .ok()
+        .and_then(|device| device.to_str().map(str::to_owned))
+        .unwrap_or_else(|| path.to_owned());
+    candidates.iter().find(|listed| listed.device == device || listed.path == path).map_or_else(
+        || ports::candidate(path, None, None, None),
+        |listed| PortCandidate { path: path.to_owned(), ..listed.clone() },
+    )
 }
 
 /// The one board a command may reach without being asked which.
@@ -350,7 +367,9 @@ pub fn unambiguous_bridge<'a>(
     candidates: &'a [PortCandidate],
     remembered: Option<&str>,
 ) -> Result<&'a PortCandidate, TransportError> {
-    if let Some(known) = candidates.iter().find(|candidate| is_remembered(candidate, remembered)) {
+    if let Some(known) =
+        candidates.iter().find(|candidate| is_remembered_port(candidate, remembered))
+    {
         return Ok(known);
     }
     match candidates {
@@ -516,10 +535,10 @@ impl Settled {
     /// Where to look for it again: the CH343 with its serial number, wherever the OS put it, or
     /// the same path when it reported none or was named by one.
     fn candidates(&self, attached: &[PortCandidate]) -> Vec<PortCandidate> {
-        match &self.port.serial {
+        match self.port.serial.as_deref() {
             Some(serial) => attached
                 .iter()
-                .filter(|candidate| candidate.serial.as_ref() == Some(serial))
+                .filter(|candidate| is_remembered_port(candidate, Some(serial)))
                 .cloned()
                 .collect(),
             None => vec![self.port.clone()],
@@ -599,7 +618,11 @@ async fn sweep(
     // is the one thing that means it has stopped being the bridge.
     let mut remembered_went_quiet = false;
     for candidate in &candidates {
-        let state = Arc::new(Attempt { serial: candidate.serial.clone(), ..Attempt::default() });
+        let state = Arc::new(Attempt {
+            serial: candidate.serial.clone(),
+            drains: ports::is_ch343(candidate),
+            ..Attempt::default()
+        });
         let attempt = connect(
             &candidate.path,
             patience(alone),
@@ -688,6 +711,9 @@ struct Attempt {
     mac: std::sync::Mutex<Option<Mac>>,
     /// The port's USB serial number, remembered with the address.
     serial: Option<String>,
+    /// The port is a CH343, which drains its UART whatever is behind it, so `Identify` may be
+    /// sent again ([`connect`]).
+    drains: bool,
 }
 
 /// One candidate's turn. `Err` carries a reason to show the user.
@@ -770,30 +796,28 @@ async fn connect(
 
     // The P4 writes to its host only once a host frame arrives
     // (`firmware/p4-bridge/src/host.rs`), so a connection opening the port hears nothing
-    // unprompted. So we ask — **exactly once, and then only wait.**
+    // unprompted. So we ask, and how often depends on what the port is.
     //
-    // Once, because a CH343 may reach something that is not a bridge, and one frame is the
-    // least a question can write into it. Once also because a path given to `--bridge` is
-    // opened whatever it reaches, and a node's USB Serial/JTAG absorbs exactly one packet:
-    // it takes one into its OUT FIFO and NACKs every one after it until firmware reads that
-    // FIFO, which node firmware never does. The second frame is therefore still in flight
-    // when the port is closed, and `close` waits for the tty's output queue — measured at
-    // 30 s against a node on this bench, which is the kernel's own timer giving up rather
-    // than the board relenting. Nothing can interrupt it: the thread stays alive in the
-    // kernel, and because a process cannot exit while one of its threads is in there,
-    // `wartui status` pointed at a node hung for half a minute after printing its answer.
-    // One frame never reaches that.
+    // **A CH343 is asked every tick until a `Ready` arrives.** Its USB side enumerates
+    // before the P4 app runs — at power-up, or on a replug — so the first `Identify` can land
+    // in the bootloader at the wrong baud, and the P4 never announces unprompted. A CH343
+    // drains its UART whatever is behind it, so a repeated ask never piles up on the host.
     //
-    // The one packet is the `Identify` behind a lone `0x00` (`encode_for_wire`).
-    //
-    // Once is nearly always enough: a running P4 reads its UART throughout. A P4 that is
-    // booting, or busy in its own flash, loses it, and the connection runs out of patience
-    // and the next one asks again. The patience below is for the *answer* to take its
-    // time, not for the asking to be repeated.
+    // **Any other port is asked exactly once, and then only waited on.** A path given to
+    // `--bridge` is opened whatever it reaches, and a node's USB Serial/JTAG absorbs exactly
+    // one packet: it takes one into its OUT FIFO and NACKs every one after it until firmware
+    // reads that FIFO, which node firmware never does. A second frame is therefore still in
+    // flight when the port is closed, and `close` waits for the tty's output queue —
+    // measured at 30 s against a node on this bench, which is the kernel's own timer giving
+    // up rather than the board relenting. Nothing can interrupt it: the thread stays alive
+    // in the kernel, and because a process cannot exit while one of its threads is in there,
+    // `wartui status` pointed at a node hung for half a minute after printing its answer. One
+    // frame, the `Identify` behind a lone `0x00` (`encode_for_wire`), never reaches that.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
     let mut keepalive =
         tokio::time::interval_at(tokio::time::Instant::now() + KEEPALIVE, KEEPALIVE);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Forward commands, preserving the urgent-first bias, until either the
     // reader dies or the engine drops its handle.
@@ -813,9 +837,8 @@ async fn connect(
                     ));
                 }
                 // Frames that decode ahead of a `Ready` count for nothing here: they are
-                // dropped as stale (`read_loop`), and a connection whose one `Identify`
-                // went unanswered delivers nothing until it gives up and the next one
-                // asks again.
+                // dropped as stale (`read_loop`), and a connection whose `Identify` went
+                // unanswered delivers nothing until it gives up and the next one asks again.
                 if waited >= patience {
                     // Says what was observed, and stops short of concluding
                     // "it is not a bridge", which may be false: a bridge that has
@@ -839,10 +862,12 @@ async fn connect(
                     });
                 }
                 waited += 1;
-                // The first tick of a tokio interval fires immediately, so this is
-                // the one ask, sent as soon as the port is open. See above for why
-                // there is never a second.
-                if waited == 1 && write_tx.send(HostToBridge::Identify).is_err() {
+                // The first tick of a tokio interval fires immediately, so the first ask
+                // goes as soon as the port is open. See above for which ports are asked
+                // again.
+                if asks_on_tick(waited, state.drains)
+                    && write_tx.send(HostToBridge::Identify).is_err()
+                {
                     break Err("writer stopped".to_owned());
                 }
             }
@@ -887,8 +912,8 @@ async fn connect(
 ///
 /// It does **not** make that close safe, and cannot: a `tcflush` empties the tty's
 /// own queue, and the packet the USB layer has already accepted is past it. Not
-/// writing a second packet is what keeps the close short, which is [`connect`]'s
-/// single `Identify`.
+/// writing a second packet is what keeps the close short, which is why [`connect`]
+/// asks a port that is not a CH343 only once.
 struct Shutdown {
     state: Arc<Attempt>,
     port: Box<dyn serialport::SerialPort>,
@@ -1027,8 +1052,8 @@ fn read_frames<R: Read>(
                     // engine keeps the dead life's `BridgeInfo` and goes on believing
                     // in a peer table the restart emptied. A second answer's uptime
                     // keeps pace with the host's clock since the last `Ready`; a new
-                    // life's falls well behind it, even when it is above the last
-                    // `Ready`'s, as when a C6 restarts seconds after a P4 reboot.
+                    // life's falls below the last `Ready`'s, or well behind that pace even
+                    // when above it, as when a C6 restarts seconds after a P4 reboot.
                     let now = Instant::now();
                     let fresh_life = is_a_new_life(uptime_ms, now, last_ready);
                     if last_ready.is_none() && *skipped > 0 {
@@ -1179,6 +1204,11 @@ fn encode_for_wire(cmd: &HostToBridge, lead: bool, buf: &mut [u8]) -> Result<usi
 ///   bringing its radio up can take longer. Concluding from less than a full settle is
 ///   concluding from impatience.
 ///
+/// A full settle is enough even for a bridge that was booting when the port opened. A CH343
+/// is asked every tick of it ([`connect`]), so the first `Identify` after the P4 app starts
+/// is decoded, and the P4 answers within `wartui_proto::split::RADIO_WAIT_MS` (2 s) of its
+/// boot, well inside the 6 s.
+///
 /// This is not the usual way the memory is corrected, and not the important one:
 /// whatever board does answer puts its own address in its place. This is for the case
 /// where nothing answers at all, which is the only one that leaves a wrong entry
@@ -1189,13 +1219,20 @@ fn silence_disowns_it(
     remembered: Option<&str>,
     candidate: &PortCandidate,
 ) -> bool {
-    alone && opened && is_remembered(candidate, remembered)
+    alone && opened && is_remembered_port(candidate, remembered)
 }
 
-/// Whether this candidate is the port the bridge was remembered on. One with no serial
-/// number of its own (named by path) never is.
-fn is_remembered(candidate: &PortCandidate, remembered: Option<&str>) -> bool {
-    candidate.serial.is_some() && candidate.serial.as_deref() == remembered
+/// Whether `candidate` is the CH343 with the `remembered` serial number. Nothing matches when
+/// either is missing: a port with no serial number of its own is no port in particular.
+#[must_use]
+pub fn is_remembered_port(candidate: &PortCandidate, remembered: Option<&str>) -> bool {
+    remembered.is_some() && candidate.serial.as_deref() == remembered
+}
+
+/// Whether [`connect`] sends `Identify` on the `waited`th tick of its patience, counting from
+/// 1: every tick on a port that `drains` its UART, and only the first on any other.
+fn asks_on_tick(waited: u32, drains: bool) -> bool {
+    drains || waited == 1
 }
 
 /// How many ticks of [`IDENTIFY_INTERVAL`] a candidate is worth: a board with nowhere else
@@ -1209,23 +1246,29 @@ fn patience(alone: bool) -> u32 {
 ///
 /// It absorbs delivery delay: a second answer to one `Identify`, read late behind a
 /// backlog, falls short by the time it waited. The bridge sends `Ready` ahead of its queue
-/// and the host's measured lag is well under this. The cost is that a restart within this
-/// long of the last `Ready` reads as the same life.
+/// and the host's measured lag is well under this.
 const READY_SLACK: Duration = Duration::from_secs(2);
 
 /// Whether a `Ready` arriving at `now` came from a life that started after the last one
 /// seen, which `last_seen` gives as its uptime and the host's time it arrived.
 ///
-/// The first is always a new life. After that, a `Ready` is a new life when its uptime is
-/// below the last life's projected uptime, the last uptime plus the time since it arrived,
-/// by more than [`READY_SLACK`]. A falling uptime is not enough: the case this exists for
-/// is a C6 that restarts under a held connection seconds after a `Ready` carried the
-/// uptime of a C6 reset with the P4, and the new life's uptime is above that one. See the
-/// call site for why both lives arrive on one connection.
+/// The first is always a new life. After that, a `Ready` is a new life when either holds:
+///
+/// - **Its uptime is below the last `Ready`'s.** One life's clock never falls, so this
+///   catches a restart however soon it follows, as when `wartui reset` reboots a bridge
+///   a second after its first `Ready`.
+/// - **Its uptime is below the last life's projection by more than [`READY_SLACK`]**, the
+///   projection being the last uptime plus the time since it arrived. This catches a C6 that
+///   restarts under a held connection seconds after a `Ready` carried the uptime of a C6
+///   reset with the P4, where the new life's uptime is above that one.
+///
+/// What neither catches is a restart whose uptime is above the last `Ready`'s and within
+/// the slack of its projection. See the call site for why both lives arrive on one
+/// connection.
 fn is_a_new_life(uptime_ms: u32, now: Instant, last_seen: Option<(u32, Instant)>) -> bool {
     last_seen.is_none_or(|(previous, arrived)| {
         let projected = u128::from(previous) + now.saturating_duration_since(arrived).as_millis();
-        u128::from(uptime_ms) + READY_SLACK.as_millis() < projected
+        uptime_ms < previous || u128::from(uptime_ms) + READY_SLACK.as_millis() < projected
     })
 }
 
@@ -1242,8 +1285,8 @@ mod tests {
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        Attempt, PROBE_TICKS, SETTLE_TICKS, encode_for_wire, identify, is_a_new_life, patience,
-        read_loop, silence_disowns_it,
+        Attempt, PROBE_TICKS, SETTLE_TICKS, asks_on_tick, encode_for_wire, identify, is_a_new_life,
+        is_remembered_port, patience, read_loop, silence_disowns_it,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
@@ -1389,6 +1432,38 @@ mod tests {
         let t0 = Instant::now();
         let now = t0 + Duration::from_secs(5);
         assert!(is_a_new_life(400, now, Some((60, t0))));
+    }
+
+    #[test]
+    fn serial_link_reports_new_life_when_bridge_restarts_within_slack_of_short_life() {
+        // `wartui reset` right after a fresh bridge's first `Ready`: the next life's uptime
+        // is within the slack of the projection, but below the last `Ready`'s.
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_millis(1_500);
+        assert!(is_a_new_life(500, now, Some((600, t0))));
+    }
+
+    #[test]
+    fn serial_link_asks_every_tick_when_port_is_a_ch343() {
+        // A CH343 drains its UART, and a P4 booting behind it loses the first ask.
+        assert!((1..=SETTLE_TICKS).all(|tick| asks_on_tick(tick, true)));
+    }
+
+    #[test]
+    fn serial_link_asks_once_when_port_is_not_a_known_ch343() {
+        // It may be a node, which absorbs one packet and wedges `close` on the next.
+        assert!(asks_on_tick(1, false));
+        assert!((2..=SETTLE_TICKS).all(|tick| !asks_on_tick(tick, false)));
+    }
+
+    #[test]
+    fn serial_link_matches_remembered_port_only_when_both_serials_are_known() {
+        let named = candidate("/dev/ttyACM0", None, None, None);
+        assert!(is_remembered_port(&board(BRIDGE_SERIAL), Some(BRIDGE_SERIAL)));
+        assert!(!is_remembered_port(&board(OTHER_SERIAL), Some(BRIDGE_SERIAL)));
+        assert!(!is_remembered_port(&board(BRIDGE_SERIAL), None));
+        assert!(!is_remembered_port(&named, None), "None never matches None");
+        assert!(!is_remembered_port(&named, Some(BRIDGE_SERIAL)));
     }
 
     /// Hands out its bytes, then fails the read, which ends [`read_loop`].
@@ -1558,7 +1633,7 @@ mod tests {
     #[test]
     fn serial_probe_returns_ready_mac_when_bridge_answers() {
         let mut port = FakePort::answering(frame(&ready()));
-        assert_eq!(identify(&mut port, WAIT), Some([1, 2, 3, 4, 5, 6]));
+        assert_eq!(identify(&mut port, WAIT, WAIT), Some([1, 2, 3, 4, 5, 6]));
         // One question, behind the lone `0x00`, and nothing more.
         let mut asked = [0u8; MAX_HOST_FRAME + 1];
         let n = encode_for_wire(&HostToBridge::Identify, true, &mut asked).unwrap();
@@ -1574,12 +1649,65 @@ mod tests {
         reply.extend(frame(&rx(-40)));
         reply.extend(frame(&ready()));
         let mut port = FakePort::answering(reply);
-        assert_eq!(identify(&mut port, WAIT), Some([1, 2, 3, 4, 5, 6]));
+        assert_eq!(identify(&mut port, WAIT, WAIT), Some([1, 2, 3, 4, 5, 6]));
+    }
+
+    /// A P4 booting behind its CH343: the first `Identify` reaches the bootloader and is lost,
+    /// and the app answers the next one.
+    struct BootingPort {
+        writes: usize,
+        reply: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for BootingPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.writes < 2 {
+                std::thread::sleep(Duration::from_millis(1));
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            match self.reply.read(buf)? {
+                0 => Err(std::io::ErrorKind::TimedOut.into()),
+                n => Ok(n),
+            }
+        }
+    }
+
+    impl std::io::Write for BootingPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn serial_probe_returns_ready_mac_when_bridge_misses_first_identify() {
+        let mut port = BootingPort { writes: 0, reply: std::io::Cursor::new(frame(&ready())) };
+        let mac = identify(&mut port, Duration::from_secs(2), Duration::from_millis(10));
+        assert_eq!(mac, Some([1, 2, 3, 4, 5, 6]));
+        assert_eq!(port.writes, 2, "asked again, and not after the answer");
+    }
+
+    #[test]
+    fn serial_probe_asks_again_without_terminator_when_nothing_answers() {
+        let mut port = FakePort::answering(Vec::new());
+        assert_eq!(identify(&mut port, Duration::from_millis(55), Duration::from_millis(10)), None);
+        let mut first = [0u8; MAX_HOST_FRAME + 1];
+        let first_len = encode_for_wire(&HostToBridge::Identify, true, &mut first).unwrap();
+        let mut again = [0u8; MAX_HOST_FRAME + 1];
+        let again_len = encode_for_wire(&HostToBridge::Identify, false, &mut again).unwrap();
+        assert_eq!(&port.written[..first_len], &first[..first_len]);
+        let rest = &port.written[first_len..];
+        assert!(rest.len() >= again_len, "asked again");
+        assert!(rest.chunks(again_len).all(|ask| ask == &again[..again_len]), "{rest:?}");
     }
 
     #[test]
     fn serial_probe_returns_none_when_nothing_answers() {
         let mut port = FakePort::answering(frame(&rx(-40)));
-        assert_eq!(identify(&mut port, WAIT), None);
+        assert_eq!(identify(&mut port, WAIT, WAIT), None);
     }
 }

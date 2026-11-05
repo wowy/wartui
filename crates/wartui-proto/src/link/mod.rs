@@ -346,9 +346,10 @@ pub enum BridgeToHost {
         queues: QueueStats,
         /// The P4–C6 UART link's counters. `None` for a bridge without one.
         radio_link: Option<RadioLinkStats>,
-        /// Line errors on the P4's host UART since boot: FIFO overflows, framing, parity and
-        /// glitches. An overflow is host bytes lost, as when the P4 holds its interrupts off
-        /// for its own flash work.
+        /// Host-link reads since boot that saw one or more line errors or overflows on the
+        /// P4's host UART: FIFO overflows, framing, parity and glitches. One read counts once
+        /// however many it saw. An overflow is host bytes lost, as when the P4 holds its
+        /// interrupts off for its own flash work.
         host_uart_errors: u32,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
