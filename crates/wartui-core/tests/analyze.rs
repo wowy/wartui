@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use wartui_core::analyze::{
-    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, SpiLoss, losses,
-    peaks,
+    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
+    losses, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
-use wartui_proto::link::{QueueId, QueueStat, QueueStats, SpiStats};
+use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
@@ -50,7 +50,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         host_frames: host,
         rx_oversize: 0,
         queues: QueueStats::new(),
-        spi: None,
+        radio_link: None,
     })
 }
 
@@ -63,9 +63,9 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
 
 /// A status reply carrying link counters: `packets`, then `n`, `2n` … `8n` in field order, so
 /// no two counters match.
-fn spi_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
+fn radio_link_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
     let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
-    let spi = SpiStats {
+    let radio_link = RadioLinkStats {
         packets,
         crc_fail: n,
         bad_magic: 2 * n,
@@ -76,7 +76,7 @@ fn spi_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
         radio_seq_gap: 7 * n,
         radio_uart_errors: 8 * n,
     };
-    Record::BridgeStatus(BridgeStatusSeen { spi: Some(spi), ..seen })
+    Record::BridgeStatus(BridgeStatusSeen { radio_link: Some(radio_link), ..seen })
 }
 
 /// A status reply carrying a count of oversize frames dropped.
@@ -313,7 +313,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             usb_lost: 870,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }
@@ -338,7 +338,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             usb_lost: 673,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }
@@ -389,20 +389,20 @@ fn analyze_rebases_queue_drops_when_bridge_restarts() {
 }
 
 #[test]
-fn analyze_reports_spi_errors_when_rows_carry_spi() {
-    // A row without SPI between two with it changes nothing; the restart rebases.
+fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
+    // A row without radio link counters between two with them changes nothing; the restart rebases.
     let (_dir, conn) = capture(vec![
-        spi_status(60_000, 1_000, 2),
+        radio_link_status(60_000, 1_000, 2),
         status(0, 0, 0, 62_000),
-        spi_status(65_000, 1_500, 5),
-        spi_status(4_000, 100, 1),
+        radio_link_status(65_000, 1_500, 5),
+        radio_link_status(4_000, 100, 1),
     ]);
-    let spi = losses(&conn).unwrap().bridge.unwrap().spi;
+    let radio_link = losses(&conn).unwrap().bridge.unwrap().radio_link;
     // Each counter is its multiple of n, which advances 3 before the restart and 1 after.
     let n = 3 + 1;
     assert_eq!(
-        spi,
-        Some(SpiLoss {
+        radio_link,
+        Some(RadioLinkLoss {
             packets: 500 + 100,
             crc_fail: n,
             bad_magic: 2 * n,
@@ -442,7 +442,7 @@ fn analyze_skips_queue_rows_when_name_unknown() {
 fn analyze_reports_no_queues_when_bridge_has_none() {
     let (_dir, conn) = capture(vec![status(0, 10, 0, 60_000), status(5, 20, 0, 65_000)]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
-    assert_eq!((bridge.queues, bridge.spi), (vec![], None));
+    assert_eq!((bridge.queues, bridge.radio_link), (vec![], None));
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             usb_lost: 30,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }

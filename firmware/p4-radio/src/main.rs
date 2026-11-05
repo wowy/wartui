@@ -49,7 +49,7 @@ use wartui_proto::air::Board;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
 use wartui_proto::ota::Receiver;
-use wartui_proto::spi::{
+use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, FIFO_FULL_THRESHOLD, Held, PacketReader, RTS_THRESHOLD, RX_BUF_LEN, Up,
     WIRE_MAX,
 };

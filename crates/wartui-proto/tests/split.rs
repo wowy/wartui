@@ -2,12 +2,12 @@
 
 use heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, SendStatus,
-    SpiStats,
+    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, RADIO_UPDATING,
+    RadioLinkStats, SendStatus,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
+use wartui_proto::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::{Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::split::{INSTALL_WAIT_MS, Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
 
 const OWN_MAC: [u8; 6] = [1, 1, 1, 1, 1, 1];
@@ -204,7 +204,7 @@ fn pair_status_sums_host_and_radio_drops() {
         seq_gap: 13,
         uart_errors: 14,
     });
-    let spi = SpiStats {
+    let radio_link = RadioLinkStats {
         packets: 100,
         crc_fail: 1,
         bad_magic: 2,
@@ -217,7 +217,7 @@ fn pair_status_sums_host_and_radio_drops() {
     };
     let host = [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 6)];
     let down = stat(QueueId::RadioDown, 1);
-    match pair.status(3_000, host, down, spi, 6) {
+    match pair.status(3_000, host, down, radio_link, 6) {
         BridgeToHost::Status {
             peer_count,
             rx_count,
@@ -225,7 +225,7 @@ fn pair_status_sums_host_and_radio_drops() {
             uptime_ms,
             rx_oversize,
             queues,
-            spi: Some(spi),
+            radio_link: Some(radio_link),
         } => {
             assert_eq!((peer_count, rx_count, rx_oversize), (3, 40, 2));
             // The host's 6 and both of the C6's rings toward the P4, 4 and 2.
@@ -243,9 +243,12 @@ fn pair_status_sums_host_and_radio_drops() {
                     QueueId::HostBulk
                 ]
             );
-            assert_eq!((spi.crc_fail, spi.packets), (1, 100));
-            assert_eq!((spi.radio_crc_fail, spi.radio_bad_magic, spi.radio_seq_gap), (11, 12, 13));
-            assert_eq!((spi.uart_errors, spi.radio_uart_errors), (4, 14));
+            assert_eq!((radio_link.crc_fail, radio_link.packets), (1, 100));
+            assert_eq!(
+                (radio_link.radio_crc_fail, radio_link.radio_bad_magic, radio_link.radio_seq_gap),
+                (11, 12, 13)
+            );
+            assert_eq!((radio_link.uart_errors, radio_link.radio_uart_errors), (4, 14));
         }
         other => panic!("not a Status: {other:?}"),
     }
@@ -270,7 +273,7 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
         1_002,
         [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 0)],
         stat(QueueId::RadioDown, 0),
-        spi_zero(),
+        radio_link_zero(),
         0,
     ) {
         BridgeToHost::Status { peer_count, .. } => assert_eq!(peer_count, 3),
@@ -336,9 +339,9 @@ fn pair_announces_radio_reset_cause_when_c6_restarts() {
     pair.note_seq(96_000);
     let mut crashed = hello(72);
     crashed.reset_cause = ResetCause::Watchdog;
-    crashed.last_phase = LoopPhase::SpiTransfer;
+    crashed.last_phase = LoopPhase::RadioLink;
     assert_eq!(pair.on_hello(crashed, 0, 60_000), PairEvent::NewLife);
-    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::SpiTransfer));
+    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::RadioLink));
 }
 
 #[test]
@@ -416,8 +419,8 @@ fn radio_status() -> RadioStatus {
     }
 }
 
-fn spi_zero() -> SpiStats {
-    SpiStats {
+fn radio_link_zero() -> RadioLinkStats {
+    RadioLinkStats {
         packets: 0,
         crc_fail: 0,
         bad_magic: 0,

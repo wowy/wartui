@@ -5,7 +5,7 @@ use super::{
     MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, UPDATE_STATUS_MAX,
 };
 use crate::ota::image::DIGEST_LEN;
-use crate::spi::update::OP_MAX;
+use crate::radio_link::update::OP_MAX;
 
 // A frame is a body (the version byte, the payload and the CRC) plus COBS overhead (one
 // byte per 254 and a leading marker, five for a body this size) and the terminator, so 8

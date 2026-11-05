@@ -1,6 +1,6 @@
 //! Updates on flash: the slot under [`wartui_proto::ota::Receiver`], the switch to a new image,
 //! and the trial that image boots on. A node and both halves of the P4 bridge share it. Each
-//! feeds its receiver its own way: a node from the air, the C6 from the SPI link and the P4
+//! feeds its receiver its own way: a node from the air, the C6 from the UART link and the P4
 //! from its USB link.
 //!
 //! The receiver decides what to write; this module only says where. An image goes into the

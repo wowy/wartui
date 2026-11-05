@@ -788,7 +788,7 @@ def bridge(db, ctx):
     for prev, cur in zip(rows, rows[1:]):
         lives[cur[0]] = lives[prev[0]] + (cur[5] < prev[5])
     bridge_queues(db, lives)
-    bridge_spi(db, lives)
+    bridge_radio_link(db, lives)
 
 
 # Mirrors QueueId::unit in crates/wartui-proto/src/link/mod.rs.
@@ -833,25 +833,25 @@ def bridge_queues(db, lives):
                  "since the bridge booted: near full, so its WARTUI_* size is the lever", sql)
 
 
-SPI_COUNTERS = ("packets", "crc_fail", "bad_magic", "seq_gap", "uart_errors",
+RADIO_LINK_COUNTERS = ("packets", "crc_fail", "bad_magic", "seq_gap", "uart_errors",
                 "radio_crc_fail", "radio_bad_magic", "radio_seq_gap", "radio_uart_errors")
 
 
-def bridge_spi(db, lives):
+def bridge_radio_link(db, lives):
     """The P4 split bridge's UART link counters over the capture, rebased across restarts."""
-    cols = ", ".join(f"spi_{c}" for c in SPI_COUNTERS)
-    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE spi_packets IS NOT NULL "
+    cols = ", ".join(f"radio_link_{c}" for c in RADIO_LINK_COUNTERS)
+    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE radio_link_packets IS NOT NULL "
                 "ORDER BY id")
     if not rows:
         return
-    sums = dict.fromkeys(SPI_COUNTERS, 0)
+    sums = dict.fromkeys(RADIO_LINK_COUNTERS, 0)
     for prev, cur in zip(rows, rows[1:]):
         restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
-        for i, c in enumerate(SPI_COUNTERS, start=1):
+        for i, c in enumerate(RADIO_LINK_COUNTERS, start=1):
             sums[c] += since_boot_delta(cur[i], prev[i], restarted)
-    print("  spi " + "  ".join(f"{c} {sums[c]}" for c in SPI_COUNTERS))
+    print("  radio link " + "  ".join(f"{c} {sums[c]}" for c in RADIO_LINK_COUNTERS))
     sql = f"SELECT id, rx_at, uptime_ms, {cols} FROM bridge_status ORDER BY id"
-    errors = {c: sums[c] for c in SPI_COUNTERS
+    errors = {c: sums[c] for c in RADIO_LINK_COUNTERS
               if c != "packets" and sums[c]}
     if errors:
         flag("WARN", "bridge",

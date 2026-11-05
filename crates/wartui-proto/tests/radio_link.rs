@@ -6,13 +6,13 @@ use wartui_proto::link::{
     BridgeToHost, Chip, HostToBridge, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD,
     QueueId, QueueStat, SendStatus, ShortStr, crc16,
 };
-use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::{
+use wartui_proto::radio_link::{
     BODY_MAX, CORE_VERSION, CRC_LEN, Down, HEADER_LEN, HELLO_IMAGE_LEN, HELLO_LEN, Held, Hello,
     Kind, MAGIC, PAYLOAD_MAX, Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
     VerifyError, WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up, records,
     seal, verify,
 };
+use wartui_proto::reset::ResetCause;
 
 fn log(text: &str) -> Up {
     Up::Message(BridgeToHost::Log { level: LogLevel::Info, message: text.try_into().unwrap() })
@@ -86,7 +86,7 @@ fn rewrite_crc(body: &mut [u8]) {
 }
 
 #[test]
-fn spi_round_trips_messages_packet() {
+fn radio_link_round_trips_messages_packet() {
     let first = log("first");
     let second = log("second");
     let mut body = [0xAAu8; BODY_MAX];
@@ -110,7 +110,7 @@ fn spi_round_trips_messages_packet() {
 }
 
 #[test]
-fn spi_packet_round_trips_when_payload_is_empty_typical_or_full() {
+fn radio_link_packet_round_trips_when_payload_is_empty_typical_or_full() {
     for len in [0, 300, PAYLOAD_MAX] {
         for fill in [0x00, 0x5A] {
             let body = body_of(fill, 42, len);
@@ -125,12 +125,12 @@ fn spi_packet_round_trips_when_payload_is_empty_typical_or_full() {
 }
 
 #[test]
-fn spi_wire_max_holds_largest_body_when_it_has_no_zeros() {
+fn radio_link_wire_max_holds_largest_body_when_it_has_no_zeros() {
     assert_eq!(wire(&vec![0x5Au8; BODY_MAX]).len(), WIRE_MAX);
 }
 
 #[test]
-fn spi_reader_takes_packets_when_they_share_a_read() {
+fn radio_link_reader_takes_packets_when_they_share_a_read() {
     let mut bytes = wire(&body_of(1, 10, 5));
     bytes.extend_from_slice(&wire(&body_of(2, 11, 6)));
     let mut reader = PacketReader::new();
@@ -138,7 +138,7 @@ fn spi_reader_takes_packets_when_they_share_a_read() {
 }
 
 #[test]
-fn spi_reader_takes_packet_when_it_spans_reads() {
+fn radio_link_reader_takes_packet_when_it_spans_reads() {
     let bytes = wire(&body_of(3, 12, 500));
     let (first, second) = bytes.split_at(100);
     let mut reader = PacketReader::new();
@@ -147,7 +147,7 @@ fn spi_reader_takes_packet_when_it_spans_reads() {
 }
 
 #[test]
-fn spi_reader_resyncs_when_garbage_precedes_packet() {
+fn radio_link_reader_resyncs_when_garbage_precedes_packet() {
     // A boot's line noise, ended by a zero: it costs nothing but its own count.
     let mut bytes = std::vec::Vec::from([0x12, 0x34, 0x56, 0x00]);
     bytes.extend_from_slice(&wire(&body_of(4, 20, 8)));
@@ -158,7 +158,7 @@ fn spi_reader_resyncs_when_garbage_precedes_packet() {
 }
 
 #[test]
-fn spi_reader_resyncs_when_garbage_has_no_terminator() {
+fn radio_link_reader_resyncs_when_garbage_has_no_terminator() {
     // The garbage runs into the first packet and spoils it; the zero that ends it realigns.
     let mut bytes = std::vec::Vec::from([0x12, 0x34, 0x56]);
     bytes.extend_from_slice(&wire(&body_of(4, 20, 8)));
@@ -171,7 +171,7 @@ fn spi_reader_resyncs_when_garbage_has_no_terminator() {
 }
 
 #[test]
-fn spi_reader_resyncs_when_packet_is_truncated() {
+fn radio_link_reader_resyncs_when_packet_is_truncated() {
     let cut = wire(&body_of(6, 30, 400));
     let mut bytes = cut[..200].to_vec();
     bytes.extend_from_slice(&wire(&body_of(7, 31, 8)));
@@ -184,7 +184,7 @@ fn spi_reader_resyncs_when_packet_is_truncated() {
 }
 
 #[test]
-fn spi_reader_reports_bad_crc_when_packet_is_oversize() {
+fn radio_link_reader_reports_bad_crc_when_packet_is_oversize() {
     let mut bytes = vec![0x5Au8; WIRE_MAX * 2];
     bytes.push(0);
     bytes.extend_from_slice(&wire(&body_of(9, 40, 8)));
@@ -193,41 +193,41 @@ fn spi_reader_reports_bad_crc_when_packet_is_oversize() {
 }
 
 #[test]
-fn spi_reader_reports_bad_crc_when_cobs_is_invalid() {
+fn radio_link_reader_reports_bad_crc_when_cobs_is_invalid() {
     // A code byte promising more than the frame holds.
     let mut reader = PacketReader::new();
     assert_eq!(read_all(&mut reader, &[0x20, 1, 2, 0]), [Err(VerifyError::BadCrc)]);
 }
 
 #[test]
-fn spi_reader_reports_nothing_when_only_zeros_arrive() {
+fn radio_link_reader_reports_nothing_when_only_zeros_arrive() {
     let mut reader = PacketReader::new();
     assert!(read_all(&mut reader, &[0, 0, 0]).is_empty());
 }
 
 #[test]
-fn spi_rejects_flipped_byte_with_bad_crc() {
+fn radio_link_rejects_flipped_byte_with_bad_crc() {
     let mut body = sealed();
     body[13] ^= 0x01;
     assert_eq!(verify(&body).unwrap_err(), VerifyError::BadCrc);
 }
 
 #[test]
-fn spi_rejects_with_bad_crc_when_body_is_too_short() {
+fn radio_link_rejects_with_bad_crc_when_body_is_too_short() {
     let body = sealed();
     assert_eq!(verify(&body[..HEADER_LEN + 1]).unwrap_err(), VerifyError::BadCrc);
     assert_eq!(verify(&[]).unwrap_err(), VerifyError::BadCrc);
 }
 
 #[test]
-fn spi_rejects_bad_magic_when_magic_flipped() {
+fn radio_link_rejects_bad_magic_when_magic_flipped() {
     let mut body = sealed();
     body[0] ^= 0x01;
     assert_eq!(verify(&body).unwrap_err(), VerifyError::BadMagic);
 }
 
 #[test]
-fn spi_rejects_other_core_version() {
+fn radio_link_rejects_other_core_version() {
     let mut body = sealed();
     body[2] = 2;
     rewrite_crc(&mut body);
@@ -235,7 +235,7 @@ fn spi_rejects_other_core_version() {
 }
 
 #[test]
-fn spi_rejects_bad_len_when_len_past_payload_max() {
+fn radio_link_rejects_bad_len_when_len_past_payload_max() {
     let mut body = sealed();
     let len = u16::try_from(PAYLOAD_MAX + 1).unwrap();
     body[8..10].copy_from_slice(&len.to_le_bytes());
@@ -244,7 +244,7 @@ fn spi_rejects_bad_len_when_len_past_payload_max() {
 }
 
 #[test]
-fn spi_rejects_bad_len_when_len_is_not_the_payload_length() {
+fn radio_link_rejects_bad_len_when_len_is_not_the_payload_length() {
     let mut body = sealed();
     body[8] = 2;
     rewrite_crc(&mut body);
@@ -252,7 +252,7 @@ fn spi_rejects_bad_len_when_len_is_not_the_payload_length() {
 }
 
 #[test]
-fn spi_rejects_unknown_kind_when_kind_unassigned() {
+fn radio_link_rejects_unknown_kind_when_kind_unassigned() {
     let mut body = sealed();
     body[3] = 9;
     rewrite_crc(&mut body);
@@ -260,7 +260,7 @@ fn spi_rejects_unknown_kind_when_kind_unassigned() {
 }
 
 #[test]
-fn spi_rejects_unknown_kind_when_kind_is_zero() {
+fn radio_link_rejects_unknown_kind_when_kind_is_zero() {
     // Code 0 names nothing: a side with nothing to say sends nothing.
     let mut body = sealed();
     body[3] = 0;
@@ -269,7 +269,7 @@ fn spi_rejects_unknown_kind_when_kind_is_zero() {
 }
 
 #[test]
-fn spi_header_has_frozen_layout() {
+fn radio_link_header_has_frozen_layout() {
     let mut body = [0xAAu8; BODY_MAX];
     body[HEADER_LEN..HEADER_LEN + 3].copy_from_slice(&[1, 2, 3]);
     let len = seal(&mut body, Kind::Hello, 0x0A0B_0C0D, 3);
@@ -299,9 +299,9 @@ fn spi_header_has_frozen_layout() {
 
 /// These bytes are the frozen hello. They must never change: any P4 build reads any C6
 /// build's hello by this layout. Written out by hand from the layout table in
-/// `spi/hello.rs`, not captured from the encoder.
+/// `radio_link/hello.rs`, not captured from the encoder.
 #[test]
-fn spi_hello_has_frozen_layout() {
+fn radio_link_hello_has_frozen_layout() {
     let hello = Hello {
         link_rev: 0x0102,
         chip: Chip::Esp32C6,
@@ -342,14 +342,14 @@ fn spi_hello_has_frozen_layout() {
 }
 
 #[test]
-fn spi_hello_round_trips_when_chip_is_p4() {
+fn radio_link_hello_round_trips_when_chip_is_p4() {
     let hello = Hello {
         link_rev: 1,
         chip: Chip::Esp32P4,
         mac: [1, 2, 3, 4, 5, 6],
         fw_version: ShortStr::try_from("0.1.0").unwrap(),
         reset_cause: ResetCause::Unknown,
-        last_phase: LoopPhase::SpiTransfer,
+        last_phase: LoopPhase::RadioLink,
         uptime_ms: 5,
         heap_free: 6,
         image: None,
@@ -363,7 +363,7 @@ fn spi_hello_round_trips_when_chip_is_p4() {
 }
 
 #[test]
-fn spi_hello_ignores_appended_bytes_when_payload_runs_past_image() {
+fn radio_link_hello_ignores_appended_bytes_when_payload_runs_past_image() {
     // A later build may append fields; this build reads the frozen 83 bytes and no more.
     let hello = Hello {
         link_rev: 1,
@@ -382,9 +382,9 @@ fn spi_hello_ignores_appended_bytes_when_payload_runs_past_image() {
 }
 
 /// The image digest is part of the frozen hello: bytes 51..83, appended to the layout
-/// `spi_hello_has_frozen_layout` pins.
+/// `radio_link_hello_has_frozen_layout` pins.
 #[test]
-fn spi_hello_has_frozen_layout_when_image_present() {
+fn radio_link_hello_has_frozen_layout_when_image_present() {
     let mut digest = [0u8; 32];
     for (i, byte) in digest.iter_mut().enumerate() {
         *byte = i as u8;
@@ -429,7 +429,7 @@ fn spi_hello_has_frozen_layout_when_image_present() {
 }
 
 #[test]
-fn spi_hello_decodes_image_none_when_payload_is_51_bytes() {
+fn radio_link_hello_decodes_image_none_when_payload_is_51_bytes() {
     // A C6 that predates the update path sends the 51-byte hello.
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
@@ -437,14 +437,14 @@ fn spi_hello_decodes_image_none_when_payload_is_51_bytes() {
 }
 
 #[test]
-fn spi_hello_decodes_image_none_when_digest_is_cut_short() {
+fn radio_link_hello_decodes_image_none_when_digest_is_cut_short() {
     let mut bytes = [0u8; HELLO_IMAGE_LEN - 1];
     bytes[2] = 1;
     assert_eq!(Hello::decode(&bytes).unwrap().image, None);
 }
 
 #[test]
-fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
+fn radio_link_hello_decodes_unknown_reset_cause_as_unknown() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
     bytes[41] = 0xEE;
@@ -455,7 +455,7 @@ fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
 }
 
 #[test]
-fn spi_hello_decodes_unknown_phase_when_code_names_nothing() {
+fn radio_link_hello_decodes_unknown_phase_when_code_names_nothing() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
     for code in [2, 5, 7, 8, 9] {
@@ -464,11 +464,11 @@ fn spi_hello_decodes_unknown_phase_when_code_names_nothing() {
     }
     // The frozen code, not the variant's enum index.
     bytes[42] = 10;
-    assert_eq!(Hello::decode(&bytes).unwrap().last_phase, LoopPhase::SpiTransfer);
+    assert_eq!(Hello::decode(&bytes).unwrap().last_phase, LoopPhase::RadioLink);
 }
 
 #[test]
-fn spi_hello_truncates_invalid_utf8_version() {
+fn radio_link_hello_truncates_invalid_utf8_version() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
     bytes[9..14].copy_from_slice(&[b'0', b'.', b'9', 0xFF, b'1']);
@@ -477,19 +477,19 @@ fn spi_hello_truncates_invalid_utf8_version() {
 }
 
 #[test]
-fn spi_hello_decodes_none_when_chip_unknown() {
+fn radio_link_hello_decodes_none_when_chip_unknown() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 3;
     assert_eq!(Hello::decode(&bytes), None);
 }
 
 #[test]
-fn spi_hello_decodes_none_when_short() {
+fn radio_link_hello_decodes_none_when_short() {
     assert_eq!(Hello::decode(&[0u8; HELLO_LEN - 1]), None);
 }
 
 #[test]
-fn spi_packer_refuses_record_that_does_not_fit() {
+fn radio_link_packer_refuses_record_that_does_not_fit() {
     let mut record = [0u8; PAYLOAD_MAX];
     let len = encode_down(&largest_send(), &mut record).unwrap();
     let mut payload = [0u8; PAYLOAD_MAX];
@@ -501,7 +501,7 @@ fn spi_packer_refuses_record_that_does_not_fit() {
 }
 
 #[test]
-fn spi_records_stop_when_len_is_zero() {
+fn radio_link_records_stop_when_len_is_zero() {
     let mut payload = [0u8; 16];
     let mut packer = Packer::new(&mut payload);
     assert!(packer.push_encoded(&[7, 8]));
@@ -510,7 +510,7 @@ fn spi_records_stop_when_len_is_zero() {
 }
 
 #[test]
-fn spi_largest_messages_fit_one_packet() {
+fn radio_link_largest_messages_fit_one_packet() {
     let mut out = [0u8; BODY_MAX];
     let down = encode_down(&largest_send(), &mut out).unwrap();
     assert!(down + 2 <= PAYLOAD_MAX, "largest Down is {down} bytes");
@@ -526,7 +526,7 @@ fn spi_largest_messages_fit_one_packet() {
 }
 
 #[test]
-fn spi_up_is_priority_when_not_a_received_frame() {
+fn radio_link_up_is_priority_when_not_a_received_frame() {
     // The C6 queues these apart from the traffic, so a backlog of frames evicts frames.
     let rx = Up::Message(BridgeToHost::Rx {
         src: [1; 6],
@@ -558,8 +558,9 @@ fn spi_up_is_priority_when_not_a_received_frame() {
 }
 
 #[test]
-fn spi_link_revision_golden_bytes() {
-    const MSG: &str = "Up/Down encoding changed: bump spi::LINK_REVISION and update these bytes";
+fn radio_link_revision_golden_bytes() {
+    const MSG: &str =
+        "Up/Down encoding changed: bump radio_link::LINK_REVISION and update these bytes";
     let mut out = [0u8; 64];
 
     let down = Down::Command(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] });
@@ -615,8 +616,9 @@ fn spi_link_revision_golden_bytes() {
 /// The records that carry the traffic: a change to any of their fields must move
 /// `LINK_REVISION` too.
 #[test]
-fn spi_link_revision_golden_bytes_for_traffic() {
-    const MSG: &str = "Up/Down encoding changed: bump spi::LINK_REVISION and update these bytes";
+fn radio_link_revision_golden_bytes_for_traffic() {
+    const MSG: &str =
+        "Up/Down encoding changed: bump radio_link::LINK_REVISION and update these bytes";
     let mut out = [0u8; 64];
 
     let rx = Up::Message(BridgeToHost::Rx {
@@ -675,7 +677,7 @@ fn spi_link_revision_golden_bytes_for_traffic() {
 }
 
 #[test]
-fn spi_seq_check_reports_gaps_when_seq_skips_or_restarts() {
+fn radio_link_seq_check_reports_gaps_when_seq_skips_or_restarts() {
     let mut check = SeqCheck::new();
     assert_eq!(check.note(10), SeqNote::First);
     assert_eq!(check.note(11), SeqNote::InOrder);
@@ -690,7 +692,7 @@ fn spi_seq_check_reports_gaps_when_seq_skips_or_restarts() {
 }
 
 #[test]
-fn spi_seq_check_reads_equal_seq_as_gap() {
+fn radio_link_seq_check_reads_equal_seq_as_gap() {
     // A sender never sends a packet twice, so a restarted C6 whose only packet was seq 0, and
     // whose next life starts at seq 0, must not read as nothing happened.
     let mut check = SeqCheck::new();
@@ -699,7 +701,7 @@ fn spi_seq_check_reads_equal_seq_as_gap() {
 }
 
 #[test]
-fn spi_held_sends_record_whole_in_next_packet_when_it_does_not_fit() {
+fn radio_link_held_sends_record_whole_in_next_packet_when_it_does_not_fit() {
     let mut ring = FrameRing::<4096>::new();
     let mut held = Held::new();
     // Two 900-byte records take 1,804 of the payload's bytes; the third needs 302 more.
@@ -711,7 +713,7 @@ fn spi_held_sends_record_whole_in_next_packet_when_it_does_not_fit() {
 }
 
 #[test]
-fn spi_held_holds_nothing_when_ring_empties_mid_packet() {
+fn radio_link_held_holds_nothing_when_ring_empties_mid_packet() {
     let mut ring = FrameRing::<256>::new();
     let mut held = Held::new();
     assert!(ring.push(&[1; 10]));
@@ -734,7 +736,7 @@ fn spi_held_holds_nothing_when_ring_empties_mid_packet() {
 }
 
 #[test]
-fn spi_held_fills_packet_exactly_when_record_is_record_max() {
+fn radio_link_held_fills_packet_exactly_when_record_is_record_max() {
     let mut ring = FrameRing::<4096>::new();
     let mut held = Held::new();
     assert!(ring.push(&[7; RECORD_MAX]));

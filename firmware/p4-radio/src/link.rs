@@ -1,7 +1,7 @@
 //! The C6's end of the UART link to the P4: what each packet carries up, and what the C6
 //! does with what comes down.
 //!
-//! `wartui_proto::spi` has the framing. The link is three futures, and nothing ticks: the
+//! `wartui_proto::radio_link` has the framing. The link is three futures, and nothing ticks: the
 //! reader wakes when a DMA read ends, the results pump when a radio job finishes, and the writer
 //! when [`Shared`]'s `wake` says there may be something to send. The writer loops until it has
 //! nothing left before it waits, so a record left held or queued never waits for a new signal.
@@ -27,7 +27,7 @@
 //! **The P4's hello confirms an image on trial.** Hearing the P4 is the test, as hearing the
 //! host is a node's; `firmware/common/src/ota.rs` has the trial.
 //!
-//! **An update arrives as [`Kind::Update`] packets** (`wartui_proto::spi::update`), which
+//! **An update arrives as [`Kind::Update`] packets** (`wartui_proto::radio_link::update`), which
 //! drive [`wartui_proto::ota::Receiver`] over [`wartui_firmware::ota`], as a node's update
 //! frames do. Each status goes up in the next packet, ahead of any records. A sector's flash
 //! work holds the task, so what the P4 sends meanwhile waits in DMA and the FIFO, then behind
@@ -60,13 +60,13 @@ use wartui_proto::link::{
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
-use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::update::{Op, Received, receive};
-use wartui_proto::spi::{
+use wartui_proto::radio_link::update::{Op, Received, receive};
+use wartui_proto::radio_link::{
     BODY_MAX, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX,
     Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
     decode_down, encode_packet, encode_up, records, seal,
 };
+use wartui_proto::reset::ResetCause;
 
 use crate::config::{RADIO_JOBS, SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
 
@@ -344,7 +344,7 @@ impl Link {
                 }
             }
         }
-        mark(LoopPhase::SpiTransfer);
+        mark(LoopPhase::RadioLink);
         // Once per change, so a P4 sending garbage costs one line per packet at most.
         if self.undecoded != self.undecoded_said {
             self.undecoded_said = self.undecoded;
@@ -595,7 +595,7 @@ async fn read_packets(
     let mut last_len = 0;
     loop {
         let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
-        mark(LoopPhase::SpiTransfer);
+        mark(LoopPhase::RadioLink);
         for &byte in &last.as_slice()[..last_len] {
             if let Some(packet) = reader.push(byte) {
                 link.borrow_mut().take(packet, shared, radio);
@@ -634,7 +634,7 @@ async fn write_packets(
         };
         let wire = encode_packet(&body[..len], buf.as_mut_slice());
         buf.set_length(wire);
-        mark(LoopPhase::SpiTransfer);
+        mark(LoopPhase::RadioLink);
         let mut write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
         Timer::after(FIFO_FILL).await;
         write.wait_for_done().await;

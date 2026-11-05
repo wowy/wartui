@@ -382,7 +382,7 @@ impl FleetEngine {
                 uptime_ms,
                 rx_oversize,
                 queues,
-                spi,
+                radio_link,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -406,7 +406,7 @@ impl FleetEngine {
                     host_frames: self.counters.frames,
                     rx_oversize: *rx_oversize,
                     queues: queues.clone(),
-                    spi: *spi,
+                    radio_link: *radio_link,
                 }));
             }
             // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not

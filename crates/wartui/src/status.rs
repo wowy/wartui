@@ -19,7 +19,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::CONTROL_CHANNEL;
-use wartui_proto::link::{BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, SpiStats};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
+};
 use wartui_proto::mac;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -81,7 +83,7 @@ pub async fn run(args: Args) -> Result<()> {
         uptime_ms,
         rx_oversize,
         queues,
-        spi,
+        radio_link,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -95,7 +97,7 @@ pub async fn run(args: Args) -> Result<()> {
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.
     println!("heap free  {} bytes", info.heap_free);
-    for line in diagnostic_lines(&queues, spi.as_ref()) {
+    for line in diagnostic_lines(&queues, radio_link.as_ref()) {
         println!("{line}");
     }
 
@@ -131,11 +133,11 @@ fn radio_line(radio: &RadioInfo) -> String {
 }
 
 /// One line per reported queue, then the UART link's counters when it has any.
-fn diagnostic_lines(queues: &QueueStats, spi: Option<&SpiStats>) -> Vec<String> {
+fn diagnostic_lines(queues: &QueueStats, radio_link: Option<&RadioLinkStats>) -> Vec<String> {
     let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
-    if let Some(s) = spi {
+    if let Some(s) = radio_link {
         lines.push(format!(
-            "  spi  packets {}  crc_fail {}  bad_magic {}  seq_gap {}  uart_errors {}  \
+            "  radio link  packets {}  crc_fail {}  bad_magic {}  seq_gap {}  uart_errors {}  \
              radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}  radio_uart_errors {}",
             s.packets,
             s.crc_fail,
@@ -254,14 +256,14 @@ mod tests {
             mac: [0x58, 0x8c, 0x81, 0x00, 0x12, 0x34],
             fw_version: "0.1.0".try_into().expect("short"),
             reset_cause: ResetCause::Watchdog,
-            last_phase: LoopPhase::SpiTransfer,
+            last_phase: LoopPhase::RadioLink,
             uptime_ms: 72,
         };
         assert_eq!(
             radio_line(&radio),
             format!(
                 "radio      {} on Esp32C6, firmware 0.1.0, reset Watchdog, \
-                 last phase SpiTransfer",
+                 last phase RadioLink",
                 wartui_proto::mac::full(&radio.mac)
             )
         );
@@ -360,7 +362,7 @@ mod tests {
             uptime_ms: 3,
             rx_oversize: 0,
             queues: QueueStats::new(),
-            spi: None,
+            radio_link: None,
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

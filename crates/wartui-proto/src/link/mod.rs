@@ -21,8 +21,8 @@
 
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
+use crate::radio_link::update::OP_MAX;
 use crate::reset::ResetCause;
-use crate::spi::update::OP_MAX;
 use heapless::{String, Vec};
 use serde::Serialize;
 
@@ -90,7 +90,7 @@ pub const GPS_WRITE_MAX: usize = 256;
 /// Bytes the host composed for the GPS receiver, in transit to the bridge.
 pub type GpsWriteBytes = Vec<u8, GPS_WRITE_MAX>;
 
-/// One encoded [`crate::spi::update::Op`] for a P4 bridge's own image, in transit to it.
+/// One encoded [`crate::radio_link::update::Op`] for a P4 bridge's own image, in transit to it.
 pub type UpdateOp = Vec<u8, OP_MAX>;
 
 /// The most bytes one [`BridgeToHost::Update`] carries: an encoded `Op::Status`, with room
@@ -148,7 +148,7 @@ pub enum LoopPhase {
     /// Writing queued frames to the USB endpoint.
     Pump,
     /// Reading or writing a packet over the P4–C6 UART link.
-    SpiTransfer,
+    RadioLink,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -241,7 +241,7 @@ pub enum HostToBridge {
         bytes: GpsWriteBytes,
     },
     /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit` or
-    /// `Install` in the [`crate::spi::update`] layout, which the P4 answers with a
+    /// `Install` in the [`crate::radio_link::update`] layout, which the P4 answers with a
     /// [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
     /// serves both links. A bridge that takes no update answers with an
     /// [`BridgeToHost::Error`].
@@ -338,7 +338,7 @@ pub enum BridgeToHost {
         /// none to report.
         queues: QueueStats,
         /// The P4–C6 UART link's counters. `None` for a bridge without one.
-        spi: Option<SpiStats>,
+        radio_link: Option<RadioLinkStats>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -363,7 +363,7 @@ pub enum BridgeToHost {
         bytes: GpsBytes,
     },
     /// Where an update to the bridge's own image stands: an `Op::Status` in the
-    /// [`crate::spi::update`] layout, answering a [`HostToBridge::Update`].
+    /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::Update`].
     Update(#[serde(with = "bytes")] UpdateStatus),
 }
 
@@ -466,7 +466,7 @@ pub struct RadioInfo {
 
 /// Counters of the P4–C6 UART link, since boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct SpiStats {
+pub struct RadioLinkStats {
     /// Verified C6→P4 packets.
     pub packets: u32,
     /// C6→P4 packets whose CRC failed.

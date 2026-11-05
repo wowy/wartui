@@ -1,9 +1,9 @@
 //! The P4's end of the UART link to the C6: what each packet carries down, and what the
 //! P4 does with what comes up.
 //!
-//! `wartui_proto::spi` has the framing. The link is two futures, and nothing ticks: the reader
-//! wakes when a DMA read ends, and the writer when [`Shared`]'s `wake_link` says there may be
-//! something to send. The writer loops until it has nothing left before it waits, so a record
+//! `wartui_proto::radio_link` has the framing. The link is two futures, and nothing ticks: the
+//! reader wakes when a DMA read ends, and the writer when [`Shared`]'s `wake_link` says there may
+//! be something to send. The writer loops until it has nothing left before it waits, so a record
 //! left held or queued never waits for a new signal. They share [`Link`] through a `RefCell`,
 //! with nothing borrowed across an `.await`.
 //!
@@ -46,13 +46,13 @@ use esp_hal::uart::uhci::{UhciRx, UhciTx};
 use wartui_firmware::phase::mark;
 use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
-use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::update::{Failure, Op, Sender, Stage};
-use wartui_proto::spi::{
+use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
+use wartui_proto::radio_link::{
     BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
     PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, decode_up, encode_packet,
     records, seal,
 };
+use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{PairEvent, RadioState};
 
 use crate::Shared;
@@ -96,7 +96,7 @@ pub struct Link {
     undecoded: u32,
     undecoded_said: u32,
     /// A record from the down queue that did not fit the last packet. Static, since it
-    /// holds up to [`RECORD_MAX`](wartui_proto::spi::RECORD_MAX) bytes.
+    /// holds up to [`RECORD_MAX`](wartui_proto::radio_link::RECORD_MAX) bytes.
     held: &'static mut Held,
     /// Sends the bundled image while the pair is updating. One per P4 life, as the pair
     /// attempts one update per life.
@@ -149,17 +149,21 @@ impl Link {
     fn take(&mut self, packet: Result<Packet<'_>, VerifyError>, shared: &Shared) {
         let packet = match packet {
             Ok(packet) => packet,
-            Err(VerifyError::BadMagic) => return shared.count_spi(|spi| &mut spi.bad_magic),
-            Err(VerifyError::BadCrc) => return shared.count_spi(|spi| &mut spi.crc_fail),
+            Err(VerifyError::BadMagic) => {
+                return shared.count_link(|radio_link| &mut radio_link.bad_magic);
+            }
+            Err(VerifyError::BadCrc) => {
+                return shared.count_link(|radio_link| &mut radio_link.crc_fail);
+            }
             // Another core, a bad `len` or an unknown kind, each under a good CRC: no C6
-            // built from this tree sends one, and `SpiStats` has no counter for them.
+            // built from this tree sends one, and `RadioLinkStats` has no counter for them.
             Err(VerifyError::OtherCore(_) | VerifyError::BadLen | VerifyError::UnknownKind(_)) => {
                 return;
             }
         };
-        shared.count_spi(|spi| &mut spi.packets);
+        shared.count_link(|radio_link| &mut radio_link.packets);
         match self.c6_seq.note(packet.seq) {
-            SeqNote::Gap => shared.count_spi(|spi| &mut spi.seq_gap),
+            SeqNote::Gap => shared.count_link(|radio_link| &mut radio_link.seq_gap),
             SeqNote::First | SeqNote::InOrder => {}
         }
         match packet.kind {
@@ -335,7 +339,7 @@ async fn read_packets(
     let mut last_len = 0;
     loop {
         let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
-        mark(LoopPhase::SpiTransfer);
+        mark(LoopPhase::RadioLink);
         for &byte in &last.as_slice()[..last_len] {
             if let Some(packet) = reader.push(byte) {
                 link.borrow_mut().take(packet, shared);
@@ -349,7 +353,7 @@ async fn read_packets(
         last_len = last.number_of_received_bytes();
         // The UART keeps line errors until they are read, so any since the last read are here.
         if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
-            shared.count_spi(|spi| &mut spi.uart_errors);
+            shared.count_link(|radio_link| &mut radio_link.uart_errors);
         }
     }
 }
@@ -374,7 +378,7 @@ async fn write_packets(
         };
         let wire = encode_packet(&body[..len], buf.as_mut_slice());
         buf.set_length(wire);
-        mark(LoopPhase::SpiTransfer);
+        mark(LoopPhase::RadioLink);
         let mut write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
         Timer::after(FIFO_FILL).await;
         write.wait_for_done().await;
@@ -382,7 +386,7 @@ async fn write_packets(
         tx = tx_back;
         buf = done;
         if result.is_err() {
-            shared.count_spi(|spi| &mut spi.uart_errors);
+            shared.count_link(|radio_link| &mut radio_link.uart_errors);
         }
     }
 }

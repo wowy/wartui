@@ -3,8 +3,8 @@
 //! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343, a
 //! second cable, so only the first flash uses it
 //! (`firmware/p4-bridge/README.md` § "First flash"). After that the P4 takes its app image as
-//! `HostToBridge::Update` ops: the `spi::update` layout it sends its own C6, driven by the same
-//! `Sender`, on a [`TICK`] and on each status.
+//! `HostToBridge::Update` ops: the `radio_link::update` layout it sends its own C6, driven by the
+//! same `Sender`, on a [`TICK`] and on each status.
 //!
 //! **The image is checked before it is sent**: the P4's chip, an app-only layout, the
 //! descriptor's project name ([`PROJECT`]), the segment checksum and appended SHA-256
@@ -55,7 +55,7 @@ use wartui_proto::link::{
     RADIO_UPDATING, UpdateOp,
 };
 use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
-use wartui_proto::spi::update::{Failure, OP_MAX, Op, Sender, Stage};
+use wartui_proto::radio_link::update::{Failure, OP_MAX, Op, Sender, Stage};
 
 use super::bridge::Args;
 use super::{

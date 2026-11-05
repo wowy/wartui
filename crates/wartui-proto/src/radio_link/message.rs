@@ -23,7 +23,7 @@ use crate::link::{BridgeToHost, HostToBridge, QueueStat};
 /// carries.
 ///
 /// Not frozen. Bump it whenever this module's types or the link enums they carry change
-/// shape; `spi_link_revision_golden_bytes` in `tests/spi.rs` fails until the bump.
+/// shape; `radio_link_revision_golden_bytes` in `tests/radio_link.rs` fails until the bump.
 pub const LINK_REVISION: u16 = 4;
 
 /// P4 to C6.

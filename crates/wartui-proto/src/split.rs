@@ -21,7 +21,7 @@
 //!   always read it and say so, but radio commands are refused.
 //! - **The P4 carries the C6's image, and the C6 runs it.** A hello whose image digest
 //!   differs from the bundled one is [`RadioState::Updating`]: the P4 sends the bundle over
-//!   the link (`crate::spi::update`) and refuses radio commands meanwhile. The C6 reboots
+//!   the link (`crate::radio_link::update`) and refuses radio commands meanwhile. The C6 reboots
 //!   into the new image, and its next hello is a new life. One attempt per P4 life, so an
 //!   image that will not take cannot loop: a C6 still on another build afterwards is
 //!   [`RadioState::Stale`], bridged with a fault when its revision matches.
@@ -39,13 +39,13 @@ use core::fmt::Write;
 
 use crate::link::{
     BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueId, QueueStat,
-    QueueStats, RADIO_UPDATING, RadioInfo, SendStatus, ShortStr, SpiStats,
+    QueueStats, RADIO_UPDATING, RadioInfo, RadioLinkStats, SendStatus, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
+use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use crate::reset::ResetCause;
-use crate::spi::{Hello, LINK_REVISION, RadioStatus};
 
 /// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC.
 pub const RADIO_WAIT_MS: u64 = 2_000;
@@ -398,7 +398,7 @@ impl Pair {
             RadioState::Mismatch(hello) => {
                 let _ = write!(
                     text,
-                    "radio speaks SPI link revision {}, this P4 speaks {}; update the radio",
+                    "radio speaks link revision {}, this P4 speaks {}; update the radio",
                     hello.link_rev, LINK_REVISION
                 );
             }
@@ -460,7 +460,7 @@ impl Pair {
         now_ms: u64,
         host: [QueueStat; 2],
         down: QueueStat,
-        mut spi: SpiStats,
+        mut radio_link: RadioLinkStats,
         host_dropped: u32,
     ) -> BridgeToHost {
         let mut queues = QueueStats::new();
@@ -472,10 +472,10 @@ impl Pair {
                 }
                 let _ = queues.push(*stat);
             }
-            spi.radio_crc_fail = status.crc_fail;
-            spi.radio_bad_magic = status.bad_magic;
-            spi.radio_seq_gap = status.seq_gap;
-            spi.radio_uart_errors = status.uart_errors;
+            radio_link.radio_crc_fail = status.crc_fail;
+            radio_link.radio_bad_magic = status.bad_magic;
+            radio_link.radio_seq_gap = status.seq_gap;
+            radio_link.radio_uart_errors = status.uart_errors;
         }
         // The C6's queues leave room for these: 4 + 3 fits in 8.
         let _ = queues.push(down);
@@ -490,7 +490,7 @@ impl Pair {
             uptime_ms: self.uptime_ms(now_ms),
             rx_oversize: counters.map_or(0, |status| status.rx_oversize),
             queues,
-            spi: Some(spi),
+            radio_link: Some(radio_link),
         }
     }
 }

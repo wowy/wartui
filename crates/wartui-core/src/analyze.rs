@@ -46,10 +46,10 @@
 //! mid-backlog shows the host reading more than the bridge passed on.
 //!
 //! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and on the P4
-//! split bridge its SPI link's counters. A queue's `peak` is the largest `high_water` any row
+//! split bridge its radio link's counters. A queue's `peak` is the largest `high_water` any row
 //! carried. That figure is since the bridge booted, so the peak can predate the capture. Its drops
-//! and the SPI counters are since-boot counts, rebased like the bridge's own: a restart between two
-//! rows is the reply's uptime falling at any row between them.
+//! and the radio link counters are since-boot counts, rebased like the bridge's own: a restart
+//! between two rows is the reply's uptime falling at any row between them.
 //!
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
@@ -111,8 +111,8 @@ pub struct BridgeLoss {
     pub oversize: u64,
     /// The bridge's queues, in the order it first reported them; empty when it reports none.
     pub queues: Vec<QueueLoss>,
-    /// The SPI link's errors, or `None` when no reply carried them, as off the P4 split bridge.
-    pub spi: Option<SpiLoss>,
+    /// The radio link's errors, or `None` when no reply carried them, as off the P4 split bridge.
+    pub radio_link: Option<RadioLinkLoss>,
 }
 
 /// How full one of the bridge's queues got, and what it dropped during the capture.
@@ -128,9 +128,10 @@ pub struct QueueLoss {
     pub dropped: u64,
 }
 
-/// The P4–C6 UART link's counters over the capture. Named as [`SpiStats`](wartui_proto::link::SpiStats) names them.
+/// The P4–C6 UART link's counters over the capture. Named as
+/// [`RadioLinkStats`](wartui_proto::link::RadioLinkStats) names them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SpiLoss {
+pub struct RadioLinkLoss {
     /// Verified C6→P4 packets.
     pub packets: u64,
     /// C6→P4 packets whose CRC failed.
@@ -151,7 +152,7 @@ pub struct SpiLoss {
     pub radio_uart_errors: u64,
 }
 
-impl SpiLoss {
+impl RadioLinkLoss {
     /// A status row's counters, or `None` when it carries none.
     fn read(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
         let get = |name: &str| row.get::<_, Option<i64>>(name).map(|v| v.map(count));
@@ -166,15 +167,15 @@ impl SpiLoss {
             Some(radio_seq_gap),
             Some(radio_uart_errors),
         ) = (
-            get("spi_packets")?,
-            get("spi_crc_fail")?,
-            get("spi_bad_magic")?,
-            get("spi_seq_gap")?,
-            get("spi_uart_errors")?,
-            get("spi_radio_crc_fail")?,
-            get("spi_radio_bad_magic")?,
-            get("spi_radio_seq_gap")?,
-            get("spi_radio_uart_errors")?,
+            get("radio_link_packets")?,
+            get("radio_link_crc_fail")?,
+            get("radio_link_bad_magic")?,
+            get("radio_link_seq_gap")?,
+            get("radio_link_uart_errors")?,
+            get("radio_link_radio_crc_fail")?,
+            get("radio_link_radio_bad_magic")?,
+            get("radio_link_radio_seq_gap")?,
+            get("radio_link_radio_uart_errors")?,
         )
         else {
             return Ok(None);
@@ -431,9 +432,10 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     // One row per queue a reply reported, or one with NULL queue columns for a reply with none.
     let mut stmt = conn.prepare(
         "SELECT s.id, s.rx_count, s.dropped_tx, s.uptime_ms, s.host_frames, s.rx_oversize,
-                s.spi_packets, s.spi_crc_fail, s.spi_bad_magic, s.spi_seq_gap,
-                s.spi_uart_errors, s.spi_radio_crc_fail, s.spi_radio_bad_magic,
-                s.spi_radio_seq_gap, s.spi_radio_uart_errors,
+                s.radio_link_packets, s.radio_link_crc_fail, s.radio_link_bad_magic,
+                s.radio_link_seq_gap, s.radio_link_uart_errors, s.radio_link_radio_crc_fail,
+                s.radio_link_radio_bad_magic,
+                s.radio_link_radio_seq_gap, s.radio_link_radio_uart_errors,
                 q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
          FROM bridge_status s LEFT JOIN bridge_queue q ON q.status_id = s.id
          ORDER BY s.id, q.rowid",
@@ -444,8 +446,9 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut status_id: Option<i64> = None;
     // The previous status row's figures. The first row is only a baseline.
     let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
-    // The SPI counters of the last status row that carried them, and the restarts seen by then.
-    let mut prev_spi: Option<(SpiLoss, u64)> = None;
+    // The radio link counters of the last status row that carried them, and the restarts seen by
+    // then.
+    let mut prev_radio_link: Option<(RadioLinkLoss, u64)> = None;
     // Beside each queue, its previous row's drops and the restarts seen by then.
     let mut prev_queue: Vec<(u64, u64)> = Vec::new();
     while let Some(row) = rows.next()? {
@@ -472,12 +475,12 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             }
             prev = Some((received, dropped, uptime, host_frames, oversize));
 
-            if let Some(now) = SpiLoss::read(row)? {
-                let sums = loss.spi.get_or_insert_default();
-                if let Some((before, life)) = &prev_spi {
+            if let Some(now) = RadioLinkLoss::read(row)? {
+                let sums = loss.radio_link.get_or_insert_default();
+                if let Some((before, life)) = &prev_radio_link {
                     sums.advance(&now, before, *life != loss.reboots);
                 }
-                prev_spi = Some((now, loss.reboots));
+                prev_radio_link = Some((now, loss.reboots));
             }
         }
 

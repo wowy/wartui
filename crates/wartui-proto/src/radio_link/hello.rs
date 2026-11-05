@@ -175,7 +175,7 @@ const fn loop_phase_code(phase: LoopPhase) -> u8 {
         LoopPhase::DrainLink => 3,
         LoopPhase::Command => 4,
         LoopPhase::Pump => 6,
-        LoopPhase::SpiTransfer => 10,
+        LoopPhase::RadioLink => 10,
     }
 }
 
@@ -185,7 +185,7 @@ const fn loop_phase_from_code(code: u8) -> LoopPhase {
         3 => LoopPhase::DrainLink,
         4 => LoopPhase::Command,
         6 => LoopPhase::Pump,
-        10 => LoopPhase::SpiTransfer,
+        10 => LoopPhase::RadioLink,
         _ => LoopPhase::Unknown,
     }
 }

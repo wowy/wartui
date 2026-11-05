@@ -1,4 +1,4 @@
-//! The SPI link's update payload, and the P4's sender driven against a C6 built on the
+//! The radio link's update payload, and the P4's sender driven against a C6 built on the
 //! node's update receiver.
 
 use std::collections::VecDeque;
@@ -10,8 +10,8 @@ use wartui_proto::link::{
     UpdateStatus, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
-use wartui_proto::spi::PAYLOAD_MAX;
-use wartui_proto::spi::update::{
+use wartui_proto::radio_link::PAYLOAD_MAX;
+use wartui_proto::radio_link::update::{
     Failure, OP_MAX, Op, REPLY_WAIT_MS, Received, Sender, Stage, TRIES, receive,
 };
 
@@ -150,7 +150,7 @@ fn chunks(log: &[Sent]) -> usize {
 }
 
 #[test]
-fn spi_update_op_encodes_frozen_layout_when_any_op() {
+fn radio_link_update_op_encodes_frozen_layout_when_any_op() {
     let mut out = [0u8; OP_MAX];
     let mut sha256 = [0u8; 32];
     sha256[0] = 0xAA;
@@ -188,7 +188,7 @@ fn spi_update_op_encodes_frozen_layout_when_any_op() {
 }
 
 #[test]
-fn spi_update_op_fits_one_packet_when_chunk_is_full() {
+fn radio_link_update_op_fits_one_packet_when_chunk_is_full() {
     const { assert!(OP_MAX <= PAYLOAD_MAX) };
     let data = [0x5A; OTA_CHUNK];
     let mut out = [0u8; OP_MAX];
@@ -198,7 +198,7 @@ fn spi_update_op_fits_one_packet_when_chunk_is_full() {
 }
 
 #[test]
-fn spi_update_op_decodes_none_when_op_unknown() {
+fn radio_link_update_op_decodes_none_when_op_unknown() {
     for op in [0u8, 6, 0xFF] {
         assert_eq!(Op::decode(&[op, 7, 0, 0, 0, 0, 0]), None);
     }
@@ -206,7 +206,7 @@ fn spi_update_op_decodes_none_when_op_unknown() {
 }
 
 #[test]
-fn spi_update_op_decodes_none_when_payload_short() {
+fn radio_link_update_op_decodes_none_when_payload_short() {
     let mut out = [0u8; OP_MAX];
     let ops = [
         Op::Begin { session: 7, len: 10, sha256: [1; 32] },
@@ -222,14 +222,14 @@ fn spi_update_op_decodes_none_when_payload_short() {
 }
 
 #[test]
-fn spi_update_op_decodes_none_when_chunk_longer_than_ota_chunk() {
+fn radio_link_update_op_decodes_none_when_chunk_longer_than_ota_chunk() {
     let mut payload = vec![2, 7, 0, 0, 0, 0];
     payload.extend_from_slice(&[0; OTA_CHUNK + 1]);
     assert_eq!(Op::decode(&payload), None);
 }
 
 #[test]
-fn spi_update_sender_installs_image_when_c6_verifies_it() {
+fn radio_link_update_sender_installs_image_when_c6_verifies_it() {
     // A partial last sector, and a whole number of sectors.
     for len in [3 * SECTOR + 1_500, 4 * SECTOR] {
         let image = image(len);
@@ -247,7 +247,7 @@ fn spi_update_sender_installs_image_when_c6_verifies_it() {
 }
 
 #[test]
-fn spi_update_sender_rewinds_to_next_offset_when_status_names_a_gap() {
+fn radio_link_update_sender_rewinds_to_next_offset_when_status_names_a_gap() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -275,7 +275,7 @@ fn spi_update_sender_rewinds_to_next_offset_when_status_names_a_gap() {
 }
 
 #[test]
-fn spi_update_sender_waits_for_status_when_a_sector_is_sent() {
+fn radio_link_update_sender_waits_for_status_when_a_sector_is_sent() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -299,7 +299,7 @@ fn spi_update_sender_waits_for_status_when_a_sector_is_sent() {
 }
 
 #[test]
-fn spi_update_sender_fails_when_c6_reports_hash_mismatch() {
+fn radio_link_update_sender_fails_when_c6_reports_hash_mismatch() {
     let image = image(SECTOR + 100);
     let mut sender = Sender::new(&image, [0; 32], &DIGEST);
     let mut c6 = FakeC6::new();
@@ -310,7 +310,7 @@ fn spi_update_sender_fails_when_c6_reports_hash_mismatch() {
 }
 
 #[test]
-fn spi_update_sender_retries_then_fails_when_no_status_arrives() {
+fn radio_link_update_sender_retries_then_fails_when_no_status_arrives() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut buf = [0u8; OP_MAX];
@@ -326,7 +326,7 @@ fn spi_update_sender_retries_then_fails_when_no_status_arrives() {
 }
 
 #[test]
-fn spi_update_sender_ignores_status_when_session_differs() {
+fn radio_link_update_sender_ignores_status_when_session_differs() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut buf = [0u8; OP_MAX];
@@ -340,7 +340,7 @@ fn spi_update_sender_ignores_status_when_session_differs() {
 }
 
 #[test]
-fn spi_update_sender_resends_each_lost_chunk_once_when_statuses_arrive_late() {
+fn radio_link_update_sender_resends_each_lost_chunk_once_when_statuses_arrive_late() {
     let image = image(4 * SECTOR);
     let total = image.len().div_ceil(OTA_CHUNK);
     for lag in [1, 2] {
@@ -364,7 +364,7 @@ fn spi_update_sender_resends_each_lost_chunk_once_when_statuses_arrive_late() {
 }
 
 #[test]
-fn spi_update_sender_resends_install_when_no_hello_follows() {
+fn radio_link_update_sender_resends_install_when_no_hello_follows() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -384,7 +384,7 @@ fn spi_update_sender_resends_install_when_no_hello_follows() {
 }
 
 #[test]
-fn spi_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
+fn radio_link_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -411,7 +411,7 @@ fn spi_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
 }
 
 #[test]
-fn spi_update_sender_fails_when_c6_refuses_install() {
+fn radio_link_update_sender_fails_when_c6_refuses_install() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -429,7 +429,7 @@ fn spi_update_sender_fails_when_c6_refuses_install() {
 }
 
 #[test]
-fn spi_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
+fn radio_link_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -449,7 +449,7 @@ fn spi_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
 }
 
 #[test]
-fn spi_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
+fn radio_link_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
     // The host drives the P4's own update with the same sender, each op and status inside a
     // link frame rather than a UART packet.
     let image = image(3 * SECTOR + 100);
@@ -490,7 +490,7 @@ fn spi_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
 }
 
 #[test]
-fn spi_update_receive_refuses_begin_when_image_is_on_trial() {
+fn radio_link_update_receive_refuses_begin_when_image_is_on_trial() {
     let image = image(100);
     let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
     let mut c6 = FakeC6::new();
@@ -511,7 +511,7 @@ fn spi_update_receive_refuses_begin_when_image_is_on_trial() {
 }
 
 #[test]
-fn spi_update_receive_refuses_ops_when_table_has_no_update_slot() {
+fn radio_link_update_receive_refuses_ops_when_table_has_no_update_slot() {
     let image = image(100);
     let mut receiver = Receiver::new(Board::Esp32c6);
     let none: Option<&mut Slot> = None;
@@ -535,7 +535,7 @@ fn spi_update_receive_refuses_ops_when_table_has_no_update_slot() {
 }
 
 #[test]
-fn spi_update_receive_hands_install_back_when_op_is_install() {
+fn radio_link_update_receive_hands_install_back_when_op_is_install() {
     let mut receiver = Receiver::new(Board::Esp32c6);
     let install = Op::Install { session: SESSION };
     assert_eq!(receive::<Slot>(&mut receiver, install, None, true), Received::Install(SESSION));

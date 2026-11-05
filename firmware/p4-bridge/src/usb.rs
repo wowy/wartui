@@ -43,7 +43,7 @@ use wartui_proto::link::{
     decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::spi::Down;
+use wartui_proto::radio_link::Down;
 use wartui_proto::split::Route;
 
 use crate::Shared;
@@ -216,7 +216,7 @@ async fn write_host<'d, D: UsbDriver<'d>>(
                 // there, and its update session stands.
                 Err(EndpointError::BufferOverflow) => {}
             }
-            // So the SPI link is polled at least once per packet.
+            // So the radio link is polled at least once per packet.
             yield_now().await;
         }
         shared.dtr.set(false);

@@ -73,12 +73,12 @@ use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats,
-    encode_frame,
+    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
+    ShortStr, encode_frame,
 };
 #[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
-use wartui_proto::spi::{
+use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
     RX_BUF_LEN, WIRE_MAX, encode_down,
 };
@@ -151,7 +151,7 @@ pub struct Shared {
     /// Records refused because the down queue was full. The ring counts only its own
     /// drops, and it never evicts here.
     down_refused: Cell<u32>,
-    spi: Cell<SpiStats>,
+    radio_link: Cell<RadioLinkStats>,
     /// Raised by whatever may have given the link's writer something to send, so a waiting
     /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
     wake_link: Signal<NoopRawMutex, ()>,
@@ -189,7 +189,7 @@ impl Shared {
             pushed: Signal::new(),
             down: RefCell::new(down),
             down_refused: Cell::new(0),
-            spi: Cell::new(SpiStats {
+            radio_link: Cell::new(RadioLinkStats {
                 packets: 0,
                 crc_fail: 0,
                 bad_magic: 0,
@@ -215,11 +215,11 @@ impl Shared {
     }
 
     /// Add one to the link counter `field` picks.
-    fn count_spi(&self, field: impl FnOnce(&mut SpiStats) -> &mut u32) {
-        let mut spi = self.spi.get();
-        let counter = field(&mut spi);
+    fn count_link(&self, field: impl FnOnce(&mut RadioLinkStats) -> &mut u32) {
+        let mut radio_link = self.radio_link.get();
+        let counter = field(&mut radio_link);
         *counter = counter.wrapping_add(1);
-        self.spi.set(spi);
+        self.radio_link.set(radio_link);
     }
 
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
@@ -360,7 +360,8 @@ impl Shared {
             }
         };
         let host_dropped = host[0].dropped.saturating_add(host[1].dropped);
-        let status = self.pair.borrow().status(now_ms(), host, down, self.spi.get(), host_dropped);
+        let status =
+            self.pair.borrow().status(now_ms(), host, down, self.radio_link.get(), host_dropped);
         self.push_host(&status);
     }
 }

@@ -1,7 +1,7 @@
 //! The P4's own image: its trial, and the update `wartui flash-bridge` sends over USB.
 //!
 //! The host sends [`HostToBridge::Update`](wartui_proto::link::HostToBridge::Update) frames
-//! carrying the `wartui_proto::spi::update` ops the C6 takes over SPI, and the P4 drives
+//! carrying the `wartui_proto::radio_link::update` ops the C6 takes over UART, and the P4 drives
 //! [`wartui_proto::ota::Receiver`] over [`wartui_firmware::ota`] with them, as the C6 does
 //! (`firmware/p4-radio/src/link.rs`). Each status goes back as a priority
 //! [`BridgeToHost::Update`]. `Install` on a verified session switches slots and reboots.
@@ -16,7 +16,7 @@
 //! host rolls back the same way. Confirming disarms it.
 //!
 //! **Flash work holds the executor.** Erasing and writing a sector takes tens of
-//! milliseconds, well inside the host's reply wait, and the SPI link and USB writer wait behind
+//! milliseconds, well inside the host's reply wait, and the UART link and USB writer wait behind
 //! it. The receiver is reset when DTR falls, so a cable pulled mid-transfer leaves no session
 //! for the next host to trip over.
 
@@ -36,7 +36,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
-use wartui_proto::spi::update::{Op, Received, receive};
+use wartui_proto::radio_link::update::{Op, Received, receive};
 
 use crate::Shared;
 

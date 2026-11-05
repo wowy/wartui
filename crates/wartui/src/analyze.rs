@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{
-    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, SpiLoss, losses, peaks,
+    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
@@ -130,8 +130,8 @@ fn losses_text(loss: &LossSummary) -> String {
                 thousands(queue.dropped)
             );
         }
-        if let Some(spi) = &bridge.spi {
-            let _ = writeln!(text, "  {:<11}{}", "spi", spi_line(spi));
+        if let Some(radio_link) = &bridge.radio_link {
+            let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(radio_link));
         }
     }
     if let Some(host) = &loss.host {
@@ -243,19 +243,19 @@ fn utc_arrival(ms: i64) -> String {
 }
 
 /// The UART link's packets, then only the error counters that moved.
-fn spi_line(spi: &SpiLoss) -> String {
+fn radio_link_line(radio_link: &RadioLinkLoss) -> String {
     use std::fmt::Write as _;
 
-    let mut line = format!("{} packets", thousands(spi.packets));
+    let mut line = format!("{} packets", thousands(radio_link.packets));
     for (count, name) in [
-        (spi.crc_fail, "crc_fail"),
-        (spi.bad_magic, "bad_magic"),
-        (spi.seq_gap, "seq_gap"),
-        (spi.uart_errors, "uart_errors"),
-        (spi.radio_crc_fail, "radio_crc_fail"),
-        (spi.radio_bad_magic, "radio_bad_magic"),
-        (spi.radio_seq_gap, "radio_seq_gap"),
-        (spi.radio_uart_errors, "radio_uart_errors"),
+        (radio_link.crc_fail, "crc_fail"),
+        (radio_link.bad_magic, "bad_magic"),
+        (radio_link.seq_gap, "seq_gap"),
+        (radio_link.uart_errors, "uart_errors"),
+        (radio_link.radio_crc_fail, "radio_crc_fail"),
+        (radio_link.radio_bad_magic, "radio_bad_magic"),
+        (radio_link.radio_seq_gap, "radio_seq_gap"),
+        (radio_link.radio_uart_errors, "radio_uart_errors"),
     ] {
         if count > 0 {
             let _ = write!(line, "  {} {name}", thousands(count));
@@ -350,7 +350,7 @@ mod tests {
     use clap::Parser;
     use wartui_core::analyze::{
         BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
-        QueueLoss, SpiLoss,
+        QueueLoss, RadioLinkLoss,
     };
     use wartui_proto::link::QueueId;
 
@@ -367,7 +367,7 @@ mod tests {
                 usb_lost: 0,
                 oversize: 0,
                 queues: vec![],
-                spi: None,
+                radio_link: None,
             }),
             nodes: vec![
                 NodeLoss {
@@ -406,7 +406,7 @@ mod tests {
                 usb_lost: 0,
                 oversize: 0,
                 queues: vec![],
-                spi: None,
+                radio_link: None,
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
@@ -634,7 +634,7 @@ mod tests {
             usb_lost: 0,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         });
         let text = losses_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
@@ -653,7 +653,7 @@ mod tests {
                 usb_lost,
                 oversize: 0,
                 queues: vec![],
-                spi: None,
+                radio_link: None,
             }),
             ..Default::default()
         };
@@ -671,7 +671,7 @@ mod tests {
                 usb_lost: 0,
                 oversize: 42,
                 queues: vec![],
-                spi: None,
+                radio_link: None,
             }),
             ..Default::default()
         };
@@ -714,8 +714,8 @@ mod tests {
         );
     }
 
-    /// A P4 split bridge's line, two of its queues and its SPI link.
-    fn split_bridge(spi: Option<SpiLoss>) -> LossSummary {
+    /// A P4 split bridge's line, two of its queues and its radio link.
+    fn split_bridge(radio_link: Option<RadioLinkLoss>) -> LossSummary {
         LossSummary {
             bridge: Some(BridgeLoss {
                 received: 1_000,
@@ -733,7 +733,7 @@ mod tests {
                     },
                     QueueLoss { queue: QueueId::RadioJobs, capacity: 32, peak: 20, dropped: 3 },
                 ],
-                spi,
+                radio_link,
             }),
             ..Default::default()
         }
@@ -750,33 +750,34 @@ mod tests {
     }
 
     #[test]
-    fn analyze_report_prints_spi_errors_only_when_nonzero() {
-        let spi = SpiLoss {
+    fn analyze_report_prints_radio_link_errors_only_when_nonzero() {
+        let radio_link = RadioLinkLoss {
             packets: 48_210,
             crc_fail: 2,
             uart_errors: 1,
             radio_seq_gap: 4,
             ..Default::default()
         };
-        let text = losses_text(&split_bridge(Some(spi)));
+        let text = losses_text(&split_bridge(Some(radio_link)));
         assert!(
             text.ends_with(
-                "  spi        48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap\n"
+                "  radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap\n"
             ),
             "{text}"
         );
     }
 
     #[test]
-    fn analyze_report_prints_spi_packets_alone_when_link_is_clean() {
-        let text = losses_text(&split_bridge(Some(SpiLoss { packets: 9, ..Default::default() })));
-        assert!(text.ends_with("  spi        9 packets\n"), "{text}");
+    fn analyze_report_prints_radio_link_packets_alone_when_link_is_clean() {
+        let text =
+            losses_text(&split_bridge(Some(RadioLinkLoss { packets: 9, ..Default::default() })));
+        assert!(text.ends_with("  radio link 9 packets\n"), "{text}");
     }
 
     #[test]
-    fn analyze_report_omits_spi_line_when_bridge_has_no_spi_link() {
+    fn analyze_report_omits_radio_link_line_when_bridge_has_no_radio_link() {
         let text = losses_text(&split_bridge(None));
-        assert!(!text.contains("spi"), "{text}");
+        assert!(!text.contains("radio link"), "{text}");
     }
 
     #[test]
