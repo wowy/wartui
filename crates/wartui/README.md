@@ -459,7 +459,7 @@ candidate once, since `board-info` does.
 ### Flashing the bridge
 
 `flash-bridge` updates the P4 bridge over the USB link it bridges on, so after its first flash
-(`firmware/p4-bridge/README.md` § "First flash") neither the CH343 nor the BOOT button is needed.
+(`firmware/p4-bridge/README.md` § "First flash") the CH343 is not needed.
 
 ```sh
 wartui flash-bridge --dry-run                       # which board, and the image's source

@@ -33,11 +33,9 @@ The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <
 writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
 `otadata`, so the P4 boots the image just written.
 
-- **POE-ETH:** there is no auto-reset, because the CH343's RTS connects to nothing. Hold BOOT while
-  plugging in the Type-C, run `cargo run --release` (or `espflash flash --chip esp32p4`), then
-  unplug and replug to run. Pressing RST lands in download mode.
-- **WIFI6:** the CH343P's DTR and RTS drive EN and GPIO35 through a transistor pair, so espflash
-  resets it normally.
+espflash resets both boards through the CH343 and reboots them into the new image, so run
+`cargo run --release -- --port <that port>` with no button held. On the WIFI6, the CH343P's DTR and
+RTS drive EN and GPIO35 through a transistor pair.
 
 The C6 is flashed through its header once, and the P4 stays in download mode while it is: see
 [`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, updating the P4 updates

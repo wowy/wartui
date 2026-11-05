@@ -1,7 +1,7 @@
 //! `wartui flash-bridge` on a P4 bridge: its app image, sent over the USB link it bridges on.
 //!
-//! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343
-//! that needs BOOT held on one board, so only the first flash uses it
+//! **The cable the host already holds carries the update.** The P4's Type-C reaches a CH343, a
+//! second cable, so only the first flash uses it
 //! (`firmware/p4-bridge/README.md` § "First flash"). After that the P4 takes its app image as
 //! `HostToBridge::Update` ops: the `spi::update` layout it sends its own C6, driven by the same
 //! `Sender`, on a [`TICK`] and on each status.
