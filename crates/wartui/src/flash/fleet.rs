@@ -33,22 +33,13 @@ use wartui_proto::mac::Mac;
 
 use super::boot::seen_booting;
 use super::{
-    Chip, NODE, RELEASE_TAG, Ran, Skip, Source, check_image, chip_of, erase_otadata_args, espflash,
-    espflash_present, feature_args, features, flash_args, judge_node_flash, judge_probe, mac_arg,
-    name, obtain_with, probe_args, read, reset_args, source,
+    NODE, RELEASE_TAG, Ran, Skip, Source, check_image, erase_otadata_args, espflash,
+    espflash_present, flash_args, judge_node_flash, judge_probe, mac_arg, name, obtain, probe_args,
+    read, reset_args, source,
 };
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The node firmware's features, comma-separated, as `cargo build` takes them. They must
-    /// name `esp32c5`, and only boards of that chip are flashed.
-    #[arg(long, value_name = "LIST", default_value = "esp32c5")]
-    pub features: String,
-
-    /// Build without the firmware's default features.
-    #[arg(long)]
-    pub no_default_features: bool,
-
     /// Leave this board alone. Repeatable.
     #[arg(long = "skip", value_name = "MAC", value_parser = mac_arg)]
     pub skip: Vec<Mac>,
@@ -74,29 +65,19 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let features = features(&args.features);
-    let chip = chip_of(&NODE, &features)?;
     espflash_present()?;
-    let source = source(
-        &NODE,
-        args.image.as_deref(),
-        args.firmware_dir.as_deref(),
-        &features,
-        args.no_default_features,
-        RELEASE_TAG,
-    )?;
+    let source = source(&NODE, args.image.as_deref(), args.firmware_dir.as_deref(), RELEASE_TAG);
     println!("image  {}", source.describe(args.dry_run));
 
     let image = if args.dry_run {
         // A file named on the command line costs nothing to read, and a wrong one is worth
         // hearing about before the real run.
         if let Source::File(path) = &source {
-            check_image(&read(path)?, chip, NODE.firmware.merged)?;
+            check_image(&read(path)?, NODE.chip, NODE.merged)?;
         }
         None
     } else {
-        let cargo = feature_args(&features, args.no_default_features);
-        Some(obtain_with(&NODE.firmware, &source, chip, &cargo)?)
+        Some(obtain(&NODE, &source)?)
     };
 
     let found = discover_ports().context("listing serial ports")?;
@@ -111,7 +92,7 @@ pub fn run(args: Args) -> Result<()> {
     let jobs = usize::from(args.jobs);
     let probed = in_parallel(&probe, jobs, |candidate| {
         let expected = candidate.mac().expect("select probes only boards with an address");
-        judge_probe(expected, chip, &espflash(&probe_args(&candidate.path)))
+        judge_probe(expected, NODE.chip, &espflash(&probe_args(&candidate.path)))
             .and_then(|info| judge_node_flash(&info))
     });
     let mut verified = Vec::new();
@@ -128,8 +109,7 @@ pub fn run(args: Args) -> Result<()> {
             0
         }
         Some(image) => {
-            let flashed =
-                in_parallel(&verified, jobs, |candidate| flash_node(candidate, chip, image));
+            let flashed = in_parallel(&verified, jobs, |candidate| flash_node(candidate, image));
             let failed =
                 flashed.iter().filter(|outcome| !matches!(outcome, Outcome::Flashed)).count();
             report.extend(verified.into_iter().zip(flashed));
@@ -162,21 +142,21 @@ const BOOT_WAIT: Duration = Duration::from_secs(10);
 /// An earlier over-the-air update leaves `otadata` pointing at whichever slot it wrote, and the
 /// merged image puts the app in `ota_0`. The erase makes the bootloader boot `ota_0`, rather
 /// than leaving that to how espflash writes the erased gap the image carries at 0xd000.
-fn flash_node(candidate: &PortCandidate, chip: Chip, image: &Path) -> Outcome {
+fn flash_node(candidate: &PortCandidate, image: &Path) -> Outcome {
     let address = candidate.mac().expect("select probes only boards with an address");
     let port = candidate.path.as_str();
-    let written = espflash(&flash_args(port, chip, image));
+    let written = espflash(&flash_args(port, NODE.chip, image));
     if !written.ok {
         return Outcome::Failed(written);
     }
-    let erased = espflash(&erase_otadata_args(port, chip));
+    let erased = espflash(&erase_otadata_args(port, NODE.chip));
     if !erased.ok {
         return Outcome::Failed(erased);
     }
     if seen_booting(address, BOOT_WAIT) {
         return Outcome::Flashed;
     }
-    let reset = espflash(&reset_args(port, chip));
+    let reset = espflash(&reset_args(port, NODE.chip));
     if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted(reset) }
 }
 
@@ -285,7 +265,6 @@ mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, ESPRESSIF_VID, candidate};
 
     use super::super::normalize;
-    use super::super::release_asset;
     use super::super::testing::{NODE_MAC, board, ran};
     use super::*;
 
@@ -327,58 +306,35 @@ mod tests {
     }
 
     #[test]
-    fn flash_fleet_finds_release_asset_when_features_are_in_any_order() {
-        assert_eq!(release_asset(&NODE, &["esp32c5"]), Some("wartui-node-fw-esp32c5.bin"));
+    fn flash_fleet_chooses_source_when_given_each_combination() {
+        let image = Path::new("fw.bin");
+        let dir = Path::new("fw");
+        assert_eq!(source(&NODE, Some(image), None, Some("v1")), Source::File(image.to_owned()));
+        assert_eq!(source(&NODE, None, Some(dir), Some("v1")), Source::Build(dir.to_owned()));
+        let checkout = Source::Build(normalize(Path::new(NODE.dir)));
+        assert_eq!(source(&NODE, None, None, None), checkout);
+        assert_eq!(source(&NODE, None, None, Some("")), checkout);
+    }
+
+    #[test]
+    fn flash_fleet_fetches_release_asset_when_built_for_a_release() {
+        // The name `release.yml` publishes the node's merged image under.
+        let asset = "wartui-node-fw-esp32c5.bin";
         assert_eq!(
-            release_asset(&NODE, &["esp32c5", "esp32c5"]),
-            Some("wartui-node-fw-esp32c5.bin")
+            source(&NODE, None, None, Some("v1")),
+            Source::Release { tag: "v1".to_owned(), asset }
         );
     }
 
     #[test]
-    fn flash_fleet_refuses_release_asset_when_features_are_outside_table() {
-        assert_eq!(release_asset(&NODE, &["esp32c5", "log"]), None);
-        assert_eq!(release_asset(&NODE, &["esp32c6"]), None);
-        assert_eq!(release_asset(&NODE, &["esp32c5", "esp32c6"]), None);
-    }
-
-    #[test]
-    fn flash_fleet_chooses_source_when_given_each_combination() {
-        let image = Path::new("fw.bin");
-        let dir = Path::new("fw");
-        let c5 = ["esp32c5"];
-        let found = source(&NODE, Some(image), None, &c5, false, Some("v1")).unwrap();
-        assert_eq!(found, Source::File(image.to_owned()));
-        let found = source(&NODE, None, Some(dir), &c5, false, Some("v1")).unwrap();
-        assert_eq!(found, Source::Build(dir.to_owned()));
-        let found = source(&NODE, None, None, &c5, false, None).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
-        let found = source(&NODE, None, None, &c5, false, Some("")).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
-        let found = source(&NODE, None, None, &c5, false, Some("v1")).unwrap();
-        let asset = "wartui-node-fw-esp32c5.bin";
-        assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });
-    }
-
-    #[test]
     fn flash_fleet_shows_default_firmware_dir_without_parent_segments_when_building() {
-        let Source::Build(dir) = source(&NODE, None, None, &["esp32c5"], false, None).unwrap()
-        else {
-            panic!("not a build")
-        };
+        let Source::Build(dir) = source(&NODE, None, None, None) else { panic!("not a build") };
         assert!(dir.ends_with("firmware/node"), "{}", dir.display());
         assert!(
             !dir.components().any(|c| c == std::path::Component::ParentDir),
             "{}",
             dir.display()
         );
-    }
-
-    #[test]
-    fn flash_fleet_refuses_release_source_when_default_features_are_off() {
-        let error =
-            source(&NODE, None, None, &["esp32c5"], true, Some("v1")).unwrap_err().to_string();
-        assert!(error.contains("--firmware-dir") && error.contains("--image"), "{error}");
     }
 
     #[test]

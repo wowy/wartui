@@ -77,7 +77,7 @@ esp_bootloader_esp_idf::esp_app_desc!(
 
 extern crate alloc;
 
-/// Say something on the USB endpoint, if this build has anywhere to say it.
+/// Say something on the USB endpoint.
 ///
 /// The bridge is forbidden from printing — its link protocol runs over the same
 /// endpoint — but a node has that pipe to itself, so this is the one window into a
@@ -85,17 +85,11 @@ extern crate alloc;
 ///
 /// `esp-println`'s serial-JTAG writer gives the FIFO a bounded number of attempts
 /// and then remembers that nobody is draining it: losing a line is correct, losing
-/// the sweep is not. The arguments are type-checked either way, so a `log`-less
-/// build cannot rot a format string nobody compiled.
+/// the sweep is not.
 macro_rules! note {
-    ($($arg:tt)*) => {{
-        #[cfg(feature = "log")]
-        esp_println::println!($($arg)*);
-        #[cfg(not(feature = "log"))]
-        {
-            let _ = format_args!($($arg)*);
-        }
-    }};
+    ($($arg:tt)*) => {
+        esp_println::println!($($arg)*)
+    };
 }
 
 mod ota;

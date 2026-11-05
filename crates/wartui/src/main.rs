@@ -595,28 +595,17 @@ mod tests {
 
     #[test]
     fn cli_parser_accepts_flash_fleet_when_given_image_and_dry_run() {
-        let cli = parse([
-            "wartui",
-            "flash-fleet",
-            "--features",
-            "esp32c5",
-            "--image",
-            "fw.bin",
-            "--dry-run",
-        ])
-        .unwrap();
+        let cli = parse(["wartui", "flash-fleet", "--image", "fw.bin", "--dry-run"]).unwrap();
         let Some(Command::FlashFleet(args)) = cli.command else { panic!("not flash-fleet") };
-        assert_eq!(args.features, "esp32c5");
         assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
         assert!(args.dry_run);
         assert_eq!(args.jobs, 4);
     }
 
     #[test]
-    fn cli_parser_defaults_flash_fleet_features_to_esp32c5_when_flag_is_omitted() {
-        let cli = parse(["wartui", "flash-fleet"]).unwrap();
-        let Some(Command::FlashFleet(args)) = cli.command else { panic!("not flash-fleet") };
-        assert_eq!(args.features, "esp32c5");
+    fn cli_parser_refuses_flash_fleet_when_given_features() {
+        // The node firmware builds for one chip, with its default features.
+        assert!(parse(["wartui", "flash-fleet", "--features", "esp32c5"]).is_err());
     }
 
     #[test]

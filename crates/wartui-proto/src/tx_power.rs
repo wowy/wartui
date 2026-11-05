@@ -21,10 +21,10 @@ pub const MAX_TX_POWER_QUARTER_DBM: i8 = 80;
 /// Bring a transmit power inside the range the host permits.
 ///
 /// Every power that reaches a radio goes through this, because a node's refusal is
-/// nearly invisible. The refusal is a `note!`, which compiles to nothing without the
-/// `log` feature. The node keeps its boot power, while the host's snapshot and the link
-/// budget in `set_peer_rate` both assume the configured
-/// value. Clamping at the host keeps the fleet and its model from diverging silently.
+/// nearly invisible. The refusal is only a `note!` on the node's own USB port. The node
+/// keeps its boot power, while the host's snapshot and the link budget in `set_peer_rate`
+/// both assume the configured value. Clamping at the host keeps the fleet and its model
+/// from diverging silently.
 #[must_use]
 pub const fn clamp_tx_power(power: i8) -> i8 {
     // Written out because `Ord::clamp` is not a `const fn`.

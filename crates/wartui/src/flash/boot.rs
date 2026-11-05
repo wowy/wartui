@@ -2,11 +2,10 @@
 //! image is running rather than the old one carrying on from RAM.
 //!
 //! **Either of two lines says the board rebooted.** The bootloader prints `Loaded app from
-//! partition` on every boot, and node firmware with the `log` feature prints its banner, `wartui
-//! node <MAC> v<version>, control channel N`. Firmware that keeps running prints neither. A banner
-//! counts only with this board's address, formatted by the same `mac::full` the firmware uses. The
-//! ROM's `ESP-ROM:` does not count: the ROM prints it when it boots into download mode too, where
-//! no app runs.
+//! partition` on every boot, and node firmware prints its banner, `wartui node <MAC> v<version>,
+//! control channel N`. Firmware that keeps running prints neither. A banner counts only with this
+//! board's address, formatted by the same `mac::full` the firmware uses. The ROM's `ESP-ROM:` does
+//! not count: the ROM prints it when it boots into download mode too, where no app runs.
 //!
 //! **Each open port starts a fresh line, and a line is capped at 1024 bytes.** Bytes from before
 //! a reopen would otherwise join the first line after it, and output with no newline would grow

@@ -411,8 +411,6 @@ wartui flash-fleet --skip 10:BD:A3:EC:44:C0
 
 | Flag                    | Default        | What it is                                                                 |
 |-------------------------|----------------|----------------------------------------------------------------------------|
-| `--features LIST`       | `esp32c5`      | The node firmware's features, which must name `esp32c5`                    |
-| `--no-default-features` | off            | Build without the firmware's default features                              |
 | `--skip MAC`            | —              | Leave this board alone; repeatable                                         |
 | `--image BIN`           | —              | Flash this merged image rather than building or fetching one               |
 | `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here                                |
@@ -439,10 +437,9 @@ image comes from the first source that applies:
 
 - `--image BIN`, as given.
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
-  `cargo build --release` there with the same features, merged with `espflash save-image`.
-- The release this binary was built for, checked against its `SHA256SUMS` and kept under the state
-  directory (`images/<tag>/`) so an offline host can reflash. A release publishes `esp32c5` with
-  default features; anything else needs `--image` or `--firmware-dir`.
+  `cargo build --release` there, merged with `espflash save-image`.
+- The release this binary was built for: `wartui-node-fw-esp32c5.bin`, checked against its
+  `SHA256SUMS` and kept under the state directory (`images/<tag>/`) so an offline host can reflash.
 
 The chip in the image's header must be the C5, or nothing is touched. After flashing, each
 node's port is watched for up to 10 s for a line only a boot prints; a node not seen to boot is reset

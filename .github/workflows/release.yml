@@ -3,14 +3,14 @@ name: Release
 # A pushed `v*` tag publishes the node and P4 bridge images and the host binaries built from that
 # one tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch their images
 # from the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and
-# the bridge it flashes always share a tree. The asset names and feature sets below must match the
-# variant tables in `crates/wartui/src/flash/mod.rs`, except the P4 bridge's merged image, which
-# only a first flash by hand uses. `SHA256SUMS` is what the host checks a download against. A node's
-# image is merged (bootloader, partition table and app, flashed at 0x0) with
-# `firmware/node/partitions.csv`, and is also published app-only (`wartui-node-app-esp32c5.bin`):
-# the image one app slot holds. The P4 bridge publishes both too, made with
-# `firmware/p4-bridge/partitions.csv`: the merged image for its first flash, and the app image
-# `flash-bridge` sends it over USB.
+# the bridge it flashes always share a tree. The asset names below must match the `asset` of each
+# `Firmware` in `crates/wartui/src/flash/` (`NODE` and `NODE_APP` in `mod.rs`, `P4_BRIDGE_APP` in
+# `p4.rs`), except the P4 bridge's merged image, which only a first flash by hand uses.
+# `SHA256SUMS` is what the host checks a download against. A node's image is merged (bootloader,
+# partition table and app, flashed at 0x0) with `firmware/node/partitions.csv`, and is also
+# published app-only (`wartui-node-app-esp32c5.bin`): the image one app slot holds. The P4 bridge
+# publishes both too, made with `firmware/p4-bridge/partitions.csv`: the merged image for its first
+# flash, and the app image `flash-bridge` sends it over USB.
 
 on:
   push:
@@ -38,7 +38,7 @@ jobs:
       - name: One copy of each esp-radio-pinned crate
         run: |
           pushd firmware/node
-          resolved=$(cargo tree --locked --features esp32c5 -e normal \
+          resolved=$(cargo tree --locked -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
           for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-esp32c5; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
@@ -53,7 +53,7 @@ jobs:
       - name: Build
         run: |
           pushd firmware/node
-          cargo build --release --features esp32c5 --locked
+          cargo build --release --locked
           popd
 
       - name: Install espflash

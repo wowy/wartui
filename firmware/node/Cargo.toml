@@ -18,25 +18,19 @@ name = "wartui-node-fw"
 path = "src/main.rs"
 
 [features]
-default = ["esp32c5", "log"]
+default = ["esp32c5"]
 
-# A feature because it forwards the chip to the `esp-*` crates. A build that turns the
-# defaults off names it again.
+# A feature because it forwards the chip to the `esp-*` crates.
 esp32c5 = [
   "esp-alloc/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
   "esp-hal/esp32c5",
   "esp-radio/esp32c5",
   "esp-rtos/esp32c5",
-  "esp-println?/esp32c5",
+  "esp-println/esp32c5",
   "dep:esp-wifi-sys-esp32c5",
   "wartui-firmware/esp32c5",
 ]
-
-# Diagnostics on the USB serial port. Unlike the bridge, a node has no link
-# protocol sharing that endpoint, so printing to it is free and is the only
-# window into a device with no display.
-log = ["dep:esp-println"]
 
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
@@ -46,12 +40,15 @@ log = ["dep:esp-println"]
 esp-alloc = "0.11.0"
 esp-bootloader-esp-idf = "0.6.0"
 esp-hal = { version = "1.2.2", features = ["unstable"] }
-# `jtag-serial` rather than `auto`, because these boards are USB and the
-# alternative costs a runtime probe per line. `critical-section` is left off:
-# nothing here prints from more than one task.
+# Diagnostics on the USB serial port. Unlike the bridge, a node has no link
+# protocol sharing that endpoint, so printing to it is free and is the only
+# window into a device with no display. `jtag-serial` rather than `auto`,
+# because these boards are USB and the alternative costs a runtime probe per
+# line. `critical-section` is left off: nothing here prints from more than one
+# task.
 esp-println = { version = "0.18.0", default-features = false, features = [
   "jtag-serial",
-], optional = true }
+] }
 esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "ble",
   "coex",

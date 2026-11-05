@@ -105,19 +105,16 @@ the first, because one sent once is lost to a dropped frame.
 
 ```sh
 cargo run --release
-cargo run --release --no-default-features --features esp32c5   # without diagnostics
 ```
 
 To flash every attached ESP32-C5 at once, and never the bridge, run `wartui flash-fleet` from the
 host. [`crates/wartui/README.md`](../../crates/wartui/README.md) § "Flashing the fleet" has how it
 picks boards.
 
-`esp32c5` is a default feature because it forwards the chip to the `esp-*` crates. A build that
-turns the defaults off names it again, or it does not compile.
+`esp32c5` is a default feature because it forwards the chip to the `esp-*` crates.
 The C5 is dual band and gets `BandMode::Auto`. It is RISC-V and builds on stable.
 
-Diagnostics are on by default and go out over USB serial-JTAG. Turning them off saves a few
-kilobytes and nothing else: a silent node is hard to tell from a broken one. The cargo runner is
+Diagnostics go out over USB serial-JTAG. The cargo runner is
 `espflash flash --monitor --partition-table partitions.csv --erase-parts otadata` with no `--chip`,
 so espflash detects the part. Run it from this directory, since the table's path is relative. Unlike
 the bridge's, this monitor is worth watching, because nothing but diagnostics goes down that pipe.
