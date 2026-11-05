@@ -357,7 +357,7 @@ async fn run_bridge(
                 uptime_ms: elapsed_ms(started),
                 rx_oversize: 0,
                 queues: wartui_proto::link::QueueStats::new(),
-                spi: None,
+                radio_link: None,
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 level: LogLevel::Info,

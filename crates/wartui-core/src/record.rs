@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
-use wartui_proto::link::{QueueStats, SpiStats};
+use wartui_proto::link::{QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -116,8 +116,8 @@ pub struct BridgeStatusSeen {
     /// Its queues' capacity, high-water mark and drops since its boot; empty when it reports
     /// none.
     pub queues: QueueStats,
-    /// Its SPI link's counters since its boot; `None` off the P4 split bridge.
-    pub spi: Option<SpiStats>,
+    /// Its radio link's counters since its boot; `None` off the P4 split bridge.
+    pub radio_link: Option<RadioLinkStats>,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

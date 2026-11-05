@@ -2,13 +2,15 @@
 
 use heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, SendStatus,
-    SpiStats,
+    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, RADIO_UPDATING,
+    RadioLinkStats, SendStatus,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
+use wartui_proto::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::{Hello, LINK_REVISION, RadioStatus};
-use wartui_proto::split::{INSTALL_WAIT_MS, Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
+use wartui_proto::split::{
+    INSTALL_WAIT_MS, Pair, PairEvent, RADIO_SILENT_MS, RADIO_WAIT_MS, RadioState, Route,
+};
 
 const OWN_MAC: [u8; 6] = [1, 1, 1, 1, 1, 1];
 const C6_MAC: [u8; 6] = [6, 6, 6, 6, 6, 6];
@@ -202,21 +204,22 @@ fn pair_status_sums_host_and_radio_drops() {
         crc_fail: 11,
         bad_magic: 12,
         seq_gap: 13,
+        uart_errors: 14,
     });
-    let spi = SpiStats {
-        transfers: 100,
+    let radio_link = RadioLinkStats {
+        packets: 100,
         crc_fail: 1,
         bad_magic: 2,
         seq_gap: 3,
-        ready_timeouts: 4,
-        ready_recovered: 5,
+        uart_errors: 4,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     };
     let host = [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 6)];
     let down = stat(QueueId::RadioDown, 1);
-    match pair.status(3_000, host, down, spi, 6) {
+    match pair.status(3_000, host, down, radio_link, 6) {
         BridgeToHost::Status {
             peer_count,
             rx_count,
@@ -224,7 +227,7 @@ fn pair_status_sums_host_and_radio_drops() {
             uptime_ms,
             rx_oversize,
             queues,
-            spi: Some(spi),
+            radio_link: Some(radio_link),
         } => {
             assert_eq!((peer_count, rx_count, rx_oversize), (3, 40, 2));
             // The host's 6 and both of the C6's rings toward the P4, 4 and 2.
@@ -242,8 +245,12 @@ fn pair_status_sums_host_and_radio_drops() {
                     QueueId::HostBulk
                 ]
             );
-            assert_eq!((spi.crc_fail, spi.transfers), (1, 100));
-            assert_eq!((spi.radio_crc_fail, spi.radio_bad_magic, spi.radio_seq_gap), (11, 12, 13));
+            assert_eq!((radio_link.crc_fail, radio_link.packets), (1, 100));
+            assert_eq!(
+                (radio_link.radio_crc_fail, radio_link.radio_bad_magic, radio_link.radio_seq_gap),
+                (11, 12, 13)
+            );
+            assert_eq!((radio_link.uart_errors, radio_link.radio_uart_errors), (4, 14));
         }
         other => panic!("not a Status: {other:?}"),
     }
@@ -257,7 +264,7 @@ fn pair_announces_new_life_when_first_hello_arrives() {
 
 #[test]
 fn pair_ignores_repeated_hellos_when_seq_rises() {
-    // A real C6's first hello lands about 72 ms into its life, then repeats per transfer.
+    // A real C6's first hello lands about 72 ms into its life, then repeats until the P4 answers.
     let mut pair = pair();
     assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
     pair.note_radio_status(radio_status());
@@ -268,7 +275,7 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
         1_002,
         [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 0)],
         stat(QueueId::RadioDown, 0),
-        spi_zero(),
+        radio_link_zero(),
         0,
     ) {
         BridgeToHost::Status { peer_count, .. } => assert_eq!(peer_count, 3),
@@ -279,11 +286,30 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
 #[test]
 fn pair_announces_new_life_when_hello_seq_restarts_with_same_uptime() {
     // The restarted C6 booted to the same first hello at the same uptime; only the seq,
-    // back to 0 after transfers up to 40, tells the lives apart.
+    // back to 0 after packets up to 40, tells the lives apart.
     let mut pair = pair();
     assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
     pair.note_seq(40);
     assert_eq!(pair.on_hello(hello(72), 0, 1_040), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_announces_new_life_when_hello_seq_is_zero_after_last_seq_of_zero() {
+    // A C6 that sent only its first hello before restarting: the seqs are equal, and a sender
+    // never sends a packet twice, so this is a restart.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_100), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_keeps_life_when_hello_seq_is_past_last_seq() {
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(172), 1, 1_100), PairEvent::None);
+    pair.note_seq(5);
+    assert_eq!(pair.on_hello(hello(272), 6, 1_200), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(72), 6, 1_300), PairEvent::NewLife);
 }
 
 #[test]
@@ -315,9 +341,9 @@ fn pair_announces_radio_reset_cause_when_c6_restarts() {
     pair.note_seq(96_000);
     let mut crashed = hello(72);
     crashed.reset_cause = ResetCause::Watchdog;
-    crashed.last_phase = LoopPhase::SpiTransfer;
+    crashed.last_phase = LoopPhase::RadioLink;
     assert_eq!(pair.on_hello(crashed, 0, 60_000), PairEvent::NewLife);
-    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::SpiTransfer));
+    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::RadioLink));
 }
 
 #[test]
@@ -391,20 +417,21 @@ fn radio_status() -> RadioStatus {
         crc_fail: 0,
         bad_magic: 0,
         seq_gap: 0,
+        uart_errors: 0,
     }
 }
 
-fn spi_zero() -> SpiStats {
-    SpiStats {
-        transfers: 0,
+fn radio_link_zero() -> RadioLinkStats {
+    RadioLinkStats {
+        packets: 0,
         crc_fail: 0,
         bad_magic: 0,
         seq_gap: 0,
-        ready_timeouts: 0,
-        ready_recovered: 0,
+        uart_errors: 0,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     }
 }
 
@@ -596,6 +623,124 @@ fn pair_deadline_is_none_when_hello_follows_install() {
     pair.note_installed(10_000);
     assert_eq!(pair.on_hello(hello(80), 0, 10_500), PairEvent::NewLife);
     assert_eq!(pair.next_deadline_ms(), None);
+}
+
+const SILENT_FAULT: &str = "the radio has stopped answering; wartui reset restarts the bridge";
+
+#[test]
+fn pair_faults_once_when_radio_stays_silent_after_poll() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS - 1), PairEvent::None);
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert_eq!(pair.fault().unwrap(), SILENT_FAULT);
+    // Said once, with no deadline left for the radio clock to spin on.
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS + 1), PairEvent::None);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_faults_ahead_of_update_progress_when_updating_radio_stays_silent() {
+    let mut pair = updating_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert_eq!(pair.fault().unwrap(), SILENT_FAULT);
+}
+
+#[test]
+fn pair_does_not_fault_when_no_poll_asked() {
+    let mut pair = up_pair();
+    assert_eq!(pair.on_tick(1_000_000), PairEvent::None);
+    assert_eq!(pair.fault(), None);
+}
+
+#[test]
+fn pair_keeps_first_poll_time_when_polls_repeat() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    pair.note_asked(6_000);
+    assert_eq!(pair.next_deadline_ms(), Some(5_000 + RADIO_SILENT_MS));
+}
+
+#[test]
+fn pair_clears_silent_fault_when_packet_heard() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    pair.note_heard();
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.next_deadline_ms(), None);
+    // The next poll starts a fresh wait.
+    pair.note_asked(20_000);
+    assert_eq!(pair.next_deadline_ms(), Some(20_000 + RADIO_SILENT_MS));
+}
+
+#[test]
+fn pair_clears_silent_fault_when_radio_restarts() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    pair.note_seq(5_000);
+    assert_eq!(pair.on_hello(hello(80), 0, 20_000), PairEvent::NewLife);
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_does_not_fault_when_silent_in_mismatch() {
+    let mut pair = pair();
+    pair.on_hello(hello_running(900, None), 0, 1_000);
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    pair.note_asked(5_000);
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::None);
+    assert!(pair.fault().unwrap().contains("predates"));
+}
+
+#[test]
+fn pair_drops_silent_deadline_when_failed_update_leaves_mismatch() {
+    // Armed while updating, then a state that gets no records: a deadline left behind would
+    // have the radio clock wake forever.
+    let mut pair = pair();
+    pair.on_hello(
+        Hello { link_rev: LINK_REVISION + 1, ..hello_running(900, Some(OTHER)) },
+        0,
+        1_000,
+    );
+    pair.note_asked(5_000);
+    pair.on_update_failed();
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_does_not_fault_when_silent_while_installing() {
+    let mut pair = updating_pair();
+    pair.note_asked(5_000);
+    pair.note_installed(6_000);
+    pair.note_asked(7_000);
+    assert_eq!(pair.next_deadline_ms(), Some(6_000 + INSTALL_WAIT_MS));
+    assert_ne!(pair.on_tick(7_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert!(pair.fault().unwrap().contains("installing"));
+}
+
+#[test]
+fn pair_does_not_arm_silence_when_waiting_or_absent() {
+    let mut pair = pair();
+    pair.note_asked(100);
+    assert_eq!(pair.next_deadline_ms(), Some(RADIO_WAIT_MS));
+    assert_eq!(pair.on_tick(RADIO_WAIT_MS), PairEvent::NewLife);
+    pair.note_asked(RADIO_WAIT_MS + 1);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_deadline_is_silent_wait_when_poll_unanswered() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.next_deadline_ms(), Some(5_000 + RADIO_SILENT_MS));
 }
 
 #[test]

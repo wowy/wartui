@@ -10,13 +10,13 @@
 
 use wartui_proto::config::env_usize;
 
-/// Bytes of received frames, as encoded `Up` records, waiting for a transfer to the P4.
+/// Bytes of received frames, as encoded `Up` records, waiting for a packet to the P4.
 ///
 /// A full queue evicts its oldest record, counted in `RadioStatus.queues`.
 pub const UP_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_RADIO_UP_QUEUE_BYTES"), 96 * 1024);
 
 /// Bytes of every other encoded `Up` record — send results, lines and the C6's status —
-/// waiting for a transfer to the P4, ahead of the received frames.
+/// waiting for a packet to the P4, ahead of the received frames.
 ///
 /// A full queue evicts its oldest record, counted in `RadioStatus.queues`. These records
 /// are small and few, so a backlog this deep means the link has stopped.
@@ -35,7 +35,7 @@ pub const SEND_JOBS: usize = env_usize(option_env!("WARTUI_RADIO_SEND_JOBS"), 4)
 /// `wartui status`.
 ///
 /// Each entry is a few bytes, so this holds a whole fleet's worth: the host removes every
-/// departed node's peer in one batch, which one transfer can carry whole. A job that finds
+/// departed node's peer in one batch, which one packet can carry whole. A job that finds
 /// the queue full is refused at once (a send `Rejected`, any other with an `Error` line) and
 /// counted in `RadioStatus.queues`.
 pub const RADIO_JOBS: usize = env_usize(option_env!("WARTUI_RADIO_JOBS"), 32);

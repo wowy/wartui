@@ -26,7 +26,7 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, QueueId,
-    QueueStat, QueueStats, SendStatus, SpiStats,
+    QueueStat, QueueStats, RadioLinkStats, SendStatus,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, plan};
@@ -1848,7 +1848,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             uptime_ms: 3_240_000,
             rx_oversize: 0,
             queues: Default::default(),
-            spi: None,
+            radio_link: None,
         }))
     };
 
@@ -1879,18 +1879,18 @@ fn engine_records_bridge_status_when_reply_arrives() {
         [QueueStat { queue: QueueId::HostBulk, capacity: 262_144, high_water: 1_024, dropped: 5 }]
             .into_iter()
             .collect();
-    let spi = SpiStats {
-        transfers: 48_210,
+    let radio_link = RadioLinkStats {
+        packets: 48_210,
         crc_fail: 2,
         bad_magic: 0,
         seq_gap: 0,
-        ready_timeouts: 1,
-        ready_recovered: 1,
+        uart_errors: 1,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     };
-    let status = |dropped_tx, uptime_ms, queues: &QueueStats, spi| {
+    let status = |dropped_tx, uptime_ms, queues: &QueueStats, radio_link| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {
             peer_count: 3,
             rx_count: 1363,
@@ -1898,7 +1898,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             uptime_ms,
             rx_oversize: 17,
             queues: queues.clone(),
-            spi,
+            radio_link,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1913,7 +1913,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
     };
 
     engine.handle(connected(), clock.at(1));
-    let first = engine.handle(status(1300, 3_240_000, &queues, Some(spi)), clock.at(2));
+    let first = engine.handle(status(1300, 3_240_000, &queues, Some(radio_link)), clock.at(2));
     // Lower than before: the bridge rebooted, and the row keeps what it said.
     let second = engine.handle(status(2, 4_000, &QueueStats::new(), None), clock.at(7));
 
@@ -1928,7 +1928,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_frames: 0,
             rx_oversize: 17,
             queues,
-            spi: Some(spi),
+            radio_link: Some(radio_link),
         }]
     );
     assert_eq!(
@@ -1942,7 +1942,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_frames: 0,
             rx_oversize: 17,
             queues: QueueStats::new(),
-            spi: None,
+            radio_link: None,
         }]
     );
 }
@@ -1964,7 +1964,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             uptime_ms: 9_000,
             rx_oversize: 0,
             queues: Default::default(),
-            spi: None,
+            radio_link: None,
         })),
         clock.at(4),
     );

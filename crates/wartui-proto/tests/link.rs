@@ -14,11 +14,11 @@ use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, FrameAccumulator, GPS_FRAME, GPS_WRITE_MAX,
     GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase,
     MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, QueueId, QueueStat,
-    QueueStats, RadioInfo, SendPayload, SendStatus, SpiStats, UPDATE_STATUS_MAX, UpdateOp,
+    QueueStats, RadioInfo, RadioLinkStats, SendPayload, SendStatus, UPDATE_STATUS_MAX, UpdateOp,
     UpdateStatus, crc16, decode_frame, encode_frame, encode_host_frame,
 };
+use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::update::{OP_MAX, Op};
 
 fn sample_commands() -> Vec<HostToBridge, 16> {
     let mut payload = Vec::new();
@@ -139,7 +139,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         uptime_ms: 60_000,
         rx_oversize: 2,
         queues: QueueStats::new(),
-        spi: None,
+        radio_link: None,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -531,7 +531,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         uptime_ms: 5_000,
         rx_oversize: 0xDEAD_BEEF,
         queues: QueueStats::new(),
-        spi: None,
+        radio_link: None,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -563,6 +563,12 @@ fn queue_id_lists_every_variant_when_all_read() {
 }
 
 #[test]
+fn queue_id_places_queue_on_p4_when_it_runs_there() {
+    let on_p4: std::vec::Vec<_> = QueueId::ALL.into_iter().filter(|id| id.on_p4()).collect();
+    assert_eq!(on_p4, [QueueId::RadioDown, QueueId::HostPriority, QueueId::HostBulk]);
+}
+
+#[test]
 fn queue_id_round_trips_name_when_every_id_named() {
     for id in QueueId::ALL {
         assert_eq!(QueueId::from_name(id.name()), Some(id), "{id:?}");
@@ -571,7 +577,7 @@ fn queue_id_round_trips_name_when_every_id_named() {
 }
 
 #[test]
-fn link_round_trips_status_with_queues_and_spi() {
+fn link_round_trips_status_with_queues_and_radio_link() {
     let mut queues = QueueStats::new();
     for (i, queue) in (1u32..).zip(QueueId::ALL.into_iter().cycle().take(8)) {
         queues
@@ -590,16 +596,16 @@ fn link_round_trips_status_with_queues_and_spi() {
         uptime_ms: 5_000,
         rx_oversize: 0,
         queues,
-        spi: Some(SpiStats {
-            transfers: u32::MAX,
+        radio_link: Some(RadioLinkStats {
+            packets: u32::MAX,
             crc_fail: 1,
             bad_magic: 2,
             seq_gap: 3,
-            ready_timeouts: 4,
-            ready_recovered: 5,
-            radio_crc_fail: 6,
-            radio_bad_magic: 7,
-            radio_seq_gap: 8,
+            uart_errors: 4,
+            radio_crc_fail: 5,
+            radio_bad_magic: 6,
+            radio_seq_gap: 7,
+            radio_uart_errors: 8,
         }),
     };
     assert_eq!(round_trip(&status), status);
@@ -613,7 +619,7 @@ fn link_round_trips_ready_with_radio() {
         fw_version: String::try_from("0.1.0").expect("short"),
         proto_version: LINK_PROTO_VERSION,
         reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::SpiTransfer,
+        last_phase: LoopPhase::RadioLink,
         heap_free: 1,
         uptime_ms: 2,
         gps: false,
@@ -633,7 +639,7 @@ fn link_round_trips_ready_with_radio() {
 #[test]
 fn link_codec_pins_update_bytes_when_host_sends_an_op() {
     // Postcard's variant index, then the op as a byte string: its length, then the
-    // `spi::update` layout. The index is `Update`'s place at the end of `HostToBridge`.
+    // `radio_link::update` layout. The index is `Update`'s place at the end of `HostToBridge`.
     let cmd = HostToBridge::Update(encoded_op(&Op::Commit { session: 0x42 }));
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");

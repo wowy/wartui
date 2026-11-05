@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use wartui_core::analyze::{
-    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, SpiLoss, losses,
-    peaks,
+    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
+    losses, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
-use wartui_proto::link::{QueueId, QueueStat, QueueStats, SpiStats};
+use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
@@ -50,7 +50,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         host_frames: host,
         rx_oversize: 0,
         queues: QueueStats::new(),
-        spi: None,
+        radio_link: None,
     })
 }
 
@@ -61,22 +61,38 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
     Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
 }
 
-/// A status reply carrying SPI counters: `transfers`, then `n`, `2n` … `8n` in field order, so
+/// A status reply carrying several queues' drops, with `dropped_tx` summed as the bridge sums it.
+fn queues_status(uptime_ms: u32, drops: &[(QueueId, u32)]) -> Record {
+    let dropped_tx = drops.iter().filter(|(q, _)| q.in_dropped_tx()).map(|(_, d)| d).sum();
+    let Record::BridgeStatus(seen) = status(0, 0, dropped_tx, uptime_ms) else { unreachable!() };
+    let queues = drops
+        .iter()
+        .map(|&(queue, dropped)| QueueStat { queue, capacity: 1_000, high_water: 10, dropped })
+        .collect();
+    Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
+}
+
+/// A status reply carrying link counters: `packets`, then `n`, `2n` … `8n` in field order, so
 /// no two counters match.
-fn spi_status(uptime_ms: u32, transfers: u32, n: u32) -> Record {
+fn radio_link_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
+    radio_link_status_split(uptime_ms, packets, n, n)
+}
+
+/// As [`radio_link_status`], with the P4's counters on `p4` and the C6's `radio_*` on `c6`.
+fn radio_link_status_split(uptime_ms: u32, packets: u32, p4: u32, c6: u32) -> Record {
     let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
-    let spi = SpiStats {
-        transfers,
-        crc_fail: n,
-        bad_magic: 2 * n,
-        seq_gap: 3 * n,
-        ready_timeouts: 4 * n,
-        ready_recovered: 5 * n,
-        radio_crc_fail: 6 * n,
-        radio_bad_magic: 7 * n,
-        radio_seq_gap: 8 * n,
+    let radio_link = RadioLinkStats {
+        packets,
+        crc_fail: p4,
+        bad_magic: 2 * p4,
+        seq_gap: 3 * p4,
+        uart_errors: 4 * p4,
+        radio_crc_fail: 5 * c6,
+        radio_bad_magic: 6 * c6,
+        radio_seq_gap: 7 * c6,
+        radio_uart_errors: 8 * c6,
     };
-    Record::BridgeStatus(BridgeStatusSeen { spi: Some(spi), ..seen })
+    Record::BridgeStatus(BridgeStatusSeen { radio_link: Some(radio_link), ..seen })
 }
 
 /// A status reply carrying a count of oversize frames dropped.
@@ -313,7 +329,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             usb_lost: 870,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }
@@ -338,7 +354,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             usb_lost: 673,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }
@@ -375,43 +391,162 @@ fn analyze_reports_queue_peak_when_rows_carry_queues() {
 }
 
 #[test]
-fn analyze_rebases_queue_drops_when_bridge_restarts() {
-    // 5 before the capture are a baseline. The bridge restarts at a row that carries no
+fn analyze_rebases_c6_queue_drops_when_bridge_restarts() {
+    // 5 before the capture are a baseline. The C6 restarts at a row that carries no
     // queue, so the next row's 15 are all new though they read as a rise from 12.
     let (_dir, conn) = capture(vec![
-        queue_status(60_000, QueueId::HostBulk, 10, 5),
-        queue_status(65_000, QueueId::HostBulk, 10, 12),
+        queue_status(60_000, QueueId::RadioUp, 10, 5),
+        queue_status(65_000, QueueId::RadioUp, 10, 12),
         status(0, 0, 0, 1_000),
-        queue_status(4_000, QueueId::HostBulk, 10, 15),
+        queue_status(4_000, QueueId::RadioUp, 10, 15),
     ]);
     let queues = losses(&conn).unwrap().bridge.unwrap().queues;
     assert_eq!(queues[0].dropped, 7 + 15);
 }
 
 #[test]
-fn analyze_reports_spi_errors_when_rows_carry_spi() {
-    // A row without SPI between two with it changes nothing; the restart rebases.
+fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
+    // The C6's queues restart with it and count whole. The P4's run on, so they count only their
+    // rise rather than their whole total again.
     let (_dir, conn) = capture(vec![
-        spi_status(60_000, 1_000, 2),
-        status(0, 0, 0, 62_000),
-        spi_status(65_000, 1_500, 5),
-        spi_status(4_000, 100, 1),
+        queues_status(
+            60_000,
+            &[
+                (QueueId::RadioUp, 2),
+                (QueueId::RadioUpPriority, 1),
+                (QueueId::RadioSendJobs, 1),
+                (QueueId::RadioJobs, 1),
+                (QueueId::RadioDown, 4),
+                (QueueId::HostPriority, 3),
+                (QueueId::HostBulk, 500),
+            ],
+        ),
+        queues_status(
+            65_000,
+            &[
+                (QueueId::RadioUp, 6),
+                (QueueId::RadioUpPriority, 1),
+                (QueueId::RadioSendJobs, 2),
+                (QueueId::RadioJobs, 3),
+                (QueueId::RadioDown, 4),
+                (QueueId::HostPriority, 3),
+                (QueueId::HostBulk, 512),
+            ],
+        ),
+        queues_status(
+            4_000,
+            &[
+                (QueueId::RadioUp, 3),
+                (QueueId::RadioUpPriority, 0),
+                (QueueId::RadioSendJobs, 1),
+                (QueueId::RadioJobs, 2),
+                (QueueId::RadioDown, 6),
+                (QueueId::HostPriority, 4),
+                (QueueId::HostBulk, 515),
+            ],
+        ),
     ]);
-    let spi = losses(&conn).unwrap().bridge.unwrap().spi;
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.reboots, 1);
+    let dropped = |queue| bridge.queues.iter().find(|q| q.queue == queue).unwrap().dropped;
+    assert_eq!(dropped(QueueId::RadioUp), 4 + 3);
+    assert_eq!(dropped(QueueId::RadioUpPriority), 0);
+    assert_eq!(dropped(QueueId::RadioSendJobs), 1 + 1);
+    assert_eq!(dropped(QueueId::RadioJobs), 2 + 2);
+    assert_eq!(dropped(QueueId::RadioDown), 2);
+    assert_eq!(dropped(QueueId::HostPriority), 1);
+    assert_eq!(dropped(QueueId::HostBulk), 12 + 3);
+}
+
+#[test]
+fn analyze_totals_dropped_from_queues_when_c6_restarts() {
+    // `dropped_tx` reads 508, 522, 505, and rebasing that fall whole would count the P4's 502 again.
+    // The total is 12 + 2 before the restart, then 3 from the C6's new life and none from the P4.
+    // `radio-jobs` is not in `dropped_tx`.
+    let (_dir, conn) = capture(vec![
+        queues_status(
+            60_000,
+            &[(QueueId::RadioUp, 8), (QueueId::RadioJobs, 1), (QueueId::HostBulk, 500)],
+        ),
+        queues_status(
+            65_000,
+            &[(QueueId::RadioUp, 20), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+        ),
+        queues_status(
+            4_000,
+            &[(QueueId::RadioUp, 3), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+        ),
+    ]);
+    assert_eq!(losses(&conn).unwrap().bridge.unwrap().dropped, 12 + 2 + 3);
+}
+
+#[test]
+fn analyze_rebases_p4_queue_drops_when_count_falls() {
+    // A P4 reboot zeroes its queues, so the count falls and all of it is new.
+    let (_dir, conn) = capture(vec![
+        queues_status(60_000, &[(QueueId::HostBulk, 5)]),
+        queues_status(65_000, &[(QueueId::HostBulk, 12)]),
+        queues_status(4_000, &[(QueueId::HostBulk, 3)]),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.queues[0].dropped, 7 + 3);
+    assert_eq!(bridge.dropped, 7 + 3);
+}
+
+#[test]
+fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
+    // A row without radio link counters between two with them changes nothing. The last row is a
+    // P4 reboot, which takes the C6 with it, so every counter falls and rebases.
+    let (_dir, conn) = capture(vec![
+        radio_link_status(60_000, 1_000, 2),
+        status(0, 0, 0, 62_000),
+        radio_link_status(65_000, 1_500, 5),
+        radio_link_status(4_000, 100, 1),
+    ]);
+    let radio_link = losses(&conn).unwrap().bridge.unwrap().radio_link;
     // Each counter is its multiple of n, which advances 3 before the restart and 1 after.
     let n = 3 + 1;
     assert_eq!(
-        spi,
-        Some(SpiLoss {
-            transfers: 500 + 100,
+        radio_link,
+        Some(RadioLinkLoss {
+            packets: 500 + 100,
             crc_fail: n,
             bad_magic: 2 * n,
             seq_gap: 3 * n,
-            ready_timeouts: 4 * n,
-            ready_recovered: 5 * n,
-            radio_crc_fail: 6 * n,
-            radio_bad_magic: 7 * n,
-            radio_seq_gap: 8 * n,
+            uart_errors: 4 * n,
+            radio_crc_fail: 5 * n,
+            radio_bad_magic: 6 * n,
+            radio_seq_gap: 7 * n,
+            radio_uart_errors: 8 * n,
+        })
+    );
+}
+
+#[test]
+fn analyze_rebases_only_radio_counters_when_c6_restarts() {
+    // The uptime falls, and the C6's counters with it. The P4's run on, so they count only their
+    // rise rather than their whole total again.
+    let (_dir, conn) = capture(vec![
+        radio_link_status_split(60_000, 1_000, 2, 2),
+        radio_link_status_split(65_000, 1_500, 5, 5),
+        radio_link_status_split(4_000, 1_600, 7, 1),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.reboots, 1);
+    // The P4's multiple advances 3 then 2, the C6's 3 then 1 from its new life.
+    let (p4, c6) = (3 + 2, 3 + 1);
+    assert_eq!(
+        bridge.radio_link,
+        Some(RadioLinkLoss {
+            packets: 500 + 100,
+            crc_fail: p4,
+            bad_magic: 2 * p4,
+            seq_gap: 3 * p4,
+            uart_errors: 4 * p4,
+            radio_crc_fail: 5 * c6,
+            radio_bad_magic: 6 * c6,
+            radio_seq_gap: 7 * c6,
+            radio_uart_errors: 8 * c6,
         })
     );
 }
@@ -442,7 +577,7 @@ fn analyze_skips_queue_rows_when_name_unknown() {
 fn analyze_reports_no_queues_when_bridge_has_none() {
     let (_dir, conn) = capture(vec![status(0, 10, 0, 60_000), status(5, 20, 0, 65_000)]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
-    assert_eq!((bridge.queues, bridge.spi), (vec![], None));
+    assert_eq!((bridge.queues, bridge.radio_link), (vec![], None));
 }
 
 #[test]
@@ -875,7 +1010,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             usb_lost: 30,
             oversize: 0,
             queues: vec![],
-            spi: None,
+            radio_link: None,
         })
     );
 }

@@ -23,7 +23,7 @@ use wartui_core::store::{
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::air::RecordKind;
-use wartui_proto::link::{QueueId, QueueStat, SpiStats};
+use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
@@ -505,8 +505,8 @@ fn store_writes_every_node_column_when_node_recorded() {
     assert_insert_names_every_column(&conn, "node");
 }
 
-/// A status reply carrying `queues` and `spi`, the rest of it fixed.
-fn bridge_status(queues: &[QueueStat], spi: Option<SpiStats>) -> Record {
+/// A status reply carrying `queues` and `radio_link`, the rest of it fixed.
+fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + 5_000,
         peer_count: 3,
@@ -516,20 +516,20 @@ fn bridge_status(queues: &[QueueStat], spi: Option<SpiStats>) -> Record {
         host_frames: 3_999_999_000,
         rx_oversize: 42,
         queues: queues.iter().copied().collect(),
-        spi,
+        radio_link,
     })
 }
 
-const SPI: SpiStats = SpiStats {
-    transfers: 4_000_000_001,
+const RADIO_LINK: RadioLinkStats = RadioLinkStats {
+    packets: 4_000_000_001,
     crc_fail: 1,
     bad_magic: 2,
     seq_gap: 3,
-    ready_timeouts: 4,
-    ready_recovered: 5,
-    radio_crc_fail: 6,
-    radio_bad_magic: 7,
-    radio_seq_gap: 8,
+    uart_errors: 4,
+    radio_crc_fail: 5,
+    radio_bad_magic: 6,
+    radio_seq_gap: 7,
+    radio_uart_errors: 8,
 };
 
 const QUEUES: [QueueStat; 2] = [
@@ -545,7 +545,7 @@ const QUEUES: [QueueStat; 2] = [
 #[test]
 fn store_round_trips_every_column_when_bridge_status_written() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&QUEUES, Some(SPI))]);
+    let conn = write(&dir, vec![bridge_status(&QUEUES, Some(RADIO_LINK))]);
     assert_insert_names_every_column(&conn, "bridge_status");
 
     let row: (i64, i64, i64, i64, i64, i64, i64) = conn
@@ -558,17 +558,18 @@ fn store_round_trips_every_column_when_bridge_status_written() {
         .unwrap();
     assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
 
-    let spi: Vec<i64> = conn
+    let radio_link: Vec<i64> = conn
         .query_row(
-            "SELECT spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_ready_timeouts,
-                    spi_ready_recovered, spi_radio_crc_fail, spi_radio_bad_magic,
-                    spi_radio_seq_gap
+            "SELECT radio_link_packets, radio_link_crc_fail, radio_link_bad_magic,
+                    radio_link_seq_gap, radio_link_uart_errors,
+                    radio_link_radio_crc_fail, radio_link_radio_bad_magic, radio_link_radio_seq_gap,
+                    radio_link_radio_uart_errors
              FROM bridge_status",
             [],
             |r| (0..9).map(|i| r.get(i)).collect(),
         )
         .unwrap();
-    assert_eq!(spi, [4_000_000_001, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(radio_link, [4_000_000_001, 1, 2, 3, 4, 5, 6, 7, 8]);
 }
 
 #[test]
@@ -599,16 +600,17 @@ fn store_writes_queue_rows_when_bridge_status_carries_queues() {
 }
 
 #[test]
-fn store_leaves_spi_columns_null_when_bridge_has_no_spi_link() {
+fn store_leaves_radio_link_columns_null_when_bridge_has_no_radio_link() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, vec![bridge_status(&[], None)]);
 
     let nulls: i64 = conn
         .query_row(
-            "SELECT (spi_transfers IS NULL) + (spi_crc_fail IS NULL) + (spi_bad_magic IS NULL)
-                  + (spi_seq_gap IS NULL) + (spi_ready_timeouts IS NULL)
-                  + (spi_ready_recovered IS NULL) + (spi_radio_crc_fail IS NULL)
-                  + (spi_radio_bad_magic IS NULL) + (spi_radio_seq_gap IS NULL)
+            "SELECT (radio_link_packets IS NULL) + (radio_link_crc_fail IS NULL)
+                  + (radio_link_bad_magic IS NULL)
+                  + (radio_link_seq_gap IS NULL) + (radio_link_uart_errors IS NULL)
+                  + (radio_link_radio_crc_fail IS NULL) + (radio_link_radio_bad_magic IS NULL)
+                  + (radio_link_radio_seq_gap IS NULL) + (radio_link_radio_uart_errors IS NULL)
              FROM bridge_status",
             [],
             |r| r.get(0),

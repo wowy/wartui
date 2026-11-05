@@ -1,4 +1,4 @@
-//! The frozen hello each side of the SPI link sends first.
+//! The frozen hello each side of the UART link sends first.
 //!
 //! **Its layout never changes**, so any P4 build reads any C6 build's hello. That is why it
 //! is a fixed layout written out by hand rather than postcard, whose encoding follows the
@@ -42,7 +42,7 @@ const FW_VERSION: usize = 9;
 const FW_VERSION_LEN: usize = 32;
 
 /// Who is on the other end of the link, sent in a [`Kind::Hello`](super::Kind::Hello)
-/// transfer.
+/// packet.
 ///
 /// The P4 sends one too, with [`Chip::Esp32P4`]. The C6 reads only its `link_rev`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +175,7 @@ const fn loop_phase_code(phase: LoopPhase) -> u8 {
         LoopPhase::DrainLink => 3,
         LoopPhase::Command => 4,
         LoopPhase::Pump => 6,
-        LoopPhase::SpiTransfer => 10,
+        LoopPhase::RadioLink => 10,
     }
 }
 
@@ -185,7 +185,7 @@ const fn loop_phase_from_code(code: u8) -> LoopPhase {
         3 => LoopPhase::DrainLink,
         4 => LoopPhase::Command,
         6 => LoopPhase::Pump,
-        10 => LoopPhase::SpiTransfer,
+        10 => LoopPhase::RadioLink,
         _ => LoopPhase::Unknown,
     }
 }

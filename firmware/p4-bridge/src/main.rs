@@ -1,18 +1,19 @@
-//! The host half of wartui's P4 split bridge, on a Waveshare ESP32-P4 board.
+//! The host half of wartui's P4 split bridge, on a Waveshare ESP32-P4-WIFI6.
 //!
 //! The P4 talks to the host over USB 2.0 high speed with wartui's link protocol, and to
-//! the board's ESP32-C6 as a 40 MHz SPI master. The C6 runs the radio
-//! (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! the board's ESP32-C6 over UART1 with hardware flow control, through UHCI's DMA. The C6 runs
+//! the radio (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
 //! `RefCell` with no locking and nothing borrowed across an `.await`:
 //!
-//! - **the SPI link** (`src/link.rs`) runs from boot, so the C6's hello arrives, and sends
+//! - **the UART link** (`src/link.rs`) runs from boot, so the C6's hello arrives, and sends
 //!   the C6 the image this P4 carries (`src/radio.rs`) when it runs another;
-//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the SPI link
-//!   notes an install, then gives [`Pair`] the time. That is how it gives up on a silent
-//!   C6, and resets one silent since an update's install through its enable pin;
+//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the pair gains a
+//!   deadline, then gives [`Pair`] the time. That is how it gives up on a silent C6, resets one
+//!   silent since an update's install through its enable pin, and reports one silent since a
+//!   host's poll;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
 //!   runs the device, a reader, a writer and the `GetStatus` answer. The reader also takes
 //!   the P4's own updates (`src/update.rs`);
@@ -25,8 +26,8 @@
 //! watchdog, and the first host frame confirms the image (`src/update.rs`).
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
-//! together. Every wait is a GPIO interrupt, a DMA completion, a USB event, a signal
-//! between the futures or a timer.
+//! together. Every wait is a DMA completion, a UART event, a USB event, a signal between the
+//! futures or a timer.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -61,25 +62,30 @@ use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
-use esp_hal::spi::Mode;
-use esp_hal::spi::master::{Config as SpiConfig, Spi};
-use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::uart::uhci::{self, Uhci};
+use esp_hal::uart::{
+    BaudrateTolerance, Config as UartConfig, CtsConfig, HwFlowControl, RtsConfig,
+    RxConfig as UartRxConfig, Uart,
+};
 use static_cell::ConstStaticCell;
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats,
-    encode_frame,
+    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
+    ShortStr, encode_frame,
 };
 #[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
-use wartui_proto::spi::{Down, Held, RECORD_MAX, TRANSFER_LEN, encode_down};
+use wartui_proto::radio_link::{
+    BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
+    RX_BUF_LEN, WIRE_MAX, encode_down,
+};
 use wartui_proto::split::{Pair, PairEvent};
 
-use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SPI_KHZ};
+use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
 use crate::link::{Bus, Link, run_link};
 use crate::radio::RADIO_DIGEST;
 use crate::update::Updates;
@@ -97,23 +103,28 @@ type DownQueue = FrameRing<DOWN_QUEUE_BYTES>;
 static HOST_QUEUE: ConstStaticCell<HostFrames> = ConstStaticCell::new(HostQueue::new());
 /// `Down` records waiting for the C6.
 static DOWN_QUEUE: ConstStaticCell<DownQueue> = ConstStaticCell::new(FrameRing::new());
-/// The record that did not fit the last transfer.
+/// The record that did not fit the last packet.
 static HELD: ConstStaticCell<Held> = ConstStaticCell::new(Held::new());
+/// The packet the reader is part-way through.
+static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader::new());
+/// Where the writer builds a packet's body.
+static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
 
-/// A DMA buffer of one transfer, with its descriptors, in static internal RAM. Each use
-/// has its own statics.
+/// A DMA buffer of `$len` bytes, with its descriptors, in static internal RAM. Each use has
+/// its own statics.
 macro_rules! dma_buf {
-    ($ty:ident) => {{
+    ($ty:ident, $len:expr) => {{
+        const LEN: usize = $len;
         const DESCRIPTORS: usize =
-            descriptor_count(TRANSFER_LEN, BurstConfig::DEFAULT.max_compatible_chunk_size());
-        static BUFFER: ConstStaticCell<InternalMemory<[u8; TRANSFER_LEN]>> =
-            ConstStaticCell::new(InternalMemory::new([0; TRANSFER_LEN]));
+            descriptor_count(LEN, BurstConfig::DEFAULT.max_compatible_chunk_size());
+        static BUFFER: ConstStaticCell<InternalMemory<[u8; LEN]>> =
+            ConstStaticCell::new(InternalMemory::new([0; LEN]));
         static DESCRIPTOR_LIST: ConstStaticCell<InternalMemory<[DmaDescriptor; DESCRIPTORS]>> =
             ConstStaticCell::new(InternalMemory::new([DmaDescriptor::EMPTY; DESCRIPTORS]));
         let mut buf =
             $ty::new(DESCRIPTOR_LIST.take().get_mut().unsize(), BUFFER.take().get_mut().unsize())
                 .expect("DMA buffer");
-        buf.set_length(TRANSFER_LEN);
+        buf.set_length(LEN);
         buf
     }};
 }
@@ -141,7 +152,10 @@ pub struct Shared {
     /// Records refused because the down queue was full. The ring counts only its own
     /// drops, and it never evicts here.
     down_refused: Cell<u32>,
-    spi: Cell<SpiStats>,
+    radio_link: Cell<RadioLinkStats>,
+    /// Raised by whatever may have given the link's writer something to send, so a waiting
+    /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
+    wake_link: Signal<NoopRawMutex, ()>,
     /// A host holds DTR, so it is reading.
     dtr: Cell<bool>,
     /// Raised on every new pair life, so the USB side learns its serial number.
@@ -176,17 +190,18 @@ impl Shared {
             pushed: Signal::new(),
             down: RefCell::new(down),
             down_refused: Cell::new(0),
-            spi: Cell::new(SpiStats {
-                transfers: 0,
+            radio_link: Cell::new(RadioLinkStats {
+                packets: 0,
                 crc_fail: 0,
                 bad_magic: 0,
                 seq_gap: 0,
-                ready_timeouts: 0,
-                ready_recovered: 0,
+                uart_errors: 0,
                 radio_crc_fail: 0,
                 radio_bad_magic: 0,
                 radio_seq_gap: 0,
+                radio_uart_errors: 0,
             }),
+            wake_link: Signal::new(),
             dtr: Cell::new(false),
             paired: Signal::new(),
             status_asked: Signal::new(),
@@ -200,12 +215,12 @@ impl Shared {
         }
     }
 
-    /// Add one to the SPI counter `field` picks.
-    fn count_spi(&self, field: impl FnOnce(&mut SpiStats) -> &mut u32) {
-        let mut spi = self.spi.get();
-        let counter = field(&mut spi);
+    /// Add one to the link counter `field` picks.
+    fn count_link(&self, field: impl FnOnce(&mut RadioLinkStats) -> &mut u32) {
+        let mut radio_link = self.radio_link.get();
+        let counter = field(&mut radio_link);
         *counter = counter.wrapping_add(1);
-        self.spi.set(spi);
+        self.radio_link.set(radio_link);
     }
 
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
@@ -243,7 +258,9 @@ impl Shared {
             Ok(len) if fits(len) => ring.push(&record[..len]),
             _ => false,
         };
-        if !queued {
+        if queued {
+            self.wake_link.signal(());
+        } else {
             self.down_refused.set(self.down_refused.get().wrapping_add(1));
         }
         queued
@@ -322,9 +339,11 @@ impl Shared {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
-    /// A new pair life began: tell the USB side, and a host that is reading.
+    /// A new pair life began: tell the USB side, a host that is reading, and the link's writer,
+    /// since the pair may bridge now.
     fn new_life(&self) {
         self.paired.signal(());
+        self.wake_link.signal(());
         self.announce();
     }
 
@@ -342,7 +361,8 @@ impl Shared {
             }
         };
         let host_dropped = host[0].dropped.saturating_add(host[1].dropped);
-        let status = self.pair.borrow().status(now_ms(), host, down, self.spi.get(), host_dropped);
+        let status =
+            self.pair.borrow().status(now_ms(), host, down, self.radio_link.get(), host_dropped);
         self.push_host(&status);
     }
 }
@@ -371,25 +391,46 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // SDIO D2 and D3 are unused; both ends leave them as inputs.
     let _d2 = Input::new(peripherals.GPIO16, InputConfig::default());
     let _d3 = Input::new(peripherals.GPIO17, InputConfig::default());
-    let ready = Input::new(peripherals.GPIO6, InputConfig::default().with_pull(Pull::Down));
+    // A spare trace, kept from floating.
+    let _spare = Input::new(peripherals.GPIO6, InputConfig::default().with_pull(Pull::Down));
 
     // Hold the C6 in reset, then release it, so the pair starts together.
     let mut c6_en = Output::new(peripherals.GPIO54, Level::Low, OutputConfig::default());
     Timer::after(C6_RESET_HOLD).await;
     c6_en.set_high();
 
-    let spi = Spi::new(
-        peripherals.SPI2,
-        SpiConfig::default().with_frequency(Rate::from_khz(SPI_KHZ)).with_mode(Mode::_0),
+    // UART0 is the console. Refused rather than run slightly off, since the C6 is not.
+    let uart = Uart::new(
+        peripherals.UART1,
+        UartConfig::default()
+            .with_baudrate(BAUD_RATE)
+            .with_baudrate_tolerance(BaudrateTolerance::Exact)
+            .with_hw_flow_ctrl(HwFlowControl {
+                cts: CtsConfig::Enabled,
+                rts: RtsConfig::Enabled(RTS_THRESHOLD),
+            })
+            .with_rx(UartRxConfig::default().with_fifo_full_threshold(FIFO_FULL_THRESHOLD)),
     )
-    .expect("SPI2")
-    .with_sck(peripherals.GPIO18)
-    .with_mosi(peripherals.GPIO19)
-    .with_miso(peripherals.GPIO14)
-    .with_cs(peripherals.GPIO15)
-    .with_dma(peripherals.DMA_AXI_CH0)
-    .into_async();
-    let bus = Bus { spi, ready, rx: dma_buf!(DmaRxBuf), tx: dma_buf!(DmaTxBuf) };
+    .expect("UART1")
+    .with_tx(peripherals.GPIO19)
+    .with_rx(peripherals.GPIO14)
+    .with_rts(peripherals.GPIO18)
+    .with_cts(peripherals.GPIO15);
+    let mut uhci = Uhci::new(uart, peripherals.UHCI0, peripherals.DMA_CH0);
+    uhci.apply_rx_config(&uhci::RxConfig::default().with_chunk_limit(RX_BUF_LEN as u16))
+        .expect("UHCI read limit");
+    // Despite its name, this config sets when a read ends: at the limit, or on an idle line.
+    // `Uhci::new` clears both.
+    uhci.apply_tx_config(&uhci::TxConfig::default()).expect("UHCI end of read");
+    let (rx, tx) = uhci.into_async().split();
+    let bus = Bus {
+        rx,
+        tx,
+        rx_bufs: [dma_buf!(DmaRxBuf, RX_BUF_LEN), dma_buf!(DmaRxBuf, RX_BUF_LEN)],
+        tx_buf: dma_buf!(DmaTxBuf, WIRE_MAX),
+        reader: READER.take(),
+        body: BODY.take(),
+    };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let gps = cfg!(feature = "gps");
@@ -397,11 +438,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST)
             .with_own_image(own_image);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates);
-    let mut link = Link::new(boot, own_mac, cause, last_phase, HELD.take());
+    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take()));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     let bridge = join3(
-        run_link(bus, &mut link, &shared),
+        run_link(bus, &link, &shared),
         radio_clock(&shared, c6_en),
         usb::run(peripherals.USB_HS, &shared),
     );
@@ -414,7 +455,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 }
 
 /// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6
-/// stays silent, and reset the C6 through `c6_en` when it asks.
+/// stays silent, reset the C6 through `c6_en` when it asks, and tell the host when a poll went
+/// unanswered.
 async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
     loop {
         let deadline = shared.pair.borrow().next_deadline_ms();
@@ -433,6 +475,7 @@ async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
                 Timer::after(C6_RESET_HOLD).await;
                 c6_en.set_high();
             }
+            PairEvent::RadioSilent => shared.push_fault(),
         }
     }
 }

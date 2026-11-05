@@ -5,7 +5,7 @@
 
 [package]
 name = "wartui-p4-bridge-fw"
-description = "The host half of the wartui P4 split bridge: USB high speed to the host, an SPI master to the board's ESP32-C6."
+description = "The host half of the wartui P4 split bridge: USB high speed to the host, a UART link to the ESP32-P4-WIFI6's ESP32-C6."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -67,7 +67,7 @@ debug = 2
 lto = "fat"
 opt-level = "s"
 
-# The crates that encode and check every record and transfer, built for speed as the
+# The crates that encode and check every record and packet, built for speed as the
 # other bridges build them.
 [profile.release.package.wartui-proto]
 opt-level = 3

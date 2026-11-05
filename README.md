@@ -91,7 +91,7 @@ wartui ota        # update node firmware over the air
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
-| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: USB link and SPI master, no protocol knowledge                        |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: USB link and UART to the C6, no protocol knowledge                    |
 | [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The bridge's radio half, on the board's ESP32-C6: `esp-radio` calls, no protocol knowledge                    |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture                                                        |
@@ -103,7 +103,7 @@ most laptops can't. wartui uses a USB-attached ESP32-P4 board as a radio bridge.
 their channels, and stores everything they see.
 
 The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firmware/p4-radio`, all
-in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4 board:
+in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4-WIFI6:
 the P4 talks to the host, and its on-board C6 runs the radio. It stays on 2.4 GHz channel 6 for
 control messages, so it never needs 5 GHz.
 

@@ -11,17 +11,17 @@
 //!   A C6 restart under a running P4 loses the peer table and transmit power, so it must
 //!   look like a bridge restart; a hello arriving after the link was up is
 //!   [`PairEvent::NewLife`], and the firmware answers with a fresh `Ready`.
-//! - **The C6 repeats its hello** in every transfer until it hears the P4's, so [`Pair`]
-//!   tells a new life from a repeat by the transfer seq; see [`Pair::on_hello`]. A
-//!   restarted C6 boots through the same code to the same first hello, often within a
-//!   millisecond of the last life's uptime, so equal uptimes prove nothing.
+//! - **The C6 repeats its hello** until it hears the P4's, so [`Pair`] tells a new life from a
+//!   repeat by the packet seq; see [`Pair::on_hello`]. A restarted C6 boots through the same
+//!   code to the same first hello, often within a millisecond of the last life's uptime, so
+//!   equal uptimes prove nothing.
 //! - **`Ready.reset_cause` is the C6's after a C6 restart**, since that restart is the
 //!   bridge restart the host sees. The P4's own boot reports the P4's cause.
 //! - **A link revision mismatch does not bridge.** The hello is frozen, so the P4 can
 //!   always read it and say so, but radio commands are refused.
 //! - **The P4 carries the C6's image, and the C6 runs it.** A hello whose image digest
 //!   differs from the bundled one is [`RadioState::Updating`]: the P4 sends the bundle over
-//!   the link (`crate::spi::update`) and refuses radio commands meanwhile. The C6 reboots
+//!   the link (`crate::radio_link::update`) and refuses radio commands meanwhile. The C6 reboots
 //!   into the new image, and its next hello is a new life. One attempt per P4 life, so an
 //!   image that will not take cannot loop: a C6 still on another build afterwards is
 //!   [`RadioState::Stale`], bridged with a fault when its revision matches.
@@ -29,23 +29,29 @@
 //!   [`PairEvent::ResetRadio`], up to [`TRIAL_BOOTS`] times. A trial image that hangs gets no
 //!   watchdog, and each power cycle counts a trial boot, so the C6 rolls back to the image it
 //!   ran before (`firmware/common/src/ota.rs`).
-//! - **A C6 whose hello carries no digest predates the update path** and is not updated: it
-//!   cannot take the image, so it needs one wired flash.
+//! - **A C6 whose hello carries no digest is not updated**: it cannot take the image, so it needs
+//!   one wired flash.
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
 //!   updates over USB (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
+//! - **A C6 that stops answering polls is a fault.** One hung holding RTS parks the P4's writer,
+//!   while `Status` goes on answering with its last counters and an update stays
+//!   [`RadioState::Updating`]. A poll arms [`RADIO_SILENT_MS`] and any verified packet disarms it,
+//!   so only a C6 that is sending nothing faults ([`PairEvent::RadioSilent`]). A
+//!   [`RadioState::Mismatch`] gets no records, so its silence means nothing; `Waiting` and `Absent`
+//!   have their own faults, and an install has its resets.
 
 use core::fmt::Write;
 
 use crate::link::{
-    BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueId, QueueStat,
-    QueueStats, RADIO_UPDATING, RadioInfo, SendStatus, ShortStr, SpiStats,
+    BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueStat, QueueStats,
+    RADIO_UPDATING, RadioInfo, RadioLinkStats, SendStatus, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
+use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use crate::reset::ResetCause;
-use crate::spi::{Hello, LINK_REVISION, RadioStatus};
 
 /// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC.
 pub const RADIO_WAIT_MS: u64 = 2_000;
@@ -59,6 +65,14 @@ pub const RADIO_WAIT_MS: u64 = 2_000;
 /// boots slowly.
 pub const INSTALL_WAIT_MS: u64 = 10_000;
 
+/// How long the P4 waits for any packet from the C6 after a host's poll before saying the radio
+/// has stopped answering.
+///
+/// It comfortably exceeds a sector's flash work and the update's
+/// [`REPLY_WAIT_MS`](crate::radio_link::update::REPLY_WAIT_MS), so a C6 busy updating never reads
+/// as hung.
+pub const RADIO_SILENT_MS: u64 = 12_000;
+
 /// What the P4 knows of its C6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RadioState {
@@ -71,7 +85,7 @@ pub enum RadioState {
     /// The C6 runs another image after this P4 life's update, and speaks this P4's revision:
     /// bridged, with a fault.
     Stale(Hello),
-    /// The C6 answered speaking another revision, or predates the update path.
+    /// The C6 answered speaking another revision, or with no image digest.
     Mismatch(Hello),
     /// No hello arrived in time.
     Absent,
@@ -86,6 +100,8 @@ pub enum PairEvent {
     NewLife,
     /// The C6 installed an update and has not said hello since: reset it.
     ResetRadio,
+    /// The C6 has not answered a poll within [`RADIO_SILENT_MS`]: tell the host.
+    RadioSilent,
 }
 
 /// Where a host command goes.
@@ -108,7 +124,7 @@ pub struct Pair {
     state: RadioState,
     /// The P4 clock when the current hello arrived.
     hello_at_ms: u64,
-    /// The seq of the last C6 transfer, of any kind.
+    /// The seq of the last C6 packet, of any kind.
     c6_seq: u32,
     /// The current life began with a C6 restart under a running P4.
     life_from_radio: bool,
@@ -132,6 +148,10 @@ pub struct Pair {
     installed_at: Option<u64>,
     /// Resets since the install.
     resets: u32,
+    /// When a host's poll first went unanswered by any C6 packet.
+    asked_at: Option<u64>,
+    /// [`RADIO_SILENT_MS`] passed after `asked_at`, and no packet has arrived since.
+    silent: bool,
 }
 
 impl Pair {
@@ -165,6 +185,8 @@ impl Pair {
             progress: 0,
             installed_at: None,
             resets: 0,
+            asked_at: None,
+            silent: false,
         }
     }
 
@@ -176,23 +198,19 @@ impl Pair {
         self
     }
 
-    /// The C6 sent a hello in its transfer `seq`, at P4 time `now_ms`.
+    /// The C6 sent a hello in its packet `seq`, at P4 time `now_ms`.
     ///
-    /// The C6 repeats its hello in every transfer until it has heard the P4's, so most
-    /// calls are the same life again. A hello is a [`PairEvent::NewLife`] when any of these
-    /// holds:
+    /// The C6 repeats its hello until it has heard the P4's, so a hello may be the same life
+    /// again. A hello is a [`PairEvent::NewLife`] when any of these holds:
     ///
     /// - it is the first, or its MAC or link revision changed;
-    /// - its seq is lower than the last C6 transfer's ([`Pair::note_seq`]). The C6 counts
-    ///   transfers from 0 at every boot and only upwards within a life, so a lower seq is a
-    ///   restart, wherever in the last life it came.
-    ///
-    /// The seq is a `u32` and wraps after about 31 days at 1,600 transfers a second. A wrap
-    /// comes mid-life, on a transfer that is not a hello, since the C6 sends hellos only
-    /// until the P4 answers. So a hello's seq is lower than the last only after a restart.
+    /// - its seq is not past the last C6 packet's ([`Pair::note_seq`]). The C6 counts packets
+    ///   from 0 at every boot, sends each once, and counts only upwards within a life, so an
+    ///   equal or lower seq is a restart, wherever in the last life it came.
     ///
     /// Anything else leaves the anchor and counters alone, so `Ready.uptime_ms` never steps
-    /// back.
+    /// back. That misses one case: a C6 that restarts having sent only seq 0, and whose next
+    /// life's seq 0 is lost, reads as the same life.
     ///
     /// A new life's state follows from its image digest; see the module documentation.
     pub fn on_hello(&mut self, hello: Hello, seq: u32, now_ms: u64) -> PairEvent {
@@ -202,8 +220,7 @@ impl Pair {
             | RadioState::Updating(old)
             | RadioState::Stale(old)
             | RadioState::Mismatch(old) => {
-                let same =
-                    old.mac == hello.mac && old.link_rev == hello.link_rev && seq >= last_seq;
+                let same = old.mac == hello.mac && old.link_rev == hello.link_rev && seq > last_seq;
                 if same {
                     return PairEvent::None;
                 }
@@ -213,6 +230,8 @@ impl Pair {
         };
         self.state = self.judge(hello);
         self.installed_at = None;
+        self.asked_at = None;
+        self.silent = false;
         self.hello_at_ms = now_ms;
         self.life_from_radio = running;
         // A new C6 life: counters from the last one no longer apply.
@@ -251,6 +270,8 @@ impl Pair {
         if matches!(self.state, RadioState::Updating(_)) {
             self.installed_at = Some(now_ms);
             self.resets = 0;
+            self.asked_at = None;
+            self.silent = false;
         }
     }
 
@@ -267,15 +288,46 @@ impl Pair {
         }
     }
 
-    /// The C6 sent a transfer other than a hello, numbered `seq`.
+    /// The C6 sent a packet other than a hello, numbered `seq`.
     pub fn note_seq(&mut self, seq: u32) {
         self.c6_seq = seq;
     }
 
+    /// The host polled at `now_ms`. Arms [`RADIO_SILENT_MS`], unless it is armed already or
+    /// the state answers for silence itself; see the module documentation.
+    pub fn note_asked(&mut self, now_ms: u64) {
+        if self.asked_at.is_none() && self.owes_answer() {
+            self.asked_at = Some(now_ms);
+        }
+    }
+
+    /// A verified packet arrived from the C6, of any kind.
+    pub fn note_heard(&mut self) {
+        self.asked_at = None;
+        self.silent = false;
+    }
+
+    /// Whether a poll going unanswered means the radio has stopped.
+    fn owes_answer(&self) -> bool {
+        self.installed_at.is_none()
+            && matches!(
+                self.state,
+                RadioState::Up(_) | RadioState::Stale(_) | RadioState::Updating(_)
+            )
+    }
+
+    /// When [`Pair::on_tick`] calls the radio silent, if it has not already.
+    fn silent_deadline_ms(&self) -> Option<u64> {
+        if self.silent || !self.owes_answer() {
+            return None;
+        }
+        self.asked_at.map(|at| at + RADIO_SILENT_MS)
+    }
+
     /// The P4 clock reached `now_ms`.
     ///
-    /// Gives up on a C6 silent since boot, and resets one silent since an install, at most
-    /// [`TRIAL_BOOTS`] times before giving up on it too.
+    /// Gives up on a C6 silent since boot, resets one silent since an install, at most
+    /// [`TRIAL_BOOTS`] times before giving up on it too, and reports one silent since a poll.
     pub fn on_tick(&mut self, now_ms: u64) -> PairEvent {
         if self.state == RadioState::Waiting && now_ms.saturating_sub(self.boot_ms) >= RADIO_WAIT_MS
         {
@@ -294,6 +346,10 @@ impl Pair {
             self.state = RadioState::Absent;
             return PairEvent::NewLife;
         }
+        if self.silent_deadline_ms().is_some_and(|at| now_ms >= at) {
+            self.silent = true;
+            return PairEvent::RadioSilent;
+        }
         PairEvent::None
     }
 
@@ -302,10 +358,7 @@ impl Pair {
     pub fn next_deadline_ms(&self) -> Option<u64> {
         let waiting = (self.state == RadioState::Waiting).then_some(self.boot_ms + RADIO_WAIT_MS);
         let installed = self.installed_at.map(|at| at + INSTALL_WAIT_MS);
-        match (waiting, installed) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [waiting, installed, self.silent_deadline_ms()].into_iter().flatten().min()
     }
 
     /// The C6's current state.
@@ -394,6 +447,12 @@ impl Pair {
     pub fn fault(&self) -> Option<LogStr> {
         let mut text = LogStr::new();
         match &self.state {
+            RadioState::Up(_) | RadioState::Stale(_) | RadioState::Updating(_) if self.silent => {
+                let _ = write!(
+                    text,
+                    "the radio has stopped answering; wartui reset restarts the bridge"
+                );
+            }
             RadioState::Mismatch(hello) if hello.image.is_none() => {
                 let _ = write!(
                     text,
@@ -403,7 +462,7 @@ impl Pair {
             RadioState::Mismatch(hello) => {
                 let _ = write!(
                     text,
-                    "radio speaks SPI link revision {}, this P4 speaks {}; update the radio",
+                    "radio speaks link revision {}, this P4 speaks {}; update the radio",
                     hello.link_rev, LINK_REVISION
                 );
             }
@@ -465,21 +524,22 @@ impl Pair {
         now_ms: u64,
         host: [QueueStat; 2],
         down: QueueStat,
-        mut spi: SpiStats,
+        mut radio_link: RadioLinkStats,
         host_dropped: u32,
     ) -> BridgeToHost {
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
         if let Some(status) = &self.status {
             for stat in &status.queues {
-                if matches!(stat.queue, QueueId::RadioUp | QueueId::RadioUpPriority) {
+                if stat.queue.in_dropped_tx() {
                     radio_up_drops = radio_up_drops.saturating_add(stat.dropped);
                 }
                 let _ = queues.push(*stat);
             }
-            spi.radio_crc_fail = status.crc_fail;
-            spi.radio_bad_magic = status.bad_magic;
-            spi.radio_seq_gap = status.seq_gap;
+            radio_link.radio_crc_fail = status.crc_fail;
+            radio_link.radio_bad_magic = status.bad_magic;
+            radio_link.radio_seq_gap = status.seq_gap;
+            radio_link.radio_uart_errors = status.uart_errors;
         }
         // The C6's queues leave room for these: 4 + 3 fits in 8.
         let _ = queues.push(down);
@@ -494,7 +554,7 @@ impl Pair {
             uptime_ms: self.uptime_ms(now_ms),
             rx_oversize: counters.map_or(0, |status| status.rx_oversize),
             queues,
-            spi: Some(spi),
+            radio_link: Some(radio_link),
         }
     }
 }

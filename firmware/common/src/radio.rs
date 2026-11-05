@@ -1,7 +1,7 @@
 //! The ESP-NOW half of a bridge: what the radio is told and what it hears, with no
 //! knowledge of the link that carries either to the host.
 //!
-//! The radio chip behind a P4 connects it to the SPI link. The rules here — the
+//! The radio chip behind a P4 connects it to the UART link. The rules here — the
 //! broadcast-slot give-up, the 24 Mbps rate, which status a send earns — are ones the host
 //! reads meaning into.
 //!
@@ -25,6 +25,7 @@
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 use esp_hal::time::Instant;
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo, PhyMode, RateConfig,
@@ -225,6 +226,9 @@ pub type Payloads<const P: usize> = Channel<NoopRawMutex, SendPayload, P>;
 
 /// The results waiting for the caller's loop.
 pub type Dones<const N: usize> = Channel<NoopRawMutex, Done, N>;
+
+/// Tells the caller's writer that a record may be waiting for it.
+pub type Wake = Signal<NoopRawMutex, ()>;
 
 /// Which queue refused a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

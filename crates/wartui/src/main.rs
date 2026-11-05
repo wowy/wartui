@@ -292,7 +292,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         ResetCause::External => "reset over USB, by espflash or a replug",
         ResetCause::Unknown => "reset for a reason it could not name",
     };
-    // The phase is only ever a hint: the SPI link marks it on every transfer, so it says
+    // The phase is only ever a hint: the radio link marks it on every packet, so it says
     // what ran last, not what stopped the bridge (`LoopPhase`). `Boot` is the exception:
     // nothing else has marked yet, so it is a fact. `Unknown` has nothing to name.
     let phase = match info.last_phase {
@@ -300,7 +300,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         LoopPhase::DrainLink => Some("it last read host commands"),
         LoopPhase::Pump => Some("it last wrote to the USB endpoint"),
         LoopPhase::Boot => Some("it had not finished starting"),
-        LoopPhase::SpiTransfer => Some("it last ran its SPI link"),
+        LoopPhase::RadioLink => Some("it last ran its radio link"),
         LoopPhase::Unknown => None,
     };
     match phase {
@@ -726,7 +726,7 @@ mod tests {
             (LoopPhase::Command, "it last ran a host command"),
             (LoopPhase::DrainLink, "it last read host commands"),
             (LoopPhase::Pump, "it last wrote to the USB endpoint"),
-            (LoopPhase::SpiTransfer, "it last ran its SPI link"),
+            (LoopPhase::RadioLink, "it last ran its radio link"),
             (LoopPhase::Boot, "it had not finished starting"),
         ] {
             assert_eq!(line(phase), format!("last reset  powered on; {said}"));

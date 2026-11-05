@@ -90,9 +90,10 @@ Four host crates, strictly layered, plus firmware that shares the bottom one and
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac`
-  type and its text form), `plan` (channel pools and the partitioning planner), `node` (a node's
-  timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
+  with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `radio_link` (the
+  UART packets between the P4 and its C6, and their frozen core), `mac` (the `Mac` type and its
+  text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
+  sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
@@ -105,11 +106,11 @@ own.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
-- **`firmware/p4-bridge`** — the host half of the bridge, on an ESP32-P4: COBS framing over USB and
-  an SPI master to its C6, no protocol knowledge. Fixes there cost a reflash, so logic belongs on
-  the host. Its image carries the C6's, and updates it.
+- **`firmware/p4-bridge`** — the host half of the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6:
+  COBS framing over USB and a DMA UART to its C6, no protocol knowledge. Fixes there cost a
+  reflash, so logic belongs on the host. Its image carries the C6's, and updates it.
 - **`firmware/p4-radio`** — the radio half of the bridge, on the board's C6: `esp-radio` calls behind
-  an SPI slave, equally without protocol knowledge.
+  a DMA UART, equally without protocol knowledge.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the program
   (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after
@@ -343,6 +344,9 @@ edit stops; follow the pointer before changing the rule.
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
   `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
   the benched path. → `firmware/common/src/lib.rs`, `reboot`
+- **The radio link's core is frozen around the UART, even before 1.0**, so any P4 build can
+  identify and update any C6 build and a link change never costs a wired flash.
+  → `crates/wartui-proto/src/radio_link/mod.rs` `//!`
 - **A C6 restart is invisible unless the host compares uptimes**, because it does not re-enumerate
   the P4's USB device and `Ready.uptime_ms` is the C6's. → `crates/wartui-bridge/src/serial.rs`, the
   `Ready` arm

@@ -32,8 +32,8 @@
 //! 1.9 MB slot back to hash it would cost seconds, and a chunk is only accepted at
 //! `next_offset`, so the running hash covers exactly the bytes written.
 //!
-//! The P4 bridge's C6 takes images through the same receiver, over the SPI link
-//! ([`crate::spi::update`]), and so does the P4 itself, over its USB link
+//! The P4 bridge's C6 takes images through the same receiver, over the UART link
+//! ([`crate::radio_link::update`]), and so does the P4 itself, over its USB link
 //! ([`crate::link::HostToBridge::Update`]). Both boot them on the same trial ([`TRIAL_BOOTS`]).
 //! [`image`] reads the digest that names an image.
 

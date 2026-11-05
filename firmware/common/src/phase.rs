@@ -57,7 +57,7 @@ pub fn boot_phase(cause: ResetCause) -> LoopPhase {
         2 => LoopPhase::DrainLink,
         3 => LoopPhase::Command,
         4 => LoopPhase::Pump,
-        5 => LoopPhase::SpiTransfer,
+        5 => LoopPhase::RadioLink,
         _ => LoopPhase::Unknown,
     }
 }

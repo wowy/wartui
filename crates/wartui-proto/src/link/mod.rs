@@ -21,14 +21,15 @@
 
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
+use crate::radio_link::update::OP_MAX;
 use crate::reset::ResetCause;
-use crate::spi::update::OP_MAX;
 use heapless::{String, Vec};
 use serde::Serialize;
 
 mod bytes;
 mod frame;
 
+pub(crate) use frame::CobsStream;
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
 };
@@ -89,7 +90,7 @@ pub const GPS_WRITE_MAX: usize = 256;
 /// Bytes the host composed for the GPS receiver, in transit to the bridge.
 pub type GpsWriteBytes = Vec<u8, GPS_WRITE_MAX>;
 
-/// One encoded [`crate::spi::update::Op`] for a P4 bridge's own image, in transit to it.
+/// One encoded [`crate::radio_link::update::Op`] for a P4 bridge's own image, in transit to it.
 pub type UpdateOp = Vec<u8, OP_MAX>;
 
 /// The most bytes one [`BridgeToHost::Update`] carries: an encoded `Op::Status`, with room
@@ -122,7 +123,7 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs on the control channel.
     Esp32C6,
-    /// No radio of its own: it bridges through an ESP32-C6 over SPI.
+    /// No radio of its own: it bridges through an ESP32-C6 over UART.
     Esp32P4,
 }
 
@@ -130,8 +131,8 @@ pub enum Chip {
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],
 /// because the interesting resets are the ones nobody was watching. It is only a hint. Each
-/// chip's futures share one task and one marker, and the SPI link's marks it on every
-/// transfer, so it says what ran last, not what stopped the chip. A future parked on an
+/// chip's futures share one task and one marker, and the UART link's marks it on every
+/// packet, so it says what ran last, not what stopped the chip. A future parked on an
 /// `await` leaves the others running, so only a call that never yields holds the marker
 /// where it hung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -146,8 +147,8 @@ pub enum LoopPhase {
     Command,
     /// Writing queued frames to the USB endpoint.
     Pump,
-    /// Waiting on a transfer over the P4–C6 SPI link.
-    SpiTransfer,
+    /// Reading or writing a packet over the P4–C6 UART link.
+    RadioLink,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -240,7 +241,7 @@ pub enum HostToBridge {
         bytes: GpsWriteBytes,
     },
     /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit` or
-    /// `Install` in the [`crate::spi::update`] layout, which the P4 answers with a
+    /// `Install` in the [`crate::radio_link::update`] layout, which the P4 answers with a
     /// [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
     /// serves both links. A bridge that takes no update answers with an
     /// [`BridgeToHost::Error`].
@@ -336,8 +337,8 @@ pub enum BridgeToHost {
         /// Fill level of each bounded queue the firmware has. Empty for a bridge with
         /// none to report.
         queues: QueueStats,
-        /// The P4–C6 SPI link's error counters. `None` for a bridge without one.
-        spi: Option<SpiStats>,
+        /// The P4–C6 UART link's counters. `None` for a bridge without one.
+        radio_link: Option<RadioLinkStats>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -362,7 +363,7 @@ pub enum BridgeToHost {
         bytes: GpsBytes,
     },
     /// Where an update to the bridge's own image stands: an `Op::Status` in the
-    /// [`crate::spi::update`] layout, answering a [`HostToBridge::Update`].
+    /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::Update`].
     Update(#[serde(with = "bytes")] UpdateStatus),
 }
 
@@ -373,7 +374,7 @@ pub enum QueueId {
     RadioUp,
     /// A bridge radio's pool of send payloads waiting for the radio. Counts entries.
     RadioSendJobs,
-    /// The P4's queue of records waiting for a transfer to the C6. Counts bytes.
+    /// The P4's queue of records waiting for a packet to the C6. Counts bytes.
     RadioDown,
     /// The P4's priority ring toward the host. Counts bytes.
     HostPriority,
@@ -424,6 +425,24 @@ impl QueueId {
         }
     }
 
+    /// Whether this queue lives on the P4, whose counts run on through a C6 restart. The rest are
+    /// the C6's and restart with it.
+    pub fn on_p4(self) -> bool {
+        match self {
+            Self::RadioDown | Self::HostPriority | Self::HostBulk => true,
+            Self::RadioUp | Self::RadioSendJobs | Self::RadioUpPriority | Self::RadioJobs => false,
+        }
+    }
+
+    /// Whether this queue's drops are summed into [`BridgeToHost::Status`]'s `dropped_tx`: the
+    /// queues a frame bound for the host passes through.
+    pub fn in_dropped_tx(self) -> bool {
+        match self {
+            Self::RadioUp | Self::RadioUpPriority | Self::HostPriority | Self::HostBulk => true,
+            Self::RadioSendJobs | Self::RadioDown | Self::RadioJobs => false,
+        }
+    }
+
     /// The queue [`QueueId::name`] gives `name`, or `None` for a name it never gives.
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|id| id.name() == name)
@@ -446,7 +465,7 @@ pub struct QueueStat {
 /// The queues a [`BridgeToHost::Status`] reports; room for every [`QueueId`] with spare.
 pub type QueueStats = Vec<QueueStat, 8>;
 
-/// The ESP32-C6 behind a split bridge, as it described itself over SPI.
+/// The ESP32-C6 behind a split bridge, as it described itself over UART.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RadioInfo {
     /// The radio chip.
@@ -463,25 +482,25 @@ pub struct RadioInfo {
     pub uptime_ms: u32,
 }
 
-/// Error counters of the P4–C6 SPI link, since boot.
+/// Counters of the P4–C6 UART link, since boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct SpiStats {
-    /// Transfers completed.
-    pub transfers: u32,
-    /// C6→P4 transfers whose CRC failed.
+pub struct RadioLinkStats {
+    /// Verified C6→P4 packets.
+    pub packets: u32,
+    /// C6→P4 packets whose CRC failed.
     pub crc_fail: u32,
-    /// C6→P4 transfers with the wrong magic.
+    /// C6→P4 packets with the wrong magic.
     pub bad_magic: u32,
-    /// C6→P4 transfers whose sequence number skipped.
+    /// C6→P4 packets whose sequence number skipped.
     pub seq_gap: u32,
-    /// Waits for the C6's READY line that timed out after it first armed.
-    pub ready_timeouts: u32,
-    /// Of `ready_timeouts`, those whose transfer went ahead anyway.
-    pub ready_recovered: u32,
-    /// P4→C6 transfers the C6 saw fail their CRC, from its `RadioStatus`.
+    /// Line errors on the P4's UART: framing, parity, glitch or FIFO overflow.
+    pub uart_errors: u32,
+    /// P4→C6 packets the C6 saw fail their CRC, from its `RadioStatus`.
     pub radio_crc_fail: u32,
-    /// P4→C6 transfers the C6 saw with the wrong magic.
+    /// P4→C6 packets the C6 saw with the wrong magic.
     pub radio_bad_magic: u32,
-    /// P4→C6 transfers the C6 saw skip a sequence number.
+    /// P4→C6 packets the C6 saw skip a sequence number.
     pub radio_seq_gap: u32,
+    /// Line errors on the C6's UART, from its `RadioStatus`.
+    pub radio_uart_errors: u32,
 }
