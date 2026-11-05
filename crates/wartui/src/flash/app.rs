@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 use wartui_proto::air::{Board, Version};
 
 use super::{
-    CHIP_ID_AT, Chip, HEADER_LEN, IMAGE_MAGIC, NODE_APP, RELEASE_TAG, Source, feature_args, fetch,
-    read, source,
+    CHIP_ID_AT, Chip, HEADER_LEN, IMAGE_MAGIC, Local, NODE_APP, NODE_APP_ASSET, RELEASE_TAG,
+    Source, fetch, local_source, read,
 };
 
 /// The largest image an app slot holds: `ota_0` and `ota_1` in `firmware/node/partitions.csv`.
@@ -79,14 +79,7 @@ const fn project_name(board: Board) -> Option<&'static str> {
     }
 }
 
-/// The node firmware's features for each board, as a release builds them.
-const fn features(board: Board) -> Option<&'static [&'static str]> {
-    match board {
-        Board::Esp32c5 => Some(&["esp32c5"]),
-        Board::Esp32c6 | Board::Esp32p4 | Board::Unknown(_) => None,
-    }
-}
-
+/// The chip a node on `board` runs on, or `None` for a board no node firmware is built for.
 const fn chip(board: Board) -> Option<Chip> {
     match board {
         Board::Esp32c5 => Some(Chip::Esp32c5),
@@ -97,7 +90,7 @@ const fn chip(board: Board) -> Option<Chip> {
 /// Whether any node image is built for `board`.
 #[must_use]
 pub const fn has_node_image(board: Board) -> bool {
-    features(board).is_some()
+    chip(board).is_some()
 }
 
 /// A board as an operator reads it.
@@ -227,10 +220,17 @@ pub fn load(path: &Path) -> Result<AppImage> {
 /// # Errors
 /// For a board no node firmware is built for.
 pub fn source_for(board: Board, firmware_dir: Option<&Path>) -> Result<Source> {
-    let Some(features) = features(board) else {
-        bail!("no node firmware is built for {}", board_name(board));
-    };
-    source(&NODE_APP, None, firmware_dir, features, RELEASE_TAG)
+    ensure!(has_node_image(board), "no node firmware is built for {}", board_name(board));
+    Ok(source(firmware_dir, RELEASE_TAG))
+}
+
+/// A build of `firmware_dir` or the checkout, else [`NODE_APP_ASSET`] from the release tagged
+/// `tag`.
+fn source(firmware_dir: Option<&Path>, tag: Option<&str>) -> Source {
+    match local_source(&NODE_APP, None, firmware_dir, tag) {
+        Local::Chosen(found) => found,
+        Local::Release(tag) => Source::Release { tag: tag.to_owned(), asset: NODE_APP_ASSET },
+    }
 }
 
 /// Build or fetch `board`'s image from `source`, and check it is that board's.
@@ -238,10 +238,10 @@ pub fn source_for(board: Board, firmware_dir: Option<&Path>) -> Result<Source> {
 /// # Errors
 /// When the build or download fails, or the image is not `board`'s.
 pub fn obtain(board: Board, source: &Source) -> Result<AppImage> {
-    let (Some(features), Some(chip)) = (features(board), chip(board)) else {
+    let Some(chip) = chip(board) else {
         bail!("no node firmware is built for {}", board_name(board));
     };
-    let image = load(&fetch(&NODE_APP.firmware, source, chip, &feature_args(features))?)?;
+    let image = load(&fetch(&NODE_APP, source, chip)?)?;
     ensure!(
         image.board == board,
         "the image built for {} says it is for {}",
@@ -420,11 +420,23 @@ mod tests {
     }
 
     #[test]
-    fn app_image_names_release_asset_when_board_is_known() {
-        let features = features(Board::Esp32c5).unwrap();
-        let found = source(&NODE_APP, None, None, features, Some("v1"));
+    fn app_image_fetches_release_asset_when_built_for_a_release() {
+        // The name `release.yml` publishes the node's app-only image under.
         let asset = "wartui-node-app-esp32c5.bin";
-        assert_eq!(found.unwrap(), Source::Release { tag: "v1".to_owned(), asset });
+        assert_eq!(source(None, Some("v1")), Source::Release { tag: "v1".to_owned(), asset });
+    }
+
+    #[test]
+    fn app_image_chooses_source_when_given_firmware_dir_or_none() {
+        let dir = Path::new("fw");
+        assert_eq!(source(Some(dir), Some("v1")), Source::Build(dir.to_owned()));
+        let Source::Build(checkout) = source(None, None) else { panic!("not a build") };
+        assert!(checkout.ends_with("firmware/node"), "{}", checkout.display());
+    }
+
+    #[test]
+    fn app_image_refuses_source_when_no_node_firmware_is_built_for_board() {
+        assert!(source_for(Board::Esp32c5, None).is_ok());
         assert!(source_for(Board::Unknown(7), None).is_err());
         assert!(source_for(Board::Esp32c6, None).is_err());
     }

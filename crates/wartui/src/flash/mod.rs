@@ -8,8 +8,8 @@
 //! match is left alone: what cannot be identified is never flashed.
 //!
 //! **The image is checked before any board is touched.** `write-bin` writes whatever bytes it is
-//! handed, so the chip ID in the bootloader's image header is compared with the chip the features
-//! name, and the image is fetched or built before the first reset. A merged image holds flash from
+//! handed, so the chip ID in the bootloader's image header is compared with the chip being
+//! flashed, and the image is fetched or built before the first reset. A merged image holds flash from
 //! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5 or a
 //! P4, with erased flash (`0xFF`) ahead of it. An app-only image starts with its own header. A
 //! node's and a P4 bridge's images are made with their `partitions.csv`.
@@ -88,36 +88,23 @@ struct Firmware {
     merged: bool,
 }
 
-/// A firmware whose `--features` name its chip, and whose release publishes an image per
-/// feature set: a node's.
-#[derive(Debug)]
-struct Featured {
-    firmware: Firmware,
-    /// The chips it runs on.
-    chips: &'static [Chip],
-    /// The feature sets a release publishes an image for, and the asset each is published as.
-    /// Each is built with the firmware's default features. Must match `release.yml`.
-    variants: &'static [(&'static [&'static str], &'static str)],
-}
-
-const NODE: Featured = Featured {
-    firmware: Firmware {
-        dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/node"),
-        elf: "target/riscv32imac-unknown-none-elf/release/wartui-node-fw",
-        what: "node",
-        partition_table: "partitions.csv",
-        merged: true,
-    },
-    chips: &[Chip::Esp32c5],
-    variants: &[(&["esp32c5"], "wartui-node-fw-esp32c5.bin")],
+/// The node firmware's merged images, which `flash-fleet` writes.
+const NODE: Firmware = Firmware {
+    dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/node"),
+    elf: "target/riscv32imac-unknown-none-elf/release/wartui-node-fw",
+    what: "node",
+    partition_table: "partitions.csv",
+    merged: true,
 };
+
+/// The release asset of the node's merged image. Must match `release.yml`.
+const NODE_ASSET: &str = "wartui-node-fw-esp32c5.bin";
 
 /// The node firmware's app-only images, which an over-the-air update carries.
-const NODE_APP: Featured = Featured {
-    firmware: Firmware { merged: false, ..NODE.firmware },
-    variants: &[(&["esp32c5"], "wartui-node-app-esp32c5.bin")],
-    ..NODE
-};
+const NODE_APP: Firmware = Firmware { merged: false, ..NODE };
+
+/// The release asset of the node's app-only image. Must match `release.yml`.
+const NODE_APP_ASSET: &str = "wartui-node-app-esp32c5.bin";
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
     mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
@@ -132,9 +119,6 @@ enum Chip {
 }
 
 impl Chip {
-    /// The chips `--features` can name, so a wrong one is refused by name.
-    const FEATURED: [Self; 2] = [Self::Esp32c5, Self::Esp32c6];
-
     /// Every chip an image header here may name.
     const ALL: [Self; 3] = [Self::Esp32c5, Self::Esp32c6, Self::Esp32p4];
 
@@ -162,30 +146,6 @@ impl Chip {
         match self {
             Self::Esp32c5 | Self::Esp32p4 => 0x2000,
             Self::Esp32c6 => 0x0,
-        }
-    }
-}
-
-/// `--features` as a list, split the way cargo splits it.
-fn features(list: &str) -> Vec<&str> {
-    list.split([',', ' ']).map(str::trim).filter(|f| !f.is_empty()).collect()
-}
-
-/// The one chip the features name, as each firmware's build demands, if the firmware
-/// runs on it.
-fn chip_of(firmware: &Featured, features: &[&str]) -> Result<Chip> {
-    let named: Vec<Chip> =
-        Chip::FEATURED.into_iter().filter(|chip| features.contains(&chip.name())).collect();
-    let runs_on = || firmware.chips.iter().map(|chip| chip.name()).collect::<Vec<_>>().join(" or ");
-    match named.as_slice() {
-        [chip] if firmware.chips.contains(chip) => Ok(*chip),
-        [chip] => {
-            bail!("a {} runs on {}, not {}", firmware.firmware.what, runs_on(), chip.name())
-        }
-        [] => bail!("--features names no chip; add {}", runs_on()),
-        _ => {
-            let what = firmware.firmware.what;
-            bail!("--features names both esp32c5 and esp32c6; a {what} is built for one")
         }
     }
 }
@@ -442,75 +402,20 @@ fn local_source<'t>(
     }
 }
 
-/// Choose a node image's source: [`local_source`], else the asset this binary's release publishes
-/// for these features.
-fn source(
-    firmware: &Featured,
-    image: Option<&Path>,
-    firmware_dir: Option<&Path>,
-    features: &[&str],
-    tag: Option<&str>,
-) -> Result<Source> {
-    let tag = match local_source(&firmware.firmware, image, firmware_dir, tag) {
-        Local::Chosen(found) => return Ok(found),
-        Local::Release(tag) => tag,
-    };
-    let Some(asset) = release_asset(firmware, features) else {
-        bail!(
-            "release {tag} publishes no {} image for --features {}; build one with \
-             --firmware-dir, or name one with --image",
-            firmware.firmware.what,
-            features.join(","),
-        );
-    };
-    Ok(Source::Release { tag: tag.to_owned(), asset })
-}
-
-/// The release asset built with exactly these features, in any order.
-fn release_asset(firmware: &Featured, features: &[&str]) -> Option<&'static str> {
-    let mut wanted = features.to_vec();
-    wanted.sort_unstable();
-    wanted.dedup();
-    firmware.variants.iter().find_map(|(set, asset)| {
-        let mut set = set.to_vec();
-        set.sort_unstable();
-        (set == wanted).then_some(*asset)
-    })
-}
-
 /// Get the image onto disk and check it is for `chip`, merged or app-only as `firmware` makes
-/// it. A build takes the firmware's default features.
+/// it.
 fn obtain(firmware: &Firmware, source: &Source, chip: Chip) -> Result<PathBuf> {
-    obtain_with(firmware, source, chip, &[])
-}
-
-/// [`obtain`], with a build adding `cargo` to `cargo build --release`.
-fn obtain_with(
-    firmware: &Firmware,
-    source: &Source,
-    chip: Chip,
-    cargo: &[String],
-) -> Result<PathBuf> {
-    let path = fetch(firmware, source, chip, cargo)?;
+    let path = fetch(firmware, source, chip)?;
     check_image(&read(&path)?, chip, firmware.merged)
         .with_context(|| format!("checking {}", path.display()))?;
     Ok(path)
 }
 
-/// What a node build adds to `cargo build --release` for `--features`.
-fn feature_args(features: &[&str]) -> Vec<String> {
-    if features.is_empty() {
-        return Vec::new();
-    }
-    vec!["--features".to_owned(), features.join(",")]
-}
-
-/// Get the image onto disk: named, built or downloaded. A build adds `cargo` to
-/// `cargo build --release`.
-fn fetch(firmware: &Firmware, source: &Source, chip: Chip, cargo: &[String]) -> Result<PathBuf> {
+/// Get the image onto disk: named, built or downloaded.
+fn fetch(firmware: &Firmware, source: &Source, chip: Chip) -> Result<PathBuf> {
     match source {
         Source::File(path) => Ok(path.clone()),
-        Source::Build(dir) => build_image(firmware, dir, chip, cargo),
+        Source::Build(dir) => build_image(firmware, dir, chip),
         Source::Release { tag, asset } => {
             let cache =
                 state_dir().unwrap_or_else(|| std::env::temp_dir().join("wartui")).join("images");
@@ -574,12 +479,11 @@ fn check_image(image: &[u8], chip: Chip, merged: bool) -> Result<()> {
     Ok(())
 }
 
-/// Build the firmware in `dir`, adding `args` to `cargo build --release`, and save its image
-/// beside the ELF: merged, or the app alone as `<elf>.app.bin`. Each build of other features
-/// writes over the last, so a caller reads the image before the next.
-fn build_image(firmware: &Firmware, dir: &Path, chip: Chip, args: &[String]) -> Result<PathBuf> {
+/// Build the firmware in `dir` with `cargo build --release`, and save its image beside the ELF:
+/// merged, or the app alone as `<elf>.app.bin`.
+fn build_image(firmware: &Firmware, dir: &Path, chip: Chip) -> Result<PathBuf> {
     let mut cargo = Command::new("cargo");
-    cargo.current_dir(dir).args(["build", "--release"]).args(args);
+    cargo.current_dir(dir).args(["build", "--release"]);
     // The firmware directory's `rust-toolchain.toml` and `.cargo/config.toml` decide the
     // toolchain and the target, and these would override them — the first is set by rustup for
     // anything run under `cargo run`, and the second moves the ELF from where it is looked for.
@@ -816,25 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_refuses_features_when_no_chip_or_both_chips_are_named() {
-        assert!(chip_of(&NODE, &features("extra")).is_err());
-        assert!(chip_of(&NODE, &features("")).is_err());
-        let error = chip_of(&NODE, &features("esp32c5,esp32c6")).unwrap_err().to_string();
-        assert!(error.contains("a node is built for one"), "{error}");
-    }
-
-    #[test]
-    fn flash_refuses_chip_when_firmware_does_not_run_on_it() {
-        let error = chip_of(&NODE, &features("esp32c6")).unwrap_err().to_string();
-        assert_eq!(error, "a node runs on esp32c5, not esp32c6");
-    }
-
-    #[test]
-    fn flash_resolves_chip_when_features_carry_extras() {
-        assert_eq!(chip_of(&NODE, &features(" esp32c5 , extra")).unwrap(), Chip::Esp32c5);
-    }
-
-    #[test]
     fn flash_parses_board_info_when_given_espflash_transcript() {
         let info = parse_board_info(BOARD_INFO).unwrap();
         let flash_bytes = Some(8 << 20);
@@ -914,7 +799,7 @@ mod tests {
     #[test]
     fn flash_erases_otadata_when_node_is_flashed() {
         // The partition table's `otadata` row, which these must match.
-        let dir = Path::new(NODE.firmware.dir);
+        let dir = Path::new(NODE.dir);
         let table = std::fs::read_to_string(dir.join("partitions.csv")).unwrap();
         let row = table.lines().find(|line| line.starts_with("otadata")).unwrap();
         let cells: Vec<&str> = row.split(',').map(str::trim).collect();
@@ -1005,14 +890,11 @@ mod tests {
         assert_eq!(normalize(Path::new("./fw/./node/")), Path::new("fw/node"));
         assert_eq!(normalize(Path::new("../fw/x/..")), Path::new("../fw"));
         assert_eq!(normalize(Path::new("/../fw")), Path::new("/fw"));
-        let dir = source(&NODE, None, Some(Path::new("/x/y/../fw")), &["esp32c5"], None).unwrap();
+        let Local::Chosen(dir) = local_source(&NODE, None, Some(Path::new("/x/y/../fw")), None)
+        else {
+            panic!("not chosen")
+        };
         assert_eq!(dir, Source::Build("/x/fw".into()));
-    }
-
-    #[test]
-    fn flash_adds_feature_args_when_building_a_node() {
-        assert_eq!(feature_args(&["esp32c5", "extra"]), ["--features", "esp32c5,extra"]);
-        assert!(feature_args(&[]).is_empty());
     }
 
     #[test]
