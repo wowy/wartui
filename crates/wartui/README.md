@@ -412,7 +412,6 @@ wartui flash-fleet --skip 10:BD:A3:EC:44:C0
 | Flag                    | Default        | What it is                                                                 |
 |-------------------------|----------------|----------------------------------------------------------------------------|
 | `--features LIST`       | `esp32c5`      | The node firmware's features, which must name `esp32c5`                    |
-| `--no-default-features` | off            | Build without the firmware's default features                              |
 | `--skip MAC`            | —              | Leave this board alone; repeatable                                         |
 | `--image BIN`           | —              | Flash this merged image rather than building or fetching one               |
 | `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here                                |

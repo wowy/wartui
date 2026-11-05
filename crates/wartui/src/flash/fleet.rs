@@ -45,10 +45,6 @@ pub struct Args {
     #[arg(long, value_name = "LIST", default_value = "esp32c5")]
     pub features: String,
 
-    /// Build without the firmware's default features.
-    #[arg(long)]
-    pub no_default_features: bool,
-
     /// Leave this board alone. Repeatable.
     #[arg(long = "skip", value_name = "MAC", value_parser = mac_arg)]
     pub skip: Vec<Mac>,
@@ -77,14 +73,8 @@ pub fn run(args: Args) -> Result<()> {
     let features = features(&args.features);
     let chip = chip_of(&NODE, &features)?;
     espflash_present()?;
-    let source = source(
-        &NODE,
-        args.image.as_deref(),
-        args.firmware_dir.as_deref(),
-        &features,
-        args.no_default_features,
-        RELEASE_TAG,
-    )?;
+    let source =
+        source(&NODE, args.image.as_deref(), args.firmware_dir.as_deref(), &features, RELEASE_TAG)?;
     println!("image  {}", source.describe(args.dry_run));
 
     let image = if args.dry_run {
@@ -95,7 +85,7 @@ pub fn run(args: Args) -> Result<()> {
         }
         None
     } else {
-        let cargo = feature_args(&features, args.no_default_features);
+        let cargo = feature_args(&features);
         Some(obtain_with(&NODE.firmware, &source, chip, &cargo)?)
     };
 
@@ -337,7 +327,7 @@ mod tests {
 
     #[test]
     fn flash_fleet_refuses_release_asset_when_features_are_outside_table() {
-        assert_eq!(release_asset(&NODE, &["esp32c5", "log"]), None);
+        assert_eq!(release_asset(&NODE, &["esp32c5", "extra"]), None);
         assert_eq!(release_asset(&NODE, &["esp32c6"]), None);
         assert_eq!(release_asset(&NODE, &["esp32c5", "esp32c6"]), None);
     }
@@ -347,23 +337,22 @@ mod tests {
         let image = Path::new("fw.bin");
         let dir = Path::new("fw");
         let c5 = ["esp32c5"];
-        let found = source(&NODE, Some(image), None, &c5, false, Some("v1")).unwrap();
+        let found = source(&NODE, Some(image), None, &c5, Some("v1")).unwrap();
         assert_eq!(found, Source::File(image.to_owned()));
-        let found = source(&NODE, None, Some(dir), &c5, false, Some("v1")).unwrap();
+        let found = source(&NODE, None, Some(dir), &c5, Some("v1")).unwrap();
         assert_eq!(found, Source::Build(dir.to_owned()));
-        let found = source(&NODE, None, None, &c5, false, None).unwrap();
+        let found = source(&NODE, None, None, &c5, None).unwrap();
         assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
-        let found = source(&NODE, None, None, &c5, false, Some("")).unwrap();
+        let found = source(&NODE, None, None, &c5, Some("")).unwrap();
         assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
-        let found = source(&NODE, None, None, &c5, false, Some("v1")).unwrap();
+        let found = source(&NODE, None, None, &c5, Some("v1")).unwrap();
         let asset = "wartui-node-fw-esp32c5.bin";
         assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });
     }
 
     #[test]
     fn flash_fleet_shows_default_firmware_dir_without_parent_segments_when_building() {
-        let Source::Build(dir) = source(&NODE, None, None, &["esp32c5"], false, None).unwrap()
-        else {
+        let Source::Build(dir) = source(&NODE, None, None, &["esp32c5"], None).unwrap() else {
             panic!("not a build")
         };
         assert!(dir.ends_with("firmware/node"), "{}", dir.display());
@@ -375,9 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn flash_fleet_refuses_release_source_when_default_features_are_off() {
+    fn flash_fleet_refuses_release_source_when_features_are_outside_table() {
         let error =
-            source(&NODE, None, None, &["esp32c5"], true, Some("v1")).unwrap_err().to_string();
+            source(&NODE, None, None, &["esp32c5", "extra"], Some("v1")).unwrap_err().to_string();
         assert!(error.contains("--firmware-dir") && error.contains("--image"), "{error}");
     }
 

@@ -449,21 +449,18 @@ fn source(
     image: Option<&Path>,
     firmware_dir: Option<&Path>,
     features: &[&str],
-    no_default_features: bool,
     tag: Option<&str>,
 ) -> Result<Source> {
     let tag = match local_source(&firmware.firmware, image, firmware_dir, tag) {
         Local::Chosen(found) => return Ok(found),
         Local::Release(tag) => tag,
     };
-    let asset = release_asset(firmware, features).filter(|_| !no_default_features);
-    let Some(asset) = asset else {
+    let Some(asset) = release_asset(firmware, features) else {
         bail!(
-            "release {tag} publishes no {} image for --features {}{}; build one with \
+            "release {tag} publishes no {} image for --features {}; build one with \
              --firmware-dir, or name one with --image",
             firmware.firmware.what,
             features.join(","),
-            if no_default_features { " --no-default-features" } else { "" },
         );
     };
     Ok(Source::Release { tag: tag.to_owned(), asset })
@@ -500,17 +497,12 @@ fn obtain_with(
     Ok(path)
 }
 
-/// What a node build adds to `cargo build --release` for `--features` and
-/// `--no-default-features`.
-fn feature_args(features: &[&str], no_default_features: bool) -> Vec<String> {
-    let mut args = Vec::new();
-    if !features.is_empty() {
-        args.extend(["--features".to_owned(), features.join(",")]);
+/// What a node build adds to `cargo build --release` for `--features`.
+fn feature_args(features: &[&str]) -> Vec<String> {
+    if features.is_empty() {
+        return Vec::new();
     }
-    if no_default_features {
-        args.push("--no-default-features".to_owned());
-    }
-    args
+    vec!["--features".to_owned(), features.join(",")]
 }
 
 /// Get the image onto disk: named, built or downloaded. A build adds `cargo` to
@@ -825,7 +817,7 @@ mod tests {
 
     #[test]
     fn flash_refuses_features_when_no_chip_or_both_chips_are_named() {
-        assert!(chip_of(&NODE, &features("log")).is_err());
+        assert!(chip_of(&NODE, &features("extra")).is_err());
         assert!(chip_of(&NODE, &features("")).is_err());
         let error = chip_of(&NODE, &features("esp32c5,esp32c6")).unwrap_err().to_string();
         assert!(error.contains("a node is built for one"), "{error}");
@@ -839,7 +831,7 @@ mod tests {
 
     #[test]
     fn flash_resolves_chip_when_features_carry_extras() {
-        assert_eq!(chip_of(&NODE, &features(" esp32c5 , log")).unwrap(), Chip::Esp32c5);
+        assert_eq!(chip_of(&NODE, &features(" esp32c5 , extra")).unwrap(), Chip::Esp32c5);
     }
 
     #[test]
@@ -1013,16 +1005,14 @@ mod tests {
         assert_eq!(normalize(Path::new("./fw/./node/")), Path::new("fw/node"));
         assert_eq!(normalize(Path::new("../fw/x/..")), Path::new("../fw"));
         assert_eq!(normalize(Path::new("/../fw")), Path::new("/fw"));
-        let dir =
-            source(&NODE, None, Some(Path::new("/x/y/../fw")), &["esp32c5"], false, None).unwrap();
+        let dir = source(&NODE, None, Some(Path::new("/x/y/../fw")), &["esp32c5"], None).unwrap();
         assert_eq!(dir, Source::Build("/x/fw".into()));
     }
 
     #[test]
     fn flash_adds_feature_args_when_building_a_node() {
-        let args = feature_args(&["esp32c5", "log"], true);
-        assert_eq!(args, ["--features", "esp32c5,log", "--no-default-features"]);
-        assert!(feature_args(&[], false).is_empty());
+        assert_eq!(feature_args(&["esp32c5", "extra"]), ["--features", "esp32c5,extra"]);
+        assert!(feature_args(&[]).is_empty());
     }
 
     #[test]
