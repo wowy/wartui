@@ -14,6 +14,9 @@
 //!   slots are still probed on time, since a node not yet present may be the one asserting.
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
+//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record and no `MORE` mean
+//!   the line is asserted by nothing this bus can serve, such as a node that never becomes
+//!   present. The bus counts it and runs the schedule below until IRQ is seen deasserted.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic.
@@ -64,6 +67,10 @@ const ABSENT_AFTER: u8 = 5;
 const SLOT_GAP: Duration = Duration::from_millis(1);
 /// The most transfers to one slot in a row while it says [`MORE`](wartui_proto::bus::MORE).
 const MORE_MAX: usize = 8;
+/// IRQ passes in a row with no record and no `MORE` before the line counts as stuck. Two,
+/// because the first pass after a node queues a record clocks the transfer it armed before,
+/// which is empty.
+const EMPTY_PASSES: u8 = 2;
 /// How often each present slot's counters go to the host.
 const REPORT_EVERY: Duration = Duration::from_millis(5_000);
 
@@ -123,6 +130,12 @@ pub fn build(
         slots: SLOTS_A.take(),
         last_end: None,
         irq_since: None,
+        empty_passes: 0,
+        irq_stuck: false,
+        stuck: 0,
+        irq_us_sum: 0,
+        irq_us_max: 0,
+        irq_n: 0,
     });
 
     let miso_b = pulled_up(b.miso);
@@ -146,6 +159,12 @@ pub fn build(
         slots: SLOTS_B.take(),
         last_end: None,
         irq_since: None,
+        empty_passes: 0,
+        irq_stuck: false,
+        stuck: 0,
+        irq_us_sum: 0,
+        irq_us_max: 0,
+        irq_n: 0,
     });
     (master_a, master_b)
 }
@@ -177,10 +196,6 @@ struct Slot {
     gaps: u32,
     retries: u32,
     records: u32,
-    /// From IRQ asserted to the start of the transfer that carried a record.
-    irq_us_sum: u64,
-    irq_us_max: u64,
-    irq_n: u32,
 }
 
 impl Slot {
@@ -201,9 +216,6 @@ impl Slot {
             gaps: 0,
             retries: 0,
             records: 0,
-            irq_us_sum: 0,
-            irq_us_max: 0,
-            irq_n: 0,
         }
     }
 
@@ -224,8 +236,9 @@ impl Slot {
 
 /// What one transfer found.
 enum Outcome {
-    /// A good transfer, and whether it says [`MORE`](wartui_proto::bus::MORE).
-    Good { more: bool },
+    /// A good transfer, whether it says [`MORE`](wartui_proto::bus::MORE), and whether it
+    /// carried a record.
+    Good { more: bool, records: bool },
     /// Nothing there: the magic failed.
     Empty,
     /// Something there, but corrupted, or not this build's.
@@ -247,8 +260,18 @@ pub struct Master {
     slots: &'static mut [Slot; SLOTS],
     /// When the last transfer on this bus ended.
     last_end: Option<Instant>,
-    /// When IRQ was first seen asserted, until it is seen deasserted.
+    /// When IRQ was first seen asserted, until it is seen deasserted or a record arrives.
     irq_since: Option<Instant>,
+    /// IRQ passes in a row that brought nothing.
+    empty_passes: u8,
+    /// Whether IRQ is stuck, until it is seen deasserted.
+    irq_stuck: bool,
+    /// Times IRQ was found stuck.
+    stuck: u32,
+    /// From IRQ first seen asserted to the start of the transfer that carried a record.
+    irq_us_sum: u64,
+    irq_us_max: u64,
+    irq_n: u32,
 }
 
 /// Run one bus forever.
@@ -263,26 +286,40 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
         let asserted = master.irq.is_high() == IRQ_ACTIVE_HIGH;
         if !asserted {
             master.irq_since = None;
+            master.empty_passes = 0;
+            master.irq_stuck = false;
         }
-        if any_present && asserted {
-            let since = *master.irq_since.get_or_insert_with(Instant::now);
+        if any_present && asserted && !master.irq_stuck {
+            master.irq_since.get_or_insert_with(Instant::now);
+            let mut brought = false;
             for k in 0..SLOTS {
                 let i = (rr + k) % SLOTS;
                 if !master.slots[i].present {
                     continue;
                 }
                 for _ in 0..MORE_MAX {
-                    let outcome = master.exchange(i, Some(since), shared).await;
-                    if !matches!(outcome, Outcome::Good { more: true }) {
+                    let outcome = master.exchange(i, true, shared).await;
+                    let Outcome::Good { more, records } = outcome else { break };
+                    brought |= more || records;
+                    if !more {
                         break;
                     }
                 }
             }
             rr = (rr + 1) % SLOTS;
+            if brought {
+                master.empty_passes = 0;
+            } else {
+                master.empty_passes = master.empty_passes.saturating_add(1);
+                if master.empty_passes >= EMPTY_PASSES {
+                    master.irq_stuck = true;
+                    master.stuck = master.stuck.wrapping_add(1);
+                }
+            }
             let now = Instant::now();
             for i in 0..SLOTS {
                 if !master.slots[i].present && master.slots[i].due(now) {
-                    master.exchange(i, None, shared).await;
+                    master.exchange(i, false, shared).await;
                 }
             }
         } else {
@@ -293,9 +330,12 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
                 .min()
                 .unwrap_or(next_report)
                 .min(next_report);
-            // With IRQ already asserted and nobody present, only the timer can wake this.
+            // With IRQ already asserted and nobody present, only the timer can wake this. Stuck,
+            // it waits for the deassert instead.
             if any_present {
-                let level = if IRQ_ACTIVE_HIGH { Event::HighLevel } else { Event::LowLevel };
+                // Asserted, or deasserted when stuck.
+                let high = IRQ_ACTIVE_HIGH != master.irq_stuck;
+                let level = if high { Event::HighLevel } else { Event::LowLevel };
                 if let Either::First(()) = select(master.irq.wait_for(level), Timer::at(due)).await
                 {
                     continue;
@@ -306,7 +346,7 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
             let now = Instant::now();
             for i in 0..SLOTS {
                 if master.slots[i].due(now) {
-                    master.exchange(i, None, shared).await;
+                    master.exchange(i, false, shared).await;
                 }
             }
         }
@@ -320,9 +360,8 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
 
 impl Master {
     /// One transfer with slot `i` after its gap, counted, and retried once after the gap when
-    /// a present slot fails the magic. `irq_since` is when IRQ was first seen asserted, if
-    /// this transfer answers it.
-    async fn exchange(&mut self, i: usize, irq_since: Option<Instant>, shared: &Shared) -> Outcome {
+    /// a present slot fails the magic. `answers_irq` is whether it is part of an IRQ pass.
+    async fn exchange(&mut self, i: usize, answers_irq: bool, shared: &Shared) -> Outcome {
         let mut retried = false;
         loop {
             if let Some(end) = self.slots[i].last_end {
@@ -353,7 +392,7 @@ impl Master {
             self.slots[i].last_start = Some(start);
             self.slots[i].last_end = Some(end);
             let outcome = if clocked {
-                self.count(i, rx_bytes(&wire.rx), start, irq_since, shared)
+                self.count(i, rx_bytes(&wire.rx), start, answers_irq, shared)
             } else {
                 Outcome::Bad
             };
@@ -373,7 +412,7 @@ impl Master {
         i: usize,
         buf: &[u8; TRANSFER_LEN],
         start: Instant,
-        irq_since: Option<Instant>,
+        answers_irq: bool,
         shared: &Shared,
     ) -> Outcome {
         let slot = &mut self.slots[i];
@@ -391,55 +430,76 @@ impl Master {
                     .count();
                 slot.records = slot.records.wrapping_add(records as u32);
                 if records > 0
-                    && let Some(since) = irq_since
+                    && answers_irq
+                    && let Some(since) = self.irq_since.take()
                 {
                     let us = start.saturating_duration_since(since).as_micros();
-                    slot.irq_us_sum = slot.irq_us_sum.saturating_add(us);
-                    slot.irq_us_max = slot.irq_us_max.max(us);
-                    slot.irq_n = slot.irq_n.wrapping_add(1);
+                    self.irq_us_sum = self.irq_us_sum.saturating_add(us);
+                    self.irq_us_max = self.irq_us_max.max(us);
+                    self.irq_n = self.irq_n.wrapping_add(1);
                 }
-                Outcome::Good { more: transfer.header.more() }
+                Outcome::Good { more: transfer.header.more(), records: records > 0 }
             }
             Err(VerifyError::BadMagic) => {
                 slot.magic = slot.magic.wrapping_add(1);
                 slot.misses = slot.misses.saturating_add(1);
                 Outcome::Empty
             }
+            // These had the magic, so something is there.
             Err(VerifyError::BadCrc) => {
                 slot.crc = slot.crc.wrapping_add(1);
+                slot.misses = 0;
                 Outcome::Bad
             }
             Err(VerifyError::OtherVersion(_)) => {
                 slot.version = slot.version.wrapping_add(1);
+                slot.misses = 0;
                 Outcome::Bad
             }
             Err(VerifyError::BadLen) => {
                 slot.len = slot.len.wrapping_add(1);
+                slot.misses = 0;
                 Outcome::Bad
             }
         };
         if !slot.present && matches!(outcome, Outcome::Good { .. }) {
             slot.present = true;
-            self.line(shared, i, format_args!("appeared"));
+            self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present && slot.misses >= ABSENT_AFTER {
             slot.present = false;
-            self.line(shared, i, format_args!("gone after {ABSENT_AFTER} transfers without magic"));
+            self.line(
+                shared,
+                Some(i),
+                format_args!("gone after {ABSENT_AFTER} transfers without magic"),
+            );
         }
         outcome
     }
 
-    /// Send each present slot's counters to the host.
+    /// Send the bus's IRQ counters, then each present slot's, to the host. Nothing while no
+    /// slot is present, since IRQ is served only for present slots.
     fn report(&self, shared: &Shared) {
+        if !self.slots.iter().any(|s| s.present) {
+            return;
+        }
+        let avg = self.irq_us_sum.checked_div(u64::from(self.irq_n)).unwrap_or(0);
+        self.line(
+            shared,
+            None,
+            format_args!(
+                "irq_us={}/{} irq_n={} stuck={}",
+                avg, self.irq_us_max, self.irq_n, self.stuck
+            ),
+        );
         for (i, slot) in self.slots.iter().enumerate() {
             if !slot.present {
                 continue;
             }
-            let avg = slot.irq_us_sum.checked_div(u64::from(slot.irq_n)).unwrap_or(0);
             self.line(
                 shared,
-                i,
+                Some(i),
                 format_args!(
-                    "ok={} magic={} crc={} ver={} len={} gap={} retry={} rec={} irq_us={}/{}",
+                    "ok={} magic={} crc={} ver={} len={} gap={} retry={} rec={}",
                     slot.ok,
                     slot.magic,
                     slot.crc,
@@ -447,19 +507,21 @@ impl Master {
                     slot.len,
                     slot.gaps,
                     slot.retries,
-                    slot.records,
-                    avg,
-                    slot.irq_us_max
+                    slot.records
                 ),
             );
         }
     }
 
-    /// One log line about slot `i`, cut short rather than dropped when it is too long.
+    /// One log line about the bus, or about slot `i` of it, cut short rather than dropped when
+    /// it is too long.
     #[inline(never)]
-    fn line(&self, shared: &Shared, i: usize, what: core::fmt::Arguments<'_>) {
+    fn line(&self, shared: &Shared, i: Option<usize>, what: core::fmt::Arguments<'_>) {
         let mut message = LogStr::new();
-        let _ = write!(message, "bus {}{} {}", self.name, i + 1, what);
+        let _ = match i {
+            Some(i) => write!(message, "bus {}{} {}", self.name, i + 1, what),
+            None => write!(message, "bus {} {}", self.name, what),
+        };
         shared.push_line(Some(LogLevel::Info), message);
     }
 }
