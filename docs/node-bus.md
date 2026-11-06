@@ -33,6 +33,10 @@ On the XIAO ESP32-C5:
 ## Pin behavior
 
 - **SPI mode 0**, at 1 MHz. The target on the carrier board is 4 MHz.
+- **No bus pin is a strapping pin** on either chip. The P4's are GPIO34–38 (ESP32-P4 datasheet
+  v0.7). The C5's are GPIO2, 3, 7 and 25–28 (ESP32-C5 datasheet v1.5), which is why the node
+  leaves D2 and D3 (GPIO25 and 7) unused. esp-hal's generated docs also flag the P4's GPIO32 and
+  33, which the datasheet does not.
 - **CS is active low and idles high.** The P4 drives each slot's CS as a plain output, high from
   boot. The node pulls its CS up, so it reads idle with no P4 attached.
 - **MISO is pulled up on the P4**, so an empty slot reads constant bytes and fails the magic.
