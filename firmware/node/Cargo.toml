@@ -40,7 +40,6 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "ble",
   "coex",
   "esp-alloc",
-  "esp-now",
   "esp32c5",
   "sniffer",
   "unstable",
@@ -48,10 +47,6 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
 ] }
 esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio", "esp32c5"] }
 esp-sync = "0.3.0"
-# IDF's own bindings, for the transmit-power read in `radio::tx_power`, which
-# `esp-radio` does not wrap. Held at the version `esp-radio` links;
-# `firmware/p4-radio/README.md` § "Dependency versions".
-esp-wifi-sys-esp32c5 = "0.3.0"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, and the flash half of over-the-air updates, which
 # brings `esp-storage` at the version `firmware/common/Cargo.toml` holds.

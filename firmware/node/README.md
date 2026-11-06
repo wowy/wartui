@@ -1,58 +1,52 @@
 # wartui node firmware
 
 A wardriving node. It listens on one channel at a time and reports every access point it hasn't
-reported lately. It takes its share of the channel pool from the fleet's core: here, `wartui` on a
-laptop behind the bridge.
+reported lately. It takes its share of the channel pool from the host: `wartui` on a laptop behind
+the P4 bridge.
 
 It replaces the vendor firmware at
 [ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver) rather than
 porting it. The web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads, and
 dock mode don't come across. A node in this fleet has no use for any of them.
 
-It shares no wire format with the vendor firmware either. A node sends and receives four frames:
+It shares no wire format with the vendor firmware either. It sends no Wi-Fi at all: it is an SPI
+slave of the P4 bridge, and that bus carries everything it says and hears.
+[`docs/node-bus.md`](../../docs/node-bus.md) has the pins, and
+[`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs) the framing. Each
+transfer carries records, one message each:
 
-| Frame          | Direction           | Size                    |
-|----------------|---------------------|-------------------------|
-| Heartbeat      | Broadcast           | 29 bytes                |
-| Sighting batch | Unicast, to bridge  | Up to 1024 bytes        |
-| Admin          | Unicast, to node    | 15 bytes                |
-| Clear          | Unicast, to node    | 6 bytes                 |
+| Message        | Direction   | Body                    |
+|----------------|-------------|-------------------------|
+| Heartbeat      | Node → P4   | 23 bytes                |
+| Sighting batch | Node → P4   | Up to 1024 bytes        |
+| Assign         | P4 → node   | 8 bytes                 |
+| Clear          | P4 → node   | Empty                   |
 
-- **Heartbeat**: every 5 s once assigned. It is broadcast because that is how a bridge discovers a
-  node before either knows the other's address. Its body opens with a 5-byte prefix: the
-  firmware version (major, minor, patch), the board and the capability flags. Then come a counter
-  of completed sweeps (scans, on the Bluetooth node), the epoch of the assignment held or 0,
-  running counts of Wi-Fi and BLE sightings turned away by a full buffer, the count of
-  heartbeats attempted since boot, so the host can count the ones it missed, the count the
-  radio could not send, so it can tell those from loss on the air, and the chip's 3.3 V rail and
-  die temperature, one byte each.
-- **Sighting batch**: sent at the end of each dwell or scan, to the bridge that last sent an admin
-  or clear frame. A 9-byte header, then one 12-plus-SSID record per newly seen BSSID or
-  advertiser, packed to fill a 1024-byte ESP-NOW v2 payload. A record's trailer carries a Passpoint
-  network's roaming consortium identifiers, or a BLE advertiser's manufacturer identifier, when
-  there are any.
-- **Admin**: the assignment.
+- **Heartbeat**: every 5 s once assigned, every second until then. Fire-and-forget: a newer one
+  replaces one the P4 has not clocked. Its body opens with a 5-byte prefix: the firmware version
+  (major, minor, patch), the board and the capability flags. Then come the node's station MAC, a
+  counter of completed sweeps (scans, on the Bluetooth node), the epoch of the assignment held or
+  0, running counts of Wi-Fi and BLE sightings turned away by a full buffer, the reset cause, and
+  the chip's 3.3 V rail and die temperature, one byte each.
+- **Sighting batch**: sent at the end of each dwell or scan, and acknowledged by the P4. A 3-byte
+  header, then one 12-plus-SSID record per newly seen BSSID or advertiser, packed to fill 1024
+  bytes. A record's trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
+  advertiser's manufacturer identifier, when there are any.
+- **Assign**: the assignment.
 - **Clear**: empties the dedup ring.
 
-All four sit behind wartui's own `WTUI` magic and a wire version byte, checked first, so neither
-fleet can reach the other.
+It also takes an image over the bus, in the update records:
 
-It also takes an image over the air, in the update frames:
+| Message        | Direction   | Body              |
+|----------------|-------------|-------------------|
+| Update begin   | P4 → node   | 41 bytes          |
+| Update chunk   | P4 → node   | 6 to 1029 bytes   |
+| Update commit  | P4 → node   | 1 byte            |
+| Update abort   | P4 → node   | 1 byte            |
+| Update confirm | P4 → node   | Empty             |
+| Update status  | Node → P4   | 6 bytes           |
 
-| Frame       | Direction          | Size              |
-|-------------|--------------------|-------------------|
-| OTA begin   | Unicast, to node   | 47 bytes          |
-| OTA chunk   | Unicast, to node   | 12 to 1035 bytes  |
-| OTA commit  | Unicast, to node   | 7 bytes           |
-| OTA abort   | Unicast, to node   | 7 bytes           |
-| OTA confirm | Unicast, to node   | 6 bytes           |
-| OTA status  | Unicast, to bridge | 12 bytes          |
-
-A chunk carries up to 1024 bytes of image and needs ESP-NOW v2. A status answers the host that
-sent the frame. § "Over-the-air updates" has the rest.
-
-It is also an SPI slave of the P4 bridge, and that bus carries a copy of each heartbeat;
-[`docs/node-bus.md`](../../docs/node-bus.md) has the pins.
+A chunk carries up to 1024 bytes of image. § "Over-the-air updates" has the rest.
 
 ## What it does differently
 
@@ -60,35 +54,32 @@ It is also an SPI slave of the P4 bridge, and that bus carries a copy of each he
 never transmits while looking, including on the DFS channels, where the rules say listen and don't
 speak.
 
-Listening also makes the rest possible. A node holds `WifiController::sniffer()` and `::esp_now()`
-together for the life of the program, and owns the channel: it parks where it chooses and returns to
-the control channel when it chooses. A scan from `scan_async` hops channels on its own schedule,
+Listening also makes the rest possible. A node holds `WifiController::sniffer()` for the life of
+the program, and owns the channel: it parks where it chooses. A scan from `scan_async` hops channels on its own schedule,
 sends probe requests unless asked to be passive, and returns an `AccessPointInfo` per network with
 no element bodies, so no roaming consortium trailer. The promiscuous callback sees each beacon
 whole.
 
-**It is on the control channel far more often.** Nothing owns the radio, so the node returns to the
-control channel after _every_ dwell, not only after a heartbeat. There it reports what it heard and
-checks for an assignment already waiting. A heartbeat opens a 100 ms window for the host to answer
-with an assignment, once every 5 seconds rather than once a sweep. A missed window costs one more
-heartbeat interval, not the assignment, since the host re-sends on the next one.
+**It never waits on a channel to be heard.** Everything goes over the node bus, so the node hops
+from dwell to dwell. Between dwells it reports what it heard and takes whatever the P4 has sent,
+an assignment included. It heartbeats every 5 seconds from wherever it is.
 
-**An unassigned node waits rather than sweeping.** It parks on the control channel and heartbeats
-every second until told what to scan. It **collects nothing until then**. wartui's planner answers
+**An unassigned node waits rather than sweeping.** It services the bus and heartbeats every second
+until told what to scan. It **collects nothing until then**. wartui's planner answers
 the first heartbeat, so the wait lasts a single beat. That is the intended trade, and explains
 where the first second of a capture went.
 
-**The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and never leaves the
-control channel, so an assignment can always reach it. It runs one scan after another, back to back.
+**The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and runs one scan
+after another, back to back.
 § "Bluetooth is a whole node's job" has the rest.
 
 **It forgets what it has reported in two cases.** An assignment that changes its channels or its
 Bluetooth flag empties the dedup ring, because the entries describe a neighborhood it no longer
-listens to. So does a clear frame, which the host sends on the operator's `r` or `R` and which
+listens to. So does a clear, which the host sends on the operator's `r` or `R` and which
 carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoning.
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
-assignment adopted, or 0 for none. That is how the host tells adoption from a MAC-layer ack without
+assignment adopted, or 0 for none. That is how the host tells adoption from a bus ack without
 asking the node's own console. The five-byte prefix is the firmware version, the board and a flags
 byte, shown by the host as:
 
@@ -98,11 +89,11 @@ byte, shown by the host as:
 
 That is the firmware version, then `5g` for the C5's radio. The board byte is 1 for an ESP32-C5.
 Flag bit 1 marks an image on trial, shown as `;trial`.
-Bluetooth isn't a capability. Every node can scan it, and the core's `ADMIN_FLAG_BLE` decides
+Bluetooth isn't a capability. Every node can scan it, and the host's `ASSIGN_FLAG_BLE` decides
 whether one does, off at every boot.
 
 The host deals no channels to a node until it has heard this. Every heartbeat carries it, not only
-the first, because one sent once is lost to a dropped frame.
+the first, because one sent once is lost to a dropped beat.
 
 ## Building and flashing
 
@@ -122,20 +113,20 @@ Diagnostics go out over USB serial-JTAG. The cargo runner is
 so espflash detects the part. Run it from this directory, since the table's path is relative. Unlike
 the bridge's, this monitor is worth watching, because nothing but diagnostics goes down that pipe.
 
-Every node can scan Bluetooth. It does so only if the core sets the flag, and a node that does scans
+Every node can scan Bluetooth. It does so only if the host sets the flag, and a node that does scans
 nothing else.
 
 ## Versioning
 
 `version` in `Cargo.toml` is bumped on every firmware change. Before 1.0, a minor bump may change
-the wire and a patch bump may not. `wartui_proto::air::NODE_VERSION` mirrors it, and a test in
+the wire and a patch bump may not. `wartui_proto::bus::NODE_VERSION` mirrors it, and a test in
 `crates/wartui-proto/tests/version.rs` fails when the two differ. The host drives a node on its own
 major and minor at any patch. It shows a node on an older major or minor as `needs update`, and
 one on a newer as `host behind`, and drives neither.
 
-The frame header, the heartbeat's type byte and its five-byte prefix never change before 1.0. They
-are how a host finds a node a minor version behind, at whatever length that build's heartbeat is.
-The update frames are frozen too, so their layout is the same on every minor version.
+The heartbeat's type byte and its five-byte prefix never change before 1.0. They are how a host
+finds a node a minor version behind, at whatever length that build's heartbeat is. The update
+records are frozen too, so their layout is the same on every minor version.
 
 The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`.
 
@@ -165,22 +156,21 @@ The cargo runner, `wartui flash-fleet` and the release images all use this table
 
 `wartui_proto::ota::Receiver` decides what to write and checks the hash. `wartui_firmware::ota`
 (`firmware/common/src/ota.rs`, shared with the P4 bridge's C6) gives it the flash: the app slot
-that is not booted, found in the partition table at boot. `src/ota.rs` hands it the air's update
-frames. `wartui ota` is the
+that is not booted, found in the partition table at boot. `src/ota.rs` hands it the bus's update
+records. `wartui ota` is the
 host's side (`crates/wartui/README.md` § "Updating over the air").
 
 **Update mode.** An update begin the receiver accepts puts the node in update mode:
 
-- parked on the control channel, sniffing nothing and scanning no Bluetooth;
-- draining every frame, and answering each update frame with a status;
+- sniffing nothing and scanning no Bluetooth;
+- servicing the bus throughout, and answering each update record with a status;
 - heartbeating every second, so the host sees it alive.
 
 The node keeps its assignment throughout and returns to it when the session ends. An abort ends
-it at once. So does 30 s without an update frame, which also drops the session.
+it at once. So does 30 s without an update record, which also drops the session.
 
-Only frames of the accepted session make their sender the core, where sightings go. A refused
-frame is answered only if its sender is the core already. A node whose table has no `trial`
-sector refuses every begin with `FlashError`, so it never runs an update untrialed.
+A node whose table has no `trial` sector refuses every begin with `FlashError`, so it never runs
+an update untrialed.
 
 **The `trial` sector decides.** The bootloader has no rollback and reads no image state, so the
 node does it. The sector records which slot is on trial and how many times it has booted: an
@@ -214,9 +204,9 @@ Three, not one, because a USB-C PD supply can reset a node once at startup. Ther
 so a hung image rolls back too: each power cycle counts a boot. A power cut mid-rollback leaves
 the sector armed and over the count, so the next boot rolls back again.
 
-**Confirmation.** The first frame from the host the node decodes confirms the image: admin,
-clear, update confirm, or any update frame. A confirmed image is one that has heard the host over
-the air, which is the whole test. An update frame confirms before the receiver sees it, because
+**Confirmation.** The first record from the P4 the node decodes confirms the image: assign,
+clear, update confirm, or any update record. A confirmed image is one that has heard the host over
+the bus, which is the whole test. An update record confirms before the receiver sees it, because
 an update taken on trial would write over the only slot known to work.
 
 ## The regulatory domain is set here
@@ -227,8 +217,8 @@ refuses those channels outright. A C5 left on the default silently loses 100–1
 host can't tell that from a node whose radio didn't tune. So `src/main.rs` passes `US`, and
 `firmware/p4-radio` does the same. This is not a preference.
 
-Otherwise, channel limits belong to the controller, not here. The node transmits only on the
-control channel, so where it dwells is a coverage decision rather than a legal one. This firmware
+Otherwise, channel limits belong to the controller, not here. The node sends no Wi-Fi, so where it
+dwells is a coverage decision rather than a legal one. This firmware
 gates nothing: it parks on whatever it is dealt and reports a refusal. In practice a C5 tunes 41 of
 the 42 channels in `SCAN_CHANNELS`.
 
@@ -241,11 +231,11 @@ reading of the driver.
 
 ## Bluetooth is a whole node's job
 
-**At most one node scans, and the core decides which.** Bit 0 of the assignment's flags byte
+**At most one node scans, and the host decides which.** Bit 0 of the assignment's flags byte
 carries it, clear at every boot on every build. Bluetooth scanning is always compiled in; the flag
-decides whether it runs. The frame that sets it carries **no channels**, by design. An empty mask
-with the flag means "Bluetooth is all of it". An empty mask without the flag is the one thing the
-core never sends, and this firmware treats it as never having been told anything.
+decides whether it runs. The assignment that sets it carries **no channels**, by design. An empty
+mask with the flag means "Bluetooth is all of it". An empty mask without the flag is the one thing
+the host never sends, and this firmware treats it as never having been told anything.
 
 The reason is a measured cost. A stock node with BLE on acknowledged none of thirty-two
 assignments. The two radios share one 2.4 GHz antenna, and the admin window is exactly when a node
@@ -258,22 +248,21 @@ the board.
 
 Scans run back to back: the controller off, the new advertisers reported, and straight into the next
 scan, with no deadline of its own. A `node::ASSIGNED_BEAT_MS` timer runs alongside, independent of
-the scan cadence. When it comes due, the node's next dwell-free pass sends a heartbeat and holds a
-full admin window open before resuming scans. A const-assert beside `SCAN_MS` in `src/ble.rs` keeps
-a scan shorter than that timer, so the timer is always checked between scans. A scan that overruns
-costs the tail of one window, not the assignment, because the core re-sends on the next heartbeat.
+the scan cadence. When it comes due, the node sends a heartbeat between two scans. A const-assert
+beside `SCAN_MS` in `src/ble.rs` keeps a scan shorter than that timer, so the timer is always
+checked between scans.
 
 Two things keep the antenna where it belongs:
 
 - The controller is told `HCI_LE_Set_Scan_Enable(0)` at the end of every scan, not just waited on.
   An initialized host stack left behind a finished scan can keep the radio.
-- The node's Wi-Fi radio never leaves the control channel, so the scan is the only thing that ever
-  takes the antenna from it.
+- The node sniffs no Wi-Fi while it holds the scan, so the scan is the only thing that takes the
+  antenna.
 
-The controller comes up at boot on every build. Initializing a radio between a dwell and an admin
-window is exactly the kind of surprise this firmware exists to avoid. It is initialized and never
+The controller comes up at boot on every build. Initializing a radio between two dwells is exactly
+the kind of surprise this firmware exists to avoid. It is initialized and never
 enabled: `HCI_LE_Set_Scan_Enable` is only ever sent from inside a scan. If the controller won't
-start, a node handed the scan parks, sniffs nothing, and says so on its own console. The host can't
+start, a node handed the scan idles, sniffs nothing, and says so on its own console. The host can't
 tell, since capabilities carry no Bluetooth bit to withhold.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe. This firmware wants
@@ -320,7 +309,7 @@ a repository.
 **Setting the channel is not `set_channel` alone.** On an unassociated station interface, the
 channel doesn't stick unless promiscuous mode is on across the change. `radio::park` does that on
 every hop. A node whose channel silently didn't change would report the right access points against
-the wrong frequency and hear no assignment at all. It would read as a dead node.
+the wrong frequency.
 
 **The promiscuous callback runs in the Wi-Fi driver's task, on a buffer that dies when it returns.**
 It can't capture state, because `set_receive_cb` takes a bare `fn`, and it can't block. So it

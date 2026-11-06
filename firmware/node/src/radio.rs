@@ -1,146 +1,27 @@
-//! What this firmware asks of the radio.
+//! What this firmware asks of the Wi-Fi radio: the channel, and promiscuous mode around it.
 //!
-//! Parking is not `set_channel` alone — see [`park`]. A node that sniffs has
-//! promiscuous mode on for its own reasons, so that falls out for free on the dwell
-//! side; the hop back to the control channel is the one to check on hardware.
-//!
-//! [`tx_power`] is a direct IDF call because `esp-radio` wraps no getter for the
-//! transmit power. Setting it goes through `WifiController::set_max_tx_power`.
-//!
-//! A heartbeat broadcasts: it is how a bridge discovers a node in the first place,
-//! before either side knows the other's address. A sighting batch unicasts, to
-//! whichever core last sent this node an admin or clear frame, so the radio retries
-//! it and an unacknowledged batch is knowable as such — see [`unicast`] and
-//! `main.rs`'s `Outgoing`.
+//! The node sends no Wi-Fi frames. Everything it says goes over the node bus (`bus`), so the
+//! radio only listens, and this module is where it is tuned.
 
-use esp_radio::esp_now::{
-    EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo, PhyMode, RateConfig,
-    WifiPhyRate,
-};
 use esp_radio::wifi::sniffer::Sniffer;
-use wartui_proto::link::BROADCAST;
+use esp_radio::wifi::{SecondaryChannel, WifiController};
 
-/// Tune the radio, saying whether it took.
+/// Tune the radio for a dwell, saying whether it took. Promiscuous mode is left on.
 ///
-/// `listen` decides whether promiscuous mode is left on afterwards: on for a
-/// dwell, off on the control channel, where every data frame in the room would
-/// otherwise reach the callback for nothing.
+/// Promiscuous mode is switched on across the change, and it is not decoration: on an
+/// unassociated station interface the channel does not stick without it, and a node whose
+/// channel silently did not change reports the right networks against the wrong frequency.
 ///
-/// Promiscuous mode is switched on across the change either way, and it is not
-/// decoration: on an
-/// unassociated station interface the channel does not stick without it, and a node
-/// whose channel silently did not change reports the right networks against the wrong
-/// frequency and hears no assignment.
-///
-/// A refusal is worth reporting rather than retrying: it is the blob declining a
-/// channel outright, and both known causes — an unset band mode, or a channel outside
-/// the regulatory domain — are settled before the first sweep.
-pub fn park(manager: &EspNowManager, sniffer: &Sniffer, channel: u8, listen: bool) -> bool {
+/// A refusal is worth reporting rather than retrying: it is the blob declining a channel
+/// outright, and both known causes — an unset band mode, or a channel outside the regulatory
+/// domain — are settled before the first sweep.
+pub fn park(controller: &mut WifiController<'_>, sniffer: &Sniffer, channel: u8) -> bool {
     let _ = sniffer.set_promiscuous_mode(true);
-    let parked = manager.set_channel(channel).is_ok();
-    if !listen {
-        let _ = sniffer.set_promiscuous_mode(false);
-    }
-    parked
+    controller.set_channel(channel, SecondaryChannel::None).is_ok()
 }
 
-/// Send at 802.11g 24 Mbps rather than ESP-NOW's 1 Mbps default, saying whether that
-/// took.
-///
-/// Applied to the broadcast peer `esp-radio` registers at init, once at boot, and to
-/// the core peer whenever [`set_core_peer`] registers one. `set_peer_rate` in
-/// `firmware/common/src/radio.rs` has why 24 Mbps, what it costs, and why it is set per
-/// peer.
-pub fn set_peer_rate(manager: &EspNowManager, mac: &[u8; 6]) -> bool {
-    let config =
-        RateConfig { phy_mode: PhyMode::_11g, rate: WifiPhyRate::Rate24m, ersu: false, dcm: false };
-    manager.set_peer_rate(mac, config).is_ok()
-}
-
-/// The radio's maximum transmit power in quarter-dBm, as the IDF reports it now, or 0
-/// when the read fails. The IDF floor is 8, so 0 cannot be a real reading.
-///
-/// What a heartbeat reports, read fresh each time: the value last asked for is not
-/// evidence that the radio holds it.
-///
-/// The manager goes unused: it is proof that `esp_wifi_start` has run, which IDF wants
-/// behind this call, and a witness is what stops it being made from somewhere in `main`
-/// that compiles and then fails on the board.
-#[allow(unsafe_code, reason = "esp-radio wraps no getter for the transmit power")]
-pub fn tx_power(_manager: &EspNowManager) -> i8 {
-    use esp_wifi_sys_esp32c5::include as sys;
-
-    let mut power: i8 = 0;
-    // SAFETY: Wi-Fi has started before the node enters its receive loop, and `power`
-    // is a writable `i8` alive for the whole call. The function only reads the radio's
-    // maximum transmit power. 0 is `ESP_OK`.
-    if unsafe { sys::esp_wifi_get_max_tx_power(&mut power) } == 0 { power } else { 0 }
-}
-
-/// A plaintext station peer on whatever channel the radio is already using.
-///
-/// `channel: None` becomes 0, which ESP-NOW reads as "the current one" — the node
-/// hops channels far more often than its core changes, so naming one explicitly
-/// would mean re-registering the peer on every dwell.
-const fn peer(mac: [u8; 6]) -> PeerInfo {
-    PeerInfo {
-        interface: EspNowWifiInterface::Station,
-        peer_address: mac,
-        // wartui does no encrypted ESP-NOW at all, so there is no PMK and no LMK.
-        lmk: None,
-        channel: None,
-        encrypt: false,
-    }
-}
-
-/// Make `mac` the node's one core peer, saying whether it registered.
-///
-/// `old` is the peer this replaces, if any, and is removed only after `mac` is
-/// registered — never `BROADCAST`, which `esp-radio` registers at init and this
-/// firmware never touches, because heartbeats keep using it after the core
-/// changes. Registering before removing means a failure here leaves the previous
-/// core's peer entry intact, so the caller's "leave `core` unchanged" is still
-/// backed by a peer that works. A rate that refused to set still leaves the peer
-/// usable, just slower, so only registration failure is reported to the caller.
-///
-/// `PeerExists` is not that failure: `old`'s removal above is best-effort, so a
-/// node switching back to a core it held before can find it still registered.
-/// Treated as success, same as `transmit` in `firmware/common/src/radio.rs` — the
-/// alternative is a node that can never move back onto a MAC it once left.
-pub fn set_core_peer(
-    manager: &EspNowManager,
-    old: Option<[u8; 6]>,
-    mac: [u8; 6],
-) -> Result<(), EspNowError> {
-    match manager.add_peer(peer(mac)) {
-        Ok(()) | Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
-        Err(err) => return Err(err),
-    }
-    let _ = set_peer_rate(manager, &mac);
-    if let Some(prev) = old {
-        let _ = manager.remove_peer(&prev);
-    }
-    Ok(())
-}
-
-/// Broadcast a frame for whoever is listening on the control channel.
-///
-/// Heartbeats only: nothing acknowledges a broadcast, so the return value says only
-/// that the radio transmitted it. A node's core is learned from an admin or clear
-/// frame, and until one arrives a heartbeat is the only thing a node can send.
-pub fn broadcast(sender: &mut EspNowSender, frame: &[u8]) -> bool {
-    // `esp-radio` registers the broadcast peer at init, and the waiter's `Drop`
-    // blocks anyway, so waiting costs nothing that walking away would save.
-    sender.send(&BROADCAST, frame).is_ok_and(|waiter| waiter.wait().is_ok())
-}
-
-/// Unicast a frame to `dst`, true only once the MAC layer has acknowledged it.
-///
-/// Sighting batches go this way rather than broadcast, so the radio retries a
-/// frame nobody heard instead of it being gone after one try. `wait` blocks for the
-/// send callback, the same as [`broadcast`]; the difference is what `Ok` means for a
-/// unicast destination, which `firmware/common/src/radio.rs`'s `transmit` also relies
-/// on: the callback status is the MAC ack, not just an enqueue.
-pub fn unicast(sender: &mut EspNowSender, dst: &[u8; 6], frame: &[u8]) -> bool {
-    sender.send(dst, frame).is_ok_and(|waiter| waiter.wait().is_ok())
+/// Switch promiscuous mode off after a dwell, so the frames on the channel stop reaching the
+/// callback while nothing is collecting them.
+pub fn quiet(sniffer: &Sniffer) {
+    let _ = sniffer.set_promiscuous_mode(false);
 }

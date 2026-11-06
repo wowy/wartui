@@ -21,7 +21,7 @@
 //! inside [`DWELL`]'s lock,
 //! which is the one place the two nest, and `ble::Scanner::sweep` nests it the same way
 //! inside `ble::PENDING`; every other caller takes `SEEN` on its own, per sighting, and
-//! never across a transmit.
+//! never across a delivery.
 //!
 //! An access point that finds the buffer full is counted in
 //! [`Refused`](wartui_proto::pending::Refused), once per dwell however often it beacons,
@@ -31,9 +31,8 @@
 //! Capture is opened and closed around the dwell rather than left running, because
 //! promiscuous mode is on across every channel change (`radio::park`). A frame
 //! arriving inside one of those toggles was heard on a channel the buffer is not stamped
-//! for — control traffic filed under the dwell channel on the way out, the dwell
-//! channel's stragglers under control on the way back — so an access point would end
-//! up named against a frequency it was never on, which is the one thing a fleet's
+//! for — the last channel's stragglers filed under the next — so an access point would
+//! end up named against a frequency it was never on, which is the one thing a fleet's
 //! channel assignments are checked by. Frames in those windows are dropped.
 
 use esp_hal::time::Instant;
@@ -151,7 +150,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
 /// Take the oldest sighting not yet reported, if there is one.
 ///
 /// One at a time rather than a bulk drain, so nothing holds a several-kilobyte buffer
-/// on the stack and the lock is never held across a transmit.
+/// on the stack and the lock is never held across a delivery.
 pub fn take() -> Option<Sighting> {
     DWELL.with(|dwell| dwell.sightings.take())
 }

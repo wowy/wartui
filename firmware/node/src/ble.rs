@@ -1,4 +1,4 @@
-//! Bluetooth scanning, run only while the core has set `ADMIN_FLAG_BLE` for this
+//! Bluetooth scanning, run only while the host has set `ASSIGN_FLAG_BLE` for this
 //! node — at most one node in a fleet, and none by default. On a stock node BLE
 //! cost it every channel assignment sent to it, because an 802.11 acknowledgment
 //! comes from the receiver's MAC hardware and its absence means the radio was
@@ -17,9 +17,8 @@
 //!
 //! And the node **sniffs no Wi-Fi at all** while it holds the scan, so there is no
 //! sweep for the scan to collide with: it runs one scan after another, back to
-//! back, and the only thing that wants the antenna is that node's own heartbeat —
-//! sent, at most once every [`wartui_proto::node::ASSIGNED_BEAT_MS`], after a scan
-//! has finished rather than during one.
+//! back, and nothing else wants the antenna: everything the node says goes over the
+//! node bus.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
 //! all this firmware wants is an address and a signal strength, so the packets are
@@ -67,18 +66,18 @@ const _: () = assert!(
 /// it to the host, which shows the fleet's total in the footer's `buffer full` line.
 ///
 /// It is also the ceiling on the burst: `report_ble` drains the sweep into
-/// `Outgoing` batches unicast to the core before the next scan starts, so this is
+/// `Outgoing` batches delivered over the node bus before the next scan starts, so this is
 /// the worst-case delay standing between one scan ending and the next one
 /// starting.
 ///
-/// The burst is also what bounds this size. A full buffer drains back to back,
-/// faster than the bridge forwards frames to USB, and the difference queues in the
-/// bridge's queue toward the host, which drops its oldest. Measured with
+/// The burst is also what bounds this size. A full buffer drains as fast as the bus
+/// acknowledges it, and what the bridge cannot forward to USB at once waits in its
+/// queue toward the host, which drops its oldest. Measured with
 /// 250-byte batches, bursts of 31 batches (512 reports) arrived whole, and loss
 /// began at about 46. A batch fills up to 1024 bytes, so 128 reports pack into about
 /// two, which leaves most of that queue for the rest of the fleet
 /// arriving at the same moment. A lost batch was acknowledged
-/// over the air, so its advertisers are already in [`sniff::SEEN`] and stay hidden
+/// on the bus, so its advertisers are already in [`sniff::SEEN`] and stay hidden
 /// until the refresh.
 ///
 /// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
@@ -102,7 +101,7 @@ static PENDING: NonReentrantMutex<BlePending<REPORTS, REPORT_INDEX>> =
 /// Take the oldest report not yet taken, if there is one.
 ///
 /// One at a time rather than a bulk drain, so nothing holds the buffer's lock
-/// across a transmit — the same shape `sniff` gives its sightings.
+/// across a delivery — the same shape `sniff` gives its sightings.
 pub fn take() -> Option<AdvReport> {
     PENDING.with(BlePending::take)
 }
@@ -145,7 +144,7 @@ impl<'d> Scanner<'d> {
     ///
     /// Returns how many distinct advertisers due to be reported were heard, at
     /// most [`REPORTS`]; the reports themselves come out through [`take`], one at
-    /// a time, so nothing here holds the buffer's lock across a sleep or a transmit.
+    /// a time, so nothing here holds the buffer's lock across a sleep or a delivery.
     ///
     /// Distinct addresses only, keeping the strongest reading for each: the same
     /// advertiser is heard several times a second and only one belongs on the wire.
