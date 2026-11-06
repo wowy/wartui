@@ -138,7 +138,8 @@ impl<const B: usize> Downlink<B> {
         self.flight.ids = ids;
     }
 
-    /// The transfer [`Downlink::fill`] filled went out as `seq` at `now_ms`.
+    /// The transfer [`Downlink::fill`] filled went out as `seq` at `now_ms`. Nothing when no
+    /// flight is due, as once [`Downlink::on_header`] has delivered it.
     pub fn sent(&mut self, seq: u16, now_ms: u64) {
         if self.flight.due {
             self.flight.due = false;
@@ -146,9 +147,10 @@ impl<const B: usize> Downlink<B> {
         }
     }
 
-    /// Read a header from the node: the flight's ids once it acknowledges them.
-    pub fn on_header(&mut self, header: &Header) -> Option<Ids> {
-        if self.wait.on_header(header) { Some(self.take_flight()) } else { None }
+    /// Read a header from the node that arrived in the P4's transfer `carried_in`: the flight's
+    /// ids once it acknowledges them ([`AckWait::on_header`]).
+    pub fn on_header(&mut self, header: &Header, carried_in: u16) -> Option<Ids> {
+        if self.wait.on_header(header, carried_in) { Some(self.take_flight()) } else { None }
     }
 
     /// Mark a resend due when the timeout passes, and return the flight's ids once the last try

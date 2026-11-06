@@ -8,7 +8,7 @@
 //! |---|---|---|
 //! | 0 | 2 | [`MAGIC`] |
 //! | 2 | 1 | [`BUS_VERSION`] |
-//! | 3 | 1 | flags: bit 0 [`MORE`], the sender has more queued after this transfer; bit 1 [`ACKS`], `ack` is valid; other bits zero |
+//! | 3 | 1 | flags: bit 0 [`ACKS`], `ack` is valid; other bits zero |
 //! | 4 | 2 | seq: the sender's counter, +1 per transfer it arms, from 0 at boot |
 //! | 6 | 2 | ack: with [`ACKS`], the seq of the last good transfer from the peer that carried records |
 //! | 8 | 2 | len: payload bytes, at most [`PAYLOAD_MAX`] |
@@ -104,10 +104,8 @@ pub const HEADER_LEN: usize = 10;
 pub const CRC_OFFSET: usize = TRANSFER_LEN - 2;
 /// The most payload one transfer carries.
 pub const PAYLOAD_MAX: usize = CRC_OFFSET - HEADER_LEN;
-/// The flag that says the sender has more queued after this transfer.
-pub const MORE: u8 = 0x01;
 /// The flag that says `ack` names a transfer.
-pub const ACKS: u8 = 0x02;
+pub const ACKS: u8 = 0x01;
 
 const _: () = assert!(TRANSFER_LEN.is_multiple_of(4), "DMA wants a multiple of 4");
 const _: () = assert!(RECORD_MAX >= MAX_NODE_PAYLOAD, "one transfer carries any up body");
@@ -116,7 +114,7 @@ const _: () = assert!(RECORD_MAX >= MAX_NODE_DOWN, "one transfer carries any dow
 /// The fields a sender stamps on a transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
-    /// [`MORE`] and [`ACKS`], or nothing.
+    /// [`ACKS`], or nothing.
     pub flags: u8,
     /// The sender's counter.
     pub seq: u16,
@@ -127,22 +125,11 @@ pub struct Header {
 impl Header {
     /// A header for transfer `seq`, acknowledging `ack` when there is one.
     #[must_use]
-    pub const fn new(seq: u16, ack: Option<u16>, more: bool) -> Self {
-        let mut flags = if more { MORE } else { 0 };
-        let ack = match ack {
-            Some(ack) => {
-                flags |= ACKS;
-                ack
-            }
-            None => 0,
-        };
-        Self { flags, seq, ack }
-    }
-
-    /// Whether the sender has more queued after this transfer.
-    #[must_use]
-    pub const fn more(&self) -> bool {
-        self.flags & MORE != 0
+    pub const fn new(seq: u16, ack: Option<u16>) -> Self {
+        match ack {
+            Some(ack) => Self { flags: ACKS, seq, ack },
+            None => Self { flags: 0, seq, ack: 0 },
+        }
     }
 
     /// The transfer this one acknowledges, if any.

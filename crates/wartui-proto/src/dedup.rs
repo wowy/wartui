@@ -1,8 +1,8 @@
 //! The ring that decides whether a sighting is worth transmitting.
 //!
 //! The ring keeps what a node sends down to what is new. An access point beacons ten times a
-//! dwell, and a node returns to it every sweep. The store keeps every sighting it is given, so what the ring suppresses
-//! is lost for good. That is why suppression is not permanent.
+//! dwell, and a node returns to it every sweep. The store keeps every sighting it is given, so
+//! what the ring suppresses is lost for good. That is why suppression is not permanent.
 //!
 //! An address held in the ring is reported again for two reasons, and no others:
 //!

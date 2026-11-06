@@ -14,14 +14,13 @@
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
 //! the next:
 //!
-//! - **IRQ asserted**: a pass over the present slots, round robin. Each slot is clocked again
-//!   while its transfers say [`MORE`](wartui_proto::bus::MORE), up to [`MORE_MAX`]. Absent
+//! - **IRQ asserted**: a pass over the present slots, round robin, one transfer each. Absent
 //!   slots are still probed on time, since a node not yet present may be the one asserting.
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
-//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record and no `MORE` mean
-//!   the line is asserted by nothing this bus can serve, such as a node that never becomes
-//!   present. The bus counts it and runs the schedule below until IRQ is seen deasserted.
+//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
+//!   asserted by nothing this bus can serve, such as a node that never becomes present. The bus
+//!   counts it and runs the schedule below until IRQ is seen deasserted.
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
 //!   clocked at once. One whose records wait for the node's ack is clocked every
 //!   [`ACK_POLL`], and no later than the wait's deadline.
@@ -86,9 +85,7 @@ const ABSENT_AFTER: u8 = 5;
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
 const SLOT_GAP: Duration = Duration::from_millis(1);
-/// The most transfers to one slot in a row while it says [`MORE`](wartui_proto::bus::MORE).
-const MORE_MAX: usize = 8;
-/// IRQ passes in a row with no record and no `MORE` before the line counts as stuck. Two,
+/// IRQ passes in a row with no record before the line counts as stuck. Two,
 /// because the first pass after a node queues a record clocks the transfer it armed before,
 /// which is empty.
 const EMPTY_PASSES: u8 = 2;
@@ -346,9 +343,8 @@ impl Slot {
 
 /// What one transfer found.
 enum Outcome {
-    /// A good transfer, whether it says [`MORE`](wartui_proto::bus::MORE), and whether it
-    /// carried a record.
-    Good { more: bool, records: bool },
+    /// A good transfer, and whether it carried a record.
+    Good { records: bool },
     /// Nothing there: the magic failed.
     Empty,
     /// Something there, but corrupted, or not this build's.
@@ -408,13 +404,8 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
                 if !master.slots[i].present {
                     continue;
                 }
-                for _ in 0..MORE_MAX {
-                    let outcome = master.exchange(i, true, shared).await;
-                    let Outcome::Good { more, records } = outcome else { break };
-                    brought |= more || records;
-                    if !more {
-                        break;
-                    }
+                if let Outcome::Good { records } = master.exchange(i, true, shared).await {
+                    brought |= records;
                 }
             }
             rr = (rr + 1) % SLOTS;
@@ -525,11 +516,15 @@ impl Master {
             let outcome = if clocked {
                 // The transfer carried the ack, whatever the node made of it.
                 self.slots[i].ack_owed = false;
-                if filled > 0 {
+                let outcome =
+                    self.count(i, seq, rx_bytes(&wire.rx), (start, end), answers_irq, shared);
+                // Bad magic: the node was not armed and took nothing, so the flight stays due
+                // and the retry carries it. Anything else may have reached the node.
+                if filled > 0 && !matches!(outcome, Outcome::Empty) {
                     let k = self.driven(i);
                     shared.nodes.downlinks.borrow_mut()[k].sent(seq, crate::now_ms());
                 }
-                self.count(i, rx_bytes(&wire.rx), start, end, answers_irq, shared)
+                outcome
             } else {
                 Outcome::Bad
             };
@@ -557,18 +552,18 @@ impl Master {
             shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::Timeout });
         }
         let slot = &self.slots[i];
-        seal(buf, Header::new(slot.seq, slot.tracker.ack(), false), len);
+        seal(buf, Header::new(slot.seq, slot.tracker.ack()), len);
         len
     }
 
-    /// Take what slot `i` sent in the transfer that ended at `end`, and note its arrival or
-    /// departure.
+    /// Take what slot `i` sent in transfer `seq`, which ran from `start` to `end`, and note its
+    /// arrival or departure.
     fn count(
         &mut self,
         i: usize,
+        seq: u16,
         buf: &[u8; TRANSFER_LEN],
-        start: Instant,
-        end: Instant,
+        (start, end): (Instant, Instant),
         answers_irq: bool,
         shared: &Shared,
     ) -> Outcome {
@@ -579,15 +574,17 @@ impl Master {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
                 slot.misses = 0;
-                if slot.peer.note(transfer.header.seq) == SeqNote::Gap {
-                    slot.gaps = slot.gaps.wrapping_add(1);
-                }
                 if !slot.present {
                     // A node that arrives may be a new life, whose seq restarts.
                     slot.tracker = AckTracker::new();
+                    slot.peer = SeqCheck::new();
                     slot.ack_owed = false;
                 }
-                let delivered = shared.nodes.downlinks.borrow_mut()[k].on_header(&transfer.header);
+                if slot.peer.note(transfer.header.seq) == SeqNote::Gap {
+                    slot.gaps = slot.gaps.wrapping_add(1);
+                }
+                let delivered =
+                    shared.nodes.downlinks.borrow_mut()[k].on_header(&transfer.header, seq);
                 for id in delivered.into_iter().flatten() {
                     shared.push_host(&BridgeToHost::Delivered { id });
                 }
@@ -612,7 +609,7 @@ impl Master {
                     self.irq_us_max = self.irq_us_max.max(us);
                     self.irq_n = self.irq_n.wrapping_add(1);
                 }
-                Outcome::Good { more: transfer.header.more(), records: records > 0 }
+                Outcome::Good { records: records > 0 }
             }
             Err(VerifyError::BadMagic) => {
                 slot.magic = slot.magic.wrapping_add(1);

@@ -6,7 +6,7 @@
 
 use wartui_proto::bus::{
     ACK_TIMEOUT_MS, ACKS, AckPoll, AckTracker, AckWait, BUS_VERSION, CRC_OFFSET, DownType,
-    Downlink, FLIGHT_MAX, HEADER_LEN, Header, MAGIC, MAX_SLOTS, MORE, PAYLOAD_MAX, Packer,
+    Downlink, FLIGHT_MAX, HEADER_LEN, Header, MAGIC, MAX_SLOTS, PAYLOAD_MAX, Packer,
     RECORD_HEADER_LEN, RECORD_MAX, SEND_TRIES, SeqCheck, SeqNote, Slot, TRANSFER_LEN, UpType,
     VerifyError, records, seal, verify,
 };
@@ -17,20 +17,20 @@ use wartui_proto::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD, Undelivered, crc16};
 const IDLE_HEADER: [u8; HEADER_LEN] = [
     0x57, 0x42, // magic "WB"
     0x01, // bus version 1
-    0x02, // flags: ACKS, nothing more queued
+    0x01, // flags: ACKS
     0x02, 0x01, // seq 0x0102, little-endian
     0x04, 0x03, // ack 0x0304, little-endian
     0x00, 0x00, // len 0
 ];
-/// CRC-16/CCITT-FALSE 0x1C23 over the header and 1,032 zero bytes, little-endian.
-const IDLE_CRC: [u8; 2] = [0x23, 0x1C];
+/// CRC-16/CCITT-FALSE 0x3099 over the header and 1,032 zero bytes, little-endian.
+const IDLE_CRC: [u8; 2] = [0x99, 0x30];
 
-/// A transfer carrying one record, with more queued behind it.
+/// A transfer carrying one record.
 #[rustfmt::skip]
 const ONE_RECORD: [u8; HEADER_LEN + 7] = [
     0x57, 0x42, // magic "WB"
     0x01, // bus version 1
-    0x03, // flags: MORE and ACKS
+    0x01, // flags: ACKS
     0x07, 0x00, // seq 7
     0x05, 0x00, // ack 5
     0x07, 0x00, // len 7: one record
@@ -38,8 +38,8 @@ const ONE_RECORD: [u8; HEADER_LEN + 7] = [
     0x04, 0x00, // record len 4
     0xDE, 0xAD, 0xBE, 0xEF, // the body, opaque to this layer
 ];
-/// CRC-16/CCITT-FALSE 0x997D over those bytes and the zero padding, little-endian.
-const ONE_RECORD_CRC: [u8; 2] = [0x7D, 0x99];
+/// CRC-16/CCITT-FALSE 0x5E4E over those bytes and the zero padding, little-endian.
+const ONE_RECORD_CRC: [u8; 2] = [0x4E, 0x5E];
 
 fn idle(seq: u16) -> [u8; TRANSFER_LEN] {
     let mut buf = [0u8; TRANSFER_LEN];
@@ -65,7 +65,7 @@ fn bus_has_pinned_sizes_when_built() {
 fn bus_seals_pinned_bytes_when_idle() {
     // Junk where the payload goes: `seal` zeroes what nothing wrote.
     let mut buf = [0xAAu8; TRANSFER_LEN];
-    seal(&mut buf, Header::new(0x0102, Some(0x0304), false), 0);
+    seal(&mut buf, Header::new(0x0102, Some(0x0304)), 0);
     assert_eq!(buf[..HEADER_LEN], IDLE_HEADER);
     assert!(buf[HEADER_LEN..CRC_OFFSET].iter().all(|&b| b == 0));
     assert_eq!(buf[CRC_OFFSET..], IDLE_CRC);
@@ -76,7 +76,7 @@ fn bus_seals_pinned_bytes_when_record_packed() {
     let mut buf = [0xAAu8; TRANSFER_LEN];
     let mut packer = Packer::new(&mut buf);
     assert!(packer.push(1, &[0xDE, 0xAD, 0xBE, 0xEF]));
-    packer.seal(Header::new(7, Some(5), true));
+    packer.seal(Header::new(7, Some(5)));
     assert_eq!(buf[..ONE_RECORD.len()], ONE_RECORD);
     assert!(buf[ONE_RECORD.len()..CRC_OFFSET].iter().all(|&b| b == 0));
     assert_eq!(buf[CRC_OFFSET..], ONE_RECORD_CRC);
@@ -90,11 +90,11 @@ fn bus_round_trips_records_when_several_packed() {
     assert!(packer.push(2, b""));
     assert!(packer.push(3, b"third"));
     let len = packer.len();
-    packer.seal(Header { flags: MORE, seq: 0xFFFF, ack: 0x1234 });
+    packer.seal(Header { flags: ACKS, seq: 0xFFFF, ack: 0x1234 });
 
     let transfer = verify(&buf).unwrap();
-    assert_eq!(transfer.header, Header { flags: MORE, seq: 0xFFFF, ack: 0x1234 });
-    assert!(transfer.header.more());
+    assert_eq!(transfer.header, Header { flags: ACKS, seq: 0xFFFF, ack: 0x1234 });
+    assert_eq!(transfer.header.acked(), Some(0x1234));
     assert!(transfer.carries_records());
     assert_eq!(transfer.payload.len(), len);
     let all: Vec<(u8, &[u8])> = transfer.records().map(|r| (r.kind, r.body)).collect();
@@ -106,7 +106,6 @@ fn bus_round_trips_empty_payload_when_idle() {
     let buf = idle(3);
     let transfer = verify(&buf).unwrap();
     assert_eq!(transfer.header, Header { flags: 0, seq: 3, ack: 0 });
-    assert!(!transfer.header.more());
     assert!(!transfer.carries_records());
     assert_eq!(transfer.records().count(), 0);
 }
@@ -245,9 +244,9 @@ fn bus_notes_gap_when_seq_skips_or_restarts() {
 #[test]
 fn bus_header_acks_nothing_when_acks_flag_clear() {
     // An ack of 0 is a real seq only with the flag beside it.
-    assert_eq!(Header::new(1, None, false).acked(), None);
+    assert_eq!(Header::new(1, None).acked(), None);
     assert_eq!(Header { flags: 0, seq: 1, ack: 0 }.acked(), None);
-    let header = Header::new(1, Some(0), false);
+    let header = Header::new(1, Some(0));
     assert_eq!(header.flags, ACKS);
     assert_eq!(header.acked(), Some(0));
 }
@@ -268,11 +267,21 @@ fn ack_wait_ends_when_peer_acks_the_transfer_waited_on() {
     let mut wait = AckWait::new();
     assert_eq!(wait.poll(0), AckPoll::Idle);
     wait.sent(4, 100);
-    assert!(!wait.on_header(&Header::new(0, None, false)));
-    assert!(!wait.on_header(&Header::new(0, Some(3), false)), "an older transfer's ack");
+    assert!(!wait.on_header(&Header::new(0, None), 5));
+    assert!(!wait.on_header(&Header::new(0, Some(3)), 6), "an older transfer's ack");
     assert_eq!(wait.poll(100 + ACK_TIMEOUT_MS - 1), AckPoll::Waiting);
-    assert!(wait.on_header(&Header::new(0, Some(4), false)));
+    assert!(wait.on_header(&Header::new(0, Some(4)), 7));
     assert!(!wait.is_waiting());
+}
+
+#[test]
+fn ack_wait_ignores_ack_when_it_came_in_the_transfer_it_names() {
+    let mut wait = AckWait::new();
+    wait.sent(4, 0);
+    // The node sealed that header before it saw transfer 4, so its ack of 4 is stale.
+    assert!(!wait.on_header(&Header::new(0, Some(4)), 4));
+    assert!(wait.is_waiting());
+    assert!(wait.on_header(&Header::new(0, Some(4)), 5));
 }
 
 #[test]
@@ -297,8 +306,8 @@ fn ack_wait_takes_resend_ack_when_only_the_new_transfer_is_named() {
     assert_eq!(wait.poll(ACK_TIMEOUT_MS), AckPoll::Resend);
     wait.sent(5, ACK_TIMEOUT_MS);
     // The resend went out in transfer 5; the first transfer's seq no longer counts.
-    assert!(!wait.on_header(&Header::new(0, Some(1), false)));
-    assert!(wait.on_header(&Header::new(0, Some(5), false)));
+    assert!(!wait.on_header(&Header::new(0, Some(1)), 6));
+    assert!(wait.on_header(&Header::new(0, Some(5)), 6));
 }
 
 #[test]
@@ -350,8 +359,8 @@ fn downlink_packs_queued_records_into_one_flight_when_they_fit() {
     down.sent(10, 0);
     assert!(!down.has_work(), "stop and wait: nothing more until the ack");
     assert_eq!(down.fill(&mut buf), 0);
-    assert_eq!(down.on_header(&Header::new(0, Some(9), false)), None);
-    assert_eq!(down.on_header(&Header::new(0, Some(10), false)).unwrap(), [1, 2]);
+    assert_eq!(down.on_header(&Header::new(0, Some(9)), 11), None);
+    assert_eq!(down.on_header(&Header::new(0, Some(10)), 11).unwrap(), [1, 2]);
     assert!(!down.has_work());
 }
 
@@ -364,7 +373,7 @@ fn downlink_leaves_record_for_next_flight_when_it_does_not_fit() {
     let len = down.fill(&mut buf);
     assert_eq!(sent_records(&buf, len).len(), 1);
     down.sent(1, 0);
-    assert_eq!(down.on_header(&Header::new(0, Some(1), false)).unwrap(), [1]);
+    assert_eq!(down.on_header(&Header::new(0, Some(1)), 2).unwrap(), [1]);
     assert!(down.has_work());
     let len = down.fill(&mut buf);
     assert_eq!(sent_records(&buf, len), [(4, vec![2; MAX_NODE_DOWN])]);
@@ -400,6 +409,51 @@ fn downlink_resends_same_flight_then_gives_up_when_unacked() {
     }
     now += ACK_TIMEOUT_MS;
     assert_eq!(down.poll(now).unwrap(), [7]);
+    assert!(!down.has_work());
+}
+
+#[test]
+fn downlink_ignores_ack_when_it_came_in_the_transfer_it_names() {
+    let mut down = Downlink::<FLIGHT_BYTES>::new();
+    down.push(3, 1, b"assign").unwrap();
+    let mut buf = [0u8; TRANSFER_LEN];
+    down.fill(&mut buf);
+    down.sent(8, 0);
+    assert_eq!(down.on_header(&Header::new(0, Some(8)), 8), None, "a restarted node's ack");
+    assert!(down.is_waiting());
+    assert_eq!(down.on_header(&Header::new(0, Some(8)), 9).unwrap(), [3]);
+}
+
+#[test]
+fn downlink_carries_same_flight_when_not_marked_sent() {
+    let mut down = Downlink::<FLIGHT_BYTES>::new();
+    down.push(5, 1, b"assign").unwrap();
+    let mut buf = [0u8; TRANSFER_LEN];
+    let first = down.fill(&mut buf);
+    let sent = sent_records(&buf, first);
+    // The node took nothing, so the P4 never calls `sent`; a record queued since waits.
+    down.push(6, 2, &[]).unwrap();
+    assert!(down.has_work());
+    assert!(!down.is_waiting());
+    let len = down.fill(&mut buf);
+    assert_eq!(sent_records(&buf, len), sent);
+    down.sent(2, 0);
+    assert_eq!(down.on_header(&Header::new(0, Some(2)), 3).unwrap(), [5]);
+}
+
+#[test]
+fn downlink_ignores_sent_when_ack_delivered_the_resend_first() {
+    let mut down = Downlink::<FLIGHT_BYTES>::new();
+    down.push(4, 1, b"assign").unwrap();
+    let mut buf = [0u8; TRANSFER_LEN];
+    down.fill(&mut buf);
+    down.sent(1, 0);
+    assert_eq!(down.poll(ACK_TIMEOUT_MS), None);
+    assert!(down.fill(&mut buf) > 0, "the resend is due");
+    // The P4 reads the node's header before marking the resend sent; it acks the first try.
+    assert_eq!(down.on_header(&Header::new(0, Some(1)), 2).unwrap(), [4]);
+    down.sent(2, ACK_TIMEOUT_MS);
+    assert!(!down.is_waiting());
     assert!(!down.has_work());
 }
 

@@ -83,11 +83,16 @@ impl AckWait {
         self.waiting.is_some()
     }
 
-    /// Read a header from the peer. Returns `true`, and ends the wait, when it acknowledges the
-    /// transfer waited on.
-    pub fn on_header(&mut self, header: &Header) -> bool {
+    /// Read a header from the peer that arrived in this side's transfer `carried_in`. Returns
+    /// `true`, and ends the wait, when it acknowledges the transfer waited on.
+    ///
+    /// An ack of `carried_in` itself is ignored: the peer sealed that header before it saw this
+    /// side's half of the transfer, so such an ack is stale, from a peer that restarted. A
+    /// restarted peer's stale ack can still match a later transfer whose records it failed to
+    /// take; that is rare, and accepted.
+    pub fn on_header(&mut self, header: &Header, carried_in: u16) -> bool {
         match (self.waiting, header.acked()) {
-            (Some(waiting), Some(ack)) if ack == waiting.seq => {
+            (Some(waiting), Some(ack)) if ack == waiting.seq && ack != carried_in => {
                 self.waiting = None;
                 true
             }

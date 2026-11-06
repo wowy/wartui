@@ -111,3 +111,9 @@ The capture recorded 407 observations, with no batch gaps.
   sightings kept arriving, but whether the radio loses frames to that window wasn't measured.
   The CRC table is still in flash.
 - The P4's error counters rose only while the nodes were reflashing.
+
+**After the review fixes**, a 7-minute run on the same bench: both nodes 0 bad, gaps, resent or
+undelivered across 2,201 and 2,260 transfers, three assignments delivered in 35 ms, 421
+observations and no batch gaps. The P4 counted no seq gap when the nodes rejoined after their
+reflash, where earlier runs counted one; its 10 magic misses and 2 retries per slot date from
+that reflash.

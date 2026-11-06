@@ -282,13 +282,16 @@ impl Shared {
     /// is acknowledged for. Anything not queued goes straight back to the free buffers.
     #[esp_hal::ram]
     fn take_transfer(&mut self, rx: DmaRxBuf) {
+        // This transfer's own seq: `seq` advances only on a successful arm, and this transfer
+        // is the one that arm made.
+        let carried_in = self.seq.wrapping_sub(1);
         let queued = match verify(rx_bytes(&rx)) {
             Ok(transfer) => {
                 self.good = self.good.wrapping_add(1);
                 if self.peer.note(transfer.header.seq) == SeqNote::Gap {
                     self.gaps = self.gaps.wrapping_add(1);
                 }
-                if self.wait.on_header(&transfer.header) {
+                if self.wait.on_header(&transfer.header, carried_in) {
                     self.acked = true;
                 }
                 match transfer.carries_records() {
@@ -369,8 +372,7 @@ impl Shared {
         };
         let Prepared { mut tx, len, reliable } = prepared;
         let carries = len > 0;
-        // Nothing queues behind the prepared transfer, so `MORE` stays clear.
-        let header = Header::new(self.seq, self.tracker.ack(), false);
+        let header = Header::new(self.seq, self.tracker.ack());
         seal(tx_bytes(&mut tx), header, len);
         match spi.transfer(TRANSFER_LEN, rx, TRANSFER_LEN, tx) {
             Ok(transfer) => {
