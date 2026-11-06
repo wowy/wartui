@@ -177,13 +177,14 @@ is here rather than only in a `//!`.
   the host as `FromNode` and from it as `ToNode`. Encode/decode is written out by hand, never by
   transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/bus.rs` and
   `tests/wire.rs`. Link frames are up to 1152 bytes each way. `docs/node-bus.md` has the table.
-- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of every
+- **A wire change means updating every node at once.** `wartui-proto` is a path dependency of every
   firmware. A record whose body is not its type's length is counted as `incompatible` and named in
-  the footer (`N frames from an older firmware — reflash`), never admitted to the node table and
+  the footer (`N frames from an older firmware — update`), never admitted to the node table and
   never half-decoded. A heartbeat whose prefix names another major or minor is the exception: its
   node is shown as `needs update` (older) or `host behind` (newer) and never assigned. Once its
   heartbeat has named that version, its sighting batches are counted `incompatible` and not
-  recorded. The bridge checks only the transfer framing, and does not need the reflash.
+  recorded. The bridge checks only the transfer framing, and does not need the update.
+  `wartui ota` updates the nodes over the bus.
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
   protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
   trees meet as an undecodable frame rather than a named mismatch, which is stated where the
@@ -198,17 +199,18 @@ is here rather than only in a `//!`.
   `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
-  helpful about it; a node on a previous build is somebody else's traffic as far as this host is
-  concerned. Flash the fleet together. The node firmware's `version` in `firmware/node/Cargo.toml`
-  is bumped on every change: before 1.0 a minor bump may break the wire and a patch bump may not.
+  helpful about it. The host decodes and drives nothing from a node on another major or minor: it
+  never assigns that node and never records its sightings. It identifies that node by the frozen
+  heartbeat identity and updates it with `wartui ota`, so update the fleet together. The node
+  firmware's `version` in `firmware/node/Cargo.toml` is bumped on every change: before 1.0 a minor
+  bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
-  The node's `trial` sector layout, which one image writes and the next reads, does not change
-  (`crates/wartui-proto/src/ota/trial.rs`). **No version marker moves until 1.0**, whatever a
-  layout does: `bus::BUS_VERSION` is the lever held for the first change a fleet in the field has
-  to survive, and `store::SCHEMA_VERSION` the same for the first capture that has to be read in an
-  earlier build's terms. Nothing before 1.0 is either, so spending one re-pins every fixture in
-  `crates/wartui-proto/tests/bus.rs` and `tests/wire.rs` to mark a difference the policy has
-  already settled. **The store has no migrations before 1.0 either.** `check_version`
+  The node's `trial` sector layout, which one image writes and the next reads, is frozen with the
+  bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker moves until 1.0**,
+  whatever a layout does. `bus::BUS_VERSION` names the node bus's frozen core and never moves:
+  the host can update any node in the field over that core, so a fleet survives every other change.
+  `store::SCHEMA_VERSION` is held for the first capture to be read in an earlier build's terms,
+  and none before 1.0 is one. **The store has no migrations before 1.0 either.** `check_version`
   refuses any marker but its own — a lower one as firmly as a higher one — and its own marker over a
   schema fingerprint that is not this build's, or over none. A capture from another build is
   somebody else's file, and the fix is a new `--db` path rather than a `migrate` arm. The
@@ -352,6 +354,9 @@ edit stops; follow the pointer before changing the rule.
 - **The radio link's core is frozen around the UART, even before 1.0**, so any P4 build can
   identify and update any C6 build and a link change never costs a wired flash.
   → `crates/wartui-proto/src/radio_link/mod.rs` `//!`
+- **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
+  any node build, and a node never needs a wired flash.
+  → `crates/wartui-proto/src/bus/mod.rs` `//!`
 - **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
   stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
   P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm

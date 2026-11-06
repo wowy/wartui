@@ -128,9 +128,9 @@ the wire and a patch bump may not. `wartui_proto::bus::NODE_VERSION` mirrors it,
 major and minor at any patch. It shows a node on an older major or minor as `needs update`, and
 one on a newer as `host behind`, and drives neither.
 
-The heartbeat's type byte and its five-byte prefix never change before 1.0. They are how a host
-finds a node a minor version behind, at whatever length that build's heartbeat is. The update
-records are frozen too, so their layout is the same on every minor version.
+The heartbeat's prefix and the MAC after it, and the update records, are part of the bus's frozen
+core ([`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs)
+`//!`), so a host finds and updates a node on any version.
 
 The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`.
 
@@ -154,7 +154,10 @@ cargo runner with `--erase-parts otadata`. So an earlier over-the-air update can
 bootloader pointing at the other slot. `trial` counts an updated image's unconfirmed boots. Its
 subtype is `undefined` because espflash 4.6 rejects a numeric data subtype.
 
-The cargo runner, `wartui flash-fleet` and the release images all use this table.
+The cargo runner, `wartui flash-fleet` and the release images all use this table. An update over
+the bus writes only an app slot, so a node keeps the table of its last wired flash, and every later
+image keeps to it ([`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs)
+`//!`, the frozen core).
 
 ## Over-the-air updates
 
@@ -162,7 +165,9 @@ The cargo runner, `wartui flash-fleet` and the release images all use this table
 (`firmware/common/src/ota.rs`, shared with the P4 bridge's C6) gives it the flash: the app slot
 that is not booted, found in the partition table at boot. `src/ota.rs` hands it the bus's update
 records. `wartui ota` is the
-host's side (`crates/wartui/README.md` § "Updating over the air").
+host's side (`crates/wartui/README.md` § "Updating over the air"). The update records are frozen
+([`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs) `//!`), so any
+later wartui can update this build.
 
 **Update mode.** An update begin the receiver accepts puts the node in update mode:
 
@@ -181,8 +186,8 @@ node does it. The sector records which slot is on trial and how many times it ha
 armed record naming the slot, then one cleared bit per boot. Clearing a bit needs no erase and
 survives the power cuts these nodes see routinely, which RTC memory does not. The node also writes
 the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them. The
-sector's layout is `wartui_proto::ota::trial`, unit-tested there and fixed until 1.0, since one
-image writes it and the next reads it.
+sector's layout is `wartui_proto::ota::trial`, unit-tested there and frozen with the bus's core,
+since one image writes it and the next reads it.
 
 Each step's flash writes come in an order a power cut cannot turn into an untrialed image:
 

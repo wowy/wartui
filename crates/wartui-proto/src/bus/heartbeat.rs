@@ -9,6 +9,8 @@ use crate::reset::ResetCause;
 pub const HEARTBEAT_LEN: usize = 23;
 
 /// Length of the prefix and MAC that open every heartbeat body ([`Heartbeat::identity`]).
+///
+/// Frozen with the bus's core ([`crate::bus`]): any later host names any node build by these bytes.
 pub const HEARTBEAT_IDENTITY_LEN: usize = HEARTBEAT_PREFIX_LEN + 6;
 
 /// Length of the prefix that opens every heartbeat body: version, board, flags

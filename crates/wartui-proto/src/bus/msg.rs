@@ -30,6 +30,9 @@ use super::{
 };
 
 /// The type of a record a node sends.
+///
+/// [`Heartbeat`](Self::Heartbeat) and [`UpdateStatus`](Self::UpdateStatus) are in the bus's
+/// frozen core ([`crate::bus`]): their codes never change, and no code is reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum UpType {
@@ -61,6 +64,9 @@ impl UpType {
 }
 
 /// The type of a record the P4 sends a node.
+///
+/// [`UpdateBegin`](Self::UpdateBegin) to [`UpdateConfirm`](Self::UpdateConfirm) are in the
+/// bus's frozen core ([`crate::bus`]): their codes never change, and no code is reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum DownType {

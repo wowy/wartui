@@ -158,7 +158,7 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     // is the only place it shows.
     if c.incompatible > 0 {
         faults
-            .push(format!("{} frames from an older firmware — reflash", thousands(c.incompatible)));
+            .push(format!("{} frames from an older firmware — update", thousands(c.incompatible)));
     }
     // Only this capture's loss. The bridge's own count runs from its boot, mostly
     // frames dropped before anyone was listening.

@@ -728,13 +728,13 @@ fn drain(node: &mut Node, ota: &mut ota::Ota) {
                 // not know, or a different length. Said out loud rather than dropped: it
                 // is the whole diagnosis for a node that is talked to and never answers.
                 Err(DecodeError::BadLength { need, got }) => note!(
-                    "ignoring a {} byte type {} record, this build reads {}; reflash this node",
+                    "ignoring a {} byte type {} record, this build reads {}; update this node",
                     got,
                     record.kind,
                     need
                 ),
                 Err(DecodeError::UnknownType(kind)) => {
-                    note!("ignoring a record of unknown type {}; reflash this node", kind);
+                    note!("ignoring a record of unknown type {}; update this node", kind);
                 }
                 Err(err) => note!("ignoring a type {} record: {}", record.kind, err),
             }

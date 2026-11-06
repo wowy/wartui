@@ -52,15 +52,19 @@ fn rewrite_crc(buf: &mut [u8; TRANSFER_LEN]) {
     buf[CRC_OFFSET..].copy_from_slice(&crc.to_le_bytes());
 }
 
+/// These sizes are the bus's frozen core. They must never change: any host and P4 reach any node
+/// build through them.
 #[test]
 fn bus_has_pinned_sizes_when_built() {
     assert_eq!(
         (MAGIC, BUS_VERSION, TRANSFER_LEN, HEADER_LEN, PAYLOAD_MAX, RECORD_MAX),
         (0x4257, 1, 1044, 10, 1032, 1029)
     );
+    assert_eq!((CRC_OFFSET, ACKS, RECORD_HEADER_LEN), (1042, 0x01, 3));
     assert_eq!(TRANSFER_LEN % 4, 0);
 }
 
+/// These bytes are the frozen transfer header and CRC. They must never change.
 #[test]
 fn bus_seals_pinned_bytes_when_idle() {
     // Junk where the payload goes: `seal` zeroes what nothing wrote.
@@ -71,6 +75,7 @@ fn bus_seals_pinned_bytes_when_idle() {
     assert_eq!(buf[CRC_OFFSET..], IDLE_CRC);
 }
 
+/// These bytes are the frozen transfer and record layout. They must never change.
 #[test]
 fn bus_seals_pinned_bytes_when_record_packed() {
     let mut buf = [0xAAu8; TRANSFER_LEN];
@@ -206,6 +211,8 @@ fn bus_ends_records_when_record_header_cut_short() {
     assert_eq!(records(&payload).count(), 1);
 }
 
+/// Skipping an unknown type is part of the bus's frozen core: a later build's new message must
+/// never cost a receiver the records beside it.
 #[test]
 fn bus_yields_record_when_type_unknown() {
     // Skipping a record is the receiver's choice, so the iterator hands it over.
@@ -241,6 +248,7 @@ fn bus_notes_gap_when_seq_skips_or_restarts() {
     assert_eq!(check.note(0), SeqNote::Gap);
 }
 
+/// The `ACKS` flag is part of the bus's frozen core. Its meaning must never change.
 #[test]
 fn bus_header_acks_nothing_when_acks_flag_clear() {
     // An ack of 0 is a real seq only with the flag beside it.
@@ -251,6 +259,7 @@ fn bus_header_acks_nothing_when_acks_flag_clear() {
     assert_eq!(header.acked(), Some(0));
 }
 
+/// The ack rule is part of the bus's frozen core: idle transfers must never move the ack.
 #[test]
 fn ack_tracker_keeps_last_record_seq_when_idle_transfers_follow() {
     let mut tracker = AckTracker::new();

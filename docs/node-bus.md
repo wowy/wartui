@@ -70,6 +70,14 @@ message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/).
 A heartbeat is never resent. Every other record waits for the peer to acknowledge the transfer that
 carried it, and is resent until it is, up to three tries.
 
+## What never changes
+
+Part of the bus is frozen, so firmware that keeps to it can always be updated over the bus by any
+later wartui. The frozen core is the transfer and its handshake, records, the heartbeat's first 11
+bytes, the update records, the `trial` sector, the partition table and what a P4 owes a node.
+The list is in the `//!` of
+[`crates/wartui-proto/src/bus/mod.rs`](../crates/wartui-proto/src/bus/mod.rs).
+
 ## Wiring two nodes without a carrier
 
 One XIAO ESP32-C5 per bus, on slots `A1` and `B1`:
