@@ -24,7 +24,7 @@ and config, then `espflash save-image` on the result. A build fails if the saved
 appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
 too.
 
-It is also the SPI master of two node buses, which carry each node's records to and from the
+It is also the SPI controller of two node buses, which carry each node's records to and from the
 host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
 forwards what a node sends, queues what the host sends a node in that node's slot, and answers
 each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`).

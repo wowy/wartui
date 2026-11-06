@@ -1,5 +1,5 @@
-//! The node bus: SPI between a P4 bridge, as master, and its nodes, as slaves. The framing, the
-//! acknowledgment that makes it reliable, and the messages its records carry.
+//! The node bus: SPI between a P4 bridge, as controller, and its nodes, as slaves. The framing,
+//! the acknowledgment that makes it reliable, and the messages its records carry.
 //!
 //! The P4 clocks every transfer. Each one is exactly [`TRANSFER_LEN`] bytes each way,
 //! little-endian:
@@ -15,7 +15,7 @@
 //! | 10 | len | payload: records ([`Packer`], [`records`]); bytes past `len` are zero |
 //! | [`CRC_OFFSET`] | 2 | CRC-16/CCITT-FALSE ([`crc16`]) over bytes `0..CRC_OFFSET` |
 //!
-//! **The length is fixed** because a slave is armed for one length before the master clocks,
+//! **The length is fixed** because a slave is armed for one length before the controller clocks,
 //! and cannot learn a length from the transfer it is in. A fixed full-duplex transfer is the
 //! path the P4–C6 bench proved error-free (`docs/p4-spi-link-findings.md`). [`TRANSFER_LEN`]
 //! carries one record holding the longest body either way, an [`UpdateChunk`] down, and is a
@@ -23,14 +23,14 @@
 //!
 //! **A node re-arms after every transfer, and asks for one through IRQ.**
 //!
-//! 1. The node arms its slave with the next transfer before the master clocks.
-//! 2. The master clocks [`TRANSFER_LEN`] bytes with the node's CS low.
+//! 1. The node arms its slave with the next transfer before the controller clocks.
+//! 2. The controller clocks [`TRANSFER_LEN`] bytes with the node's CS low.
 //! 3. CS rises, and the node arms the next transfer at once.
 //! 4. A node with a record to send drives IRQ until a transfer has carried it. IRQ is shared by
-//!    a bus's nodes, so the master polls each node in turn while it is asserted.
+//!    a bus's nodes, so the controller polls each node in turn while it is asserted.
 //!
-//! A master that clocks a node before it has re-armed reads bytes that fail the magic. The
-//! master leaves a gap between transfers to one node, and retries after it.
+//! A controller that clocks a node before it has re-armed reads bytes that fail the magic. The
+//! controller leaves a gap between transfers to one node, and retries after it.
 //!
 //! **A transfer that carries records is acknowledged; an idle one needs nothing.** Each end
 //! stamps `ack` with the seq of the last good record-carrying transfer it took from the peer

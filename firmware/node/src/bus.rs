@@ -8,8 +8,8 @@
 //! ([`take`]).
 //!
 //! **The re-arm lives in an interrupt on CS's rising edge.** esp-hal's slave does one blocking
-//! transfer at a time, armed before the master clocks, so each transfer must be followed by
-//! the next arm before the master's next one. The main loop cannot do it: it blocks for whole
+//! transfer at a time, armed before the controller clocks, so each transfer must be followed by
+//! the next arm before the controller's next one. The main loop cannot do it: it blocks for whole
 //! dwells and Bluetooth scans, and esp-rtos offers no thread to hand it to. So CS is read twice,
 //! by the slave and by a GPIO input whose rising edge ends a transfer.
 //!
@@ -25,7 +25,7 @@
 //! again after its timeout.
 //!
 //! **A transfer's records are acknowledged on the very next transfer.** Once it is queued, its
-//! seq is the ack the handler stamps on the transfer it arms next, before the master's next
+//! seq is the ack the handler stamps on the transfer it arms next, before the controller's next
 //! clock. Then it arms that transfer: the one the main loop prepared, or an idle one it seals
 //! itself. It stamps seq, ack and flags at arm time, so seq counts arms in order. Packing what
 //! goes out happens in [`send`] and [`deliver`], from the main loop, and so does reading what
@@ -92,7 +92,7 @@ struct Prepared {
 struct Shared {
     cs: Input<'static>,
     irq: Output<'static>,
-    /// The transfer the master clocks next, and whether it carries a record.
+    /// The transfer the controller clocks next, and whether it carries a record.
     armed: Option<(Armed, bool)>,
     /// The slave when nothing is armed: only after an arm that failed.
     spare: Option<SpiDma<'static, Blocking>>,
@@ -129,7 +129,7 @@ struct Shared {
     inbox_full: u32,
     /// The handler's longest run, edge to return, in µs.
     handler_max_us: u32,
-    /// CS edges with the transfer not done: the master ended one early.
+    /// CS edges with the transfer not done: the controller ended one early.
     early: u32,
     /// Arms the slave refused.
     arm_failed: u32,
@@ -261,7 +261,7 @@ impl Shared {
         while !transfer.is_done() {
             spun = true;
             if Instant::now() >= until {
-                // Left armed: the slave finishes it on the master's next transfer, which
+                // Left armed: the slave finishes it on the controller's next transfer, which
                 // then fails its checks at both ends, and the edge after that re-arms.
                 self.note_settle(edge, spun);
                 self.early = self.early.wrapping_add(1);

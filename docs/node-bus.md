@@ -1,9 +1,9 @@
 # The node bus
 
-The node bus is SPI between the P4 bridge and its nodes, and the nodes' only link. The P4 is master
-on two buses, A and B, and each node has its own CS line, called a slot: `A1` to `A7` and `B1` to
-`B7`. Wired straight to the P4, each bus takes six nodes. The wartui-carrier takes three, five or
-seven per bus, and names its sockets by the silk, `N1` to `Nn`
+The node bus is SPI between the P4 bridge and its nodes, and the nodes' only link. The P4 is the
+controller on two buses, A and B, and each node has its own CS line, called a slot: `A1` to `A7`
+and `B1` to `B7`. Wired straight to the P4, each bus takes six nodes. The wartui-carrier takes
+three, five or seven per bus, and names its sockets by the silk, `N1` to `Nn`
 ([On the carrier board](#on-the-carrier-board)).
 
 ## Pins

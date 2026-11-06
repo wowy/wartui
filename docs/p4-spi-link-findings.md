@@ -24,7 +24,7 @@ board already routes between the chips, through each chip's GPIO matrix:
 | CS, hardware, driven by the P4 | 15 | 21 |
 | READY, driven by the C6 | 6 | 2 (the spare 0 Ω link) |
 
-- The P4 is the SPI2 master, in mode 0 with DMA.
+- The P4 is the SPI2 controller, in mode 0 with DMA.
 - The C6 is the SPI2 slave with DMA. esp-hal marks that driver unstable, and it does single
   transfers only.
 - Every transaction is one full-duplex 1,036-byte transfer: a 10-byte header, a 1,024-byte

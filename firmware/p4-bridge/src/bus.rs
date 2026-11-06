@@ -1,4 +1,4 @@
-//! The P4's end of the node bus: two SPI masters, each with up to [`PER_BUS`] nodes behind its
+//! The P4's end of the node bus: two SPI controllers, each with up to [`PER_BUS`] nodes behind its
 //! own CS (`docs/node-bus.md`). The board `main` read at boot sets how many each drives: six on
 //! the bench, and three, five or seven on a carrier.
 //!
@@ -185,24 +185,24 @@ pub fn to_node(shared: &Shared, slot: BusSlot, id: u16, kind: u8, body: &[u8]) {
     }
 }
 
-/// Each bus's slots and master, in statics so its future stays small.
+/// Each bus's slots and controller, in statics so its future stays small.
 static SLOTS_A: ConstStaticCell<[Slot; PER_BUS]> =
     ConstStaticCell::new([const { Slot::new() }; PER_BUS]);
 static SLOTS_B: ConstStaticCell<[Slot; PER_BUS]> =
     ConstStaticCell::new([const { Slot::new() }; PER_BUS]);
-static MASTER_A: StaticCell<Master> = StaticCell::new();
-static MASTER_B: StaticCell<Master> = StaticCell::new();
+static CONTROLLER_A: StaticCell<Controller> = StaticCell::new();
+static CONTROLLER_B: StaticCell<Controller> = StaticCell::new();
 
-/// Build both buses for `board`. Called once: the buffers and masters are statics.
+/// Build both buses for `board`. Called once: the buffers and controllers are statics.
 ///
-/// Every CS line goes high before either master is built, so no node sees a transfer start.
+/// Every CS line goes high before either controller is built, so no node sees a transfer start.
 /// Out of line, so what it builds is on this frame rather than `main`'s.
 #[inline(never)]
 pub fn build(
     board: NodeBoard,
     (spi2, dma_a, a): (SPI2<'static>, DMA_AXI_CH0<'static>, Pins),
     (spi3, dma_b, b): (SPI3<'static>, DMA_AXI_CH1<'static>, Pins),
-) -> (&'static mut Master, &'static mut Master) {
+) -> (&'static mut Controller, &'static mut Controller) {
     let high = |pin: Option<AnyPin<'static>>| {
         pin.map(|pin| Output::new(pin, Level::High, OutputConfig::default()))
     };
@@ -223,7 +223,7 @@ pub fn build(
         .with_miso(miso_a.peripheral_input())
         .with_dma(dma_a)
         .into_async();
-    let master_a = MASTER_A.init(Master {
+    let controller_a = CONTROLLER_A.init(Controller {
         bus: 0,
         board,
         per_bus: per_bus(&cs_a),
@@ -255,7 +255,7 @@ pub fn build(
         .with_miso(miso_b.peripheral_input())
         .with_dma(dma_b)
         .into_async();
-    let master_b = MASTER_B.init(Master {
+    let controller_b = CONTROLLER_B.init(Controller {
         bus: 1,
         board,
         per_bus: per_bus(&cs_b),
@@ -278,10 +278,10 @@ pub fn build(
         irq_us_max: 0,
         irq_n: 0,
     });
-    (master_a, master_b)
+    (controller_a, controller_b)
 }
 
-/// The master and the buffers it hands back after each transfer.
+/// The controller and the buffers it hands back after each transfer.
 struct Wire {
     spi: SpiDma<'static, Async>,
     rx: DmaRxBuf,
@@ -365,7 +365,7 @@ enum Outcome {
 }
 
 /// One bus and its slots.
-pub struct Master {
+pub struct Controller {
     /// 0 for A, 1 for B.
     bus: u8,
     /// What carries the nodes, which names the slots in log lines.
@@ -400,56 +400,56 @@ pub struct Master {
 }
 
 /// Run one bus forever. A bus that drives no slot, on a broken carrier, waits forever.
-pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
-    if master.per_bus == 0 {
+pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
+    if controller.per_bus == 0 {
         core::future::pending().await
     }
-    let per_bus = master.per_bus;
+    let per_bus = controller.per_bus;
     let mut rr = 0;
     let mut next_report = Instant::now() + REPORT_EVERY;
-    let queued = &shared.nodes.queued[usize::from(master.bus)];
+    let queued = &shared.nodes.queued[usize::from(controller.bus)];
     loop {
-        if let Some(end) = master.last_end {
+        if let Some(end) = controller.last_end {
             Timer::at(end + SLOT_GAP).await;
         }
-        let any_present = master.slots.iter().any(|s| s.present);
-        let asserted = master.irq.is_high() == master.irq_active_high;
+        let any_present = controller.slots.iter().any(|s| s.present);
+        let asserted = controller.irq.is_high() == controller.irq_active_high;
         if !asserted {
-            master.irq_since = None;
-            master.empty_passes = 0;
-            master.irq_stuck = false;
+            controller.irq_since = None;
+            controller.empty_passes = 0;
+            controller.irq_stuck = false;
         }
-        if any_present && asserted && !master.irq_stuck {
-            master.irq_since.get_or_insert_with(Instant::now);
+        if any_present && asserted && !controller.irq_stuck {
+            controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
             for k in 0..per_bus {
                 let i = (rr + k) % per_bus;
-                if !master.slots[i].present {
+                if !controller.slots[i].present {
                     continue;
                 }
-                if let Outcome::Good { records } = master.exchange(i, true, shared).await {
+                if let Outcome::Good { records } = controller.exchange(i, true, shared).await {
                     brought |= records;
                 }
             }
             rr = (rr + 1) % per_bus;
             if brought {
-                master.empty_passes = 0;
+                controller.empty_passes = 0;
             } else {
-                master.empty_passes = master.empty_passes.saturating_add(1);
-                if master.empty_passes >= EMPTY_PASSES {
-                    master.irq_stuck = true;
-                    master.stuck = master.stuck.wrapping_add(1);
+                controller.empty_passes = controller.empty_passes.saturating_add(1);
+                if controller.empty_passes >= EMPTY_PASSES {
+                    controller.irq_stuck = true;
+                    controller.stuck = controller.stuck.wrapping_add(1);
                 }
             }
             let now = Instant::now();
             for i in 0..per_bus {
-                if !master.slots[i].present && master.due(i, now, shared) {
-                    master.exchange(i, false, shared).await;
+                if !controller.slots[i].present && controller.due(i, now, shared) {
+                    controller.exchange(i, false, shared).await;
                 }
             }
         } else {
             let due = (0..per_bus)
-                .map(|i| master.next_due(i, shared))
+                .map(|i| controller.next_due(i, shared))
                 .min()
                 .unwrap_or(next_report)
                 .min(next_report);
@@ -458,9 +458,9 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
             // instead.
             if any_present {
                 // Asserted, or deasserted when stuck.
-                let high = master.irq_active_high != master.irq_stuck;
+                let high = controller.irq_active_high != controller.irq_stuck;
                 let level = if high { Event::HighLevel } else { Event::LowLevel };
-                let woke = select3(master.irq.wait_for(level), Timer::at(due), queued.wait());
+                let woke = select3(controller.irq.wait_for(level), Timer::at(due), queued.wait());
                 if let Either3::First(()) = woke.await {
                     continue;
                 }
@@ -469,20 +469,20 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
             }
             let now = Instant::now();
             for i in 0..per_bus {
-                if master.due(i, now, shared) {
-                    master.exchange(i, false, shared).await;
+                if controller.due(i, now, shared) {
+                    controller.exchange(i, false, shared).await;
                 }
             }
         }
         let now = Instant::now();
         if now >= next_report {
             next_report = now + REPORT_EVERY;
-            master.report(shared);
+            controller.report(shared);
         }
     }
 }
 
-impl Master {
+impl Controller {
     /// The index of slot `i` of this bus among the driven slots.
     fn driven(&self, i: usize) -> usize {
         usize::from(self.bus) * PER_BUS + i
