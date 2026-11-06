@@ -179,7 +179,7 @@ is here rather than only in a `//!`.
   `tests/wire.rs`. Link frames are up to 1152 bytes each way. `docs/node-bus.md` has the table.
 - **A wire change means updating every node at once.** `wartui-proto` is a path dependency of every
   firmware. A record whose body is not its type's length is counted as `incompatible` and named in
-  the footer (`N frames from an older firmware — reflash`), never admitted to the node table and
+  the footer (`N frames from an older firmware — update`), never admitted to the node table and
   never half-decoded. A heartbeat whose prefix names another major or minor is the exception: its
   node is shown as `needs update` (older) or `host behind` (newer) and never assigned. Once its
   heartbeat has named that version, its sighting batches are counted `incompatible` and not
@@ -199,9 +199,11 @@ is here rather than only in a `//!`.
   `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
-  helpful about it; a node on a previous build is somebody else's traffic as far as this host is
-  concerned. Flash the fleet together. The node firmware's `version` in `firmware/node/Cargo.toml`
-  is bumped on every change: before 1.0 a minor bump may break the wire and a patch bump may not.
+  helpful about it. The host decodes and drives nothing from a node on another major or minor: it
+  never assigns that node and never records its sightings. It identifies that node by the frozen
+  heartbeat identity and updates it with `wartui ota`, so update the fleet together. The node
+  firmware's `version` in `firmware/node/Cargo.toml` is bumped on every change: before 1.0 a minor
+  bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
   The node's `trial` sector layout, which one image writes and the next reads, is frozen with the
   bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker moves until 1.0**,

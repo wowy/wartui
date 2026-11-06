@@ -52,8 +52,8 @@ fn rewrite_crc(buf: &mut [u8; TRANSFER_LEN]) {
     buf[CRC_OFFSET..].copy_from_slice(&crc.to_le_bytes());
 }
 
-/// These sizes are the bus's frozen core, `RECORD_MAX` aside. They must never change: any host and
-/// P4 reach any node build through them.
+/// These sizes are the bus's frozen core. They must never change: any host and P4 reach any node
+/// build through them.
 #[test]
 fn bus_has_pinned_sizes_when_built() {
     assert_eq!(

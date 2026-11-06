@@ -48,7 +48,7 @@ reasoning.
 | `host_uart_errors` > 0 | P4 host-link reads that saw one or more line errors on the UART from the host: FIFO overruns, framing, parity or glitches. One read counts once however many it saw, and each is host bytes lost or corrupted on the way in. The P4 overruns while it writes its own flash with interrupts off, which only a `flash-bridge` update does, and that update rewinds over the loss. In a capture, suspect the cable, the CH343 or a P4 stall. | `firmware/p4-bridge/src/host.rs` `//!`, `docs/p4-host-uart-findings.md` |
 | `garbled` | COBS or link frames that did not decode, usually resynchronization after a truncated USB write. | `crates/wartui-proto/src/link/frame.rs` |
 | `undecodable` | Records whose body would not parse for their type: always our bug. | `crates/wartui-core/src/engine/rx.rs`, `crates/wartui-proto/src/bus/` |
-| `incompatible` | Records whose body is not their type's length, or sightings from a node whose heartbeat named another major or minor: a node on another build. The fix is to reflash the fleet together. | `crates/wartui-proto/src/bus/mod.rs` `BUS_VERSION`, `NODE_VERSION` |
+| `incompatible` | Records whose body is not their type's length, or sightings from a node whose heartbeat named another major or minor: a node on another build. The fix is to update the fleet together with `wartui ota`. | `crates/wartui-proto/src/bus/mod.rs` `BUS_VERSION`, `NODE_VERSION` |
 
 ## Sightings and decode
 

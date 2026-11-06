@@ -72,31 +72,11 @@ carried it, and is resent until it is, up to three tries.
 
 ## What never changes
 
-Part of the bus is frozen, so any later wartui can name and update a node on any build. Firmware
-of your own that keeps to it can always be updated over the bus:
-
-- **The transfer.** SPI mode 0 on the node's pins above, and the 1,044-byte transfer with its
-  header, magic, version 1, flags, CRC and zero padding.
-- **The handshake.** The node re-arms after every transfer, and raises IRQ to ask for one.
-- **The ack.** `ack` names the last good transfer that carried records. Idle transfers never move
-  it, and each direction waits for its ack before sending more records.
-- **Records.** A type byte, a little-endian `u16` length and the body, packed to the payload's
-  length. A receiver skips a type it does not know.
-- **The heartbeat's first 11 bytes.** Up type 1 opens with the version (major, minor, patch), the
-  board, a flags byte and the node's MAC, at any body length. The board codes and flag bits 0
-  (5 GHz) and 1 (image on trial) keep their meanings.
-- **The update records.** Up type 3 and down types 3 to 7, their layouts, the status codes 0 to 6,
-  the 1,024-byte chunk, and how the node answers them.
-- **Confirming an update.** Any update record, `UpdateConfirm` included, confirms an image on trial.
-- **The `trial` flash sector.** The image that installs an update writes it, and the new image
-  reads it to count its boots on trial, so its layout
-  ([`crates/wartui-proto/src/ota/trial.rs`](../crates/wartui-proto/src/ota/trial.rs)) never changes.
-
-The rest changes between versions: the clock rate, the timings, `Sightings`, `Assign`, `Clear`,
-and the heartbeat past its MAC. A type code is never reused. The layouts and the node's side of
-an update are in the `//!` of
-[`crates/wartui-proto/src/bus/mod.rs`](../crates/wartui-proto/src/bus/mod.rs) and
-[`crates/wartui-proto/src/ota.rs`](../crates/wartui-proto/src/ota.rs).
+Part of the bus is frozen, so firmware that keeps to it can always be updated over the bus by any
+later wartui. The frozen core is the transfer and its handshake, records, the heartbeat's first 11
+bytes, the update records, the `trial` sector, the partition table and what a P4 owes a node.
+The list is in the `//!` of
+[`crates/wartui-proto/src/bus/mod.rs`](../crates/wartui-proto/src/bus/mod.rs).
 
 ## Wiring two nodes without a carrier
 

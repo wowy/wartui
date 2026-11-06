@@ -177,13 +177,13 @@ fn queue_line(stat: &QueueStat) -> String {
 /// What to say when no node's record has reached the bridge, or `None` when one has.
 ///
 /// An oversize record comes from a node on another build, so a bridge that has counted only
-/// those has a node that needs reflashing.
+/// those has a node that needs updating.
 fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     if rx_count > 0 {
         return None;
     }
     let heard = if rx_oversize > 0 {
-        "A node is sending records too long for this build; reflash it."
+        "A node is sending records too long for this build; update it with `wartui ota`."
     } else {
         "The bridge has had no record from a node."
     };

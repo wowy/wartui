@@ -57,21 +57,36 @@
 //! - the record layout ([`RECORD_HEADER_LEN`], [`records`]), and a receiver skipping a type it
 //!   does not know;
 //! - the heartbeat's identity: up type 1 opens with the prefix and the node's MAC
-//!   ([`HEARTBEAT_IDENTITY_LEN`], [`Heartbeat::identity`]), read from a body of any length, with
-//!   the [`Board`] codes, [`CAP_FLAG_5G`] and [`CAP_FLAG_TRIAL`];
+//!   ([`HEARTBEAT_IDENTITY_LEN`], [`Heartbeat::identity`]), read from a body of at least those
+//!   11 bytes, at any length past them, with the [`Board`] codes, [`CAP_FLAG_5G`] and
+//!   [`CAP_FLAG_TRIAL`];
 //! - the update conversation: up type 3 and down types 3 to 7, their layouts, the
 //!   [`UpdateState`] codes, [`UPDATE_CHUNK`], and the receiver's side that [`crate::ota`]
 //!   describes;
 //! - confirming a trial: an [`UpdateConfirm`], or any update record, confirms an image on trial;
 //! - the `trial` sector's layout ([`crate::ota::trial`]), which the image that installs an update
-//!   writes and the image it installs reads.
+//!   writes and the image it installs reads;
+//! - the node's partition table: an update writes only an app slot, so every later image runs on
+//!   the table of the node's last wired flash (`firmware/node/partitions.csv`). Each later image
+//!   fits the 0x1E0000 app slots, `otadata` stays where it is, and the image finds its update
+//!   slot and `trial` sector by the rule of `locate` in `firmware/common/src/ota.rs`: the first
+//!   app slot it did not boot from, factory and test excluded, and the first `data`/`undefined`
+//!   partition, which must be at least one sector;
+//! - what any P4 owes a node of any build, whose re-arm time, ack timeout and tries its image
+//!   fixes: at least 1 ms from the end of one transfer to a node to the start of the next, so it
+//!   has re-armed; and a transfer to a node whose IRQ is asserted, or whose records the P4 has
+//!   yet to acknowledge, well within the node's [`ACK_TIMEOUT_MS`]. Otherwise the node gives up
+//!   on records never clocked out, and resends unacknowledged ones until [`SEND_TRIES`] run out.
+//!   Every node built so far carries 1 s, so every later P4 answers within 1 s.
 //!
 //! A node may be reachable only through the bus, so any later host and P4 must be able to
 //! identify and update any node build, and a bus change never sends the user back to a wired
 //! flash. Everything else changes freely between builds and is named by the node's version in
-//! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, [`ACK_TIMEOUT_MS`], [`SEND_TRIES`],
-//! the P4's scheduling and pins, up type 2, down types 1 and 2, and the heartbeat past its MAC. A
-//! core type code is never reused, and a new message takes a new code.
+//! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, within what the node's SPI slave
+//! takes, which is the chip's limit rather than the image's; [`ACK_TIMEOUT_MS`] and
+//! [`SEND_TRIES`], as each sender's own policy; the P4's pins, and its scheduling beyond what it
+//! owes a node; up type 2, down types 1 and 2, and the heartbeat past its MAC. A core type code
+//! is never reused, and a new message takes a new code.
 //!
 //! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
 //! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the

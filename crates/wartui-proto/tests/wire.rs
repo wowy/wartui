@@ -977,20 +977,15 @@ fn heartbeat_prefix_decodes_version_board_and_flags_when_body_is_exact() {
     assert_eq!(prefix.board, Board::Esp32c5);
 }
 
-/// Reading the identity from a body of any length is part of the bus's frozen core.
+/// The prefix decodes from a body of its five bytes alone.
 #[test]
-fn heartbeat_prefix_decodes_when_body_is_any_length_past_prefix() {
+fn heartbeat_prefix_decodes_when_body_is_prefix_only() {
     // An older or newer minor's heartbeat: the prefix is all that is read.
     let older = [0, 0, 7, 2, 0];
     let caps = Capabilities::decode_prefix(&older).expect("prefix only");
     assert_eq!(caps.version, Version::new(0, 0, 7));
     assert_eq!(caps.board, Board::Esp32c6);
     assert!(!caps.five_ghz);
-
-    let mut longer = HEARTBEAT.to_vec();
-    longer.extend_from_slice(&[0xAA; 40]);
-    assert_eq!(Capabilities::decode_prefix(&longer), Capabilities::decode_prefix(HEARTBEAT));
-    assert_eq!(Heartbeat::identity(&longer), Heartbeat::identity(HEARTBEAT));
 }
 
 /// The frozen identity, read from a heartbeat longer than this build's, as a later build may

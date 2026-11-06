@@ -107,7 +107,7 @@ pub async fn run(args: Args) -> Result<()> {
     if counts.incompatible > 0 {
         println!(
             "# {} records were in a layout this build does not read. Those nodes are \
-             invisible to `run` until they are reflashed with firmware/node.",
+             invisible to `run` until they are updated with firmware/node.",
             counts.incompatible
         );
     }
