@@ -303,15 +303,6 @@ pub(crate) fn load_from(
         }
         Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
-    // Checked before the parse, whose `unknown field` says nothing about what to do. A file
-    // that is not TOML at all fails the parse below instead.
-    if toml::from_str::<toml::Table>(&text).is_ok_and(|table| table.contains_key("tx-power")) {
-        bail!(
-            "{} has a `[tx-power]` table, but transmit power is not a setting: the fleet sends \
-             no Wi-Fi of its own. Delete the table.",
-            path.display()
-        );
-    }
     let config: Config =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     config.validate().with_context(|| format!("in {}", path.display()))?;
@@ -549,13 +540,6 @@ mod tests {
         let path = dir.path().join("missing.toml");
         let error = load(Some(&path)).unwrap_err();
         assert!(error.to_string().contains("missing.toml"), "{error}");
-    }
-
-    #[test]
-    fn config_loader_says_to_delete_table_when_file_has_tx_power_table() {
-        let chain = load_error("pool = \"us\"\n[tx-power]\nfleet = 10\n");
-        assert!(chain.contains("wartui.toml has a `[tx-power]` table"), "{chain}");
-        assert!(chain.contains("Delete the table."), "{chain}");
     }
 
     #[test]

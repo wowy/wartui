@@ -310,9 +310,7 @@ wdgwars = ""
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
-wartui refuses to start on an unknown key or table, naming the file and line. A `[tx-power]` table
-is refused with what to do: nothing in the fleet sends Wi-Fi of its own, so transmit power is not
-a setting, and the table is to be deleted. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, any of them
+wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, any of them
 or `serial` beside its table's `remember = false`, or an `excluded-ssids` entry that is empty, over
 32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset` and
 `ota` read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
