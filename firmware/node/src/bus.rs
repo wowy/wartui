@@ -38,8 +38,8 @@ use wartui_proto::heapless::{Deque, Vec};
 
 /// Receive buffers: one armed, up to [`RECEIVED_MAX`] waiting, and one being checked.
 const RX_BUFS: usize = 4;
-/// Transmit buffers: one armed, and one prepared or being packed.
-const TX_BUFS: usize = 2;
+/// Transmit buffers: one armed, one prepared, and one being packed.
+const TX_BUFS: usize = 3;
 /// Finished transfers the handler holds for the main loop.
 const RECEIVED_MAX: usize = RX_BUFS - 2;
 /// How long the handler waits after CS rises for the DMA to report the transfer done.
@@ -74,6 +74,8 @@ struct Shared {
     early: u32,
     /// Arms the slave refused.
     arm_failed: u32,
+    /// The longest wait after CS rose for the DMA to report the transfer done, in µs.
+    settle_max_us: u32,
 }
 
 static STATE: NonReentrantMutex<Option<Shared>> = NonReentrantMutex::new(None);
@@ -133,7 +135,7 @@ pub fn start(
     io: &mut Io<'_>,
 ) {
     let rx = [dma_buf!(DmaRxBuf), dma_buf!(DmaRxBuf), dma_buf!(DmaRxBuf), dma_buf!(DmaRxBuf)];
-    let tx = [dma_buf!(DmaTxBuf), dma_buf!(DmaTxBuf)];
+    let tx = [dma_buf!(DmaTxBuf), dma_buf!(DmaTxBuf), dma_buf!(DmaTxBuf)];
     irq.set_low();
     cs.listen(Event::RisingEdge);
     let mut shared = Shared {
@@ -151,6 +153,7 @@ pub fn start(
         unread: 0,
         early: 0,
         arm_failed: 0,
+        settle_max_us: 0,
     };
     for buf in rx {
         // RX_BUFS fits RX_BUFS.
@@ -184,16 +187,19 @@ impl Shared {
             }
             return;
         };
-        let until = Instant::now() + SETTLE;
+        let edge = Instant::now();
+        let until = edge + SETTLE;
         while !transfer.is_done() {
             if Instant::now() >= until {
                 // Left armed: the slave finishes it on the master's next transfer, which
                 // then fails its checks at both ends, and the edge after that re-arms.
+                self.note_settle(edge);
                 self.early = self.early.wrapping_add(1);
                 self.armed = Some((transfer, carries));
                 return;
             }
         }
+        self.note_settle(edge);
         let (spi, (rx, tx)) = transfer.wait();
         self.transfers = self.transfers.wrapping_add(1);
         if self.received.is_full()
@@ -207,7 +213,14 @@ impl Shared {
         self.arm(spi);
     }
 
-    /// Arm the prepared transfer, or an idle one, and set IRQ to match.
+    /// Keep the longest wait since `edge` for the transfer to report done.
+    fn note_settle(&mut self, edge: Instant) {
+        let us = u32::try_from((Instant::now() - edge).as_micros()).unwrap_or(u32::MAX);
+        self.settle_max_us = self.settle_max_us.max(us);
+    }
+
+    /// Arm the prepared transfer, or an idle one, and set IRQ to match. IRQ goes low when
+    /// nothing could be armed, since no transfer can then carry a record.
     fn arm(&mut self, spi: SpiDma<'static, Blocking>) {
         let (mut tx, len, carries) = match self.prepared.take() {
             Some((tx, len)) => (tx, len, true),
@@ -215,6 +228,7 @@ impl Shared {
                 Some(tx) => (tx, 0, false),
                 None => {
                     self.spare = Some(spi);
+                    self.irq.set_low();
                     return;
                 }
             },
@@ -222,6 +236,7 @@ impl Shared {
         let Some(rx) = self.rx_free.pop() else {
             self.restore(tx, len, carries);
             self.spare = Some(spi);
+            self.irq.set_low();
             return;
         };
         // Nothing queues behind the prepared transfer, so `MORE` stays clear.
@@ -231,15 +246,16 @@ impl Shared {
             Ok(transfer) => {
                 self.seq = self.seq.wrapping_add(1);
                 self.armed = Some((transfer, carries));
+                self.irq.set_level(Level::from(carries || self.prepared.is_some()));
             }
             Err((_, spi, rx, tx)) => {
                 self.arm_failed = self.arm_failed.wrapping_add(1);
                 let _ = self.rx_free.push(rx);
                 self.restore(tx, len, carries);
                 self.spare = Some(spi);
+                self.irq.set_low();
             }
         }
-        self.irq.set_level(Level::from(carries || self.prepared.is_some()));
     }
 
     /// Put back a transmit buffer that was not armed.
@@ -253,30 +269,34 @@ impl Shared {
 }
 
 /// Queue `frame` for the P4 as a node-frame record, replacing a copy it has not clocked yet.
+///
+/// Packed outside the lock into a free buffer, then swapped in under one lock, so a CS edge
+/// sees either the old prepared transfer or the new one and IRQ never drops between them.
 pub fn send(frame: &[u8]) {
-    let taken = STATE.with(|state| {
-        let shared = state.as_mut()?;
-        let replaced = shared.prepared.take().map(|(tx, _)| tx);
-        let fresh = replaced.is_none();
-        replaced.or_else(|| shared.tx_free.pop()).map(|tx| (tx, fresh))
-    });
-    let Some((mut tx, fresh)) = taken else { return };
-    if !fresh {
-        MAIN.with(|main| main.replaced = main.replaced.wrapping_add(1));
-    }
+    let Some(mut tx) = STATE.with(|state| state.as_mut().and_then(|s| s.tx_free.pop())) else {
+        return;
+    };
     let mut packer = Packer::new(tx_bytes(&mut tx));
     // Every node frame fits an empty transfer.
     packer.push(RecordType::NodeFrame, frame);
     let len = packer.len();
-    STATE.with(|state| {
-        let Some(shared) = state.as_mut() else { return };
-        shared.prepared = Some((tx, len));
+    let replaced = STATE.with(|state| {
+        let shared = state.as_mut()?;
+        let old = shared.prepared.replace((tx, len));
+        let replaced = old.is_some();
+        if let Some((old, _)) = old {
+            let _ = shared.tx_free.push(old);
+        }
         shared.irq.set_high();
         // A failed arm left nothing armed: arm this one now.
         if let Some(spi) = shared.spare.take() {
             shared.arm(spi);
         }
+        Some(replaced)
     });
+    if replaced == Some(true) {
+        MAIN.with(|main| main.replaced = main.replaced.wrapping_add(1));
+    }
 }
 
 /// Check every transfer the P4 has sent since the last call, and print the counters every
@@ -330,14 +350,15 @@ impl Main {
 
 /// Print one line of counters.
 fn report() {
-    let isr =
-        STATE.with(|state| state.as_ref().map(|s| (s.transfers, s.unread, s.early, s.arm_failed)));
-    let Some((transfers, unread, early, arm_failed)) = isr else { return };
+    let isr = STATE.with(|state| {
+        state.as_ref().map(|s| (s.transfers, s.unread, s.early, s.arm_failed, s.settle_max_us))
+    });
+    let Some((transfers, unread, early, arm_failed, settle_max_us)) = isr else { return };
     let (good, magic, crc, version, len, gaps, replaced) = MAIN
         .with(|m| (m.good, m.bad_magic, m.bad_crc, m.other_version, m.bad_len, m.gaps, m.replaced));
     note!(
         "bus: {} transfers, {} good, {} magic, {} crc, {} version, {} len, {} gaps, {} unread, \
-         {} early, {} arm failed, {} replaced",
+         {} early, {} arm failed, {} replaced, {} us settle max",
         transfers,
         good,
         magic,
@@ -348,7 +369,8 @@ fn report() {
         unread,
         early,
         arm_failed,
-        replaced
+        replaced,
+        settle_max_us
     );
 }
 
