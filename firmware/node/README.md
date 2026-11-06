@@ -9,8 +9,8 @@ It replaces the vendor firmware at
 porting it. The web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads, and
 dock mode don't come across. A node in this fleet has no use for any of them.
 
-It shares no wire format with the vendor firmware either. It sends no Wi-Fi at all: it is an SPI
-slave of the P4 bridge, and that bus carries everything it says and hears.
+It shares no wire format with the vendor firmware either. It sends no Wi-Fi at all: it is a node on
+the P4 bridge's SPI bus, and that bus carries everything it says and hears.
 [`docs/node-bus.md`](../../docs/node-bus.md) has the pins, and
 [`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs) the framing. Each
 transfer carries records, one message each:

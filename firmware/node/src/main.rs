@@ -346,7 +346,7 @@ fn main() -> ! {
     let scanning = scanner.is_some();
 
     // The node bus, on the XIAO's D7-D10 and D0 (`docs/node-bus.md`). Pulled up, so CS reads
-    // idle with no P4 attached. One pin, two readers: the slave takes it as CS, and
+    // idle with no P4 attached. One pin, two readers: the SPI driver takes it as CS, and
     // `bus` re-arms on its rising edge.
     let cs = Input::new(peripherals.GPIO12, InputConfig::default().with_pull(Pull::Up));
     let spi = Spi::new(peripherals.SPI2, Mode::_0)

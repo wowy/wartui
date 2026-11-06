@@ -29,7 +29,7 @@ carried the fleet as before. The run was `wartui run` for 10.5 minutes.
 - **Bus B's 30 cm jumpers made no difference** at 1 MHz.
 - **The node re-arms in time.** Its CS-edge interrupt collects each transfer and arms the next.
   The 1 ms gap the P4 leaves after each transfer to a slot was always enough: no transfer arrived
-  at an unarmed slave, and none ended before its DMA reported done.
+  at an unarmed node, and none ended before its DMA reported done.
 - **The IRQ latency is about one transfer.** A transfer takes 8.3 ms at 1 MHz. When a heartbeat
   is queued, the node already has an idle transfer armed, so the P4 clocks that one first and
   collects the record on its next pass. The 18 ms maximum is two passes. At 4 MHz, a pass is
@@ -41,7 +41,7 @@ carried the fleet as before. The run was `wartui run` for 10.5 minutes.
 
 ## The DMA is done before the edge's handler looks
 
-A later build (db7155d) bins each CS edge by how long the handler waits for the slave's DMA to
+A later build (db7155d) bins each CS edge by how long the handler waits for the SPI driver's DMA to
 report the transfer done. Its limit is 50 µs. Both nodes were rebooted under a P4 that was
 already polling, and ran for 3 minutes:
 
@@ -61,7 +61,7 @@ already polling, and ran for 3 minutes:
 ## ESP-NOW carried on alongside
 
 The capture recorded 512 observations and 255 heartbeats, with no batch gaps. The engine saw no
-reboot from either node. So serving the slave from a GPIO interrupt did not disturb the
+reboot from either node. So serving the SPI driver from a GPIO interrupt did not disturb the
 promiscuous callback, the Bluetooth scan, or the ESP-NOW sends.
 
 `1A:50` joined with reset cause `watchdog` and `0D:20` with `external`. Both causes date from the

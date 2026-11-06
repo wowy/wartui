@@ -1,5 +1,5 @@
-//! The node's end of the node bus: an SPI slave of the P4 bridge (`docs/node-bus.md`), and the
-//! node's only link to the host.
+//! The node's end of the node bus, which the P4 bridge's SPI controller clocks
+//! (`docs/node-bus.md`), and the node's only link to the host.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the messages. A heartbeat goes up
 //! fire-and-forget ([`send`]): a newer one replaces one the P4 has not clocked. Sightings and
@@ -7,11 +7,11 @@
 //! acknowledges them. Records from the P4 wait in an inbox until the main loop takes them
 //! ([`take`]).
 //!
-//! **The re-arm lives in an interrupt on CS's rising edge.** esp-hal's slave does one blocking
+//! **The re-arm lives in an interrupt on CS's rising edge.** esp-hal's SPI driver does one blocking
 //! transfer at a time, armed before the controller clocks, so each transfer must be followed by
 //! the next arm before the controller's next one. The main loop cannot do it: it blocks for whole
 //! dwells and Bluetooth scans, and esp-rtos offers no thread to hand it to. So CS is read twice,
-//! by the slave and by a GPIO input whose rising edge ends a transfer.
+//! by the SPI driver and by a GPIO input whose rising edge ends a transfer.
 //!
 //! **The handler checks every transfer, and keeps only those with records.** The P4 clocks a
 //! slot it waits on every 25 ms, far more often than the main loop looks, so a queue of every
@@ -94,7 +94,7 @@ struct Shared {
     irq: Output<'static>,
     /// The transfer the controller clocks next, and whether it carries a record.
     armed: Option<(Armed, bool)>,
-    /// The slave when nothing is armed: only after an arm that failed.
+    /// The SPI driver when nothing is armed: only after an arm that failed.
     spare: Option<SpiDma<'static, Blocking>>,
     /// Transfers with records, each with its payload's length, until [`take`] reads them.
     received: Deque<(DmaRxBuf, usize), RECEIVED_MAX>,
@@ -131,7 +131,7 @@ struct Shared {
     handler_max_us: u32,
     /// CS edges with the transfer not done: the controller ended one early.
     early: u32,
-    /// Arms the slave refused.
+    /// Arms the SPI driver refused.
     arm_failed: u32,
     /// The longest wait after CS rose for the DMA to report the transfer done, in µs.
     settle_max_us: u32,
@@ -177,7 +177,7 @@ macro_rules! dma_buf {
 
 /// Arm the first transfer and hand the bus to the CS interrupt.
 ///
-/// `spi` takes `cs.peripheral_input()` as its CS, so the slave and the edge read one pin.
+/// `spi` takes `cs.peripheral_input()` as its CS, so the SPI driver and the edge read one pin.
 /// Called once: the buffers are statics.
 pub fn start(
     spi: SpiDma<'static, Blocking>,
@@ -261,7 +261,7 @@ impl Shared {
         while !transfer.is_done() {
             spun = true;
             if Instant::now() >= until {
-                // Left armed: the slave finishes it on the controller's next transfer, which
+                // Left armed: the SPI driver finishes it on the controller's next transfer, which
                 // then fails its checks at both ends, and the edge after that re-arms.
                 self.note_settle(edge, spun);
                 self.early = self.early.wrapping_add(1);
