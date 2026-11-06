@@ -2,21 +2,21 @@ use wartui_proto::bus::Slot;
 
 use super::{FleetEngine, Now};
 
-/// A lag large enough that [`FleetEngine::air_is_live`] says no: 100 ms, past which a heartbeat
+/// A lag large enough that [`FleetEngine::reading_live`] says no: 100 ms, past which a heartbeat
 /// says what a node held then rather than now.
-pub(crate) const BEHIND_THE_AIR_US: u64 = 100_000;
+pub(crate) const BEHIND_US: u64 = 100_000;
 
-/// A change in whether the host is measurably behind the air.
+/// A change in whether the host is measurably behind the bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LagTransition {
     FellBehind,
     CaughtUp,
 }
 
-/// What a lag measured from two arrivals changes, given whether a spell behind the air is open.
+/// What a lag measured from two arrivals changes, given whether a spell behind the bridge is open.
 /// Only a measured lag opens a spell, so a session's first frame logs nothing.
 fn lag_transition(behind: bool, lag_us: u64) -> Option<LagTransition> {
-    match (behind, lag_us >= BEHIND_THE_AIR_US) {
+    match (behind, lag_us >= BEHIND_US) {
         (false, true) => Some(LagTransition::FellBehind),
         (true, false) => Some(LagTransition::CaughtUp),
         _ => None,
@@ -29,7 +29,7 @@ fn lag_transition(behind: bool, lag_us: u64) -> Option<LagTransition> {
 fn calculate_updated_lag(current_lag_us: u64, bridge_elapsed_us: u64, host_elapsed_us: u64) -> u64 {
     let lag_increase_us = bridge_elapsed_us.saturating_sub(host_elapsed_us);
     if lag_increase_us == 0 {
-        // The host out-waited the air: nothing is queued.
+        // The host out-waited the bridge: nothing is queued.
         0
     } else {
         current_lag_us.saturating_add(lag_increase_us)
@@ -49,9 +49,17 @@ impl FleetEngine {
     /// A connection starts caught up, and its first frame counts as live. Nothing older can reach
     /// it: the bridge queues nothing for an absent host and clears its queue when one connects, and
     /// the transport drops whatever decodes ahead of the connection's first `Ready`
-    /// (`wartui_bridge::serial`, `read_loop`), which is what was already past that queue. This is
-    /// an estimate, not clock synchronization, with one job: keeping [`Self::send_admin`] from
-    /// mistaking the past for the present.
+    /// (`wartui_bridge::serial`, `read_loop`), which is what was already past that queue.
+    ///
+    /// This is an estimate, not clock synchronization. Its jobs:
+    ///
+    /// - The "host fell behind the bridge" and "caught up" logs, and [`Self::lag_peak_us`] for
+    ///   the host status row.
+    /// - A heartbeat read behind is history: its epoch does not set what the node holds, and it
+    ///   neither reads as a restart nor flags an assignment as unadopted (`on_heartbeat`).
+    /// - `note_batch_seq`'s replay flag: a gap after a replayed batch is the host link's loss,
+    ///   not the node's.
+    /// - The `live` flag each stored heartbeat carries.
     pub(super) fn note_arrival(&mut self, slot: Slot, rx_us: u32, now: Now) {
         // A first frame has nothing to be timed against, and the connection started caught up.
         if let Some((last_rx_us, last_mono)) = self.last_arrival {
@@ -83,7 +91,7 @@ impl FleetEngine {
         self.last_arrival = Some((rx_us, now.mono));
     }
 
-    /// End the spell behind the air that [`Self::note_arrival`] opened, and say so.
+    /// End the spell behind the bridge that [`Self::note_arrival`] opened, and say so.
     fn close_behind(&mut self, now: Now) {
         let Some(since) = self.behind_since.take() else { return };
         let peak_us = std::mem::take(&mut self.behind_peak_us);
@@ -101,33 +109,33 @@ impl FleetEngine {
         self.behind_peak_us = 0;
     }
 
-    /// Whether a record being handled now is recent enough to act on. Only assignments care: a stale
-    /// heartbeat still proves the node, but the epoch it reports is history.
-    pub(super) fn air_is_live(&self) -> bool {
-        self.backlog_lag_us < BEHIND_THE_AIR_US
+    /// Whether the host is reading the link live, so a record handled now says what holds now. A
+    /// stale heartbeat still proves the node, but the epoch it reports is history.
+    pub(super) fn reading_live(&self) -> bool {
+        self.backlog_lag_us < BEHIND_US
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BEHIND_THE_AIR_US, LagTransition, lag_transition};
+    use super::{BEHIND_US, LagTransition, lag_transition};
 
     #[test]
     fn lag_transition_falls_behind_when_measured_lag_reaches_threshold() {
-        assert_eq!(lag_transition(false, BEHIND_THE_AIR_US), Some(LagTransition::FellBehind));
-        assert_eq!(lag_transition(false, BEHIND_THE_AIR_US - 1), None);
+        assert_eq!(lag_transition(false, BEHIND_US), Some(LagTransition::FellBehind));
+        assert_eq!(lag_transition(false, BEHIND_US - 1), None);
     }
 
     #[test]
     fn lag_transition_catches_up_when_lag_drops_below_threshold() {
         assert_eq!(lag_transition(true, 0), Some(LagTransition::CaughtUp));
-        assert_eq!(lag_transition(true, BEHIND_THE_AIR_US - 1), Some(LagTransition::CaughtUp));
+        assert_eq!(lag_transition(true, BEHIND_US - 1), Some(LagTransition::CaughtUp));
     }
 
     #[test]
     fn lag_transition_reports_nothing_when_spell_continues() {
         // One line per transition, never per frame.
-        assert_eq!(lag_transition(true, BEHIND_THE_AIR_US * 30), None);
+        assert_eq!(lag_transition(true, BEHIND_US * 30), None);
         assert_eq!(lag_transition(false, 0), None);
     }
 }

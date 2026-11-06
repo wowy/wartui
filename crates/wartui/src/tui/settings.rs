@@ -43,8 +43,8 @@ pub struct Settings {
     /// `--config`.
     pub config_path: Option<PathBuf>,
     /// The file as last loaded or saved. `b` rewrites only the Bluetooth node from this
-    /// copy, and a remembered bridge only the bridge, so neither puts the running pool or
-    /// powers into the file.
+    /// copy, and a remembered bridge only the bridge, so neither puts the running pool
+    /// into the file.
     pub saved: config::Config,
     /// The bridge `run` remembers, and whether it remembers one. Shared with the
     /// transport, so the remember-bridge switch takes effect on the next reconnect and
@@ -61,8 +61,6 @@ pub struct Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Pool,
-    Fleet,
-    Bridge,
     RememberBle,
     RememberBridge,
     ExcludedSsids,
@@ -70,10 +68,8 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 7] = [
+const FIELDS: [Field; 5] = [
     Field::Pool,
-    Field::Fleet,
-    Field::Bridge,
     Field::RememberBle,
     Field::RememberBridge,
     Field::ExcludedSsids,
@@ -99,11 +95,6 @@ impl Field {
 #[derive(Debug, Clone)]
 pub(super) struct ConfigModal {
     selected: Field,
-    /// Whole dBm, the unit the operator sees and `config::TX_POWER_DBM` bounds.
-    fleet_dbm: i8,
-    /// Whole dBm, the bridge's effective power. Always a number: the row shows what is
-    /// in force, not whether anything set it.
-    bridge_dbm: i8,
     /// The pool row's current value, edited by `step`.
     pool: PoolArg,
     /// Whether `b` remembers the node it gives the scan to.
@@ -137,8 +128,7 @@ enum Page {
 /// `All → Eu → Us`, the order the pool row steps through.
 const POOL_STEPS: [PoolArg; 3] = [PoolArg::All, PoolArg::Eu, PoolArg::Us];
 
-/// Step `current` one place through [`POOL_STEPS`], wrapping past either end like the
-/// tx-power rows in [`ConfigModal::step`].
+/// Step `current` one place through [`POOL_STEPS`], wrapping past either end.
 fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
     let len = POOL_STEPS.len();
     let index = POOL_STEPS.iter().position(|&pool| pool == current).unwrap_or(0);
@@ -155,39 +145,26 @@ impl ConfigModal {
     ///
     /// | Row | Step |
     /// |---|---|
-    /// | tx power | 1 dBm, within `config::TX_POWER_DBM` |
     /// | pool | one place in [`POOL_STEPS`] |
     /// | remember | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | key | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
-        let value = match self.selected {
-            Field::Fleet => &mut self.fleet_dbm,
-            Field::Bridge => &mut self.bridge_dbm,
-            Field::Pool => {
-                self.pool = step_pool(self.pool, delta);
-                return;
-            }
+        match self.selected {
+            Field::Pool => self.pool = step_pool(self.pool, delta),
             Field::RememberBle => {
                 if delta != 0 {
                     self.remember_ble = !self.remember_ble;
                 }
-                return;
             }
             Field::RememberBridge => {
                 if delta != 0 {
                     self.remember_bridge = !self.remember_bridge;
                 }
-                return;
             }
             // A text row, and a row that opens a page. `on_key` handles both.
-            Field::WdgwarsKey | Field::ExcludedSsids => return,
-        };
-        // In i16, so stepping past either end of i8 cannot overflow.
-        let start = i16::from(*config::TX_POWER_DBM.start());
-        let len = i16::from(*config::TX_POWER_DBM.end()) - start + 1;
-        let stepped = start + (i16::from(*value) + i16::from(delta) - start).rem_euclid(len);
-        *value = i8::try_from(stepped).expect("wraps within TX_POWER_DBM, which is i8");
+            Field::WdgwarsKey | Field::ExcludedSsids => {}
+        }
     }
 }
 
@@ -210,8 +187,6 @@ impl ConfigModal {
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
         Self {
             selected: Field::Pool,
-            fleet_dbm: snapshot.tx_power / 4,
-            bridge_dbm: snapshot.bridge_tx_power / 4,
             pool: snapshot.pool.into(),
             remember_ble: snapshot.remember_ble,
             // The engine does not hold this one, so it comes from the handle.
@@ -374,36 +349,22 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    let Ok(mut permits) = commands.try_reserve_many(3) else {
+    let Ok(mut permits) = commands.try_reserve_many(2) else {
         return Err(ENGINE_BUSY);
     };
     let pool = ChannelPool::from(modal.pool);
-    for command in [
-        Command::SetPool { pool },
-        Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
-        Command::RememberBle { on: modal.remember_ble },
-    ] {
+    for command in [Command::SetPool { pool }, Command::RememberBle { on: modal.remember_ble }] {
         if let Some(permit) = permits.next() {
             permit.send(command);
         }
     }
-    // Same rule as `toggle_ble`. Power and pool reach a node in an assignment, and a
-    // fleet with no plan has none to send.
-    let planned = snapshot.plan.is_some();
-    let when = if planned { "on their next heartbeat" } else { "once the fleet is in a plan" };
-    let mut text = format!(
-        "tx power: fleet {} dBm, bridge {} dBm — nodes take it {when}",
-        modal.fleet_dbm, modal.bridge_dbm
-    );
-    if pool != snapshot.pool {
-        if planned {
-            text.push_str(&format!(
-                "; pool {pool} — the fleet re-cuts on each node's next heartbeat"
-            ));
-        } else {
-            text.push_str(&format!("; pool {pool} — nodes take it once the fleet is in a plan"));
-        }
-    }
+    // Same rule as `toggle_ble`. The pool reaches a node in an assignment, and a fleet
+    // with no plan has none to send.
+    let mut text = match (pool != snapshot.pool, snapshot.plan.is_some()) {
+        (false, _) => "settings applied".to_owned(),
+        (true, true) => format!("pool {pool} — the fleet re-cuts on each node's next heartbeat"),
+        (true, false) => format!("pool {pool} — nodes take it once the fleet is in a plan"),
+    };
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
         memory.set_enabled(modal.remember_bridge);
@@ -460,7 +421,6 @@ fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Setting
     let written = config::Config {
         pool: Some(modal.pool),
         excluded_ssids: modal.excluded.clone(),
-        tx_power: config::TxPower { fleet: Some(modal.fleet_dbm), bridge: Some(modal.bridge_dbm) },
         bluetooth: config::Bluetooth {
             remember: Some(modal.remember_ble),
             node: if modal.remember_ble {
@@ -521,7 +481,7 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 14, frame.area());
+    let area = centered_rect(48, 12, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -553,12 +513,9 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     let row = |label: &str, value: &dyn Display, field: Field| {
         Line::from(Span::styled(format!("{label:<18}◂ {value} ▸"), styled(field)))
     };
-    let dbm = |dbm: i8| format!("{dbm:>2} dBm");
     let on_off = |on: bool| if on { "on" } else { "off" };
     let lines = vec![
         row("pool", &ChannelPool::from(modal.pool), Field::Pool),
-        row("fleet tx power", &dbm(modal.fleet_dbm), Field::Fleet),
-        row("bridge tx power", &dbm(modal.bridge_dbm), Field::Bridge),
         row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
         Line::from(Span::styled(
@@ -670,8 +627,7 @@ mod tests {
     #[test]
     fn ui_opens_modal_with_snapshot_values_when_c_key_is_pressed() {
         let mut snapshot = busy();
-        snapshot.tx_power = 40; // 10 dBm
-        snapshot.bridge_tx_power = 60; // 15 dBm
+        snapshot.remember_ble = false;
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
 
@@ -679,8 +635,7 @@ mod tests {
 
         let modal = ui.modal().expect("the modal opened");
         assert_eq!(modal.selected, Field::Pool);
-        assert_eq!(modal.fleet_dbm, 10);
-        assert_eq!(modal.bridge_dbm, 15);
+        assert!(!modal.remember_ble);
         assert!(rx.try_recv().is_err(), "opening the modal sends nothing");
     }
 
@@ -698,17 +653,17 @@ mod tests {
     }
 
     #[test]
-    fn ui_reaches_bridge_row_from_pool_when_j_pressed() {
+    fn ui_reaches_remember_bridge_row_from_pool_when_j_pressed() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal().expect("still open").selected, Field::Fleet);
+        assert_eq!(ui.modal().expect("still open").selected, Field::RememberBle);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
-        assert_eq!(ui.modal().expect("still open").selected, Field::Bridge);
+        assert_eq!(ui.modal().expect("still open").selected, Field::RememberBridge);
     }
 
     #[test]
@@ -761,74 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_modal_wraps_dbm_between_two_and_twenty_when_stepping_past_the_range() {
-        let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-
-        while ui.modal().expect("still open").fleet_dbm > 2 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-        }
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal().expect("still open").fleet_dbm, 20, "wraps below the floor");
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal().expect("still open").fleet_dbm, 2, "wraps past the ceiling");
-    }
-
-    #[test]
-    fn ui_sends_set_tx_power_in_quarter_dbm_when_enter_pressed() {
-        let mut snapshot = busy();
-        snapshot.tx_power = 40;
-        snapshot.bridge_tx_power = 60;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: snapshot.pool });
-        assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 44, bridge: 60 });
-        assert!(ui.modal().is_none(), "applying closes the modal");
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("fleet 11 dBm, bridge 15 dBm"), "{notice}");
-    }
-
-    #[test]
-    fn ui_says_nodes_take_it_once_fleet_is_in_a_plan_when_no_plan_exists() {
-        // Same rule as `toggle_ble`. The power arrives in an assignment, so it waits
-        // for a plan.
-        let snapshot = busy(); // `busy()`'s plan is `None`.
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("once the fleet is in a plan"), "{notice}");
-    }
-
-    #[test]
-    fn ui_says_nodes_take_it_on_next_heartbeat_when_plan_exists() {
-        let mut snapshot = busy();
-        snapshot.plan = plan(ChannelPool::Us, 4);
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("on their next heartbeat"), "{notice}");
-    }
-
-    #[test]
     fn ui_sends_pool_command_when_enter_pressed_with_pool_changed() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
@@ -842,7 +729,6 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
-        assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 8, bridge: 8 });
         assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         // `busy()`'s plan is `None`, so the re-cut waits on one.
@@ -858,8 +744,6 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::Eu;
-        snapshot.tx_power = 40; // 10 dBm
-        snapshot.bridge_tx_power = 60; // 15 dBm
         // Holds the scan but is not remembered, so the save falls back on the holder.
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         let (tx, mut rx) = mpsc::channel(4);
@@ -873,8 +757,6 @@ mod tests {
         assert!(notice.contains(&target.display().to_string()), "{notice}");
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.pool, Some(PoolArg::Eu));
-        assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, Some(15));
         assert_eq!(saved.bluetooth.remember, Some(true));
         assert_eq!(saved.bluetooth.node, Some(snapshot.nodes[0].state.mac));
     }
@@ -911,7 +793,7 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for one of the modal's three commands, so none goes out.
+        // Room for one of the modal's two commands, so none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
@@ -936,17 +818,17 @@ mod tests {
         // Open with the edit, so the operator can press Enter again once the engine
         // takes commands.
         let modal = ui.modal().expect("still open");
-        assert_eq!(modal.fleet_dbm, 3, "the edit survives");
+        assert!(!modal.remember_ble, "the edit survives");
         assert!(!target.exists(), "nothing was written");
         assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
     }
 
     #[test]
-    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_three() {
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_two() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(1);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -968,15 +850,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        for _ in 0..3 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        }
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(matches!(rx.try_recv().unwrap(), Command::SetPool { .. }));
-        assert!(matches!(rx.try_recv().unwrap(), Command::SetTxPower { .. }));
         assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: false });
         let file = config::load(Some(&target)).expect("a valid file");
         assert_eq!(file.bluetooth.remember, Some(false));
@@ -990,11 +869,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        for _ in 0..3 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        }
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         let modal = ui.modal().expect("still open");
-        assert_eq!(modal.selected, Field::RememberBle, "the row under the powers");
+        assert_eq!(modal.selected, Field::RememberBle, "the row under the pool");
         assert!(modal.remember_ble, "seeded from the snapshot");
 
         for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
@@ -1009,23 +886,21 @@ mod tests {
         // while the modal is open is overwritten like anything else.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "pool = \"us\"\n[tx-power]\nfleet = 5\nbridge = 6\n").unwrap();
+        std::fs::write(&target, "pool = \"us\"\n[bluetooth]\nremember = true\n").unwrap();
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::Eu;
-        snapshot.tx_power = 40; // 10 dBm
-        snapshot.bridge_tx_power = 60; // 15 dBm
+        snapshot.remember_ble = false;
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
-        // Hand-edited while the modal is open: a different pool, fleet and bridge.
-        std::fs::write(&target, "pool = \"all\"\n[tx-power]\nfleet = 2\nbridge = 3\n").unwrap();
+        // Hand-edited while the modal is open: a different pool and remember switch.
+        std::fs::write(&target, "pool = \"all\"\n[bluetooth]\nremember = true\n").unwrap();
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.pool, Some(PoolArg::Eu), "the modal's value wins over the hand edit");
-        assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, Some(15));
+        assert_eq!(saved.bluetooth.remember, Some(false));
     }
 
     #[test]
@@ -1054,14 +929,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        // Only the fleet row moves. The pool row is left alone.
+        // Only the remember row moves. The pool row is left alone.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(!notice.contains("; pool"), "{notice}");
+        assert!(notice.starts_with("settings applied;"), "{notice}");
+        assert!(!notice.contains("pool"), "{notice}");
     }
 
     #[test]
@@ -1428,9 +1304,9 @@ mod tests {
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("settings"), "{rendered}");
-        assert!(rendered.contains("fleet tx power"), "{rendered}");
-        assert!(rendered.contains("bridge tx power"), "{rendered}");
         assert!(rendered.contains("pool"), "{rendered}");
+        assert!(rendered.contains("remember bt node"), "{rendered}");
+        assert!(!rendered.contains("tx power"), "{rendered}");
         assert!(rendered.contains("remember bridge"), "{rendered}");
         // The view behind it is still live, not blanked out.
         assert!(rendered.contains("C5 57:84"), "{rendered}");

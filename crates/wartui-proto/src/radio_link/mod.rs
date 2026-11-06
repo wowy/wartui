@@ -1,4 +1,4 @@
-//! The UART link between an ESP32-P4 bridge and the ESP32-C6 that runs its radio.
+//! The UART link between an ESP32-P4 bridge and the board's ESP32-C6.
 //!
 //! UART1 on both chips, over the board's SDIO traces: [`BAUD_RATE`], 8N1, hardware RTS/CTS.
 //! Nothing is clocked, so each side writes only when it has something to say, and each

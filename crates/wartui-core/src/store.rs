@@ -214,9 +214,8 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
--- its own so it carries on while the bridge is gone. `frames` through
--- `admin_windows_missed` and `store_written`/`store_dropped` are counts since the
--- capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
+-- its own so it carries on while the bridge is gone. `frames` through `incompatible`
+-- and `store_written`/`store_dropped` are counts since the capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
 -- largest since the previous row. `throttled` is the Raspberry Pi firmware's
 -- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
 -- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
@@ -229,7 +228,6 @@ CREATE TABLE IF NOT EXISTS host_status (
   garbled INTEGER NOT NULL,
   undecodable INTEGER NOT NULL,
   incompatible INTEGER NOT NULL,
-  admin_windows_missed INTEGER NOT NULL,
   lag_peak_us INTEGER NOT NULL,
   store_written INTEGER NOT NULL,
   store_dropped INTEGER NOT NULL,
@@ -979,13 +977,10 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
     };
     format!(
-        "version=1;at_ms={at_ms};pool={};nodes_tx_power_quarter_dbm={};\
-         bridge_tx_power_quarter_dbm={};record_raw={};gps={};gps_max_age_ms={};\
+        "version=1;at_ms={at_ms};pool={};record_raw={};gps={};gps_max_age_ms={};\
          remember_ble={};preferred_ble={};ble_node={};topology_timeout_ms={};\
          status_interval_ms={};admin_timeout_ms={}",
         pool_name(settings.pool),
-        settings.tx_power,
-        settings.bridge_tx_power,
         settings.record_raw,
         settings.gps,
         settings.gps_max_age.as_millis(),
@@ -1267,10 +1262,9 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO host_status
                        (at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                        admin_windows_missed, lag_peak_us, store_written, store_dropped,
-                        store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
-                        battery_mv, battery_ma)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        lag_peak_us, store_written, store_dropped, store_queue_peak,
+                        store_commit_peak_us, throttled, soc_temp_mc, battery_mv, battery_ma)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 )?
                 .execute(params![
                     host.at_ms,
@@ -1279,7 +1273,6 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     column(host.garbled),
                     column(host.undecodable),
                     column(host.incompatible),
-                    column(host.admin_windows_missed),
                     column(host.lag_peak_us),
                     column(host.store_written),
                     column(host.store_dropped),

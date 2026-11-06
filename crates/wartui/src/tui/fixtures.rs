@@ -15,7 +15,6 @@ use wartui_proto::bus::{Board, Capabilities, NODE_VERSION, RecordKind, Slot, Ver
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use super::draw;
 use super::ui::Ui;
@@ -115,8 +114,7 @@ pub(super) fn acked_not_adopted(last: u8) -> NodeView {
     view
 }
 
-/// Sent an assignment that its radio never acked. In practice BLE held the antenna
-/// through the admin window.
+/// Sent an assignment the bridge could not deliver.
 pub(super) fn unacked(last: u8) -> NodeView {
     let mut view = pending(last);
     view.state.last_outcome = Some(AdminOutcome::Unacked);
@@ -155,8 +153,7 @@ pub(super) fn busy() -> Snapshot {
         }),
         link_up: true,
         link_error: None,
-        // Defaults, like `tx_power` and `bridge_tx_power` below, so an unrelated test
-        // cannot trip the pool row's save rule.
+        // The default, so an unrelated test cannot trip the pool row's save rule.
         pool: ChannelPool::All,
         plan: None,
         ble_node: None,
@@ -194,7 +191,6 @@ pub(super) fn busy() -> Snapshot {
             undecodable: 1,
             incompatible: 2,
             garbled: 5,
-            admin_windows_missed: 6,
             admin_sent: 3,
             admin_acked: 2,
             admin_failed: 1,
@@ -224,8 +220,6 @@ pub(super) fn busy() -> Snapshot {
             at_ms: None,
         },
         gps: None,
-        tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
-        bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         excluded_ssids: Vec::new(),
     }
 }

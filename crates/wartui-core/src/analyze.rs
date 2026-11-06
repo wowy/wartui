@@ -58,7 +58,7 @@ use wartui_proto::bus::RecordKind;
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
-use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
+use crate::engine::{BEHIND_US, advance_since_boot};
 use crate::store::parse_kind;
 
 /// What a capture lost.
@@ -75,7 +75,7 @@ pub struct LossSummary {
 /// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
-    /// Frames the bridge received over the air.
+    /// Records the bridge received from its nodes.
     pub received: u64,
     /// Frames the bridge dropped on their way to the host: its queues' drops when rows carry them,
     /// else `dropped_tx`'s rise. The module documentation says why.
@@ -198,7 +198,7 @@ impl RadioLinkLoss {
 /// What the host did with the frames it read, and how it held up, first `host_status` row to last.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostLoss {
-    /// Sighting batches dropped as radio retransmits.
+    /// Sighting batches dropped as node-bus resends.
     pub duplicates: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
@@ -206,13 +206,11 @@ pub struct HostLoss {
     pub undecodable: u64,
     /// Frames from a build speaking another wire version or layout.
     pub incompatible: u64,
-    /// Assignments held back because the heartbeat that would have carried them was stale.
-    pub admin_windows_missed: u64,
     /// Rows the store dropped.
     pub store_dropped: u64,
-    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the air.
+    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the bridge.
     pub lag_over_100ms: u64,
-    /// The furthest behind the air the host fell, in microseconds.
+    /// The furthest behind the bridge the host fell, in microseconds.
     pub lag_peak_us: u64,
     /// The slowest batch the store wrote, in microseconds.
     pub commit_peak_us: u64,
@@ -488,7 +486,6 @@ struct HostRow {
     garbled: u64,
     undecodable: u64,
     incompatible: u64,
-    admin_windows_missed: u64,
     store_dropped: u64,
     lag_peak_us: u64,
     commit_peak_us: u64,
@@ -506,23 +503,21 @@ impl HostRow {
             garbled: count(row.get(1)?),
             undecodable: count(row.get(2)?),
             incompatible: count(row.get(3)?),
-            admin_windows_missed: count(row.get(4)?),
-            store_dropped: count(row.get(5)?),
-            lag_peak_us: count(row.get(6)?),
-            commit_peak_us: count(row.get(7)?),
-            queue_peak: count(row.get(8)?),
-            throttled: row.get(9)?,
-            soc_temp_mc: row.get(10)?,
-            battery_mv: row.get(11)?,
+            store_dropped: count(row.get(4)?),
+            lag_peak_us: count(row.get(5)?),
+            commit_peak_us: count(row.get(6)?),
+            queue_peak: count(row.get(7)?),
+            throttled: row.get(8)?,
+            soc_temp_mc: row.get(9)?,
+            battery_mv: row.get(10)?,
         })
     }
 }
 
 fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     let mut stmt = conn.prepare(
-        "SELECT duplicate_batches, garbled, undecodable, incompatible, admin_windows_missed,
-                store_dropped, lag_peak_us, store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc,
-                battery_mv
+        "SELECT duplicate_batches, garbled, undecodable, incompatible, store_dropped, lag_peak_us,
+                store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc, battery_mv
          FROM host_status
          ORDER BY id",
     )?;
@@ -538,7 +533,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 
         let loss = loss.get_or_insert_default();
         let lag = row.lag_peak_us;
-        loss.lag_over_100ms += u64::from(lag >= BEHIND_THE_AIR_US);
+        loss.lag_over_100ms += u64::from(lag >= BEHIND_US);
         loss.lag_peak_us = loss.lag_peak_us.max(lag);
         loss.commit_peak_us = loss.commit_peak_us.max(row.commit_peak_us);
         loss.queue_peak = loss.queue_peak.max(row.queue_peak);
@@ -561,7 +556,6 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     loss.garbled = delta(|r| r.garbled);
     loss.undecodable = delta(|r| r.undecodable);
     loss.incompatible = delta(|r| r.incompatible);
-    loss.admin_windows_missed = delta(|r| r.admin_windows_missed);
     loss.store_dropped = delta(|r| r.store_dropped);
     loss.since_boot = last_throttled.map(|word| (word >> 16) & 0xF);
     Ok(Some(loss))

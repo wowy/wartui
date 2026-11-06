@@ -319,9 +319,10 @@ fn main() -> ! {
     }
 
     // The node sends no Wi-Fi frames of its own. The cap holds anything the MAC answers in
-    // hardware, such as an ack to a frame addressed to this station, at the lowest power
-    // `set_max_tx_power` accepts; `DEFAULT_TX_POWER_QUARTER_DBM` documents it.
-    match controller.set_max_tx_power(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM) {
+    // hardware, such as an ack to a frame addressed to this station, at 2 dBm, the lowest power
+    // `set_max_tx_power` accepts, in ESP-IDF's quarter-dBm units.
+    const MIN_TX_POWER_QUARTER_DBM: i8 = 8;
+    match controller.set_max_tx_power(MIN_TX_POWER_QUARTER_DBM) {
         Ok(()) => {}
         Err(err) => note!("could not cap transmit power: {:?}", err),
     }

@@ -45,9 +45,8 @@ impl FleetEngine {
             return;
         }
 
-        // Read before borrowing the node, acted on after. Only heartbeats that owed something
-        // count, or they would bury the ones that did.
-        let live = self.air_is_live();
+        // Read before borrowing the node.
+        let live = self.reading_live();
 
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         if !node.dirty {
@@ -55,8 +54,9 @@ impl FleetEngine {
         }
         let Some(assignment) = node.desired else { return };
         let Some(slot) = node.slot else { return };
-        if !live {
-            self.counters.admin_windows_missed += 1;
+        // `deal` can skip only an epoch a live heartbeat reported. Until one has, the node may
+        // hold the epoch just allocated and discard the send, so it waits for a live heartbeat.
+        if !live && node.held_epoch.is_none() {
             return;
         }
         node.admin_attempts += 1;
@@ -87,10 +87,9 @@ impl FleetEngine {
         if self.in_flight(now, |p| matches!(p, Pending::Clear { mac: m, .. } if *m == mac)) {
             return;
         }
-        let live = self.air_is_live();
         let Some(node) = self.nodes.get(&mac) else { return };
         let Some(slot) = node.slot else { return };
-        if !node.clear_dedup_ring || !live {
+        if !node.clear_dedup_ring {
             return;
         }
 

@@ -32,7 +32,13 @@ pub struct Args {
     config: Option<PathBuf>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
-    #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
+    #[arg(
+        long,
+        value_name = "NODES",
+        num_args = 0..=1,
+        default_missing_value = "3",
+        value_parser = crate::sim_nodes()
+    )]
     sim: Option<u8>,
 
     /// Also print the raw bytes of every record.

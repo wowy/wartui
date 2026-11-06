@@ -4,8 +4,7 @@
 `crates/wartui-proto/src/beacon.rs` implements a classification ladder, and the tests
 around it are assembled frames: they check the ladder against my reading of it. That is worth doing and
 it is not the same as checking it against the air. This script closes that gap
-the way `tools/espnow-sniffer` does for the ESP-NOW structs — by turning real
-frames into permanent regression tests.
+by turning real frames into permanent regression tests.
 
 macOS can capture 802.11 management frames without any extra hardware, at the
 cost of dropping off the network while it does:
@@ -19,8 +18,8 @@ four hundred copies of the same access point. Radiotap headers are stripped:
 `parse_mgmt` is handed the 802.11 frame itself, which is what promiscuous mode
 delivers on the node.
 
-Output is `<name> <length> <hex>`, the same format the ESP-NOW vectors use, so
-the two files stay readable by the same eyes.
+Output is `<name> <length> <hex>`, one frame per line, which
+`crates/wartui-proto/tests/beacon.rs` reads.
 
 **Frames are scrubbed before they are printed.** A capture of the air around you
 is a geolocation fingerprint: BSSIDs are exactly what WiGLE, Google and Apple

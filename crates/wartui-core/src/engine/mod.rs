@@ -12,9 +12,8 @@
 //!
 //! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
-//! assignable and none holds it. [`Command::SetTxPower`] records transmit powers the capture keeps
-//! and no radio uses. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`] re-cuts the fleet
-//! against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never
+//! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
+//! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never
 //! captured.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
@@ -39,14 +38,13 @@ use wartui_proto::bus::Slot;
 use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
-use wartui_proto::tx_power::clamp_tx_power;
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::{Assignment, NodeState};
 pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};
 
-pub(crate) use lag::BEHIND_THE_AIR_US;
+pub(crate) use lag::BEHIND_US;
 pub(crate) use rx::advance_since_boot;
 
 use crate::distinct::Distinct;
@@ -108,13 +106,13 @@ pub struct FleetEngine {
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
     last_arrival: Option<(u32, Instant)>,
-    /// How far behind the air this host is, in microseconds. Zero while the link is read live,
+    /// How far behind the bridge this host is reading, in microseconds. Zero while the link is read live,
     /// climbing while frames arrive faster than wall-clock time allows. Zero on start and every
     /// connect or disconnect ([`Self::note_arrival`] has why).
     backlog_lag_us: u64,
     /// The largest [`Self::backlog_lag_us`] measured since the last [`Event::HostSample`].
     lag_peak_us: u64,
-    /// When the current measured spell behind the air began. `None` while live. Bounds the log
+    /// When the current measured spell behind the bridge began. `None` while live. Bounds the log
     /// lines of [`Self::note_arrival`].
     behind_since: Option<Instant>,
     /// The largest lag measured during the spell [`Self::behind_since`] opened.
@@ -127,8 +125,6 @@ impl FleetEngine {
     pub fn capture_settings(&self) -> CaptureSettings {
         CaptureSettings {
             pool: self.config.pool,
-            tx_power: self.config.tx_power,
-            bridge_tx_power: self.config.bridge_tx_power,
             record_raw: self.config.record_raw,
             // The bridge's receiver is built for every run, so it counts only while a bridge with
             // a GPS port is connected.
@@ -145,11 +141,7 @@ impl FleetEngine {
     }
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
-    pub fn new(mut config: EngineConfig, now: Now) -> Self {
-        // Clamped once here, not where each power reaches a radio. `tx_power::clamp_tx_power` says
-        // why.
-        config.tx_power = clamp_tx_power(config.tx_power);
-        config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
+    pub fn new(config: EngineConfig, now: Now) -> Self {
         Self {
             nodes: BTreeMap::new(),
             slots: HashMap::new(),
@@ -233,7 +225,6 @@ impl FleetEngine {
             garbled: c.garbled,
             undecodable: c.undecodable,
             incompatible: c.incompatible,
-            admin_windows_missed: c.admin_windows_missed,
             lag_peak_us: std::mem::take(&mut self.lag_peak_us),
             store_written: sample.store.written,
             store_dropped: sample.store.dropped,
@@ -335,7 +326,7 @@ impl FleetEngine {
         match msg {
             BridgeToHost::FromNode { slot, rx_us, kind, body } => {
                 let rx = FromNode { slot: *slot, rx_us: *rx_us, kind: *kind, body };
-                // Before `on_from_node`: heartbeats read `air_is_live`.
+                // Before `on_from_node`: heartbeats read `reading_live`.
                 self.note_arrival(rx.slot, rx.rx_us, now);
                 self.on_from_node(&rx, now, batch);
             }

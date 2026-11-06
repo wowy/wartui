@@ -136,8 +136,8 @@ impl Ui {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
         let holds = snapshot.ble_node == Some(target);
-        // Same rule as an assignment. The flag travels in the admin frame, and only a
-        // heartbeat opens its window.
+        // Same rule as an assignment. The flag travels in the assignment, which answers
+        // a heartbeat.
         if !holds && let Some(why) = why_not_assignable(node) {
             self.say(format!("{} {why}", mac::full(&target)), snapshot);
             return;
@@ -163,8 +163,8 @@ impl Ui {
     fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
-        // Same refusal as `toggle_ble`. The frame travels in the admin window, and
-        // only a heartbeat opens one.
+        // Same refusal as `toggle_ble`. The clear answers a heartbeat, and goes to the
+        // slot that heartbeat came from.
         if let Some(why) = why_not_assignable(node) {
             self.say(format!("{} {why}", mac::full(&target)), snapshot);
             return;

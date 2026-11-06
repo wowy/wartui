@@ -20,9 +20,6 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
-# PlatformIO build output (tools/espnow-sniffer)
-.pio/
-
 # Python bytecode (tools/beacons)
 __pycache__/
 *.py[cod]

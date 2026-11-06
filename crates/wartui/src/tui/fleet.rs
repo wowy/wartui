@@ -1,5 +1,5 @@
 //! The channels column colors each node's share by how far its assignment has got,
-//! because a MAC-layer ack is not adoption. Only the node's heartbeat, carrying the
+//! because a delivery is not adoption. Only the node's heartbeat, carrying the
 //! epoch it holds, shows it took the frame (`NodeState::adopted`).
 //!
 //! | State | Wi-Fi share | Bluetooth node |
@@ -266,9 +266,8 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
 
 /// The state column: what the operator most needs to know about a node.
 ///
-/// `stale`: sightings arrive, heartbeats do not, usually because BLE holds the
-/// antenna. The node cannot be assigned. This differs from silence, which has other
-/// causes.
+/// `stale`: sightings arrive, heartbeats do not. The node cannot be assigned. This
+/// differs from silence, which has other causes.
 fn node_state(node: &NodeView) -> (String, Severity) {
     let state = &node.state;
     // Ahead of `no heartbeat`: a node on another major or minor has its heartbeats read

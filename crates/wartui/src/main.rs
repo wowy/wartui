@@ -1,8 +1,8 @@
 //! wartui's command line.
 //!
 //! `run` is the tool; `flash-fleet` and `flash-bridge` put the firmware on the boards it
-//! drives, and `ota` updates the nodes' firmware over the air. Everything else checks one link
-//! in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
+//! drives, and `ota` updates the nodes' firmware through the bridge. Everything else checks one
+//! link in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
 //! § "When nothing arrives" has which to reach for.
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
@@ -79,7 +79,7 @@ enum Command {
     FlashFleet(flash::fleet::Args),
     /// Update the P4 bridge's firmware over its link.
     FlashBridge(flash::bridge::Args),
-    /// Update nodes' firmware over the air, through the bridge.
+    /// Update nodes' firmware through the bridge.
     Ota(ota::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
@@ -241,6 +241,11 @@ fn no_boards_notice() -> String {
 fn memory(explicit: Option<&Path>) -> BridgeMemory {
     let bridge = config::remembered_bridge(explicit);
     BridgeMemory::holding(bridge.mac).on_port(bridge.serial)
+}
+
+/// `--sim`'s node count: at most one node per node-bus slot, as on a real bridge.
+fn sim_nodes() -> clap::builder::RangedI64ValueParser<u8> {
+    clap::value_parser!(u8).range(0..=wartui_proto::plan::MAX_NODES as i64)
 }
 
 /// Open whichever transport the arguments called for.
@@ -524,14 +529,9 @@ mod tests {
 
     #[test]
     fn cli_parser_rejects_removed_flags_when_given_before_or_after_subcommand() {
-        // Power and pool come from `wartui.toml` or the settings modal; the store
-        // commits at its built-in interval.
-        for flag in [
-            ["--pool", "eu"],
-            ["--node-tx-power", "10"],
-            ["--bridge-tx-power", "10"],
-            ["--commit-interval", "500"],
-        ] {
+        // The pool comes from `wartui.toml` or the settings modal; the store commits at
+        // its built-in interval.
+        for flag in [["--pool", "eu"], ["--commit-interval", "500"]] {
             for args in [
                 ["wartui", flag[0], flag[1]].as_slice(),
                 ["wartui", "run", flag[0], flag[1]].as_slice(),
@@ -539,6 +539,20 @@ mod tests {
                 assert!(parse(args).is_err(), "{args:?} should be refused");
             }
         }
+    }
+
+    #[test]
+    fn cli_parser_rejects_sim_node_count_when_over_fourteen() {
+        for args in [
+            ["wartui", "--sim", "15"].as_slice(),
+            ["wartui", "run", "--sim", "15"].as_slice(),
+            ["wartui", "sniff", "--sim", "15"].as_slice(),
+            ["wartui", "status", "--sim", "15"].as_slice(),
+            ["wartui", "ota", "--sim", "15"].as_slice(),
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
+        assert!(parse(["wartui", "--sim", "14"]).is_ok());
     }
 
     #[test]

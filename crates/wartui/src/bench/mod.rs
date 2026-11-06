@@ -51,13 +51,13 @@ use wartui_core::store::{
 };
 use wartui_proto::dedup::DEDUP_RING;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
 use self::timeline::{Mark, Slice, Timeline};
 
 /// How often each node's progress is checked during the measured window.
 ///
-/// Longer than the slowest sweep a fleet of one to twenty nodes has, so a node doing its
+/// Longer than the slowest sweep a fleet of one to fourteen nodes has, so a node doing its
 /// job always reports something inside one.
 const SAMPLE: Duration = Duration::from_secs(2);
 
@@ -86,7 +86,7 @@ pub enum Profile {
     /// Ten nodes in real time, one of them scanning Bluetooth: a busy street, sustained.
     #[default]
     Drive,
-    /// The fleet maximum of twenty nodes in real time, one on Bluetooth, to find where
+    /// The fleet maximum of fourteen nodes in real time, one on Bluetooth, to find where
     /// the store stops keeping up and starts dropping.
     Burst,
 }
@@ -97,7 +97,7 @@ impl Profile {
     const fn load(self) -> (u8, f64, f64) {
         match self {
             Self::Drive => (10, 1.0, 1.0),
-            Self::Burst => (20, 1.0, 1.0),
+            Self::Burst => (MAX_NODES as u8, 1.0, 1.0),
         }
     }
 
@@ -214,6 +214,9 @@ pub async fn run(args: Args) -> Result<()> {
     let nodes = args.nodes.unwrap_or(nodes);
     if nodes == 0 {
         bail!("--nodes must be at least 1");
+    }
+    if usize::from(nodes) > MAX_NODES {
+        bail!("--nodes must be at most {MAX_NODES}, one per node-bus slot");
     }
     if args.interval < SAMPLE.as_secs() {
         bail!("--interval must be at least {}s, the sampling period", SAMPLE.as_secs());
@@ -926,9 +929,9 @@ mod tests {
     use std::time::Duration;
 
     use wartui_proto::dedup::DEDUP_RING;
-    use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
+    use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
-    use super::{Report, Value, busy_networks, percentile, table};
+    use super::{MAX_NODES, Report, Value, busy_networks, percentile, table};
 
     fn slice(t_s: u64, rows_per_s: f64, device_writes: Option<u64>) -> Report {
         let mut row = Report::default();

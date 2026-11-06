@@ -29,10 +29,6 @@ pub struct Counters {
     pub unknown_slot: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Assignments held back because their heartbeat was replayed from the bridge's backlog, so
-    /// the epoch it reported was history. Counted only where one was owed, so this is sends
-    /// deferred, not stale records.
-    pub admin_windows_missed: u64,
     /// Assignments this host has sent.
     pub admin_sent: u64,
     /// Assignments the bridge delivered.
@@ -151,10 +147,6 @@ pub struct Snapshot {
     /// the connected bridge has a GPS port. Separate from [`Self::position`]: "no fix" and "no
     /// receiver" look identical in a row but are different problems.
     pub gps: Option<crate::gps::GpsView>,
-    /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
-    pub tx_power: i8,
-    /// The bridge's Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
-    pub bridge_tx_power: i8,
     /// The SSIDs never captured, as text for the settings modal to edit.
     pub excluded_ssids: Vec<String>,
 }
@@ -259,8 +251,6 @@ impl FleetEngine {
             now_ms: now.unix_ms,
             position: self.config.position.resolve(now.unix_ms),
             gps: self.shown_gps(now.unix_ms).map(crate::gps::Gps::view),
-            tx_power: self.config.tx_power,
-            bridge_tx_power: self.config.bridge_tx_power,
             excluded_ssids: self
                 .config
                 .excluded_ssids
