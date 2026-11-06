@@ -51,6 +51,9 @@ It also takes an image over the air, in the update frames:
 A chunk carries up to 1024 bytes of image and needs ESP-NOW v2. A status answers the host that
 sent the frame. § "Over-the-air updates" has the rest.
 
+It is also an SPI slave of the P4 bridge, and that bus carries a copy of each heartbeat;
+[`docs/node-bus.md`](../../docs/node-bus.md) has the pins.
+
 ## What it does differently
 
 **It listens instead of scanning.** It parks the radio and reads beacons and probe responses. So it
