@@ -1,16 +1,16 @@
 //! `wartui status` — ask the bridge how it is doing.
 //!
 //! The only command that proves the link works in both directions, which makes
-//! it the first thing to reach for when frames are not arriving: a bridge that
+//! it the first thing to reach for when records are not arriving: a bridge that
 //! answers is listening, and one that does not is either wedged or not there.
 //!
 //! `dropped_tx` is the number worth watching: frames the bridge threw away because
 //! they arrived faster than the host drained the link — a host not reading,
-//! or a burst too big to queue — so observations lost on this side of the radio
-//! rather than on the air.
+//! or a burst too big to queue — so observations lost between the bridge and the
+//! host rather than on the node bus.
 //!
-//! `oversize` counts frames the bridge heard and dropped for being longer than any
-//! wartui node sends: somebody else's ESP-NOW traffic, harmless to the capture.
+//! `oversize` counts node records the bridge dropped for being longer than any node of
+//! this build sends: a node on another build.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,7 +18,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -77,7 +76,6 @@ pub async fn run(args: Args) -> Result<()> {
         .context("the bridge did not answer a status request")??;
 
     let BridgeToHost::Status {
-        peer_count,
         rx_count,
         dropped_tx,
         uptime_ms,
@@ -90,10 +88,9 @@ pub async fn run(args: Args) -> Result<()> {
         unreachable!("wait_for_status only returns Status")
     };
 
-    println!("peers      {peer_count}");
-    println!("received   {rx_count} frames");
+    println!("received   {rx_count} records");
     println!("dropped    {dropped_tx} frames");
-    println!("oversize   {rx_oversize} frames");
+    println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.
@@ -171,20 +168,20 @@ fn queue_line(stat: &QueueStat) -> String {
     )
 }
 
-/// What to say when no node's frame has reached the bridge, or `None` when one has.
+/// What to say when no node's record has reached the bridge, or `None` when one has.
 ///
-/// Oversize frames are ESP-NOW from somebody else, so a bridge that has counted only those
-/// has a working radio and no fleet to hear.
+/// An oversize record comes from a node on another build, so a bridge that has counted only
+/// those has a node that needs reflashing.
 fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     if rx_count > 0 {
         return None;
     }
     let heard = if rx_oversize > 0 {
-        "The radio is hearing ESP-NOW traffic, but none of it is from a wartui node."
+        "A node is sending records too long for this build; reflash it."
     } else {
-        "The bridge has heard no wartui frames."
+        "The bridge has had no record from a node."
     };
-    Some(format!("{heard} Check the nodes are powered and on channel {CONTROL_CHANNEL}."))
+    Some(format!("{heard} Check the nodes are powered and wired to the bridge's node bus."))
 }
 
 async fn wait_for_ready(link: &mut wartui_bridge::LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
@@ -289,18 +286,15 @@ mod tests {
             .expect("room");
         queues
             .push(QueueStat {
-                queue: QueueId::RadioSendJobs,
-                capacity: 8,
-                high_water: 3,
+                queue: QueueId::NodeDown,
+                capacity: 4_096,
+                high_water: 3_102,
                 dropped: 2,
             })
             .expect("room");
         queues
-            .push(QueueStat { queue: QueueId::RadioJobs, capacity: 32, high_water: 20, dropped: 0 })
-            .expect("room");
-        queues
             .push(QueueStat {
-                queue: QueueId::RadioUpPriority,
+                queue: QueueId::RadioUp,
                 capacity: 8_192,
                 high_water: 96,
                 dropped: 0,
@@ -310,9 +304,8 @@ mod tests {
             diagnostic_lines(&queues, None, 0),
             [
                 "  queue host-bulk  1024/262144 bytes  dropped 0",
-                "  queue radio-send-jobs  3/8 entries  dropped 2",
-                "  queue radio-jobs  20/32 entries  dropped 0",
-                "  queue radio-up-priority  96/8192 bytes  dropped 0",
+                "  queue node-down  3102/4096 bytes  dropped 2",
+                "  queue radio-up  96/8192 bytes  dropped 0",
                 "  host link   uart_errors 0",
             ]
         );
@@ -334,20 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn status_cmd_names_foreign_traffic_when_bridge_heard_only_oversize_frames() {
+    fn status_cmd_names_other_build_when_bridge_counted_only_oversize_records() {
         let note = silence_note(0, 3).expect("no node was heard");
-        assert!(note.starts_with("The radio is hearing ESP-NOW traffic, but none"), "{note}");
-        assert!(note.contains("powered and on channel"), "{note}");
+        assert!(note.starts_with("A node is sending records too long"), "{note}");
+        assert!(note.contains("wired to the bridge's node bus"), "{note}");
     }
 
     #[test]
-    fn status_cmd_says_heard_no_wartui_frames_when_bridge_counted_none() {
+    fn status_cmd_says_no_record_when_bridge_counted_none() {
         let note = silence_note(0, 0).expect("no node was heard");
-        assert!(note.starts_with("The bridge has heard no wartui frames."), "{note}");
+        assert!(note.starts_with("The bridge has had no record from a node."), "{note}");
     }
 
     #[test]
-    fn status_cmd_omits_silence_note_when_a_node_frame_arrived() {
+    fn status_cmd_omits_silence_note_when_a_node_record_arrived() {
         assert_eq!(silence_note(1, 3), None);
     }
 
@@ -364,7 +357,6 @@ mod tests {
     #[test]
     fn status_cmd_returns_answer_when_status_arrives() {
         let status = BridgeToHost::Status {
-            peer_count: 1,
             rx_count: 2,
             dropped_tx: 0,
             uptime_ms: 3,

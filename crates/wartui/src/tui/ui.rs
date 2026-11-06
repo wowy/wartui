@@ -322,7 +322,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.nodes.push(unannounced(0x21));
         snapshot.nodes.push(stale_node(0x22));
-        snapshot.nodes.push(refused(0x23));
+        snapshot.nodes.push(unslotted(0x23));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
         // `expect`, not `continue`, so every reason is asserted.
         let row = |mac_suffix: u8| {
@@ -336,7 +336,7 @@ mod tests {
         for (row, want) in [
             (row(0x21), "heartbeated yet"),
             (row(0x22), "not heartbeating"),
-            (row(0x23), "peer table"),
+            (row(0x23), "bus slot"),
         ] {
             let (tx, mut rx) = mpsc::channel(4);
             let mut ui = Ui { selected: row, ..Default::default() };

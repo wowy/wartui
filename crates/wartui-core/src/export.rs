@@ -63,8 +63,8 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
-use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
+use wartui_proto::bus::RecordKind;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Band, ChannelInfo, channel_info};
 

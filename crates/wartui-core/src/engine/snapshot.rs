@@ -1,5 +1,5 @@
 use wartui_bridge::BridgeInfo;
-use wartui_proto::air::{Compat, RecordKind};
+use wartui_proto::bus::{Compat, RecordKind};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, Plan};
 
@@ -11,43 +11,44 @@ use crate::record::{Observation, ssid_text};
 /// Running totals, all of them since the engine started.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
-    /// ESP-NOW frames of ours the bridge forwarded.
+    /// Node records the bridge forwarded.
     pub frames: u64,
-    /// Frames that parsed as observations.
+    /// Sightings recorded.
     pub observations: u64,
-    /// Frames that parsed as heartbeats.
+    /// Records that parsed as heartbeats.
     pub heartbeats: u64,
-    /// Frames of ours that would not parse.
+    /// Records of an unknown type, or that would not parse.
     pub undecodable: u64,
-    /// Frames of ours in a wire version or layout this build does not read: another wire version,
-    /// a wrong length, or a sighting batch from a node once its heartbeat has named another major
-    /// or minor. A half-flashed fleet looks like this, and nothing else says so. A heartbeat naming
-    /// another major or minor is not counted: its node is shown instead.
+    /// Records in a layout this build does not read: a wrong length, or a sighting batch from a
+    /// node once its heartbeat has named another major or minor. A half-flashed fleet looks like
+    /// this, and nothing else says so. A heartbeat naming another major or minor is not counted:
+    /// its node is shown instead.
     pub incompatible: u64,
+    /// Sighting batches from a slot no heartbeat has named yet, dropped: there is no node to
+    /// file them under. A node's first seconds after it is plugged in.
+    pub unknown_slot: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Assignments held back because their heartbeat was replayed from the bridge's backlog, its
-    /// window long shut. Counted only where one was owed, so this is transmits deferred, not stale
-    /// frames.
+    /// Assignments held back because their heartbeat was replayed from the bridge's backlog, so
+    /// the epoch it reported was history. Counted only where one was owed, so this is sends
+    /// deferred, not stale records.
     pub admin_windows_missed: u64,
-    /// Assignments this host has put on the air.
+    /// Assignments this host has sent.
     pub admin_sent: u64,
-    /// Assignments a node's radio acknowledged.
+    /// Assignments the bridge delivered.
     pub admin_acked: u64,
-    /// Assignments unacknowledged, refused by the bridge, or never answered for.
+    /// Assignments undelivered, or never answered for.
     pub admin_failed: u64,
-    /// Assignments acked but not taken, as the node's next heartbeat epoch shows. Each is re-sent
-    /// on that heartbeat, like an unacknowledged one.
+    /// Assignments delivered but not taken, as the node's next heartbeat epoch shows. Each is
+    /// re-sent on that heartbeat, like an undelivered one.
     pub admin_unadopted: u64,
-    /// Assignments refused because the bridge's peer table was full.
-    pub peer_table_full: u64,
     /// Times the pool was re-partitioned.
     pub replans: u64,
-    /// Sighting batches lost between nodes and the host, from `seq` gaps after a live batch. Frames
-    /// the bridge evicted with no host reading are its `dropped_tx`.
+    /// Sighting batches lost between nodes and the host, from `seq` gaps after a live batch.
+    /// Records the bridge evicted with no host reading are its `dropped_tx`.
     pub batches_lost: u64,
-    /// Sighting batches dropped as MAC-layer retransmissions ([`DUPLICATE_BATCH_WINDOW_US`]). Not
-    /// in `batches_lost`, since nothing was lost.
+    /// Sighting batches dropped as resends of the batch before ([`DUPLICATE_BATCH_WINDOW_US`]).
+    /// Not in `batches_lost`, since nothing was lost.
     pub duplicate_batches: u64,
     /// Access points heard with no pending-buffer room, once per dwell. Mostly delay, not loss: an
     /// address turned away is not in the dedup ring, so the next dwell reports it. Steady growth
@@ -59,9 +60,9 @@ pub struct Counters {
 
 /// A node as of one snapshot.
 ///
-/// Both flags are carried because the UI cannot re-derive them. A node can stream observations with
-/// a healthy RSSI yet take no assignment, since only heartbeats open its admin window. And the
-/// liveness timeout is engine configuration the snapshot does not carry.
+/// Both flags are carried because the UI cannot re-derive them. A node can stream observations yet
+/// take no assignment, since only a heartbeat is answered with one. And the liveness timeout is
+/// engine configuration the snapshot does not carry.
 #[derive(Debug, Clone)]
 pub struct NodeView {
     /// Everything known about the node.
@@ -116,8 +117,8 @@ pub struct Snapshot {
     pub remember_ble: bool,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
-    /// Nodes heartbeating inside the topology timeout. Can exceed [`Self::assignable`]: a node with
-    /// no peer slot, or no declared radio, is alive but undrivable.
+    /// Nodes heartbeating inside the topology timeout. Can exceed [`Self::assignable`]: a node
+    /// with no declared radio is alive but undrivable.
     pub alive: usize,
     /// How many can take an assignment: exactly the set the planner partitions.
     pub assignable: usize,
@@ -176,9 +177,7 @@ impl Snapshot {
 /// The bridge's self-report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStatus {
-    /// Registered peers.
-    pub peer_count: u8,
-    /// Frames received and accepted to forward since boot.
+    /// Node records forwarded since boot.
     pub rx_count: u32,
     /// Frames the bridge's outbound ring dropped since boot. Mostly history: a bridge powered with
     /// nothing attached drops all it hears.

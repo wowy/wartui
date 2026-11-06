@@ -54,7 +54,7 @@ use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, SerialTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
-use wartui_proto::air::OtaState;
+use wartui_proto::bus::UpdateState;
 use wartui_proto::link::{
     BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED,
     RADIO_UPDATING, UpdateOp,
@@ -536,15 +536,15 @@ fn failure_text(failure: Failure, image_known: bool) -> String {
              once by hand, per {FIRST_FLASH}"
         ),
         Failure::Silent => "the bridge stopped answering the update".to_owned(),
-        Failure::Refused(OtaState::FlashError) => format!(
+        Failure::Refused(UpdateState::FlashError) => format!(
             "the bridge refused the update: it has no second app slot or trial sector, or is \
              still on trial. A board on espflash's default partition table needs one flash by \
              hand with the bridge's own, per {FIRST_FLASH}"
         ),
-        Failure::Refused(OtaState::HashMismatch) => {
+        Failure::Refused(UpdateState::HashMismatch) => {
             "the bridge received the image damaged; run flash-bridge again".to_owned()
         }
-        Failure::Refused(OtaState::TooLarge) => {
+        Failure::Refused(UpdateState::TooLarge) => {
             "the image is larger than the bridge's update slot".to_owned()
         }
         Failure::Refused(state) => format!("the bridge refused the update: {state:?}"),
@@ -760,14 +760,14 @@ mod tests {
 
     #[test]
     fn flash_p4_names_wired_flash_when_bridge_has_no_update_slot() {
-        let text = failure_text(Failure::Refused(OtaState::FlashError), true);
+        let text = failure_text(Failure::Refused(UpdateState::FlashError), true);
         assert!(text.contains("partition table") && text.contains(FIRST_FLASH), "{text}");
     }
 
     #[test]
     fn flash_p4_says_run_again_when_switch_to_image_fails() {
         // A refusal after `Install`: the image arrived whole, so the table is not at fault.
-        let text = failure_text(Failure::SwitchFailed(OtaState::FlashError), true);
+        let text = failure_text(Failure::SwitchFailed(UpdateState::FlashError), true);
         assert!(text.contains("switching") && text.contains("run flash-bridge again"), "{text}");
         assert!(!text.contains("partition table") && !text.contains(FIRST_FLASH), "{text}");
     }

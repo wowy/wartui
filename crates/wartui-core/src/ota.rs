@@ -1,27 +1,23 @@
-//! The host's half of an over-the-air update: a state machine that takes one node from its
-//! running image to a new one, confirmed. [`wartui_proto::ota::Receiver`] is the node's half.
+//! The host's half of a node's update: a state machine that takes one node from its running
+//! image to a new one, confirmed. [`wartui_proto::ota::Receiver`] is the node's half.
 //!
 //! Like [`crate::engine`], it reads no clock and does no I/O. Time arrives as [`Now`], and
 //! what it wants sent comes back as [`HostToBridge`] commands for a driver
 //! (`runtime::drive_ota`) to queue.
 //!
-//! **The first `begin` rides a heartbeat.** Outside update mode a node hears frames only in the
-//! admin window its heartbeat opens: 100 ms every 5 s when assigned, about a second when parked.
-//! So [`OtaBeginMsg`] goes out on each heartbeat from the node until a status for this session
-//! answers it. An accepted `begin` puts the node in update mode, where it listens continuously,
-//! and everything after it goes out as soon as it is due. A refused `begin` from a host that is
-//! not yet the node's core is not answered at all, which is why [`BEGIN_TIMEOUT`] is the only
-//! way that phase fails.
+//! **The first `begin` rides a heartbeat**, which names the node-bus slot the node sits in, so the
+//! session learns where to send from the node's own heartbeats. [`UpdateBegin`] goes out on each
+//! heartbeat from the node until a status for this session answers it. An accepted `begin` puts
+//! the node in update mode, where it services the bus continuously, and everything after it goes
+//! out as soon as it is due.
 //!
-//! **One chunk is in flight at a time**, the next sent only on the previous one's
-//! [`SendStatus`]. The bridge queues its `SendResult`s in an 8-deep priority ring that evicts
-//! its oldest; a burst of chunks would overrun it, and a lost result leaves the host unable to
-//! tell an acked chunk from a dropped one. At ~3.6 ms a frame the pace is the flash's anyway
-//! (`docs/espnow-v2-findings.md`).
+//! **One chunk is in flight at a time**, the next sent only on the previous one's `Delivered` or
+//! `Undelivered`. The P4 holds a few records per slot and delivers one transfer per ack, so a
+//! burst would fill the queue, and a refusal leaves the host resending anyway.
 //!
-//! **Flow control is the node's `next_offset`, not the MAC ack.** An ack says the radio took
-//! the frame, not that the node read it: its receive queue is ten deep and drains only between
-//! flash writes. The node reports a status on each 4 KB sector it writes, so after the chunk
+//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took
+//! the transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past
+//! a lost chunk arrives at the wrong offset. The node reports a status on each 4 KB sector it writes, so after the chunk
 //! that completes a sector the host waits for one. Any status moves the host to the offset it
 //! names, back or forward, except one below the highest offset the node has reported since its
 //! `begin`: that one was overtaken by a newer status, and acting on it would resend what the node
@@ -29,25 +25,25 @@
 //! last offset the node reported: a node that has those bytes answers the duplicate with its
 //! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
 //! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
-//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] unacked
-//! sends in a row: a node rebooting has its radio off, and acks nothing for a second or so.
-//! Each returns to the `begin`, which an identical one resumes where the node's progress
-//! stands: from 0 after a reboot, which loses the receiver's state and the node's core.
+//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered
+//! sends in a row: a node rebooting acknowledges nothing for a second or so. Each returns to the
+//! `begin`, which an identical one resumes where the node's progress stands: from 0 after a
+//! reboot, which loses the receiver's state.
 //! [`MAX_RESTARTS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
-//! up after the node accepted it sends [`OtaAbortMsg`] once, so the node leaves update mode at
+//! up after the node accepted it sends [`UpdateAbort`] once, so the node leaves update mode at
 //! once rather than after its 30 s of silence.
 //!
-//! **Success, rollback and silence are told apart by the heartbeat's frozen prefix**: version
-//! and trial flag, which every minor reads. A node switches slots the moment it reports
+//! **Success, rollback and silence are told apart by the heartbeat's prefix**: version and trial
+//! flag, which every minor reads. A node switches slots the moment it reports
 //! `Verified`, so its next boot heartbeats the new version with `trial` set. That heartbeat is
 //! success even when the `Verified` itself was lost. The new image is confirmed by the first
-//! host frame it decodes; [`OtaConfirmMsg`] goes out on each heartbeat still showing `trial`,
+//! record from the bridge it decodes; [`UpdateConfirm`] goes out on each heartbeat still showing `trial`,
 //! and one with the new version and no `trial` is done.
 //!
 //! The prefix carries no boot counter, and a node on another minor has no layout this host
 //! reads beyond it, so "not rebooted yet" is told from "rolled back" by time. The old image
 //! heartbeats for a moment after `Verified`: the switch and reboot take milliseconds, but
-//! heartbeats already in the bridge's backlog arrive after it. So an old-version heartbeat
+//! heartbeats already queued at the bridge arrive after it. So an old-version heartbeat
 //! counts as failure only [`REBOOT_GRACE`] after `Verified`, by which time the node has either
 //! booted the new image or is still on the old one: a switch that failed, or a new image that
 //! rolled back. Once a trial heartbeat has been heard, a reboot is proven, and an old-version
@@ -55,29 +51,30 @@
 //!
 //! **A heartbeat is the new image only once this session has sent its commit**, since nothing
 //! installs before one. That check comes first in every phase, `Begin` included: a `Verified`
-//! that is lost, then resent commits unacked while the node reboots, return the session to its
+//! that is lost, then resent commits undelivered while the node reboots, return the session to its
 //! `begin`, and the new image's first heartbeat must be confirmed, never answered with a
 //! `begin`. The node would take that `begin` and stream the image again into the slot holding
 //! the old one, destroying the copy a rollback returns to.
 //!
 //! After the commit, the image's version with `trial` set is the new image on trial: the old
-//! image cannot be on trial, because the node confirms a trial image on the first update frame
+//! image cannot be on trial, because the node confirms a trial image on the first update record
 //! it decodes. Without `trial`, the version says it is the new image, confirmed, when it differs
 //! from the old one. An image of the version the node already runs (`--force`) leaves the
-//! version unable to tell, so done then needs an acked [`OtaConfirmMsg`], and a heartbeat of that
-//! version without `trial` gets another confirm until one is acked. A rollback in that case is
-//! indistinguishable from a confirmed image once the old image acks a confirm, which is the cost
-//! of reinstalling one version.
+//! version unable to tell, so done then needs a delivered [`UpdateConfirm`], and a heartbeat of
+//! that version without `trial` gets another confirm until one is delivered. A rollback in that
+//! case is indistinguishable from a confirmed image once the old image takes a confirm, which is
+//! the cost of reinstalling one version.
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wartui_proto::air::{
-    Capabilities, OTA_CHUNK, OTA_CHUNK_MSG_MAX, OtaAbortMsg, OtaBeginMsg, OtaChunkMsg,
-    OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg, Version,
+use wartui_proto::bus::{
+    ACK_TIMEOUT_MS, Capabilities, DownType, Heartbeat, SEND_TRIES, Slot, UPDATE_CHUNK,
+    UPDATE_CHUNK_MAX, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateConfirm,
+    UpdateState, UpdateStatus, Version,
 };
-use wartui_proto::link::{HostToBridge, SendPayload, SendStatus};
+use wartui_proto::link::{HostToBridge, ToNodeBody};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::SECTOR;
 
@@ -91,16 +88,17 @@ pub const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 /// session and the update returns to its `begin`.
 pub const MAX_STATUS_TIMEOUTS: u32 = 20;
 
-/// How long a sent frame waits for its `SendResult` before it is treated as unacked. The
-/// bridge answers in milliseconds; a result evicted from its ring never comes.
-pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a sent record waits for its `Delivered` before it is treated as undelivered: a second
+/// past the bridge's own give-up, so the bridge's answer comes first. A lost answer never comes.
+pub const SEND_TIMEOUT: Duration =
+    Duration::from_millis(ACK_TIMEOUT_MS * SEND_TRIES as u64 + 1_000);
 
-/// Unacked chunks or commits in a row before the node is taken to have rebooted or wandered off,
+/// Undelivered chunks or commits in a row before the node is taken to have rebooted or wandered off,
 /// and the update returns to its `begin`.
 pub const MAX_SEND_FAILURES: u32 = 10;
 
-/// How long the `begin` is retried on heartbeats before the node is given up on: six admin
-/// windows of an assigned node, thirty of a parked one.
+/// How long the `begin` is retried on heartbeats before the node is given up on: six heartbeats
+/// of an assigned node, thirty of an unassigned one.
 pub const BEGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How many times an update may start over from its `begin` after losing the node, before
@@ -230,19 +228,21 @@ pub enum Outcome {
 /// What [`OtaSession::handle`] reacts to.
 #[derive(Debug, Clone, Copy)]
 pub enum OtaEvent<'a> {
-    /// The bridge's answer to a frame the session sent.
-    SendResult {
-        /// The id the session gave the frame.
+    /// The bridge's answer to a record the session sent.
+    Delivery {
+        /// The id the session gave the record.
         id: u16,
-        /// What the radio said.
-        status: SendStatus,
+        /// `Delivered`, rather than `Undelivered`.
+        delivered: bool,
     },
-    /// A frame the bridge heard. Only the session's own node is read.
-    Rx {
-        /// Who sent it.
-        src: Mac,
-        /// The frame.
-        payload: &'a [u8],
+    /// A record a node sent. Only the session's own node is read.
+    FromNode {
+        /// The slot it came from.
+        slot: Slot,
+        /// Its type, a `bus::UpType` byte.
+        kind: u8,
+        /// Its body.
+        body: &'a [u8],
     },
     /// Time passing, for timeouts. A few times a second is enough.
     Tick,
@@ -269,10 +269,10 @@ pub struct OtaImage {
     /// The firmware version the image carries.
     pub version: Version,
     /// The board it was built for.
-    pub board: wartui_proto::air::Board,
+    pub board: wartui_proto::bus::Board,
 }
 
-/// A frame awaiting its `SendResult`.
+/// A record awaiting its answer.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
     id: u16,
@@ -293,8 +293,10 @@ enum Sent {
 #[derive(Debug)]
 pub struct OtaSession {
     node: Mac,
+    /// The slot the node's latest heartbeat came from, which everything is sent to.
+    slot: Option<Slot>,
     bytes: Arc<[u8]>,
-    begin: OtaBeginMsg,
+    begin: UpdateBegin,
     /// The version the node ran when the update started.
     from: Version,
     phase: Phase,
@@ -327,7 +329,7 @@ impl OtaSession {
     /// An update of `node`, running `from`, to `image`.
     ///
     /// `session` names it on the wire; the caller picks one a restarted host is unlikely to
-    /// repeat. `first_id` is the first `SendEspNow` id it uses, so a driver running several
+    /// repeat. `first_id` is the first `ToNode` id it uses, so a driver running several
     /// in turn keeps late results of one from matching another ([`Self::next_id`]).
     #[must_use]
     pub fn new(
@@ -342,8 +344,9 @@ impl OtaSession {
         let len = u32::try_from(image.bytes.len()).unwrap_or(u32::MAX);
         Self {
             node,
+            slot: None,
             bytes: Arc::clone(&image.bytes),
-            begin: OtaBeginMsg {
+            begin: UpdateBegin {
                 session,
                 len,
                 sha256: image.sha256,
@@ -371,14 +374,14 @@ impl OtaSession {
     }
 
     /// Confirm a node already running `version` on trial, as an update ends: an
-    /// [`OtaConfirmMsg`] on each heartbeat until one without `trial` follows an acked confirm.
+    /// [`UpdateConfirm`] on each heartbeat until one without `trial` follows a delivered confirm.
     #[must_use]
     pub fn confirm_trial(node: Mac, version: Version, first_id: u16, now: Now) -> Self {
         let image = OtaImage {
             bytes: Arc::from(Vec::new()),
             sha256: [0; 32],
             version,
-            board: wartui_proto::air::Board::Unknown(0),
+            board: wartui_proto::bus::Board::Unknown(0),
         };
         let mut session = Self::new(node, version, &image, 0, first_id, now);
         session.committed = true;
@@ -394,23 +397,34 @@ impl OtaSession {
         }
         let now = now.mono;
         match event {
-            OtaEvent::SendResult { id, status } => self.on_send_result(now, id, status, &mut out),
-            OtaEvent::Rx { src, payload } if src == self.node => {
-                if let Ok(caps) = Capabilities::decode_prefix(payload) {
-                    self.on_heartbeat(now, caps, &mut out);
-                } else if let Ok(status) = OtaStatusMsg::decode(payload)
-                    && status.session == self.begin.session
-                {
-                    self.on_status(now, status, &mut out);
-                }
+            OtaEvent::Delivery { id, delivered } => {
+                self.on_delivery(now, id, delivered, &mut out);
             }
-            OtaEvent::Rx { .. } => {}
+            OtaEvent::FromNode { slot, kind, body } => match UpType::from_u8(kind) {
+                // A heartbeat of any layout opens with the prefix and the MAC.
+                Some(UpType::Heartbeat) => {
+                    if let Ok((caps, mac)) = Heartbeat::identity(body)
+                        && mac == self.node
+                    {
+                        self.slot = Some(slot);
+                        self.on_heartbeat(now, caps, &mut out);
+                    }
+                }
+                Some(UpType::UpdateStatus) if self.slot == Some(slot) => {
+                    if let Ok(status) = UpdateStatus::decode(body)
+                        && status.session == self.begin.session
+                    {
+                        self.on_status(now, status, &mut out);
+                    }
+                }
+                _ => {}
+            },
             OtaEvent::Tick => self.on_tick(now, &mut out),
         }
         if self.abort_owed {
             self.abort_owed = false;
-            let abort = OtaAbortMsg { session: self.begin.session }.encode();
-            self.send(now, Sent::Abort, &abort, &mut out);
+            let abort = UpdateAbort { session: self.begin.session }.encode();
+            self.send(now, Sent::Abort, DownType::UpdateAbort, &abort, &mut out);
         }
         out
     }
@@ -422,8 +436,8 @@ impl OtaSession {
             return out;
         }
         if matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing) {
-            let abort = OtaAbortMsg { session: self.begin.session }.encode();
-            self.send(now.mono, Sent::Abort, &abort, &mut out);
+            let abort = UpdateAbort { session: self.begin.session }.encode();
+            self.send(now.mono, Sent::Abort, DownType::UpdateAbort, &abort, &mut out);
         }
         self.fail(now.mono, Failure::Cancelled);
         out
@@ -451,7 +465,7 @@ impl OtaSession {
         self.node
     }
 
-    /// The first `SendEspNow` id this session has not used.
+    /// The first `ToNode` id this session has not used.
     #[must_use]
     pub const fn next_id(&self) -> u16 {
         self.next_id
@@ -484,7 +498,7 @@ impl OtaSession {
             (Some(false), _) => self.finish(now, Outcome::Done(new)),
             (None, Phase::Begin) => {
                 let begin = self.begin.encode();
-                self.send(now, Sent::Begin, &begin, out);
+                self.send(now, Sent::Begin, DownType::UpdateBegin, &begin, out);
             }
             (None, Phase::Streaming | Phase::Committing) => {}
             (None, Phase::AwaitReboot) => {
@@ -493,7 +507,7 @@ impl OtaSession {
                 }
             }
             // The image's version without `trial`, from a node whose old image carries it too,
-            // with no confirm acked: the confirm's ack was lost, so it goes again.
+            // with no confirm delivered: the confirm's delivery was lost, so it goes again.
             (None, Phase::AwaitConfirm) if caps.version == new && !caps.trial => {
                 self.send_confirm(now, out);
             }
@@ -501,37 +515,37 @@ impl OtaSession {
         }
     }
 
-    fn on_status(&mut self, now: Instant, status: OtaStatusMsg, out: &mut Vec<HostToBridge>) {
+    fn on_status(&mut self, now: Instant, status: UpdateStatus, out: &mut Vec<HostToBridge>) {
         let len = self.begin.len;
-        if matches!(status.state, OtaState::Receiving | OtaState::Verified) {
+        if matches!(status.state, UpdateState::Receiving | UpdateState::Verified) {
             self.accepted = true;
         }
         match (self.phase, status.state) {
-            (Phase::AwaitReboot, OtaState::FlashError) => self.fail(now, Failure::SwitchFailed),
+            (Phase::AwaitReboot, UpdateState::FlashError) => self.fail(now, Failure::SwitchFailed),
             (Phase::AwaitReboot | Phase::AwaitConfirm | Phase::Done | Phase::Failed, _) => {}
-            (Phase::Begin, OtaState::Idle) => {}
-            (Phase::Begin, OtaState::FlashError) => self.fail(now, Failure::Refused),
-            (_, OtaState::WrongBoard) => self.fail(now, Failure::WrongBoard),
-            (_, OtaState::TooLarge) => self.fail(now, Failure::TooLarge),
-            (_, OtaState::FlashError) => self.fail(now, Failure::FlashError),
-            (_, OtaState::HashMismatch) => self.fail(now, Failure::HashMismatch),
-            (_, OtaState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
-            (_, OtaState::Verified) => self.enter(now, Phase::AwaitReboot),
-            (Phase::Streaming | Phase::Committing, OtaState::Idle) => self.restart(now),
-            (Phase::Begin, OtaState::Receiving) => {
+            (Phase::Begin, UpdateState::Idle) => {}
+            (Phase::Begin, UpdateState::FlashError) => self.fail(now, Failure::Refused),
+            (_, UpdateState::WrongBoard) => self.fail(now, Failure::WrongBoard),
+            (_, UpdateState::TooLarge) => self.fail(now, Failure::TooLarge),
+            (_, UpdateState::FlashError) => self.fail(now, Failure::FlashError),
+            (_, UpdateState::HashMismatch) => self.fail(now, Failure::HashMismatch),
+            (_, UpdateState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
+            (_, UpdateState::Verified) => self.enter(now, Phase::AwaitReboot),
+            (Phase::Streaming | Phase::Committing, UpdateState::Idle) => self.restart(now),
+            (Phase::Begin, UpdateState::Receiving) => {
                 // A `begin` answers from where the node stands, which a reboot sets back to 0.
                 self.high = 0;
                 self.stream_from(now, status.next_offset, out);
             }
             // Overtaken by a newer status.
-            (Phase::Streaming | Phase::Committing, OtaState::Receiving)
+            (Phase::Streaming | Phase::Committing, UpdateState::Receiving)
                 if status.next_offset < self.high => {}
             // The last sector's own status, overtaken by the commit.
-            (Phase::Committing, OtaState::Receiving) if status.next_offset >= len => {}
-            (Phase::Committing, OtaState::Receiving) => {
+            (Phase::Committing, UpdateState::Receiving) if status.next_offset >= len => {}
+            (Phase::Committing, UpdateState::Receiving) => {
                 self.stream_from(now, status.next_offset, out);
             }
-            (Phase::Streaming, OtaState::Receiving) => {
+            (Phase::Streaming, UpdateState::Receiving) => {
                 self.reported = status.next_offset.min(len);
                 self.high = self.reported;
                 self.next = self.reported;
@@ -542,16 +556,10 @@ impl OtaSession {
         }
     }
 
-    fn on_send_result(
-        &mut self,
-        now: Instant,
-        id: u16,
-        status: SendStatus,
-        out: &mut Vec<HostToBridge>,
-    ) {
+    fn on_delivery(&mut self, now: Instant, id: u16, delivered: bool, out: &mut Vec<HostToBridge>) {
         let Some(pending) = self.pending.filter(|p| p.id == id) else { return };
         self.pending = None;
-        if status == SendStatus::AckOk {
+        if delivered {
             self.on_acked(now, pending.frame, out);
         } else {
             self.on_unacked(now, pending.frame, out);
@@ -596,7 +604,7 @@ impl OtaSession {
         }
     }
 
-    /// Count an unacked send, returning to the `begin` past [`MAX_SEND_FAILURES`]. Whether to
+    /// Count an undelivered send, returning to the `begin` past [`MAX_SEND_FAILURES`]. Whether to
     /// retry.
     fn note_send_failure(&mut self, now: Instant) -> bool {
         self.send_failures += 1;
@@ -666,37 +674,47 @@ impl OtaSession {
         let offset = self.next;
         let start = offset as usize;
         let data = &self.bytes[start..start + self.chunk_len(offset) as usize];
-        let msg = OtaChunkMsg { session: self.begin.session, offset, data };
-        let mut buf = [0u8; OTA_CHUNK_MSG_MAX];
+        let msg = UpdateChunk { session: self.begin.session, offset, data };
+        let mut buf = [0u8; UPDATE_CHUNK_MAX];
         let Some(n) = msg.encode_into(&mut buf) else { return };
-        self.send(now, Sent::Chunk(offset), &buf[..n], out);
+        self.send(now, Sent::Chunk(offset), DownType::UpdateChunk, &buf[..n], out);
     }
 
     fn send_commit(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        let commit = OtaCommitMsg { session: self.begin.session }.encode();
+        let commit = UpdateCommit { session: self.begin.session }.encode();
         self.committed = true;
-        self.send(now, Sent::Commit, &commit, out);
+        self.send(now, Sent::Commit, DownType::UpdateCommit, &commit, out);
         self.wait_status = Some(now + STATUS_TIMEOUT);
     }
 
     fn send_confirm(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        self.send(now, Sent::Confirm, &OtaConfirmMsg.encode(), out);
+        self.send(now, Sent::Confirm, DownType::UpdateConfirm, &UpdateConfirm.encode(), out);
     }
 
-    fn send(&mut self, now: Instant, frame: Sent, bytes: &[u8], out: &mut Vec<HostToBridge>) {
+    /// Send one record to the node's slot. Nothing goes before a heartbeat has named the slot,
+    /// and every phase that sends begins on one.
+    fn send(
+        &mut self,
+        now: Instant,
+        frame: Sent,
+        kind: DownType,
+        bytes: &[u8],
+        out: &mut Vec<HostToBridge>,
+    ) {
+        let Some(slot) = self.slot else { return };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.pending = Some(Pending { id, sent: now, frame });
-        // Every update frame fits ESP-NOW v2's payload (`air::ota`'s assertions).
-        let payload = SendPayload::from_slice(bytes).unwrap_or_default();
-        out.push(HostToBridge::SendEspNow { id, dst: self.node, ensure_peer: true, payload });
+        // Every update body fits `MAX_NODE_DOWN` (`bus::update`'s assertions).
+        let body = ToNodeBody::from_slice(bytes).unwrap_or_default();
+        out.push(HostToBridge::ToNode { slot, id, kind: kind.as_u8(), body });
     }
 
-    /// Bytes in the chunk at `offset`: [`OTA_CHUNK`], or what is left of the image.
+    /// Bytes in the chunk at `offset`: [`UPDATE_CHUNK`], or what is left of the image.
     fn chunk_len(&self, offset: u32) -> u32 {
-        // `OTA_CHUNK` is 1024.
+        // `UPDATE_CHUNK` is 1024.
         #[allow(clippy::cast_possible_truncation)]
-        let full = OTA_CHUNK as u32;
+        let full = UPDATE_CHUNK as u32;
         full.min(self.begin.len - offset)
     }
 

@@ -24,7 +24,7 @@ pub struct Now {
 }
 
 /// Something the engine must react to.
-// `Link` carries an inline ESP-NOW payload. Boxing it would allocate per frame to shrink a value
+// `Link` carries an inline node record. Boxing it would allocate per frame to shrink a value
 // that lives inside one `handle` call.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ pub enum Command {
     /// against, so Bluetooth costs the fleet a whole sniffer and buys back-to-back scans.
     ///
     /// Nothing is sent now. The planner's next re-cut deals that node's channels to the rest.
-    /// Moving the scan costs two frames, since the old holder gets a share back. While remembering
+    /// Moving the scan costs two assignments, since the old holder gets a share back. While remembering
     /// is on, the target also becomes the preferred node, `None` included, so a withdrawn scan
     /// stays withdrawn.
     AssignBle {
@@ -71,9 +71,8 @@ pub enum Command {
 
     /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
     ///
-    /// Both are clamped as [`FleetEngine::new`] clamps them. The bridge's power goes out at once
-    /// (`FleetEngine::update_bridge_tx_power`), the nodes' in re-sent assignments
-    /// (`FleetEngine::update_nodes_tx_power`). Setting the current values is a no-op.
+    /// Both are clamped as [`FleetEngine::new`] clamps them, and kept in the capture's settings.
+    /// Nothing on the node bus transmits, so neither reaches a radio.
     SetTxPower {
         /// Wi-Fi transmit power for the nodes.
         nodes: i8,
@@ -81,8 +80,8 @@ pub enum Command {
         bridge: i8,
     },
 
-    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out in that
-    /// node's next admin window, like an assignment.
+    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that
+    /// node's next heartbeat, like an assignment.
     ClearRing {
         /// Which node, or `None` for every node [`FleetEngine::is_assignable`] when this arrives.
         mac: Option<Mac>,
@@ -90,7 +89,7 @@ pub enum Command {
 
     /// Change the channel pool the fleet partitions.
     ///
-    /// The planner re-cuts the fleet, and each node takes its new share in its next admin window
+    /// The planner re-cuts the fleet, and each node takes its new share on its next heartbeat
     /// under a fresh epoch. A node whose share changes empties its own dedup ring. Setting the
     /// current pool is a no-op.
     SetPool {
@@ -99,7 +98,7 @@ pub enum Command {
     },
 
     /// Replace the SSIDs never captured ([`EngineConfig::excluded_ssids`]). Takes effect from the
-    /// next sighting; nothing goes out on the air.
+    /// next sighting; nothing goes to the nodes.
     SetExcludedSsids {
         /// Each SSID's bytes, matched exactly, in the operator's order.
         ssids: IndexSet<Vec<u8>>,
@@ -113,9 +112,8 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands sent ahead of `bulk`. Assignments and dedup-ring clears race a node's 100 ms admin
-    /// window straight after a heartbeat. Peer removals come here because `bulk` can drop them
-    /// (`FleetEngine::evict_stale_peers`).
+    /// Commands sent ahead of `bulk`: assignments and dedup-ring clears, which answer a
+    /// heartbeat.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 

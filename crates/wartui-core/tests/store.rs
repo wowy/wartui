@@ -16,13 +16,13 @@ use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus,
-    NodeSeen, Observation, Record,
+    NodeSeen, Observation, RawFrame, Record,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::{BUS_VERSION, RecordKind, Slot, UpType, wire_epoch};
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -31,6 +31,8 @@ use wartui_proto::reset::ResetCause;
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
 const EPOCH_MS: i64 = 1_777_642_477_000;
+/// The node-bus slot `NODE` sits in, `A2`.
+const SLOT: Slot = Slot::new(0, 1).unwrap();
 
 fn fixed(lat: f64, lon: f64) -> Fix {
     Fix {
@@ -62,7 +64,7 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
     Record::Observation(Observation {
         node_mac: node,
         rx_at_ms: at_ms,
-        link_rssi: Some(-41),
+        slot: SLOT,
         bssid,
         ssid: b"example".to_vec(),
         security: "[WPA2_PSK]".to_owned(),
@@ -120,9 +122,9 @@ fn store_records_scan_table_when_capture_created() {
         wartui_proto::plan::SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
     assert_eq!(channels, expected);
     let version: String = conn
-        .query_row("SELECT v FROM kv WHERE k = 'capture.wire_version'", [], |r| r.get(0))
-        .expect("wire version provenance");
-    assert_eq!(version, wartui_proto::air::WIRE_VERSION.to_string());
+        .query_row("SELECT v FROM kv WHERE k = 'capture.bus_version'", [], |r| r.get(0))
+        .expect("bus version provenance");
+    assert_eq!(version, BUS_VERSION.to_string());
 }
 
 #[test]
@@ -264,6 +266,23 @@ fn store_records_simulated_flag_when_capture_created() {
     }
 }
 
+/// A heartbeat from `NODE` in `SLOT` with every field set; tests override what they read.
+fn heartbeat() -> Heartbeat {
+    Heartbeat {
+        node_mac: NODE,
+        rx_at_ms: EPOCH_MS,
+        counter: 174,
+        epoch: 5,
+        slot: SLOT,
+        wifi_refused: 12,
+        ble_refused: 3,
+        reset_cause: ResetCause::PowerOn,
+        vdd_mv: Some(3304),
+        die_temp_c: Some(41),
+        live: true,
+    }
+}
+
 #[test]
 fn store_round_trips_record_when_each_type_written() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -276,24 +295,7 @@ fn store_round_trips_record_when_each_type_written() {
                 last_seen_ms: EPOCH_MS,
                 capabilities: Some("0.1.0;5g".to_owned()),
             }),
-            Record::Heartbeat(Heartbeat {
-                node_mac: NODE,
-                rx_at_ms: EPOCH_MS,
-                counter: 174,
-                epoch: 5,
-                link_rssi: Some(-41),
-                wifi_refused: 12,
-                ble_refused: 3,
-                beat: 61,
-                unsent: 4,
-                dwell: 0,
-                prev_dwell: 0,
-                tx_power: 8,
-                reset_cause: ResetCause::PowerOn,
-                vdd_mv: None,
-                die_temp_c: None,
-                live: false,
-            }),
+            Record::Heartbeat(Heartbeat { live: false, ..heartbeat() }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
         ],
     );
@@ -304,20 +306,14 @@ fn store_round_trips_record_when_each_type_written() {
     assert_eq!((nodes, beats, obs), (1, 1, 1));
 
     let epoch: i64 = conn.query_row("SELECT epoch FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(epoch, 5, "the epoch the frame said the node held");
+    assert_eq!(epoch, 5, "the epoch the heartbeat said the node held");
 
     let refused: (i64, i64) = conn
         .query_row("SELECT wifi_refused, ble_refused FROM heartbeat", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();
-    assert_eq!(refused, (12, 3), "the since-boot counts as the frame carried them");
-
-    let beat: i64 = conn.query_row("SELECT beat FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
-
-    let unsent: i64 = conn.query_row("SELECT unsent FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(unsent, 4, "the since-boot failed-send count as the frame carried it");
+    assert_eq!(refused, (12, 3), "the since-boot counts as the heartbeat carried them");
 
     let live: bool = conn.query_row("SELECT live FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert!(!live, "replayed from the bridge's backlog");
@@ -329,6 +325,13 @@ fn store_round_trips_record_when_each_type_written() {
         .unwrap();
     assert_eq!(mac, NODE.to_vec(), "MACs are stored as six raw bytes, never as text");
     assert_eq!(source, "static");
+
+    let slots: (String, String) = conn
+        .query_row("SELECT heartbeat.slot, observation.slot FROM heartbeat, observation", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(slots, ("A2".to_owned(), "A2".to_owned()), "slots are stored by their text form");
 }
 
 /// Asserts that the one row in `table` has no NULL column and that no column declares a default.
@@ -367,115 +370,33 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
     // The record sets every field, so any column the insert omits shows up as NULL or as a
     // default.
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 11,
-            prev_dwell: 1,
-            tx_power: 8,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv: Some(3304),
-            die_temp_c: Some(41),
-            live: true,
-        })],
-    );
+    let conn = write(&dir, vec![Record::Heartbeat(heartbeat())]);
     assert_insert_names_every_column(&conn, "heartbeat");
 }
 
 #[test]
-fn store_writes_dwell_when_heartbeat_recorded() {
+fn store_writes_slot_and_reset_cause_when_heartbeat_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
+    let slot = Slot::new(1, 6).unwrap();
     let conn = write(
         &dir,
         vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 8,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv: None,
-            die_temp_c: None,
-            live: true,
-        })],
-    );
-    let dwell: (i64, i64) = conn
-        .query_row("SELECT dwell, prev_dwell FROM heartbeat", [], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap();
-    assert_eq!(dwell, (149, 36), "the channel numbers as the frame carried them");
-}
-
-#[test]
-fn store_writes_tx_power_and_reset_cause_when_heartbeat_recorded() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 24,
+            slot,
             reset_cause: ResetCause::Brownout,
-            vdd_mv: None,
-            die_temp_c: None,
-            live: true,
+            ..heartbeat()
         })],
     );
-    let row: (i64, String) = conn
-        .query_row("SELECT tx_power, reset_cause FROM heartbeat", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let row: (String, String) = conn
+        .query_row("SELECT slot, reset_cause FROM heartbeat", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
-    assert_eq!(row, (24, "brownout".to_owned()), "quarter-dBm as sent, the cause by name");
+    assert_eq!(row, ("B7".to_owned(), "brownout".to_owned()), "the slot and the cause by name");
 }
 
 #[test]
 fn store_writes_health_readings_when_heartbeat_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let beat = |vdd_mv, die_temp_c| {
-        Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 24,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv,
-            die_temp_c,
-            live: true,
-        })
-    };
+    let beat =
+        |vdd_mv, die_temp_c| Record::Heartbeat(Heartbeat { vdd_mv, die_temp_c, ..heartbeat() });
     let conn = write(&dir, vec![beat(Some(3304), Some(41)), beat(None, None)]);
     let rows: Vec<(Option<i64>, Option<i64>)> = conn
         .prepare("SELECT vdd_mv, die_temp_c FROM heartbeat ORDER BY id")
@@ -505,11 +426,31 @@ fn store_writes_every_node_column_when_node_recorded() {
     assert_insert_names_every_column(&conn, "node");
 }
 
+#[test]
+fn store_writes_every_raw_frame_column_when_raw_frame_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Raw(RawFrame {
+            rx_at_ms: EPOCH_MS,
+            slot: SLOT,
+            kind: UpType::Sightings.as_u8(),
+            bytes: vec![1, 2, 3],
+        })],
+    );
+    assert_insert_names_every_column(&conn, "raw_frame");
+    let row: (String, u8, Vec<u8>) = conn
+        .query_row("SELECT slot, kind, bytes FROM raw_frame", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(row, ("A2".to_owned(), UpType::Sightings.as_u8(), vec![1, 2, 3]));
+}
+
 /// A status reply carrying `queues` and `radio_link`, the rest of it fixed.
 fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + 5_000,
-        peer_count: 3,
         rx_count: 4_000_000_000,
         dropped_tx: 1305,
         uptime_ms: 3_240_000,
@@ -540,7 +481,7 @@ const QUEUES: [QueueStat; 2] = [
         high_water: 4_000_000_002,
         dropped: 9,
     },
-    QueueStat { queue: QueueId::RadioJobs, capacity: 32, high_water: 20, dropped: 0 },
+    QueueStat { queue: QueueId::NodeDown, capacity: 32, high_water: 20, dropped: 0 },
 ];
 
 #[test]
@@ -549,15 +490,15 @@ fn store_round_trips_every_column_when_bridge_status_written() {
     let conn = write(&dir, vec![bridge_status(&QUEUES, Some(RADIO_LINK))]);
     assert_insert_names_every_column(&conn, "bridge_status");
 
-    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
+            "SELECT rx_at, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
              FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .unwrap();
-    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
+    assert_eq!(row, (EPOCH_MS + 5_000, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
 
     let radio_link: Vec<i64> = conn
         .query_row(
@@ -598,7 +539,7 @@ fn store_writes_queue_rows_when_bridge_status_carries_queues() {
         rows,
         [
             (parent, "host-bulk".to_owned(), 262_144, 4_000_000_002, 9),
-            (parent, "radio-jobs".to_owned(), 32, 20, 0),
+            (parent, "node-down".to_owned(), 32, 20, 0),
         ]
     );
 }
@@ -1726,7 +1667,7 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
     Record::Assignment(AssignmentSent {
         node_mac: NODE,
         counter,
-        wire_version: wartui_proto::air::wire_epoch(counter),
+        wire_version: wire_epoch(counter),
         channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),
         ble: false,
         created_at_ms: EPOCH_MS,
@@ -1917,10 +1858,10 @@ fn wigle_csv_skips_sighting_when_kind_is_neither_wifi_nor_ble() {
     // No build writes this kind, so only an edited file holds one.
     let rw = Connection::open(dir.path().join("wartui.db")).expect("opening for writing");
     rw.execute(
-        "INSERT INTO observation (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+        "INSERT INTO observation (node_mac, rx_at, slot, bssid, ssid, security, channel, rssi,
                                   kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
                                   raw_body)
-         SELECT node_mac, rx_at + 500, link_rssi, X'DDDDDDDDDDDD', ssid, security, channel, rssi,
+         SELECT node_mac, rx_at + 500, slot, X'DDDDDDDDDDDD', ssid, security, channel, rssi,
                 'zigbee', rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at, raw_body
          FROM observation WHERE bssid = X'AAAAAAAAAAAA'",
         [],
@@ -2123,7 +2064,7 @@ fn wigle_csv_ignores_uploads_when_after_uploads_off() {
 
 #[test]
 fn wigle_csv_includes_row_when_stored_after_upload_at_cutoff_time() {
-    // One frame's sightings share an rx_at, and the store can commit them in two batches.
+    // One batch's sightings share an rx_at, and the store can commit them in two batches.
     // An upload that read between the commits covered only the first, so the second still
     // goes on the next upload.
     let dir = tempfile::tempdir().expect("temp dir");

@@ -15,7 +15,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `export`       | Write a WiGLE CSV from a capture                                                    |
 | `analyze`      | Summarize a capture and what it lost; see "Analyzing a capture"                     |
 | `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
-| `sniff`        | Print every wartui frame the bridge hears, decoded, a line per record               |
+| `sniff`        | Print every record the bridge's nodes send, decoded, a line per sighting            |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
@@ -23,12 +23,11 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
-Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
-or clear frame. So `sniff` on a second bridge on the channel hears every heartbeat and no sightings.
-`sniff` also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
+`sniff` names each record by the node-bus slot it came from (`A1` to `B7`), and each heartbeat by
+the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
 for one, since the P4 stops writing to a host it has not heard from in 15 s.
-If the attached bridge is swapped mid-run, `run` re-sends every assignment so each node learns the
-new address. The same bridge reconnecting or rebooting sends nothing; nodes already address it.
+A node is reached through the slot its latest heartbeat came from, so moving a node to another
+slot moves its assignment with it on its next heartbeat.
 
 `run` takes:
 
@@ -138,16 +137,15 @@ of its output, after the export summary:
     57:84  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   queue      host-bulk  peak 262,144/262,144 bytes  1,300 dropped
-  queue      radio-jobs  peak 20/32 entries  0 dropped
+  queue      node-down  peak 3,102/4,096 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
-  heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent
   buffer full wifi 18,220  ble 1,203
   loss by node
-    1C:5A  batches 12  heartbeats 3/702 (0.4%)  buffer full ble 1,203
-    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  buffer full wifi 18,220
+    1C:5A  batches 12  heartbeats 699  buffer full ble 1,203
+    57:84  batches 200  heartbeats 2,757  buffer full wifi 18,220
 ```
 
 | Line           | What it counts                                                                  |
@@ -161,7 +159,6 @@ of its output, after the export summary:
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
-| `heartbeats`   | Heartbeats lost between node and host, and how many of them were `unsent`       |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
@@ -183,13 +180,11 @@ the queue held since the bridge booted, so it can predate the capture. Left out:
 - the `bridge` line, when the capture holds no status reply
 - `queue` lines, when the bridge reports no queues
 - the `radio link` line, off the P4 split bridge
-- the `unsent` clause, total or per node, when it is zero
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
-- the `oversize (not a node's)` clause, when it is zero. It counts ESP-NOW frames too long to be
-  a wartui node's, which the bridge dropped and left out of `frames received`. Frames without
-  wartui's magic are dropped there too, and counted nowhere
+- the `oversize (not a node's)` clause, when it is zero. It counts node records longer than any
+  node of this build sends, which the bridge dropped and left out of `frames received`
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
 - the `health` line, when nothing could be read; off a Pi it holds only the temperature
 - the `battery min` clause, when the host has no hwmon device named `battery`
@@ -214,36 +209,9 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 `battery min` is the lowest voltage the battery's fuel gauge read; its current draw is stored as
 `battery_ma` for queries but not printed.
 
-Compare the per-node heartbeat percentages to spot disproportionate loss. Each is missed beats
-divided by distinct received plus missed beats, including the received baseline. The totals cover
-the whole capture; `--recapture` selects export rows, not heartbeat intervals.
-
-`unsent` is the missed beats the node's own radio could not send: a full send queue or a failed
-send callback. Each heartbeat carries the node's count of them since boot. The rest were lost on
-the air or past the bridge. A large `unsent` share points at the node, not the air.
-
-Each heartbeat carries a 16-bit sequence number that starts at 1 when the node boots and wraps.
-The 32-bit sweep counter wraps too. Forward modulo deltas below half-range are progress, including
-wraps; a delta at least half-range in either counter indicates a restart. This assumes fewer than
-32,768 beats and 2^31 sweeps between observations. A restart whose counters both look forward is
-undetectable. A repeated heartbeat counts once. Across a detected restart, only missing beats
-since boot are counted, not any loss before that boot. A gap after a heartbeat replayed from the
-bridge's backlog is not counted, including the replay-to-live handoff.
-
-Add `--heartbeat-windows` to list each counted gap after the normal summary:
-
-```sh
-wartui analyze --db tonight.db --heartbeat-windows
-```
-
-Each line gives the node, two UTC arrival timestamps with milliseconds, heartbeat row IDs, and
-missed count, with `(N unsent)` when the node's radio could not send some of them. These observed
-arrivals bracket missing beats; they are not exact transmission times. Rows stay in arrival order
-even when the wall clock steps back; a reversed clock is labeled.
-Repeats add no gap, and the first heartbeat per node is only a baseline. A `restart-associated,
-uncertain interval` counts only missing beats since boot: neither the boot time nor pre-boot loss
-is known. Window counts sum to the lifetime missed total. With no counted gaps, the flag prints
-`no counted gaps`; without the flag, no windows are printed.
+`heartbeats` per node is the heartbeats the capture holds. A heartbeat carries no sequence number
+of its own, so a lost one is not counted. A restart is the node's sweep counter falling by half its
+range or more, which resets the `buffer full` baseline.
 
 ### Uploading to WDGWars
 
@@ -839,7 +807,7 @@ for shows `??`.
 | `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window           |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
-| `refused`      | The bridge's peer table is full                                                                                                             |
+| `no slot`      | Another node's heartbeat came from its node-bus slot, so it cannot be reached until its own heartbeat names a slot                          |
 | `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; update it with `wartui ota`                            |
 | `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
@@ -870,7 +838,7 @@ yellow too; any other state keeps its own color:
 | Voltage | below 3.00 V   | The C5's minimum recommended supply; the chip resets at 2.7 V |
 | Die     | 70 °C or above | A warning; the die runs hotter than ambient                   |
 
-A `stale`, `refused`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
+A `stale`, `no slot`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
 nothing sent would reach it, it has not yet said what it is, or its frames are not this build's, so
 its share might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
 heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats
@@ -921,10 +889,6 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   since the bridge booted, which is large and harmless on a dongle left powered with nothing
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
   radio link counters, and a `bridge_queue` row per queue it reported.
-- **`57:84 at 2 dBm, assigned 6 dBm`**: that node's radio reports a transmit power other than the
-  assignment it holds. It refused the power and kept its previous one. `57:84 cannot read its
-  transmit power` means it could not report one at all. Power-cycle that node; if it persists, it
-  is that board. The line goes once the node reports its assigned power.
 - **`4F:08 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
   fault, and the line stays for the run. `brownout` means check that node's supply; `software`,
   `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on
@@ -970,11 +934,10 @@ wartui --log-file wartui.log run
 Beyond the counters, `wartui status` prints what the bridge reports about its insides:
 
 - **`queue NAME  HIGH/CAPACITY UNIT  dropped N`**, one per queue: the high-water mark since boot
-  and what the queue threw away. The bridge reports `radio-jobs` (sends and peer and power
-  commands waiting for the radio), `radio-send-jobs` (the payloads of those sends), `radio-up` (the
-  C6's received frames for the P4), `radio-up-priority` (the C6's
-  other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
-  the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
+  and what the queue threw away. The bridge reports `radio-up` (the C6's lines and status for the
+  P4), `radio-down` (the P4's records for the C6), `node-down` (the P4's queues of records for its
+  nodes: one slot's size, the deepest any slot has been, and every slot's refusals), and
+  `host-priority` and `host-bulk` (its two queues of frames for the host).
 - **`radio link  …`**: the UART link's packets from the C6 and its error counters at each end;
   the `radio_` counters are the C6's. Every error count means corrupted or lost packets, and one
   bad packet can move more than one count. A C6 restart reads as one `seq_gap`.
@@ -1018,7 +981,7 @@ Each node's membership changes are logged once each:
 | Message               | When                                              |
 | --------------------- | ------------------------------------------------- |
 | `node joined`         | its first heartbeat this run                      |
-| `node left the fleet` | its peer is removed after a minute of silence     |
+| `node left the fleet` | a minute after its last heartbeat                 |
 | `node returned`       | its first heartbeat after `node left the fleet`   |
 | `node restarted`      | its heartbeat counter fell, or its epoch reset    |
 

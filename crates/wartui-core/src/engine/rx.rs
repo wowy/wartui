@@ -1,13 +1,13 @@
-use wartui_proto::air::{
-    Capabilities, DecodeError, Frame, HeartbeatMsg, MAGIC, NODE_VERSION, RecordKind, SightingBatch,
-    SightingMsg, wire_epoch,
+use wartui_proto::bus::{
+    Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind, SightingBatch,
+    SightingMsg, Slot, UpType, wire_epoch,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::node;
 
 #[cfg(doc)]
 use super::Counters;
-use super::{ActionBatch, FleetEngine, NodeState, Now, PowerMismatch};
+use super::{ActionBatch, FleetEngine, NodeState, Now};
 use crate::record::{BatchGap, Heartbeat, NodeSeen, Observation, RawFrame, Record};
 
 /// Log a node's boot at `warn!` when its [`ResetCause`](wartui_proto::reset::ResetCause) is a
@@ -19,19 +19,18 @@ macro_rules! by_reset {
     };
 }
 
-/// How long after a batch a byte-identical same-`seq` repeat still counts as an 802.11 retry, not a
+/// How long after a batch a byte-identical same-`seq` repeat still counts as a copy of it, not a
 /// node's own re-send.
 ///
-/// A retry follows a lost MAC ack: the radio retransmits and the bridge delivers every copy. It is
-/// dropped and counted in [`Counters::duplicate_batches`]. A re-send follows a send whose every ack
-/// was lost: the node leaves `seq` unchanged and may next report the same addresses at the same
-/// RSSI. That is a real sighting and is recorded.
+/// A copy is dropped and counted in [`Counters::duplicate_batches`]. A re-send follows a batch
+/// the node gave up on: it leaves `seq` unchanged and may next report the same addresses at the
+/// same RSSI. That is a real sighting and is recorded.
 ///
-/// 100 ms, compared with a strict `<`. The radio's retries arrived about 4 ms after the original,
-/// all within 100 ms (`docs/batch-loss-findings.md`). A re-send takes at least a whole sweep, which
-/// has no admin window, so two reports of one channel are at least a dwell apart
-/// (`node::CHANNEL_DWELL_MS`). A one-channel share re-reports every ~130 ms. A bridge reboot resets
-/// `rx_us`, so the wrapped difference is huge and the batch is recorded: the safe direction.
+/// 100 ms, compared with a strict `<`. Two reports of one channel are at least a dwell apart
+/// (`node::CHANNEL_DWELL_MS`). The node bus resends a batch only after its 1 s ack timeout, so
+/// this window does not catch those, and a batch resent that way is recorded twice. A bridge
+/// reboot resets `rx_us`, so the wrapped difference is huge and the batch is recorded: the safe
+/// direction.
 pub(super) const DUPLICATE_BATCH_WINDOW_US: u64 = 100_000;
 
 const _: () = assert!(
@@ -57,100 +56,115 @@ pub(crate) fn advance_since_boot(value: u64, prev: Option<u64>, restarted: bool)
     }
 }
 
-/// One frame the bridge received, as it reported it.
+/// One record a node sent, as the bridge forwarded it.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Rx<'a> {
-    pub(super) src: Mac,
-    pub(super) dst: Mac,
-    pub(super) rssi: i8,
+pub(super) struct FromNode<'a> {
+    pub(super) slot: Slot,
     /// The bridge's microsecond stamp on arrival.
     pub(super) rx_us: u32,
-    pub(super) payload: &'a [u8],
+    pub(super) kind: u8,
+    pub(super) body: &'a [u8],
 }
 
 impl FleetEngine {
-    pub(super) fn on_rx(&mut self, rx: &Rx<'_>, now: Now, batch: &mut ActionBatch) {
-        let Rx { src, dst, rssi, payload, .. } = *rx;
-        // Not ours.
-        if !payload.starts_with(&MAGIC) {
-            return;
-        }
+    pub(super) fn on_from_node(&mut self, rx: &FromNode<'_>, now: Now, batch: &mut ActionBatch) {
+        let FromNode { slot, kind, body, .. } = *rx;
         self.counters.frames += 1;
 
         if self.config.record_raw {
             batch.records.push(Record::Raw(RawFrame {
                 rx_at_ms: now.unix_ms,
-                src,
-                dst,
-                rssi: Some(rssi),
-                bytes: payload.to_vec(),
+                slot,
+                kind,
+                bytes: body.to_vec(),
             }));
         }
 
-        let frame = match Frame::decode(payload) {
-            Ok(frame) => frame,
-            // A heartbeat of another length still opens with the frozen prefix. From a node on
-            // another major or minor that names a node one side must update; from one on this
-            // minor it is a bug, counted like any other mismatch.
-            Err(DecodeError::BadLength { .. }) => {
-                match Capabilities::decode_prefix(payload) {
-                    Ok(caps) if !caps.version.compat_with_host().drivable() => {
-                        self.on_outdated_heartbeat(rx, caps, now, batch);
+        match UpType::from_u8(kind) {
+            Some(UpType::Heartbeat) => match HeartbeatMsg::decode(body) {
+                // The right length is no guarantee of the right layout: a minor version may move
+                // fields without resizing the body.
+                Ok(heartbeat) if !heartbeat.capabilities.version.compat_with_host().drivable() => {
+                    self.on_outdated_heartbeat(
+                        rx,
+                        heartbeat.mac,
+                        heartbeat.capabilities,
+                        now,
+                        batch,
+                    );
+                }
+                Ok(heartbeat) => self.on_heartbeat(rx, heartbeat, now, batch),
+                // A heartbeat of another length still opens with the prefix and the MAC. From a
+                // node on another major or minor that names a node one side must update; from one
+                // on this minor it is a bug, counted like any other mismatch.
+                Err(DecodeError::BadLength { .. }) => match HeartbeatMsg::identity(body) {
+                    Ok((caps, mac)) if !caps.version.compat_with_host().drivable() => {
+                        self.on_outdated_heartbeat(rx, mac, caps, now, batch);
                     }
                     _ => self.counters.incompatible += 1,
+                },
+                Err(_) => self.counters.undecodable += 1,
+            },
+            Some(UpType::Sightings) => {
+                // A batch names no node: the slot's latest heartbeat does.
+                let Some(src) = self.slots.get(&slot).copied() else {
+                    self.counters.unknown_slot += 1;
+                    return;
+                };
+                // A node on another major or minor may still hold an assignment from a build that
+                // could drive it, and its batches are not this build's layout even when they
+                // parse.
+                if !self.drivable(src) {
+                    self.counters.incompatible += 1;
+                    return;
                 }
-                return;
+                match SightingBatch::decode(body) {
+                    Ok(sightings) => self.on_sightings(rx, src, sightings, now, batch),
+                    Err(DecodeError::BadLength { .. }) => self.counters.incompatible += 1,
+                    Err(_) => self.counters.undecodable += 1,
+                }
             }
-            Err(DecodeError::BadVersion(_)) => {
-                self.counters.incompatible += 1;
-                return;
-            }
-            Err(_) => {
-                self.counters.undecodable += 1;
-                return;
-            }
-        };
-
-        // Decode before admitting anyone to the fleet.
-        match frame {
-            // Another host's commands, and a node's update status, are not the engine's to act on.
-            Frame::Admin(_)
-            | Frame::Clear(_)
-            | Frame::OtaBegin(_)
-            | Frame::OtaChunk(_)
-            | Frame::OtaCommit(_)
-            | Frame::OtaAbort(_)
-            | Frame::OtaConfirm(_)
-            | Frame::OtaStatus(_) => {}
-            // The right length is no guarantee of the right layout: a minor version may move
-            // fields without resizing the frame.
-            Frame::Heartbeat(heartbeat)
-                if !heartbeat.capabilities.version.compat_with_host().drivable() =>
-            {
-                self.on_outdated_heartbeat(rx, heartbeat.capabilities, now, batch);
-            }
-            // A node on another major or minor may still hold an assignment from a build that
-            // could drive it, and its batches are not this build's layout even when they parse.
-            Frame::Sightings(_) if !self.drivable(src) => self.counters.incompatible += 1,
-            Frame::Heartbeat(heartbeat) => {
-                self.on_heartbeat(rx, heartbeat, now, batch);
-            }
-            Frame::Sightings(sightings) => {
-                self.on_sightings(rx, sightings, now, batch);
-            }
+            // A node's update status is the update session's to read, not the engine's.
+            Some(UpType::UpdateStatus) => {}
+            None => self.counters.undecodable += 1,
         }
     }
 
-    /// A heartbeat: proof of life, and the one moment the node's admin window is open.
+    /// File the node a heartbeat from `slot` names as that slot's.
+    ///
+    /// A known node on a new slot moves there, and a slot whose heartbeat names a new node is
+    /// that node's from now on. The node that held it keeps its MAC and its row, but has no slot
+    /// until its own heartbeat names one, so nothing is sent to the wrong node.
+    fn take_slot(&mut self, slot: Slot, mac: Mac) {
+        let previous = self.slots.insert(slot, mac);
+        if let Some(other) = previous.filter(|other| *other != mac)
+            && let Some(node) = self.nodes.get_mut(&other)
+            && node.slot == Some(slot)
+        {
+            node.slot = None;
+        }
+        let Some(node) = self.nodes.get_mut(&mac) else { return };
+        let moved_from = node.slot.replace(slot).filter(|old| *old != slot);
+        if let Some(old) = moved_from {
+            if self.slots.get(&old) == Some(&mac) {
+                self.slots.remove(&old);
+            }
+            tracing::info!(mac = %mac::full(&mac), from = %old, to = %slot, "node moved slot");
+        }
+    }
+
+    /// A heartbeat: proof of life, the node's slot, and the moment to answer it.
     fn on_heartbeat(
         &mut self,
-        rx: &Rx<'_>,
+        rx: &FromNode<'_>,
         heartbeat: HeartbeatMsg,
         now: Now,
         batch: &mut ActionBatch,
     ) {
-        let Rx { src, rssi, rx_us, .. } = *rx;
-        self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
+        let FromNode { slot, .. } = *rx;
+        let src = heartbeat.mac;
+        self.see_node(src, now, Some(heartbeat.capabilities), batch);
+        self.take_slot(slot, src);
         self.counters.heartbeats += 1;
         // Read before borrowing the node: liveness decides whether its epoch is believed.
         let live = self.air_is_live();
@@ -167,10 +181,9 @@ impl FleetEngine {
             None => by_reset!(
                 heartbeat.reset_cause,
                 mac = %mac::full(&src),
+                %slot,
                 capabilities = %heartbeat.capabilities,
-                rssi,
                 reset = %heartbeat.reset_cause,
-                tx_power = heartbeat.tx_power,
                 vdd = %heartbeat.vdd,
                 die_temp = %heartbeat.die_temp,
                 "node joined"
@@ -190,9 +203,7 @@ impl FleetEngine {
                 mac = %mac::full(&src),
                 counter_before = node.counter,
                 counter_after = heartbeat.counter,
-                beat = heartbeat.beat,
                 reset = %heartbeat.reset_cause,
-                tx_power = heartbeat.tx_power,
                 vdd = %heartbeat.vdd,
                 die_temp = %heartbeat.die_temp,
                 "node restarted"
@@ -215,46 +226,11 @@ impl FleetEngine {
             node.last_batch_rx_us = None;
             // The epoch reset too, so what it holds is unknown.
             node.held_epoch = None;
-            // So did its transmit power, which the next adopted heartbeat reports afresh.
-            node.power_mismatch = None;
         }
         node.capabilities = Some(heartbeat.capabilities);
         // A replayed heartbeat's epoch is history and must not overwrite a live one.
         if live {
             node.held_epoch = Some(heartbeat.epoch);
-        }
-        // Read against this heartbeat's epoch, recorded just above, and only once the node holds
-        // the assignment: one that has not adopted it is the re-send's business, not a power
-        // fault. A node reporting another power had the assigned power refused, so its radio kept
-        // its previous power (the 2 dBm boot default or an earlier assignment's), or something
-        // reset the cap since. 0 means the node could not read its power.
-        if live && node.adopted() {
-            let assigned = node.desired.or(node.confirmed).map(|a| a.tx_power);
-            if let Some(assigned) = assigned {
-                let reported = heartbeat.tx_power;
-                let epoch = heartbeat.epoch;
-                if reported != assigned {
-                    let mismatch = PowerMismatch { epoch, reported, assigned };
-                    if node.power_mismatch != Some(mismatch) {
-                        tracing::warn!(
-                            mac = %mac::full(&src),
-                            reported,
-                            assigned,
-                            epoch,
-                            "node transmit power differs from its assignment"
-                        );
-                        node.power_mismatch = Some(mismatch);
-                    }
-                } else if node.power_mismatch.take().is_some() {
-                    tracing::info!(
-                        mac = %mac::full(&src),
-                        reported,
-                        assigned,
-                        epoch,
-                        "node transmit power matches its assignment"
-                    );
-                }
-            }
         }
         // Since-boot counts to session counts (`advance_since_boot`). The first heartbeat is a
         // baseline, like the bridge's `dropped_baseline`: earlier refusals are not this capture's.
@@ -269,7 +245,6 @@ impl FleetEngine {
         node.last_ble_refused = Some(heartbeat.ble_refused);
         node.counter = Some(heartbeat.counter);
         node.last_heartbeat = Some(now.mono);
-        node.last_heartbeat_rx_us = Some(rx_us);
         node.heartbeats += 1;
         node.vdd = heartbeat.vdd;
         node.die_temp = heartbeat.die_temp;
@@ -278,14 +253,9 @@ impl FleetEngine {
             rx_at_ms: now.unix_ms,
             counter: heartbeat.counter,
             epoch: heartbeat.epoch,
-            link_rssi: Some(rssi),
+            slot,
             wifi_refused: heartbeat.wifi_refused,
             ble_refused: heartbeat.ble_refused,
-            beat: heartbeat.beat,
-            unsent: heartbeat.unsent,
-            dwell: heartbeat.dwell,
-            prev_dwell: heartbeat.prev_dwell,
-            tx_power: heartbeat.tx_power,
             reset_cause: heartbeat.reset_cause,
             vdd_mv: heartbeat.vdd.mv(),
             die_temp_c: heartbeat.die_temp.c(),
@@ -295,11 +265,11 @@ impl FleetEngine {
         if rebooted && node.desired.is_some() {
             self.reissue(src);
         }
-        // Acked but not adopted: the radio delivered the frame, but the heartbeat says the node
-        // does not hold it (a length or version mismatch, a dropped receive queue, or a bug). After
-        // a reboot `confirmed` is already `None`, so that case stays out. Re-sent in this window
-        // like an unacknowledged assignment, under the same epoch, which the node does not hold
-        // either way.
+        // Delivered but not adopted: the bus delivered the record, but the heartbeat says the node
+        // does not hold it (a length or version mismatch, a dropped inbox, or a bug). After a
+        // reboot `confirmed` is already `None`, so that case stays out. Re-sent on this heartbeat
+        // like an undelivered assignment, under the same epoch, which the node does not hold either
+        // way.
         //
         // Re-fetched because `reissue` above borrowed all of `self`.
         if let Some(node) = self.nodes.get_mut(&src)
@@ -313,11 +283,11 @@ impl FleetEngine {
             self.counters.admin_unadopted += 1;
         }
         // A first heartbeat joins the fleet and changes every node's range. Re-partitioning now
-        // lets the node take its share in the window it just opened.
+        // lets the node take its share in answer to this heartbeat.
         self.replan(now);
         // The node holds exactly what `desired` carries, yet it is still dirty. Either `deal`
-        // allocated before `held_epoch` was known (a backlog replay leaves it `None`), or an ack
-        // was lost after adoption. Re-issuing spends one epoch and is right either way.
+        // allocated before `held_epoch` was known (a backlog replay leaves it `None`), or a
+        // delivery was lost after adoption. Re-issuing spends one epoch and is right either way.
         if let Some(node) = self.nodes.get(&src)
             && live
             && node.dirty
@@ -326,8 +296,8 @@ impl FleetEngine {
         {
             self.reissue(src);
         }
-        // The node's 100 ms window is the only time in its sweep it listens. `send_admin` checks
-        // the heartbeat is live.
+        // Answered off the heartbeat, through the slot it came from. `send_admin` checks the
+        // heartbeat is live.
         self.send_admin(src, now, batch);
         self.send_dedup_ring_clear(src, now, batch);
     }
@@ -341,23 +311,26 @@ impl FleetEngine {
             .is_none_or(|caps| caps.version.compat_with_host().drivable())
     }
 
-    /// A heartbeat from a node on another major or minor, of which only the frozen prefix is read.
+    /// A heartbeat from a node on another major or minor, of which only the prefix and MAC are
+    /// read.
     ///
     /// The node is filed and shown with its version so the operator can find it, but it is never
     /// assignable ([`FleetEngine::is_assignable`]): nothing past the prefix is this build's
-    /// layout, so its counter, epoch and refusals mean nothing here. It opens no admin window and
-    /// sets no `last_heartbeat`. If it holds the Bluetooth scan, the scan is withdrawn now rather
+    /// layout, so its counter, epoch and refusals mean nothing here. It is answered with nothing
+    /// and sets no `last_heartbeat`. If it holds the Bluetooth scan, the scan is withdrawn now rather
     /// than when it ages out, and the preferred node stays as it is, so the node takes the scan
     /// back once it can be driven again.
     fn on_outdated_heartbeat(
         &mut self,
-        rx: &Rx<'_>,
+        rx: &FromNode<'_>,
+        src: Mac,
         capabilities: Capabilities,
         now: Now,
         batch: &mut ActionBatch,
     ) {
-        let Rx { src, rssi, .. } = *rx;
-        self.see_node(src, now, rssi, Some(capabilities), batch);
+        self.see_node(src, now, Some(capabilities), batch);
+        // Its slot is still its own: an update goes to it there.
+        self.take_slot(rx.slot, src);
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if node.capabilities.map(|caps| caps.version) != Some(capabilities.version) {
             let mac = mac::full(&src);
@@ -385,17 +358,18 @@ impl FleetEngine {
     /// A batch of sightings, recorded unless it retransmits the batch before it.
     fn on_sightings(
         &mut self,
-        rx: &Rx<'_>,
+        rx: &FromNode<'_>,
+        src: Mac,
         sightings: SightingBatch<'_>,
         now: Now,
         batch: &mut ActionBatch,
     ) {
-        let Rx { src, rssi, rx_us, payload, .. } = *rx;
-        // Once per frame, not once per sighting.
-        self.see_node(src, now, rssi, None, batch);
+        let FromNode { rx_us, body: payload, .. } = *rx;
+        // Once per batch, not once per sighting.
+        self.see_node(src, now, None, batch);
         if self.is_duplicate_batch(src, sightings.seq, payload, rx_us) {
-            // A radio retry after a lost MAC ack. `see_node` already took it as proof of life.
-            // Recording it again would double the observations.
+            // A copy of the batch before. `see_node` already took it as proof of life. Recording
+            // it again would double the observations.
             self.counters.duplicate_batches += 1;
             if let Some(node) = self.nodes.get_mut(&src) {
                 node.duplicate_batches += 1;
@@ -403,23 +377,24 @@ impl FleetEngine {
         } else {
             self.note_batch_seq(src, sightings.seq, now, batch);
             for (sighting, raw) in sightings.iter() {
-                self.on_sighting(rx, sighting, raw, now, batch);
+                self.on_sighting(rx, src, sighting, raw, now, batch);
             }
         }
         self.remember_batch(src, payload, rx_us);
     }
 
-    /// One record of a [`Frame::Sightings`] batch, after [`Self::see_node`] and
-    /// [`Self::note_batch_seq`] ran for its frame.
+    /// One record of a sighting batch, after [`Self::see_node`] and [`Self::note_batch_seq`] ran
+    /// for its batch.
     fn on_sighting(
         &mut self,
-        rx: &Rx<'_>,
+        rx: &FromNode<'_>,
+        src: Mac,
         sighting: SightingMsg<'_>,
         raw: &[u8],
         now: Now,
         batch: &mut ActionBatch,
     ) {
-        let Rx { src, rssi, .. } = *rx;
+        let slot = rx.slot;
         // An excluded network is never captured: dropped before it counts, reaches the tail or is
         // recorded. Its batch already counted for liveness and sequence.
         if sighting.kind == RecordKind::Wifi && self.config.excluded_ssids.contains(sighting.ssid) {
@@ -439,7 +414,7 @@ impl FleetEngine {
         }
         // The trailer's meaning depends on the kind: roaming consortium body for Wi-Fi, company
         // identifier for BLE. A BLE trailer that is not two bytes cannot come from a well-formed
-        // frame of this wire version, so it is dropped rather than guessed at.
+        // batch of this build, so it is dropped rather than guessed at.
         let (rcoi, mfgr_id) = match sighting.kind {
             RecordKind::Wifi => ((!sighting.ext.is_empty()).then(|| sighting.ext.to_vec()), None),
             RecordKind::Ble => (
@@ -451,7 +426,7 @@ impl FleetEngine {
         let observation = Observation {
             node_mac: src,
             rx_at_ms: now.unix_ms,
-            link_rssi: Some(rssi),
+            slot,
             bssid: sighting.bssid,
             ssid: sighting.ssid.to_vec(),
             security: sighting.security.to_string(),
@@ -462,7 +437,7 @@ impl FleetEngine {
             mfgr_id,
             fix: self.config.position.resolve(now.unix_ms),
             // One record's bytes. The batch header carries nothing a re-parse needs, and
-            // `--record-raw` keeps the whole frame in `Record::Raw`.
+            // `--record-raw` keeps the whole batch in `Record::Raw`.
             raw_body: raw.to_vec(),
         };
         self.push_tail(&observation);
@@ -471,14 +446,14 @@ impl FleetEngine {
 
     /// Track batches lost between this node and the host.
     ///
-    /// `seq` counts up once per batch the bridge acknowledges, wraps, and restarts at boot
+    /// `seq` counts up once per batch the P4 acknowledges, wraps, and restarts at boot
     /// ([`Self::on_heartbeat`] resets the baseline). A retransmission never reaches here
-    /// ([`Self::is_duplicate_batch`]). A repeated `seq` that does is a send that failed after all
-    /// retries though the frame arrived. The node reuses that `seq` for its next batch, so no loss
-    /// is counted.
+    /// ([`Self::is_duplicate_batch`]). A repeated `seq` that does is a send the node gave up on
+    /// though the batch arrived. The node reuses that `seq` for its next batch, so no loss is
+    /// counted.
     ///
     /// A gap under [`UNCOUNTED_GAP`] is that many batches lost. At or past it the count wrapped or
-    /// the frame came out of order, and guessing would invent history. Each counted gap is also a
+    /// the batch came out of order, and guessing would invent history. Each counted gap is also a
     /// [`Record::BatchGap`], so the store's sum matches the live count.
     ///
     /// Only a gap after a live batch counts. One after a replayed batch spans a spell the host
@@ -538,14 +513,12 @@ impl FleetEngine {
         &mut self,
         src: Mac,
         now: Now,
-        rssi: i8,
         capabilities: Option<Capabilities>,
         batch: &mut ActionBatch,
     ) {
         let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
         node.last_seen = now.mono;
         node.last_seen_ms = now.unix_ms;
-        node.link_rssi = Some(rssi);
         batch.records.push(Record::Node(NodeSeen {
             mac: src,
             first_seen_ms: node.first_seen_ms,

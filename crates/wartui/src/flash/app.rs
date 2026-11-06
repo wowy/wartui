@@ -22,7 +22,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
-use wartui_proto::air::{Board, Version};
+use wartui_proto::bus::{Board, Version};
 
 use super::{
     CHIP_ID_AT, Chip, HEADER_LEN, IMAGE_MAGIC, NODE_APP, RELEASE_TAG, Source, fetch, read, source,

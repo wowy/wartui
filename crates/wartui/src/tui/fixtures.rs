@@ -11,7 +11,7 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Board, Capabilities, NODE_VERSION, RecordKind, Version, wire_epoch};
+use wartui_proto::bus::{Board, Capabilities, NODE_VERSION, RecordKind, Slot, Version, wire_epoch};
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
@@ -33,15 +33,14 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.reboots = reboots;
     state.heartbeats = 12;
     state.observations = 340;
-    state.link_rssi = Some(-41);
+    state.slot = Slot::from_u8(last % 14);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));
     NodeView { state, alive: true, assignable }
 }
 
-/// Heard only through sightings. Normal for a few seconds after boot: a node reports
-/// what it found on a channel before it returns to the control channel to heartbeat.
+/// Known only by sightings filed under its slot: no heartbeat yet.
 pub(super) fn unannounced(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
     view.state.capabilities = None;
@@ -82,11 +81,10 @@ pub(super) fn stale_node(last: u8) -> NodeView {
     view
 }
 
-/// Heartbeating, but with no slot in the bridge's peer table.
-pub(super) fn refused(last: u8) -> NodeView {
+/// Heartbeating, but its slot's latest heartbeat named another node.
+pub(super) fn unslotted(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
-    view.state.peer_refused = true;
-    view.state.last_outcome = Some(AdminOutcome::Refused);
+    view.state.slot = None;
     view
 }
 
@@ -100,12 +98,8 @@ pub(super) fn adopt(state: &mut NodeState) {
 /// Given channels, acked, and adopted: fully settled.
 pub(super) fn assigned(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    let assignment = Assignment {
-        channels: ChannelSet::from_run(IndexRun::new(0, 0)),
-        ble: false,
-        tx_power: 8,
-        counter: 9,
-    };
+    let assignment =
+        Assignment { channels: ChannelSet::from_run(IndexRun::new(0, 0)), ble: false, counter: 9 };
     view.state.confirmed = Some(assignment);
     view.state.desired = Some(assignment);
     view.state.last_outcome = Some(AdminOutcome::Acked);
@@ -137,7 +131,6 @@ pub(super) fn pending(last: u8) -> NodeView {
     view.state.desired = Some(Assignment {
         channels: ChannelSet::from_run(IndexRun::new(14, 38)),
         ble: false,
-        tx_power: 8,
         counter: 10,
     });
     view.state.dirty = true;
@@ -206,7 +199,7 @@ pub(super) fn busy() -> Snapshot {
             admin_acked: 2,
             admin_failed: 1,
             admin_unadopted: 0,
-            peer_table_full: 0,
+            unknown_slot: 0,
             replans: 0,
             batches_lost: 0,
             duplicate_batches: 0,
@@ -215,7 +208,6 @@ pub(super) fn busy() -> Snapshot {
         },
         store: StoreStats { written: 800, dropped: 7 },
         bridge_status: Some(BridgeStatus {
-            peer_count: 0,
             rx_count: 900,
             dropped_tx: 1300,
             dropped_since_attach: 0,

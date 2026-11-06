@@ -15,7 +15,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::RecordKind;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, SCAN_CHANNELS};
 
 const NODES: usize = 6;
@@ -80,8 +80,8 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
 
-    // Nobody asks for any of this: the nodes turn up and each takes its share in the
-    // admin window its own heartbeat opens.
+    // Nobody asks for any of this: the nodes turn up and each takes its share in
+    // answer to its own heartbeat.
     let settled = until(&snapshot_rx, "every node to acknowledge a range", |s| {
         s.nodes.len() == NODES
             && s.nodes.iter().all(|n| {
