@@ -1,4 +1,4 @@
-//! The host side of the link to the ESP-NOW bridge.
+//! The host side of the link to the P4 bridge.
 //!
 //! Everything above this crate talks to a [`LinkHandle`] and never learns
 //! whether the frames came from a real dongle or from [`sim`]. That is what
@@ -75,7 +75,7 @@ pub struct BridgeInfo {
 
 /// Something that happened on the link.
 // `Message` is much larger than the other variants because it carries an
-// inline ESP-NOW payload. Boxing it would mean an allocation for every frame
+// inline node record. Boxing it would mean an allocation for every frame
 // received, and buys nothing: tokio's channels allocate blocks as messages
 // arrive rather than reserving the full capacity up front, so an idle queue
 // costs nothing either way.
@@ -190,7 +190,7 @@ impl LinkHandle {
         self.events.recv().await
     }
 
-    /// Queue a command that is racing a node's admin window.
+    /// Queue a command that answers a node's heartbeat.
     ///
     /// Never blocks: a full queue means the bridge is behind, and the engine
     /// must keep running rather than wait on it.
@@ -238,8 +238,8 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
 /// Receives commands, always preferring urgent ones.
 ///
 /// Without this bias a burst of status polls can queue ahead of a channel
-/// assignment and push it past the node's 100 ms admin window, costing a whole
-/// sweep. It is the concrete mechanism protecting that deadline.
+/// assignment and hold it back from the heartbeat it answers. It is the
+/// concrete mechanism keeping assignments prompt.
 #[derive(Debug)]
 pub(crate) struct CommandRx {
     urgent: mpsc::Receiver<HostToBridge>,
@@ -265,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn link_handle_prioritizes_urgent_commands_when_bulk_commands_are_backlogged() {
         // Without this bias a burst of status polls can queue ahead of a channel
-        // assignment and push it past the node's 100 ms admin window.
+        // assignment and hold it back from the heartbeat it answers.
         let (handle, mut plumbing) = link_pair();
         for _ in 0..32 {
             handle.send_bulk(HostToBridge::GetStatus).expect("queued");
