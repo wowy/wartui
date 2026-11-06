@@ -16,6 +16,7 @@ Where the prose lives:
   when that behavior changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
   set (`firmware/p4-radio/README.md`).
+- `docs/node-bus.md` — the SPI bus between the P4 bridge and its nodes: pins and pin behavior.
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -91,7 +92,8 @@ own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `radio_link` (the
-  UART packets between the P4 and its C6, and their frozen core), `mac` (the `Mac` type and its
+  UART packets between the P4 and its C6, and their frozen core), `bus` (the SPI transfers
+  between a P4 bridge and its nodes), `mac` (the `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
   sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the

@@ -19,7 +19,9 @@
 //!   (`src/update.rs`);
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
-//!   never addresses.
+//!   never addresses;
+//! - **the node buses** (`src/bus.rs`), one future per SPI master, poll the nodes wired to
+//!   them and report link counters to the host as log lines.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -27,8 +29,8 @@
 //! (`src/update.rs`).
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
-//! together. Every wait is a DMA completion, a UART event, a signal between the futures or a
-//! timer.
+//! together. Every wait is a DMA completion, a UART event, a GPIO level, a signal between the
+//! futures or a timer.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -49,7 +51,7 @@ mod update;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::join4;
+use embassy_futures::join::{join, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
@@ -127,6 +129,9 @@ macro_rules! dma_buf {
         buf
     }};
 }
+
+// After `dma_buf!`, which it uses.
+mod bus;
 
 /// Resets rather than hanging. The reset takes the C6 with it, and the host sees a new
 /// life in the next `Ready`.
@@ -448,6 +453,40 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         tx_buf: dma_buf!(DmaTxBuf, HOST_CHUNK),
     };
 
+    // The node buses (`docs/node-bus.md`).
+    let pins_a = bus::Pins {
+        sck: peripherals.GPIO20.into(),
+        mosi: peripherals.GPIO21.into(),
+        miso: peripherals.GPIO22.into(),
+        irq: peripherals.GPIO23.into(),
+        cs: [
+            peripherals.GPIO26.into(),
+            peripherals.GPIO27.into(),
+            peripherals.GPIO32.into(),
+            peripherals.GPIO33.into(),
+            peripherals.GPIO46.into(),
+            peripherals.GPIO47.into(),
+        ],
+    };
+    let pins_b = bus::Pins {
+        sck: peripherals.GPIO31.into(),
+        mosi: peripherals.GPIO30.into(),
+        miso: peripherals.GPIO29.into(),
+        irq: peripherals.GPIO28.into(),
+        cs: [
+            peripherals.GPIO50.into(),
+            peripherals.GPIO49.into(),
+            peripherals.GPIO5.into(),
+            peripherals.GPIO4.into(),
+            peripherals.GPIO3.into(),
+            peripherals.GPIO2.into(),
+        ],
+    };
+    let (bus_a, bus_b) = bus::build(
+        (peripherals.SPI2, peripherals.DMA_AXI_CH0, pins_a),
+        (peripherals.SPI3, peripherals.DMA_AXI_CH1, pins_b),
+    );
+
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
@@ -456,11 +495,14 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
-    match join4(
-        run_link(bus, &link, &shared),
-        radio_clock(&shared, c6_en),
-        host::run(host_bus, &shared),
-        gps::run(pins, &shared),
+    match join(
+        join4(
+            run_link(bus, &link, &shared),
+            radio_clock(&shared, c6_en),
+            host::run(host_bus, &shared),
+            gps::run(pins, &shared),
+        ),
+        join(bus::run(bus_a, &shared), bus::run(bus_b, &shared)),
     )
     .await {}
 }

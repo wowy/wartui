@@ -11,12 +11,13 @@
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
 //! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
 //! link between a P4 bridge and the C6 that runs its radio, and [`split`] holds the P4's
-//! decisions about that C6.
+//! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes.
 
 #![no_std]
 
 pub mod air;
 pub mod beacon;
+pub mod bus;
 pub mod config;
 pub mod dedup;
 pub mod frame_ring;

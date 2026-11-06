@@ -32,6 +32,9 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Io, Level, Output, OutputConfig, Pull};
+use esp_hal::spi::Mode;
+use esp_hal::spi::slave::Spi;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
@@ -92,6 +95,7 @@ macro_rules! note {
     };
 }
 
+mod bus;
 mod ota;
 
 /// Granularity of the listening loops. Fine enough that a 100 ms window is not
@@ -375,6 +379,20 @@ fn main() -> ! {
     };
     let scanning = scanner.is_some();
 
+    // The node bus, on the XIAO's D7-D10 and D0 (`docs/node-bus.md`). Pulled up, so CS reads
+    // idle with no P4 attached. One pin, two readers: the slave takes it as CS, and
+    // `bus` re-arms on its rising edge.
+    let cs = Input::new(peripherals.GPIO12, InputConfig::default().with_pull(Pull::Up));
+    let spi = Spi::new(peripherals.SPI2, Mode::_0)
+        .with_sck(peripherals.GPIO8)
+        .with_mosi(peripherals.GPIO10)
+        .with_miso(peripherals.GPIO9)
+        .with_cs(cs.peripheral_input())
+        .with_dma(peripherals.DMA_CH0);
+    let irq = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    let mut io = Io::new(peripherals.IO_MUX);
+    bus::start(spi, cs, irq, &mut io);
+
     let node = NODE.take();
     node.reset_cause = cause;
     node.trial = trial;
@@ -387,6 +405,7 @@ fn main() -> ! {
     );
 
     loop {
+        bus::service();
         if ota.updating() {
             // Update mode: parked on the control channel, sniffing nothing and scanning no
             // Bluetooth, draining every frame. It heartbeats every second whatever the
@@ -576,6 +595,7 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// boot default, or an earlier assignment's power) or what something reset it to since.
 /// The rail voltage and die temperature are read beside it, on the control channel where
 /// every heartbeat goes out, so the voltage read's PBUS excursion never lands in a dwell.
+/// A copy goes to the node bus too, whatever the radio made of it.
 fn heartbeat(manager: &EspNowManager, sender: &mut EspNowSender, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
@@ -598,9 +618,11 @@ fn heartbeat(manager: &EspNowManager, sender: &mut EspNowSender, node: &mut Node
     };
     node.beats = beat;
     node.beat_dwell = node.last_dwell;
-    if !radio::broadcast(sender, &msg.encode()) {
+    let frame = msg.encode();
+    if !radio::broadcast(sender, &frame) {
         node.unsent = node.unsent.wrapping_add(1);
     }
+    bus::send(&frame);
 }
 
 /// Encode a die reading, sending a failed one as no reading.
@@ -814,6 +836,8 @@ fn listen(
 ///
 /// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
 /// update frame: decoding one is hearing the host over the air, which is the whole test.
+///
+/// It services the node bus first: this runs after every dwell and throughout every listen.
 fn drain_admin(
     controller: &mut WifiController<'_>,
     manager: &EspNowManager,
@@ -822,6 +846,7 @@ fn drain_admin(
     node: &mut Node,
     ota: &mut ota::Ota,
 ) {
+    bus::service();
     while let Some(received) = receiver.receive() {
         let src = received.info.src_address;
         let admin = match Frame::decode(received.data()) {
