@@ -24,6 +24,9 @@ and config, then `espflash save-image` on the result. A build fails if the saved
 appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
 too.
 
+It is also the SPI master of two node buses, which carry a copy of each node's heartbeat;
+[`docs/node-bus.md`](../../docs/node-bus.md) has the pins.
+
 ## Boards
 
 This firmware runs on the Waveshare ESP32-P4-WIFI6.
