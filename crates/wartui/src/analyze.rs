@@ -221,7 +221,6 @@ fn host_line(host: &HostLoss) -> String {
             millis(host.lag_peak_us)
         ));
     }
-    clauses.extend(nonzero(host.admin_windows_missed, "admin windows missed"));
     if host.commit_peak_us > 0 {
         clauses.push(format!("slowest commit {}", millis(host.commit_peak_us)));
     }

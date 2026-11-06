@@ -98,7 +98,7 @@ own.
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
   `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
-  sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
+  sweep cursor), `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
@@ -334,13 +334,16 @@ edit stops; follow the pointer before changing the rule.
   `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
   `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
-- **A heartbeat read behind the bridge is history, not an answer's cue.** A host that falls behind a
-  busy fleet drains the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the
-  gap is the lag. Delete either half of the check and the symptom is a plausible-looking lie
-  rather than an error. A connection starts caught up, which is safe only because nothing older
-  than it reaches the engine: a bridge clears its queue when a host connects, and the transport
-  drops what decodes ahead of a connection's first `Ready`.
-  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`;
+- **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains
+  the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the gap is the
+  lag. Such a heartbeat's epoch is not believed, and no assignment or clear goes out on one: the
+  slot it names may be another node's now, and `deal` cannot skip an epoch it has not seen. Delete
+  either half of the check and the symptom is a plausible-looking lie rather than an error.
+  A connection starts caught up, which is safe only because nothing older than it reaches the
+  engine: a bridge clears its queue when a host connects, and the transport drops what decodes
+  ahead of a connection's first `Ready`.
+  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `BEHIND_US`;
+  `crates/wartui-core/src/engine/admin.rs`, `send_admin` / `send_dedup_ring_clear`;
   `crates/wartui-bridge/src/serial.rs`, `read_loop`
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
@@ -370,11 +373,6 @@ edit stops; follow the pointer before changing the rule.
   which builds and then panics on the first task the radio spawns. The node is the firmware that
   links `esp-radio`; Dependabot ignores them and each firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/p4-radio/README.md` § "Dependency versions"
-- **Transmit power is a setting, not a radio's.** `fleet` and `bridge` under `[tx-power]` in
-  `wartui.toml`, and the settings modal, set powers the engine clamps (2 to 20 dBm) and the capture
-  keeps; nothing on the node bus transmits, so neither reaches a radio. The node keeps the 2 dBm
-  boot default. → `crates/wartui-proto/src/tx_power.rs`; `crates/wartui-core/src/engine/event.rs`,
-  `Command::SetTxPower`
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
   change it does not stick, and a node whose channel silently did not change reads as a dead node
   rather than a bug. → `firmware/node/src/radio.rs`, `park`

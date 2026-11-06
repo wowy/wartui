@@ -300,8 +300,8 @@ pub async fn drive_ota(
     }
 }
 
-/// Applied settings as `capture_settings` rows: applied rather than requested, because clamps and
-/// no-ops belong to the engine.
+/// Applied settings as `capture_settings` rows: applied rather than requested, because no-ops
+/// belong to the engine.
 ///
 /// A change takes its sequence number and time when first seen, and a full queue retries that same
 /// row on later passes without blocking the engine. A refused retry is not a drop. A change is
@@ -414,15 +414,15 @@ mod tests {
         log.record(&store, engine.capture_settings(), clock);
         assert_eq!(log.next_sequence, 1, "unchanged settings are not per-tick records");
 
-        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), clock);
         log.record(&store, engine.capture_settings(), clock);
-        // A repeated request is a no-op even when the supplied values need clamping.
-        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        // A repeated request is a no-op.
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), clock);
         log.record(&store, engine.capture_settings(), clock);
         assert_eq!(log.next_sequence, 2);
 
         let reversed = Now { unix_ms: 999, ..clock };
-        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), reversed);
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Eu }), reversed);
         log.record(&store, engine.capture_settings(), reversed);
         engine.handle(Event::Command(Command::RememberBle { on: false }), reversed);
         log.record(&store, engine.capture_settings(), reversed);
@@ -439,9 +439,9 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("rows");
         assert_eq!(values.len(), 4);
-        assert!(values[0].contains("nodes_tx_power_quarter_dbm=8;"));
-        assert!(values[1].contains("nodes_tx_power_quarter_dbm=80;bridge_tx_power_quarter_dbm=8;"));
-        assert!(values[2].contains("at_ms=999;pool=us;"));
+        assert!(values[0].contains("pool=all;"));
+        assert!(values[1].contains("at_ms=1000;pool=us;"));
+        assert!(values[2].contains("at_ms=999;pool=eu;"));
         assert!(values[3].contains("remember_ble=false;"));
     }
 
@@ -497,7 +497,7 @@ mod tests {
         let clock = Now { mono: Instant::now(), unix_ms: 1000 };
         let (store, rx) = full_store(clock);
         let first = settings(clock);
-        let second = CaptureSettings { tx_power: first.tx_power + 4, ..first };
+        let second = CaptureSettings { record_raw: !first.record_raw, ..first };
         let mut log = SettingsLog::default();
         for _ in 0..3 {
             log.record(&store, first, clock);

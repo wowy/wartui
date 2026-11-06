@@ -26,7 +26,6 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
 use wartui_proto::plan::ChannelPool;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use crate::{capture, config, tui, upload};
 
@@ -79,7 +78,13 @@ pub struct Args {
     pub(crate) config: Option<PathBuf>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
-    #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
+    #[arg(
+        long,
+        value_name = "NODES",
+        num_args = 0..=1,
+        default_missing_value = "3",
+        value_parser = crate::sim_nodes()
+    )]
     sim: Option<u8>,
 
     /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM.db` in the
@@ -129,26 +134,7 @@ pub struct Args {
     notes: Option<String>,
 }
 
-/// The fleet's two transmit powers in ESP-IDF quarter-dBm units: `(nodes, bridge)`.
-///
-/// Whole dBm in, 2 to 20, which maps exactly onto the 8 to 80 quarter-dBm the host
-/// permits; the wire carries quarter-dBm, so the conversion happens once here rather
-/// than on either side of it. Nodes and bridge are completely independent, each
-/// resolved on its own: the file beats the default.
-///
-/// ```text
-/// nodes  = file.fleet  ∨ default
-/// bridge = file.bridge ∨ default
-/// ```
-fn tx_powers(file: &config::TxPower) -> (i8, i8) {
-    let quarter = |dbm: i8| dbm * 4;
-    let nodes = file.fleet.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    let bridge = file.bridge.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    (nodes, bridge)
-}
-
-/// Which channel pool the fleet starts on: the file beats the default, as
-/// [`tx_powers`] resolves the transmit powers.
+/// Which channel pool the fleet starts on: the file beats the default.
 fn pool(file: Option<PoolArg>) -> ChannelPool {
     file.unwrap_or_default().into()
 }
@@ -271,7 +257,6 @@ pub async fn run(args: Args) -> Result<()> {
         CaptureInfo { pool, notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
     let store_config = StoreConfig::new(&db);
 
-    let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
@@ -288,8 +273,6 @@ pub async fn run(args: Args) -> Result<()> {
         pool,
         record_raw: args.record_raw,
         position,
-        tx_power,
-        bridge_tx_power,
         remember_ble,
         preferred_ble,
         excluded_ssids,
@@ -389,38 +372,8 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpsChoice, PoolArg, gps_choice, pool, test_data, tx_powers};
-    use crate::config::TxPower;
+    use super::{GpsChoice, PoolArg, gps_choice, pool, test_data};
     use wartui_proto::plan::ChannelPool;
-    use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
-
-    #[test]
-    fn run_cmd_applies_default_tx_power_when_file_names_none() {
-        assert_eq!(
-            tx_powers(&TxPower::default()),
-            (DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM)
-        );
-    }
-
-    #[test]
-    fn run_cmd_leaves_bridge_at_default_tx_power_when_file_names_only_fleet() {
-        // Nodes and bridge are independent: a fleet power alone never touches
-        // the bridge, which stays at the default.
-        let file = TxPower { fleet: Some(10), bridge: None };
-        assert_eq!(tx_powers(&file), (40, DEFAULT_TX_POWER_QUARTER_DBM));
-    }
-
-    #[test]
-    fn run_cmd_leaves_nodes_at_default_tx_power_when_file_names_only_bridge() {
-        let file = TxPower { fleet: None, bridge: Some(17) };
-        assert_eq!(tx_powers(&file), (DEFAULT_TX_POWER_QUARTER_DBM, 68));
-    }
-
-    #[test]
-    fn run_cmd_applies_both_file_tx_powers_when_file_names_both() {
-        let file = TxPower { fleet: Some(10), bridge: Some(17) };
-        assert_eq!(tx_powers(&file), (40, 68));
-    }
 
     #[test]
     fn run_cmd_applies_file_pool_when_file_names_one() {

@@ -54,6 +54,10 @@ A chunk carries up to 1024 bytes of image. § "Over-the-air updates" has the res
 never transmits while looking, including on the DFS channels, where the rules say listen and don't
 speak.
 
+**It sends no Wi-Fi frames of its own.** Everything it says goes over the node bus. What the radio
+answers in hardware, such as an acknowledgment to a frame addressed to this station, is capped at
+2 dBm, the lowest power `set_max_tx_power` accepts (`src/main.rs`).
+
 Listening also makes the rest possible. A node holds `WifiController::sniffer()` for the life of
 the program, and owns the channel: it parks where it chooses. A scan from `scan_async` hops channels on its own schedule,
 sends probe requests unless asked to be passive, and returns an `AccessPointInfo` per network with
@@ -237,10 +241,8 @@ decides whether it runs. The assignment that sets it carries **no channels**, by
 mask with the flag means "Bluetooth is all of it". An empty mask without the flag is the one thing
 the host never sends, and this firmware treats it as never having been told anything.
 
-The reason is a measured cost. A stock node with BLE on acknowledged none of thirty-two
-assignments. The two radios share one 2.4 GHz antenna, and the admin window is exactly when a node
-is otherwise idle and the Bluetooth controller is free to take it
-([`docs/phase-0-findings.md`](../../docs/phase-0-findings.md),
+The two radios share one 2.4 GHz antenna, and a Bluetooth controller left free takes it whenever
+the node is otherwise idle ([`docs/phase-0-findings.md`](../../docs/phase-0-findings.md),
 [`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with no sweep has nothing to
 hand the antenna back to, so the conflict is arranged away rather than scheduled around. That costs
 one node's Wi-Fi coverage. Which node is the operator's decision, not a property of the binary on

@@ -1094,7 +1094,7 @@ fn read_frames<R: Read>(
                     // `Identify`, and clears its queue when a host arrives. So whatever
                     // decodes before this connection's first `Ready` was written before
                     // the connection, out of the CH343's or the tty's buffer, and is
-                    // stale: a heartbeat seconds old reads as a host behind the air. A
+                    // stale: a heartbeat seconds old reads as a host behind the bridge. A
                     // rebooted bridge's `Ready` on a connection already announced changes
                     // nothing here.
                     if last_ready.is_none() {

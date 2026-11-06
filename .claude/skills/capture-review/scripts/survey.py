@@ -5,8 +5,8 @@ Prints facts, section by section, then a FLAGS list. Each flag carries the SQL t
 it. It interprets nothing beyond thresholds: the reviewer reads the source to say why.
 
 The file is opened read-only (`mode=ro`), so a capture that is still being written is safe to
-survey. Every section tolerates a missing table or column, because captures come from many
-builds and the schema changes shape freely before 1.0.
+survey. It reads the tables and columns this build writes (`SCHEMA` in
+crates/wartui-core/src/store.rs), and nothing else.
 
 Usage: python3 -I survey.py CAPTURE.db [--log wartui.log] [--node 59:50]
 """
@@ -25,6 +25,9 @@ FLAGS = []  # (severity, area, text, sql)
 # Reset causes that are the operator's own doing; every other stored cause is a fault.
 # Mirrors `ResetCause::is_fault` in crates/wartui-proto/src/reset.rs.
 NOT_FAULTS = ("power_on", "external")
+
+# Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
+MAX_NODES = 14
 
 
 def is_fault(cause):
@@ -115,19 +118,6 @@ class Db:
         self.tables = {
             r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        self._cols = {}
-
-    def cols(self, table):
-        if table not in self._cols:
-            self._cols[table] = (
-                {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
-                if table in self.tables
-                else set()
-            )
-        return self._cols[table]
-
-    def has(self, table, *columns):
-        return table in self.tables and all(c in self.cols(table) for c in columns)
 
     def q(self, sql, args=()):
         return self.conn.execute(sql, args).fetchall()
@@ -135,10 +125,6 @@ class Db:
     def one(self, sql, args=()):
         row = self.conn.execute(sql, args).fetchone()
         return row[0] if row else None
-
-
-def absent(what):
-    print(f"  n/a ({what} absent)")
 
 
 def since_boot_delta(cur, prev, rebooted):
@@ -156,11 +142,9 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS
     section("capture")
-    if not db.has("capture", "started_at"):
-        absent("capture table")
-        return
-    cols = db.cols("capture")
-    row = dict(zip(sorted(cols), db.q(f"SELECT {', '.join(sorted(cols))} FROM capture")[0]))
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_chip", "bridge_fw", "channel_pool",
+            "notes", "simulated")
+    row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
     end = row.get("ended_at")
     ctx["start"], ctx["end"] = START_MS, end
@@ -185,8 +169,6 @@ def provenance(db, ctx):
     if row.get("simulated"):
         flag("WARN", "capture", "simulated=1: test data (--sim or --lat/--lon); never uploaded")
 
-    if "kv" not in db.tables:
-        return
     kv = dict(db.q("SELECT k, v FROM kv"))
     ctx["kv"] = kv
     for k in sorted(kv):
@@ -242,9 +224,6 @@ def provenance(db, ctx):
 
 def nodes(db, ctx):
     section("nodes")
-    if not db.has("node", "mac"):
-        absent("node table")
-        return
     rows = db.q("SELECT mac, first_seen, last_seen, capabilities FROM node ORDER BY mac")
     ctx["nodes"] = {r[0]: r for r in rows}
     for mac, first, last, caps in rows:
@@ -273,162 +252,106 @@ def nodes(db, ctx):
                 "assignment gave another node the Bluetooth job, so no node scanned Bluetooth",
                 "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
             )
-    if len(rows) > 20:
-        print(f"  {len(rows)} nodes: more than the supported twenty")
+    if len(rows) > MAX_NODES:
+        print(f"  {len(rows)} nodes: more than a bridge's {MAX_NODES} slots, so some came and went")
 
 
 def heartbeats(db, ctx):
     section("heartbeats")
-    if not db.has("heartbeat", "node_mac", "beat", "counter"):
-        absent("heartbeat table or beat column")
-        return
-    cols = db.cols("heartbeat")
-    want = ["node_mac", "id", "rx_at", "counter", "epoch", "rssi", "beat"]
-    for c in ("live", "wifi_refused", "ble_refused"):
-        want.append(c if c in cols else "NULL")
-    want += ["unsent", "dwell", "prev_dwell"]
-    for c in ("tx_power", "reset_cause"):
-        want.append(c if c in cols else "NULL")
-    rows = db.q(f"SELECT {', '.join(want)} FROM heartbeat ORDER BY node_mac, id")
+    # Row layout, read by index here and in assignments() and observations().
+    rows = db.q("SELECT node_mac, id, rx_at, counter, epoch, slot, reset_cause, live, "
+                "wifi_refused, ble_refused, vdd_mv, die_temp_c FROM heartbeat "
+                "ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
     timeout = int(ctx.get("settings", {}).get("topology_timeout_ms", 60000))
     ble_nodes = ctx.get("ble_nodes", set())
-    miss_by_job = Counter()
-    beats_by_job = Counter()
     total_reversals = 0
     for mac, hs in per.items():
-        heard = missed = unsent = reboots = replayed = dups = 0
+        reboots = replayed = 0
         wifi_ref = ble_ref = 0
         silences = []
         reversals = 0
-        prev = None
         intervals = []
-        # Per scan channel: [misses, beats sent] after a dwell on it. 0 is no dwell.
-        by_dwell = defaultdict(lambda: [0, 0])
-        unplaced = 0
+        slots = Counter()
+        moves = []  # (rx_at, from slot, to slot)
         # The reset cause of each boot seen: the first beat's, then each restart's.
-        boots = [hs[0][14]] if hs else []
+        boots = [hs[0][6]] if hs else []
+        prev = None
+        # The engine's `held_epoch`: the last live beat's epoch, None until one and after a restart.
+        held = None
         for r in hs:
-            (_, rid, rx, counter, epoch, rssi, beat, live, wr, br, us, dw, p_dw, tx, cause,
-             *_rest) = r
+            (_, _, rx, counter, epoch, slot, cause, live, wr, br, _, _) = r
             replayed += live == 0
-            if live != 0 and (prev is None or (beat - prev[6]) % 2**16 != 0
-                              or counter != prev[3]):
-                # Arrived live, so sent after its own dwell; a repeat counts once. A replayed
-                # beat is left out, as the misses after one are.
-                by_dwell[dw][1] += 1
+            slots[slot] += 1
             if prev is not None:
-                p_rx, p_counter, p_beat, p_live, p_wr, p_br, p_us = (
-                    prev[2], prev[3], prev[6], prev[7], prev[8], prev[9], prev[10])
+                p_rx, p_counter, p_slot = prev[2], prev[3], prev[5]
+                if slot != p_slot:
+                    moves.append((rx, p_slot, slot))
+                # As the engine reads a restart: the counter fell, or a live beat reports no
+                # epoch after a live beat reported a real one.
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
-                            or (beat - p_beat) % 2**16 >= 2**15)
+                            or (live != 0 and epoch == 0 and held not in (None, 0)))
                 if rebooted:
                     reboots += 1
                     boots.append(cause)
-                    ctx.setdefault("restarts", []).append((rx, mac, p_counter, counter, p_beat,
-                                                           beat, p_rx, cause))
-                    gap_h, gap_m = 1, max(0, beat - 1)
-                else:
-                    d = (beat - p_beat) % 2**16
-                    gap_h, gap_m = (0, 0) if d == 0 else (1, d - 1)
-                    dups += d == 0
-                heard += gap_h
-                if p_live != 0:  # a gap after a replayed beat spans time no host read
-                    missed += gap_m
-                    # `unsent` excludes the beat carrying it and wraps at 256. The previous beat
-                    # arrived, so its send did not fail; the cap only guards against a bad row.
-                    unsent_since = us if rebooted else (us - p_us) % 256
-                    unsent += min(unsent_since, gap_m)
-                    # Only the last beat of a run of misses is named, by this beat's
-                    # `prev_dwell`; the ones before it went after dwells no arrival records.
-                    if gap_m:
-                        by_dwell[p_dw][0] += 1
-                        by_dwell[p_dw][1] += 1
-                        unplaced += gap_m - 1
-                if wr is not None and p_wr is not None:
-                    wifi_ref += since_boot_delta(wr, p_wr, rebooted)
-                    ble_ref += since_boot_delta(br, p_br, rebooted)
+                    ctx.setdefault("restarts", []).append((rx, mac, p_counter, counter, p_rx,
+                                                           cause))
+                    held = None
+                wifi_ref += since_boot_delta(wr, prev[8], rebooted)
+                ble_ref += since_boot_delta(br, prev[9], rebooted)
                 dt = rx - p_rx
                 if dt < 0:
                     reversals += 1
-                else:
+                elif prev[7] != 0:  # an interval after a replayed beat spans time no host read
                     intervals.append(dt)
                 if dt > timeout:
                     silences.append((p_rx, rx))
+            if live != 0:
+                held = epoch
             prev = r
-        job = "ble" if mac in ble_nodes else "wifi"
-        miss_by_job[job] += missed
-        beats_by_job[job] += heard + missed
+        total_reversals += reversals
         if ctx["only"] and short(mac) != ctx["only"]:
             continue  # walked anyway: its restarts feed the grouping and the adoption check
-        rssis = [r[5] for r in hs if r[5] is not None]
-        half = len(rssis) // 2
-        trend = ""
-        if half > 10:
-            trend = (f"  (first half p50 {statistics.median(rssis[:half])}, "
-                     f"second half p50 {statistics.median(rssis[half:])})")
-        split = f": {unsent} unsent, {missed - unsent} lost after sending" if missed else ""
-        print(
-            f"  {short(mac)} [{job}]  rows {len(hs)}  missed {missed}/{heard + missed} "
-            f"({pct(missed, heard + missed)}){split}  restarts {reboots}  replayed {replayed}  "
-            f"repeats {dups}"
-        )
+        job = "ble" if mac in ble_nodes else "wifi"
+        where = "  ".join(f"{s} {n}" for s, n in slots.most_common())
+        print(f"  {short(mac)} [{job}]  rows {len(hs)}  slot {where}  restarts {reboots}  "
+              f"replayed {replayed}")
         if intervals:
             print(f"        interval ms  {spread(intervals)}")
-        print(f"        link rssi    {spread(rssis, ' dBm')}{trend}")
+            # An assigned node beats once a sweep, at most every 5 s, so its median interval is
+            # its cadence. Twice that is a beat that did not arrive.
+            usual = max(statistics.median(intervals), 5000)
+            late = [i for i in intervals if i > 2 * usual]
+            if late:
+                print(f"        ~{len(late)} gaps over twice its median interval of "
+                      f"{usual:.0f} ms (inferred from timing)")
         if wifi_ref or ble_ref:
-            print(
-                f"        buffer full wifi {wifi_ref}  ble {ble_ref}  "
-                "(pending-buffer pressure, not loss)"
-            )
-        placed = {ch: mn for ch, mn in by_dwell.items() if ch}
-        if job == "wifi" and missed and placed:
-            line = "  ".join(f"{ch}:{m}/{n}" for ch, (m, n) in sorted(placed.items()))
-            if by_dwell[0][1]:
-                line += f"  none:{by_dwell[0][0]}/{by_dwell[0][1]}"
-            if unplaced:
-                line += f"  unplaced {unplaced}"
-            print(f"        miss by dwell {line}  (misses/beats sent after that channel)")
-            # Each channel against the pooled rate of the node's other channels: a median of
-            # per-channel rates is 0 whenever half of them lose nothing.
-            all_m = sum(m for m, _ in placed.values())
-            all_n = sum(n for _, n in placed.values())
-            for ch, (m, n) in sorted(placed.items()):
-                rest_n = all_n - n
-                rest = (all_m - m) / rest_n if rest_n else 0.0
-                if m >= 5 and m / n >= 0.02 and m / n >= 3 * rest:
-                    flag("WARN", "loss",
-                         f"{short(mac)} loses heartbeats sent after a dwell on channel {ch}: "
-                         f"{m} of {n} ({m / n:.1%}), against {rest:.1%} across its other "
-                         "channels",
-                         f"WITH hb AS (SELECT dwell, prev_dwell, (beat - LAG(beat) OVER "
-                         f"(ORDER BY id) + 65536) % 65536 AS d FROM heartbeat WHERE "
-                         f"hex(node_mac)='{mac.hex().upper()}' AND COALESCE(live, 1) != 0)\n"
-                         "SELECT ch, SUM(m) AS misses, SUM(n) AS sent FROM (\n"
-                         "  SELECT prev_dwell AS ch, 1 AS m, 1 AS n FROM hb "
-                         "WHERE d BETWEEN 2 AND 32767\n"
-                         "  UNION ALL SELECT dwell, 0, 1 FROM hb WHERE d IS NULL OR d != 0\n"
-                         ") WHERE ch != 0 GROUP BY ch ORDER BY ch")
+            print(f"        buffer full wifi {wifi_ref}  ble {ble_ref}  "
+                  "(pending-buffer pressure, not loss)")
+        node_sql = f"hex(node_mac)='{mac.hex().upper()}'"
+        for at, a, b in moves[:5]:
+            print(f"        moved        {a} -> {b} at {rel(at)}")
+        if moves:
+            flag("INFO", "node",
+                 f"{short(mac)} heartbeated from {len(slots)} slots ({', '.join(slots)}), "
+                 f"moving {len(moves)} time(s), first near {rel(moves[0][0])}",
+                 f"SELECT id, rx_at, slot FROM (SELECT *, LAG(slot) OVER (ORDER BY id) AS ps "
+                 f"FROM heartbeat WHERE {node_sql}) WHERE slot != ps ORDER BY id")
         epochs = Counter(r[4] for r in hs)
         print(f"        epochs held  {dict(sorted(epochs.items()))}")
-        powers = Counter(r[13] for r in hs if r[13] is not None)
-        if powers:
-            print(f"        tx power seen {dict(sorted(powers.items(), reverse=True))}  "
-                  "(quarter-dBm the radio reported; 0 = read failed)")
         if any(c is not None for c in boots):
             # The first beat names a boot that may predate the capture; the rest are restarts
             # this capture saw.
             before, during = boots[0], boots[1:]
             print(f"        boots        before capture: {before}"
                   + (f"; in capture: {', '.join(str(c) for c in during)}" if during else ""))
-            node_sql = f"hex(node_mac)='{mac.hex().upper()}'"
             if is_fault(before):
                 flag("INFO", "node",
                      f"{short(mac)} last booted before the capture started, for {before}",
-                     f"SELECT id, rx_at, counter, beat, reset_cause FROM heartbeat WHERE "
+                     f"SELECT id, rx_at, counter, reset_cause FROM heartbeat WHERE "
                      f"{node_sql} ORDER BY id LIMIT 1")
             faults = [c for c in during if is_fault(c)]
             if faults:
@@ -436,7 +359,7 @@ def heartbeats(db, ctx):
                 flag("WARN", "node",
                      f"{short(mac)} restarted {len(faults)} time(s) in the capture for a cause "
                      f"other than power-on or an external reset: {', '.join(faults)}",
-                     f"SELECT id, rx_at, counter, beat, reset_cause FROM (SELECT *, LAG(counter) "
+                     f"SELECT id, rx_at, counter, reset_cause FROM (SELECT *, LAG(counter) "
                      f"OVER (ORDER BY id) AS pc FROM heartbeat WHERE {node_sql}) WHERE counter < pc "
                      f"AND reset_cause NOT IN ({not_faults}) ORDER BY id")
         for a, b in silences[:5]:
@@ -448,71 +371,8 @@ def heartbeats(db, ctx):
                 f"{short(mac)} went {len(silences)} time(s) without a heartbeat for longer than "
                 f"topology_timeout ({timeout} ms); longest {dur(max(b - a for a, b in silences))}",
                 f"SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) AS gap FROM heartbeat "
-                f"WHERE hex(node_mac)='{mac.hex().upper()}' ORDER BY gap DESC LIMIT 10",
+                f"WHERE {node_sql} ORDER BY gap DESC LIMIT 10",
             )
-        rate = missed / (heard + missed) if heard + missed else 0
-        if rate > 0.02:
-            flag(
-                "WARN",
-                "loss",
-                f"{short(mac)} missed {missed} of {heard + missed} heartbeats ({rate:.1%}){split}",
-                "-- wartui analyze --db <db> --heartbeat-windows",
-            )
-        if reversals:
-            total_reversals += reversals
-        # Miss rate against the link RSSI of the beat that arrived after each gap.
-        buckets = defaultdict(lambda: [0, 0])
-        for a, b in zip(hs, hs[1:]):
-            if b[5] is None or a[7] == 0:
-                continue
-            d = (b[6] - a[6]) % 2**16
-            if d == 0 or d >= 2**15:
-                continue
-            k = int(b[5] // 5 * 5)
-            buckets[k][0] += d - 1
-            buckets[k][1] += d
-        if missed and buckets:
-            print("        miss by rssi " + "  ".join(
-                f"{k}..{k + 4}:{m}/{n}" for k, (m, n) in sorted(buckets.items(), reverse=True)
-                if n >= 20))
-        if missed and ctx.get("start"):
-            per20 = Counter()
-            for a, b in zip(hs, hs[1:]):
-                d = (b[6] - a[6]) % 2**16
-                if 1 < d < 2**15 and a[7] != 0:
-                    per20[(b[2] - ctx["start"]) // 1_200_000] += d - 1
-            if per20:
-                print("        miss per 20m " + " ".join(
-                    str(per20.get(i, 0)) for i in range(max(per20) + 1)))
-        if missed >= 20:
-            # Spacing in beats between consecutive missed beats. Random loss makes 1 the most
-            # common spacing; a mode of 2 or more means something periodic hits the beat.
-            pos = 0
-            misses = []
-            for a, b in zip(hs, hs[1:]):
-                d = (b[6] - a[6]) % 2**16
-                if d >= 2**15 or (b[3] - a[3]) % 2**32 >= 2**31:
-                    pos += 10**6  # a restart; never pair misses across it
-                    continue
-                if d > 1 and a[7] != 0:
-                    misses.extend(range(pos + 1, pos + d))
-                pos += d
-            spacing = Counter(min(y - x, 7) for x, y in zip(misses, misses[1:]) if y - x < 10**5)
-            if spacing:
-                n = sum(spacing.values())
-                print("        miss spacing " + "  ".join(
-                    f"{'7+' if k == 7 else k}:{spacing[k]}" for k in range(1, 8) if spacing[k])
-                      + "  (beats between consecutive misses)")
-                # Independent loss at rate p gives P(k) = p(1-p)^(k-1), falling with k, so any
-                # short spacing that outnumbers spacing 1 is a period, not chance.
-                mode = max(range(1, 7), key=lambda k: spacing.get(k, 0))
-                count = spacing.get(mode, 0)
-                if mode >= 2 and count >= 10 and count > spacing.get(1, 0):
-                    flag("WARN", "node",
-                         f"{short(mac)} misses heartbeats periodically: {count} of {n} gaps "
-                         f"between misses are exactly {mode} beats, against {spacing.get(1, 0)} "
-                         "back-to-back (independent loss would make 1 the most common)",
-                         f"-- beat numbers of misses for {short(mac)}: walk heartbeat.beat by id")
     restarts = sorted(ctx.get("restarts", []))
     groups = []
     for r in restarts:
@@ -524,10 +384,10 @@ def heartbeats(db, ctx):
     for g in groups:
         macs = sorted({short(r[1]) for r in g})
         at = g[0][0]
-        silent = max(r[0] - r[6] for r in g)
-        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]} beat {r[4]}->{r[5]}"
-                           + (f" reset {r[7]}" if r[7] is not None else "") for r in g)
-        causes = sorted({f"{short(r[1])} {r[7]}" for r in g if r[7] is not None})
+        silent = max(r[0] - r[4] for r in g)
+        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]}"
+                           + (f" reset {r[5]}" if r[5] is not None else "") for r in g)
+        causes = sorted({f"{short(r[1])} {r[5]}" for r in g if r[5] is not None})
         print(f"  restart near {rel(at)}: {', '.join(macs)}  (longest silence {dur(silent)})"
               + (f"  reset {', '.join(causes)}" if causes else ""))
         who = (f"all {fleet} nodes restarted together" if len(macs) == fleet and fleet > 1
@@ -536,19 +396,13 @@ def heartbeats(db, ctx):
              f"{who} near {rel(at)} ({utc(at)}); longest heartbeat silence {dur(silent)}"
              + ("; a shared cause (power, bridge, host) is more likely than node firmware"
                 if len(macs) > 1 else ""),
-             f"-- {detail}\nSELECT id, node_mac, rx_at, counter, beat FROM heartbeat WHERE rx_at "
+             f"-- {detail}\nSELECT id, node_mac, rx_at, counter, epoch FROM heartbeat WHERE rx_at "
              f"BETWEEN {at - 60000} AND {at + 30000} ORDER BY id")
-    tx_power_siblings(per, ctx)
     end = ctx.get("end")
     lasts = [hs[-1][2] for hs in per.values() if hs]
     if end and len(lasts) > 1 and end - max(lasts) > 30_000 and max(lasts) - min(lasts) < 15_000:
         print(f"  every node fell silent within {dur(max(lasts) - min(lasts))} of each other, "
               f"{dur(end - max(lasts))} before the capture ended (fleet power off before quit?)")
-    if beats_by_job["ble"] and beats_by_job["wifi"]:
-        print(
-            f"  by job: wifi-sweeping missed {pct(miss_by_job['wifi'], beats_by_job['wifi'])}, "
-            f"bluetooth missed {pct(miss_by_job['ble'], beats_by_job['ble'])}"
-        )
     if total_reversals:
         flag("WARN", "clock",
              f"heartbeat rx_at stepped backwards {total_reversals} time(s) in arrival order: the "
@@ -557,53 +411,8 @@ def heartbeats(db, ctx):
              "ORDER BY d LIMIT 10")
 
 
-def tx_power_siblings(per, ctx):
-    """Flag a node whose radio reports a transmit power its siblings do not, minute by minute.
-
-    Compared against the siblings rather than the configured power, because the IDF may round
-    what it was asked for. Each node's most common reading in a minute stands for that minute.
-    """
-    by_minute = defaultdict(dict)  # minute -> mac -> (modal tx_power, first rx_at)
-    for mac, hs in per.items():
-        minutes = defaultdict(Counter)
-        firsts = {}
-        for r in hs:
-            # A replayed beat carries the power of when it was sent, not of the minute it arrived.
-            if r[13] is not None and r[7] != 0:
-                minutes[r[2] // 60_000][r[13]] += 1
-                firsts.setdefault(r[2] // 60_000, r[2])
-        for m, c in minutes.items():
-            by_minute[m][mac] = (c.most_common(1)[0][0], firsts[m])
-    odd = defaultdict(list)  # mac -> [(first rx_at, its power, siblings' power)]
-    for powers in by_minute.values():
-        for mac, (p, at) in powers.items():
-            others = Counter(v for k, (v, _) in powers.items() if k != mac)
-            if not others:
-                continue
-            common, n = others.most_common(1)[0]
-            if n * 2 > sum(others.values()) and p != common:
-                odd[mac].append((at, p, common))
-    for mac, minutes in sorted(odd.items()):
-        if ctx["only"] and short(mac) != ctx["only"]:
-            continue
-        if len(minutes) < 2:
-            continue  # one minute is a fleet-wide power change landing on different beats
-        pairs = Counter((p, c) for _, p, c in minutes)
-        (p, c), _ = pairs.most_common(1)[0]
-        first = min(at for at, _, _ in minutes)
-        flag("WARN", "node",
-             f"{short(mac)} reports tx_power {p} in {len(minutes)} minute(s) where most of its "
-             f"siblings report {c} (quarter-dBm), first near {rel(first)}",
-             f"SELECT rx_at / 60000 AS minute, hex(node_mac) AS node, tx_power, COUNT(*) AS beats "
-             f"FROM heartbeat WHERE rx_at BETWEEN {first - 60000} AND {first + 120000} "
-             "AND COALESCE(live, 1) != 0 GROUP BY 1, 2, 3 ORDER BY 1, 2")
-
-
 def assignments(db, ctx):
     section("assignments")
-    if not db.has("assignment", "node_mac", "counter", "outcome"):
-        absent("assignment table")
-        return
     rows = db.q(
         "SELECT node_mac, counter, wire_version, channels, ble, created_at, delivered_at, outcome, "
         "latency_us FROM assignment ORDER BY id"
@@ -641,18 +450,18 @@ def assignments(db, ctx):
         )
     ctx["assigned"] = assigned
     if scan:
-        print("  final share per node (* = control channel 6, where heartbeats and admin go):")
+        print("  final share per node:")
         last = {}
         for r in rows:
             last[r[0]] = r
         for mac, r in sorted(last.items()):
             chans = [scan[i] for i in range(len(scan)) if r[3] >> i & 1]
-            print(f"    {short(mac)}  " + " ".join(f"{c}*" if c == 6 else str(c) for c in chans)
+            print(f"    {short(mac)}  " + " ".join(str(c) for c in chans)
                   + ("  BLE" if r[4] else ""))
 
     # Adoption: a live heartbeat well after an acked assignment should carry that assignment's wire
     # epoch, or the epoch of any assignment sent since. An unacked or silent one may still have
-    # landed (the frame arrived, its ack did not), which the engine allows for too.
+    # landed (the transfer arrived, its ack did not), which the engine allows for too.
     hb = ctx.get("hb", {})
     grace = 15_000
     for mac in {r[0] for r in rows}:
@@ -684,9 +493,6 @@ def assignments(db, ctx):
 
 def batch_gaps(db, ctx):
     section("batch gaps")
-    if not db.has("batch_gap", "node_mac", "lost"):
-        absent("batch_gap table")
-        return
     rows = db.q("SELECT node_mac, rx_at, lost FROM batch_gap ORDER BY id")
     if not rows:
         print("  none recorded")
@@ -713,13 +519,9 @@ def batch_gaps(db, ctx):
 
 def bridge(db, ctx):
     section("bridge status")
-    if not db.has("bridge_status", "uptime_ms"):
-        absent("bridge_status table")
-        return
-    oversize_col = "rx_oversize" if db.has("bridge_status", "rx_oversize") else "0"
     rows = db.q(
-        "SELECT id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, "
-        f"{oversize_col} FROM bridge_status ORDER BY id"
+        "SELECT id, rx_at, rx_oversize, rx_count, dropped_tx, uptime_ms, host_frames "
+        "FROM bridge_status ORDER BY id"
     )
     if not rows:
         print("  no status replies")
@@ -739,7 +541,7 @@ def bridge(db, ctx):
             reboots.append(cur[1])
         received += since_boot_delta(cur[3], prev[3], restarted)
         dropped += since_boot_delta(cur[4], prev[4], restarted)
-        oversize += since_boot_delta(cur[7], prev[7], restarted)
+        oversize += since_boot_delta(cur[2], prev[2], restarted)
         gaps.append(cur[1] - prev[1])
     # dropped_tx sums queues on both chips, so neither restart rule fits it: as analyze does, take
     # the total from the queues when rows carry them.
@@ -747,15 +549,16 @@ def bridge(db, ctx):
     if in_dropped_tx:
         dropped = sum(in_dropped_tx)
     host_read = rows[-1][6] - rows[0][6]
-    peers = Counter(r[2] for r in rows)
     print(f"  rows {len(rows)}  reboots {len(reboots)}  received {received}  dropped {dropped} "
           f"({pct(dropped, received)})  host read {host_read}")
     print(f"  ~lost on USB {max(0, received - dropped - host_read)} "
           "(inferred from counters; +/-24 frames at each end)")
     if oversize:
-        print(f"  oversize {oversize} (ESP-NOW frames over 1024 bytes, not a node's; "
-              "not in received)")
-    print(f"  peer_count seen {dict(sorted(peers.items()))}")
+        print(f"  oversize {oversize} (node records over 1024 bytes; not in received)")
+        flag("WARN", "bridge",
+             f"the P4 dropped {oversize} node record(s) over 1024 bytes, which no node of this "
+             "build sends",
+             "SELECT id, rx_at, uptime_ms, rx_oversize FROM bridge_status ORDER BY id")
     if gaps:
         print(f"  reply interval ms  {spread(gaps)}")
         interval = int(ctx.get("settings", {}).get("status_interval_ms", 5000))
@@ -777,10 +580,6 @@ def bridge(db, ctx):
     if dropped:
         flag("WARN", "bridge", f"bridge dropped {dropped} frames it could not hand the host",
              "SELECT id, rx_at, dropped_tx FROM bridge_status ORDER BY id")
-    # peer_count includes the broadcast peer the bridge registers at init, so a fleet of N reads N+1.
-    fleet = len(ctx.get("nodes", {}))
-    if peers and fleet and max(peers) > fleet + 1:
-        print(f"  note: peer_count peaked at {max(peers)}, above {fleet} nodes + the broadcast peer")
     flat = 0
     longest_flat = (0, None)
     for prev, cur in zip(rows, rows[1:]):
@@ -791,7 +590,7 @@ def bridge(db, ctx):
         else:
             flat = 0
     if longest_flat[0] > 30_000:
-        print(f"  bridge heard nothing over the air for {dur(longest_flat[0])} from "
+        print(f"  bridge forwarded no node record for {dur(longest_flat[0])} from "
               f"{rel(longest_flat[1])} (rx_count flat, bridge up)")
     bridge_queues(queues)
     bridge_radio_link(db, lives)
@@ -800,15 +599,14 @@ def bridge(db, ctx):
 
 # Mirrors QueueId::unit in crates/wartui-proto/src/link/mod.rs.
 QUEUE_UNITS = {
-    "radio-up": "bytes", "radio-send-jobs": "entries", "radio-down": "bytes",
-    "host-priority": "bytes", "host-bulk": "bytes", "radio-up-priority": "bytes",
-    "radio-jobs": "entries",
+    "radio-up": "bytes", "radio-down": "bytes", "host-priority": "bytes", "host-bulk": "bytes",
+    "node-down": "bytes",
 }
 
 
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
-P4_QUEUES = {"radio-down", "host-priority", "host-bulk"}
-DROPPED_TX_QUEUES = {"radio-up", "radio-up-priority", "host-priority", "host-bulk"}
+P4_QUEUES = {"radio-down", "host-priority", "host-bulk", "node-down"}
+DROPPED_TX_QUEUES = {"radio-up", "host-priority", "host-bulk"}
 
 
 def bridge_queue_drops(db, lives):
@@ -908,15 +706,9 @@ def bridge_host_uart(db):
 
 def host(db, ctx):
     section("host status")
-    if not db.has("host_status", "at"):
-        absent("host_status table")
-        return
-    cols = db.cols("host_status")
-    order = [c for c in (
-        "at", "frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
-        "admin_windows_missed", "lag_peak_us", "store_written", "store_dropped",
-        "store_queue_peak", "store_commit_peak_us", "throttled", "soc_temp_mc", "battery_mv",
-        "battery_ma") if c in cols]
+    order = ["at", "frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
+             "lag_peak_us", "store_written", "store_dropped", "store_queue_peak",
+             "store_commit_peak_us", "throttled", "soc_temp_mc", "battery_mv", "battery_ma"]
     rows = [dict(zip(order, r)) for r in db.q(f"SELECT {', '.join(order)} FROM host_status "
                                                "ORDER BY id")]
     if not rows:
@@ -925,22 +717,19 @@ def host(db, ctx):
     first, last = rows[0], rows[-1]
     deltas = {}
     for c in ("frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
-              "admin_windows_missed", "store_written", "store_dropped"):
-        if c in first:
-            deltas[c] = (last[c] or 0) - (first[c] or 0)
+              "store_written", "store_dropped"):
+        deltas[c] = last[c] - first[c]
     print("  " + "  ".join(f"{k} {v}" for k, v in deltas.items()))
     for c in ("lag_peak_us", "store_queue_peak", "store_commit_peak_us"):
-        if c in first:
-            print(f"  {c:<22}{spread([r[c] for r in rows if r[c] is not None])}")
-    if "lag_peak_us" in first:
-        behind = sum(1 for r in rows if (r["lag_peak_us"] or 0) >= 100_000)
-        if behind:
-            flag("WARN" if behind > 5 else "INFO", "host",
-                 f"host fell >=100 ms behind the air in {behind} of {len(rows)} samples "
-                 "(too stale to answer a heartbeat's admin window)",
-                 "SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= 100000")
+        print(f"  {c:<22}{spread([r[c] for r in rows])}")
+    behind = sum(1 for r in rows if r["lag_peak_us"] >= 100_000)
+    if behind:
+        flag("WARN" if behind > 5 else "INFO", "host",
+             f"host read the link >=100 ms behind the bridge in {behind} of {len(rows)} samples "
+             "(heartbeats read then are history)",
+             "SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= 100000")
     for c, sev in (("store_dropped", "WARN"), ("garbled", "WARN"), ("undecodable", "WARN"),
-                   ("incompatible", "WARN"), ("admin_windows_missed", "WARN")):
+                   ("incompatible", "WARN")):
         if deltas.get(c):
             flag(sev, "host", f"host_status {c} rose by {deltas[c]} over the capture",
                  f"SELECT at, {c} FROM host_status ORDER BY id")
@@ -953,45 +742,39 @@ def host(db, ctx):
              f"{len(long_gaps)} gap(s) over 15 s between 5 s host samples: the host stalled, "
              "slept or lost power",
              "SELECT at, at - LAG(at) OVER (ORDER BY id) gap FROM host_status ORDER BY gap DESC")
-    if "throttled" in first:
-        words = [r["throttled"] for r in rows if r["throttled"] is not None]
-        if words:
-            under = sum(1 for w in words if w & 1)
-            thr = sum(1 for w in words if w & 4)
-            print(f"  pi throttle: under-voltage now in {under}, throttled now in {thr} of "
-                  f"{len(words)}; since-boot bits {words[-1] >> 16:#06b}")
-            if under:
-                flag("WARN", "power", f"Pi reported under-voltage in {under} samples",
-                     "SELECT at, throttled FROM host_status WHERE throttled & 1")
-    if "soc_temp_mc" in first:
-        temps = [r["soc_temp_mc"] for r in rows if r["soc_temp_mc"] is not None]
-        if temps:
-            print(f"  soc temp C  max {max(temps) / 1000:.1f}  p50 "
-                  f"{statistics.median(temps) / 1000:.1f}")
-            if max(temps) > 80_000:
-                flag("WARN", "power", f"SoC reached {max(temps) / 1000:.1f} C")
-    if "battery_mv" in first:
-        mv = [r["battery_mv"] for r in rows if r["battery_mv"] is not None]
-        if mv:
-            print(f"  battery V  first {mv[0] / 1000:.2f}  last {mv[-1] / 1000:.2f}  "
-                  f"min {min(mv) / 1000:.2f}")
-        ma = [r.get("battery_ma") for r in rows if r.get("battery_ma") is not None]
-        if ma:
-            discharging = sum(1 for a in ma if a < 0)
-            print(f"  battery mA  {spread(ma)}  discharging in {discharging} of {len(ma)} samples")
-            if discharging > 0.9 * len(ma) and mv and mv[0] - mv[-1] > 200:
-                flag("WARN", "power",
-                     f"host ran on its battery the whole capture: {mv[0] / 1000:.2f} V -> "
-                     f"{mv[-1] / 1000:.2f} V, current negative in {pct(discharging, len(ma))} "
-                     "of samples (not charging)",
-                     "SELECT at, battery_mv, battery_ma FROM host_status ORDER BY id")
+    words = [r["throttled"] for r in rows if r["throttled"] is not None]
+    if words:
+        under = sum(1 for w in words if w & 1)
+        thr = sum(1 for w in words if w & 4)
+        print(f"  pi throttle: under-voltage now in {under}, throttled now in {thr} of "
+              f"{len(words)}; since-boot bits {words[-1] >> 16:#06b}")
+        if under:
+            flag("WARN", "power", f"Pi reported under-voltage in {under} samples",
+                 "SELECT at, throttled FROM host_status WHERE throttled & 1")
+    temps = [r["soc_temp_mc"] for r in rows if r["soc_temp_mc"] is not None]
+    if temps:
+        print(f"  soc temp C  max {max(temps) / 1000:.1f}  p50 "
+              f"{statistics.median(temps) / 1000:.1f}")
+        if max(temps) > 80_000:
+            flag("WARN", "power", f"SoC reached {max(temps) / 1000:.1f} C")
+    mv = [r["battery_mv"] for r in rows if r["battery_mv"] is not None]
+    if mv:
+        print(f"  battery V  first {mv[0] / 1000:.2f}  last {mv[-1] / 1000:.2f}  "
+              f"min {min(mv) / 1000:.2f}")
+    ma = [r["battery_ma"] for r in rows if r["battery_ma"] is not None]
+    if ma:
+        discharging = sum(1 for a in ma if a < 0)
+        print(f"  battery mA  {spread(ma)}  discharging in {discharging} of {len(ma)} samples")
+        if discharging > 0.9 * len(ma) and mv and mv[0] - mv[-1] > 200:
+            flag("WARN", "power",
+                 f"host ran on its battery the whole capture: {mv[0] / 1000:.2f} V -> "
+                 f"{mv[-1] / 1000:.2f} V, current negative in {pct(discharging, len(ma))} "
+                 "of samples (not charging)",
+                 "SELECT at, battery_mv, battery_ma FROM host_status ORDER BY id")
 
 
 def observations(db, ctx):
     section("observations")
-    if not db.has("observation", "node_mac", "rx_at"):
-        absent("observation table")
-        return
     total = db.one("SELECT COUNT(*) FROM observation")
     print(f"  rows {total}")
     if not total:
@@ -1128,9 +911,6 @@ def observations(db, ctx):
 
 def gps(db, ctx):
     section("positions")
-    if not db.has("observation", "pos_source"):
-        absent("observation.pos_source")
-        return
     total = db.one("SELECT COUNT(*) FROM observation") or 0
     mix = dict(db.q("SELECT pos_source, COUNT(*) FROM observation GROUP BY 1"))
     print("  sources " + "  ".join(f"{k} {v} ({pct(v, total)})" for k, v in mix.items()))
@@ -1140,8 +920,6 @@ def gps(db, ctx):
              "WHERE pos_source='none' GROUP BY 1")
     if mix.get("static"):
         flag("WARN", "gps", "static positions present: test data, never uploadable")
-    if not db.has("observation", "lat", "lon", "pos_at"):
-        return
     ages = [a for (a,) in db.q("SELECT rx_at - pos_at FROM observation WHERE pos_at IS NOT NULL")]
     if ages:
         print(f"  fix age at sighting ms  {spread(ages)}")
@@ -1190,9 +968,6 @@ def gps(db, ctx):
 
 def uploads(db, ctx):
     section("uploads")
-    if not db.has("upload", "result"):
-        absent("upload table")
-        return
     rows = db.q("SELECT uploaded_at, job_id, rows, through_id, result FROM upload ORDER BY id")
     if not rows:
         print("  none")
@@ -1224,35 +999,26 @@ def uploads(db, ctx):
               "the build that uploaded did")
 
 
+# Mirrors bus::UpType in crates/wartui-proto/src/bus/msg.rs.
+UP_TYPES = {1: "heartbeat", 2: "sightings", 3: "update status"}
+
+
 def raw_frames(db, ctx):
     section("raw frames")
-    if not db.has("raw_frame", "bytes"):
-        absent("raw_frame table")
-        return
     n = db.one("SELECT COUNT(*) FROM raw_frame")
     print(f"  rows {n}")
     if not n:
         return
-    by_src = db.q("SELECT src, COUNT(*) FROM raw_frame GROUP BY 1 ORDER BY 2 DESC LIMIT 30")
-    known = set(ctx.get("nodes", {}))
-    for src, c in by_src:
-        print(f"    {short(src)}  {c}{'' if src in known else '  (not in node table)'}")
-    heads = Counter()
-    for (b,) in db.q("SELECT substr(bytes, 1, 6) FROM raw_frame"):
-        if b[:4] == b"WTUI" and len(b) >= 6:
-            heads[f"WTUI v{b[4]} type {b[5]}"] += 1
-        else:
-            heads["other"] += 1
-    print("  headers " + "  ".join(f"{k}: {v}" for k, v in heads.most_common()))
-    # Type 1 is a heartbeat. Equal counts mean any heartbeat loss happened before the bridge.
-    wire = int(ctx.get("kv", {}).get("capture.wire_version", 1))
-    header = b"WTUI".hex().upper() + f"{wire:02X}01"  # magic, wire version, type 1 (heartbeat)
-    raw_hb = dict(db.q("SELECT src, COUNT(*) FROM raw_frame "
-                       "WHERE hex(substr(bytes, 1, 6)) = ? GROUP BY 1", (header,)))
-    stored = {m: len(h) for m, h in ctx.get("hb", {}).items()}
+    by_slot = db.q("SELECT slot, kind, COUNT(*) FROM raw_frame GROUP BY 1, 2 ORDER BY 1, 2")
+    for slot, kind, c in by_slot:
+        print(f"    {slot}  {UP_TYPES.get(kind, f'type {kind}')}  {c}")
+    # Equal counts mean any heartbeat loss happened before the host read the record.
+    raw_hb = dict(db.q("SELECT slot, COUNT(*) FROM raw_frame WHERE kind = 1 GROUP BY 1"))
+    stored = Counter(h[5] for hs in ctx.get("hb", {}).values() for h in hs)
     if raw_hb:
-        print("  heartbeat frames raw/stored per node: " + "  ".join(
-            f"{short(m)} {raw_hb.get(m, 0)}/{stored.get(m, 0)}" for m in sorted(stored)))
+        slots = sorted(set(raw_hb) | set(stored))
+        print("  heartbeat records raw/stored per slot: " + "  ".join(
+            f"{s} {raw_hb.get(s, 0)}/{stored.get(s, 0)}" for s in slots))
 
 
 LOG_LINE = re.compile(
@@ -1373,9 +1139,7 @@ def main():
     print(f"tables: {', '.join(sorted(db.tables))}")
     provenance(db, ctx)
     # The Bluetooth node, read early so nodes() and heartbeats() can tell it from the sweepers.
-    if db.has("assignment", "ble"):
-        ctx["ble_nodes"] = {m for (m,) in db.q("SELECT DISTINCT node_mac FROM assignment "
-                                              "WHERE ble=1")}
+    ctx["ble_nodes"] = {m for (m,) in db.q("SELECT DISTINCT node_mac FROM assignment WHERE ble=1")}
     nodes(db, ctx)
     heartbeats(db, ctx)
     assignments(db, ctx)

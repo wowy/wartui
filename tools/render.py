@@ -17,8 +17,8 @@ and everything it draws is fed to a `pyte.Screen`. What comes back is the grid:
     tools/render.py --sim 3 --cols 120 --rows 30
 
 `--keys` presses keys before the capture, so the states behind `j`, `k` and `b`
-are reachable too; `b` shows as `pending` until the next admin window, which is
-the protocol rather than lag.
+are reachable too; `b` shows as `pending` until the node's next heartbeat, which
+is the protocol rather than lag.
 
 The binary is built before it is spawned rather than run through `cargo run`,
 because a first `draw` writes only the cells it considers non-empty: cargo's
@@ -32,9 +32,9 @@ their own: the bridge's own receiver is read if it has one, and no host port is 
 pin a position for whatever that leaves unfixed.
 
 Real nodes answer on their own schedule rather than an accelerated clock, which is what
-`--after` and `--settle` default differently for: an assignment lands in the node's own
-admin window after a heartbeat, up to 5 s away, and is confirmed on the next, so a `b`
-read a second later reads as pending when it is merely early.
+`--after` and `--settle` default differently for: an assignment answers the node's next
+heartbeat, up to 5 s away, and is confirmed on the one after, so a `b` read a second
+later reads as pending when it is merely early.
 
 The capture goes to a temporary database that is deleted on the way out, since `run`
 otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,
@@ -46,7 +46,7 @@ and the operator's own is not a render's to change. Nor is it read, so a render 
 about the machine. `--config` passed through `-- ARGS` is used instead. A bare `--bridge` therefore
 has no remembered bridge and finds the board by sweeping the attached P4 bridges, so naming the
 bridge is the way to avoid opening another one. A `--bridge` render also drives the real fleet on default settings: nodes are
-assigned the default pool and transmit power, and a remembered Bluetooth node is not applied, so the
+assigned the default pool, and a remembered Bluetooth node is not applied, so the
 screen is not the operator's own setup.
 """
 
@@ -83,9 +83,9 @@ DEFAULT_SIM_NODES = 3
 
 # How long to let the fleet fill in, and how long to leave a key to land, when nothing on
 # the command line says. A simulated fleet runs on its own clock and has settled in well
-# under a second. A real one answers in each node's own admin window, which comes at the
-# end of a sweep — about five seconds on a full pool — so a screen read any sooner than
-# this shows a share that is still on its way as one that never arrives.
+# under a second. A real one answers each node's own heartbeat, which comes every five
+# seconds once the node is assigned, so a screen read any sooner than this shows a share
+# that is still on its way as one that never arrives.
 SIM_AFTER, SIM_SETTLE = 4.0, 1.0
 BRIDGE_AFTER, BRIDGE_SETTLE = 15.0, 15.0
 

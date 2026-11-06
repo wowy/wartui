@@ -159,7 +159,7 @@ impl FleetEngine {
         self.take_slot(slot, src);
         self.counters.heartbeats += 1;
         // Read before borrowing the node: liveness decides whether its epoch is believed.
-        let live = self.air_is_live();
+        let live = self.reading_live();
         let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
         // A falling counter means the node restarted and forgot its assignment.
         let counter_rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
@@ -288,8 +288,8 @@ impl FleetEngine {
         {
             self.reissue(src);
         }
-        // Answered off the heartbeat, through the slot it came from. `send_admin` checks the
-        // heartbeat is live.
+        // Answered off the heartbeat, through the slot it came from. A heartbeat read behind sends
+        // nothing.
         self.send_admin(src, now, batch);
         self.send_dedup_ring_clear(src, now, batch);
     }
@@ -452,8 +452,8 @@ impl FleetEngine {
     /// fell behind, whose losses are the bridge's `dropped_tx`. The few batches lost at the
     /// replay-to-live handoff go uncounted.
     fn note_batch_seq(&mut self, src: Mac, seq: u16, now: Now, batch: &mut ActionBatch) {
-        // Read before borrowing the node. See `air_is_live`.
-        let live = self.air_is_live();
+        // Read before borrowing the node. See `reading_live`.
+        let live = self.reading_live();
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq.filter(|_| node.last_seq_live) {
             let gap = seq.wrapping_sub(last.wrapping_add(1));

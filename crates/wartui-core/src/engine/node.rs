@@ -69,7 +69,7 @@ pub struct NodeState {
     pub last_latency_us: Option<u32>,
     /// The epoch this node's latest *live* heartbeat reported holding, `0` for none. A replayed
     /// heartbeat never sets it, since it says what the node held then, not now
-    /// ([`FleetEngine::air_is_live`]).
+    /// ([`FleetEngine::reading_live`]).
     pub held_epoch: Option<u8>,
     /// The cause of this node's latest restart the host saw that was a fault
     /// ([`ResetCause::is_fault`]). Never set by the first heartbeat, whose boot may predate the

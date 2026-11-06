@@ -1,5 +1,5 @@
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
-//! as refused sightings and missed admin windows, sit outside it, so a clean run looks
+//! as refused sightings and duplicate batches, sit outside it, so a clean run looks
 //! clean.
 
 use ratatui::Frame;
@@ -59,15 +59,6 @@ pub(super) fn draw_footer(
         }
         if c.duplicate_batches > 0 {
             spans.push(Span::raw(format!("  dup {}", thousands(c.duplicate_batches))));
-        }
-        // Missed windows sit with the totals, not the faults: connecting to a bridge
-        // that has been buffering produces them normally. It shows before the first
-        // assignment too, where it explains why nothing has been assigned yet.
-        if c.admin_windows_missed > 0 {
-            spans.push(Span::raw(format!(
-                "  {} held for a live window",
-                thousands(c.admin_windows_missed)
-            )));
         }
         lines.push(Line::from(spans));
     }

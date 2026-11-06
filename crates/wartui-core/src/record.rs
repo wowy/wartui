@@ -128,9 +128,7 @@ pub struct HostStatus {
     pub undecodable: u64,
     /// `Counters::incompatible`.
     pub incompatible: u64,
-    /// `Counters::admin_windows_missed`.
-    pub admin_windows_missed: u64,
-    /// The furthest behind the air this host fell since the previous row, in microseconds. Only
+    /// The furthest behind the bridge this host fell since the previous row, in microseconds. Only
     /// lags measured from arriving frames count, not the assumption made on connecting.
     pub lag_peak_us: u64,
     /// Rows the store has written.
@@ -280,16 +278,11 @@ pub struct AssignmentSent {
 
 /// Host settings that affect capture interpretation, not proof that a radio adopted them.
 ///
-/// Kept separately from assignments: power and pool can change before any node is assignable.
-/// Neither power reaches a radio over the node bus; they are the operator's settings.
+/// Kept separately from assignments: the pool can change before any node is assignable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureSettings {
     /// Pool the planner partitions.
     pub pool: ChannelPool,
-    /// Normalized desired node power, in quarter-dBm.
-    pub tx_power: i8,
-    /// Normalized desired bridge power, in quarter-dBm.
-    pub bridge_tx_power: i8,
     /// Whether undecoded node records are retained.
     pub record_raw: bool,
     /// Whether the position chain has a GPS receiver.

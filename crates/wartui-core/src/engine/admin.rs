@@ -37,17 +37,20 @@ impl FleetEngine {
     /// Send a dirty node its assignment. Called only straight off a heartbeat, so it goes to the
     /// slot that heartbeat came from.
     ///
+    /// A heartbeat read behind the bridge sends nothing.
+    ///
     /// One assignment per node is in flight at a time: while one is unanswered and inside
     /// [`EngineConfig::admin_timeout`](super::EngineConfig::admin_timeout), a heartbeat sends
     /// nothing and counts nothing.
     pub(super) fn send_admin(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+        // A heartbeat read behind names the slot the node was in then, which may be another
+        // node's now, and its epoch is history `deal` cannot skip. The next live heartbeat sends.
+        if !self.reading_live() {
+            return;
+        }
         if self.in_flight(now, |p| matches!(p, Pending::Admin(a) if a.mac == mac)) {
             return;
         }
-
-        // Read before borrowing the node, acted on after. Only heartbeats that owed something
-        // count, or they would bury the ones that did.
-        let live = self.air_is_live();
 
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         if !node.dirty {
@@ -55,10 +58,6 @@ impl FleetEngine {
         }
         let Some(assignment) = node.desired else { return };
         let Some(slot) = node.slot else { return };
-        if !live {
-            self.counters.admin_windows_missed += 1;
-            return;
-        }
         node.admin_attempts += 1;
 
         let id = self.next_send_id();
@@ -84,13 +83,17 @@ impl FleetEngine {
     /// [`Self::send_admin`] is. One clear per node is in flight at a time: while one is
     /// unanswered and inside the admin timeout, a heartbeat sends none.
     pub(super) fn send_dedup_ring_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+        // A heartbeat read behind names the slot the node was in then, which may be another
+        // node's now. The next live heartbeat sends.
+        if !self.reading_live() {
+            return;
+        }
         if self.in_flight(now, |p| matches!(p, Pending::Clear { mac: m, .. } if *m == mac)) {
             return;
         }
-        let live = self.air_is_live();
         let Some(node) = self.nodes.get(&mac) else { return };
         let Some(slot) = node.slot else { return };
-        if !node.clear_dedup_ring || !live {
+        if !node.clear_dedup_ring {
             return;
         }
 

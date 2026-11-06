@@ -69,17 +69,6 @@ pub enum Command {
         on: bool,
     },
 
-    /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
-    ///
-    /// Both are clamped as [`FleetEngine::new`] clamps them, and kept in the capture's settings.
-    /// Nothing on the node bus transmits, so neither reaches a radio.
-    SetTxPower {
-        /// Wi-Fi transmit power for the nodes.
-        nodes: i8,
-        /// Wi-Fi transmit power for the bridge.
-        bridge: i8,
-    },
-
     /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that
     /// node's next heartbeat, like an assignment.
     ClearRing {

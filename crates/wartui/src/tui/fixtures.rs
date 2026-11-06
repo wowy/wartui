@@ -11,11 +11,12 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::bus::{Board, Capabilities, NODE_VERSION, RecordKind, Slot, Version, wire_epoch};
+use wartui_proto::bus::{
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, RecordKind, Slot, Version, wire_epoch,
+};
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use super::draw;
 use super::ui::Ui;
@@ -33,7 +34,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.reboots = reboots;
     state.heartbeats = 12;
     state.observations = 340;
-    state.slot = Slot::from_u8(last % 14);
+    state.slot = Slot::from_u8(last % MAX_SLOTS as u8);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));
@@ -115,8 +116,7 @@ pub(super) fn acked_not_adopted(last: u8) -> NodeView {
     view
 }
 
-/// Sent an assignment that its radio never acked. In practice BLE held the antenna
-/// through the admin window.
+/// Sent an assignment the bridge could not deliver.
 pub(super) fn unacked(last: u8) -> NodeView {
     let mut view = pending(last);
     view.state.last_outcome = Some(AdminOutcome::Unacked);
@@ -155,8 +155,7 @@ pub(super) fn busy() -> Snapshot {
         }),
         link_up: true,
         link_error: None,
-        // Defaults, like `tx_power` and `bridge_tx_power` below, so an unrelated test
-        // cannot trip the pool row's save rule.
+        // The default, so an unrelated test cannot trip the pool row's save rule.
         pool: ChannelPool::All,
         plan: None,
         ble_node: None,
@@ -194,7 +193,6 @@ pub(super) fn busy() -> Snapshot {
             undecodable: 1,
             incompatible: 2,
             garbled: 5,
-            admin_windows_missed: 6,
             admin_sent: 3,
             admin_acked: 2,
             admin_failed: 1,
@@ -224,8 +222,6 @@ pub(super) fn busy() -> Snapshot {
             at_ms: None,
         },
         gps: None,
-        tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
-        bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         excluded_ssids: Vec::new(),
     }
 }

@@ -2,8 +2,8 @@
 //! image is running rather than the old one carrying on from RAM.
 //!
 //! **Either of two lines says the board rebooted.** The bootloader prints `Loaded app from
-//! partition` on every boot, and node firmware prints its banner, `wartui node <MAC> v<version>,
-//! control channel N`. Firmware that keeps running prints neither. A banner counts only with this
+//! partition` on every boot, and node firmware prints its banner, `wartui node <MAC> v<version>`.
+//! Firmware that keeps running prints neither. A banner counts only with this
 //! board's address, formatted by the same `mac::full` the firmware uses. The ROM's `ESP-ROM:` does
 //! not count: the ROM prints it when it boots into download mode too, where no app runs.
 //!
@@ -109,7 +109,7 @@ mod tests {
     use super::*;
 
     fn banner(address: &Mac) -> String {
-        format!("wartui node {} v0.9.0, control channel 6\r\n", mac::full(address))
+        format!("wartui node {} v0.9.0\r\n", mac::full(address))
     }
 
     #[test]

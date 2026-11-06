@@ -132,7 +132,7 @@ fn store_records_initial_provenance_when_capture_created() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("provenance.db");
     let engine = FleetEngine::new(
-        EngineConfig { tx_power: 127, bridge_tx_power: -1, record_raw: true, ..Default::default() },
+        EngineConfig { record_raw: true, ..Default::default() },
         Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
     );
     let provenance = CaptureProvenance {
@@ -159,8 +159,6 @@ fn store_records_initial_provenance_when_capture_created() {
     assert_eq!(get("capture.release_tag"), "v-test");
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
-    assert!(settings.contains("nodes_tx_power_quarter_dbm=80;"), "{settings}");
-    assert!(settings.contains("bridge_tx_power_quarter_dbm=8;"), "{settings}");
     assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
     assert!(settings.contains("preferred_ble=none;ble_node=none;"), "{settings}");
     assert_eq!(store.close().dropped, 0);
@@ -181,7 +179,7 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
             sequence: sequence as u64,
             at_ms,
             settings: wartui_core::record::CaptureSettings {
-                tx_power: 8 + sequence as i8,
+                topology_timeout: std::time::Duration::from_secs(60 + sequence as u64),
                 ..settings
             },
         })
@@ -198,7 +196,7 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
     assert_eq!(rows.len(), 3);
     for (i, (key, value)) in rows.iter().enumerate() {
         assert_eq!(key, &format!("capture.settings.{i:020}"));
-        assert!(value.contains(&format!("nodes_tx_power_quarter_dbm={};", 8 + i)), "{value}");
+        assert!(value.contains(&format!("topology_timeout_ms={};", 60_000 + i * 1000)), "{value}");
     }
     assert!(rows[2].1.contains(&format!("at_ms={};", EPOCH_MS - 1)));
     let unknown: i64 = conn
@@ -580,7 +578,6 @@ fn host_status(
         garbled: 3,
         undecodable: 4,
         incompatible: 5,
-        admin_windows_missed: 8,
         lag_peak_us: 9,
         store_written: 10,
         store_dropped: 11,
@@ -607,9 +604,8 @@ fn store_round_trips_every_column_when_host_status_written() {
     let mut stmt = conn
         .prepare(
             "SELECT at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                    admin_windows_missed, lag_peak_us, store_written, store_dropped,
-                    store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
-                    battery_mv, battery_ma
+                    lag_peak_us, store_written, store_dropped, store_queue_peak,
+                    store_commit_peak_us, throttled, soc_temp_mc, battery_mv, battery_ma
              FROM host_status ORDER BY id",
         )
         .unwrap();
@@ -623,16 +619,15 @@ fn store_round_trips_every_column_when_host_status_written() {
                 garbled: count(3)?,
                 undecodable: count(4)?,
                 incompatible: count(5)?,
-                admin_windows_missed: count(6)?,
-                lag_peak_us: count(7)?,
-                store_written: count(8)?,
-                store_dropped: count(9)?,
-                store_queue_peak: count(10)?,
-                store_commit_peak_us: count(11)?,
-                throttled: r.get(12)?,
-                soc_temp_mc: r.get(13)?,
-                battery_mv: r.get(14)?,
-                battery_ma: r.get(15)?,
+                lag_peak_us: count(6)?,
+                store_written: count(7)?,
+                store_dropped: count(8)?,
+                store_queue_peak: count(9)?,
+                store_commit_peak_us: count(10)?,
+                throttled: r.get(11)?,
+                soc_temp_mc: r.get(12)?,
+                battery_mv: r.get(13)?,
+                battery_ma: r.get(14)?,
             })
         })
         .unwrap()

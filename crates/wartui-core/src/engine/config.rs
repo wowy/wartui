@@ -4,7 +4,6 @@ use indexmap::IndexSet;
 use wartui_proto::bus::{ACK_TIMEOUT_MS, SEND_TRIES};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 #[cfg(doc)]
 use super::{Command, FleetEngine};
@@ -38,14 +37,6 @@ pub struct EngineConfig {
     /// `Undelivered` itself once its tries run out, so the default, [`SEND_TIMEOUT`], waits past
     /// that.
     pub admin_timeout: Duration,
-    /// Wi-Fi transmit power for every node's assignment, in ESP-IDF quarter-dBm units.
-    /// [`FleetEngine::new`] clamps it to the host's range, so a bad value costs a clamp rather than
-    /// leaving every radio at its boot power. [`Command::SetTxPower`] clamps the same way.
-    pub tx_power: i8,
-    /// Wi-Fi transmit power for the bridge, in ESP-IDF quarter-dBm units, clamped like `tx_power`.
-    /// Separate because the bridge transmits assignments, not the heartbeats and sightings a fleet
-    /// is positioned for. `FleetEngine::poll_bridge` says why every status poll carries it.
-    pub bridge_tx_power: i8,
     /// Whether [`Command::AssignBle`] records its target as the preferred Bluetooth node.
     pub remember_ble: bool,
     /// The node given the Bluetooth scan whenever it is assignable and no node holds
@@ -72,8 +63,6 @@ impl Default for EngineConfig {
             record_raw: false,
             position: PositionChain::empty(),
             admin_timeout: SEND_TIMEOUT,
-            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
-            bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             remember_ble: true,
             preferred_ble: None,
             excluded_ssids: IndexSet::new(),

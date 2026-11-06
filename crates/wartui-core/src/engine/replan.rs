@@ -1,7 +1,6 @@
 use wartui_proto::bus::wire_epoch;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{self, ChannelPool, Job, Plan};
-use wartui_proto::tx_power::clamp_tx_power;
 
 use super::{Assignment, Command, FleetEngine, Now};
 
@@ -27,7 +26,6 @@ impl FleetEngine {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::RememberBle { on } => self.on_remember_ble(on),
-            Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
             Command::SetPool { pool } => self.on_set_pool(pool),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
@@ -44,13 +42,6 @@ impl FleetEngine {
         self.config.pool = pool;
         let members = self.plan_members.clone();
         self.cut(&members);
-    }
-
-    /// Record the operator's transmit powers, clamped as [`FleetEngine::new`] clamps. Nothing on
-    /// the node bus transmits, so they reach no radio: they stay in the capture's settings.
-    fn on_set_tx_power(&mut self, nodes: i8, bridge: i8) {
-        self.config.tx_power = clamp_tx_power(nodes);
-        self.config.bridge_tx_power = clamp_tx_power(bridge);
     }
 
     /// Move the Bluetooth scan, or take it off the fleet.

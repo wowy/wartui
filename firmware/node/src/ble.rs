@@ -1,14 +1,9 @@
 //! Bluetooth scanning, run only while the host has set `ASSIGN_FLAG_BLE` for this
-//! node — at most one node in a fleet, and none by default. On a stock node BLE
-//! cost it every channel assignment sent to it, because an 802.11 acknowledgment
-//! comes from the receiver's MAC hardware and its absence means the radio was
-//! simply not on the channel: NimBLE and Wi-Fi share the one 2.4 GHz antenna, and
-//! the admin window is precisely when the node is otherwise idle and the
-//! controller is free to take it. This firmware acknowledged every time at around
-//! a tenth of its sweep period
-//! (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
+//! node — at most one node in a fleet, and none by default. Bluetooth and Wi-Fi share
+//! the one 2.4 GHz antenna, and a controller left free takes it whenever the node is
+//! otherwise idle (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
 //!
-//! Two things here are what avoid repeating that.
+//! Two things here keep the two apart.
 //!
 //! The scan is **bounded and switched off** rather than left running.
 //! `HCI_LE_Set_Scan_Enable(0)` stops the controller taking the antenna at all,

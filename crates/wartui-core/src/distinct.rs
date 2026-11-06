@@ -1,7 +1,7 @@
 //! How many distinct addresses a session has heard, in memory that does not grow with it.
 //!
 //! An exact answer means holding every address: about 18 bytes each, 9 MiB for a day's 500 k
-//! networks and 42 MiB for a twenty-node burst (`docs/store-io-findings.md`). The store cannot
+//! networks and 42 MiB for the burst `docs/store-io-findings.md` measured. The store cannot
 //! answer instead without undoing what makes capture cheap. `COUNT(DISTINCT bssid)` scans and sorts
 //! an unindexed table on the card, and its read snapshot holds back the checkpoint that keeps the
 //! WAL one commit long. A table or index keyed by address is a random-key B-tree, and the one the

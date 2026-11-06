@@ -1,7 +1,7 @@
-//! `wartui ota` — update nodes over the air, one at a time, through the bridge.
+//! `wartui ota` — update nodes over the node bus, one at a time, through the bridge.
 //!
-//! **It listens before it acts.** A node is only reachable in the admin window its heartbeat
-//! opens, and only a heartbeat says what board and version it is, so the run gathers them for
+//! **It listens before it acts.** A node is reached through the slot its heartbeat came from,
+//! and only a heartbeat says what board and version it is, so the run gathers them for
 //! `--listen` seconds first: long enough for an assigned node, which beats every 5 s, to be
 //! heard once. Only the heartbeat's frozen prefix is read, so a node a minor version behind,
 //! which `run` cannot drive, is exactly the node this reaches.
@@ -16,8 +16,8 @@
 //! still on its old image. Frames from the other nodes are ignored meanwhile.
 //!
 //! **Events that queued while the run was busy are thrown away** before each update starts: a
-//! heartbeat that waited out an image build or the prompt is no admin window, and a `begin`
-//! sent on one goes nowhere. [`wartui_core::ota`] has the session's own reasoning.
+//! heartbeat that waited out an image build or the prompt is history, and the session starts
+//! from the next one. [`wartui_core::ota`] has the session's own reasoning.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, IsTerminal, Write};
@@ -79,7 +79,13 @@ pub struct Args {
 
     /// Update a simulated fleet instead of hardware. Its nodes run an older version, so there
     /// is something to update.
-    #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
+    #[arg(
+        long,
+        value_name = "NODES",
+        num_args = 0..=1,
+        default_missing_value = "3",
+        value_parser = crate::sim_nodes()
+    )]
     sim: Option<u8>,
 }
 

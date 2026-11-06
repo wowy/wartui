@@ -45,8 +45,8 @@ slot moves its assignment with it on its next heartbeat.
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The channel pool, transmit powers and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is global;
-see "When nothing arrives".
+The channel pool and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is
+global; see "When nothing arrives".
 
 ### Capture metadata
 
@@ -59,12 +59,12 @@ The capture records the host build and its settings in SQLite metadata:
 | `capture.core_version` | Core crate version |
 | `capture.release_tag` | Release tag, when the host was built with one |
 | `capture.scan_channels` | The host's ordered scan table, which gives stored channel indices their meaning |
-| `capture.wire_version` | The wire version the host understands |
+| `capture.bus_version` | The node-bus version the host understands |
 | `capture.settings.initial` | Initial host settings, normalized by the engine |
 | `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
 
-Settings include the channel pool, transmit powers, raw recording, positioning configuration and
-Bluetooth preference. They describe desired host settings, not a radio's acknowledgment or adoption.
+Settings include the channel pool, raw recording, positioning configuration and Bluetooth
+preference. They describe desired host settings, not a radio's acknowledgment or adoption.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
@@ -196,11 +196,10 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 
 | Clause                 | What it counts                                                                 |
 |------------------------|--------------------------------------------------------------------------------|
-| `not stored`           | Frames read and deliberately dropped: radio retries, undecodable, incompatible |
+| `not stored`           | Frames read and deliberately dropped: bus resends, undecodable, incompatible   |
 | `store dropped`        | Rows lost because the store's queue was full or a write failed                 |
 | `garbled`              | USB frames that failed their checksum                                          |
-| `behind ≥100 ms`       | Samples in which the host fell far enough behind the air to miss windows       |
-| `admin windows missed` | Assignments held back because the heartbeat behind them was stale              |
+| `behind ≥100 ms`       | Samples in which the host read the link 100 ms or more behind the bridge       |
 | `slowest commit`       | The slowest batch the store wrote                                              |
 | `queue peak`           | The deepest the store's queue got                                              |
 
@@ -283,10 +282,6 @@ site queues nothing; one the site already queued is recorded in the capture.
 pool = "us"
 excluded-ssids = ["HomeNet", "Pixel 9"]
 
-[tx-power]
-fleet = 10
-bridge = 15
-
 [bluetooth]
 remember = true
 node = "AA:BB:CC:DD:EE:FF"
@@ -307,8 +302,6 @@ wdgwars = ""
 |------------------------|---------|--------------------------------------------------------------------------------|
 | `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"                    |
 | `excluded-ssids`       | `[]`    | Wi-Fi networks never captured, matched exactly; see below                      |
-| `[tx-power] fleet`     | `2`     | Node transmit power (heartbeats, sightings), whole dBm 2–20                    |
-| `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                            |
 | `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"                      |
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
 | `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
@@ -317,18 +310,17 @@ wdgwars = ""
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
-Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
-nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
-file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, any of them
-or `serial` beside its table's `remember = false`, or an `excluded-ssids` entry that is empty, over
-32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset` and
-`ota` read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
-cannot stop them. `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it
-decides which board gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the
-whole file on save, `b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when
-the bridge it remembers changes; see "Keyboard commands" and "When nothing arrives". `flash-bridge`
-writes both for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
-under `--sim`. A new file is readable only by its owner.
+wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
+an unknown `pool`, a malformed `node` or `mac`, any of them or `serial` beside its table's
+`remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
+refused too, naming the file and key. `status`, `sniff`, `reset` and `ota` read only `[bridge] mac`
+and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
+`flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
+gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save,
+`b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when the bridge it
+remembers changes; see "Keyboard commands" and "When nothing arrives". `flash-bridge` writes both
+for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates
+it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
@@ -358,13 +350,14 @@ Linux, what the kernel and block device wrote.
 wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
 ```
 
-`--profile drive` (default) is ten nodes at real time; `burst` is twenty. Every node reports every
-sweep in the simulated neighborhood, measuring starts once the fleet holds its assignments, and a
-run counts only if `idle_node_windows` reads 0. `--interval` (default 60 s) adds a timeline showing
-when the card slowed. Each SQLite and batching setting has a flag, so two settings compare on one
-binary. The store checkpoints on its own thread after each commit; `--checkpoint-every MS` spaces
-those out, and `--inline-checkpoint` puts SQLite's own back in the commit.
-[`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the method and numbers.
+`--profile drive` (default) is ten nodes at real time; `burst` is fourteen (`plan::MAX_NODES`), the
+most a bridge takes. Every node reports every sweep in the simulated neighborhood, measuring starts
+once the fleet holds its assignments, and a run counts only if `idle_node_windows` reads 0.
+`--interval` (default 60 s) adds a timeline showing when the card slowed. Each SQLite and batching
+setting has a flag, so two settings compare on one binary. The store checkpoints on its own thread
+after each commit; `--checkpoint-every MS` spaces those out, and `--inline-checkpoint` puts SQLite's
+own back in the commit. [`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the
+method and numbers.
 
 ### Flashing the fleet
 
@@ -509,7 +502,7 @@ again, or any `wartui` command that opens the bridge.
 
 ### Updating over the air
 
-`ota` updates the nodes' firmware through the bridge, with no cable to them. It listens for
+`ota` updates the nodes' firmware through the bridge, with no USB cable to them. It listens for
 heartbeats, shows what it would do with each node, asks, then updates the chosen nodes one at a
 time. Nothing else may hold the bridge meanwhile, so stop `run` first.
 
@@ -615,7 +608,7 @@ update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
-Only `b`, `c`, `r`, and `R` reach the air, and no key sets channels. `b` picks _which_ node scans
+Only `b`, `c`, `r`, and `R` reach the engine, and no key sets channels. `b` picks _which_ node scans
 Bluetooth; the planner still authors every share. With `remember bt node` on, `b` also writes its
 choice, or its absence, to `[bluetooth]` in `wartui.toml`, leaving the rest of the file alone. `r`
 and `R` make a node forget every address it has reported, on its next heartbeat.
@@ -647,21 +640,20 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
-`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
-`wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
-lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
-one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
-the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns
-to the rows; edits to the rows stay pending.
+The rows are the pool (`all → eu → us`), `remember bt node` (`off`, `on`), `remember bridge`
+(`off`, `on`), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are
+listed, or `none`, and opens a page that lists them. While an SSID is being typed there, every
+letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already listed,
+and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the remembered
+bridge but none of the rows, and returns to the rows; edits to the rows stay pending.
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
-the engine and writes every row shown to `pool`, `excluded-ssids`, `[tx-power]`, `[bluetooth]`,
-`[bridge]`, and `[api-keys]`, whatever was there. The bridge takes its power on its next status
-poll, and settings closes. If the engine is not accepting commands, nothing is sent or written, and
-settings stays open with its edits. A moved pool re-cuts the fleet. Each node takes its new share
-and power on its next heartbeat, emptying its dedup ring when its share changes.
+the engine and writes every row shown to `pool`, `excluded-ssids`, `[bluetooth]`, `[bridge]`, and
+`[api-keys]`, whatever was there, and settings closes. If the engine is not accepting commands,
+nothing is sent or written, and settings stays open with its edits. A moved pool re-cuts the fleet.
+Each node takes its new share on its next heartbeat, emptying its dedup ring when its share
+changes.
 
 ## How channels are assigned
 
@@ -670,21 +662,21 @@ sniffing node. It re-cuts when that set changes, the Bluetooth scan moves (§ "B
 pool changes in settings. The header shows its inputs: `auto — 4 of 5` is four heartbeating nodes of
 five seen.
 
-**A changed share waits for the node's admin window.** The radio is away scanning except for the
-100 ms it holds open every 5 s, so an assignment takes up to one heartbeat interval, not a sweep.
-That delay is the protocol, not lag. The `channels` column leads with a count (`1: 1…`) because a
-round-robin share is a dozen scattered channels, too many to fit.
+**A changed share waits for the node's next heartbeat.** An assignment answers a heartbeat, through
+the node-bus slot that heartbeat came from, and an assigned node heartbeats every 5 s, so an
+assignment takes up to one heartbeat interval, not a sweep. That delay is the protocol, not lag.
+The `channels` column leads with a count (`1: 1…`) because a round-robin share is a dozen
+scattered channels, too many to fit.
 
-**An assignment counts once the node's radio acknowledges it** at the MAC layer, never on the
+**An assignment counts once the bridge says the node acknowledged it** on the node bus, never on the
 bridge's report of a successful enqueue. An ack does not prove the node took it. Adoption does:
-every heartbeat carries the epoch the node holds, usually the new one within 5 s of the window. A
-heartbeat reporting some *other* epoch makes wartui re-send in the window it opened. The footer
+every heartbeat carries the epoch the node holds, usually the new one on the heartbeat after the
+send. A heartbeat reporting some *other* epoch makes wartui re-send in answer to it. The footer
 counts those as "assignments acknowledged but not adopted", apart from `no admin ack`'s
 never-acknowledged ones.
 
-**Repeated `no admin ack` is nearly always Bluetooth**, sharing the antenna through the admin window
-(§ "Bluetooth"). Press `b` on the node. The scanning node itself rarely shows this: its Wi-Fi radio
-never leaves the control channel.
+**Repeated `no admin ack` means the bridge cannot deliver to that node.** The P4 resent the
+transfer on every try and the node acknowledged none, or the bridge never answered.
 
 ## Bluetooth
 
@@ -694,13 +686,13 @@ on (the default), `b` saves the choice. The remembered node takes the scan back 
 heartbeating and nothing holds it: at startup, or on returning to the fleet. Taking the scan off
 with `b` forgets it. Turning `remember bt node` off forgets the node and leaves the scan; turning it
 on remembers whoever holds it then. That node's `channels` reads `bluetooth`, since it is dealt no
-channels, or `bluetooth…` while the change waits for its admin window. Taking the scan off shows as
-its new share, pending.
+channels, or `bluetooth…` while the change waits for the node's next heartbeat. Taking the scan off
+shows as its new share, pending.
 
-**It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A node that also
-sweeps must hand the antenna back for every admin window; a stock node failed to, acknowledging none
-of thirty-two assignments ([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). With
-nothing else to do, the scan runs **back to back**, competing only with the node's own transmits.
+**It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A Bluetooth
+controller left free takes it whenever the node is otherwise idle
+([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)), so the node holding the scan sniffs
+no Wi-Fi. With nothing else to do, the scan runs **back to back**.
 
 The fleet is one sniffer short, and the pool is re-cut the moment the scan moves: giving it away
 grows every other share, taking it back shrinks them. A fleet of **one** node holding the scan
@@ -799,14 +791,14 @@ nothing and says how many networks it left out.
 
 Rows name nodes by chip and last two address octets: `C5 57:84`. The chip comes from the board its
 heartbeats announce, so a node not yet heartbeating shows `—`, and a board this build has no name
-for shows `??`.
+for shows `??`. `slot` is the node-bus slot its latest heartbeat came from (`A1` to `B7`).
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
 | `alive`        | Heartbeating, so it can be given channels                                                                                                   |
-| `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window           |
+| `stale`        | Still being heard, but not heartbeating, so it cannot be given channels                                                                     |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
-| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
+| `no admin ack` | The bridge could not deliver its assignment, or never answered; see [How channels are assigned](#how-channels-are-assigned)                 |
 | `no slot`      | Another node's heartbeat came from its node-bus slot, so it cannot be reached until its own heartbeat names a slot                          |
 | `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; update it with `wartui ota`                            |
 | `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
@@ -817,8 +809,8 @@ The `channels` column shows where an assignment stands
 
 | `channels`       | Meaning                                           |
 |------------------|---------------------------------------------------|
-| yellow, with `…` | Waiting for the node's admin window               |
-| blue, with `…`   | Acknowledged by the node's radio, not yet adopted |
+| yellow, with `…` | Waiting for the node's next heartbeat             |
+| blue, with `…`   | Acknowledged by the node, not yet adopted         |
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
 
@@ -868,16 +860,16 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 
 - **`lost`** (a column, and `lost N` summed in the footer): whole batches missing between node and
   host, from gaps in each batch's sequence number. The column reads `—` before a node's first batch,
-  then a running count; both appear once any node loses one. A sequence advances only on a MAC-layer
-  ack, so a gap is lost after the bridge's radio took it, in its receive queue or on USB, not on the
-  air. A batch is up to about a dozen access points, hidden until the node's five-minute refresh.
-  Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final value. A gap
-  after a batch replayed from the bridge's backlog is not counted, because those batches were
-  dropped while no host was reading.
+  then a running count; both appear once any node loses one. A sequence advances only when the P4
+  acknowledges a batch, so a gap is lost after the P4 took it, in its queue or on USB, not on the
+  node bus. A batch is up to about a dozen access points, hidden until the node's five-minute
+  refresh. Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final
+  value. A gap after a batch replayed from the bridge's backlog is not counted, because those
+  batches were dropped while no host was reading.
 - **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
-  100 ms), a radio retransmitting after the bridge's ack was lost. The first copy was recorded, so
-  nothing is lost and `dup` never overlaps `lost`. A repeat 100 ms or more later is the node's own
-  re-send after a failed send, recorded normally.
+  2 s), the node bus resending a batch whose ack the node did not see. The first copy was
+  recorded, so nothing is lost and `dup` never overlaps `lost`. A repeat 2 s or more later is
+  recorded normally.
 - **`buffer full wifi N  ble M`**: a line below the totals, counting distinct networks and
   advertisers a node heard but had no room for in that dwell or scan, fleet-wide, this session. It
   appears when a count passes zero, omits a kind still at zero, and stays. Not a fault: an address
