@@ -41,7 +41,7 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 use wartui_proto::tx_power::clamp_tx_power;
 
-pub use config::EngineConfig;
+pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::{Assignment, NodeState};
 pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};

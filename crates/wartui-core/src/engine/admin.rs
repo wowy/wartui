@@ -36,8 +36,14 @@ pub(super) struct PendingAdmin {
 impl FleetEngine {
     /// Send a dirty node its assignment. Called only straight off a heartbeat, so it goes to the
     /// slot that heartbeat came from.
+    ///
+    /// One assignment per node is in flight at a time: while one is unanswered and inside
+    /// [`EngineConfig::admin_timeout`](super::EngineConfig::admin_timeout), a heartbeat sends
+    /// nothing and counts nothing.
     pub(super) fn send_admin(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
-        let id = self.next_send_id();
+        if self.in_flight(now, |p| matches!(p, Pending::Admin(a) if a.mac == mac)) {
+            return;
+        }
 
         // Read before borrowing the node, acted on after. Only heartbeats that owed something
         // count, or they would bury the ones that did.
@@ -55,6 +61,7 @@ impl FleetEngine {
         }
         node.admin_attempts += 1;
 
+        let id = self.next_send_id();
         let msg = Assign {
             epoch: wire_epoch(assignment.counter),
             flags: Assign::flags_for(assignment.ble),
@@ -74,8 +81,12 @@ impl FleetEngine {
     }
 
     /// Send a clear to a node that owes one. Called only off a heartbeat, as
-    /// [`Self::send_admin`] is.
+    /// [`Self::send_admin`] is. One clear per node is in flight at a time: while one is
+    /// unanswered and inside the admin timeout, a heartbeat sends none.
     pub(super) fn send_dedup_ring_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+        if self.in_flight(now, |p| matches!(p, Pending::Clear { mac: m, .. } if *m == mac)) {
+            return;
+        }
         let live = self.air_is_live();
         let Some(node) = self.nodes.get(&mac) else { return };
         let Some(slot) = node.slot else { return };
@@ -86,6 +97,13 @@ impl FleetEngine {
         let id = self.next_send_id();
         self.pending.insert(id, Pending::Clear { mac, sent_mono: now.mono });
         batch.urgent.push(to_node(slot, id, DownType::Clear, &Clear.encode()));
+    }
+
+    /// Whether a pending send that `which` picks is in flight at `now`: unanswered, and not past
+    /// [`EngineConfig::admin_timeout`](super::EngineConfig::admin_timeout).
+    fn in_flight(&self, now: Now, which: impl Fn(&Pending) -> bool) -> bool {
+        let timeout = self.config.admin_timeout;
+        self.pending.values().any(|p| which(p) && now.mono.duration_since(p.sent_mono()) < timeout)
     }
 
     fn next_send_id(&mut self) -> u16 {

@@ -70,15 +70,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, Capabilities, DownType, Heartbeat, SEND_TRIES, Slot, UPDATE_CHUNK,
-    UPDATE_CHUNK_MAX, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateConfirm,
-    UpdateState, UpdateStatus, Version,
+    Capabilities, DownType, Heartbeat, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateAbort,
+    UpdateBegin, UpdateChunk, UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus, Version,
 };
 use wartui_proto::link::{HostToBridge, ToNodeBody};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::SECTOR;
 
-use crate::engine::Now;
+use crate::engine::{Now, SEND_TIMEOUT};
 
 /// How long to wait for the status a sector's last chunk is owed, or for a commit's answer,
 /// before resending. A sector write takes tens of milliseconds, so this is several of them.
@@ -87,11 +86,6 @@ pub const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 /// Status timeouts in a row, about 10 s, after which the node is taken to have dropped the
 /// session and the update returns to its `begin`.
 pub const MAX_STATUS_TIMEOUTS: u32 = 20;
-
-/// How long a sent record waits for its `Delivered` before it is treated as undelivered: a second
-/// past the bridge's own give-up, so the bridge's answer comes first. A lost answer never comes.
-pub const SEND_TIMEOUT: Duration =
-    Duration::from_millis(ACK_TIMEOUT_MS * SEND_TRIES as u64 + 1_000);
 
 /// Undelivered chunks or commits in a row before the node is taken to have rebooted or wandered off,
 /// and the update returns to its `begin`.

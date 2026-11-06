@@ -1,9 +1,8 @@
 use wartui_proto::bus::{
-    Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind, SightingBatch,
-    SightingMsg, Slot, UpType, wire_epoch,
+    ACK_TIMEOUT_MS, Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind,
+    SightingBatch, SightingMsg, Slot, UpType, wire_epoch,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::node;
 
 #[cfg(doc)]
 use super::Counters;
@@ -19,24 +18,17 @@ macro_rules! by_reset {
     };
 }
 
-/// How long after a batch a byte-identical same-`seq` repeat still counts as a copy of it, not a
-/// node's own re-send.
+/// How long after a batch a byte-identical same-`seq` repeat still counts as a copy of it.
 ///
-/// A copy is dropped and counted in [`Counters::duplicate_batches`]. A re-send follows a batch
-/// the node gave up on: it leaves `seq` unchanged and may next report the same addresses at the
-/// same RSSI. That is a real sighting and is recorded.
+/// A copy is the node bus resending a batch whose ack the node did not see. It is dropped and
+/// counted in [`Counters::duplicate_batches`]. Copies of one batch arrive at most one arm wait
+/// plus one ack timeout apart, each [`ACK_TIMEOUT_MS`] on the node, so the window is twice that,
+/// compared with a strict `<`. Each copy refreshes the stamp, so the window runs from the last.
 ///
-/// 100 ms, compared with a strict `<`. Two reports of one channel are at least a dwell apart
-/// (`node::CHANNEL_DWELL_MS`). The node bus resends a batch only after its 1 s ack timeout, so
-/// this window does not catch those, and a batch resent that way is recorded twice. A bridge
-/// reboot resets `rx_us`, so the wrapped difference is huge and the batch is recorded: the safe
-/// direction.
-pub(super) const DUPLICATE_BATCH_WINDOW_US: u64 = 100_000;
-
-const _: () = assert!(
-    DUPLICATE_BATCH_WINDOW_US < node::CHANNEL_DWELL_MS as u64 * 1_000,
-    "the shortest time between two reports of one channel is one dwell"
-);
+/// A node that gives up on a batch discards it and starts its next under the same `seq`, with
+/// new bytes, so that batch is recorded. A bridge reboot resets `rx_us`, so the wrapped difference
+/// is huge and the batch is recorded: the safe direction.
+pub(super) const DUPLICATE_BATCH_WINDOW_US: u64 = 2 * ACK_TIMEOUT_MS * 1_000;
 
 /// The smallest `seq` gap not counted as loss: one this large is read as a wrap or reordering
 /// ([`FleetEngine::note_batch_seq`]).
