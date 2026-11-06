@@ -39,6 +39,25 @@ carried the fleet as before. The run was `wartui run` for 10.5 minutes.
   stayed there. The nodes were flashed and running before the P4 was, so those copies most
   likely queued while nothing polled.
 
+## The DMA is done before the edge's handler looks
+
+A later build (db7155d) bins each CS edge by how long the handler waits for the slave's DMA to
+report the transfer done. Its limit is 50 µs. Both nodes were rebooted under a P4 that was
+already polling, and ran for 3 minutes:
+
+| | Done on the first check | Spun | Longest time from edge to first check |
+| --- | --- | --- | --- |
+| `0D:20` | 941 of 941 | 0 | 41 µs |
+| `1A:50` | 990 of 990 | 0 | 45 µs |
+
+- The wait never ran. So the 50 µs limit is a guard, not a cost paid per transfer.
+- The 41–45 µs is the handler's own time to reach and make its first check, with interrupts
+  masked. The cause isn't known. Flash-cache misses in a handler that runs from flash are a
+  guess that was not tested.
+- In an earlier run, one `early` and one seq gap per node appeared. They came from the P4
+  rebooting mid-transfer during its own update, and did not recur once the nodes rebooted
+  under a running P4.
+
 ## ESP-NOW carried on alongside
 
 The capture recorded 512 observations and 255 heartbeats, with no batch gaps. The engine saw no
