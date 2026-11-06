@@ -16,6 +16,7 @@ Where the prose lives:
   when that behavior changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
   set (`firmware/p4-radio/README.md`).
+- `docs/node-bus.md` — the SPI bus between the P4 bridge and its nodes: pins and pin behavior.
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
