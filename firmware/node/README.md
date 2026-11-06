@@ -128,9 +128,10 @@ the wire and a patch bump may not. `wartui_proto::bus::NODE_VERSION` mirrors it,
 major and minor at any patch. It shows a node on an older major or minor as `needs update`, and
 one on a newer as `host behind`, and drives neither.
 
-The heartbeat's type byte and its five-byte prefix never change before 1.0. They are how a host
-finds a node a minor version behind, at whatever length that build's heartbeat is. The update
-records are frozen too, so their layout is the same on every minor version.
+The heartbeat's type byte, its five-byte prefix and the MAC after it never change, even after 1.0.
+They are how a host finds a node on another version, at whatever length that build's heartbeat
+is. The update records are frozen too, so their layout is the same on every version
+([`docs/node-bus.md`](../../docs/node-bus.md) § "What never changes").
 
 The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`.
 
@@ -162,7 +163,9 @@ The cargo runner, `wartui flash-fleet` and the release images all use this table
 (`firmware/common/src/ota.rs`, shared with the P4 bridge's C6) gives it the flash: the app slot
 that is not booted, found in the partition table at boot. `src/ota.rs` hands it the bus's update
 records. `wartui ota` is the
-host's side (`crates/wartui/README.md` § "Updating over the air").
+host's side (`crates/wartui/README.md` § "Updating over the air"). The update records are part of
+the bus's frozen core ([`docs/node-bus.md`](../../docs/node-bus.md) § "What never changes"), so any
+later wartui can update this build.
 
 **Update mode.** An update begin the receiver accepts puts the node in update mode:
 
@@ -181,8 +184,8 @@ node does it. The sector records which slot is on trial and how many times it ha
 armed record naming the slot, then one cleared bit per boot. Clearing a bit needs no erase and
 survives the power cuts these nodes see routinely, which RTC memory does not. The node also writes
 the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them. The
-sector's layout is `wartui_proto::ota::trial`, unit-tested there and fixed until 1.0, since one
-image writes it and the next reads it.
+sector's layout is `wartui_proto::ota::trial`, unit-tested there and frozen with the bus's core,
+since one image writes it and the next reads it.
 
 Each step's flash writes come in an order a power cut cannot turn into an untrialed image:
 

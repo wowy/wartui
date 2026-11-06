@@ -876,6 +876,8 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
     assert!(matches!(down(DownType::UpdateConfirm, OTA_CONFIRM), Ok(DownMsg::UpdateConfirm(_))));
 }
 
+/// Up types 1 and 3 and down types 3 to 7 are the bus's frozen core. Their codes must never
+/// change, and no code is reused.
 #[test]
 fn msg_types_number_each_direction_from_one_when_pinned() {
     let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus];
@@ -955,6 +957,8 @@ fn msg_decoder_rejects_truncated_body_when_body_is_too_short() {
     );
 }
 
+/// The prefix and MAC are the bus's frozen core, `HEARTBEAT_LEN` aside. They must never change:
+/// any host names any node build by them.
 #[test]
 fn heartbeat_pins_prefix_and_mac_when_inspecting_body() {
     // Version, board and flags, then the MAC: what a host reads from a node on another
@@ -973,6 +977,7 @@ fn heartbeat_prefix_decodes_version_board_and_flags_when_body_is_exact() {
     assert_eq!(prefix.board, Board::Esp32c5);
 }
 
+/// Reading the identity from a body of any length is part of the bus's frozen core.
 #[test]
 fn heartbeat_prefix_decodes_when_body_is_any_length_past_prefix() {
     // An older or newer minor's heartbeat: the prefix is all that is read.
@@ -986,6 +991,27 @@ fn heartbeat_prefix_decodes_when_body_is_any_length_past_prefix() {
     longer.extend_from_slice(&[0xAA; 40]);
     assert_eq!(Capabilities::decode_prefix(&longer), Capabilities::decode_prefix(HEARTBEAT));
     assert_eq!(Heartbeat::identity(&longer), Heartbeat::identity(HEARTBEAT));
+}
+
+/// The frozen identity, read from a heartbeat longer than this build's, as a later build may
+/// send. These bytes must never change.
+#[test]
+fn heartbeat_identity_reads_pinned_prefix_and_mac_when_body_is_longer_than_this_build() {
+    let mut body = vec![
+        0x00, 0x07, 0x01, // version 0.7.1
+        0x01, // board: ESP32-C5
+        0x03, // flags: 5g, trial
+        0x02, 0x00, 0x00, 0x00, 0x4F, 0x98, // mac 02:00:00:00:4F:98
+    ];
+    body.extend_from_slice(&[0xAA; 40]);
+    let caps = Capabilities {
+        version: Version::new(0, 7, 1),
+        board: Board::Esp32c5,
+        five_ghz: true,
+        trial: true,
+    };
+    assert_eq!(Heartbeat::identity(&body), Ok((caps, [0x02, 0x00, 0x00, 0x00, 0x4F, 0x98])));
+    assert_eq!(Capabilities::decode_prefix(&body), Ok(caps));
 }
 
 #[test]
@@ -1014,6 +1040,8 @@ fn msg_decoder_rejects_body_when_fixed_body_exceeds_expected_length() {
     );
 }
 
+/// The update records' lengths and `UPDATE_CHUNK` are the bus's frozen core. They must never
+/// change: any later host updates any node build with them.
 #[test]
 fn update_codec_matches_expected_body_lengths_when_checking_constants() {
     assert_eq!(OTA_BEGIN.len(), UPDATE_BEGIN_LEN);
@@ -1050,6 +1078,7 @@ fn ota_begin() -> UpdateBegin {
     }
 }
 
+/// These bytes are the bus's frozen core. They must never change.
 #[test]
 fn update_begin_serializes_byte_for_byte_when_encoded_and_decoded() {
     assert_eq!(ota_begin().encode().as_slice(), OTA_BEGIN);
@@ -1070,6 +1099,7 @@ fn update_begin_rejects_body_when_length_differs() {
     );
 }
 
+/// These bytes are the bus's frozen core. They must never change.
 #[test]
 fn update_chunk_serializes_byte_for_byte_when_encoded_and_decoded() {
     let chunk = UpdateChunk { session: 7, offset: 0x0001_0400, data: &[0xAA, 0xBB, 0xCC] };
@@ -1116,6 +1146,7 @@ fn update_chunk_refuses_to_encode_when_data_is_empty_or_too_long() {
     assert!(out.iter().all(|&b| b == 0x5A), "nothing written on a refusal");
 }
 
+/// These bytes are the bus's frozen core. They must never change.
 #[test]
 fn update_commit_and_abort_serialize_byte_for_byte_when_encoded_and_decoded() {
     assert_eq!(UpdateCommit { session: 7 }.encode().as_slice(), OTA_COMMIT);
@@ -1135,6 +1166,7 @@ fn update_commit_and_abort_serialize_byte_for_byte_when_encoded_and_decoded() {
     );
 }
 
+/// These bytes are the bus's frozen core. They must never change.
 #[test]
 fn update_confirm_serializes_byte_for_byte_when_encoded_and_decoded() {
     assert_eq!(UpdateConfirm.encode().as_slice(), OTA_CONFIRM);
@@ -1147,6 +1179,7 @@ fn update_confirm_serializes_byte_for_byte_when_encoded_and_decoded() {
     );
 }
 
+/// These bytes are the bus's frozen core. They must never change.
 #[test]
 fn update_status_serializes_byte_for_byte_when_encoded_and_decoded() {
     let status = UpdateStatus { session: 7, state: UpdateState::Receiving, next_offset: 8192 };
@@ -1160,6 +1193,7 @@ fn update_status_serializes_byte_for_byte_when_encoded_and_decoded() {
     );
 }
 
+/// The `UpdateState` codes 0 to 6 are the bus's frozen core. They must never change.
 #[test]
 fn update_state_round_trips_every_byte_when_converted() {
     let named = [

@@ -46,6 +46,33 @@
 //! A sender that sends no records for 65,536 transfers and then sends at exactly the seq its
 //! peer last acknowledged reads a stale ack as its own.
 //!
+//! **Frozen forever, even before 1.0:**
+//!
+//! - the transfer: SPI mode 0 on the node's D8 SCLK, D10 MOSI, D9 MISO, D7 CS and D0 IRQ,
+//!   [`TRANSFER_LEN`], the header above with [`MAGIC`], [`BUS_VERSION`] and [`ACKS`],
+//!   [`HEADER_LEN`], [`PAYLOAD_MAX`], [`CRC_OFFSET`] and the CRC, with zeros past `len`;
+//! - the handshake: the node re-arms after every transfer, and raises IRQ to ask for one;
+//! - the ack rule: `ack` names the last good record-carrying transfer, idle transfers never move
+//!   it, and each direction is stop-and-wait;
+//! - the record layout ([`RECORD_HEADER_LEN`], [`records`]), and a receiver skipping a type it
+//!   does not know;
+//! - the heartbeat's identity: up type 1 opens with the prefix and the node's MAC
+//!   ([`HEARTBEAT_IDENTITY_LEN`], [`Heartbeat::identity`]), read from a body of any length, with
+//!   the [`Board`] codes, [`CAP_FLAG_5G`] and [`CAP_FLAG_TRIAL`];
+//! - the update conversation: up type 3 and down types 3 to 7, their layouts, the
+//!   [`UpdateState`] codes, [`UPDATE_CHUNK`], and the receiver's side that [`crate::ota`]
+//!   describes;
+//! - confirming a trial: an [`UpdateConfirm`], or any update record, confirms an image on trial;
+//! - the `trial` sector's layout ([`crate::ota::trial`]), which the image that installs an update
+//!   writes and the image it installs reads.
+//!
+//! A node may be reachable only through the bus, so any later host and P4 must be able to
+//! identify and update any node build, and a bus change never sends the user back to a wired
+//! flash. Everything else changes freely between builds and is named by the node's version in
+//! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, [`ACK_TIMEOUT_MS`], [`SEND_TRIES`],
+//! the P4's scheduling and pins, up type 2, down types 1 and 2, and the heartbeat past its MAC. A
+//! core type code is never reused, and a new message takes a new code.
+//!
 //! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
 //! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the
 //! messages are in [`UpMsg`] and [`DownMsg`]. The P4 needs no knowledge of them, so a change to
@@ -96,7 +123,8 @@ pub use version::{Compat, NODE_VERSION, Version};
 pub const TRANSFER_LEN: usize = 1044;
 /// The first two bytes of every transfer: "WB" in little-endian order.
 pub const MAGIC: u16 = 0x4257;
-/// This framing's version. A transfer naming another is not this build's to read.
+/// The frozen core's version. It never changes; a transfer naming another is not this build's
+/// to read.
 pub const BUS_VERSION: u8 = 1;
 /// Bytes before the payload.
 pub const HEADER_LEN: usize = 10;

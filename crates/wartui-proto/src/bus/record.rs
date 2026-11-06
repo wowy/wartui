@@ -7,6 +7,8 @@
 //! The type byte names a message per direction ([`UpType`], [`DownType`]), and the body is the
 //! message's body. A receiver skips a type it does not know.
 //!
+//! This layout, and the skip, are in the bus's frozen core ([`crate::bus`]).
+//!
 //! [`UpType`]: super::UpType
 //! [`DownType`]: super::DownType
 

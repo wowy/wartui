@@ -35,6 +35,7 @@ fn capabilities_survives_heartbeat_round_trip_when_encoded_and_decoded() {
     assert_eq!(round_trip(trial), trial);
 }
 
+/// `CAP_FLAG_5G` and `CAP_FLAG_TRIAL` are the bus's frozen core. They must never change.
 #[test]
 fn capabilities_maps_feature_bits_when_converting_to_flags() {
     // Written out rather than derived, because these are wire values: the node
@@ -58,12 +59,15 @@ fn capabilities_preserves_known_flags_when_parsing_unknown_feature_bits() {
     assert!(!bare.five_ghz && !bare.trial);
 }
 
+/// The `Board` codes are the bus's frozen core. They must never change.
 #[test]
 fn board_maps_bytes_when_converting_to_and_from_wire() {
     // Wire values, frozen with the prefix that carries them.
     assert_eq!(Board::Esp32c5.as_u8(), 1);
     assert_eq!(Board::Esp32c6.as_u8(), 2);
     assert_eq!(Board::Esp32p4.as_u8(), 4);
+    assert_eq!(Board::from_u8(1), Board::Esp32c5);
+    assert_eq!(Board::from_u8(2), Board::Esp32c6);
     assert_eq!(Board::from_u8(4), Board::Esp32p4);
     for byte in 0..=u8::MAX {
         assert_eq!(Board::from_u8(byte).as_u8(), byte);

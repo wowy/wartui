@@ -1,6 +1,9 @@
 //! The update messages: the P4 relays the host's image to a node as [`UpdateChunk`]s of
 //! [`UPDATE_CHUNK`] bytes, and the node answers in [`UpdateStatus`]es. [`crate::ota`] is the
 //! node's half of the conversation.
+//!
+//! These records, their layouts, the [`UpdateState`] codes and [`UPDATE_CHUNK`] are in the bus's
+//! frozen core ([`crate::bus`]), so any later host can update any node build.
 
 use super::msg::{fixed, le_u32};
 use super::{Board, DecodeError, Version};
