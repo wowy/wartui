@@ -45,8 +45,8 @@ slot moves its assignment with it on its next heartbeat.
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The channel pool and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is global;
-see "When nothing arrives".
+The channel pool and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is
+global; see "When nothing arrives".
 
 ### Capture metadata
 
@@ -310,16 +310,17 @@ wdgwars = ""
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
-wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, any of them
-or `serial` beside its table's `remember = false`, or an `excluded-ssids` entry that is empty, over
-32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset` and
-`ota` read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
-cannot stop them. `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it
-decides which board gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the
-whole file on save, `b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when
-the bridge it remembers changes; see "Keyboard commands" and "When nothing arrives". `flash-bridge`
-writes both for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
-under `--sim`. A new file is readable only by its owner.
+wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
+an unknown `pool`, a malformed `node` or `mac`, any of them or `serial` beside its table's
+`remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
+refused too, naming the file and key. `status`, `sniff`, `reset` and `ota` read only `[bridge] mac`
+and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
+`flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
+gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save,
+`b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when the bridge it
+remembers changes; see "Keyboard commands" and "When nothing arrives". `flash-bridge` writes both
+for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates
+it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
@@ -349,13 +350,14 @@ Linux, what the kernel and block device wrote.
 wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
 ```
 
-`--profile drive` (default) is ten nodes at real time; `burst` is fourteen, the most a bridge takes. Every node reports every
-sweep in the simulated neighborhood, measuring starts once the fleet holds its assignments, and a
-run counts only if `idle_node_windows` reads 0. `--interval` (default 60 s) adds a timeline showing
-when the card slowed. Each SQLite and batching setting has a flag, so two settings compare on one
-binary. The store checkpoints on its own thread after each commit; `--checkpoint-every MS` spaces
-those out, and `--inline-checkpoint` puts SQLite's own back in the commit.
-[`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the method and numbers.
+`--profile drive` (default) is ten nodes at real time; `burst` is fourteen (`plan::MAX_NODES`), the
+most a bridge takes. Every node reports every sweep in the simulated neighborhood, measuring starts
+once the fleet holds its assignments, and a run counts only if `idle_node_windows` reads 0.
+`--interval` (default 60 s) adds a timeline showing when the card slowed. Each SQLite and batching
+setting has a flag, so two settings compare on one binary. The store checkpoints on its own thread
+after each commit; `--checkpoint-every MS` spaces those out, and `--inline-checkpoint` puts SQLite's
+own back in the commit. [`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the
+method and numbers.
 
 ### Flashing the fleet
 
@@ -639,11 +641,11 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The rows are the pool (`all → eu → us`), `remember bt node` (`off`, `on`), `remember bridge`
-(`off`, `on`), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
-lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
-one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
-the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns
-to the rows; edits to the rows stay pending.
+(`off`, `on`), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are
+listed, or `none`, and opens a page that lists them. While an SSID is being typed there, every
+letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already listed,
+and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the remembered
+bridge but none of the rows, and returns to the rows; edits to the rows stay pending.
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
@@ -684,8 +686,8 @@ on (the default), `b` saves the choice. The remembered node takes the scan back 
 heartbeating and nothing holds it: at startup, or on returning to the fleet. Taking the scan off
 with `b` forgets it. Turning `remember bt node` off forgets the node and leaves the scan; turning it
 on remembers whoever holds it then. That node's `channels` reads `bluetooth`, since it is dealt no
-channels, or `bluetooth…` while the change waits for the node's next heartbeat. Taking the scan off shows as
-its new share, pending.
+channels, or `bluetooth…` while the change waits for the node's next heartbeat. Taking the scan off
+shows as its new share, pending.
 
 **It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A Bluetooth
 controller left free takes it whenever the node is otherwise idle
@@ -860,10 +862,10 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   host, from gaps in each batch's sequence number. The column reads `—` before a node's first batch,
   then a running count; both appear once any node loses one. A sequence advances only when the P4
   acknowledges a batch, so a gap is lost after the P4 took it, in its queue or on USB, not on the
-  node bus. A batch is up to about a dozen access points, hidden until the node's five-minute refresh.
-  Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final value. A gap
-  after a batch replayed from the bridge's backlog is not counted, because those batches were
-  dropped while no host was reading.
+  node bus. A batch is up to about a dozen access points, hidden until the node's five-minute
+  refresh. Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final
+  value. A gap after a batch replayed from the bridge's backlog is not counted, because those
+  batches were dropped while no host was reading.
 - **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
   2 s), the node bus resending a batch whose ack the node did not see. The first copy was
   recorded, so nothing is lost and `dup` never overlaps `lost`. A repeat 2 s or more later is

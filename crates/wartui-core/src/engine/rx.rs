@@ -288,8 +288,8 @@ impl FleetEngine {
         {
             self.reissue(src);
         }
-        // Answered off the heartbeat, through the slot it came from. A heartbeat read behind can
-        // send the assignment in force once more, which the node takes and discards.
+        // Answered off the heartbeat, through the slot it came from. A heartbeat read behind sends
+        // nothing.
         self.send_admin(src, now, batch);
         self.send_dedup_ring_clear(src, now, batch);
     }

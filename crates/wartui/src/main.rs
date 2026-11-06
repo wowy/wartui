@@ -542,17 +542,15 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_rejects_sim_node_count_when_over_fourteen() {
-        for args in [
-            ["wartui", "--sim", "15"].as_slice(),
-            ["wartui", "run", "--sim", "15"].as_slice(),
-            ["wartui", "sniff", "--sim", "15"].as_slice(),
-            ["wartui", "status", "--sim", "15"].as_slice(),
-            ["wartui", "ota", "--sim", "15"].as_slice(),
-        ] {
-            assert!(parse(args).is_err(), "{args:?} should be refused");
+    fn cli_parser_rejects_sim_node_count_when_over_max_nodes() {
+        let max = wartui_proto::plan::MAX_NODES.to_string();
+        let over = (wartui_proto::plan::MAX_NODES + 1).to_string();
+        for command in [None, Some("run"), Some("sniff"), Some("status"), Some("ota")] {
+            let args: Vec<&str> =
+                ["wartui"].into_iter().chain(command).chain(["--sim", &over]).collect();
+            assert!(parse(args.as_slice()).is_err(), "{args:?} should be refused");
         }
-        assert!(parse(["wartui", "--sim", "14"]).is_ok());
+        assert!(parse(["wartui", "--sim", max.as_str()]).is_ok());
     }
 
     #[test]

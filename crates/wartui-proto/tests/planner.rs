@@ -14,9 +14,7 @@ use wartui_proto::plan::{
 
 const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
 
-const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=14;
-
-const _: () = assert!(*FLEET_SIZES.end() as usize == MAX_NODES);
+const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=MAX_NODES as u8;
 
 /// Every index the plan hands to anybody, with repeats kept so overlap shows.
 fn covered(p: &wartui_proto::plan::Plan) -> Vec<u8> {

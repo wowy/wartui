@@ -11,7 +11,9 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::bus::{Board, Capabilities, NODE_VERSION, RecordKind, Slot, Version, wire_epoch};
+use wartui_proto::bus::{
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, RecordKind, Slot, Version, wire_epoch,
+};
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
@@ -32,7 +34,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.reboots = reboots;
     state.heartbeats = 12;
     state.observations = 340;
-    state.slot = Slot::from_u8(last % 14);
+    state.slot = Slot::from_u8(last % MAX_SLOTS as u8);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));

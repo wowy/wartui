@@ -63,7 +63,8 @@ For every flag or anomaly worth mentioning:
    the others were fine points at that node, while all nodes at once points at the bridge, host or
    environment. Compare across the speed and place of the drive too, and against the node's share
    of channels and its slot. If the user has other captures in the repo root, check whether the
-   same node misbehaves in them as well. A pattern that repeats across drives is worth more than one capture's numbers.
+   same node misbehaves in them as well. A pattern that repeats across drives is worth more than one
+   capture's numbers.
 2. **Read the code that owns it** before naming a cause. `references/checks.md` maps each symptom
    to the module and findings doc to read; AGENTS.md § "Invariants that are easy to break" says
    which behaviors are deliberate. Cite `path:line`.
@@ -86,7 +87,7 @@ Drop these, they are settled policy:
 
 - Schema version bumps, migrations or compatibility shims for older captures or firmware — nothing
   is compatible before 1.0, and the fix for another build's file is a new `--db`.
-- Safeguards for more than fourteen nodes, one per node-bus slot.
+- Safeguards for more than fourteen nodes (`plan::MAX_NODES`), one per node-bus slot.
 - `--lat/--lon` as a GPS fallback. It is test-only, and it marks a capture as test data.
 - Uploading. A review never runs `wartui upload` or touches the WDGWars endpoints.
 

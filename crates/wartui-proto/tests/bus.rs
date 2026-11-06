@@ -333,9 +333,9 @@ fn slot_parses_text_form_when_valid() {
 
 #[test]
 fn slot_refuses_byte_when_past_max_slots() {
-    assert_eq!(MAX_SLOTS, 14);
-    assert!(Slot::from_u8(13).is_some());
-    assert!(Slot::from_u8(14).is_none());
+    let max = u8::try_from(MAX_SLOTS).unwrap();
+    assert!(Slot::from_u8(max - 1).is_some());
+    assert!(Slot::from_u8(max).is_none());
     assert!(Slot::new(2, 0).is_none());
     assert!(Slot::new(0, 7).is_none());
 }

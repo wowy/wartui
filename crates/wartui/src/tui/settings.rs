@@ -824,17 +824,19 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_two() {
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_no_queue_slot_free() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Command::ClearRing { mac: None }).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert!(rx.try_recv().is_err(), "nothing was sent");
+        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("not accepting commands"), "{notice}");

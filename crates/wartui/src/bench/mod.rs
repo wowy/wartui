@@ -57,7 +57,7 @@ use self::timeline::{Mark, Slice, Timeline};
 
 /// How often each node's progress is checked during the measured window.
 ///
-/// Longer than the slowest sweep a fleet of one to fourteen nodes has, so a node doing its
+/// Longer than the slowest sweep a fleet of one to [`MAX_NODES`] nodes has, so a node doing its
 /// job always reports something inside one.
 const SAMPLE: Duration = Duration::from_secs(2);
 
@@ -86,8 +86,8 @@ pub enum Profile {
     /// Ten nodes in real time, one of them scanning Bluetooth: a busy street, sustained.
     #[default]
     Drive,
-    /// The fleet maximum of fourteen nodes in real time, one on Bluetooth, to find where
-    /// the store stops keeping up and starts dropping.
+    /// The fleet maximum in real time, one on Bluetooth, to find where the store stops
+    /// keeping up and starts dropping.
     Burst,
 }
 

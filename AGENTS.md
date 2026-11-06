@@ -336,15 +336,15 @@ edit stops; follow the pointer before changing the rule.
   `docs/phase-2-findings.md`
 - **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains
   the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the gap is the
-  lag. Such a heartbeat's epoch is not believed, and a node whose epoch no live heartbeat has
-  reported is sent no assignment until one does, since `deal` cannot skip an epoch it has not seen.
-  Delete either half of the check and the symptom is a plausible-looking lie rather than an error.
+  lag. Such a heartbeat's epoch is not believed, and no assignment or clear goes out on one: the
+  slot it names may be another node's now, and `deal` cannot skip an epoch it has not seen. Delete
+  either half of the check and the symptom is a plausible-looking lie rather than an error.
   A connection starts caught up, which is safe only because nothing older than it reaches the
   engine: a bridge clears its queue when a host connects, and the transport drops what decodes
   ahead of a connection's first `Ready`.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `BEHIND_US`;
-  `crates/wartui-core/src/engine/admin.rs`, `send_admin`; `crates/wartui-bridge/src/serial.rs`,
-  `read_loop`
+  `crates/wartui-core/src/engine/admin.rs`, `send_admin` / `send_dedup_ring_clear`;
+  `crates/wartui-bridge/src/serial.rs`, `read_loop`
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
   `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes

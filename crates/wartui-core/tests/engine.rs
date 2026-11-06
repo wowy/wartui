@@ -3125,10 +3125,10 @@ fn engine_keeps_node_undeparted_when_link_down() {
 }
 
 // A host behind the bridge drains its queue as fast as USB will carry it, and every
-// heartbeat in it is history (`docs/phase-4-findings.md`). A node first heard there has
-// an epoch no live heartbeat has reported, which `deal` cannot skip, so its share waits.
+// heartbeat in it is history (`docs/phase-4-findings.md`): the slot it names may be
+// another node's now, and its epoch is one `deal` cannot skip. So the share waits.
 #[test]
-fn engine_holds_assignment_when_backlog_heartbeats_from_node_with_unknown_epoch() {
+fn engine_holds_assignment_when_backlog_heartbeats() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -3151,7 +3151,7 @@ fn engine_holds_assignment_when_backlog_heartbeats_from_node_with_unknown_epoch(
         assert!(!stored_live(&batch), "beat {beat} is stored as replayed");
     }
 
-    assert_eq!(sent, 0, "no epoch a live heartbeat reported, so nothing sent");
+    assert_eq!(sent, 0, "every heartbeat read behind, so nothing sent");
     assert!(engine.nodes().next().expect("the node").dirty, "still owed");
     // Admitted regardless: a stale heartbeat still says the node was alive and
     // what it is.
@@ -3189,10 +3189,10 @@ fn engine_sends_assignment_when_live_heartbeat_follows_backlog() {
     assert_eq!(dst, NODE);
 }
 
-// The bus delivers a late send all the same, so a node whose epoch a live heartbeat
-// already reported is answered while the host reads behind.
+// An epoch a live heartbeat reported does not make a replayed one current: the node
+// may have moved slots since, and an assignment carries no MAC to catch that.
 #[test]
-fn engine_sends_assignment_when_heartbeat_replayed_with_epoch_known() {
+fn engine_holds_assignment_when_heartbeat_replayed_with_epoch_known() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -3205,8 +3205,8 @@ fn engine_sends_assignment_when_heartbeat_replayed_with_epoch_known() {
     let replayed = engine.handle(beat_at(NODE, 2, 0, caps, 2_000_000), clock.at_ms(2));
 
     assert!(!stored_live(&replayed), "read behind the bridge");
-    let (_, dst, _) = sent_admin(&replayed);
-    assert_eq!(dst, NODE);
+    assert!(admins(&replayed).is_empty(), "nothing sent on a heartbeat read behind");
+    assert!(engine.nodes().next().expect("the node").dirty, "still owed");
 }
 
 /// Whether the one heartbeat stored in a batch was stored as live.
@@ -3414,37 +3414,37 @@ fn engine_drops_clear_owed_when_node_reboots() {
 }
 
 #[test]
-fn engine_sends_clear_when_heartbeat_replayed() {
-    // The bus delivers a late send all the same, and a clear carries no epoch, so a
-    // heartbeat read behind the bridge carries one like a live heartbeat does.
+fn engine_holds_clear_when_heartbeat_replayed() {
+    // A heartbeat read behind names the slot the node was in then, and a clear carries
+    // no MAC, so it waits for a live one.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let caps = Capabilities::here(Board::Esp32c5);
-    engine.handle(beat_at(NODE, 1, 0, caps, 1_000_000), clock.at_ms(0));
+    let first = engine.handle(beat_at(NODE, 1, 0, caps, 1_000), clock.at_ms(1));
+    assert!(stored_live(&first));
     engine.handle(clear_ring(Some(NODE)), clock.at_ms(1));
 
     let batch = engine.handle(beat_at(NODE, 2, 0, caps, 2_000_000), clock.at_ms(2));
 
     assert!(!stored_live(&batch), "read behind the bridge");
-    let (_, dst) = sent_clear(&batch);
-    assert_eq!(dst, NODE);
+    assert!(clears(&batch).is_empty(), "nothing sent on a heartbeat read behind");
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring, "still owed");
 }
 
 #[test]
 fn engine_skips_held_epoch_when_dealing_first_assignment() {
-    // Both heartbeats report holding wire epoch 1 -- exactly what `deal` would
+    // The first heartbeat reports holding wire epoch 1 -- exactly what `deal` would
     // allocate first under `EngineConfig::default()` (the first counter is 1, and
-    // `wire_epoch(1) == 1`). The second is answered once the first send times out.
+    // `wire_epoch(1) == 1`). It is answered at once.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(heartbeat_holding(NODE, 1, 1), clock.at(1));
-    let batch = engine.handle(heartbeat_holding(NODE, 2, 1), clock.at(6));
+    let batch = engine.handle(heartbeat_holding(NODE, 1, 1), clock.at(1));
     let (id, _, admin) = sent_admin(&batch);
     assert_ne!(admin.epoch, 1, "never the epoch the node's own heartbeat already reports");
 
-    engine.handle(delivered(id), clock.at(6));
-    engine.handle(heartbeat_holding(NODE, 3, admin.epoch), clock.at(10));
+    engine.handle(delivered(id), clock.at(1));
+    engine.handle(heartbeat_holding(NODE, 2, admin.epoch), clock.at(5));
     assert!(engine.nodes().next().expect("the node").adopted());
 }
 

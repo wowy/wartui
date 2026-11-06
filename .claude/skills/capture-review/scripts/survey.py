@@ -26,6 +26,9 @@ FLAGS = []  # (severity, area, text, sql)
 # Mirrors `ResetCause::is_fault` in crates/wartui-proto/src/reset.rs.
 NOT_FAULTS = ("power_on", "external")
 
+# Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
+MAX_NODES = 14
+
 
 def is_fault(cause):
     return cause is not None and cause not in NOT_FAULTS
@@ -249,15 +252,16 @@ def nodes(db, ctx):
                 "assignment gave another node the Bluetooth job, so no node scanned Bluetooth",
                 "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
             )
-    if len(rows) > 14:
-        print(f"  {len(rows)} nodes: more than a bridge's fourteen slots, so some came and went")
+    if len(rows) > MAX_NODES:
+        print(f"  {len(rows)} nodes: more than a bridge's {MAX_NODES} slots, so some came and went")
 
 
 def heartbeats(db, ctx):
     section("heartbeats")
     # Row layout, read by index here and in assignments() and observations().
     rows = db.q("SELECT node_mac, id, rx_at, counter, epoch, slot, reset_cause, live, "
-                "wifi_refused, ble_refused, vdd_mv, die_temp_c FROM heartbeat ORDER BY node_mac, id")
+                "wifi_refused, ble_refused, vdd_mv, die_temp_c FROM heartbeat "
+                "ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
         per[r[0]].append(r)
@@ -276,23 +280,26 @@ def heartbeats(db, ctx):
         # The reset cause of each boot seen: the first beat's, then each restart's.
         boots = [hs[0][6]] if hs else []
         prev = None
+        # The engine's `held_epoch`: the last live beat's epoch, None until one and after a restart.
+        held = None
         for r in hs:
             (_, _, rx, counter, epoch, slot, cause, live, wr, br, _, _) = r
             replayed += live == 0
             slots[slot] += 1
             if prev is not None:
-                p_rx, p_counter, p_epoch, p_slot = prev[2], prev[3], prev[4], prev[5]
+                p_rx, p_counter, p_slot = prev[2], prev[3], prev[5]
                 if slot != p_slot:
                     moves.append((rx, p_slot, slot))
                 # As the engine reads a restart: the counter fell, or a live beat reports no
-                # epoch after a real one.
+                # epoch after a live beat reported a real one.
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
-                            or (live != 0 and epoch == 0 and p_epoch != 0))
+                            or (live != 0 and epoch == 0 and held not in (None, 0)))
                 if rebooted:
                     reboots += 1
                     boots.append(cause)
                     ctx.setdefault("restarts", []).append((rx, mac, p_counter, counter, p_rx,
                                                            cause))
+                    held = None
                 wifi_ref += since_boot_delta(wr, prev[8], rebooted)
                 ble_ref += since_boot_delta(br, prev[9], rebooted)
                 dt = rx - p_rx
@@ -302,6 +309,8 @@ def heartbeats(db, ctx):
                     intervals.append(dt)
                 if dt > timeout:
                     silences.append((p_rx, rx))
+            if live != 0:
+                held = epoch
             prev = r
         total_reversals += reversals
         if ctx["only"] and short(mac) != ctx["only"]:
@@ -1007,8 +1016,9 @@ def raw_frames(db, ctx):
     raw_hb = dict(db.q("SELECT slot, COUNT(*) FROM raw_frame WHERE kind = 1 GROUP BY 1"))
     stored = Counter(h[5] for hs in ctx.get("hb", {}).values() for h in hs)
     if raw_hb:
+        slots = sorted(set(raw_hb) | set(stored))
         print("  heartbeat records raw/stored per slot: " + "  ".join(
-            f"{s} {raw_hb.get(s, 0)}/{stored.get(s, 0)}" for s in sorted(set(raw_hb) | set(stored))))
+            f"{s} {raw_hb.get(s, 0)}/{stored.get(s, 0)}" for s in slots))
 
 
 LOG_LINE = re.compile(

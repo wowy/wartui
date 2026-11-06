@@ -215,10 +215,10 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
 -- its own so it carries on while the bridge is gone. `frames` through `incompatible`
--- and `store_written`/`store_dropped` are counts since the capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
--- largest since the previous row. `throttled` is the Raspberry Pi firmware's
--- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
--- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
+-- and `store_written`/`store_dropped` are counts since the capture began. `lag_peak_us`,
+-- `store_queue_peak` and `store_commit_peak_us` are the largest since the previous row.
+-- `throttled` is the Raspberry Pi firmware's `get_throttled` word, NULL off a Pi; `soc_temp_mc` is
+-- thermal zone 0 in milli-degrees Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
 -- voltage and current as its driver reports them, NULL on a host without one.
 CREATE TABLE IF NOT EXISTS host_status (
   id INTEGER PRIMARY KEY,

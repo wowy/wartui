@@ -13,8 +13,8 @@
 //! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
-//! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never
-//! captured.
+//! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi
+//! networks are never captured.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -106,9 +106,9 @@ pub struct FleetEngine {
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
     last_arrival: Option<(u32, Instant)>,
-    /// How far behind the bridge this host is reading, in microseconds. Zero while the link is read live,
-    /// climbing while frames arrive faster than wall-clock time allows. Zero on start and every
-    /// connect or disconnect ([`Self::note_arrival`] has why).
+    /// How far behind the bridge this host is reading, in microseconds. Zero while the link is
+    /// read live, climbing while frames arrive faster than wall-clock time allows. Zero on start
+    /// and every connect or disconnect ([`Self::note_arrival`] has why).
     backlog_lag_us: u64,
     /// The largest [`Self::backlog_lag_us`] measured since the last [`Event::HostSample`].
     lag_peak_us: u64,
