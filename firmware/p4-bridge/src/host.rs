@@ -49,11 +49,9 @@ use wartui_firmware::phase::mark;
 use wartui_firmware::reboot;
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LoopPhase, MAX_HOST_FRAME, SendStatus,
-    decode_frame,
+    FrameAccumulator, HOST_BAUD, HostToBridge, LoopPhase, MAX_HOST_FRAME, decode_frame,
 };
 use wartui_proto::radio_link::Down;
-use wartui_proto::split::Route;
 
 use crate::Shared;
 
@@ -137,15 +135,15 @@ async fn read_host(
     }
 }
 
-/// Decode one host frame, open the gate, and send the command where the pair says.
+/// Decode one host frame, open the gate, and carry out the command: on the P4, or by queueing
+/// a record for a node.
 ///
-/// Out of line: a decoded command is 1.5 KB, and a refusal carries a frame. The command is
-/// decoded straight into the `Down` that relays it, so it is never copied.
+/// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
 fn take_frame(frame: &mut [u8], shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
-    let Some(down @ Down::Command(cmd)) = &decoded else { return };
+    let Some(cmd) = &decoded else { return };
     let opened = open(shared);
     let confirmed = crate::update::note_host_frame(shared);
     // An `Identify` announces below, and the announcement carries the confirm's line. Any other
@@ -157,12 +155,17 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
             shared.flush_update_lines();
         }
     }
-    let route = shared.pair.borrow().route(cmd);
-    match route {
-        Route::Local => local(cmd, shared),
-        Route::Forward => forward(down, shared),
-        Route::Refuse(Some(answer)) => shared.push_host(&answer),
-        Route::Refuse(None) => {}
+    mark(LoopPhase::Command);
+    // Listed rather than caught, so a new command is a compile error until it is placed.
+    match cmd {
+        HostToBridge::Identify => shared.announce(),
+        HostToBridge::GetStatus => shared.status_asked.signal(()),
+        HostToBridge::Reset => reboot(),
+        HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
+        HostToBridge::Update(op) => crate::update::take(op, shared),
+        HostToBridge::ToNode { slot, id, kind, body } => {
+            crate::bus::to_node(shared, *slot, *id, *kind, body);
+        }
     }
 }
 
@@ -181,32 +184,8 @@ fn open(shared: &Shared) -> bool {
 }
 
 #[inline(never)]
-fn decode(frame: &mut [u8]) -> Option<Down> {
-    decode_frame::<HostToBridge>(frame).ok().map(Down::Command)
-}
-
-/// Carry out a command the P4 answers itself.
-fn local(cmd: &HostToBridge, shared: &Shared) {
-    mark(LoopPhase::Command);
-    match cmd {
-        HostToBridge::Identify => shared.announce(),
-        HostToBridge::GetStatus => shared.status_asked.signal(()),
-        HostToBridge::Reset => reboot(),
-        HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
-        HostToBridge::Update(op) => crate::update::take(op, shared),
-        // `Pair::route` sends nothing else here.
-        _ => {}
-    }
-}
-
-/// Queue a command for the C6. A send that finds the queue full is answered `Rejected`,
-/// since nothing else would ever answer it.
-fn forward(down: &Down, shared: &Shared) {
-    if !shared.push_down(down)
-        && let Down::Command(HostToBridge::SendEspNow { id, .. }) = *down
-    {
-        shared.push_host(&BridgeToHost::SendResult { id, status: SendStatus::Rejected, tx_us: 0 });
-    }
+fn decode(frame: &mut [u8]) -> Option<HostToBridge> {
+    decode_frame::<HostToBridge>(frame).ok()
 }
 
 /// Write queued frames to the host forever, a chunk at a time.

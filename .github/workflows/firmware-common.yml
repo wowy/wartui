@@ -68,7 +68,7 @@ jobs:
         if: success() || failure()
         run: |
           pushd firmware/common
-          cargo clippy --release --features esp32c6,radio --locked -- -D warnings
+          cargo clippy --release --features esp32c6 --locked -- -D warnings
           popd
 
       # The P4 is a different target from the C-series chips.

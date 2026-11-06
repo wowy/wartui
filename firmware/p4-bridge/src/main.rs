@@ -2,7 +2,8 @@
 //!
 //! The P4 talks to the host over UART0, which the board's CH343 carries to the Type-C, with
 //! wartui's link protocol, through UHCI's DMA. It talks to the board's ESP32-C6 over UART1 with
-//! hardware flow control, on the FIFO. The C6 runs the radio (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! hardware flow control, on the FIFO; the C6 holds that link for a future Bluetooth host link
+//! (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
@@ -16,12 +17,12 @@
 //!   host's poll;
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
-//!   (`src/update.rs`);
+//!   (`src/update.rs`) and queues the host's records for its nodes;
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
-//! - **the node buses** (`src/bus.rs`), one future per SPI master, poll the nodes wired to
-//!   them and report link counters to the host as log lines.
+//! - **the node buses** (`src/bus.rs`), one future per SPI master, carry each node's records
+//!   to and from the host, and report link counters to it as log lines.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -81,7 +82,7 @@ use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
     WIRE_MAX, encode_down,
 };
-use wartui_proto::split::{Pair, PairEvent};
+use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
 use crate::host::Presence;
@@ -179,6 +180,8 @@ pub struct Shared {
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
     updates: RefCell<&'static mut Updates>,
+    /// The node buses' slots, as the host reader and both buses see them.
+    nodes: bus::Nodes,
 }
 
 impl Shared {
@@ -215,6 +218,7 @@ impl Shared {
             gps_fault: Cell::new(None),
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
+            nodes: bus::Nodes::new(),
         }
     }
 
@@ -229,8 +233,8 @@ impl Shared {
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
     /// Dropped, and not counted, while no host is present. A backlog held for an absent host
-    /// arrives late when one attaches, carries its current position onto old sightings and
-    /// reads as missed admin windows. Faults worth keeping are repeated by
+    /// arrives late when one attaches, and the host stamps its current position onto the old
+    /// sightings in it. Faults worth keeping are repeated by
     /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
@@ -248,11 +252,10 @@ impl Shared {
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.
     ///
-    /// Refused rather than evicting the oldest: an evicted command is lost with nothing to
-    /// say so, and an evicted send would never be answered.
+    /// Refused rather than evicting the oldest: an evicted record is lost with nothing to say
+    /// so.
     #[inline(never)]
     fn push_down(&self, down: &Down) -> bool {
-        // The largest `Down` is a relayed 1470-byte ESP-NOW send.
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
@@ -366,11 +369,18 @@ impl Shared {
                 dropped: ring.dropped().saturating_add(self.down_refused.get()),
             }
         };
-        let host_dropped = host[0].dropped.saturating_add(host[1].dropped);
-        let radio_link = self.radio_link.get();
-        let uart_errors = self.host_uart_errors.get();
-        let status =
-            self.pair.borrow().status(now_ms(), host, down, radio_link, host_dropped, uart_errors);
+        let (rx_count, rx_oversize) = self.nodes.rx_counts();
+        let counters = P4Counters {
+            host,
+            down,
+            node_down: self.nodes.stat(),
+            radio_link: self.radio_link.get(),
+            host_dropped: host[0].dropped.saturating_add(host[1].dropped),
+            host_uart_errors: self.host_uart_errors.get(),
+            rx_count,
+            rx_oversize,
+        };
+        let status = self.pair.borrow().status(now_ms(), counters);
         self.push_host(&status);
     }
 }

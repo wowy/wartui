@@ -11,13 +11,20 @@
 use wartui_proto::config::env_usize;
 
 /// Bytes of encoded frames bound for the host that may be evicted when it falls behind:
-/// received frames and logs.
+/// node records, GPS bytes and logs.
 pub const HOST_BULK_BYTES: usize = env_usize(option_env!("WARTUI_P4_HOST_BULK_BYTES"), 256 * 1024);
 
-/// Bytes of encoded frames bound for the host that answer it: `Ready`, `Status`, send
-/// results and errors.
+/// Bytes of encoded frames bound for the host that answer it: `Ready`, `Status`, delivery
+/// answers and errors.
 pub const HOST_PRIORITY_BYTES: usize =
     env_usize(option_env!("WARTUI_P4_HOST_PRIORITY_BYTES"), 16 * 1024);
 
-/// Bytes of encoded `Down` records waiting for a packet to the C6.
-pub const DOWN_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_P4_DOWN_QUEUE_BYTES"), 16 * 1024);
+/// Bytes of encoded `Down` records waiting for a packet to the C6: the status poll, a byte or
+/// two each.
+pub const DOWN_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_P4_DOWN_QUEUE_BYTES"), 1024);
+
+/// Bytes of records the host sent one node that wait behind the flight in its slot's queue.
+/// The default holds three full update chunks.
+///
+/// A record that finds the queue full is refused at once, with `Undelivered`.
+pub const NODE_DOWN_BYTES: usize = env_usize(option_env!("WARTUI_P4_NODE_DOWN_BYTES"), 4096);
