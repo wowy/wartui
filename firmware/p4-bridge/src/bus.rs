@@ -58,9 +58,7 @@ use wartui_proto::bus::{
     AckTracker, Downlink, Header, NodeBoard, SeqCheck, SeqNote, Slot as BusSlot, TRANSFER_LEN,
     VerifyError, seal, verify,
 };
-use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, LogLevel, LogStr, QueueId, QueueStat, Undelivered,
-};
+use wartui_proto::link::{BridgeToHost, FromNodeBody, LogStr, QueueId, QueueStat, Undelivered};
 
 use crate::Shared;
 use crate::config::NODE_DOWN_BYTES;
@@ -727,7 +725,7 @@ impl Controller {
             Some(i) => write!(message, "{} {}", self.board.label(self.slot_id(i)), what),
             None => write!(message, "bus {name} {what}"),
         };
-        shared.push_line(Some(LogLevel::Info), message);
+        shared.push_log(&message);
     }
 }
 

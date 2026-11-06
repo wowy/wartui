@@ -36,7 +36,7 @@ use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogLevel, LogStr, UPDATE_STATUS_MAX,
+    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, UPDATE_STATUS_MAX,
     UpdateStatusBytes,
 };
 use wartui_proto::ota::Receiver;
@@ -55,7 +55,15 @@ pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
 
 /// Lines for the host held until the next announcement, since nothing reaches the host
 /// before its `Ready`: what the boot found, and the confirm.
-pub type Lines = Vec<(Option<LogLevel>, LogStr), 8>;
+pub type Lines = Vec<Line, 8>;
+
+/// One held line, sent as the host message it names.
+pub enum Line {
+    /// A `Log`.
+    Log(LogStr),
+    /// An `Error`.
+    Error(LogStr),
+}
 
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32p4));
@@ -119,8 +127,13 @@ impl Updates {
         }
         let mut lines = Lines::new();
         for note in notes {
-            let level = if matches!(note, Note::Failed(..)) { None } else { Some(LogLevel::Info) };
-            let _ = lines.push((level, text(format_args!("{note}"))));
+            let message = text(format_args!("{note}"));
+            let line = if matches!(note, Note::Failed(..)) {
+                Line::Error(message)
+            } else {
+                Line::Log(message)
+            };
+            let _ = lines.push(line);
         }
         let fault = match table_fault {
             Some(err) => Some(text(format_args!(
@@ -142,11 +155,11 @@ impl Updates {
             Ok(()) => {
                 self.trial = false;
                 self.rtc.rwdt.disable();
-                (Some(LogLevel::Info), text(format_args!("{IMAGE_CONFIRMED}")))
+                Line::Log(text(format_args!("{IMAGE_CONFIRMED}")))
             }
             Err(err) => {
                 self.confirm_failed = true;
-                (None, text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}")))
+                Line::Error(text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}")))
             }
         };
         let _ = self.lines.push(line);
@@ -176,9 +189,8 @@ impl Updates {
             // the rest.
             Ok(_) => reboot(),
             Err(err) => {
-                let _ = self
-                    .lines
-                    .push((None, text(format_args!("could not switch to the new image: {err}"))));
+                let message = text(format_args!("could not switch to the new image: {err}"));
+                let _ = self.lines.push(Line::Error(message));
                 receiver.reset();
                 Some(UpdateStatus { session, state: UpdateState::FlashError, next_offset: 0 })
             }
@@ -207,7 +219,7 @@ pub fn note_host_frame(shared: &Shared) -> bool {
 #[inline(never)]
 pub fn take(bytes: &[u8], shared: &Shared) {
     let Some(op) = Op::decode(bytes) else {
-        shared.push_line(None, text(format_args!("an update op did not decode")));
+        shared.push_error("an update op did not decode");
         return;
     };
     let status = shared.updates.borrow_mut().take(op);
@@ -235,8 +247,11 @@ fn answer(status: UpdateStatus, shared: &Shared) {
 /// Send the host the lines held for it.
 #[inline(never)]
 pub fn say_lines(shared: &Shared) {
-    for (level, message) in take_lines(shared) {
-        shared.push_line(level, message);
+    for line in take_lines(shared) {
+        match line {
+            Line::Log(message) => shared.push_log(&message),
+            Line::Error(message) => shared.push_error(&message),
+        }
     }
 }
 

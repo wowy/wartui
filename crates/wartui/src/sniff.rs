@@ -16,7 +16,7 @@ use wartui_proto::bus::{
     Compat, DecodeError, Heartbeat, NODE_VERSION, NodeBoard, RecordKind, SightingMsg, Slot, UpMsg,
     UpType,
 };
-use wartui_proto::link::BridgeToHost;
+use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION};
 use wartui_proto::mac;
 
 #[derive(ClapArgs)]
@@ -175,11 +175,9 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         // `sniff` being the raw view, the fields go out as the bridge sent them.
         if let LinkEvent::Connected(info) = &event {
             println!(
-                "#   reset {:?}, last phase {:?}, {} bytes of heap free, up {}ms",
-                info.reset_cause, info.last_phase, info.heap_free, info.uptime_ms
+                "#   reset {:?}, last phase {:?}, up {}ms",
+                info.reset_cause, info.last_phase, info.uptime_ms
             );
-            // A port, not a receiver: one that does not answer is a bridge `Error`.
-            println!("#   {}", if info.gps { "gps port" } else { "no gps port" });
             println!("#   nodes on {}", info.node_board);
             counts.board = Some(info.node_board);
         }
@@ -202,13 +200,13 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
-        BridgeToHost::Ready { chip, mac: bridge_mac, fw_version, proto_version, .. } => {
+        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => {
             // Unreachable as the transport stands: every `Ready` it decodes
             // becomes a `LinkEvent::Connected`, handled above, and none is
             // forwarded as a message. Kept because the match is exhaustive
             // over the wire format rather than over what happens to arrive.
             println!(
-                "# bridge ready: {chip:?} {} firmware {fw_version} link v{proto_version}",
+                "# bridge ready: {} firmware {fw_version} link v{LINK_PROTO_VERSION}",
                 mac::full(bridge_mac)
             );
         }
@@ -221,9 +219,9 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             );
         }
 
-        BridgeToHost::Log { level, message } => {
+        BridgeToHost::Log { message } => {
             if args.verbose {
-                println!("# bridge {level:?}: {message}");
+                println!("# bridge log: {message}");
             }
         }
 
@@ -409,7 +407,7 @@ mod tests {
             uptime_ms: 1_000,
             rx_oversize: 0,
             queues: wartui_proto::link::QueueStats::new(),
-            radio_link: None,
+            radio_link: wartui_proto::link::RadioLinkStats::default(),
             host_uart_errors: 0,
         };
         assert!(heard(LinkEvent::Message(status)));
@@ -421,17 +419,14 @@ mod tests {
         let mut counts = Counts::default();
         assert_eq!(head(7, b1, &counts), "         7us  B1");
         let info = wartui_bridge::BridgeInfo {
-            chip: wartui_proto::link::Chip::Esp32P4,
             mac: [0; 6],
             fw_version: String::new(),
             reset_cause: wartui_proto::reset::ResetCause::PowerOn,
             last_phase: wartui_proto::link::LoopPhase::Unknown,
-            heap_free: 0,
             uptime_ms: 0,
-            gps: false,
+            node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
-            node_board: NodeBoard::Carrier14,
         };
         handle(LinkEvent::Connected(info), &args(), &mut counts);
         assert_eq!(head(7, b1, &counts), "         7us  N8");
@@ -502,6 +497,7 @@ mod tests {
             reset_cause: wartui_proto::reset::ResetCause::PowerOn,
             vdd: Vdd::NONE,
             die_temp: DieTemp::NONE,
+            heap_free: 0,
         }
         .encode()
         .to_vec()

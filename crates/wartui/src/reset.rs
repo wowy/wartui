@@ -222,12 +222,7 @@ fn rebooted(uptime_ms: u32, before: Option<u32>) -> bool {
 
 fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
     match info {
-        Some(info) => println!(
-            "back up: {} on {:?}, firmware {}",
-            mac::full(&info.mac),
-            info.chip,
-            info.fw_version
-        ),
+        Some(info) => println!("back up: {}, firmware {}", mac::full(&info.mac), info.fw_version),
         // Reachable when the bridge was announced on a connection this command did
         // not open: the transport reports one `Connected` per connection.
         None => println!("back up"),

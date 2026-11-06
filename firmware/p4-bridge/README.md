@@ -4,8 +4,8 @@ The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs
 talks to the host with wartui's link protocol over UART0, which the board's CH343 carries to the
 Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on the board's SDIO
 traces. The C6 holds that link for a future Bluetooth host link
-([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting `Esp32P4` and
-both chips' diagnostics. The queue sizes are in `src/config.rs`.
+([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting both chips'
+diagnostics. The queue sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -134,7 +134,6 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 | --- | --- |
 | `updating the radio to the bundled image (n%)` | The update is under way; sent again every tenth of the image |
 | `radio runs another build; the bundled image did not take` | The C6 refused the image, stopped answering, or rolled back. The bridge still runs while the link revision matches |
-| `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
 | `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The P4 sends the C6 no records |
 | `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
 | `the radio has stopped answering; wartui reset restarts the bridge` | A host polled and no packet came from the C6 for 12 s, as when it hangs holding RTS. Ends when a packet arrives |

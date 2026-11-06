@@ -3,7 +3,7 @@
 //! The P4 talks to the host over UART0, which the board's CH343 carries to the Type-C, with
 //! wartui's link protocol, through UHCI's DMA. It talks to the board's ESP32-C6 over UART1 with
 //! hardware flow control, on the FIFO; the C6 holds that link for a future Bluetooth host link
-//! (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! (`firmware/p4-radio`). The host sees one bridge, reporting both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
@@ -84,10 +84,11 @@ use wartui_proto::bus::PER_BUS;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, HOST_BAUD, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat,
-    RadioLinkStats, ShortStr, encode_frame,
+    BridgeToHost, HOST_BAUD, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
+    ShortStr, encode_frame,
 };
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
     WIRE_MAX, encode_down,
@@ -321,16 +322,7 @@ impl Shared {
         }
         update::say_lines(self);
         if let Some(message) = update::fault(self) {
-            self.push_line(None, message);
-        }
-    }
-
-    /// A line for the host: an `Error` without a level, else a `Log`.
-    #[inline(never)]
-    fn push_line(&self, level: Option<LogLevel>, message: LogStr) {
-        match level {
-            Some(level) => self.push_host(&BridgeToHost::Log { level, message }),
-            None => self.push_host(&BridgeToHost::Error { message }),
+            self.push_error(&message);
         }
     }
 
@@ -360,9 +352,9 @@ impl Shared {
     }
 
     #[inline(never)]
-    fn push_log(&self, level: LogLevel, message: &str) {
+    fn push_log(&self, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
-        self.push_host(&BridgeToHost::Log { level, message });
+        self.push_host(&BridgeToHost::Log { message });
     }
 
     /// Queue a batch from the GPS receiver, copied out of its slot here rather than in the
@@ -541,7 +533,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, &carrier);
-    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take()));
+    let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
+    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     match join(

@@ -148,7 +148,7 @@ pub async fn run(args: Args) -> Result<()> {
         Ok(info) => info?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
     };
-    println!("bridge  {} on {:?}, firmware {}", mac::full(&info.mac), info.chip, info.fw_version);
+    println!("bridge  {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("listening {} s for heartbeats", args.listen);
     let heard = listen(&mut link, Duration::from_secs(args.listen)).await?;
     let targets = select(&heard, &args.nodes)?;

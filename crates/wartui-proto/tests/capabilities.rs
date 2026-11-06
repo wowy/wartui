@@ -20,6 +20,7 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 0,
     }
     .encode();
     Heartbeat::decode(&body).expect("we just encoded it").capabilities
@@ -65,10 +66,10 @@ fn board_maps_bytes_when_converting_to_and_from_wire() {
     // Wire values, frozen with the prefix that carries them.
     assert_eq!(Board::Esp32c5.as_u8(), 1);
     assert_eq!(Board::Esp32c6.as_u8(), 2);
-    assert_eq!(Board::Esp32p4.as_u8(), 4);
+    assert_eq!(Board::Esp32p4.as_u8(), 3);
     assert_eq!(Board::from_u8(1), Board::Esp32c5);
     assert_eq!(Board::from_u8(2), Board::Esp32c6);
-    assert_eq!(Board::from_u8(4), Board::Esp32p4);
+    assert_eq!(Board::from_u8(3), Board::Esp32p4);
     for byte in 0..=u8::MAX {
         assert_eq!(Board::from_u8(byte).as_u8(), byte);
     }
@@ -82,10 +83,13 @@ fn board_decodes_unknown_when_byte_unassigned() {
 }
 
 #[test]
-fn board_decodes_unknown_when_byte_is_three() {
-    // Assigned to no board, and a heartbeat carrying it is still a node.
-    assert_eq!(Board::from_u8(3), Board::Unknown(3));
-    assert_eq!(Board::Unknown(3).as_u8(), 3);
+fn board_decodes_unknown_when_byte_is_zero_or_four() {
+    // 0 is never sent, and 4 is past the last board. A heartbeat carrying either is still a
+    // node.
+    for byte in [0, 4] {
+        assert_eq!(Board::from_u8(byte), Board::Unknown(byte));
+        assert_eq!(Board::Unknown(byte).as_u8(), byte);
+    }
 }
 
 #[test]

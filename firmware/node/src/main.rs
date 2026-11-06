@@ -481,12 +481,12 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// the host; the host treats sixty seconds of silence as a node that has left the fleet.
 /// `node.version` is the epoch this node holds, which is how the host tells adoption from a
 /// bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
-/// (`bus::send`). The rail voltage and die temperature are read between dwells, so the
-/// voltage read's PBUS excursion never lands in one.
+/// (`bus::send`). The rail voltage, die temperature and free heap are read between dwells, so
+/// the voltage read's PBUS excursion never lands in one.
 fn heartbeat(node: &Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped beat or stale after a reflash, and they are
-    // five bytes of twenty-three.
+    // five bytes of twenty-seven.
     let msg = Heartbeat {
         capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
         mac: node.mac,
@@ -497,6 +497,7 @@ fn heartbeat(node: &Node) {
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
         die_temp: die_temp(health::die_temp_c()),
+        heap_free: esp_alloc::HEAP.free() as u32,
     };
     bus::send(UpType::Heartbeat, &msg.encode());
 }

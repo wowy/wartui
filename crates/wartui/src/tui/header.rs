@@ -18,12 +18,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
         (
-            format!(
-                "bridge {} ({:?}), fw v{} — link {state}",
-                mac::short(&bridge.mac),
-                bridge.chip,
-                bridge.fw_version
-            ),
+            format!("bridge {}, fw v{} — link {state}", mac::short(&bridge.mac), bridge.fw_version),
             if snapshot.link_up && snapshot.position.is_located() {
                 Color::Green
             } else {

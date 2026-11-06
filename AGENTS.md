@@ -172,7 +172,7 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every node-bus
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
-  `Heartbeat` (23 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
+  `Heartbeat` (27 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
   plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
@@ -189,9 +189,8 @@ is here rather than only in a `//!`.
   `wartui ota` updates the nodes over the bus.
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
   protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
-  trees meet as an undecodable frame rather than a named mismatch, which is stated where the
-  constant is. Every addition to the link enums therefore goes on the end — postcard writes a
-  variant as its index and a struct's fields in order.
+  trees may meet as an undecodable frame rather than a named mismatch, which is stated where the
+  constant is.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
   bytes of company identifier, or nothing. The split is made once, in the engine's

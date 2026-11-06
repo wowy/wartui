@@ -131,10 +131,10 @@ impl FleetEngine {
         CaptureSettings {
             pool: self.config.pool,
             record_raw: self.config.record_raw,
-            // The bridge's receiver is built for every run, so it counts only while a bridge with
-            // a GPS port is connected.
+            // The bridge's receiver is built for every run, so it counts only while a bridge is
+            // connected.
             gps: self.config.position.gps().is_some()
-                || (self.bridge_has_gps() && self.config.position.bridge_gps().is_some()),
+                || (self.bridge_connected() && self.config.position.bridge_gps().is_some()),
             gps_max_age: self.config.position.max_age(),
             remember_ble: self.remember_ble,
             preferred_ble: self.preferred_ble,
@@ -191,7 +191,6 @@ impl FleetEngine {
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
-                    chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
                     node_board: info.node_board,
                 }));
@@ -307,7 +306,7 @@ impl FleetEngine {
     /// interval.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
-        if self.bridge_has_gps() && self.config.position.bridge_gps().is_some() {
+        if self.bridge_connected() && self.config.position.bridge_gps().is_some() {
             let bytes = GpsWriteBytes::from_slice(&ubx::valset_rate(self.config.gps_rate_hz))
                 .expect("a rate write fits one GpsWrite");
             batch.bulk.push(HostToBridge::GpsWrite { bytes });
@@ -326,12 +325,13 @@ impl FleetEngine {
         self.node_board().label(slot)
     }
 
-    /// Whether the bridge connected now was built with a GPS port. `self.bridge` outlives a
-    /// disconnect, so the link must be up too. The runtime reads this after each event to decide
-    /// whether the host's search stands down, so the two never disagree about the bridge.
+    /// Whether a bridge is connected now, and so a GPS port: every P4 reads one. `self.bridge`
+    /// outlives a disconnect, so the link must be up too. The runtime reads this after each event
+    /// to decide whether the host's search stands down, so the two never disagree about the
+    /// bridge.
     #[must_use]
-    pub fn bridge_has_gps(&self) -> bool {
-        self.link_up && self.bridge.as_ref().is_some_and(|bridge| bridge.gps)
+    pub fn bridge_connected(&self) -> bool {
+        self.link_up && self.bridge.is_some()
     }
 
     /// Where the host believes it is: the chain the runtime feeds the bridge's receiver through.

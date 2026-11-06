@@ -9,7 +9,7 @@ use heapless::Vec;
 
 use super::{AckPoll, AckWait, HEADER_LEN, Header, PAYLOAD_MAX, Packer, RECORD_MAX, TRANSFER_LEN};
 use crate::frame_ring::FrameRing;
-use crate::link::Undelivered;
+use crate::link::{MAX_NODE_DOWN, Undelivered};
 
 /// The most records one flight carries.
 pub const FLIGHT_MAX: usize = 16;
@@ -56,15 +56,13 @@ impl<const B: usize> Downlink<B> {
         }
     }
 
-    /// Queue record `id` of type `kind`.
+    /// Queue record `id` of type `kind`. `body` is a [`ToNodeBody`](crate::link::ToNodeBody),
+    /// which one transfer always carries: [`RECORD_MAX`] is [`MAX_NODE_DOWN`], checked at build.
     ///
     /// # Errors
-    /// [`Undelivered::TooLarge`] for a body no transfer carries, and
     /// [`Undelivered::QueueFull`] when the queue has no room. Nothing is queued then.
     pub fn push(&mut self, id: u16, kind: u8, body: &[u8]) -> Result<(), Undelivered> {
-        if body.len() > RECORD_MAX {
-            return Err(Undelivered::TooLarge);
-        }
+        debug_assert!(body.len() <= MAX_NODE_DOWN, "a {}-byte body for a node", body.len());
         let mut entry = [0u8; ENTRY_HEADER + RECORD_MAX];
         let len = ENTRY_HEADER + body.len();
         entry[..2].copy_from_slice(&id.to_le_bytes());

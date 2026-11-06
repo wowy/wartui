@@ -44,13 +44,8 @@ pub const HOST_BAUD: u32 = 4_000_000;
 /// The revision of this protocol both ends must agree on.
 ///
 /// Held at 1 until 1.0, whatever the message enums do: both ends are flashed from one tree,
-/// so there is no older peer for it to protect.
-///
-/// The cost is that a host and a bridge built from different trees meet as an
-/// undecodable frame, not a named mismatch. Postcard writes an enum variant as its index
-/// and a struct's fields in order. A new variant is an index the old build has no case
-/// for. A new field on [`BridgeToHost::Ready`] shifts everything after it, so the bridge
-/// reads as one that answered nothing. Every addition to these enums goes on the end.
+/// so there is no older peer for it to protect. The cost is that a host and a bridge built
+/// from different trees may meet as an undecodable frame, not a named mismatch.
 pub const LINK_PROTO_VERSION: u8 = 1;
 
 /// The longest body a node sends. A [`crate::bus::SightingBatch`] fills it exactly. The P4
@@ -105,7 +100,7 @@ pub const UPDATE_STATUS_MAX: usize = 16;
 /// One encoded `Op::Status`, in transit to the host.
 pub type UpdateStatusBytes = Vec<u8, UPDATE_STATUS_MAX>;
 
-/// The P4's `Info` [`BridgeToHost::Log`] after a host frame confirms its image on trial.
+/// The P4's [`BridgeToHost::Log`] after a host frame confirms its image on trial.
 /// `wartui flash-bridge` waits for it after an update, so both ends read the text from here.
 pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
 
@@ -113,20 +108,13 @@ pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
 /// error follows after a colon.
 pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 
+/// The P4's [`BridgeToHost::Error`] while no GPS receiver answers on its port, repeated with
+/// every announcement. The simulator sends it too, as a P4 with nothing on the port.
+pub const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
+
 /// The start of the P4's [`BridgeToHost::Error`] while it updates its C6
 /// (`split::Pair::fault`). `wartui flash-bridge` follows the C6's update by it.
 pub const RADIO_UPDATING: &str = "updating the radio";
-
-/// Which chip the bridge firmware is running on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub enum Chip {
-    /// Dual-band, same radio as the nodes.
-    Esp32C5,
-    /// 2.4 GHz only: the radio coprocessor of a P4 bridge.
-    Esp32C6,
-    /// No radio of its own: it bridges through an ESP32-C6 over UART.
-    Esp32P4,
-}
 
 /// What a bridge chip's firmware last marked before it reset.
 ///
@@ -152,16 +140,6 @@ pub enum LoopPhase {
     RadioLink,
 }
 
-/// Severity of a [`BridgeToHost::Log`] line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[allow(missing_docs)]
-pub enum LogLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
 /// Why the P4 could not deliver a [`HostToBridge::ToNode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Undelivered {
@@ -169,8 +147,6 @@ pub enum Undelivered {
     NoNode,
     /// The slot's queue had no room.
     QueueFull,
-    /// The body is longer than one transfer carries.
-    TooLarge,
     /// The node did not acknowledge the transfer that carried it, after every try.
     Timeout,
 }
@@ -197,7 +173,7 @@ pub enum HostToBridge {
     /// Bytes to write verbatim to the GPS receiver, composed by the host.
     ///
     /// The bridge does not read them, so a change to the receiver's configuration costs
-    /// a `cargo run`, not a reflash. A bridge without a GPS port drops them.
+    /// a `cargo run`, not a reflash.
     GpsWrite {
         /// The receiver's own protocol, typically UBX.
         #[serde(with = "bytes")]
@@ -206,8 +182,7 @@ pub enum HostToBridge {
     /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit` or
     /// `Install` in the [`crate::radio_link::update`] layout, which the P4 answers with a
     /// [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
-    /// serves both links. A bridge that takes no update answers with an
-    /// [`BridgeToHost::Error`].
+    /// serves both links. A P4 that refuses updates answers with an [`BridgeToHost::Error`].
     Update(#[serde(with = "bytes")] UpdateOp),
     /// One record for the node in `slot`, answered by [`BridgeToHost::Delivered`] or
     /// [`BridgeToHost::Undelivered`].
@@ -236,25 +211,17 @@ pub enum HostToBridge {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
     /// Sent in answer to [`HostToBridge::Identify`], when a host's first frame arrives, and
-    /// when a new life begins while a host is present (`firmware/p4-bridge/src/host.rs`). The
-    /// host checks `proto_version` and refuses a bridge it does not understand.
+    /// when a new life begins while a host is present (`firmware/p4-bridge/src/host.rs`).
     Ready {
-        /// Which chip this is.
-        chip: Chip,
         /// The bridge's identity: its C6's MAC, or the P4's own while no C6 answers.
         mac: Mac,
         /// Bridge firmware version.
         fw_version: ShortStr,
-        /// Always [`LINK_PROTO_VERSION`] as the firmware was built with.
-        proto_version: u8,
         /// Why this life started. Anything but [`ResetCause::PowerOn`] means
         /// the bridge restarted underneath a host that may not have noticed.
         reset_cause: ResetCause,
         /// Where the previous life stopped, when the reset preserved it.
         last_phase: LoopPhase,
-        /// Bytes free in the C6's heap. Nothing wartui writes allocates, so a figure that
-        /// falls across a long capture is a leak.
-        heap_free: u32,
         /// Milliseconds since this life started, at the moment of announcing.
         ///
         /// Lets the host tell a *new* life from a second answer to an
@@ -262,21 +229,16 @@ pub enum BridgeToHost {
         /// the bus, so both arrive on one connection, and nothing else in the frame separates
         /// them. See `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
-        /// Whether this board was built with a GPS port.
-        ///
-        /// A board fact. It does not mean a receiver answered: a missing receiver is
-        /// reported as an [`Self::Error`] instead.
-        gps: bool,
-        /// The ESP32-C6 radio behind the bridge, as the C6 reported it. `None` while the C6
-        /// has not answered.
-        radio: Option<RadioInfo>,
-        /// The digest appended to the booted image ([`crate::ota::image`]), from a bridge
-        /// that takes updates over this link. `None` from one that does not. The host reads
-        /// it to tell an installed image from a rollback.
-        image: Option<[u8; DIGEST_LEN]>,
         /// What carries the nodes, which the P4 reads at boot. It sets the slots driven and the
         /// names an operator reads for them.
         node_board: NodeBoard,
+        /// The ESP32-C6 radio behind the bridge, as the C6 reported it. `None` while the C6
+        /// has not answered.
+        radio: Option<RadioInfo>,
+        /// The digest appended to the P4's booted image ([`crate::ota::image`]). The host reads
+        /// it to tell an installed image from a rollback. `None` when the P4 cannot read one:
+        /// its partition table did not read, or the image carries no appended digest.
+        image: Option<[u8; DIGEST_LEN]>,
     },
     /// Reply to [`HostToBridge::GetStatus`].
     Status {
@@ -290,11 +252,10 @@ pub enum BridgeToHost {
         /// Node records longer than [`MAX_NODE_PAYLOAD`], dropped since boot. No node of
         /// this build sends one.
         rx_oversize: u32,
-        /// Fill level of each bounded queue the firmware has. Empty for a bridge with
-        /// none to report.
+        /// Fill level of each bounded queue: the P4's, and the C6's once it has reported them.
         queues: QueueStats,
-        /// The P4–C6 UART link's counters. `None` for a bridge without one.
-        radio_link: Option<RadioLinkStats>,
+        /// The P4–C6 UART link's counters.
+        radio_link: RadioLinkStats,
         /// Host-link reads since boot that saw one or more line errors or overflows on the
         /// P4's host UART: FIFO overflows, framing, parity and glitches. One read counts once
         /// however many it saw. An overflow is host bytes lost, as when the P4 holds its
@@ -304,8 +265,6 @@ pub enum BridgeToHost {
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
     Log {
-        /// Severity.
-        level: LogLevel,
         /// Message text.
         message: LogStr,
     },
@@ -374,19 +333,19 @@ pub enum PowerOutcome {
     Failed,
 }
 
-/// A bounded queue whose depth the firmware reports.
+/// A bounded queue whose depth the firmware reports. Every queue counts bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum QueueId {
-    /// The C6's queue toward the P4. Counts bytes.
+    /// The C6's queue toward the P4.
     RadioUp,
-    /// The P4's queue of records waiting for a packet to the C6. Counts bytes.
+    /// The P4's queue of records waiting for a packet to the C6.
     RadioDown,
-    /// The P4's priority ring toward the host. Counts bytes.
+    /// The P4's priority ring toward the host.
     HostPriority,
-    /// The P4's bulk ring toward the host. Counts bytes.
+    /// The P4's bulk ring toward the host.
     HostBulk,
     /// The P4's queues of records for its nodes, one per slot: one slot's capacity, the
-    /// deepest any slot has been, and every slot's refusals. Counts bytes.
+    /// deepest any slot has been, and every slot's refusals.
     NodeDown,
 }
 
@@ -403,17 +362,6 @@ impl QueueId {
             Self::HostPriority => "host-priority",
             Self::HostBulk => "host-bulk",
             Self::NodeDown => "node-down",
-        }
-    }
-
-    /// What this queue's capacity, high-water mark and drops count: `"bytes"` or `"entries"`.
-    pub fn unit(self) -> &'static str {
-        match self {
-            Self::RadioUp
-            | Self::RadioDown
-            | Self::HostPriority
-            | Self::HostBulk
-            | Self::NodeDown => "bytes",
         }
     }
 
@@ -444,9 +392,9 @@ impl QueueId {
 /// How full a queue has been, and what it has lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct QueueStat {
-    /// Which queue this describes; it also says whether the counts are bytes or entries.
+    /// Which queue this describes.
     pub queue: QueueId,
-    /// Its size.
+    /// Its size, in bytes.
     pub capacity: u32,
     /// The most it has held at once.
     pub high_water: u32,
@@ -457,11 +405,9 @@ pub struct QueueStat {
 /// The queues a [`BridgeToHost::Status`] reports; room for every [`QueueId`] with spare.
 pub type QueueStats = Vec<QueueStat, 8>;
 
-/// The ESP32-C6 behind a split bridge, as it described itself over UART.
+/// The ESP32-C6 behind the P4, as it described itself over UART.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RadioInfo {
-    /// The radio chip.
-    pub chip: Chip,
     /// The radio's MAC.
     pub mac: Mac,
     /// The radio firmware's version.
@@ -475,7 +421,7 @@ pub struct RadioInfo {
 }
 
 /// Counters of the P4–C6 UART link, since boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RadioLinkStats {
     /// Verified C6→P4 packets.
     pub packets: u32,

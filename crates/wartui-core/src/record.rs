@@ -78,6 +78,8 @@ pub struct Heartbeat {
     pub vdd_mv: Option<u16>,
     /// The node's die temperature in whole degrees Celsius, `None` when the read failed.
     pub die_temp_c: Option<i16>,
+    /// Bytes free in the node's heap.
+    pub heap_free: u32,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }
@@ -100,11 +102,10 @@ pub struct BridgeStatusSeen {
     pub host_frames: u64,
     /// Node records too long to forward that it dropped since its boot. Not in `rx_count`.
     pub rx_oversize: u32,
-    /// Its queues' capacity, high-water mark and drops since its boot; empty when it reports
-    /// none.
+    /// Its queues' capacity, high-water mark and drops since its boot.
     pub queues: QueueStats,
-    /// Its radio link's counters since its boot; `None` off the P4 split bridge.
-    pub radio_link: Option<RadioLinkStats>,
+    /// Its radio link's counters since its boot.
+    pub radio_link: RadioLinkStats,
     /// Line errors on the P4's host UART since its boot: bytes from this host lost or corrupted.
     pub host_uart_errors: u32,
 }
@@ -220,8 +221,6 @@ pub struct RawFrame {
 pub struct BridgeSeen {
     /// The bridge's MAC: its C6's, which names the bridge.
     pub mac: Mac,
-    /// Which chip it is.
-    pub chip: String,
     /// Its firmware version.
     pub fw_version: String,
     /// What carries its nodes, which maps the stored bus slots to the silk names.

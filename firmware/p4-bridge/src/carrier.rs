@@ -45,7 +45,7 @@ use wartui_proto::carrier::{
     ADDRESS, ALL_INPUTS, Decision, REG_CONFIG, REG_INPUT, REG_OUTPUT, decide, port, ports,
     warm_board,
 };
-use wartui_proto::link::{BridgeToHost, LogLevel, LogStr, PowerOutcome};
+use wartui_proto::link::{BridgeToHost, LogStr, PowerOutcome};
 
 use crate::{I2cBus, Shared};
 
@@ -249,7 +249,7 @@ pub fn say(shared: &Shared) {
             power.board,
             power.board.slot_count()
         );
-        shared.push_line(Some(LogLevel::Info), line);
+        shared.push_log(&line);
     }
 }
 

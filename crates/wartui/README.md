@@ -140,6 +140,7 @@ of its output, after the export summary:
   queue      host-bulk  peak 262,144/262,144 bytes  1,300 dropped
   queue      node-down  peak 3,102/4,096 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
+  host link  0 host_uart_errors
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
@@ -156,7 +157,8 @@ of its output, after the export summary:
 | `peak by node` | The same for each node, by address                                              |
 | `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
-| `radio link`   | The P4 split bridge's link packets, and its link errors that are not zero       |
+| `radio link`   | Packets on the P4–C6 link, and its link errors that are not zero                |
+| `host link`    | Host-link reads on the P4 that saw line errors or overflows                     |
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
@@ -173,14 +175,13 @@ around the step is a lower bound.
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
 is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
-`store dropped`, `queue` drops and, on a Pi, the `health` counts. A `queue` peak is the most
-the queue held since the bridge booted, so it can predate the capture. Left out:
+`store dropped`, `queue` drops, `host link` and, on a Pi, the `health` counts. A `queue` peak is
+the most the queue held since the bridge booted, so it can predate the capture. Left out:
 
 - the `peak` lines, when the capture holds no sighting
 - `peak wifi` or `peak ble`, when the capture holds no sighting of that kind
 - the `bridge` line, when the capture holds no status reply
 - `queue` lines, when the bridge reports no queues
-- the `radio link` line, off the P4 split bridge
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
@@ -493,8 +494,8 @@ The run fails, and the P4 keeps the image it ran, when:
   stop the transfer.
 - The P4 does not announce itself within 10 s: another program, such as a running `wartui run`,
   holds the port, or the bridge is still starting. Try again.
-- The P4 answers in a form this build cannot read, or does not answer the update: its firmware
-  predates link updates. Flash it once by hand.
+- The P4 answers in a form this build cannot read, or does not answer the update: it runs
+  firmware from another tree. Flash it once by hand.
 - The P4 refuses the update: it has no second app slot, as on espflash's default partition table.
   Flash it once by hand with its own table.
 
@@ -783,7 +784,7 @@ nothing and says how many networks it left out.
   bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a second (default 5) on every
   bridge status poll. `g` reports on a port named with `--gps` when there is one. Otherwise it
   reports on the bridge's receiver while it is sending sentences, or when no host receiver is read
-  and the bridge has a GPS port, and shows `bridge` as its port.
+  and a bridge is connected, and shows `bridge` as its port.
   `wartui sniff --verbose` prints the receiver's raw stream.
 - **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
   marked as test data: `upload` refuses it, and `export` warns.

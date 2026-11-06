@@ -29,12 +29,9 @@ use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::gps::{self, ABSENT_PROBE_MS, BATCH_SLOTS, Bus, Watch};
-use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel};
+use wartui_proto::link::{GpsBytes, GpsWriteBytes, NO_GPS_RECEIVER};
 
 use crate::{I2cBus, Shared};
-
-/// What the bridge reports when the receiver stops answering.
-const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
 
 static BATCH_BUF: ConstStaticCell<[GpsBytes; BATCH_SLOTS]> =
     ConstStaticCell::new([const { GpsBytes::new() }; BATCH_SLOTS]);
@@ -97,10 +94,7 @@ async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, G
         match changes.answered {
             Some(true) => {
                 shared.gps_fault.set(None);
-                shared.push_log(
-                    LogLevel::Info,
-                    "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
-                );
+                shared.push_log("the GPS receiver answered on the I2C bus (GPIO7/GPIO8)");
             }
             Some(false) => {
                 shared.gps_fault.set(Some(NO_GPS_RECEIVER));

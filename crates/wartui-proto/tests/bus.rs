@@ -554,9 +554,8 @@ fn downlink_ignores_sent_when_ack_delivered_the_resend_first() {
 }
 
 #[test]
-fn downlink_refuses_record_when_queue_full_or_body_too_large() {
+fn downlink_refuses_record_when_queue_full() {
     let mut down = Downlink::<64>::new();
-    assert_eq!(down.push(1, 4, &[0; RECORD_MAX + 1]), Err(Undelivered::TooLarge));
     down.push(2, 1, &[0; 40]).unwrap();
     assert_eq!(down.push(3, 1, &[0; 40]), Err(Undelivered::QueueFull));
     assert_eq!(down.refused(), 1);

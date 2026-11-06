@@ -162,10 +162,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let shared = Shared::new(UP_QUEUE.take());
     // Queued behind the hello exchange, for the P4 to relay once the link is up.
     if let Some(err) = table_fault {
-        shared
-            .line(None, format_args!("could not read the partition table: {err}; updates refused"));
+        shared.error(format_args!("could not read the partition table: {err}; updates refused"));
     } else if let Some(lacks) = ota.lacks() {
-        shared.line(None, format_args!("{lacks}; updates refused"));
+        shared.error(format_args!("{lacks}; updates refused"));
     }
     for note in &booted.notes {
         shared.note(note);

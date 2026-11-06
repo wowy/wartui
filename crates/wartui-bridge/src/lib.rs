@@ -18,7 +18,7 @@ pub mod sim;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use wartui_proto::bus::NodeBoard;
-use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, RadioInfo};
+use wartui_proto::link::{BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -41,8 +41,6 @@ pub const BULK_CAPACITY: usize = 512;
 /// What the bridge announced about itself when it came up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeInfo {
-    /// Which chip the firmware is running on.
-    pub chip: Chip,
     /// The bridge's MAC: its C6's, which names the bridge.
     pub mac: Mac,
     /// Bridge firmware version.
@@ -53,27 +51,20 @@ pub struct BridgeInfo {
     pub reset_cause: ResetCause,
     /// Where the previous life stopped, when the reset preserved it.
     pub last_phase: LoopPhase,
-    /// Bytes free in the C6's heap at the moment it announced.
-    pub heap_free: u32,
     /// How long the bridge had been up when it announced itself.
     ///
     /// Small means this connection is talking to a bridge that has just restarted;
     /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
-    /// Whether this bridge was built with a GPS port.
-    ///
-    /// A board fact: it says the bridge forwards a receiver's bytes, not that a receiver
-    /// answered.
-    pub gps: bool,
+    /// What carries the nodes, which names their slots for the operator.
+    pub node_board: NodeBoard,
     /// The C6 behind the P4, as it described itself. Its reset cause is the only record of
     /// a radio crash under a running bridge. `None` until it answers.
     pub radio: Option<RadioInfo>,
-    /// The digest appended to the booted image, from a bridge that takes updates over the
-    /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.
-    /// `None` from a bridge that does not.
+    /// The digest appended to the P4's booted image. `wartui flash-bridge` reads it to tell an
+    /// installed image from a rollback. `None` when the P4 cannot read one: its partition
+    /// table did not read, or the image carries no appended digest.
     pub image: Option<[u8; DIGEST_LEN]>,
-    /// What carries the nodes, which names their slots for the operator.
-    pub node_board: NodeBoard,
 }
 
 /// Something that happened on the link.

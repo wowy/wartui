@@ -38,8 +38,8 @@ use wartui_proto::bus::{
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::link::{
-    BridgeToHost, Chip, FromNodeBody, HostToBridge, LogLevel, LogStr, LoopPhase, PowerOutcome,
-    RadioInfo, Undelivered,
+    BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome,
+    RadioInfo, RadioLinkStats, Undelivered,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
@@ -277,22 +277,18 @@ async fn run_bridge(
     attached: tokio::sync::watch::Sender<bool>,
 ) {
     let info = BridgeInfo {
-        chip: Chip::Esp32P4,
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
         // A simulated bridge has only ever just been switched on, so anything else
         // here is a fault on screen that no amount of looking could explain.
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::Unknown,
-        // Not modeled: nothing in the simulator allocates on a device heap,
-        // and a made-up figure would be read as a measurement.
-        heap_free: 0,
         // Announced the instant it came up, and it never reboots.
         uptime_ms: 0,
-        gps: false,
+        // Every slot driven, so a full simulated fleet shows silk names.
+        node_board: NodeBoard::Carrier14,
         // The C6 behind the P4, as the real bridge reports it.
         radio: Some(RadioInfo {
-            chip: Chip::Esp32C6,
             mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
             fw_version: wartui_proto::link::ShortStr::try_from(concat!(
                 env!("CARGO_PKG_VERSION"),
@@ -305,10 +301,14 @@ async fn run_bridge(
         }),
         // No image to name: it takes no update over the link.
         image: None,
-        // Every slot driven, so a full simulated fleet shows silk names.
-        node_board: NodeBoard::Carrier14,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
+        return;
+    }
+    // A P4 with nothing on its GPS port says so with each announcement.
+    let no_gps =
+        BridgeToHost::Error { message: LogStr::try_from(NO_GPS_RECEIVER).unwrap_or_default() };
+    if plumbing.events.send(LinkEvent::Message(no_gps)).await.is_err() {
         return;
     }
     let _ = attached.send(true);
@@ -320,7 +320,7 @@ async fn run_bridge(
             // The real bridge replies with `Ready`, but `Connected` has already
             // gone out above and a host counting connections would be confused.
             HostToBridge::Identify => None,
-            // No GPS port to write to, as announced above.
+            // No receiver on its GPS port to write to.
             HostToBridge::GpsWrite { .. } => None,
             HostToBridge::GetStatus => Some(BridgeToHost::Status {
                 rx_count: 0,
@@ -328,11 +328,10 @@ async fn run_bridge(
                 uptime_ms: elapsed_ms(started),
                 rx_oversize: 0,
                 queues: wartui_proto::link::QueueStats::new(),
-                radio_link: None,
+                radio_link: RadioLinkStats::default(),
                 host_uart_errors: 0,
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
-                level: LogLevel::Info,
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
             }),
             // It holds no image to update.
@@ -408,10 +407,11 @@ struct SimNode {
     /// same way the firmware's does: on the sweep or scan completing, whether or
     /// not a heartbeat goes out then.
     hb_counter: u32,
-    /// The supply and die readings each heartbeat carries. Fixed, and a little different
-    /// on each node, so the fleet table's rows differ.
+    /// The supply, die and heap readings each heartbeat carries. Fixed, so no node leaks, and
+    /// a little different on each node, so the fleet table's rows differ.
     vdd: Vdd,
     die_temp: DieTemp,
+    heap_free: u32,
     /// When this node next sends a heartbeat. `None` while unassigned. Set fresh every time
     /// an assignment is adopted while unassigned, not only the first, so a stale deadline from
     /// before this node was last unassigned never fires early.
@@ -458,6 +458,7 @@ impl SimNode {
             hb_counter: 1,
             vdd: Vdd::from_mv(3300 - 12 * u16::from(index % 4)),
             die_temp: DieTemp::from_c(40 + i16::from(index % 8)),
+            heap_free: 40_000 - 256 * u32::from(index % 8),
             next_beat: None,
             seq: 0,
             seen: Box::default(),
@@ -830,6 +831,7 @@ async fn beat(
         reset_cause: ResetCause::PowerOn,
         vdd: node.vdd,
         die_temp: node.die_temp,
+        heap_free: node.heap_free,
     };
     send_record(events, node.bus_slot, UpType::Heartbeat, &msg.encode(), started).await
 }

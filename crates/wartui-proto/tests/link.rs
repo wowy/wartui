@@ -10,8 +10,8 @@ use wartui_proto::bus::{
     SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UpType, UpdateState, UpdateStatus, Vdd,
 };
 use wartui_proto::link::{
-    BridgeToHost, Chip, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
-    GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase, MAX_FRAME,
+    BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
+    GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
     MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PowerOutcome, QueueId, QueueStat, QueueStats,
     RadioInfo, RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
     UpdateStatusBytes, crc16, decode_frame, encode_frame, encode_host_frame,
@@ -88,41 +88,34 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 40_000,
     };
 
     let mut v = Vec::new();
     v.push(BridgeToHost::Ready {
-        chip: Chip::Esp32C6,
         mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
         fw_version: String::try_from("0.1.0").expect("short"),
-        proto_version: LINK_PROTO_VERSION,
         // Not the defaults: a round trip that only ever carried the zero
         // variant of an enum would pass just as well with the field dropped.
         reset_cause: ResetCause::Watchdog,
         last_phase: LoopPhase::Command,
-        heap_free: 61_234,
         uptime_ms: 8_675_309,
-        gps: false,
+        node_board: NodeBoard::Bench,
         radio: None,
         image: None,
-        node_board: NodeBoard::Bench,
     })
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
     // fields a round trip would otherwise pass on without carrying.
     v.push(BridgeToHost::Ready {
-        chip: Chip::Esp32C5,
         mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x61],
         fw_version: String::try_from("0.1.0").expect("short"),
-        proto_version: LINK_PROTO_VERSION,
         reset_cause: ResetCause::Lockup,
         last_phase: LoopPhase::Pump,
-        heap_free: 60_000,
         uptime_ms: 1_000,
-        gps: true,
+        node_board: NodeBoard::Carrier14,
         radio: None,
         image: Some([0xD1; 32]),
-        node_board: NodeBoard::Carrier14,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::FromNode {
@@ -140,9 +133,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Delivered { id: 7 }).expect("sample_events has room");
-    for reason in
-        [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::TooLarge, Undelivered::Timeout]
-    {
+    for reason in [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::Timeout] {
         v.push(BridgeToHost::Undelivered { id: 8, reason }).expect("sample_events has room");
     }
     v.push(BridgeToHost::Status {
@@ -151,13 +142,12 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         uptime_ms: 60_000,
         rx_oversize: 2,
         queues: QueueStats::new(),
-        radio_link: None,
+        radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
-        level: LogLevel::Warn,
-        message: String::try_from("outbound ring full").expect("short"),
+        message: String::try_from("bus A slot 3 answered").expect("short"),
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNGGA,").expect("fits") })
@@ -583,7 +573,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
     }
     let undelivered = BridgeToHost::Undelivered { id: 1, reason: Undelivered::Timeout };
-    assert_eq!(postcard::to_slice(&undelivered, &mut buf).expect("encodes"), [8, 1, 3]);
+    assert_eq!(postcard::to_slice(&undelivered, &mut buf).expect("encodes"), [8, 1, 2]);
 }
 
 #[test]
@@ -615,7 +605,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         uptime_ms: 5_000,
         rx_oversize: 0xDEAD_BEEF,
         queues: QueueStats::new(),
-        radio_link: None,
+        radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
     };
     let mut out = [0u8; MAX_FRAME];
@@ -681,7 +671,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         uptime_ms: 5_000,
         rx_oversize: 0,
         queues,
-        radio_link: Some(RadioLinkStats {
+        radio_link: RadioLinkStats {
             packets: u32::MAX,
             crc_fail: 1,
             bad_magic: 2,
@@ -691,7 +681,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
             radio_bad_magic: 6,
             radio_seq_gap: 7,
             radio_uart_errors: 8,
-        }),
+        },
         host_uart_errors: 9,
     };
     assert_eq!(round_trip(&status), status);
@@ -700,17 +690,13 @@ fn link_round_trips_status_with_queues_and_radio_link() {
 #[test]
 fn link_round_trips_ready_with_radio() {
     let ready = BridgeToHost::Ready {
-        chip: Chip::Esp32P4,
         mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
         fw_version: String::try_from("0.1.0").expect("short"),
-        proto_version: LINK_PROTO_VERSION,
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::RadioLink,
-        heap_free: 1,
         uptime_ms: 2,
-        gps: false,
+        node_board: NodeBoard::Carrier10,
         radio: Some(RadioInfo {
-            chip: Chip::Esp32C6,
             mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x63],
             fw_version: String::try_from("0.1.1").expect("short"),
             reset_cause: ResetCause::Watchdog,
@@ -718,7 +704,6 @@ fn link_round_trips_ready_with_radio() {
             uptime_ms: u32::MAX,
         }),
         image: Some([0xA5; 32]),
-        node_board: NodeBoard::Carrier10,
     };
     assert_eq!(round_trip(&ready), ready);
 }
@@ -768,8 +753,9 @@ fn link_codec_pins_power_cycled_bytes_when_bridge_answers() {
 }
 
 #[test]
-fn link_codec_pins_node_board_as_last_byte_when_ready_is_encoded() {
-    // `node_board` is `Ready`'s last field, so its byte ends the body.
+fn link_codec_pins_node_board_ahead_of_radio_and_image_when_ready_is_encoded() {
+    // The sample has no radio and no image, so `node_board`'s byte is followed only by their
+    // two `None` tags.
     let mut out = [0u8; MAX_FRAME];
     for (board, code) in [
         (NodeBoard::Bench, 0),
@@ -782,7 +768,7 @@ fn link_codec_pins_node_board_as_last_byte_when_ready_is_encoded() {
             *node_board = board;
         }
         let n = encode_frame(&ready, &mut out).expect("encodes");
-        assert_eq!(frame_body(&out[..n]).last(), Some(&code), "{board:?}");
+        assert_eq!(frame_body(&out[..n]).last_chunk(), Some(&[code, 0, 0]), "{board:?}");
     }
 }
 
@@ -791,7 +777,9 @@ fn link_refuses_ready_when_node_board_byte_names_none() {
     let ready = sample_events().into_iter().next().expect("Ready is first");
     let mut buf = [0u8; MAX_FRAME];
     let mut bytes = postcard::to_slice(&ready, &mut buf).expect("encodes").to_vec();
-    *bytes.last_mut().expect("a body") = 4;
+    // `node_board`, ahead of the radio's and the image's `None` tags.
+    let at = bytes.len() - 3;
+    bytes[at] = 4;
     assert!(postcard::from_bytes::<BridgeToHost>(&bytes).is_err());
 }
 
@@ -818,18 +806,14 @@ fn link_round_trips_update_when_op_is_a_full_chunk() {
 fn link_round_trips_ready_when_image_is_present_or_absent() {
     for image in [None, Some([0x5A; 32])] {
         let ready = BridgeToHost::Ready {
-            chip: Chip::Esp32P4,
             mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
             fw_version: String::try_from("0.1.0").expect("short"),
-            proto_version: LINK_PROTO_VERSION,
             reset_cause: ResetCause::Software,
             last_phase: LoopPhase::Boot,
-            heap_free: 0,
             uptime_ms: 3,
-            gps: true,
+            node_board: NodeBoard::Carrier6,
             radio: None,
             image,
-            node_board: NodeBoard::Carrier6,
         };
         assert_eq!(round_trip(&ready), ready);
     }

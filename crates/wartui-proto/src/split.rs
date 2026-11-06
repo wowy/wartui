@@ -30,8 +30,6 @@
 //!   [`PairEvent::ResetRadio`], up to [`TRIAL_BOOTS`] times. A trial image that hangs gets no
 //!   watchdog, and each power cycle counts a trial boot, so the C6 rolls back to the image it
 //!   ran before (`firmware/common/src/ota.rs`).
-//! - **A C6 whose hello carries no digest is not updated**: it cannot take the image, so it needs
-//!   one wired flash.
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
 //!   updates over the host link (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
@@ -46,8 +44,8 @@ use core::fmt::Write;
 
 use crate::bus::NodeBoard;
 use crate::link::{
-    BridgeToHost, Chip, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueStat, QueueStats,
-    RADIO_UPDATING, RadioInfo, RadioLinkStats, ShortStr,
+    BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING, RadioInfo,
+    RadioLinkStats, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
@@ -87,7 +85,7 @@ pub enum RadioState {
     /// The C6 runs another image after this P4 life's update, and speaks this P4's revision:
     /// bridged, with a fault.
     Stale(Hello),
-    /// The C6 answered speaking another revision, or with no image digest.
+    /// The C6 answered speaking another revision, and no update brought it to this one.
     Mismatch(Hello),
     /// No hello arrived in time.
     Absent,
@@ -256,15 +254,17 @@ impl Pair {
     /// The state a new life's hello puts the pair in.
     fn judge(&mut self, hello: Hello) -> RadioState {
         let revision = hello.link_rev == LINK_REVISION;
-        match hello.image {
-            Some(image) if image == self.bundled && revision => RadioState::Up(hello),
-            Some(image) if image != self.bundled && !self.attempted => {
-                self.attempted = true;
-                self.progress = 0;
-                RadioState::Updating(hello)
-            }
-            Some(image) if image != self.bundled && revision => RadioState::Stale(hello),
-            Some(_) | None => RadioState::Mismatch(hello),
+        let bundled = hello.image == self.bundled;
+        if bundled && revision {
+            RadioState::Up(hello)
+        } else if !bundled && !self.attempted {
+            self.attempted = true;
+            self.progress = 0;
+            RadioState::Updating(hello)
+        } else if !bundled && revision {
+            RadioState::Stale(hello)
+        } else {
+            RadioState::Mismatch(hello)
         }
     }
 
@@ -435,18 +435,13 @@ impl Pair {
             _ => (self.own_cause, self.own_phase),
         };
         Some(BridgeToHost::Ready {
-            chip: Chip::Esp32P4,
             mac,
             fw_version: self.own_fw.clone(),
-            proto_version: LINK_PROTO_VERSION,
             reset_cause,
             last_phase,
-            heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
-            // The P4 always reads its GPS receiver.
-            gps: true,
+            node_board: self.node_board,
             radio: hello.map(|hello| RadioInfo {
-                chip: hello.chip,
                 mac: hello.mac,
                 fw_version: hello.fw_version.clone(),
                 reset_cause: hello.reset_cause,
@@ -454,7 +449,6 @@ impl Pair {
                 uptime_ms: hello.uptime_ms,
             }),
             image: self.own_image,
-            node_board: self.node_board,
         })
     }
 
@@ -466,12 +460,6 @@ impl Pair {
                 let _ = write!(
                     text,
                     "the radio has stopped answering; wartui reset restarts the bridge"
-                );
-            }
-            RadioState::Mismatch(hello) if hello.image.is_none() => {
-                let _ = write!(
-                    text,
-                    "radio predates bundled updates; flash it through the header once"
                 );
             }
             RadioState::Mismatch(hello) => {
@@ -541,7 +529,7 @@ impl Pair {
             uptime_ms: self.uptime_ms(now_ms),
             rx_oversize,
             queues,
-            radio_link: Some(radio_link),
+            radio_link,
             host_uart_errors,
         }
     }

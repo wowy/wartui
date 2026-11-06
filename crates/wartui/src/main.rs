@@ -279,12 +279,9 @@ fn spec(bridge: &str) -> BridgeSpec {
 /// the kind of thing that should not be silent.
 fn describe(event: &LinkEvent) -> Option<String> {
     match event {
-        LinkEvent::Connected(info) => Some(format!(
-            "bridge {} on {:?}, firmware {}",
-            mac::full(&info.mac),
-            info.chip,
-            info.fw_version
-        )),
+        LinkEvent::Connected(info) => {
+            Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
+        }
         LinkEvent::Disconnected { reason } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
@@ -488,7 +485,7 @@ mod tests {
         BridgeInfo, BridgeSpec, Command, last_reset_line, no_boards_notice, parse, silence_notice,
         spec,
     };
-    use wartui_proto::link::{Chip, LoopPhase};
+    use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
 
     /// A P4 bridge's CH343 as the OS lists it.
@@ -718,17 +715,14 @@ mod tests {
     fn last_reset_line_says_what_ran_last_when_phase_is_only_a_hint() {
         let line = |last_phase| {
             last_reset_line(&BridgeInfo {
-                chip: Chip::Esp32P4,
                 mac: [0; 6],
                 fw_version: String::new(),
                 reset_cause: ResetCause::PowerOn,
                 last_phase,
-                heap_free: 0,
                 uptime_ms: 0,
-                gps: false,
+                node_board: wartui_proto::bus::NodeBoard::Bench,
                 radio: None,
                 image: None,
-                node_board: wartui_proto::bus::NodeBoard::Bench,
             })
         };
         for (phase, said) in [

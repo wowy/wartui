@@ -26,7 +26,7 @@ use wartui_proto::bus::{
     UpdateState, UpdateStatus, Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
-    BridgeToHost, Chip, FromNodeBody, HostToBridge, LinkError, LoopPhase, PowerOutcome, QueueId,
+    BridgeToHost, FromNodeBody, HostToBridge, LinkError, LoopPhase, PowerOutcome, QueueId,
     QueueStat, QueueStats, RadioLinkStats, Undelivered,
 };
 use wartui_proto::mac::Mac;
@@ -140,6 +140,7 @@ fn beat_msg(src: Mac, counter: u32) -> HeartbeatMsg {
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 0,
     }
 }
 
@@ -295,34 +296,22 @@ fn connected() -> Event {
 
 /// A connect from a bridge at `mac`, for the tests about a bridge swap.
 fn connected_with_mac(mac: Mac) -> Event {
-    connected_bridge(mac, false)
-}
-
-/// A connect from a bridge built with a GPS port.
-fn connected_with_gps() -> Event {
-    connected_bridge([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24], true)
-}
-
-fn connected_bridge(mac: Mac, gps: bool) -> Event {
-    connected_board(mac, gps, NodeBoard::Bench)
+    connected_board(mac, NodeBoard::Bench)
 }
 
 /// A connect from a bridge whose nodes `board` carries.
-fn connected_board(mac: Mac, gps: bool, node_board: NodeBoard) -> Event {
+fn connected_board(mac: Mac, node_board: NodeBoard) -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
-        chip: Chip::Esp32P4,
         mac,
         fw_version: "0.1.0".to_owned(),
         // An ordinary connect. The engine draws no conclusions from these, but a
         // fixture that said otherwise would describe a fleet without a bridge.
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::Unknown,
-        heap_free: 65_536,
         uptime_ms: 1_000,
-        gps,
+        node_board,
         radio: None,
         image: None,
-        node_board,
     }))
 }
 
@@ -1486,7 +1475,6 @@ fn engine_records_bridge_when_connected() {
         panic!("expected a bridge record, got {:?}", batch.records)
     };
     assert_eq!(bridge.mac, [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
-    assert_eq!(bridge.chip, "Esp32P4");
     assert_eq!(bridge.fw_version, "0.1.0");
 }
 
@@ -1523,24 +1511,16 @@ fn gps_writes(batch: &ActionBatch) -> Vec<Vec<u8>> {
 }
 
 #[test]
-fn engine_writes_gps_rate_on_every_poll_when_bridge_has_gps() {
+fn engine_writes_gps_rate_on_every_poll_when_bridge_is_connected() {
     let clock = Clock::new();
     let config = EngineConfig {
         gps_rate_hz: 2,
         ..config_with_receivers(&Gps::detached(), &Gps::detached())
     };
     let mut engine = engine(config, &clock);
-    assert_eq!(gps_writes(&engine.handle(connected_with_gps(), clock.at(1))), [valset_rate(2)]);
+    assert_eq!(gps_writes(&engine.handle(connected(), clock.at(1))), [valset_rate(2)]);
     // The next poll repeats it: a dropped write has nothing else behind it.
     assert_eq!(gps_writes(&engine.handle(Event::Tick, clock.at(7))), [valset_rate(2)]);
-}
-
-#[test]
-fn engine_writes_no_gps_rate_when_bridge_has_no_gps() {
-    let clock = Clock::new();
-    let mut engine = engine(config_with_receivers(&Gps::detached(), &Gps::detached()), &clock);
-    assert!(gps_writes(&engine.handle(connected(), clock.at(1))).is_empty());
-    assert!(gps_writes(&engine.handle(Event::Tick, clock.at(7))).is_empty());
 }
 
 #[test]
@@ -1548,7 +1528,7 @@ fn engine_writes_no_gps_rate_when_chain_has_no_bridge_receiver() {
     // `--no-gps`: the bridge's receiver is left as it booted.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    assert!(gps_writes(&engine.handle(connected_with_gps(), clock.at(1))).is_empty());
+    assert!(gps_writes(&engine.handle(connected(), clock.at(1))).is_empty());
 }
 
 /// Whether the snapshot at `now` reports on the bridge's receiver.
@@ -1572,7 +1552,7 @@ fn engine_snapshot_shows_host_receiver_when_bridge_receiver_is_silent() {
     let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
     assert!(!shows_bridge_gps(&engine, clock.at(1)), "no bridge yet");
-    engine.handle(connected_with_gps(), clock.at(1));
+    engine.handle(connected(), clock.at(1));
     // The host's search carries on while the bridge's receiver says nothing.
     assert!(!shows_bridge_gps(&engine, clock.at(2)));
 }
@@ -1583,7 +1563,7 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
     let clock = Clock::new();
     let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
-    engine.handle(connected_with_gps(), clock.at(1));
+    engine.handle(connected(), clock.at(1));
     bridge.feed_bytes(GSV, clock.at(2).unix_ms);
     assert!(shows_bridge_gps(&engine, clock.at(2)));
     assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
@@ -1592,8 +1572,6 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
         clock.at(3),
     );
     assert!(!shows_bridge_gps(&engine, clock.at(3)), "the host's search resumes");
-    engine.handle(connected(), clock.at(4));
-    assert!(!shows_bridge_gps(&engine, clock.at(4)), "a bridge without a GPS port");
 }
 
 #[test]
@@ -1603,47 +1581,48 @@ fn engine_snapshot_shows_pinned_host_receiver_when_bridge_receiver_is_talking() 
     let bridge = Gps::bridged(DEFAULT_MAX_AGE);
     let host = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
-    engine.handle(connected_with_gps(), clock.at(1));
+    engine.handle(connected(), clock.at(1));
     bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
     assert!(!shows_bridge_gps(&engine, clock.at(2)));
     host.stop();
 }
 
 #[test]
-fn engine_snapshot_shows_bridge_receiver_when_chain_has_no_host_receiver_and_bridge_has_gps() {
+fn engine_snapshot_shows_bridge_receiver_when_chain_has_no_host_receiver_and_bridge_connects() {
     // `--gps bridge`: the bridge's receiver is the only one, so it is shown connecting before its
     // first fix.
     let clock = Clock::new();
     let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
-    engine.handle(connected_with_gps(), clock.at(1));
+    engine.handle(connected(), clock.at(1));
     assert!(shows_bridge_gps(&engine, clock.at(2)));
 }
 
 #[test]
-fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_bridge_has_no_gps() {
-    // `--sim`, or a bridge built without a GPS port: nothing is being read, so nothing is shown
-    // rather than a receiver that never connects.
+fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_no_bridge_is_connected() {
+    // Nothing is being read, so nothing is shown rather than a receiver that never connects.
     let clock = Clock::new();
     let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     let gps = |engine: &FleetEngine| engine.snapshot(clock.at(2), StoreStats::default()).gps;
     assert_eq!(gps(&engine), None, "no bridge yet");
     engine.handle(connected(), clock.at(1));
-    assert_eq!(gps(&engine), None);
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(1),
+    );
+    assert_eq!(gps(&engine), None, "the bridge has gone");
 }
 
 #[test]
-fn engine_records_gps_setting_when_connected_bridge_has_gps() {
+fn engine_records_gps_setting_when_bridge_is_connected() {
     // `run` builds the bridge's receiver for every capture, so its presence in the chain alone
     // says nothing about whether a receiver is being read.
     let clock = Clock::new();
     let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     assert!(!engine.capture_settings().gps, "no bridge yet");
-    engine.handle(connected(), clock.at(1));
-    assert!(!engine.capture_settings().gps, "a bridge without a GPS port");
-    engine.handle(connected_with_gps(), clock.at(2));
+    engine.handle(connected(), clock.at(2));
     assert!(engine.capture_settings().gps);
     engine.handle(
         Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
@@ -1664,7 +1643,7 @@ fn engine_records_gps_setting_when_chain_has_host_receiver() {
 fn engine_records_no_gps_setting_when_chain_has_no_receiver() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected_with_gps(), clock.at(1));
+    engine.handle(connected(), clock.at(1));
     assert!(!engine.capture_settings().gps);
 }
 
@@ -1858,7 +1837,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             uptime_ms: 3_240_000,
             rx_oversize: 0,
             queues: Default::default(),
-            radio_link: None,
+            radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
         }))
     };
@@ -1924,9 +1903,10 @@ fn engine_records_bridge_status_when_reply_arrives() {
     };
 
     engine.handle(connected(), clock.at(1));
-    let first = engine.handle(status(1300, 3_240_000, &queues, Some(radio_link)), clock.at(2));
+    let first = engine.handle(status(1300, 3_240_000, &queues, radio_link), clock.at(2));
     // Lower than before: the bridge rebooted, and the row keeps what it said.
-    let second = engine.handle(status(2, 4_000, &QueueStats::new(), None), clock.at(7));
+    let rebooted = RadioLinkStats::default();
+    let second = engine.handle(status(2, 4_000, &QueueStats::new(), rebooted), clock.at(7));
 
     assert_eq!(
         statuses(&first),
@@ -1938,7 +1918,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_frames: 0,
             rx_oversize: 17,
             queues,
-            radio_link: Some(radio_link),
+            radio_link,
             host_uart_errors: 0,
         }]
     );
@@ -1952,7 +1932,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_frames: 0,
             rx_oversize: 17,
             queues: QueueStats::new(),
-            radio_link: None,
+            radio_link: rebooted,
             host_uart_errors: 0,
         }]
     );
@@ -1974,7 +1954,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             uptime_ms: 9_000,
             rx_oversize: 0,
             queues: Default::default(),
-            radio_link: None,
+            radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
         })),
         clock.at(4),
@@ -2587,9 +2567,7 @@ fn engine_counts_one_reboot_when_replay_then_live_both_show_it() {
 fn engine_records_unacked_and_retries_when_bridge_cannot_deliver() {
     // Every reason the bridge gives is the same outcome to the host: not delivered, so
     // still owed, and re-sent under the same epoch off the next heartbeat.
-    for reason in
-        [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::TooLarge, Undelivered::Timeout]
-    {
+    for reason in [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::Timeout] {
         let clock = Clock::new();
         let mut engine = engine(EngineConfig::default(), &clock);
         engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -3320,7 +3298,7 @@ fn clear_ring(mac: Option<Mac>) -> Event {
 fn engine_sends_power_cycle_at_once_when_operator_asks() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected_board(NODE, false, NodeBoard::Carrier14), clock.at(0));
+    engine.handle(connected_board(NODE, NodeBoard::Carrier14), clock.at(0));
     let slot = Slot::new(1, 0).expect("B1");
 
     let batch = engine.handle(Event::Command(Command::PowerCycle { slot }), clock.at(1));
@@ -3333,7 +3311,7 @@ fn engine_sends_power_cycle_at_once_when_operator_asks() {
 fn engine_names_power_cycle_outcome_when_bridge_answers() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected_board(NODE, false, NodeBoard::Carrier6), clock.at(0));
+    engine.handle(connected_board(NODE, NodeBoard::Carrier6), clock.at(0));
     let b1 = Slot::new(1, 0).expect("B1");
     let a5 = Slot::new(0, 4).expect("A5");
     let cases = [

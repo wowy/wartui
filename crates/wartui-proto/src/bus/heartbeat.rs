@@ -6,7 +6,7 @@ use crate::mac::Mac;
 use crate::reset::ResetCause;
 
 /// Length of a [`Heartbeat`] body.
-pub const HEARTBEAT_LEN: usize = 23;
+pub const HEARTBEAT_LEN: usize = 27;
 
 /// Length of the prefix and MAC that open every heartbeat body ([`Heartbeat::identity`]).
 ///
@@ -24,8 +24,8 @@ pub const CAP_FLAG_TRIAL: u8 = 1 << 1;
 
 /// The board a firmware image was built for.
 ///
-/// Each byte is fixed once assigned. 0 is never sent, and 3 stays unassigned. A byte this build has no name for decodes to
-/// [`Board::Unknown`]: a node on a board added later is still a node.
+/// Each byte is fixed once assigned, and 0 is never sent. A byte this build has no name for
+/// decodes to [`Board::Unknown`]: a node on a board added later is still a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Board {
     /// An ESP32-C5 board: byte 1.
@@ -33,7 +33,7 @@ pub enum Board {
     /// The ESP32-C6 that runs a P4 bridge's radio: byte 2. No node runs on one; its update
     /// receiver names it.
     Esp32c6,
-    /// An ESP32-P4 bridge: byte 4. No node runs on one; its update receiver names it. The P4
+    /// An ESP32-P4 bridge: byte 3. No node runs on one; its update receiver names it. The P4
     /// fills a link update's `Begin` with its receiver's board, so the receiver's board check
     /// passes every image: `wartui flash-bridge` checks the image is the P4's before sending it.
     Esp32p4,
@@ -48,7 +48,7 @@ impl Board {
         match self {
             Self::Esp32c5 => 1,
             Self::Esp32c6 => 2,
-            Self::Esp32p4 => 4,
+            Self::Esp32p4 => 3,
             Self::Unknown(byte) => byte,
         }
     }
@@ -59,7 +59,7 @@ impl Board {
         match byte {
             1 => Self::Esp32c5,
             2 => Self::Esp32c6,
-            4 => Self::Esp32p4,
+            3 => Self::Esp32p4,
             other => Self::Unknown(other),
         }
     }
@@ -82,7 +82,7 @@ pub struct Capabilities {
     pub version: Version,
     /// The board it was built for.
     pub board: Board,
-    /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only.
+    /// The radio reaches 5 GHz.
     pub five_ghz: bool,
     /// The node runs an image it has not yet confirmed ([`CAP_FLAG_TRIAL`]).
     pub trial: bool,
@@ -176,7 +176,7 @@ impl fmt::Display for Capabilities {
 /// Sent every [`IDLE_BEAT_MS`] while unassigned and every [`ASSIGNED_BEAT_MS`] while assigned.
 /// Never resent: a newer one replaces one the P4 has not clocked.
 ///
-/// Twenty-three bytes: the [`Capabilities`] prefix, the node's MAC, then the counters and
+/// Twenty-seven bytes: the [`Capabilities`] prefix, the node's MAC, then the counters and
 /// readings below in order.
 ///
 /// [`IDLE_BEAT_MS`]: crate::node::IDLE_BEAT_MS
@@ -211,6 +211,9 @@ pub struct Heartbeat {
     /// The die temperature in whole degrees just before this heartbeat, offset by 40, or
     /// [`DieTemp::NONE`] when the read failed. The die runs well above the air around it.
     pub die_temp: DieTemp,
+    /// Bytes free in the node's heap just before this heartbeat. Only the radio's blobs
+    /// allocate, so a figure that falls steadily across a capture is a leak.
+    pub heap_free: u32,
 }
 
 const P: usize = HEARTBEAT_PREFIX_LEN;
@@ -235,6 +238,7 @@ impl Heartbeat {
             reset_cause: ResetCause::from_u8(body[M + 9]),
             vdd: Vdd(body[M + 10]),
             die_temp: DieTemp(body[M + 11]),
+            heap_free: le_u32(body, M + 12),
         })
     }
 
@@ -266,8 +270,9 @@ impl Heartbeat {
         out[M + 9] = self.reset_cause.as_u8();
         out[M + 10] = self.vdd.0;
         out[M + 11] = self.die_temp.0;
+        out[M + 12..M + 16].copy_from_slice(&self.heap_free.to_le_bytes());
         out
     }
 }
 
-const _: () = assert!(M + 12 == HEARTBEAT_LEN);
+const _: () = assert!(M + 16 == HEARTBEAT_LEN);

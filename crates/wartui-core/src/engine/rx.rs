@@ -253,6 +253,7 @@ impl FleetEngine {
             reset_cause: heartbeat.reset_cause,
             vdd_mv: heartbeat.vdd.mv(),
             die_temp_c: heartbeat.die_temp.c(),
+            heap_free: heartbeat.heap_free,
             live,
         }));
 

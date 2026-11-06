@@ -73,7 +73,6 @@ CREATE TABLE IF NOT EXISTS capture (
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   bridge_mac BLOB,
-  bridge_chip TEXT,
   bridge_fw TEXT,
   -- What carries the bridge's nodes: `bench`, `carrier-6`, `carrier-10` or `carrier-14`.
   -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
@@ -103,7 +102,8 @@ CREATE TABLE IF NOT EXISTS node (
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
--- the node's read failed. An assignment
+-- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
+-- across a capture is a leak in the node firmware. An assignment
 -- sent in answer to a heartbeat is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   reset_cause TEXT NOT NULL,
   vdd_mv INTEGER,
   die_temp_c INTEGER,
+  heap_free INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -180,8 +181,8 @@ CREATE TABLE IF NOT EXISTS observation (
 -- between two rows, the `rx_count` difference less the `host_frames` difference is records
 -- lost on the host link plus the bridge's `dropped_tx`, give or take the records queued behind
 -- the reply, which overtakes them.
--- The `radio_link_*` columns are the P4 split bridge's UART link counters since boot, named as
--- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` counts
+-- The `radio_link_*` columns are the P4–C6 UART link's counters since boot, named as
+-- `RadioLinkStats` names them. `host_uart_errors` counts
 -- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
 -- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
 -- flash.
@@ -193,22 +194,21 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   uptime_ms INTEGER NOT NULL,
   host_frames INTEGER NOT NULL,
   rx_oversize INTEGER NOT NULL,
-  radio_link_packets INTEGER,
-  radio_link_crc_fail INTEGER,
-  radio_link_bad_magic INTEGER,
-  radio_link_seq_gap INTEGER,
-  radio_link_uart_errors INTEGER,
-  radio_link_radio_crc_fail INTEGER,
-  radio_link_radio_bad_magic INTEGER,
-  radio_link_radio_seq_gap INTEGER,
-  radio_link_radio_uart_errors INTEGER,
+  radio_link_packets INTEGER NOT NULL,
+  radio_link_crc_fail INTEGER NOT NULL,
+  radio_link_bad_magic INTEGER NOT NULL,
+  radio_link_seq_gap INTEGER NOT NULL,
+  radio_link_uart_errors INTEGER NOT NULL,
+  radio_link_radio_crc_fail INTEGER NOT NULL,
+  radio_link_radio_bad_magic INTEGER NOT NULL,
+  radio_link_radio_seq_gap INTEGER NOT NULL,
+  radio_link_radio_uart_errors INTEGER NOT NULL,
   host_uart_errors INTEGER NOT NULL
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
 -- `high_water` is the most the queue has held since the bridge booted, `dropped` what it
--- has evicted or refused. `queue` names it as `wartui status` does, and the name settles
--- whether the counts are bytes or entries.
+-- has evicted or refused. `queue` names it as `wartui status` does. Every count is bytes.
 CREATE TABLE IF NOT EXISTS bridge_queue (
   status_id INTEGER NOT NULL REFERENCES bridge_status(id),
   queue TEXT NOT NULL,
@@ -1138,8 +1138,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, slot, wifi_refused, ble_refused,
-                        reset_cause, vdd_mv, die_temp_c, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        reset_cause, vdd_mv, die_temp_c, heap_free, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1152,6 +1152,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.reset_cause.as_str(),
                     hb.vdd_mv,
                     hb.die_temp_c,
+                    hb.heap_free,
                     hb.live
                 ])?;
             }
@@ -1188,13 +1189,11 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 // Which dongle produced this capture. Written when the bridge announces itself,
                 // always after the capture row exists, and again if it re-announces.
                 tx.prepare_cached(
-                    "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3,
-                       node_board = ?4
+                    "UPDATE capture SET bridge_mac = ?1, bridge_fw = ?2, node_board = ?3
                      WHERE id = 1",
                 )?
                 .execute(params![
                     &bridge.mac[..],
-                    bridge.chip.as_str(),
                     bridge.fw_version.as_str(),
                     bridge.node_board.name()
                 ])?;
@@ -1238,15 +1237,15 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.uptime_ms,
                     column(status.host_frames),
                     status.rx_oversize,
-                    radio_link.map(|s| s.packets),
-                    radio_link.map(|s| s.crc_fail),
-                    radio_link.map(|s| s.bad_magic),
-                    radio_link.map(|s| s.seq_gap),
-                    radio_link.map(|s| s.uart_errors),
-                    radio_link.map(|s| s.radio_crc_fail),
-                    radio_link.map(|s| s.radio_bad_magic),
-                    radio_link.map(|s| s.radio_seq_gap),
-                    radio_link.map(|s| s.radio_uart_errors),
+                    radio_link.packets,
+                    radio_link.crc_fail,
+                    radio_link.bad_magic,
+                    radio_link.seq_gap,
+                    radio_link.uart_errors,
+                    radio_link.radio_crc_fail,
+                    radio_link.radio_bad_magic,
+                    radio_link.radio_seq_gap,
+                    radio_link.radio_uart_errors,
                     status.host_uart_errors,
                 ])?;
                 let status_id = tx.last_insert_rowid();
@@ -1335,7 +1334,7 @@ mod tests {
             host_frames: 0,
             rx_oversize: 0,
             queues: Default::default(),
-            radio_link: None,
+            radio_link: Default::default(),
             host_uart_errors: 0,
         })
     }
