@@ -27,7 +27,7 @@ Run both, from the repo root:
 
 ```sh
 python3 -I .claude/skills/capture-review/scripts/survey.py <db> [--log <log>] [--node 57:84]
-cargo run --release -q -p wartui -- analyze --db <db> --heartbeat-windows
+cargo run --release -q -p wartui -- analyze --db <db>
 ```
 
 The survey opens the file read-only and ends with a `FLAGS` list, each with the SQL that
