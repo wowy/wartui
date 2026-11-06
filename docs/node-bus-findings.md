@@ -117,3 +117,24 @@ undelivered across 2,201 and 2,260 transfers, three assignments delivered in 35 
 observations and no batch gaps. The P4 counted no seq gap when the nodes rejoined after their
 reflash, where earlier runs counted one; its 10 magic misses and 2 retries per slot date from
 that reflash.
+
+## Node updates over the bus, 2026-11-06
+
+`wartui ota --force` on the same bench at 1 MHz. Each node was reinstalled with its own version,
+0.3.1, which is the hardest case to confirm: the version can't tell the new image from the old.
+
+| | 0D:20, bus A | 1A:50, bus B |
+| --- | --- | --- |
+| Image | 905 KB | 905 KB |
+| Rate while sending | 24 KB/s | 24 KB/s |
+| Outcome | confirmed on the new image | confirmed on the new image |
+
+Both ran first time, with no restart of the session. The timed run, 1A:50's, took 45 s from start to
+confirmed, its 6 s listen and the image build included.
+
+- **The rate is one round trip per chunk.** One chunk is in flight at a time, and each waits
+  for the node's ack, which the P4 fetches on its 25 ms ack poll, then for `Delivered` to reach the
+  host. That is about 42 ms per KB. Pipelining chunks, or a faster clock, would raise it.
+- **Rollback.** An update cancelled at `rebooting` sends no confirm. The node booted the new image
+  as `trial boot 1 of 3`. Two resets through its USB counted boots 2 and 3, and the third rolled it
+  back to the old slot and rebooted. It then heartbeated off trial, with nothing sent to it.
