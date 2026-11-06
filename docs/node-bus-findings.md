@@ -73,3 +73,41 @@ reset after `flash-fleet`, not from this run.
   its CS is high, waits for the carrier board.
 - Speed. This run used 1 MHz. The carrier target is 4 MHz.
 - Load. Only heartbeats crossed the bus. Sighting batches cross it from the wire v1 cut onward.
+
+## Wire v1: the bus alone, 2026-11-05
+
+Branch `feat/wire-v1` takes the nodes off ESP-NOW. Heartbeats, sightings and assignments cross
+the bus as records, each data transfer is acknowledged, and a sender waits for its ack before
+sending more. Same boards and wiring as above. The P4 was wired-flashed over its CH343.
+
+**The first build (00a8ab2) dropped transfers at the node.** Its CS handler kept two finished
+transfers for the main loop, and the main loop reads the bus only between 125 ms dwells. While
+the P4 waits for an ack it clocks the slot every 25 ms, so idle transfers crowded out data:
+
+| 10 minutes | `0D:20` | `1A:50` |
+| --- | --- | --- |
+| Transfers dropped unread | 125 | 153 |
+| Assignment delivery, host send to `Delivered` | 60 ms | 60 ms, then 1,094 ms |
+
+The 1,094 ms delivery is one dropped data transfer and the P4's resend after its 1 s ack
+timeout.
+
+**The fix (d97134b) checks each transfer in the handler.** An idle transfer gives its buffer
+back at once. A data transfer queues, and the next transfer armed acknowledges it. A second
+10-minute run:
+
+| | `0D:20` (A1) | `1A:50` (B1) |
+| --- | --- | --- |
+| Transfers at the node | 2,999 | 3,090 |
+| Bad, dropped, gaps, resent or undelivered | 0 | 0 |
+| Assignment delivery | 35, 35 ms | 35 ms |
+| Longest CS handler run | 236 µs | 234 µs |
+| Heartbeats recorded | 120 | 120 |
+
+The capture recorded 407 observations, with no batch gaps.
+
+- The handler now runs from RAM and makes two CRC passes per edge, one checking and one
+  sealing. That costs up to 236 µs with interrupts masked, at roughly 4–10 edges a second. The
+  sightings kept arriving, but whether the radio loses frames to that window wasn't measured.
+  The CRC table is still in flash.
+- The P4's error counters rose only while the nodes were reflashing.
