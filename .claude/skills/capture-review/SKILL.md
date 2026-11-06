@@ -61,11 +61,9 @@ For every flag or anomaly worth mentioning:
    coincide with a bridge reboot, a GPS gap, a host stall, a settings change, a speed? Compare
    the odd node against its siblings in the same minutes; a fault on one node during a window when
    the others were fine points at that node, while all nodes at once points at the bridge, host or
-   environment. For per-node loss, compare at equal link RSSI (the survey's `miss by rssi`), not
-   just overall. Compare across the speed and place of the drive too, and against the node's share
-   of channels, because the node holding channel 6 shares the control channel with every
-   heartbeat. If the user has other captures in the repo root, check whether the same node misbehaves
-   in them as well. A pattern that repeats across drives is worth more than one capture's numbers.
+   environment. Compare across the speed and place of the drive too, and against the node's share
+   of channels and its slot. If the user has other captures in the repo root, check whether the
+   same node misbehaves in them as well. A pattern that repeats across drives is worth more than one capture's numbers.
 2. **Read the code that owns it** before naming a cause. `references/checks.md` maps each symptom
    to the module and findings doc to read; AGENTS.md § "Invariants that are easy to break" says
    which behaviors are deliberate. Cite `path:line`.
@@ -78,8 +76,8 @@ For every flag or anomaly worth mentioning:
 4. **Rate confidence**: *confirmed* (data and code agree), *likely*, or *hypothesis* (say what
    capture would test it).
 
-Answer loss questions from the capture, never by proposing a bench test: loss comes from busy
-air while driving, which a desk does not reproduce. Figures that are estimated rather than counted
+Answer loss questions from the capture, never by proposing a bench test: a drive's load comes
+from busy air, which a desk does not reproduce. Figures that are estimated rather than counted
 get a `~` and "inferred from timing" (or "from counters").
 
 ### Not findings
@@ -88,7 +86,7 @@ Drop these, they are settled policy:
 
 - Schema version bumps, migrations or compatibility shims for older captures or firmware — nothing
   is compatible before 1.0, and the fix for another build's file is a new `--db`.
-- Safeguards for more than twenty nodes.
+- Safeguards for more than fourteen nodes, one per node-bus slot.
 - `--lat/--lon` as a GPS fallback. It is test-only, and it marks a capture as test data.
 - Uploading. A review never runs `wartui upload` or touches the WDGWars endpoints.
 
