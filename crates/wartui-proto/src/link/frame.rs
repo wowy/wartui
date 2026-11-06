@@ -1,8 +1,8 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION,
-    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, UPDATE_STATUS_MAX,
+    BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION, MAX_FRAME,
+    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, UPDATE_STATUS_MAX,
 };
 use crate::ota::image::DIGEST_LEN;
 use crate::radio_link::update::OP_MAX;
@@ -14,10 +14,10 @@ use crate::radio_link::update::OP_MAX;
 // fields, its variant index, and the body's version byte and CRC.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
-// The same for the host-to-bridge direction, whose longest frame is a full v2 send.
-// COBS adds one byte per 254, so 16 covers it with the terminator.
-const MAX_HOST_BODY: usize = MAX_HOST_FRAME - 16;
-const _: () = assert!(MAX_ESPNOW_V2_PAYLOAD + 32 < MAX_HOST_BODY);
+// The same for the host-to-bridge direction, whose longest frames are a full record for a
+// node and an update op with a full chunk.
+const MAX_HOST_BODY: usize = MAX_HOST_FRAME - 8;
+const _: () = assert!(MAX_NODE_DOWN + 32 < MAX_HOST_BODY);
 // The GPS byte pipe, both ways, so a larger batch is a build error too.
 const _: () = assert!(GPS_FRAME + 32 < MAX_BODY);
 const _: () = assert!(GPS_WRITE_MAX + 32 < MAX_HOST_BODY);
@@ -26,10 +26,10 @@ const _: () = assert!(OP_MAX + 32 < MAX_HOST_BODY);
 const _: () = assert!(UPDATE_STATUS_MAX + 32 < MAX_BODY);
 // The two replies that grew with the split bridge, at their fullest.
 const _: () = assert!(
-    // variant index, `peer_count`, four `u32`s, then 8 queues of a tag and three `u32`s,
-    // then the `Option` tag and nine `u32`s. Varint integers never exceed their fixed width
-    // by more than a byte each.
-    1 + 1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 1 + 9 * 5 < MAX_BODY,
+    // variant index, four `u32`s, then 8 queues of a tag and three `u32`s, then the
+    // `Option` tag, nine `u32`s and the last `u32`. Varint integers never exceed their fixed
+    // width by more than a byte each.
+    1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 1 + 9 * 5 + 5 < MAX_BODY,
     "a Status with every queue and link stats must fit one frame"
 );
 const _: () = assert!(
@@ -127,8 +127,8 @@ static CRC16_TABLE: [u16; 256] = {
 /// Serialize a bridge-to-host `msg` into `out` as a complete frame, terminator included,
 /// of up to [`MAX_FRAME`].
 ///
-/// Each encoder takes one direction's enum, so a [`HostToBridge::SendEspNow`] can never be
-/// encoded against the smaller bridge-to-host buffer.
+/// Each encoder takes one direction's enum, so a frame is always checked against its own
+/// direction's buffer.
 ///
 /// Returns how many bytes of `out` were used.
 ///
@@ -139,9 +139,7 @@ pub fn encode_frame(msg: &BridgeToHost, out: &mut [u8]) -> Result<usize, LinkErr
 }
 
 /// Serialize a host-to-bridge `msg` into `out` as a complete frame of up to
-/// [`MAX_HOST_FRAME`], which a [`HostToBridge::SendEspNow`] with a full v2 payload needs.
-///
-/// Host only: its body buffer is three times [`encode_frame`]'s, on the stack.
+/// [`MAX_HOST_FRAME`].
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.

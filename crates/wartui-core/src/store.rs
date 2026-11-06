@@ -33,14 +33,14 @@ use std::time::{Duration, Instant};
 
 pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
-use wartui_proto::air::{RecordKind, WIRE_VERSION};
+use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
 
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, Record};
 
 /// The schema version this build writes and reads: 1 until wartui 1.0, as
-/// [`wartui_proto::air::WIRE_VERSION`] is. It is the lever for the first capture that must be read
+/// [`wartui_proto::link::LINK_PROTO_VERSION`] is. It is the lever for the first capture that must be read
 /// in an earlier build's terms, and none is before 1.0. Meanwhile [`SCHEMA_FINGERPRINT`] tells
 /// builds apart (see the module docs).
 pub const SCHEMA_VERSION: i32 = 1;
@@ -92,21 +92,15 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
+-- `slot` is the node-bus slot the heartbeat came from (`A1` to `B7`).
 -- `wifi_refused` and `ble_refused` are the node's since-boot refusal counts as
--- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
--- the node's since-boot heartbeat count, raw, and wraps at 2^16. `unsent` is the
--- heartbeats its radio could not send since boot, this one excluded, raw, and
--- wraps at 2^8. `dwell` is the scan channel number the node dwelt on just
--- before this heartbeat, 0 when none did (parked, Bluetooth, or a refused hop).
--- `prev_dwell` is the `dwell` its previous heartbeat carried, arrived or not, so
--- a single missed beat gets its channel from the next row. `tx_power` is the
--- radio's maximum transmit power in quarter-dBm as the node read it just before
--- this heartbeat, 0 when the read failed. `reset_cause` is why the node is
+-- the heartbeat carried them: raw, so a reboot shows as the value falling.
+-- `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
 -- the node's read failed. An assignment
--- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
+-- sent in answer to a heartbeat is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
@@ -114,14 +108,9 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   rx_at INTEGER NOT NULL,
   counter INTEGER NOT NULL,
   epoch INTEGER NOT NULL,
-  rssi INTEGER,
+  slot TEXT NOT NULL,
   wifi_refused INTEGER NOT NULL,
   ble_refused INTEGER NOT NULL,
-  beat INTEGER NOT NULL,
-  unsent INTEGER NOT NULL,
-  dwell INTEGER NOT NULL,
-  prev_dwell INTEGER NOT NULL,
-  tx_power INTEGER NOT NULL,
   reset_cause TEXT NOT NULL,
   vdd_mv INTEGER,
   die_temp_c INTEGER,
@@ -129,11 +118,11 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   live INTEGER NOT NULL
 );
 
--- One row per transmitted assignment, written when its outcome is known, so
+-- One row per assignment sent, written when its outcome is known, so
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the engine's monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
+-- `channels` is the forty-two-bit SCAN_CHANNELS mask the assignment carried, stored as the
 -- integer it is: the indices are what the wire said, and which channels they name is
 -- the scan table of the build that wrote the row. Nothing reads the column back, and
 -- nothing rewrites it when the table changes -- a row records what went out.
@@ -158,7 +147,7 @@ CREATE TABLE IF NOT EXISTS observation (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
-  link_rssi INTEGER,
+  slot TEXT NOT NULL,
   bssid BLOB NOT NULL,
   ssid BLOB,
   security TEXT NOT NULL,
@@ -180,13 +169,13 @@ CREATE TABLE IF NOT EXISTS observation (
 -- One row per bridge status reply, which the host polls for every few seconds.
 -- `rx_count`, `dropped_tx`, `uptime_ms` and `rx_oversize` are the bridge's since-boot
 -- counts as the reply carried them: raw, as `heartbeat` keeps its drop counts, so a
--- bridge reboot shows as the values falling. `rx_count` is the frames the bridge
--- accepted to forward; `rx_oversize` is those it dropped for being longer than any
--- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is
--- how many frames of ours this host had read off the link when the reply arrived, taken with
--- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
--- difference less the `host_frames` difference is frames lost on the host link plus the bridge's
--- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
+-- bridge reboot shows as the values falling. `rx_count` is the node records the bridge
+-- forwarded; `rx_oversize` is those it dropped for being longer than any node sends, which
+-- are not in `rx_count`. `host_frames` is how many node records this host had read off the
+-- link when the reply arrived, taken with `rx_count` so the two pair closely but not exactly:
+-- between two rows, the `rx_count` difference less the `host_frames` difference is records
+-- lost on the host link plus the bridge's `dropped_tx`, give or take the records queued behind
+-- the reply, which overtakes them.
 -- The `radio_link_*` columns are the P4 split bridge's UART link counters since boot, named as
 -- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` counts
 -- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
@@ -195,7 +184,6 @@ CREATE TABLE IF NOT EXISTS observation (
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
-  peer_count INTEGER NOT NULL,
   rx_count INTEGER NOT NULL,
   dropped_tx INTEGER NOT NULL,
   uptime_ms INTEGER NOT NULL,
@@ -266,12 +254,13 @@ CREATE TABLE IF NOT EXISTS batch_gap (
   lost INTEGER NOT NULL
 );
 
+-- One row per node record, kept only with `--record-raw`: the slot it came from, its type
+-- byte (`bus::UpType`) and its body verbatim.
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
-  src BLOB NOT NULL,
-  dst BLOB,
-  rssi INTEGER,
+  slot TEXT NOT NULL,
+  kind INTEGER NOT NULL,
   bytes BLOB NOT NULL
 );
 
@@ -569,7 +558,7 @@ impl Store {
         let scan_channels = SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         for (key, value) in [
             ("capture.scan_channels", Some(scan_channels)),
-            ("capture.wire_version", Some(WIRE_VERSION.to_string())),
+            ("capture.bus_version", Some(BUS_VERSION.to_string())),
             ("capture.core_version", Some(env!("CARGO_PKG_VERSION").to_owned())),
             ("capture.host_version", provenance.host_version.clone()),
             ("capture.host_build", provenance.host_build.clone()),
@@ -1149,25 +1138,18 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::Heartbeat(hb) => {
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
-                       (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
-                        beat, unsent, dwell, prev_dwell, tx_power, reset_cause, vdd_mv,
-                        die_temp_c, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                             ?16)",
+                       (node_mac, rx_at, counter, epoch, slot, wifi_refused, ble_refused,
+                        reset_cause, vdd_mv, die_temp_c, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
                     hb.rx_at_ms,
                     hb.counter,
                     hb.epoch,
-                    hb.link_rssi,
+                    hb.slot.to_string(),
                     hb.wifi_refused,
                     hb.ble_refused,
-                    hb.beat,
-                    hb.unsent,
-                    hb.dwell,
-                    hb.prev_dwell,
-                    hb.tx_power,
                     hb.reset_cause.as_str(),
                     hb.vdd_mv,
                     hb.die_temp_c,
@@ -1177,7 +1159,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::Observation(obs) => {
                 tx.prepare_cached(
                     "INSERT INTO observation
-                       (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+                       (node_mac, rx_at, slot, bssid, ssid, security, channel, rssi,
                         kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
                         raw_body)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
@@ -1185,7 +1167,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 .execute(params![
                     &obs.node_mac[..],
                     obs.rx_at_ms,
-                    obs.link_rssi,
+                    obs.slot.to_string(),
                     &obs.bssid[..],
                     obs.ssid,
                     obs.security,
@@ -1241,16 +1223,15 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 let radio_link = status.radio_link;
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames,
+                       (rx_at, rx_count, dropped_tx, uptime_ms, host_frames,
                         rx_oversize, radio_link_packets, radio_link_crc_fail,
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
                         radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
-                    status.peer_count,
                     status.rx_count,
                     status.dropped_tx,
                     status.uptime_ms,
@@ -1325,15 +1306,13 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(
-                    "INSERT INTO raw_frame (rx_at, src, dst, rssi, bytes)
-                     VALUES (?1,?2,?3,?4,?5)",
+                    "INSERT INTO raw_frame (rx_at, slot, kind, bytes) VALUES (?1,?2,?3,?4)",
                 )?
                 .execute(params![
                     raw.rx_at_ms,
-                    &raw.src[..],
-                    &raw.dst[..],
-                    raw.rssi,
-                    raw.bytes,
+                    raw.slot.to_string(),
+                    raw.kind,
+                    raw.bytes
                 ])?;
             }
         }
@@ -1351,7 +1330,6 @@ mod tests {
     fn status(rx_at_ms: i64) -> Record {
         Record::BridgeStatus(BridgeStatusSeen {
             rx_at_ms,
-            peer_count: 0,
             rx_count: 0,
             dropped_tx: 0,
             uptime_ms: 0,

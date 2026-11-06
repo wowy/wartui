@@ -3,7 +3,7 @@
 //! No database, no fleet table, no transmit. The point is to be able to say
 //! "the bridge hears the fleet and the decoder agrees" with nothing else in the
 //! way, and to have something to reach for later when a node goes quiet and the
-//! question is whether the frames are arriving at all.
+//! question is whether its records are arriving at all.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{
-    Capabilities, Compat, DecodeError, Frame, MAGIC, NODE_VERSION, RecordKind, SightingMsg,
-};
 use wartui_proto::beacon::rcoi_text;
-use wartui_proto::link::{BROADCAST, BridgeToHost};
-use wartui_proto::mac::{self, Mac};
+use wartui_proto::bus::{
+    Compat, DecodeError, Heartbeat, NODE_VERSION, RecordKind, SightingMsg, Slot, UpMsg, UpType,
+};
+use wartui_proto::link::BridgeToHost;
+use wartui_proto::mac;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -35,7 +35,7 @@ pub struct Args {
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
 
-    /// Also print the raw bytes of every frame.
+    /// Also print the raw bytes of every record.
     #[arg(long)]
     raw: bool,
 
@@ -82,48 +82,26 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} frames: {} sighting in {} batches, {} heartbeat, {} admin, {} update, \
-         {} update status, {} undecodable",
+        "\n# {} records: {} sighting in {} batches, {} heartbeat, {} update status, \
+         {} undecodable",
         counts.total,
         counts.sighting,
         counts.batches,
         counts.heartbeat,
-        counts.admin,
-        counts.update,
         counts.update_status,
         counts.undecodable
     );
-    // Every assignment on the air during a sniff came from somewhere else: this
-    // command holds the port and a radio does not hear its own frames. One in our own
-    // format is the harder to notice any other way, because our nodes obey a second
-    // wartui core's assignments and the fleet table cannot show the difference.
-    if counts.admin > 0 {
-        println!(
-            "# {} assignments arrived in wartui's own wire format, and this host sent \
-             none of them. A second wartui core is driving these nodes, and they are \
-             taking assignments from both.",
-            counts.admin
-        );
-    }
-    if counts.update > 0 {
-        println!(
-            "# {} update frames arrived, and this host sent none of them. Another wartui \
-             host is updating nodes on this channel.",
-            counts.update
-        );
-    }
     if counts.update_status > 0 {
         println!(
-            "# {} update statuses arrived: nodes nearby are answering a host's \
-             update session.",
+            "# {} update statuses arrived: a node is answering an update session this \
+             host is not running.",
             counts.update_status
         );
     }
     if counts.incompatible > 0 {
         println!(
-            "# {} frames were ours but in a wire version or layout this build does not \
-             read. Those nodes are invisible to `run` until they are reflashed with \
-             firmware/node.",
+            "# {} records were in a layout this build does not read. Those nodes are \
+             invisible to `run` until they are reflashed with firmware/node.",
             counts.incompatible
         );
     }
@@ -151,28 +129,24 @@ struct Counts {
     /// undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
     total: u64,
-    /// Records seen, across every batch — not the number of `Rx` frames.
+    /// Sightings seen, across every batch — not the number of records.
     sighting: u64,
-    /// Sighting-batch frames, each carrying one or more `sighting` records.
+    /// Sighting batches, each carrying one or more sightings.
     batches: u64,
     heartbeat: u64,
-    admin: u64,
-    /// Update frames a host sent: begin, chunk, commit, abort and confirm. Another host's
-    /// session, since this command transmits nothing.
-    update: u64,
     /// Update statuses nodes sent, answering some host's session.
     update_status: u64,
-    /// Frames of ours in a wire version or layout this build does not read, as the engine
-    /// counts them, which is what a fleet half-way through a reflash looks like.
+    /// Records in a layout this build does not read, as the engine counts them, which is what a
+    /// fleet half-way through a reflash looks like.
     incompatible: u64,
-    /// Heartbeats from nodes on an older major or minor, read from their frozen prefix.
+    /// Heartbeats from nodes on an older major or minor, read from their prefix.
     needs_update: u64,
     /// Heartbeats from nodes on a newer major or minor, read the same way.
     host_behind: u64,
     undecodable: u64,
-    /// Each source's standing from its latest heartbeat, so its sighting batches are read
-    /// only when the engine would read them.
-    compat: HashMap<Mac, Compat>,
+    /// Each slot's standing from its latest heartbeat, so its sighting batches are read only
+    /// when the engine would read them.
+    compat: HashMap<Slot, Compat>,
 }
 
 fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
@@ -202,164 +176,17 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
 
     // Any decoded message, not just `Connected`: a busy fleet can cost a bridge every
     // `Ready` to its oldest-first transmit rings while its observations arrive
-    // perfectly well, and accusing it underneath a screenful of decoded frames is the
+    // perfectly well, and accusing it underneath a screenful of decoded records is the
     // one output worse than saying nothing.
     counts.heard_a_bridge = true;
 
     match message {
-        BridgeToHost::Rx { src, dst, rssi, rx_us, payload, .. } => {
-            // Not ours.
-            if !payload.starts_with(&MAGIC) {
-                return;
-            }
+        BridgeToHost::FromNode { slot, rx_us, kind, body } => {
             counts.total += 1;
-            let addressing = if *dst == BROADCAST { "bcast" } else { "unicast" };
-            let head =
-                format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac::full(src));
-
-            // A heartbeat from another major or minor opens with the frozen prefix, which
-            // names the node's firmware. The rest is not this build's layout, even when its
-            // length happens to match.
-            let undrivable = Capabilities::decode_prefix(payload)
-                .ok()
-                .filter(|caps| !caps.version.compat_with_host().drivable());
-            if let Some(caps) = undrivable {
-                counts.compat.insert(*src, caps.version.compat_with_host());
-                if caps.version.compat_with_host().node_behind() {
-                    counts.needs_update += 1;
-                    println!("{head}  HEARTBEAT {caps}, needs update to {NODE_VERSION}");
-                } else {
-                    counts.host_behind += 1;
-                    println!("{head}  HEARTBEAT {caps}, newer than this host's {NODE_VERSION}");
-                }
-            } else {
-                match Frame::decode(payload) {
-                    Ok(Frame::Heartbeat(heartbeat)) => {
-                        counts.heartbeat += 1;
-                        counts
-                            .compat
-                            .insert(*src, heartbeat.capabilities.version.compat_with_host());
-                        println!(
-                            "{head}  HEARTBEAT #{} b{} e{} u{} d{}<{} p{} {}  {}",
-                            heartbeat.counter,
-                            heartbeat.beat,
-                            heartbeat.epoch,
-                            heartbeat.unsent,
-                            heartbeat.dwell,
-                            heartbeat.prev_dwell,
-                            heartbeat.tx_power,
-                            heartbeat.reset_cause,
-                            heartbeat.capabilities
-                        );
-                    }
-                    // Not this build's layout once the node's heartbeat has named another
-                    // major or minor, even when it parses, as the engine reads it.
-                    Ok(Frame::Sightings(sightings))
-                        if counts.compat.get(src).is_some_and(|compat| !compat.drivable()) =>
-                    {
-                        counts.incompatible += 1;
-                        println!(
-                            "{head}  B#{} from a node on another minor, not read",
-                            sightings.seq
-                        );
-                    }
-                    Ok(Frame::Sightings(sightings)) => {
-                        counts.batches += 1;
-                        for (i, (sighting, _raw)) in sightings.iter().enumerate() {
-                            counts.sighting += 1;
-                            println!(
-                                "{head}  B#{} {}/{}  {}",
-                                sightings.seq,
-                                i + 1,
-                                sightings.count,
-                                render(&sighting)
-                            );
-                        }
-                    }
-                    Ok(Frame::Admin(admin)) => {
-                        counts.admin += 1;
-                        let indices: Vec<String> =
-                            admin.channels.indices().map(|idx| idx.to_string()).collect();
-                        // `none` rather than nothing: the one frame with an empty set is
-                        // the Bluetooth node's, and a blank there reads as a bug.
-                        let indices =
-                            if indices.is_empty() { "none".to_owned() } else { indices.join(",") };
-                        println!(
-                            "{head}  ADMIN e{}{} channel idx {}  -> {}",
-                            admin.epoch,
-                            if admin.scan_ble() { " +ble" } else { "" },
-                            indices,
-                            mac::full(dst),
-                        );
-                    }
-                    // A clear this host did not send is the same fact as an assignment
-                    // it did not send: something else is driving these nodes.
-                    Ok(Frame::Clear(_)) => {
-                        counts.admin += 1;
-                        println!("{head}  CLEAR  -> {}", mac::full(dst));
-                    }
-                    // An update this host is not running, which is the same fact again.
-                    Ok(Frame::OtaBegin(begin)) => {
-                        counts.update += 1;
-                        println!(
-                            "{head}  OTA BEGIN s{} {} bytes {} {:?} sha {}  -> {}",
-                            begin.session,
-                            begin.len,
-                            begin.version,
-                            begin.board,
-                            hex(&begin.sha256[..4]),
-                            mac::full(dst),
-                        );
-                    }
-                    Ok(Frame::OtaChunk(chunk)) => {
-                        counts.update += 1;
-                        println!(
-                            "{head}  OTA CHUNK s{} @{} +{}  -> {}",
-                            chunk.session,
-                            chunk.offset,
-                            chunk.data.len(),
-                            mac::full(dst),
-                        );
-                    }
-                    Ok(Frame::OtaCommit(commit)) => {
-                        counts.update += 1;
-                        println!("{head}  OTA COMMIT s{}  -> {}", commit.session, mac::full(dst));
-                    }
-                    Ok(Frame::OtaAbort(abort)) => {
-                        counts.update += 1;
-                        println!("{head}  OTA ABORT s{}  -> {}", abort.session, mac::full(dst));
-                    }
-                    Ok(Frame::OtaConfirm(_)) => {
-                        counts.update += 1;
-                        println!("{head}  OTA CONFIRM  -> {}", mac::full(dst));
-                    }
-                    Ok(Frame::OtaStatus(status)) => {
-                        counts.update_status += 1;
-                        println!(
-                            "{head}  OTA STATUS s{} {:?} next @{}",
-                            status.session, status.state, status.next_offset
-                        );
-                    }
-                    // Named rather than left as "undecodable": a fleet half-way
-                    // through a reflash is exactly what this looks like.
-                    Err(DecodeError::BadVersion(version)) => {
-                        counts.incompatible += 1;
-                        println!("{head}  wire version {version}, which this build does not speak");
-                    }
-                    // Ours, from a node on this minor: a bug in one of the two builds.
-                    Err(DecodeError::BadLength { need, got }) => {
-                        counts.incompatible += 1;
-                        println!("{head}  frame is {got} bytes, not {need}");
-                    }
-                    Err(err) => {
-                        counts.undecodable += 1;
-                        println!("{head}  undecodable: {err:?}");
-                    }
-                }
-            }
-
+            let head = format!("{rx_us:>10}us  {slot}");
+            record(*slot, &head, *kind, body, counts);
             if args.raw {
-                println!("      {}", hex(payload));
+                println!("      {}", hex(body));
             }
         }
 
@@ -374,12 +201,10 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             );
         }
 
-        BridgeToHost::Status {
-            peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize, ..
-        } => {
+        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, .. } => {
             println!(
-                "# status: {peer_count} peers, {rx_count} received, \
-                 {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
+                "# status: {rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, \
+                 up {}s",
                 uptime_ms / 1000
             );
         }
@@ -407,9 +232,84 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         // Answers `flash-bridge`'s update ops, which `sniff` never sends.
         BridgeToHost::Update(status) => println!("# update status {}", hex(status)),
 
-        // Only reachable once transmit exists; harmless to print until then.
-        BridgeToHost::SendResult { id, status, tx_us } => {
-            println!("# send {id} -> {status:?} at {tx_us}us");
+        // Answers to `ToNode`, which `sniff` never sends.
+        BridgeToHost::Delivered { id } => println!("# record {id} delivered"),
+        BridgeToHost::Undelivered { id, reason } => {
+            println!("# record {id} undelivered: {reason:?}");
+        }
+    }
+}
+
+/// One record from the node in `slot`, decoded and counted as the engine reads it.
+fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
+    // A heartbeat from another major or minor opens with the prefix, which names the node's
+    // firmware. The rest is not this build's layout, even when its length happens to match.
+    let undrivable = (kind == UpType::Heartbeat.as_u8())
+        .then(|| Heartbeat::identity(body).ok())
+        .flatten()
+        .filter(|(caps, _)| !caps.version.compat_with_host().drivable());
+    if let Some((caps, mac)) = undrivable {
+        counts.compat.insert(slot, caps.version.compat_with_host());
+        let mac = mac::full(&mac);
+        if caps.version.compat_with_host().node_behind() {
+            counts.needs_update += 1;
+            println!("{head}  HEARTBEAT {mac} {caps}, needs update to {NODE_VERSION}");
+        } else {
+            counts.host_behind += 1;
+            println!("{head}  HEARTBEAT {mac} {caps}, newer than this host's {NODE_VERSION}");
+        }
+        return;
+    }
+    match UpMsg::decode(kind, body) {
+        Ok(UpMsg::Heartbeat(heartbeat)) => {
+            counts.heartbeat += 1;
+            counts.compat.insert(slot, heartbeat.capabilities.version.compat_with_host());
+            println!(
+                "{head}  HEARTBEAT {} #{} e{} {}  {}",
+                mac::full(&heartbeat.mac),
+                heartbeat.counter,
+                heartbeat.epoch,
+                heartbeat.reset_cause,
+                heartbeat.capabilities
+            );
+        }
+        // Not this build's layout once the slot's heartbeat has named another major or minor,
+        // even when it parses, as the engine reads it.
+        Ok(UpMsg::Sightings(sightings))
+            if counts.compat.get(&slot).is_some_and(|compat| !compat.drivable()) =>
+        {
+            counts.incompatible += 1;
+            println!("{head}  B#{} from a node on another minor, not read", sightings.seq);
+        }
+        Ok(UpMsg::Sightings(sightings)) => {
+            counts.batches += 1;
+            for (i, (sighting, _raw)) in sightings.iter().enumerate() {
+                counts.sighting += 1;
+                println!(
+                    "{head}  B#{} {}/{}  {}",
+                    sightings.seq,
+                    i + 1,
+                    sightings.count,
+                    render(&sighting)
+                );
+            }
+        }
+        Ok(UpMsg::UpdateStatus(status)) => {
+            counts.update_status += 1;
+            println!(
+                "{head}  UPDATE STATUS s{} {:?} next @{}",
+                status.session, status.state, status.next_offset
+            );
+        }
+        // Named rather than left as "undecodable": a fleet half-way through a reflash is
+        // exactly what this looks like.
+        Err(DecodeError::BadLength { need, got }) => {
+            counts.incompatible += 1;
+            println!("{head}  record is {got} bytes, not {need}");
+        }
+        Err(err) => {
+            counts.undecodable += 1;
+            println!("{head}  type {kind}, undecodable: {err:?}");
         }
     }
 }
@@ -480,7 +380,6 @@ mod tests {
         // `Ready` can be lost to the bridge's transmit rings while everything
         // else it sends arrives; frames on screen must not be contradicted.
         let status = BridgeToHost::Status {
-            peer_count: 0,
             rx_count: 0,
             dropped_tx: 0,
             uptime_ms: 1_000,
@@ -497,27 +396,26 @@ mod tests {
         assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
     }
 
-    /// Count one received `payload` the way `handle` does.
-    fn counted(payload: &[u8]) -> Counts {
+    /// Count one record the way `handle` does.
+    fn counted(kind: UpType, body: &[u8]) -> Counts {
         let mut counts = Counts::default();
-        feed(&mut counts, payload);
+        feed(&mut counts, kind, body);
         counts
     }
 
-    /// Hand `handle` one received `payload` from the same node every time.
-    fn feed(counts: &mut Counts, payload: &[u8]) {
-        let rx = BridgeToHost::Rx {
-            src: [0x02, 0, 0, 0, 0x57, 0x84],
-            dst: BROADCAST,
-            rssi: -41,
+    /// Hand `handle` one record from the same slot every time.
+    fn feed(counts: &mut Counts, kind: UpType, body: &[u8]) {
+        let rx = BridgeToHost::FromNode {
+            slot: Slot::new(0, 0).expect("A1"),
             rx_us: 0,
-            payload: wartui_proto::link::EspNowPayload::from_slice(payload).expect("fits"),
+            kind: kind.as_u8(),
+            body: wartui_proto::link::FromNodeBody::from_slice(body).expect("fits"),
         };
         handle(LinkEvent::Message(rx), &args(), counts);
     }
 
     fn one_sighting() -> Vec<u8> {
-        use wartui_proto::air::{Security, SightingBatchWriter};
+        use wartui_proto::bus::{Security, SightingBatchWriter};
         let mut writer = SightingBatchWriter::new(1);
         let msg = SightingMsg {
             kind: RecordKind::Wifi,
@@ -535,29 +433,26 @@ mod tests {
     #[test]
     fn sniff_cmd_counts_batch_incompatible_when_its_node_runs_another_minor() {
         let mut counts = Counts::default();
-        feed(&mut counts, &heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION)));
-        feed(&mut counts, &one_sighting());
+        let behind = heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION));
+        feed(&mut counts, UpType::Heartbeat, &behind);
+        feed(&mut counts, UpType::Sightings, &one_sighting());
         assert_eq!((counts.incompatible, counts.batches, counts.sighting), (1, 0, 0));
 
         // The same node, reflashed: its batches read again.
-        feed(&mut counts, &heartbeat_with(NODE_VERSION));
-        feed(&mut counts, &one_sighting());
+        feed(&mut counts, UpType::Heartbeat, &heartbeat_with(NODE_VERSION));
+        feed(&mut counts, UpType::Sightings, &one_sighting());
         assert_eq!((counts.incompatible, counts.batches, counts.sighting), (1, 1, 1));
     }
 
-    fn heartbeat_with(version: wartui_proto::air::Version) -> Vec<u8> {
-        use wartui_proto::air::{Board, DieTemp, HeartbeatMsg, Vdd};
-        HeartbeatMsg {
+    fn heartbeat_with(version: wartui_proto::bus::Version) -> Vec<u8> {
+        use wartui_proto::bus::{Board, Capabilities, DieTemp, Vdd};
+        Heartbeat {
+            capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
+            mac: [0x02, 0, 0, 0, 0x57, 0x84],
             counter: 1,
             epoch: 0,
-            capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
             wifi_refused: 0,
             ble_refused: 0,
-            beat: 1,
-            unsent: 0,
-            dwell: 0,
-            prev_dwell: 0,
-            tx_power: 8,
             reset_cause: wartui_proto::reset::ResetCause::PowerOn,
             vdd: Vdd::NONE,
             die_temp: DieTemp::NONE,
@@ -567,57 +462,60 @@ mod tests {
     }
 
     #[test]
-    fn sniff_cmd_counts_update_apart_from_status_when_both_arrive() {
-        use wartui_proto::air::{OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg};
-        let mut counts = Counts::default();
-        feed(&mut counts, &OtaCommitMsg { session: 1 }.encode());
-        feed(&mut counts, &OtaConfirmMsg.encode());
-        let status = OtaStatusMsg { session: 1, state: OtaState::Receiving, next_offset: 4096 };
-        feed(&mut counts, &status.encode());
-        assert_eq!((counts.update, counts.update_status, counts.admin), (2, 1, 0));
+    fn sniff_cmd_counts_update_status_when_node_answers_a_session() {
+        use wartui_proto::bus::{UpdateState, UpdateStatus};
+        let status = UpdateStatus { session: 1, state: UpdateState::Receiving, next_offset: 4096 };
+        let counts = counted(UpType::UpdateStatus, &status.encode());
+        assert_eq!((counts.update_status, counts.undecodable), (1, 0));
     }
 
     #[test]
     fn sniff_cmd_counts_heartbeat_when_node_runs_this_minor() {
-        let counts = counted(&heartbeat_with(NODE_VERSION));
+        let counts = counted(UpType::Heartbeat, &heartbeat_with(NODE_VERSION));
         assert_eq!((counts.heartbeat, counts.needs_update, counts.host_behind), (1, 0, 0));
     }
 
     #[test]
     fn sniff_cmd_counts_needs_update_when_full_length_heartbeat_names_older_minor() {
         // Full length, so it would decode, but past the prefix its fields are not ours.
-        let counts = counted(&heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION)));
+        let counts = counted(
+            UpType::Heartbeat,
+            &heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION)),
+        );
         assert_eq!((counts.heartbeat, counts.needs_update, counts.incompatible), (0, 1, 0));
     }
 
     #[test]
     fn sniff_cmd_counts_host_behind_when_heartbeat_names_newer_minor() {
         let minor = NODE_VERSION.minor + 1;
-        let ahead = wartui_proto::air::Version { minor, ..NODE_VERSION };
-        let mut frame = heartbeat_with(ahead);
-        frame.truncate(14);
-        let counts = counted(&frame);
+        let ahead = wartui_proto::bus::Version { minor, ..NODE_VERSION };
+        let mut body = heartbeat_with(ahead);
+        body.truncate(14);
+        let counts = counted(UpType::Heartbeat, &body);
         assert_eq!((counts.heartbeat, counts.host_behind, counts.incompatible), (0, 1, 0));
     }
 
     #[test]
     fn sniff_cmd_counts_incompatible_when_this_minor_sends_wrong_length() {
-        let mut frame = heartbeat_with(NODE_VERSION);
-        frame.push(0);
-        let counts = counted(&frame);
+        let mut body = heartbeat_with(NODE_VERSION);
+        body.push(0);
+        let counts = counted(UpType::Heartbeat, &body);
         assert_eq!((counts.incompatible, counts.undecodable, counts.heartbeat), (1, 0, 0));
     }
 
     #[test]
-    fn sniff_cmd_counts_nothing_when_frame_lacks_magic() {
-        let vendor = [0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
+    fn sniff_cmd_counts_undecodable_when_record_type_is_unknown() {
         let mut counts = Counts::default();
-        feed(&mut counts, &vendor);
-        feed(&mut counts, b"not espnow at all");
-        feed(&mut counts, b"");
+        let rx = BridgeToHost::FromNode {
+            slot: Slot::new(0, 0).expect("A1"),
+            rx_us: 0,
+            kind: 0x42,
+            body: wartui_proto::link::FromNodeBody::from_slice(b"anything").expect("fits"),
+        };
+        handle(LinkEvent::Message(rx), &args(), &mut counts);
         assert_eq!(
             (counts.total, counts.undecodable, counts.incompatible, counts.heartbeat),
-            (0, 0, 0, 0)
+            (1, 1, 0, 0)
         );
         assert!(counts.compat.is_empty());
     }

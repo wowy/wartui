@@ -9,9 +9,9 @@
 //!
 //! **The link runs on UART1's FIFO, with interrupts and RTS/CTS, not DMA.** The P4 has one UHCI,
 //! and the host link (`src/host.rs`) needs it more: it has no flow control, so a late read there
-//! loses bytes, while a late read here raises RTS and the C6 waits. This link carries a fleet's
-//! ESP-NOW traffic now and is to carry BLE to the host; both fit a FIFO, and on a 10-minute burst
-//! load it took no error and no queue drop (`docs/p4-host-uart-findings.md`).
+//! loses bytes, while a late read here raises RTS and the C6 waits. This link carries the C6's
+//! status and lines, and is to carry a Bluetooth host link. A fleet's traffic fits a FIFO: on a
+//! 10-minute burst load it took no error and no queue drop (`docs/p4-host-uart-findings.md`).
 //!
 //! **A read takes what the FIFO holds**, once it reaches `FIFO_FULL_THRESHOLD` or the line goes
 //! idle. RTS rises at `RTS_THRESHOLD`, so a P4 busy elsewhere holds the C6 back rather than drops
@@ -33,8 +33,7 @@
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
 //! differently is sent none, and its records are not read. A C6 updating on this P4's revision
 //! has its records read too (`Pair::reads_records`), so its lines about the update reach the
-//! host. Only its lines and status are relayed then; the frames it received meanwhile are
-//! dropped.
+//! host. Its lines are relayed whether or not the pair bridges.
 //!
 //! While the pair is `Updating`, the writer sends the next op from a [`Sender`] of the bundled
 //! image ([`crate::radio`]), polling it on each status from the C6, which come back as
@@ -184,12 +183,10 @@ impl Link {
             }
             Kind::Messages => {
                 shared.pair.borrow_mut().note_seq(packet.seq);
-                let pair = shared.pair.borrow();
-                let (read, bridging) = (pair.reads_records(), pair.bridges());
-                drop(pair);
+                let read = shared.pair.borrow().reads_records();
                 if read {
                     for record in records(packet.payload) {
-                        self.relay(record, bridging, shared);
+                        self.relay(record, shared);
                     }
                 }
             }
@@ -211,19 +208,11 @@ impl Link {
         }
     }
 
-    /// Act on one record from the C6. Unless `bridging`, only its lines and status.
-    ///
-    /// Out of line: a decoded [`Up`] is over 1 KB.
+    /// Act on one record from the C6: a line for the host, or its counters.
     #[inline(never)]
-    fn relay(&mut self, record: &[u8], bridging: bool, shared: &Shared) {
+    fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
-            Ok(Up::Message(msg))
-                if bridging
-                    || matches!(msg, BridgeToHost::Log { .. } | BridgeToHost::Error { .. }) =>
-            {
-                shared.push_host(&msg);
-            }
-            Ok(Up::Message(_)) => {}
+            Ok(Up::Log { level, message }) => shared.push_line(level, message),
             Ok(Up::RadioStatus(status)) => {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());
@@ -304,14 +293,14 @@ impl Link {
                 shared.pair.borrow_mut().on_update_failed();
                 shared.push_host(&BridgeToHost::Error { message: text });
                 shared.push_fault();
-                // A stale C6 bridges, so records queued meanwhile can go now.
+                // A stale C6 bridges, so a poll queued meanwhile can go now.
                 shared.wake_link.signal(());
             }
         }
     }
 }
 
-/// Whether radio commands and records flow to and from the C6.
+/// Whether records flow to and from the C6.
 fn radio_up(shared: &Shared) -> bool {
     shared.pair.borrow().bridges()
 }

@@ -1,4 +1,4 @@
-//! The frame ring behind the P4's host queue and the C6's air queues.
+//! The frame ring behind the P4's host queue and the C6's queue toward the P4.
 
 use wartui_proto::frame_ring::FrameRing;
 

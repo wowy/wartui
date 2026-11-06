@@ -1,33 +1,28 @@
 //! What a node says it is, in every heartbeat it sends.
 //!
-//! A version, a board and two feature bits, since the magic is what separates one of
-//! ours from anything else. The rule that matters: a node from a later build announcing
+//! A version, a board and two feature bits. The rule that matters: a node from a later build announcing
 //! something this host has never heard of is still a node.
 
-use wartui_proto::air::{
-    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, HeartbeatMsg, NODE_VERSION, Vdd,
+use wartui_proto::bus::{
+    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, Heartbeat, NODE_VERSION, Vdd,
     Version,
 };
 use wartui_proto::reset::ResetCause;
 
 fn round_trip(caps: Capabilities) -> Capabilities {
-    let frame = HeartbeatMsg {
+    let body = Heartbeat {
+        capabilities: caps,
+        mac: [0x02, 0, 0, 0, 0, 1],
         counter: 0,
         epoch: 0,
-        capabilities: caps,
         wifi_refused: 0,
         ble_refused: 0,
-        beat: 1,
-        unsent: 0,
-        dwell: 0,
-        prev_dwell: 0,
-        tx_power: 8,
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
     }
     .encode();
-    HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities
+    Heartbeat::decode(&body).expect("we just encoded it").capabilities
 }
 
 #[test]

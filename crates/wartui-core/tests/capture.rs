@@ -52,7 +52,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert_eq!(snapshot.nodes.len(), 3, "every simulated node should have been seen");
     assert!(snapshot.counters.observations > 0, "and should have reported something");
     assert_eq!(snapshot.counters.undecodable, 0, "the decoder agrees with the simulator");
-    assert_eq!(snapshot.counters.undecodable, 0);
+    assert_eq!(snapshot.counters.unknown_slot, 0, "every node heartbeats before it reports");
     assert_eq!(snapshot.store.dropped, 0, "nothing should be dropped at this rate");
 
     let conn = open_readonly(&path).expect("reopening the capture");

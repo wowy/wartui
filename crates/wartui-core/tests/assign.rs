@@ -1,7 +1,7 @@
 //! The Phase 4 milestone, run against a simulated fleet.
 //!
 //! A node's heartbeat carries the epoch of the assignment it holds, so
-//! adoption — not just a MAC-layer ack — is directly observable rather than
+//! adoption — not just the bus's delivery — is directly observable rather than
 //! inferred from a sweep period. Nothing but the planner decides what a node
 //! holds, and the only thing that moves a share is how many nodes there are to
 //! share with.
@@ -21,7 +21,6 @@ use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::node::ADMIN_WAIT_MS;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 
 /// How much faster than real time the fake fleet runs.
@@ -48,11 +47,11 @@ async fn until(
 }
 
 /// Run a fleet of `nodes` until every one of them has *adopted* its share —
-/// its own heartbeat reports the epoch it was dealt, not merely acknowledged
-/// it — and report each node's adopted channels, in fleet order.
+/// its own heartbeat reports the epoch it was dealt, not merely took delivery
+/// of it — and report each node's adopted channels, in fleet order.
 ///
 /// Nobody asks for any of it: the nodes turn up, the planner cuts the pool,
-/// and each takes its share in the admin window its own heartbeat opens.
+/// and each takes its share in answer to its own heartbeat.
 async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     let link = SimTransport::new(SimConfig {
         node_count: nodes,
@@ -90,7 +89,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
 
-    // What was written down about the frame that put the first node there,
+    // What was written down about the assignment that put the first node there,
     // and the heartbeat that then confirmed it held it.
     let conn = open_readonly(path).expect("reopening the capture");
     let (outcome, stored, ble, latency): (String, i64, bool, Option<i64>) = conn
@@ -106,14 +105,14 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     // was told rather than an interpretation of it.
     assert_eq!(ChannelSet::from_bits(u64::try_from(stored).expect("a 40-bit mask")), channels[0]);
     assert!(!ble, "nobody asked for the Bluetooth scan");
-    // The number that settles whether a bridge this dumb can hit a 100 ms
-    // window. Measured on the simulated bridge's clock, from the heartbeat that
-    // opened the window to the transmit callback; a paused test holds that
-    // clock still between the two, so host scheduling cannot reach it.
-    let latency = latency.expect("and carries the latency the whole design turns on");
+    // Measured on this host's clock, from the send to the bridge's `Delivered`; a
+    // paused test holds that clock still between the two, so it cannot run past
+    // the time the engine waits for an answer.
+    let latency = latency.expect("a delivered assignment carries its latency");
+    let admin_timeout = EngineConfig::default().admin_timeout;
     assert!(
-        (0..=i64::from(ADMIN_WAIT_MS) * 1000).contains(&latency),
-        "{latency} us is inside the admin window"
+        (0..i64::try_from(admin_timeout.as_micros()).expect("fits")).contains(&latency),
+        "{latency} us is inside the admin timeout"
     );
 
     let epoch: i64 = conn
@@ -187,7 +186,7 @@ async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
         ChannelPool::All.channels(),
         "the current node shares the pool with nobody"
     );
-    assert_eq!(settled.counters.incompatible, 0, "a named node, not an older frame");
+    assert_eq!(settled.counters.incompatible, 0, "a named node, not an older record");
 
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");

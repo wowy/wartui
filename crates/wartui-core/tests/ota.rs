@@ -1,5 +1,5 @@
 //! The host's update session, driven on a clock the test invents against a scripted node
-//! running the real receiver over a slot in memory. Then the same session against the
+//! running the real receiver over a flash slot in memory. Then the same session against the
 //! simulated fleet, end to end.
 
 use std::collections::VecDeque;
@@ -15,10 +15,11 @@ use wartui_core::ota::{
     OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
 use wartui_core::runtime::{drive_ota, now};
-use wartui_proto::air::{
-    Board, Capabilities, DieTemp, Frame, HeartbeatMsg, OtaState, OtaStatusMsg, Vdd, Version,
+use wartui_proto::bus::{
+    Board, Capabilities, DieTemp, DownMsg, Heartbeat, NODE_VERSION, Slot, UpType, UpdateState,
+    UpdateStatus, Vdd, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge, SendStatus};
+use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::reset::ResetCause;
@@ -28,8 +29,19 @@ const OLD: Version = Version::new(0, 1, 0);
 const NEW: Version = Version::new(0, 1, 1);
 const BOARD: Board = Board::Esp32c5;
 const SESSION: u8 = 0x5A;
+/// The node-bus slot the node sits in.
+const SLOT: Slot = slot(0, 3);
+/// A slot the node is not in.
+const OTHER_SLOT: Slot = slot(1, 0);
 /// Five and a half sectors, so the last chunk is short and the last sector partial.
 const IMAGE_LEN: usize = 5 * SECTOR + 1500;
+
+const fn slot(bus: u8, index: u8) -> Slot {
+    match Slot::new(bus, index) {
+        Some(slot) => slot,
+        None => panic!("not a slot"),
+    }
+}
 
 fn image_bytes() -> Vec<u8> {
     (0..IMAGE_LEN).map(|i| u8::try_from(i * 7 % 251).unwrap_or(0)).collect()
@@ -41,13 +53,13 @@ fn image(version: Version) -> OtaImage {
     OtaImage { bytes: Arc::from(bytes), sha256, version, board: BOARD }
 }
 
-/// A slot held in memory, which fails every operation once told to.
-struct Slot {
+/// An update slot held in memory, which fails every operation once told to.
+struct Flash {
     flash: Vec<u8>,
     fail: bool,
 }
 
-impl SectorSink for Slot {
+impl SectorSink for Flash {
     type Error = ();
 
     fn capacity(&self) -> u32 {
@@ -73,16 +85,13 @@ impl SectorSink for Slot {
     }
 }
 
-/// A node as the firmware behaves: any host frame it decodes confirms a trial image, it
-/// answers only the host it has accepted an update from, and it reboots into the image on
-/// `Verified`.
+/// A node as the firmware behaves: any update record it decodes confirms a trial image, it
+/// answers every record that has a status, and it reboots into the image on `Verified`.
 struct Node {
     receiver: Box<Receiver>,
-    slot: Slot,
+    flash: Flash,
     version: Version,
     trial: bool,
-    /// Whether the host is this node's core, so it is answered.
-    core: bool,
     /// Never confirms a trial image.
     rejecting: bool,
     /// Reports `Verified` and stays on the old image.
@@ -93,10 +102,9 @@ impl Node {
     fn new() -> Self {
         Self {
             receiver: Box::new(Receiver::new(BOARD)),
-            slot: Slot { flash: vec![0; 0x1E_0000], fail: false },
+            flash: Flash { flash: vec![0; 0x1E_0000], fail: false },
             version: OLD,
             trial: false,
-            core: false,
             rejecting: false,
             cannot_switch: false,
         }
@@ -106,65 +114,49 @@ impl Node {
         heartbeat(self.version, self.trial)
     }
 
-    /// Take a host frame, returning the status the node sends back.
-    fn hear(&mut self, payload: &[u8]) -> Option<OtaStatusMsg> {
-        let frame = Frame::decode(payload).ok()?;
+    /// Take a record from the host, returning the status the node sends back.
+    fn hear(&mut self, kind: u8, body: &[u8]) -> Option<UpdateStatus> {
+        let msg = DownMsg::decode(kind, body).ok()?;
         if !self.rejecting {
             self.trial = false;
         }
-        let held = self.receiver.is_active().then(|| self.receiver.status().session);
-        let (status, accepted) = match frame {
-            Frame::OtaBegin(msg) if self.trial => (
-                OtaStatusMsg { session: msg.session, state: OtaState::FlashError, next_offset: 0 },
-                false,
-            ),
-            Frame::OtaBegin(msg) => {
-                let status = self.receiver.begin(&msg, &self.slot);
-                (status, matches!(status.state, OtaState::Receiving | OtaState::Verified))
-            }
-            Frame::OtaChunk(msg) => {
-                let status = self.receiver.chunk(&msg, &mut self.slot);
-                if held == Some(msg.session) {
-                    self.core = true;
-                }
-                (status?, held == Some(msg.session))
-            }
-            Frame::OtaCommit(msg) => {
-                (self.receiver.commit(&msg, &mut self.slot), held == Some(msg.session))
-            }
-            Frame::OtaAbort(msg) => (self.receiver.abort(&msg), held == Some(msg.session)),
+        let status = match msg {
+            DownMsg::UpdateBegin(msg) if self.trial => UpdateStatus {
+                session: msg.session,
+                state: UpdateState::FlashError,
+                next_offset: 0,
+            },
+            DownMsg::UpdateBegin(msg) => self.receiver.begin(&msg, &self.flash),
+            DownMsg::UpdateChunk(msg) => self.receiver.chunk(&msg, &mut self.flash)?,
+            DownMsg::UpdateCommit(msg) => self.receiver.commit(&msg, &mut self.flash),
+            DownMsg::UpdateAbort(msg) => self.receiver.abort(&msg),
             _ => return None,
         };
-        if accepted {
-            self.core = true;
-        }
-        let answer = self.core.then_some(status);
-        if status.state == OtaState::Verified && !self.cannot_switch {
+        if status.state == UpdateState::Verified && !self.cannot_switch {
             self.reboot(self.receiver.version().unwrap_or(self.version), true);
         }
-        answer
+        Some(status)
     }
 
     fn reboot(&mut self, version: Version, trial: bool) {
         self.receiver.reset();
         self.version = version;
         self.trial = trial;
-        self.core = false;
     }
 }
 
 fn heartbeat(version: Version, trial: bool) -> Vec<u8> {
-    HeartbeatMsg {
+    heartbeat_of(NODE, version, trial)
+}
+
+fn heartbeat_of(mac: Mac, version: Version, trial: bool) -> Vec<u8> {
+    Heartbeat {
+        capabilities: Capabilities { version, trial, ..Capabilities::here(BOARD) },
+        mac,
         counter: 1,
         epoch: 0,
-        capabilities: Capabilities { version, trial, ..Capabilities::here(BOARD) },
         wifi_refused: 0,
         ble_refused: 0,
-        beat: 1,
-        unsent: 0,
-        dwell: 0,
-        prev_dwell: 0,
-        tx_power: 8,
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
@@ -173,7 +165,17 @@ fn heartbeat(version: Version, trial: bool) -> Vec<u8> {
     .to_vec()
 }
 
-/// A frame the session sent, for asserting on.
+/// A heartbeat from `slot`.
+fn beat_from(slot: Slot, body: &[u8]) -> OtaEvent<'_> {
+    OtaEvent::FromNode { slot, kind: UpType::Heartbeat.as_u8(), body }
+}
+
+/// An update status from `slot`.
+fn status_from(slot: Slot, body: &[u8]) -> OtaEvent<'_> {
+    OtaEvent::FromNode { slot, kind: UpType::UpdateStatus.as_u8(), body }
+}
+
+/// A record the session sent, for asserting on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Out {
     Begin,
@@ -183,29 +185,29 @@ enum Out {
     Confirm,
 }
 
-fn summarize(payload: &[u8]) -> Out {
-    match Frame::decode(payload) {
-        Ok(Frame::OtaBegin(_)) => Out::Begin,
-        Ok(Frame::OtaChunk(msg)) => Out::Chunk(msg.offset),
-        Ok(Frame::OtaCommit(_)) => Out::Commit,
-        Ok(Frame::OtaAbort(_)) => Out::Abort,
-        Ok(Frame::OtaConfirm(_)) => Out::Confirm,
+fn summarize(kind: u8, body: &[u8]) -> Out {
+    match DownMsg::decode(kind, body) {
+        Ok(DownMsg::UpdateBegin(_)) => Out::Begin,
+        Ok(DownMsg::UpdateChunk(msg)) => Out::Chunk(msg.offset),
+        Ok(DownMsg::UpdateCommit(_)) => Out::Commit,
+        Ok(DownMsg::UpdateAbort(_)) => Out::Abort,
+        Ok(DownMsg::UpdateConfirm(_)) => Out::Confirm,
         other => panic!("the session sent {other:?}"),
     }
 }
 
-/// What becomes of one frame on its way to the node.
+/// What becomes of one record on its way to the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fate {
-    /// Acked and read; the node's answer comes back.
+    /// Delivered and read; the node's answer comes back.
     Deliver,
-    /// Acked and never read: the node's receive queue overflowed.
+    /// Delivered and never read: the node's receive queue overflowed.
     Lose,
-    /// Not acked, and not read.
-    Unacked,
-    /// Acked and read, and the node's answer is lost.
+    /// Undelivered, and not read.
+    Undelivered,
+    /// Delivered and read, and the node's answer is lost.
     Mute,
-    /// Read, and its ack is lost.
+    /// Read, and reported undelivered: the node's acks are lost.
     Unheard,
 }
 
@@ -217,6 +219,8 @@ fn deliver(_: Out) -> Fate {
 struct Bench {
     session: OtaSession,
     node: Node,
+    /// The slot the node heartbeats from.
+    slot: Slot,
     start: Instant,
     elapsed: Duration,
     next_beat: Duration,
@@ -238,6 +242,7 @@ impl Bench {
         Self {
             session: OtaSession::new(NODE, from, image, SESSION, 1, now),
             node,
+            slot: SLOT,
             start,
             elapsed: Duration::ZERO,
             next_beat: Duration::from_millis(1000),
@@ -257,16 +262,20 @@ impl Bench {
 
     fn beat(&mut self) {
         let frame = self.node.heartbeat();
-        self.feed(OtaEvent::Rx { src: NODE, payload: &frame });
+        self.feed(beat_from(self.slot, &frame));
     }
 
     fn beat_as(&mut self, version: Version, trial: bool) {
         let frame = heartbeat(version, trial);
-        self.feed(OtaEvent::Rx { src: NODE, payload: &frame });
+        self.feed(beat_from(self.slot, &frame));
     }
 
-    /// Carry every queued frame to the node, the result back before the node's answer as
-    /// the bridge's priority ring has it, until nothing is left to send.
+    fn status(&mut self, slot: Slot, status: UpdateStatus) {
+        self.feed(status_from(slot, &status.encode()));
+    }
+
+    /// Carry every queued record to the node, the delivery result back before the node's
+    /// answer, until nothing is left to send.
     fn settle(&mut self, fate: &mut impl FnMut(Out) -> Fate) {
         self.settle_until(fate, &|_| false);
     }
@@ -276,26 +285,21 @@ impl Bench {
         while !done(self)
             && let Some(cmd) = self.queue.pop_front()
         {
-            let HostToBridge::SendEspNow { id, dst, ensure_peer, payload } = cmd else {
+            let HostToBridge::ToNode { slot, id, kind, body } = cmd else {
                 panic!("the session sent {cmd:?}");
             };
-            assert_eq!(dst, NODE);
-            assert!(ensure_peer);
-            let out = summarize(&payload);
+            assert_eq!(slot, self.slot, "sent to the slot the node heartbeats from");
+            let out = summarize(kind, &body);
             self.sent.push(out);
             let fate = fate(out);
             let status = match fate {
-                Fate::Deliver | Fate::Mute | Fate::Unheard => self.node.hear(&payload),
-                Fate::Lose | Fate::Unacked => None,
+                Fate::Deliver | Fate::Mute | Fate::Unheard => self.node.hear(kind, &body),
+                Fate::Lose | Fate::Undelivered => None,
             };
-            let acked = if matches!(fate, Fate::Unacked | Fate::Unheard) {
-                SendStatus::AckFail
-            } else {
-                SendStatus::AckOk
-            };
-            self.feed(OtaEvent::SendResult { id, status: acked });
+            let delivered = !matches!(fate, Fate::Undelivered | Fate::Unheard);
+            self.feed(OtaEvent::Delivery { id, delivered });
             if let Some(status) = status.filter(|_| fate != Fate::Mute) {
-                self.feed(OtaEvent::Rx { src: NODE, payload: &status.encode() });
+                self.status(self.slot, status);
             }
         }
     }
@@ -333,7 +337,7 @@ impl Bench {
     }
 
     fn assert_image_written(&self) {
-        assert_eq!(&self.node.slot.flash[..IMAGE_LEN], &image_bytes()[..]);
+        assert_eq!(&self.node.flash.flash[..IMAGE_LEN], &image_bytes()[..]);
     }
 }
 
@@ -361,15 +365,51 @@ fn ota_session_updates_and_confirms_node_when_nothing_is_lost() {
 #[test]
 fn ota_session_sends_begin_only_when_node_heartbeats() {
     let mut bench = Bench::new(&image(NEW));
-    // A node outside update mode hears nothing but its admin window.
+    // Nothing names the node's slot until its own heartbeat does.
     for _ in 0..20 {
         bench.elapsed += Duration::from_millis(50);
         bench.feed(OtaEvent::Tick);
     }
+    let other = heartbeat_of([9; 6], OLD, false);
+    bench.feed(beat_from(SLOT, &other));
+    let idle = UpdateStatus { session: SESSION, state: UpdateState::Idle, next_offset: 0 };
+    bench.status(SLOT, idle);
     assert!(bench.queue.is_empty(), "nothing before a heartbeat: {:?}", bench.queue);
     bench.beat();
     bench.settle(&mut deliver);
     assert_eq!(bench.sent.first(), Some(&Out::Begin));
+}
+
+#[test]
+fn ota_session_sends_nothing_when_cancelled_before_any_heartbeat() {
+    let mut bench = Bench::new(&image(NEW));
+    let sends = bench.session.cancel(bench.now());
+    assert!(sends.is_empty(), "no slot to send the abort to: {sends:?}");
+    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::Cancelled)));
+}
+
+#[test]
+fn ota_session_ignores_status_when_another_slot_sends_it() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 4096);
+    let queued = bench.queue.len();
+    // An `Idle` for this session from a slot the node is not in leaves the stream running.
+    let idle = UpdateStatus { session: SESSION, state: UpdateState::Idle, next_offset: 0 };
+    bench.status(OTHER_SLOT, idle);
+    assert_eq!(bench.session.progress().phase, Phase::Streaming);
+    assert_eq!(bench.queue.len(), queued, "nothing sent");
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    assert_eq!(bench.count(Out::Begin), 1);
+}
+
+#[test]
+fn ota_session_sends_to_new_slot_when_node_heartbeats_from_another() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.run(&mut |_| Fate::Lose, Duration::from_secs(3), |b| b.count(Out::Begin) == 2);
+    // The node is moved to another slot; `settle` checks every record follows it there.
+    bench.slot = OTHER_SLOT;
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    bench.assert_image_written();
 }
 
 #[test]
@@ -399,13 +439,13 @@ fn ota_session_fails_when_begin_goes_unanswered() {
 }
 
 #[test]
-fn ota_session_resends_chunk_when_send_is_unacked() {
+fn ota_session_resends_chunk_when_send_is_undelivered() {
     let mut bench = Bench::new(&image(NEW));
     let mut failed = false;
     let mut fate = |out| {
         if out == Out::Chunk(2048) && !failed {
             failed = true;
-            return Fate::Unacked;
+            return Fate::Undelivered;
         }
         Fate::Deliver
     };
@@ -416,9 +456,9 @@ fn ota_session_resends_chunk_when_send_is_unacked() {
 }
 
 #[test]
-fn ota_session_fails_when_chunks_stay_unacked_across_every_begin() {
+fn ota_session_fails_when_chunks_stay_undelivered_across_every_begin() {
     let mut bench = Bench::new(&image(NEW));
-    let mut fate = |out| if out == Out::Chunk(2048) { Fate::Unacked } else { Fate::Deliver };
+    let mut fate = |out| if out == Out::Chunk(2048) { Fate::Undelivered } else { Fate::Deliver };
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Failed(Failure::NotAnswering));
     // Each begin resumes at 2048 and sends it until the streak gives up on it.
     let per_begin = MAX_SEND_FAILURES as usize + 1;
@@ -432,10 +472,10 @@ fn ota_session_fails_when_chunks_stay_unacked_across_every_begin() {
 fn ota_session_begins_again_and_restarts_when_node_reboots_mid_stream() {
     let mut bench = Bench::new(&image(NEW));
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 8192);
-    // A hard reset: the radio acks nothing while the node boots, and the node comes back
-    // without the session or its core.
+    // A hard reset: the node acknowledges nothing while it boots, and comes back without the
+    // session.
     bench.node.reboot(OLD, false);
-    let mut fate = |_| Fate::Unacked;
+    let mut fate = |_| Fate::Undelivered;
     bench.run(&mut fate, Duration::from_secs(1), |b| b.session.progress().phase == Phase::Begin);
     assert_eq!(bench.session.progress().phase, Phase::Begin, "back to the begin, not failed");
     assert!(bench.session.outcome().is_none());
@@ -493,8 +533,8 @@ fn ota_session_begins_again_and_resumes_when_node_reports_idle() {
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 8192);
     // The node rebooted and lost the session: its next chunk is answered `Idle`.
     bench.node.receiver.reset();
-    let idle = OtaStatusMsg { session: SESSION, state: OtaState::Idle, next_offset: 0 };
-    bench.feed(OtaEvent::Rx { src: NODE, payload: &idle.encode() });
+    let idle = UpdateStatus { session: SESSION, state: UpdateState::Idle, next_offset: 0 };
+    bench.status(SLOT, idle);
     bench.queue.clear();
     assert_eq!(bench.session.progress().phase, Phase::Begin);
     let begins = bench.count(Out::Begin);
@@ -521,7 +561,7 @@ fn ota_session_resumes_from_node_offset_when_begin_finds_progress() {
 fn ota_session_fails_when_node_reports_flash_error() {
     let mut bench = Bench::new(&image(NEW));
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 4096);
-    bench.node.slot.fail = true;
+    bench.node.flash.fail = true;
     assert_eq!(bench.run_to_end(&mut deliver), Outcome::Failed(Failure::FlashError));
 }
 
@@ -557,14 +597,14 @@ fn ota_session_sends_no_abort_when_begin_is_never_accepted() {
 fn ota_session_confirms_instead_of_streaming_again_when_rebegun_after_install() {
     let mut bench = Bench::new(&image(NEW));
     let mut first = true;
-    // `Verified` is lost; every resent commit then goes unacked while the node reboots into
-    // the new image, which returns the session to its `begin`.
+    // `Verified` is lost; every resent commit then goes undelivered while the node reboots
+    // into the new image, which returns the session to its `begin`.
     let mut fate = |out| match out {
         Out::Commit if first => {
             first = false;
             Fate::Mute
         }
-        Out::Commit => Fate::Unacked,
+        Out::Commit => Fate::Undelivered,
         _ => Fate::Deliver,
     };
     bench.run(&mut fate, Duration::from_secs(5), |b| {
@@ -580,8 +620,8 @@ fn ota_session_confirms_instead_of_streaming_again_when_rebegun_after_install() 
 }
 
 #[test]
-fn ota_session_resends_confirm_when_its_ack_is_lost_on_same_version() {
-    // `--force` onto the version the node runs: only an acked confirm says it is done.
+fn ota_session_resends_confirm_when_its_delivery_is_lost_on_same_version() {
+    // `--force` onto the version the node runs: only a delivered confirm says it is done.
     let mut bench = Bench::from(&image(NEW), NEW);
     let mut first = true;
     let mut fate = |out| {
@@ -593,7 +633,7 @@ fn ota_session_resends_confirm_when_its_ack_is_lost_on_same_version() {
     };
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Done(NEW));
     assert!(!bench.node.trial);
-    assert_eq!(bench.count(Out::Confirm), 2, "once more after the lost ack");
+    assert_eq!(bench.count(Out::Confirm), 2, "once more after the lost delivery");
 }
 
 #[test]
@@ -602,14 +642,14 @@ fn ota_session_confirms_trial_node_when_started_to_confirm() {
     let now = |ms| Now { mono: start + Duration::from_millis(ms), unix_ms: 0 };
     let mut session = OtaSession::confirm_trial(NODE, NEW, 1, now(0));
     let beat = heartbeat(NEW, true);
-    let sends = session.handle(now(10), OtaEvent::Rx { src: NODE, payload: &beat });
-    let [HostToBridge::SendEspNow { id, payload, .. }] = sends.as_slice() else {
+    let sends = session.handle(now(10), beat_from(SLOT, &beat));
+    let [HostToBridge::ToNode { slot, id, kind, body }] = sends.as_slice() else {
         panic!("one confirm: {sends:?}")
     };
-    assert_eq!(summarize(payload), Out::Confirm);
-    session.handle(now(20), OtaEvent::SendResult { id: *id, status: SendStatus::AckOk });
+    assert_eq!((*slot, summarize(*kind, body)), (SLOT, Out::Confirm));
+    session.handle(now(20), OtaEvent::Delivery { id: *id, delivered: true });
     let beat = heartbeat(NEW, false);
-    session.handle(now(1000), OtaEvent::Rx { src: NODE, payload: &beat });
+    session.handle(now(1000), beat_from(SLOT, &beat));
     assert_eq!(session.outcome(), Some(&Outcome::Done(NEW)));
 }
 
@@ -619,11 +659,10 @@ fn ota_session_ignores_stale_status_when_newer_one_arrived_first() {
     // Stopped with chunk 7168 queued and the node's last status at 4096.
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.sent.contains(&Out::Chunk(6144)));
     // Two gap statuses, the newer first: the older is stale and must not rewind the host.
-    let status = |next_offset| {
-        OtaStatusMsg { session: SESSION, state: OtaState::Receiving, next_offset }.encode()
-    };
-    bench.feed(OtaEvent::Rx { src: NODE, payload: &status(6144) });
-    bench.feed(OtaEvent::Rx { src: NODE, payload: &status(5120) });
+    let status =
+        |next_offset| UpdateStatus { session: SESSION, state: UpdateState::Receiving, next_offset };
+    bench.status(SLOT, status(6144));
+    bench.status(SLOT, status(5120));
     assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
     assert_eq!(bench.count(Out::Chunk(6144)), 2, "rewound to the newer gap");
     assert_eq!(bench.count(Out::Chunk(5120)), 1, "never to the stale one");
@@ -655,8 +694,8 @@ fn ota_session_succeeds_when_verified_is_lost_and_resent_commit_confirms_new_ima
         }
         Fate::Deliver
     };
-    // The resent commit reaches the new image, which confirms on hearing the host and does
-    // not answer a host it has not accepted an update from.
+    // The resent commit reaches the new image, which confirms on hearing the host and answers
+    // that it holds no session; its next heartbeat is the new image, confirmed.
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Done(NEW));
     assert!(bench.count(Out::Commit) >= 2);
 }
@@ -715,10 +754,10 @@ fn ota_session_sends_abort_when_cancelled() {
 }
 
 #[test]
-fn ota_session_ignores_frames_when_another_node_sends_them() {
+fn ota_session_ignores_heartbeat_when_another_node_sends_it() {
     let mut bench = Bench::new(&image(NEW));
-    let frame = heartbeat(OLD, false);
-    let sends = bench.session.handle(bench.now(), OtaEvent::Rx { src: [9; 6], payload: &frame });
+    let frame = heartbeat_of([9; 6], OLD, false);
+    let sends = bench.session.handle(bench.now(), beat_from(OTHER_SLOT, &frame));
     assert!(sends.is_empty());
 }
 
@@ -728,12 +767,12 @@ fn ota_session_reads_heartbeat_prefix_when_node_runs_another_minor() {
     // A longer heartbeat of some other minor's layout: only the prefix is read.
     let mut frame = heartbeat(Version::new(0, 0, 9), false);
     frame.extend_from_slice(&[0xAA; 9]);
-    bench.feed(OtaEvent::Rx { src: NODE, payload: &frame });
+    bench.feed(beat_from(SLOT, &frame));
     let queued: Vec<Out> = bench
         .queue
         .iter()
         .map(|cmd| match cmd {
-            HostToBridge::SendEspNow { payload, .. } => summarize(payload),
+            HostToBridge::ToNode { kind, body, .. } => summarize(*kind, body),
             other => panic!("the session sent {other:?}"),
         })
         .collect();
@@ -759,9 +798,11 @@ async fn connected(link: &mut LinkHandle) {
 async fn versions(link: &mut LinkHandle, nodes: &[Mac]) -> Vec<Capabilities> {
     let mut heard = vec![None; nodes.len()];
     while heard.iter().any(Option::is_none) {
-        if let Some(LinkEvent::Message(BridgeToHost::Rx { src, payload, .. })) = link.recv().await
-            && let Ok(caps) = Capabilities::decode_prefix(&payload)
-            && let Some(i) = nodes.iter().position(|n| *n == src)
+        if let Some(LinkEvent::Message(BridgeToHost::FromNode { kind, body, .. })) =
+            link.recv().await
+            && kind == UpType::Heartbeat.as_u8()
+            && let Ok((caps, mac)) = Heartbeat::identity(&body)
+            && let Some(i) = nodes.iter().position(|n| *n == mac)
         {
             heard[i] = Some(caps);
         }
@@ -775,7 +816,7 @@ fn sim_image(version: Version) -> OtaImage {
 
 #[tokio::test(start_paused = true)]
 async fn drive_ota_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_roll_back() {
-    let old = wartui_bridge::sim::minor_behind(wartui_proto::air::NODE_VERSION);
+    let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
     let mut link = SimTransport::new(SimConfig {
         node_count: 4,
         speed: SPEED,
@@ -793,7 +834,7 @@ async fn drive_ota_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_ro
         assert_eq!((caps.version, caps.trial), (old, false));
     }
 
-    let new = wartui_proto::air::NODE_VERSION;
+    let new = NODE_VERSION;
     let image = sim_image(new);
     let mut next_id = 1;
     let mut outcomes = Vec::new();

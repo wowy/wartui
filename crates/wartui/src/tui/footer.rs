@@ -121,9 +121,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
             thousands(c.admin_unadopted)
         ));
     }
-    if c.peer_table_full > 0 {
-        faults.push("peer table full".to_owned());
-    }
     // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
     // so nothing sniffs at all.
     if let Some(plan) = snapshot.plan
@@ -180,9 +177,8 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults
             .push(format!("bridge dropped {}", thousands(u64::from(status.dropped_since_attach))));
     }
-    // A restart under a running capture is a fault even when nothing fails now: the
-    // peer table came back empty and the data has a gap. A power-on is how a capture
-    // starts, so it is not one.
+    // A restart under a running capture is a fault even when nothing fails now: the data
+    // has a gap. A power-on is how a capture starts, so it is not one.
     if let Some(bridge) = &snapshot.bridge
         && let Some(reason) = restart_fault(bridge)
     {
@@ -194,17 +190,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     for view in &snapshot.nodes {
         let node = &view.state;
         let name = mac::short(&node.mac);
-        if let Some(mismatch) = node.power_mismatch {
-            faults.push(if mismatch.reported == 0 {
-                format!("{name} cannot read its transmit power")
-            } else {
-                format!(
-                    "{name} at {} dBm, assigned {} dBm",
-                    dbm(mismatch.reported),
-                    dbm(mismatch.assigned)
-                )
-            });
-        }
         if let Some(cause) = node.fault_restart {
             let times = if node.fault_restarts > 1 {
                 format!(" (×{})", node.fault_restarts)
@@ -215,20 +200,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
     }
     faults
-}
-
-/// A quarter-dBm power in dBm: whole when it divides by four, else to the quarter.
-fn dbm(quarter_dbm: i8) -> String {
-    let q = i16::from(quarter_dbm);
-    let sign = if q < 0 { "-" } else { "" };
-    let (whole, quarters) = (q.abs() / 4, q.abs() % 4);
-    let frac = match quarters {
-        1 => ".25",
-        2 => ".5",
-        3 => ".75",
-        _ => "",
-    };
-    format!("{sign}{whole}{frac}")
 }
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
@@ -329,7 +300,6 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
-    use wartui_core::engine::PowerMismatch;
 
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {
@@ -642,33 +612,6 @@ mod tests {
         with_restart(ResetCause::PowerOn)
     }
 
-    /// `quiet()` with node `57:84` reporting `reported` against an assignment of `assigned`.
-    fn with_mismatch(reported: i8, assigned: i8) -> Snapshot {
-        let mut snapshot = quiet();
-        snapshot.nodes[0].state.power_mismatch =
-            Some(PowerMismatch { epoch: 3, reported, assigned });
-        snapshot
-    }
-
-    #[test]
-    fn footer_reports_node_power_when_it_differs_from_assignment() {
-        let screen = rendered(&with_mismatch(8, 24));
-        assert!(screen.contains("57:84 at 2 dBm, assigned 6 dBm"), "{screen}");
-    }
-
-    #[test]
-    fn footer_reports_unreadable_power_when_node_reports_zero() {
-        let lines = faults(&with_mismatch(0, 24));
-        assert_eq!(lines, ["57:84 cannot read its transmit power"]);
-    }
-
-    #[test]
-    fn footer_prints_quarter_dbm_when_power_not_whole() {
-        let lines = faults(&with_mismatch(9, 26));
-        assert_eq!(lines, ["57:84 at 2.25 dBm, assigned 6.5 dBm"]);
-        assert_eq!(dbm(31), "7.75");
-    }
-
     #[test]
     fn footer_reports_node_restart_when_cause_is_fault() {
         let mut snapshot = quiet();
@@ -686,8 +629,6 @@ mod tests {
     fn footer_reports_no_node_fault_when_fleet_clean() {
         assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
         let screen = rendered(&quiet());
-        assert!(!screen.contains("transmit power"), "{screen}");
-        assert!(!screen.contains("dBm, assigned"), "{screen}");
         assert!(!screen.contains("restarted:"), "{screen}");
     }
 

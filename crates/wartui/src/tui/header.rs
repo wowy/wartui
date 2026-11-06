@@ -224,11 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn view_warns_no_drivable_nodes_when_all_nodes_are_refused_peer_slots() {
+    fn view_warns_no_drivable_nodes_when_no_node_holds_a_slot() {
         // Every node heartbeating, none reachable, so there is nothing to partition.
         let mut snapshot = busy();
         snapshot.plan = None;
-        snapshot.nodes = vec![refused(0x21), refused(0x22), refused(0x23)];
+        snapshot.nodes = vec![unslotted(0x21), unslotted(0x22), unslotted(0x23)];
         snapshot.alive = 3;
         snapshot.assignable = 0;
 

@@ -7,7 +7,7 @@
 
 [package]
 name = "wartui-firmware"
-description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker, radio half and GPS reader, the node's health readings, and updates on flash."
+description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker and GPS reader, the node's health readings, and updates on flash."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -18,27 +18,20 @@ repository = "https://github.com/wowy/wartui"
 # Each firmware names its own chip feature here.
 esp32c5 = [
   "esp-hal/esp32c5",
-  "esp-radio?/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
   "esp-storage/esp32c5",
 ]
 esp32c6 = [
   "esp-hal/esp32c6",
-  "esp-radio?/esp32c6",
   "esp-bootloader-esp-idf/esp32c6",
   "esp-storage/esp32c6",
 ]
-# No radio of its own; src/lib.rs refuses it with `radio`. It takes its own updates
-# over its USB link.
+# It takes its own updates over its USB link.
 esp32p4 = [
   "esp-hal/esp32p4",
   "esp-bootloader-esp-idf/esp32p4",
   "esp-storage/esp32p4",
 ]
-
-# The bridge's ESP-NOW half (`src/radio.rs`), for every firmware that owns a radio
-# and bridges it.
-radio = ["dep:embassy-sync", "dep:esp-radio"]
 
 # A u-blox GPS receiver on I2C (`src/gps.rs`), which the P4 bridge always reads.
 gps = ["dep:embassy-futures", "dep:embassy-sync", "dep:embassy-time"]
@@ -49,18 +42,11 @@ gps = ["dep:embassy-futures", "dep:embassy-sync", "dep:embassy-time"]
 # workspace's own lockfile could move to 1.3 and its clippy would lint against an
 # esp-hal neither firmware builds. `firmware/p4-radio/README.md` § "Dependency versions".
 esp-hal = { version = "~1.2.2", features = ["unstable"] }
-# Behind `radio` and `gps`, at the versions `firmware/p4-radio/Cargo.toml` and
-# `firmware/p4-bridge/Cargo.toml` pin and with the radio firmware's `esp-radio` features,
-# so each build unifies to the same set.
+# Behind `gps`, at the versions `firmware/p4-bridge/Cargo.toml` pins, so each build
+# unifies to the same set.
 embassy-futures = { version = "0.1.2", optional = true }
 embassy-sync = { version = "0.8.0", optional = true }
 embassy-time = { version = "0.5.1", optional = true }
-esp-radio = { version = "1.0.0-beta.1", default-features = false, optional = true, features = [
-  "esp-alloc",
-  "esp-now",
-  "unstable",
-  "wifi",
-] }
 # Updates on flash (`src/ota.rs`), which every firmware takes, at the versions
 # `firmware/node/Cargo.toml` pins. `esp-storage` is held at the version
 # `esp-bootloader-esp-idf` resolves; `firmware/p4-radio/README.md` § "Dependency versions".

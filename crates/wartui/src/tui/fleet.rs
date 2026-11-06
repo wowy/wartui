@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Board, Compat, NODE_VERSION, Version};
+use wartui_proto::bus::{Board, Compat, NODE_VERSION, Version};
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -36,7 +36,7 @@ pub(super) fn draw_fleet(
     let show_lost = snapshot.nodes.iter().any(|n| n.state.batches_lost > 0);
     let lost_at = 4;
 
-    let mut header = vec!["node", "rssi", "beats", "obs", "last", "channels", "state"];
+    let mut header = vec!["node", "slot", "beats", "obs", "last", "channels", "state"];
     if show_lost {
         header.insert(lost_at, "lost");
     }
@@ -55,7 +55,7 @@ pub(super) fn draw_fleet(
             let style = severity.style();
             let mut cells = vec![
                 Cell::from(node_label(node)),
-                Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
+                Cell::from(node.state.slot.map_or_else(|| "—".to_owned(), |slot| slot.to_string())),
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
@@ -255,8 +255,8 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
         }
         _ => {}
     }
-    if state.peer_refused {
-        return Some("has no slot in the bridge's peer table, so it cannot be reached");
+    if state.slot.is_none() {
+        return Some("lost its bus slot to another node's heartbeat, so it cannot be reached");
     }
     if !node.assignable {
         return Some("is not heartbeating, so it cannot be assigned");
@@ -281,23 +281,18 @@ fn node_state(node: &NodeView) -> (String, Severity) {
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Severity::Warning);
     }
-    // Ahead of `stale`. A peer refusal makes a heartbeating node unassignable, and
-    // the fix is on the fleet, not the node.
-    if state.peer_refused {
-        return ("refused".to_owned(), Severity::Fault);
+    // Ahead of `stale`. A node whose slot another node's heartbeat took is unreachable
+    // until its own heartbeat names a slot again.
+    if state.slot.is_none() {
+        return ("no slot".to_owned(), Severity::Warning);
     }
     if !node.assignable {
         return ("stale".to_owned(), Severity::Warning);
     }
-    // The most actionable state. The cause is nearly always the radio being off the
-    // control channel during its admin window.
+    // The most actionable state: the bridge could not deliver the node's assignment, or
+    // never answered for it.
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Severity::Fault);
-    }
-    // The bridge refused this send for a reason a reconnect clears (`NoPeer`, a
-    // rejection), so the node stays assignable. Peer-table refusal is handled above.
-    if state.last_outcome == Some(AdminOutcome::Refused) {
-        return ("refused".to_owned(), Severity::Fault);
     }
     if state.reboots > 0 {
         return (format!("rebooted x{}", state.reboots), Severity::Notice);
@@ -374,7 +369,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use wartui_core::engine::Assignment;
-    use wartui_proto::air::{Capabilities, DieTemp, Vdd};
+    use wartui_proto::bus::{Capabilities, DieTemp, Vdd};
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
     use super::*;
@@ -499,8 +494,7 @@ mod tests {
     fn channels_cell_displays_bluetooth_when_node_is_assigned_bluetooth_scan() {
         // `0: none` would read as a fault rather than a job.
         let mut view = assigned(0x11);
-        let assignment =
-            Assignment { channels: ChannelSet::empty(), ble: true, tx_power: 8, counter: 1 };
+        let assignment = Assignment { channels: ChannelSet::empty(), ble: true, counter: 1 };
         view.state.confirmed = Some(assignment);
         view.state.desired = Some(assignment);
         adopt(&mut view.state);
@@ -511,10 +505,10 @@ mod tests {
     }
 
     #[test]
-    fn node_state_returns_refused_label_when_node_has_no_peer_slot() {
-        let view = refused(0x21);
+    fn node_state_returns_no_slot_label_when_another_node_took_its_slot() {
+        let view = unslotted(0x21);
         let (label, _) = node_state(&view);
-        assert_eq!(label, "refused");
+        assert_eq!(label, "no slot");
     }
 
     #[test]
@@ -683,10 +677,10 @@ mod tests {
         })
     }
 
-    /// The fleet table's header line. Found by `rssi` and `beats`, since the stream's
-    /// header has an `rssi` too and "lost" can appear elsewhere on screen.
+    /// The fleet table's header line. Found by `slot` and `beats`, since "lost" can appear
+    /// elsewhere on screen.
     fn fleet_header(screen: &str) -> String {
-        let header = |line: &&str| line.contains("rssi") && line.contains("beats");
+        let header = |line: &&str| line.contains("slot") && line.contains("beats");
         screen.lines().find(header).unwrap_or_default().to_owned()
     }
 

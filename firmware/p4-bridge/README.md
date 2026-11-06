@@ -3,9 +3,9 @@
 The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs this firmware: it
 talks to the host with wartui's link protocol over UART0, which the board's CH343 carries to the
 Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on the board's SDIO
-traces. The C6 runs
-the radio ([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting
-`Esp32P4` and both chips' diagnostics. The queue sizes are in `src/config.rs`.
+traces. The C6 holds that link for a future Bluetooth host link
+([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting `Esp32P4` and
+both chips' diagnostics. The queue sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -24,8 +24,10 @@ and config, then `espflash save-image` on the result. A build fails if the saved
 appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
 too.
 
-It is also the SPI master of two node buses, which carry a copy of each node's heartbeat;
-[`docs/node-bus.md`](../../docs/node-bus.md) has the pins.
+It is also the SPI master of two node buses, which carry each node's records to and from the
+host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
+forwards what a node sends, queues what the host sends a node in that node's slot, and answers
+each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`).
 
 ## Boards
 
@@ -100,10 +102,11 @@ differ, it sends the C6 its image over the UART link, once per boot. The C6 writ
 into it and boots it on trial, and the P4's hello confirms it. The host sees the C6's reboot as a
 new bridge life, with a fresh `Ready`.
 
-Meanwhile the bridge announces the C6's MAC and refuses radio commands. With a C6 image of
-about 570 KB, `flash-bridge` updated both chips in 11 s and 17 s on the bench
-([`docs/p4-uart-link-findings.md`](../../docs/p4-uart-link-findings.md)). A bundled image that will not take is tried again on every power-up, about 30 s without a radio
-each time, until a P4 with a fixed image is flashed.
+Meanwhile the bridge announces the C6's MAC. With a C6 image of about 570 KB, `flash-bridge`
+updated both chips in 11 s and 17 s on the bench
+([`docs/p4-uart-link-findings.md`](../../docs/p4-uart-link-findings.md)). A bundled image that will
+not take is tried again on every power-up, about 30 s each time, until a P4 with a fixed image is
+flashed.
 
 If no hello follows the install within 10 s, the P4 resets the C6 through its enable pin, up to
 three times, so a hung trial image counts the boots it needs to roll back.
@@ -115,7 +118,7 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 | `updating the radio to the bundled image (n%)` | The update is under way; sent again every tenth of the image |
 | `radio runs another build; the bundled image did not take` | The C6 refused the image, stopped answering, or rolled back. The bridge still runs while the link revision matches |
 | `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
-| `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The bridge refuses radio commands |
+| `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The P4 sends the C6 no records |
 | `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
 | `the radio has stopped answering; wartui reset restarts the bridge` | A host polled and no packet came from the C6 for 12 s, as when it hangs holding RTS. Ends when a packet arrives |
 
@@ -181,9 +184,10 @@ as a drop in `Status`.
 
 | Variable | Default | Holds |
 | --- | --- | --- |
-| `WARTUI_P4_HOST_BULK_BYTES` | 262144 | frames for the host that may be evicted: received frames and logs |
+| `WARTUI_P4_HOST_BULK_BYTES` | 262144 | frames for the host that may be evicted: node records, GPS bytes and logs |
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
-| `WARTUI_P4_DOWN_QUEUE_BYTES` | 16384 | `Down` records waiting for a packet to the C6 |
+| `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
+| `WARTUI_P4_NODE_DOWN_BYTES` | 4096 | per slot, the host's records for that node waiting behind the one transfer in flight; a full queue answers `Undelivered` |
 
 The C6 link's baud rate (4 Mbaud) is fixed, as part of its frozen core. The host link's is
 `wartui_proto::link::HOST_BAUD`.

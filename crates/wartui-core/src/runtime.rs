@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{Frame, OtaStatusMsg};
+use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 
@@ -214,10 +214,10 @@ pub const OTA_TICK: Duration = Duration::from_millis(50);
 
 /// Run one node's update to its end, or until `stop` resolves, which cancels it.
 ///
-/// Frames from other nodes are handed to the session, which reads only its own node's.
+/// Records from other nodes are handed to the session, which reads only its own node's.
 /// `progress` is called after every event, for showing.
 ///
-/// Every frame sent, every send result, every status from the node and every phase change is
+/// Every record sent, every delivery answer, every status from the node and every phase change is
 /// logged at debug level with structured fields, so a bench log of an update can be read back
 /// by a script.
 pub async fn drive_ota(
@@ -236,23 +236,28 @@ pub async fn drive_ota(
             () = &mut stop => session.cancel(now()),
             _ = ticker.tick() => session.handle(now(), OtaEvent::Tick),
             event = link.recv() => match event {
-                Some(LinkEvent::Message(BridgeToHost::SendResult { id, status, tx_us })) => {
-                    tracing::debug!(id, status = ?status, tx_us, "ota send result");
-                    session.handle(now(), OtaEvent::SendResult { id, status })
+                Some(LinkEvent::Message(BridgeToHost::Delivered { id })) => {
+                    tracing::debug!(id, status = "delivered", "ota send result");
+                    session.handle(now(), OtaEvent::Delivery { id, delivered: true })
                 }
-                Some(LinkEvent::Message(BridgeToHost::Rx { src, payload, .. })) => {
-                    if src == session.node()
+                Some(LinkEvent::Message(BridgeToHost::Undelivered { id, reason })) => {
+                    tracing::debug!(id, status = ?reason, "ota send result");
+                    session.handle(now(), OtaEvent::Delivery { id, delivered: false })
+                }
+                Some(LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. })) => {
+                    if kind == UpType::UpdateStatus.as_u8()
                         && tracing::enabled!(tracing::Level::DEBUG)
-                        && let Ok(status) = OtaStatusMsg::decode(&payload)
+                        && let Ok(status) = UpdateStatus::decode(&body)
                     {
                         tracing::debug!(
+                            %slot,
                             session = status.session,
                             state = ?status.state,
                             next_offset = status.next_offset,
                             "ota status"
                         );
                     }
-                    session.handle(now(), OtaEvent::Rx { src, payload: &payload })
+                    session.handle(now(), OtaEvent::FromNode { slot, kind, body: &body })
                 }
                 Some(_) => Vec::new(),
                 None => return Outcome::Failed(Failure::LinkClosed),
@@ -260,21 +265,21 @@ pub async fn drive_ota(
         };
         for cmd in sends {
             if tracing::enabled!(tracing::Level::DEBUG)
-                && let HostToBridge::SendEspNow { id, payload, .. } = &cmd
+                && let HostToBridge::ToNode { slot, id, kind, body } = &cmd
             {
-                let (kind, offset) = match Frame::decode(payload) {
-                    Ok(Frame::OtaBegin(_)) => ("begin", None),
-                    Ok(Frame::OtaChunk(chunk)) => ("chunk", Some(chunk.offset)),
-                    Ok(Frame::OtaCommit(_)) => ("commit", None),
-                    Ok(Frame::OtaAbort(_)) => ("abort", None),
-                    Ok(Frame::OtaConfirm(_)) => ("confirm", None),
+                let (kind, offset) = match DownMsg::decode(*kind, body) {
+                    Ok(DownMsg::UpdateBegin(_)) => ("begin", None),
+                    Ok(DownMsg::UpdateChunk(chunk)) => ("chunk", Some(chunk.offset)),
+                    Ok(DownMsg::UpdateCommit(_)) => ("commit", None),
+                    Ok(DownMsg::UpdateAbort(_)) => ("abort", None),
+                    Ok(DownMsg::UpdateConfirm(_)) => ("confirm", None),
                     _ => ("other", None),
                 };
-                tracing::debug!(id, kind, offset, len = payload.len(), "ota send");
+                tracing::debug!(%slot, id, kind, offset, len = body.len(), "ota send");
             }
             if let Err(e) = link.send_urgent(cmd) {
                 // The session's own timeouts resend it.
-                tracing::warn!("dropping an update frame: {e}");
+                tracing::warn!("dropping an update record: {e}");
             }
         }
         let now_progress = session.progress();

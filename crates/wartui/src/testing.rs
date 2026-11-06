@@ -9,7 +9,7 @@ use std::time::Duration;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig};
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::{RecordKind, Slot};
 use wartui_proto::plan::ChannelPool;
 
 use crate::upload::{Prepare, Prepared};
@@ -21,7 +21,7 @@ pub(crate) fn sighting(bssid: [u8; 6], at_ms: i64, lat: Option<f64>) -> Record {
     Record::Observation(Observation {
         node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
         rx_at_ms: at_ms,
-        link_rssi: Some(-41),
+        slot: Slot::new(0, 0).expect("A1"),
         bssid,
         ssid: b"example".to_vec(),
         security: "[WPA2_PSK]".to_owned(),

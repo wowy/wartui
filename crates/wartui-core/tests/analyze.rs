@@ -4,13 +4,12 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use wartui_core::analyze::{
-    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
-    losses, peaks,
+    BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss, losses, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::{RecordKind, Slot};
 use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -19,6 +18,7 @@ use wartui_proto::reset::ResetCause;
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x1C, 0x5A];
 const EPOCH_MS: i64 = 1_777_642_477_000;
+const SLOT: Slot = Slot::new(0, 0).unwrap();
 
 /// A fresh capture holding `records`.
 fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
@@ -39,11 +39,10 @@ fn status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32) -> Record {
     read_status(at_s, rx_count, dropped_tx, uptime_ms, 0)
 }
 
-/// A status reply beside the frames the host had read when it arrived.
+/// A status reply beside the node records the host had read when it arrived.
 fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: u64) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + at_s * 1000,
-        peer_count: 2,
         rx_count,
         dropped_tx,
         uptime_ms,
@@ -96,27 +95,22 @@ fn radio_link_status_split(uptime_ms: u32, packets: u32, p4: u32, c6: u32) -> Re
     Record::BridgeStatus(BridgeStatusSeen { radio_link: Some(radio_link), ..seen })
 }
 
-/// A status reply carrying a count of oversize frames dropped.
+/// A status reply carrying a count of oversize node records dropped.
 fn oversize_status(at_s: i64, uptime_ms: u32, rx_oversize: u32) -> Record {
     let Record::BridgeStatus(seen) = status(at_s, 0, 0, uptime_ms) else { unreachable!() };
     Record::BridgeStatus(BridgeStatusSeen { rx_oversize, ..seen })
 }
 
 /// A live heartbeat.
-fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> Record {
+fn beat(node: Mac, at_ms: i64, counter: u32, wifi: u16, ble: u16) -> Record {
     Record::Heartbeat(Heartbeat {
         node_mac: node,
         rx_at_ms: EPOCH_MS + at_ms,
         counter,
         epoch: 3,
-        link_rssi: Some(-40),
+        slot: SLOT,
         wifi_refused: wifi,
         ble_refused: ble,
-        beat: seq,
-        unsent: 0,
-        dwell: 0,
-        prev_dwell: 0,
-        tx_power: 8,
         reset_cause: ResetCause::PowerOn,
         vdd_mv: None,
         die_temp_c: None,
@@ -125,15 +119,9 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
 }
 
 /// A heartbeat replayed from the bridge's backlog.
-fn replayed(node: Mac, at_ms: i64, counter: u32, seq: u16) -> Record {
-    let Record::Heartbeat(hb) = beat(node, at_ms, counter, seq, 0, 0) else { unreachable!() };
+fn replayed(node: Mac, at_ms: i64, counter: u32) -> Record {
+    let Record::Heartbeat(hb) = beat(node, at_ms, counter, 0, 0) else { unreachable!() };
     Record::Heartbeat(Heartbeat { live: false, ..hb })
-}
-
-/// `record`, a heartbeat, carrying `unsent` heartbeats the node's radio could not send since boot.
-fn unsent(record: Record, unsent: u8) -> Record {
-    let Record::Heartbeat(hb) = record else { unreachable!() };
-    Record::Heartbeat(Heartbeat { unsent, ..hb })
 }
 
 fn gap(node: Mac, seq: u16, lost: u16) -> Record {
@@ -146,14 +134,9 @@ fn gap(node: Mac, seq: u16, lost: u16) -> Record {
     })
 }
 
-/// Assigned heartbeats every 5 s, from `from_s`, every one sent.
+/// Assigned heartbeats every 5 s, from `from_s`.
 fn steady(node: Mac, from_s: i64, count: u32) -> Vec<Record> {
-    (0..count)
-        .map(|i| {
-            let seq = u16::try_from(i + 1).expect("a short run");
-            beat(node, (from_s + i64::from(i) * 5) * 1000, i + 1, seq, 0, 0)
-        })
-        .collect()
+    (0..count).map(|i| beat(node, (from_s + i64::from(i) * 5) * 1000, i + 1, 0, 0)).collect()
 }
 
 /// A sighting `at_ms` after the capture's start, with no position.
@@ -161,7 +144,7 @@ fn sighting(node: Mac, kind: RecordKind, at_ms: i64) -> Record {
     Record::Observation(Observation {
         node_mac: node,
         rx_at_ms: EPOCH_MS + at_ms,
-        link_rssi: Some(-41),
+        slot: SLOT,
         bssid: [0xAA; 6],
         ssid: b"example".to_vec(),
         security: "[WPA2_PSK]".to_owned(),
@@ -287,10 +270,10 @@ fn analyze_counts_peak_in_total_and_node_only_when_kind_is_unknown() {
     let path = dir.path().join("wartui.db");
     let rw = Connection::open(&path).expect("opening for writing");
     rw.execute(
-        "INSERT INTO observation (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+        "INSERT INTO observation (node_mac, rx_at, slot, bssid, ssid, security, channel, rssi,
                                   kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
                                   raw_body)
-         SELECT node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi, 'zigbee', rcoi,
+         SELECT node_mac, rx_at, slot, bssid, ssid, security, channel, rssi, 'zigbee', rcoi,
                 mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at, raw_body
          FROM observation",
         [],
@@ -307,7 +290,7 @@ fn analyze_counts_peak_in_total_and_node_only_when_kind_is_unknown() {
 
 #[test]
 fn analyze_reports_no_peaks_when_capture_holds_no_sightings() {
-    let (_dir, conn) = capture(vec![beat(NODE, 0, 1, 1, 0, 0)]);
+    let (_dir, conn) = capture(vec![beat(NODE, 0, 1, 0, 0)]);
     assert_eq!(peaks(&conn).expect("reading peaks"), PeakSummary::default());
 }
 
@@ -379,7 +362,7 @@ fn analyze_reports_queue_peak_when_rows_carry_queues() {
     // The peak is the largest high-water any row carried, in the order first reported.
     let (_dir, conn) = capture(vec![
         queue_status(60_000, QueueId::HostBulk, 300, 0),
-        queue_status(65_000, QueueId::RadioJobs, 20, 0),
+        queue_status(65_000, QueueId::NodeDown, 20, 0),
         queue_status(70_000, QueueId::HostBulk, 700, 0),
         queue_status(75_000, QueueId::HostBulk, 400, 0),
     ]);
@@ -388,7 +371,7 @@ fn analyze_reports_queue_peak_when_rows_carry_queues() {
         queues,
         [
             QueueLoss { queue: QueueId::HostBulk, capacity: 1_000, peak: 700, dropped: 0 },
-            QueueLoss { queue: QueueId::RadioJobs, capacity: 1_000, peak: 20, dropped: 0 },
+            QueueLoss { queue: QueueId::NodeDown, capacity: 1_000, peak: 20, dropped: 0 },
         ]
     );
 }
@@ -416,9 +399,7 @@ fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
             60_000,
             &[
                 (QueueId::RadioUp, 2),
-                (QueueId::RadioUpPriority, 1),
-                (QueueId::RadioSendJobs, 1),
-                (QueueId::RadioJobs, 1),
+                (QueueId::NodeDown, 1),
                 (QueueId::RadioDown, 4),
                 (QueueId::HostPriority, 3),
                 (QueueId::HostBulk, 500),
@@ -428,9 +409,7 @@ fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
             65_000,
             &[
                 (QueueId::RadioUp, 6),
-                (QueueId::RadioUpPriority, 1),
-                (QueueId::RadioSendJobs, 2),
-                (QueueId::RadioJobs, 3),
+                (QueueId::NodeDown, 3),
                 (QueueId::RadioDown, 4),
                 (QueueId::HostPriority, 3),
                 (QueueId::HostBulk, 512),
@@ -440,9 +419,7 @@ fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
             4_000,
             &[
                 (QueueId::RadioUp, 3),
-                (QueueId::RadioUpPriority, 0),
-                (QueueId::RadioSendJobs, 1),
-                (QueueId::RadioJobs, 2),
+                (QueueId::NodeDown, 5),
                 (QueueId::RadioDown, 6),
                 (QueueId::HostPriority, 4),
                 (QueueId::HostBulk, 515),
@@ -453,9 +430,7 @@ fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
     assert_eq!(bridge.reboots, 1);
     let dropped = |queue| bridge.queues.iter().find(|q| q.queue == queue).unwrap().dropped;
     assert_eq!(dropped(QueueId::RadioUp), 4 + 3);
-    assert_eq!(dropped(QueueId::RadioUpPriority), 0);
-    assert_eq!(dropped(QueueId::RadioSendJobs), 1 + 1);
-    assert_eq!(dropped(QueueId::RadioJobs), 2 + 2);
+    assert_eq!(dropped(QueueId::NodeDown), 2 + 2);
     assert_eq!(dropped(QueueId::RadioDown), 2);
     assert_eq!(dropped(QueueId::HostPriority), 1);
     assert_eq!(dropped(QueueId::HostBulk), 12 + 3);
@@ -465,19 +440,19 @@ fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
 fn analyze_totals_dropped_from_queues_when_c6_restarts() {
     // `dropped_tx` reads 508, 522, 505, and rebasing that fall whole would count the P4's 502 again.
     // The total is 12 + 2 before the restart, then 3 from the C6's new life and none from the P4.
-    // `radio-jobs` is not in `dropped_tx`.
+    // `node-down` is not in `dropped_tx`.
     let (_dir, conn) = capture(vec![
         queues_status(
             60_000,
-            &[(QueueId::RadioUp, 8), (QueueId::RadioJobs, 1), (QueueId::HostBulk, 500)],
+            &[(QueueId::RadioUp, 8), (QueueId::NodeDown, 1), (QueueId::HostBulk, 500)],
         ),
         queues_status(
             65_000,
-            &[(QueueId::RadioUp, 20), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+            &[(QueueId::RadioUp, 20), (QueueId::NodeDown, 9), (QueueId::HostBulk, 502)],
         ),
         queues_status(
             4_000,
-            &[(QueueId::RadioUp, 3), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+            &[(QueueId::RadioUp, 3), (QueueId::NodeDown, 9), (QueueId::HostBulk, 502)],
         ),
     ]);
     assert_eq!(losses(&conn).unwrap().bridge.unwrap().dropped, 12 + 2 + 3);
@@ -615,7 +590,7 @@ fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
         gap(NODE, 10, 2),
         gap(NODE, 50, 5),
         gap(OTHER, 20, 1),
-        beat(OTHER, 0, 1, 1, 0, 0),
+        beat(OTHER, 0, 1, 0, 0),
     ]);
     let loss = losses(&conn).unwrap();
     // Sorted by address, and a node with batch gaps but no heartbeat is still listed.
@@ -625,232 +600,63 @@ fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
 }
 
 #[test]
-fn analyze_counts_missed_heartbeats_when_beat_skips() {
-    // Beats 3 and 4 never arrived. The counter jumps further, since it counts sweeps.
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 1, 1, 0, 0),
-        beat(NODE, 5_000, 4, 2, 0, 0),
-        beat(NODE, 20_000, 13, 5, 0, 0),
-        beat(NODE, 25_000, 16, 6, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 2));
-}
-
-#[test]
-fn analyze_ignores_duplicate_heartbeat_when_beat_repeats() {
-    // A radio retransmit or a replay: the same beat twice is one heartbeat and no loss.
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 1, 1, 0, 0),
-        beat(NODE, 5_000, 4, 2, 0, 0),
-        beat(NODE, 5_010, 4, 2, 0, 0),
-        beat(NODE, 10_000, 7, 3, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 0));
-}
-
-#[test]
-fn analyze_counts_across_wrap_when_beat_wraps() {
-    // 65535 then 1: beat 0 was lost.
+fn analyze_counts_refusal_rise_when_sweep_counter_wraps() {
+    // A small forward modulo delta is a wrap, not a reboot, so only the rise counts.
     let (_dir, conn) =
-        capture(vec![beat(NODE, 0, 900, u16::MAX, 0, 0), beat(NODE, 10_000, 903, 1, 0, 0)]);
+        capture(vec![beat(NODE, 0, u32::MAX - 1, 10, 0), beat(NODE, 15_000, 2, 12, 0)]);
     let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 1));
+    assert_eq!((node.heartbeats, node.wifi_refused), (2, 2));
 }
 
 #[test]
-fn analyze_ignores_gap_when_counter_falls() {
-    // The node rebooted during the silence, so the beat restarted and the gap is not loss.
-    let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 1, 0, 0)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
-}
-
-#[test]
-fn analyze_counts_gap_when_sweep_counter_wraps() {
-    // A small forward modulo delta is a wrap, not a reboot. Beats 101 and 102 were lost.
-    let (_dir, conn) =
-        capture(vec![beat(NODE, 0, u32::MAX - 1, 100, 10, 0), beat(NODE, 15_000, 2, 103, 12, 0)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (2, 2, 2));
-}
-
-#[test]
-fn analyze_brackets_windows_when_beats_skip_and_repeat() {
+fn analyze_counts_every_heartbeat_row_when_rows_repeat_or_replay() {
+    // A heartbeat carries no sequence, so every row counts, replayed or repeated.
     let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 100, 80, 0, 0),
-        beat(NODE, 5_000, 101, 81, 0, 0),
-        beat(NODE, 5_010, 101, 81, 0, 0),
-        beat(NODE, 20_000, 104, 84, 0, 0),
-        beat(NODE, 20_010, 104, 84, 0, 0),
-        beat(NODE, 30_000, 106, 86, 0, 0),
+        replayed(NODE, 0, 30),
+        beat(NODE, 1_000, 240, 0, 0),
+        beat(NODE, 1_010, 240, 0, 0),
     ]);
     let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 3));
-    assert_eq!(
-        node.heartbeat_windows,
-        vec![
-            HeartbeatWindow {
-                start_id: 3,
-                end_id: 4,
-                start_rx_at_ms: EPOCH_MS + 5_010,
-                end_rx_at_ms: EPOCH_MS + 20_000,
-                missed: 2,
-                unsent: 0,
-                restarted: false,
-            },
-            HeartbeatWindow {
-                start_id: 5,
-                end_id: 6,
-                start_rx_at_ms: EPOCH_MS + 20_010,
-                end_rx_at_ms: EPOCH_MS + 30_000,
-                missed: 1,
-                unsent: 0,
-                restarted: false,
-            },
-        ]
-    );
+    assert_eq!(node.heartbeats, 3);
 }
 
 #[test]
-fn analyze_marks_windows_when_restart_beats_are_missing() {
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 40, 20, 0, 0),
-        beat(NODE, 60_000, 1, 12, 0, 0),
-        beat(NODE, 65_000, 2, 13, 0, 0),
-        beat(NODE, 120_000, 10, 3, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 13));
-    assert_eq!(node.heartbeat_windows.len(), 2);
-    assert_eq!(
-        node.heartbeat_windows[0],
-        HeartbeatWindow {
-            start_id: 1,
-            end_id: 2,
-            start_rx_at_ms: EPOCH_MS,
-            end_rx_at_ms: EPOCH_MS + 60_000,
-            missed: 11,
-            unsent: 0,
-            restarted: true,
-        }
-    );
-    assert_eq!(node.heartbeat_windows[1].missed, 2);
-    assert!(node.heartbeat_windows[1].restarted);
-}
-
-#[test]
-fn analyze_preserves_window_arrival_order_when_clock_reverses() {
-    let (_dir, conn) =
-        capture(vec![beat(NODE, 5_000, 1, 1, 0, 0), beat(NODE, -25_000, 4, 4, 0, 0)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!(
-        node.heartbeat_windows,
-        vec![HeartbeatWindow {
-            start_id: 1,
-            end_id: 2,
-            start_rx_at_ms: EPOCH_MS + 5_000,
-            end_rx_at_ms: EPOCH_MS - 25_000,
-            missed: 2,
-            unsent: 0,
-            restarted: false,
-        }]
-    );
-}
-
-#[test]
-fn analyze_excludes_windows_when_first_beats_and_handoff_are_baselines() {
-    let (_dir, conn) = capture(vec![
-        replayed(NODE, 0, 30, 17),
-        beat(NODE, 1_000, 240, 140, 0, 0),
-        beat(NODE, 21_000, 244, 144, 0, 0),
-        replayed(OTHER, 0, 40, 20),
-        beat(OTHER, 60_000, 1, 12, 0, 0),
-    ]);
-    let loss = losses(&conn).unwrap();
-    assert!(loss.nodes[0].heartbeat_windows.is_empty());
-    let node = &loss.nodes[1];
-    assert_eq!(node.heartbeats_missed, 3);
-    assert_eq!(
-        node.heartbeat_windows,
-        vec![HeartbeatWindow {
-            start_id: 2,
-            end_id: 3,
-            start_rx_at_ms: EPOCH_MS + 1_000,
-            end_rx_at_ms: EPOCH_MS + 21_000,
-            missed: 3,
-            unsent: 0,
-            restarted: false,
-        }]
-    );
-}
-
-#[test]
-fn analyze_counts_windows_when_both_counters_wrap() {
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, u32::MAX - 1, u16::MAX, 0, 0),
-        beat(NODE, 10_000, 2, 1, 0, 0),
-        beat(NODE, 15_000, 3, 2, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 1));
-    assert_eq!(node.heartbeat_windows.len(), 1);
-    assert_eq!(node.heartbeat_windows[0].missed, 1);
-    assert!(!node.heartbeat_windows[0].restarted);
-}
-
-#[test]
-fn analyze_classifies_restart_when_modulo_delta_reaches_half_range() {
-    for (counter, seq, missed, restarted) in [
-        (1, 10 + 0x7fff, 0x7ffe, false),
-        (1, 10 + 0x8000, 10 + 0x8000 - 1, true),
-        (0x7fff_ffff, 12, 1, false),
-        (0x8000_0000, 12, 11, true),
-    ] {
+fn analyze_classifies_restart_when_counter_delta_reaches_half_range() {
+    // A restart counts the refusals whole; otherwise only their rise counts.
+    for (counter, refused) in [(0x7fff_ffff, 2), (0x8000_0000, 12)] {
         let (_dir, conn) =
-            capture(vec![beat(NODE, 0, 0, 10, 0, 0), beat(NODE, 10_000, counter, seq, 0, 0)]);
+            capture(vec![beat(NODE, 0, 0, 10, 0), beat(NODE, 10_000, counter, 12, 0)]);
         let node = &losses(&conn).unwrap().nodes[0];
-        assert_eq!(node.heartbeats_missed, missed);
-        assert_eq!(node.heartbeat_windows.len(), 1);
-        assert_eq!(node.heartbeat_windows[0].missed, missed);
-        assert_eq!(node.heartbeat_windows[0].restarted, restarted);
+        assert_eq!(node.wifi_refused, refused, "counter {counter:#x}");
     }
 }
 
 #[test]
-fn analyze_keeps_windows_per_node_when_arrivals_are_interleaved() {
+fn analyze_rebases_refusals_per_node_when_arrivals_are_interleaved() {
+    // Each node's counter is read against its own previous row, never the other node's.
     let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 1, 1, 0, 0),
-        beat(OTHER, 1_000, 100, 100, 0, 0),
-        beat(NODE, 10_000, 3, 3, 0, 0),
-        beat(OTHER, 21_000, 104, 104, 0, 0),
-        beat(NODE, 15_000, 1, 1, 0, 0),
+        beat(NODE, 0, 1, 0, 0),
+        beat(OTHER, 1_000, 100, 50, 0),
+        beat(NODE, 10_000, 3, 4, 0),
+        beat(OTHER, 21_000, 104, 53, 0),
+        beat(NODE, 15_000, 1, 2, 0),
     ]);
     let loss = losses(&conn).unwrap();
-    assert_eq!(loss.nodes[0].heartbeats_missed, 3);
-    assert_eq!(loss.nodes[1].heartbeats_missed, 1);
-    assert_eq!(loss.nodes[0].heartbeat_windows[0].start_id, 2);
-    assert_eq!(loss.nodes[0].heartbeat_windows[0].end_id, 4);
-    assert_eq!(loss.nodes[1].heartbeat_windows[0].start_id, 1);
-    assert_eq!(loss.nodes[1].heartbeat_windows[0].end_id, 3);
-    for node in &loss.nodes {
-        assert_eq!(
-            node.heartbeats_missed,
-            node.heartbeat_windows.iter().map(|window| window.missed).sum::<u64>()
-        );
-    }
+    let summary: Vec<_> =
+        loss.nodes.iter().map(|n| (n.mac, n.heartbeats, n.wifi_refused)).collect();
+    // `OTHER` sorts first; `NODE` restarted at its third row, so its 2 count whole.
+    assert_eq!(summary, vec![(OTHER, 2, 3), (NODE, 3, 4 + 2)]);
 }
 
 #[test]
 fn analyze_rebases_refusals_when_node_reboots() {
     let (_dir, conn) = capture(vec![
         // 100 refused before the capture began: a baseline.
-        beat(NODE, 0, 10, 5, 100, 4),
-        beat(NODE, 5_000, 11, 6, 130, 6),
+        beat(NODE, 0, 10, 100, 4),
+        beat(NODE, 5_000, 11, 130, 6),
         // Rebooted: the counts restarted, so all of each is new.
-        beat(NODE, 10_000, 1, 1, 20, 1),
-        beat(NODE, 11_000, 2, 2, 25, 1),
+        beat(NODE, 10_000, 1, 20, 1),
+        beat(NODE, 11_000, 2, 25, 1),
     ]);
     let node = &losses(&conn).unwrap().nodes[0];
     assert_eq!((node.wifi_refused, node.ble_refused), (30 + 20 + 5, 2 + 1));
@@ -859,130 +665,15 @@ fn analyze_rebases_refusals_when_node_reboots() {
 #[test]
 fn analyze_walks_arrival_order_when_clock_steps_back() {
     // The host clock steps back 30 s after the second heartbeat. Arrival order still has the
-    // beats rising by one, so nothing was missed and nothing restarted.
+    // counter rising, so nothing restarted.
     let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 1, 1, 10, 0),
-        beat(NODE, 5_000, 2, 2, 12, 0),
-        beat(NODE, -25_000, 3, 3, 15, 0),
-        beat(NODE, -20_000, 4, 4, 16, 0),
+        beat(NODE, 0, 1, 10, 0),
+        beat(NODE, 5_000, 2, 12, 0),
+        beat(NODE, -25_000, 3, 15, 0),
+        beat(NODE, -20_000, 4, 16, 0),
     ]);
     let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (4, 0, 6));
-}
-
-#[test]
-fn analyze_reads_falling_beat_as_reboot_when_counter_rises() {
-    // The node rebooted out of range and came back with a higher sweep counter. The falling
-    // beat is the restart, so the refusal counts are all new and beat 1 follows no loss.
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 10, 40, 100, 0),
-        beat(NODE, 5_000, 11, 41, 110, 0),
-        beat(NODE, 60_000, 50, 1, 30, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (3, 0, 10 + 30));
-}
-
-#[test]
-fn analyze_counts_beats_lost_since_boot_when_first_heard_late() {
-    // Rebooted, and beats 1 to 11 since boot never arrived.
-    let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 12, 0, 0)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 11));
-}
-
-#[test]
-fn analyze_ignores_beat_gap_when_previous_heartbeat_replayed() {
-    // Beat 17 was replayed from the bridge's backlog; 140 is the first live one. The beats
-    // between were sent while no host was reading, which the bridge's drop count covers.
-    let (_dir, conn) = capture(vec![
-        replayed(NODE, 0, 30, 17),
-        beat(NODE, 1_000, 240, 140, 0, 0),
-        beat(NODE, 6_000, 241, 141, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 0));
-}
-
-#[test]
-fn analyze_counts_beat_gap_when_previous_heartbeat_live() {
-    let (_dir, conn) = capture(vec![
-        replayed(NODE, 0, 30, 17),
-        beat(NODE, 1_000, 240, 140, 0, 0),
-        beat(NODE, 21_000, 244, 144, 0, 0),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 3));
-}
-
-#[test]
-fn analyze_ignores_beats_lost_since_boot_when_previous_heartbeat_replayed() {
-    // The node rebooted while no host was reading; beats 1 to 11 fall in that time.
-    let (_dir, conn) = capture(vec![replayed(NODE, 0, 40, 20), beat(NODE, 60_000, 1, 12, 0, 0)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
-}
-
-#[test]
-fn analyze_splits_missed_heartbeats_into_unsent_when_unsent_advances_across_gap() {
-    // Beats 3 to 5 are missing, and the radio could not send two of them.
-    let (_dir, conn) = capture(vec![
-        beat(NODE, 0, 1, 1, 0, 0),
-        beat(NODE, 5_000, 2, 2, 0, 0),
-        unsent(beat(NODE, 30_000, 7, 6, 0, 0), 2),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (3, 2));
-    assert_eq!(node.heartbeat_windows[0].unsent, 2);
-}
-
-#[test]
-fn analyze_counts_unsent_since_boot_when_node_restarts() {
-    // Rebooted: beats 1 to 11 since boot are missing, and the radio could not send 3 of them.
-    let (_dir, conn) = capture(vec![
-        unsent(beat(NODE, 0, 40, 20, 0, 0), 5),
-        unsent(beat(NODE, 60_000, 1, 12, 0, 0), 3),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (11, 3));
-    assert!(node.heartbeat_windows[0].restarted);
-    assert_eq!(node.heartbeat_windows[0].unsent, 3);
-}
-
-#[test]
-fn analyze_ignores_unsent_when_gap_follows_replayed_heartbeat() {
-    // The 50 unsent between the replayed beat and the first live one fall in time no host was
-    // reading. Only the one unsent between live beats 140 and 144 counts.
-    let (_dir, conn) = capture(vec![
-        replayed(NODE, 0, 30, 17),
-        unsent(beat(NODE, 1_000, 240, 140, 0, 0), 50),
-        unsent(beat(NODE, 21_000, 244, 144, 0, 0), 51),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (3, 1));
-}
-
-#[test]
-fn analyze_caps_unsent_at_missed_when_count_exceeds_gap() {
-    // Two failed sends across one missed beat cannot come from honest rows; the count caps at
-    // the gap.
-    let (_dir, conn) =
-        capture(vec![beat(NODE, 0, 1, 1, 0, 0), unsent(beat(NODE, 10_000, 3, 3, 0, 0), 2)]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (1, 1));
-    assert_eq!(node.heartbeat_windows[0].unsent, 1);
-}
-
-#[test]
-fn analyze_counts_unsent_across_wrap_when_count_passes_255() {
-    // 250 to 3 is nine failed sends, not a restart.
-    let (_dir, conn) = capture(vec![
-        unsent(beat(NODE, 0, 10, 10, 0, 0), 250),
-        unsent(beat(NODE, 60_000, 22, 22, 0, 0), 3),
-    ]);
-    let node = &losses(&conn).unwrap().nodes[0];
-    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (11, 9));
-    assert!(!node.heartbeat_windows[0].restarted);
+    assert_eq!((node.heartbeats, node.wifi_refused), (4, 6));
 }
 
 /// A host row with every count at `n` and the given peaks and health.
@@ -1015,7 +706,7 @@ fn host_row(
 
 #[test]
 fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
-    // 30 frames the bridge received never reached the host; a bridge restart leaves the
+    // 30 records the bridge received never reached the host; a bridge restart leaves the
     // host's own count rising.
     let (_dir, conn) = capture(vec![
         read_status(0, 10_000, 0, 60_000, 4_000),
@@ -1055,7 +746,7 @@ fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
 
 #[test]
 fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
-    // The first reply overtook 24 frames still queued in the bridge, so the host had read
+    // The first reply overtook 24 records still queued in the bridge, so the host had read
     // 24 fewer than `rx_count` says and reads them after the baseline: over the capture it
     // reads more than the bridge received.
     let (_dir, conn) = capture(vec![

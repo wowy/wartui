@@ -5,7 +5,7 @@
 
 [package]
 name = "wartui-p4-radio-fw"
-description = "The radio half of the wartui P4 split bridge: ESP-NOW on the ESP32-P4-WIFI6's ESP32-C6, a UART link to the P4."
+description = "The C6 half of the wartui P4 split bridge: the ESP32-P4-WIFI6's ESP32-C6, on a UART link to the P4."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -19,25 +19,19 @@ path = "src/main.rs"
 # Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
 # for the reasons `README.md` § "Dependency versions" gives. Each that takes a chip feature
 # names the only one: the P4 boards carry an ESP32-C6.
-esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
 esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
-esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
-  "esp-alloc",
-  "esp-now",
-  "esp32c6",
-  "unstable",
-  "wifi",
-] }
-esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
+# The executor and time driver. No allocator: nothing here allocates.
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp32c6"] }
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 static_cell = "2.1.1"
-# The reset funnel, the reset cause, the phase marker and the radio half, shared with
-# the P4 where it applies, and the flash half of updates, shared with the node, which brings
-# `esp-storage` at the version `firmware/common/Cargo.toml` holds.
-wartui-firmware = { path = "../common", features = ["esp32c6", "radio"] }
+# The reset funnel, the reset cause and the phase marker, shared with the P4, and the flash
+# half of updates, shared with the node, which brings `esp-storage` at the version
+# `firmware/common/Cargo.toml` holds.
+wartui-firmware = { path = "../common", features = ["esp32c6"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]
@@ -49,11 +43,8 @@ unsafe_code = "deny"
 all = { level = "deny", priority = -1 }
 
 [profile.dev]
-# The radio blobs misbehave below opt-level 2, and the debug profile is too big.
+# The debug profile is too big.
 opt-level = "s"
-
-[profile.dev.package.esp-radio]
-opt-level = 3
 
 [profile.release]
 codegen-units = 1

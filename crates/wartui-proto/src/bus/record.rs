@@ -4,11 +4,11 @@
 //! `len`. A record never spans transfers: the longest fits one, so [`Packer`] refuses rather
 //! than splits.
 //!
-//! | Type | [`RecordType`] | Body |
-//! |---|---|---|
-//! | 1 | [`RecordType::NodeFrame`] | one node frame verbatim, as it would go on the air ([`crate::air`]) |
+//! The type byte names a message per direction ([`UpType`], [`DownType`]), and the body is the
+//! message's body. A receiver skips a type it does not know.
 //!
-//! The record layer is fixed; the table grows. A receiver skips a type it does not know.
+//! [`UpType`]: super::UpType
+//! [`DownType`]: super::DownType
 
 use super::{HEADER_LEN, Header, PAYLOAD_MAX, TRANSFER_LEN, seal};
 
@@ -17,25 +17,6 @@ pub const RECORD_HEADER_LEN: usize = 3;
 /// The longest record body: a whole payload less one record header.
 pub const RECORD_MAX: usize = PAYLOAD_MAX - RECORD_HEADER_LEN;
 
-/// What a record's body holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum RecordType {
-    /// One node frame verbatim.
-    NodeFrame = 1,
-}
-
-impl RecordType {
-    /// The type a record's byte names, if this build knows it.
-    #[must_use]
-    pub const fn from_u8(b: u8) -> Option<Self> {
-        match b {
-            1 => Some(Self::NodeFrame),
-            _ => None,
-        }
-    }
-}
-
 /// One record from a payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record<'a> {
@@ -43,14 +24,6 @@ pub struct Record<'a> {
     pub kind: u8,
     /// The body.
     pub body: &'a [u8],
-}
-
-impl Record<'_> {
-    /// The type, if this build knows it.
-    #[must_use]
-    pub const fn record_type(&self) -> Option<RecordType> {
-        RecordType::from_u8(self.kind)
-    }
 }
 
 /// Packs records into a transfer buffer, then seals it.
@@ -73,12 +46,12 @@ impl<'a> Packer<'a> {
     }
 
     /// Appends one record, or returns `false` and changes nothing when it does not fit.
-    pub fn push(&mut self, kind: RecordType, body: &[u8]) -> bool {
+    pub fn push(&mut self, kind: u8, body: &[u8]) -> bool {
         if !self.fits(body.len()) {
             return false;
         }
         let at = HEADER_LEN + self.len;
-        self.buf[at] = kind as u8;
+        self.buf[at] = kind;
         // Fits: no body that fits is longer than RECORD_MAX.
         self.buf[at + 1..at + RECORD_HEADER_LEN]
             .copy_from_slice(&(body.len() as u16).to_le_bytes());

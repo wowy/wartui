@@ -5,8 +5,8 @@
 //! capture is least likely to contain. Real frames go in `beacon_vectors.txt`
 //! and are exercised by `every_captured_beacon_yields_a_usable_observation`.
 
-use wartui_proto::air::{SIGHTING_RECORD_MAX, SSID_MAX, Security, SightingMsg};
 use wartui_proto::beacon::{parse_mgmt, rcoi_text};
+use wartui_proto::bus::{SIGHTING_RECORD_MAX, SSID_MAX, Security, SightingMsg};
 
 /// One `tag, len, data` element.
 fn ie(tag: u8, data: &[u8]) -> Vec<u8> {

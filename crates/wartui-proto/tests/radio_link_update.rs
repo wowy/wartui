@@ -4,10 +4,10 @@
 use std::collections::VecDeque;
 
 use sha2::{Digest, Sha256};
-use wartui_proto::air::{Board, OTA_CHUNK, OtaState, OtaStatusMsg};
+use wartui_proto::bus::{Board, UPDATE_CHUNK, UpdateState, UpdateStatus};
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, UPDATE_STATUS_MAX, UpdateOp,
-    UpdateStatus, decode_frame, encode_frame, encode_host_frame,
+    UpdateStatusBytes, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::radio_link::PAYLOAD_MAX;
@@ -65,7 +65,7 @@ impl FakeC6 {
         }
     }
 
-    fn take(&mut self, payload: &[u8]) -> Option<OtaStatusMsg> {
+    fn take(&mut self, payload: &[u8]) -> Option<UpdateStatus> {
         let op = Op::decode(payload).expect("an op");
         assert!(!matches!(op, Op::Status(_)), "a status sent down");
         match receive(&mut self.receiver, op, Some(&mut self.slot), false) {
@@ -177,9 +177,9 @@ fn radio_link_update_op_encodes_frozen_layout_when_any_op() {
     assert_eq!(out[..len], [4, 7]);
     assert_eq!(Op::decode(&out[..len]), Some(install));
 
-    let status = Op::Status(OtaStatusMsg {
+    let status = Op::Status(UpdateStatus {
         session: 7,
-        state: OtaState::HashMismatch,
+        state: UpdateState::HashMismatch,
         next_offset: 0x0000_2000,
     });
     let len = status.encode(&mut out);
@@ -190,7 +190,7 @@ fn radio_link_update_op_encodes_frozen_layout_when_any_op() {
 #[test]
 fn radio_link_update_op_fits_one_packet_when_chunk_is_full() {
     const { assert!(OP_MAX <= PAYLOAD_MAX) };
-    let data = [0x5A; OTA_CHUNK];
+    let data = [0x5A; UPDATE_CHUNK];
     let mut out = [0u8; OP_MAX];
     let chunk = Op::Chunk { session: 1, offset: 0, data: &data };
     assert_eq!(chunk.encode(&mut out), OP_MAX);
@@ -213,7 +213,7 @@ fn radio_link_update_op_decodes_none_when_payload_short() {
         Op::Chunk { session: 7, offset: 0, data: &[] },
         Op::Commit { session: 7 },
         Op::Install { session: 7 },
-        Op::Status(OtaStatusMsg { session: 7, state: OtaState::Idle, next_offset: 0 }),
+        Op::Status(UpdateStatus { session: 7, state: UpdateState::Idle, next_offset: 0 }),
     ];
     for op in ops {
         let len = op.encode(&mut out);
@@ -224,7 +224,7 @@ fn radio_link_update_op_decodes_none_when_payload_short() {
 #[test]
 fn radio_link_update_op_decodes_none_when_chunk_longer_than_ota_chunk() {
     let mut payload = vec![2, 7, 0, 0, 0, 0];
-    payload.extend_from_slice(&[0; OTA_CHUNK + 1]);
+    payload.extend_from_slice(&[0; UPDATE_CHUNK + 1]);
     assert_eq!(Op::decode(&payload), None);
 }
 
@@ -242,7 +242,7 @@ fn radio_link_update_sender_installs_image_when_c6_verifies_it() {
         assert_eq!(c6.slot.flash[..len], image[..]);
         assert_eq!(log.first(), Some(&Sent::Begin));
         assert_eq!(log[log.len() - 2..], [Sent::Commit, Sent::Install]);
-        assert_eq!(chunks(&log), len.div_ceil(OTA_CHUNK));
+        assert_eq!(chunks(&log), len.div_ceil(UPDATE_CHUNK));
     }
 }
 
@@ -284,7 +284,7 @@ fn radio_link_update_sender_waits_for_status_when_a_sector_is_sent() {
     let status = c6.take(&buf[..len]).unwrap();
     sender.on_status(&status);
     let mut last = None;
-    for offset in (0..SECTOR).step_by(OTA_CHUNK) {
+    for offset in (0..SECTOR).step_by(UPDATE_CHUNK) {
         let len = sender.next(1, &mut buf).unwrap();
         assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Chunk(offset as u32));
         last = c6.take(&buf[..len]);
@@ -304,7 +304,7 @@ fn radio_link_update_sender_fails_when_c6_reports_hash_mismatch() {
     let mut sender = Sender::new(&image, [0; 32], &DIGEST);
     let mut c6 = FakeC6::new();
     let log = run(&mut sender, &mut c6, |_| false);
-    assert_eq!(sender.stage(), Stage::Failed(Failure::Refused(OtaState::HashMismatch)));
+    assert_eq!(sender.stage(), Stage::Failed(Failure::Refused(UpdateState::HashMismatch)));
     assert_eq!(log.last(), Some(&Sent::Commit));
     assert_eq!(c6.installed, None);
 }
@@ -331,9 +331,9 @@ fn radio_link_update_sender_ignores_status_when_session_differs() {
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut buf = [0u8; OP_MAX];
     sender.next(0, &mut buf).unwrap();
-    sender.on_status(&OtaStatusMsg {
+    sender.on_status(&UpdateStatus {
         session: SESSION + 1,
-        state: OtaState::FlashError,
+        state: UpdateState::FlashError,
         next_offset: 0,
     });
     assert_eq!(sender.stage(), Stage::Sending);
@@ -342,7 +342,7 @@ fn radio_link_update_sender_ignores_status_when_session_differs() {
 #[test]
 fn radio_link_update_sender_resends_each_lost_chunk_once_when_statuses_arrive_late() {
     let image = image(4 * SECTOR);
-    let total = image.len().div_ceil(OTA_CHUNK);
+    let total = image.len().div_ceil(UPDATE_CHUNK);
     for lag in [1, 2] {
         // The first chunk of a sector, so a resend of every chunk after it would show.
         for lost_at in [SECTOR as u32, 0] {
@@ -418,12 +418,12 @@ fn radio_link_update_sender_fails_when_c6_refuses_install() {
     let (_, at) = run_late(&mut sender, &mut c6, 0, |sent| sent == Sent::Install);
     assert_eq!(sender.stage(), Stage::Installed);
     // The C6 could not switch images, reset its receiver and refused the session.
-    sender.on_status(&OtaStatusMsg {
+    sender.on_status(&UpdateStatus {
         session: SESSION,
-        state: OtaState::FlashError,
+        state: UpdateState::FlashError,
         next_offset: 0,
     });
-    assert_eq!(sender.stage(), Stage::Failed(Failure::SwitchFailed(OtaState::FlashError)));
+    assert_eq!(sender.stage(), Stage::Failed(Failure::SwitchFailed(UpdateState::FlashError)));
     let mut buf = [0u8; OP_MAX];
     assert_eq!(sender.next(at + REPLY_WAIT_MS, &mut buf), None);
 }
@@ -437,13 +437,13 @@ fn radio_link_update_sender_stays_installed_when_status_after_install_is_no_refu
     // A C6 rebooted into the new image holds no session, statuses trail the ops, and a
     // refusal for another session is not this one's.
     for (session, state) in [
-        (0, OtaState::Idle),
-        (SESSION, OtaState::Idle),
-        (SESSION, OtaState::Receiving),
-        (SESSION, OtaState::Verified),
-        (SESSION + 1, OtaState::FlashError),
+        (0, UpdateState::Idle),
+        (SESSION, UpdateState::Idle),
+        (SESSION, UpdateState::Receiving),
+        (SESSION, UpdateState::Verified),
+        (SESSION + 1, UpdateState::FlashError),
     ] {
-        sender.on_status(&OtaStatusMsg { session, state, next_offset: 0 });
+        sender.on_status(&UpdateStatus { session, state, next_offset: 0 });
         assert_eq!(sender.stage(), Stage::Installed, "{session} {state:?}");
     }
 }
@@ -470,7 +470,8 @@ fn radio_link_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4()
         let Some(status) = p4.take(&op) else { continue };
         let mut reply = [0u8; UPDATE_STATUS_MAX];
         let len = Op::Status(status).encode(&mut reply);
-        let event = BridgeToHost::Update(UpdateStatus::from_slice(&reply[..len]).expect("fits"));
+        let event =
+            BridgeToHost::Update(UpdateStatusBytes::from_slice(&reply[..len]).expect("fits"));
         let mut frame = [0u8; MAX_FRAME];
         let n = encode_frame(&event, &mut frame).expect("encodes");
         let Ok(BridgeToHost::Update(bytes)) = decode_frame(&mut frame[..n - 1]) else {
@@ -494,17 +495,17 @@ fn radio_link_update_receive_refuses_begin_when_image_is_on_trial() {
     let image = image(100);
     let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
     let mut c6 = FakeC6::new();
-    let refused = Received::Status(Some(OtaStatusMsg {
+    let refused = Received::Status(Some(UpdateStatus {
         session: SESSION,
-        state: OtaState::FlashError,
+        state: UpdateState::FlashError,
         next_offset: 0,
     }));
     assert_eq!(receive(&mut c6.receiver, begin, Some(&mut c6.slot), true), refused);
     assert_eq!(
         receive(&mut c6.receiver, begin, Some(&mut c6.slot), false),
-        Received::Status(Some(OtaStatusMsg {
+        Received::Status(Some(UpdateStatus {
             session: SESSION,
-            state: OtaState::Receiving,
+            state: UpdateState::Receiving,
             next_offset: 0,
         }))
     );
@@ -518,15 +519,15 @@ fn radio_link_update_receive_refuses_ops_when_table_has_no_update_slot() {
     let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
     assert_eq!(
         receive(&mut receiver, begin, none, false),
-        Received::Status(Some(OtaStatusMsg {
+        Received::Status(Some(UpdateStatus {
             session: SESSION,
-            state: OtaState::FlashError,
+            state: UpdateState::FlashError,
             next_offset: 0,
         }))
     );
-    let idle = Received::Status(Some(OtaStatusMsg {
+    let idle = Received::Status(Some(UpdateStatus {
         session: SESSION,
-        state: OtaState::Idle,
+        state: UpdateState::Idle,
         next_offset: 0,
     }));
     let chunk = Op::Chunk { session: SESSION, offset: 0, data: &image };

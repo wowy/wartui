@@ -4,8 +4,9 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 wardriving nodes, speaking ESP-NOW through an ESP32-P4
-bridge whose on-board C6 runs the radio, reached over USB through the board's CH343. `README.md`
+A terminal fleet controller for ESP32-C5 wardriving nodes, wired over SPI to an ESP32-P4 bridge
+(the node bus), reached over USB through the board's CH343. The board's C6 holds a UART link the P4
+updates and reports on. `README.md`
 introduces it and says which chip goes where.
 
 Where the prose lives:
@@ -16,7 +17,8 @@ Where the prose lives:
   when that behavior changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
   set (`firmware/p4-radio/README.md`).
-- `docs/node-bus.md` — the SPI bus between the P4 bridge and its nodes: pins and pin behavior.
+- `docs/node-bus.md` — the SPI bus between the P4 bridge and its nodes: pins, pin behavior and the
+  messages its records carry.
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -76,7 +78,7 @@ cargo clippy --release
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check                    # then each firmware's combination:
 cargo clippy --release --features esp32c5         # node
-cargo clippy --release --features esp32c6,radio   # P4 bridge's radio
+cargo clippy --release --features esp32c6         # P4 bridge's radio
 cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf  # P4 bridge
 ```
 
@@ -91,9 +93,10 @@ Four host crates, strictly layered, plus firmware that shares the bottom one and
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `radio_link` (the
-  UART packets between the P4 and its C6, and their frozen core), `bus` (the SPI transfers
-  between a P4 bridge and its nodes), `mac` (the `Mac` type and its
+  with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
+  slots, and the messages a node and the P4 exchange), `beacon`, `hci`, `dedup`, `link`,
+  `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
+  `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
   sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
@@ -108,23 +111,22 @@ own.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
-- **`firmware/p4-bridge`** — the host half of the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6:
-  COBS framing over a DMA UART to the host, through the board's CH343, and a FIFO UART with
-  RTS/CTS to its C6, no protocol knowledge. Fixes there cost a
-  reflash, so logic belongs on the host. Its image carries the C6's, and updates it.
-- **`firmware/p4-radio`** — the radio half of the bridge, on the board's C6: `esp-radio` calls behind
-  a DMA UART, equally without protocol knowledge.
+- **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
+  a DMA UART to the host, through the board's CH343, the node bus's two SPI masters, and a FIFO
+  UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
+  knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
+  carries the C6's, and updates it.
+- **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
+  It holds the link for a future Bluetooth host link, and runs no radio today.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
-  owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the program
-  (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after
-  every dwell, and parks there doing nothing when it holds no assignment. The node given the
-  Bluetooth scan never leaves the control channel at all: it sniffs nothing and runs one scan after
-  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and this crate
-  is the conversation with the radio.
+  and owns the channel (`firmware/node/README.md` § "What it does differently"). Hops from one
+  assigned channel to the next, reporting each dwell over the node bus, and idles servicing the
+  bus when it holds no assignment. The node given the Bluetooth scan sniffs nothing and runs one
+  scan after another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
+  this crate is the conversation with the radio and the bus.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
-  the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
-  feature (`radio`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
+  the bridge's reset-surviving phase marker (`phase`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
   updates on flash, the slot, the switch and the trial (`ota`).
   Each firmware depends on it by path and selects its chip feature in that dependency. It is its
   own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
@@ -146,8 +148,8 @@ ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels ar
 ### Store is the system of record
 
 `store` is SQLite behind one owner thread with batched transactions and a bounded queue that
-**drops rather than blocks** (a stalled engine misses everything, including an assignment racing
-a 100 ms window). A capture file holds one run: `Store::create` refuses a path that exists.
+**drops rather than blocks** (a stalled engine misses everything, including the assignment that
+answers a heartbeat). A capture file holds one run: `Store::create` refuses a path that exists.
 `export` (WiGLE CSV) is a view over the store, re-runnable against a finished or still-running
 capture. `SCHEMA` changes shape as freely as the work needs; `store::SCHEMA_VERSION` stays at 1
 until 1.0, and a capture stamped anything else, or stamped 1 over another build's `SCHEMA`
@@ -165,58 +167,48 @@ Which tier answered is stored per row.
 These bite from a distance — from a file other than the one that owns them — so the reasoning
 is here rather than only in a `//!`.
 
-- **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (29 bytes), `SightingBatch`
-  (9 plus records of 12 plus the SSID and the trailer, up to 1024), `AdminMsg` (15) and `ClearMsg`
-  (6, header only), and the update frames `OtaBeginMsg` (47), `OtaChunkMsg` (12 to 1035),
-  `OtaCommitMsg` (7), `OtaAbortMsg` (7), `OtaConfirmMsg` (6) and, node to host, `OtaStatusMsg`
-  (12). A heartbeat broadcasts, since that is how a bridge discovers a node before either side
-  knows the other's address; a sighting batch unicasts to the bridge that last sent this node an
-  admin or clear frame, so a shared format is a shared conversation either way.
-  The magic is checked before anything else at both ends: a frame without it is dropped at the
-  bridge and ignored by the host, never reported. Encode/decode is written out by
-  hand, never by transmuting a packed struct, and pinned byte-for-byte in
-  `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
-  node frames up to 1024, and bridge→host link frames up to 1152 to carry one
-  ([`docs/espnow-v2-findings.md`](docs/espnow-v2-findings.md)).
-- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of both
-  firmwares. A frame carrying our magic and an unknown version byte is counted as `incompatible` and
-  named in the footer (`N frames from an older firmware — reflash`), never admitted to the node
-  table and never half-decoded. A heartbeat whose frozen prefix names another major or minor is the
-  exception: its node is shown as `needs update` (older) or `host behind` (newer) and never
-  assigned. Once its heartbeat has named that version, its sighting batches are counted
-  `incompatible` and not recorded. The bridge reads only the magic, which is frozen, and does not
-  need the reflash.
-- **`link::LINK_PROTO_VERSION` does not move before 1.0 either**, and for the reason
-  `air::WIRE_VERSION` does not: there is no older peer for it to protect when the policy is to
-  flash both ends from one tree. The cost is that a host and a bridge built from different
+- **The wire is ours, in both directions, and shares nothing with the vendor's.** Every node-bus
+  transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
+  a type byte, a length and a body. The type byte is the message, numbered per direction: up,
+  `Heartbeat` (23 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
+  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
+  (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
+  and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
+  the host as `FromNode` and from it as `ToNode`. Encode/decode is written out by hand, never by
+  transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/bus.rs` and
+  `tests/wire.rs`. Link frames are up to 1152 bytes each way. `docs/node-bus.md` has the table.
+- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of every
+  firmware. A record whose body is not its type's length is counted as `incompatible` and named in
+  the footer (`N frames from an older firmware — reflash`), never admitted to the node table and
+  never half-decoded. A heartbeat whose prefix names another major or minor is the exception: its
+  node is shown as `needs update` (older) or `host behind` (newer) and never assigned. Once its
+  heartbeat has named that version, its sighting batches are counted `incompatible` and not
+  recorded. The bridge checks only the transfer framing, and does not need the reflash.
+- **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
+  protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
   trees meet as an undecodable frame rather than a named mismatch, which is stated where the
   constant is. Every addition to the link enums therefore goes on the end — postcard writes a
   variant as its index and a struct's fields in order.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
   bytes of company identifier, or nothing. The split is made once, in the engine's
-  `Frame::Sightings` arm, per record; keeping `air` byte-transparent over the trailer is what lets
-  a change to how an identifier is *read* cost a re-export rather than a reflash.
-  → `crates/wartui-proto/src/air/sighting.rs`, `SightingMsg::ext`;
+  sightings path, per record; keeping `bus` byte-transparent over the trailer is what lets a change
+  to how an identifier is *read* cost a re-export rather than a reflash.
+  → `crates/wartui-proto/src/bus/sighting.rs`, `SightingMsg::ext`;
   `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
   concerned. Flash the fleet together. The node firmware's `version` in `firmware/node/Cargo.toml`
   is bumped on every change: before 1.0 a minor bump may break the wire and a patch bump may not.
-  `air::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
-  **The one exception is a frozen core**, unchanged until 1.0 so a host can find a node a minor
-  version behind, show it as `needs update` and update it over the air: the frame header, the
-  heartbeat's type byte and its 5-byte prefix of version, board and flags
-  (`air::Capabilities::decode_prefix`), and the update frames, type bytes and layouts both
-  (`crates/wartui-proto/src/air/ota.rs`), and the node's `trial` sector layout, which one image
-  writes and the next reads (`crates/wartui-proto/src/ota/trial.rs`). **Neither version
-  marker moves until 1.0**, whatever a layout does: `air::WIRE_VERSION` is the lever held for the
-  first change a fleet in the field has to survive, and `store::SCHEMA_VERSION` the same for the
-  first capture that has to be read in an earlier build's terms. Nothing before 1.0 is either, so
-  spending one re-pins every fixture in `crates/wartui-proto/tests/wire.rs` to mark a difference the
-  policy has already settled. **The store has no migrations before 1.0 either.** `check_version`
+  `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
+  The node's `trial` sector layout, which one image writes and the next reads, does not change
+  (`crates/wartui-proto/src/ota/trial.rs`). **No version marker moves until 1.0**, whatever a
+  layout does: `bus::BUS_VERSION` is the lever held for the first change a fleet in the field has
+  to survive, and `store::SCHEMA_VERSION` the same for the first capture that has to be read in an
+  earlier build's terms. Nothing before 1.0 is either, so spending one re-pins every fixture in
+  `crates/wartui-proto/tests/bus.rs` and `tests/wire.rs` to mark a difference the policy has
+  already settled. **The store has no migrations before 1.0 either.** `check_version`
   refuses any marker but its own — a lower one as firmly as a higher one — and its own marker over a
   schema fingerprint that is not this build's, or over none. A capture from another build is
   somebody else's file, and the fix is a new `--db` path rather than a `migrate` arm. The
@@ -236,26 +228,27 @@ is here rather than only in a `//!`.
   re-cuts the whole pool, and `replan` — not `reissue` — is what delivers both ends of the move.
   `Command::SetPool` is the other, and an input the same way: it changes what the planner cuts,
   never who holds which share.
-- **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
-  never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
+- **Only heartbeating nodes are assignable or in the plan** — an assignment answers a heartbeat,
+  and goes to the slot that heartbeat came from. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
   indices *are* the wire format.
 - **A node is only in the plan once it has said what it is.** `FleetEngine::is_assignable`
-  refuses a node whose heartbeats carry no `air::Capabilities`, or whose version does not speak
-  `air::NODE_VERSION` (another major or minor), alongside one the bridge has no peer slot for.
+  refuses a node whose heartbeats carry no `bus::Capabilities`, or whose version does not speak
+  `bus::NODE_VERSION` (another major or minor), alongside one whose bus slot another node's
+  heartbeat has taken.
   `None` means only that nothing but a sighting has been heard from that address yet — an ordinary
   few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
   has confirmed is a share that may be nobody's.
-- **Twenty nodes maximum** (`plan::MAX_NODES`), the ESP-NOW peer table. The host removes a node's
-  peer after a minute without a heartbeat (`topology_timeout`). More than twenty heard within a
-  minute is unsupported.
-- **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
-  callback), never on a successful enqueue — and an ack is not adoption. Every heartbeat carries the
-  epoch the node holds, or 0 for none, so the host can tell whether the node actually took the frame
-  rather than merely receiving it. A node adopts an assignment only when the epoch/version differs
+- **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
+  per bus, of which the P4 drives six today. A node is known by its MAC, which its heartbeat
+  carries, and reached through the slot that heartbeat came from (`bus::Slot`, `A1` to `B7`).
+- **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has
+  acknowledged the transfer that carried it), never on a successful enqueue — and delivery is not
+  adoption. Every heartbeat carries the epoch the node holds, or 0 for none, so the host can tell
+  whether the node actually took the assignment rather than merely receiving it. A node adopts an assignment only when the epoch/version differs
   from the one it holds, so re-sending an identical one is acknowledged and silently discarded. If a
   node's heartbeat reports an epoch other than the one it acked, the frame did not land after all,
-  and the host re-sends it on that heartbeat's window rather than waiting. The host never sends a
+  and the host re-sends it on that heartbeat rather than waiting. The host never sends a
   node the epoch its heartbeat says it already holds, because a fresh capture restarts the counter
   while a running node keeps its epoch across it.
   → `crates/wartui-core/src/engine/node.rs`, `NodeState::adopted`;
@@ -265,9 +258,9 @@ is here rather than only in a `//!`.
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
   changes when fleet membership changes, when the Bluetooth scan moves, when the operator changes the
   pool, and at no other time.
-- **An updated node image is confirmed only by hearing the host over the air.** The first frame
-  from the host a trial image decodes — admin, clear, update confirm or an update frame — marks it
-  valid; nothing else does, because hearing the host is the whole test. Rollback is the node app's
+- **An updated node image is confirmed only by hearing the bridge.** The first record from the P4 a
+  trial image decodes — assign, clear, update confirm or an update record — marks it valid; nothing
+  else does, because hearing the bridge is the whole test. Rollback is the node app's
   job, since the prebuilt espflash bootloader has none and reads no image state: the third
   unconfirmed boot returns `otadata` to the other slot. The `trial` flash sector, not `otadata`,
   records which slot is on trial and how many times it has booted, one cleared bit per boot,
@@ -281,9 +274,7 @@ is here rather than only in a `//!`.
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
 - **`clippy::all` is denied workspace-wide, in every firmware too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). The node allows one IDF call `esp-radio`
-  does not wrap: the transmit-power read each heartbeat carries (`firmware/node/src/radio.rs`,
-  `tx_power`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
   the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Avoid `unsafe`
   wherever a safe route exists. Any further `unsafe` — a new
   `#[allow(unsafe_code)]`, or a new `unsafe` block inside a function already allowed — is the
@@ -297,8 +288,9 @@ is here rather than only in a `//!`.
 Each of these is enforced in one place and explained there at length. The claim is here so an
 edit stops; follow the pointer before changing the rule.
 
-- **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
-  → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/common/src/radio.rs` `hear`
+- **A record-carrying transfer is acknowledged, an idle one never**, and each direction of each
+  slot is stop-and-wait with resends, so an idle transfer cannot acknowledge lost data and every
+  message is safe to take twice. → `crates/wartui-proto/src/bus/mod.rs` `//!`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens CH343s and
   nothing else, which means finding a bridge never writes to a node, and `wartui reset` — which
   transmits before anything has identified itself — never sweeps at all. A CH343 reports a serial
@@ -342,8 +334,8 @@ edit stops; follow the pointer before changing the rule.
   `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
   `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
-- **A heartbeat read behind the air is not an admin window.** A host that falls behind a busy
-  fleet drains the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the
+- **A heartbeat read behind the bridge is history, not an answer's cue.** A host that falls behind a
+  busy fleet drains the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the
   gap is the lag. Delete either half of the check and the symptom is a plausible-looking lie
   rather than an error. A connection starts caught up, which is safe only because nothing older
   than it reaches the engine: a bridge clears its queue when a host connects, and the transport
@@ -367,7 +359,7 @@ edit stops; follow the pointer before changing the rule.
   never reads a backlog from before it attached. Bytes already past the queue still reach the port,
   and the host drops every frame that decodes ahead of the connection's first `Ready`.
   → `firmware/p4-bridge/src/host.rs` `//!`, and `src/main.rs`, `Shared::push_host`
-- **Both firmwares pass `US` for the regulatory domain, and that is not a preference**: `esp-radio`
+- **The node passes `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/node/src/main.rs`, `firmware/node/README.md`
 - **Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves.**
@@ -375,31 +367,14 @@ edit stops; follow the pointer before changing the rule.
   outright. The others — `esp-alloc`, `esp-sync`, `esp-storage`, `esp-wifi-sys-*` — go higher
   perfectly happily, and a higher one is a *second copy* rather than an upgrade: a duplicate
   `__esp_radio_printf` that fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills,
-  which builds and then panics on the first task the radio spawns. Dependabot ignores them and each
-  firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
+  which builds and then panics on the first task the radio spawns. The node is the firmware that
+  links `esp-radio`; Dependabot ignores them and each firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/p4-radio/README.md` § "Dependency versions"
-- **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
-  is what decides otherwise: `fleet` and `bridge` under `[tx-power]` in `wartui.toml`, or the
-  settings modal, set the nodes and the bridge, each independent of the other and falling back to
-  the default on its own. Both take whole dBm (2 to 20) that the host converts to quarter-dBm. The
-  engine clamps the two settings once, at construction, then carries the bridge's with **every
-  status poll** and the nodes' in their assignments. The poll carries it because `bulk` drops
-  rather than blocks and a lost `SetTxPower` has nothing behind it to notice; range is the cost of
-  changing the default. The ceiling is 20 dBm rather than the 21 the IDF accepts — whether anything above
-  20 dBm works correctly is unverified, so the clamp keeps it unreachable.
-  `wartui_core::engine::Command::SetTxPower` changes both mid-run, from the operator's own settings
-  modal (`c`): clamped the same way, and — for the nodes — by re-sending the plan already in force
-  under fresh epochs rather than asking the planner to re-cut anything, since it changes what the
-  fleet transmits at and never what it scans.
-  → `crates/wartui-proto/src/tx_power.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
-  `crates/wartui-core/src/engine/mod.rs`, `poll_bridge`; `crates/wartui-core/src/engine/event.rs`,
-  `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
-- **ESP-NOW goes out at 802.11g 24 Mbps, set per peer** through `esp-radio`'s `set_peer_rate` —
-  the interface-wide rate call is refused on the C5 and C6, and a peer registered without the
-  funnel goes out at 1 Mbps. → `firmware/common/src/radio.rs`, `set_peer_rate`;
-  `firmware/node/src/radio.rs`
-- **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
-  → `firmware/common/src/radio.rs`, `peer`
+- **Transmit power is a setting, not a radio's.** `fleet` and `bridge` under `[tx-power]` in
+  `wartui.toml`, and the settings modal, set powers the engine clamps (2 to 20 dBm) and the capture
+  keeps; nothing on the node bus transmits, so neither reaches a radio. The node keeps the 2 dBm
+  boot default. → `crates/wartui-proto/src/tx_power.rs`; `crates/wartui-core/src/engine/event.rs`,
+  `Command::SetTxPower`
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
   change it does not stick, and a node whose channel silently did not change reads as a dead node
   rather than a bug. → `firmware/node/src/radio.rs`, `park`

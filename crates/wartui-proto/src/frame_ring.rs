@@ -1,6 +1,6 @@
 //! A byte ring of whole frames, for queues that must drop a frame and never half of one.
 //!
-//! The P4 holds frames bound for the host and the C6 frames bound for the air, each in a
+//! The P4 holds frames bound for the host and the C6 records bound for the P4, each in a
 //! buffer sized at build time. Both want the newest data when a consumer falls behind, so
 //! a full ring evicts its oldest frame. Each frame is stored behind a `u16` length so
 //! eviction and reading always land on a frame boundary.
@@ -114,6 +114,12 @@ impl<const N: usize> FrameRing<N> {
             self.pop_head();
         }
         (n, finished)
+    }
+
+    /// The length of the oldest frame, or `None` when none is queued.
+    #[must_use]
+    pub fn peek_len(&self) -> Option<usize> {
+        (self.len > 0).then(|| self.head_len())
     }
 
     /// Whether a frame has been partly read.

@@ -1,27 +1,27 @@
-//! Over-the-air updates from the air: the host's update frames, handed to
+//! Updates over the node bus: the host's update records, handed to
 //! [`wartui_proto::ota::Receiver`] over the flash [`wartui_firmware::ota`] owns.
 //!
 //! The slot, the switch to a new image and the trial it boots on are shared with the P4
 //! bridge's C6, and their reasoning lives in `firmware/common/src/ota.rs`. This module is the
-//! node's conversation: which frames reach the receiver, when update mode ends, and what each
+//! node's conversation: which records reach the receiver, when update mode ends, and what each
 //! step prints.
 //!
-//! **Any update frame from the host confirms a trial image first**, as an admin, clear or
-//! update-confirm frame does. Hearing the host is the test, and an update accepted on trial
+//! **Any update record from the host confirms a trial image first**, as an assign, clear or
+//! update-confirm record does. Hearing the host is the test, and an update accepted on trial
 //! would write over the only slot known to work. So a `begin` the node still on trial would
-//! take is refused with [`OtaState::FlashError`].
+//! take is refused with [`UpdateState::FlashError`].
 
 use esp_hal::peripherals::FLASH;
 use esp_hal::time::{Duration, Instant};
 use static_cell::ConstStaticCell;
 use wartui_firmware::ota::Ota as Flash;
 use wartui_firmware::reboot;
-use wartui_proto::air::{
-    OtaAbortMsg, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg,
+use wartui_proto::bus::{
+    UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState, UpdateStatus,
 };
 use wartui_proto::ota::Receiver;
 
-/// How long update mode waits for the next update frame before giving up on the session.
+/// How long update mode waits for the next update record before giving up on the session.
 ///
 /// Long enough to cover a host that re-sends after a lost status, short enough that a host
 /// that went away mid-update costs the fleet half a minute of this node, not the drive.
@@ -29,28 +29,19 @@ const SILENCE: Duration = Duration::from_millis(30_000);
 
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(crate::BOARD));
 
-/// An update frame, as [`Ota::on_update`] takes it.
+/// An update record, as [`Ota::on_update`] takes it.
 pub enum Update<'a> {
-    Begin(OtaBeginMsg),
-    Chunk(OtaChunkMsg<'a>),
-    Commit(OtaCommitMsg),
-    Abort(OtaAbortMsg),
-}
-
-/// What [`Ota::on_update`] made of a frame.
-pub struct Answer {
-    /// The status to send its sender, if any.
-    pub status: Option<OtaStatusMsg>,
-    /// Whether the frame belongs to the session the receiver accepted: a `begin` it took,
-    /// or a later frame naming the session it holds.
-    pub accepted: bool,
+    Begin(UpdateBegin),
+    Chunk(UpdateChunk<'a>),
+    Commit(UpdateCommit),
+    Abort(UpdateAbort),
 }
 
 /// The node's flash and its update session.
 pub struct Ota {
     flash: Flash,
     receiver: &'static mut Receiver,
-    /// When the last update frame arrived.
+    /// When the last update record arrived.
     heard: Instant,
     /// Update mode outlasts a session dropped after a failed install, until [`SILENCE`].
     lingering: bool,
@@ -88,7 +79,7 @@ impl Ota {
     }
 
     /// End a trial. Returns whether it took; a failure leaves the image on trial, so the
-    /// next frame from the host tries again.
+    /// next record from the host tries again.
     pub fn confirm(&mut self) -> bool {
         match self.flash.confirm() {
             Ok(()) => {
@@ -103,76 +94,62 @@ impl Ota {
     }
 
     /// Whether the node is in update mode: a session is open, or one dropped after a
-    /// failed install has not yet gone [`SILENCE`] without an update frame.
+    /// failed install has not yet gone [`SILENCE`] without an update record.
     pub fn updating(&self) -> bool {
         self.receiver.is_active() || self.lingering
     }
 
-    /// Leave update mode if no update frame has arrived for [`SILENCE`].
+    /// Leave update mode if no update record has arrived for [`SILENCE`].
     pub fn expire(&mut self) {
         if self.updating() && self.heard.elapsed() >= SILENCE {
-            note!("update abandoned: no update frame for {} s", SILENCE.as_secs());
+            note!("update abandoned: no update record for {} s", SILENCE.as_secs());
             self.receiver.reset();
             self.lingering = false;
         }
     }
 
-    /// Hand an update frame to the receiver.
+    /// Hand an update record to the receiver.
     ///
     /// `on_trial` is whether the running image is still unconfirmed. A `begin` is refused
-    /// with [`OtaState::FlashError`] then, and on a table without a `trial` sector or a
-    /// second app slot.
-    pub fn on_update(&mut self, update: &Update<'_>, on_trial: bool) -> Answer {
+    /// with [`UpdateState::FlashError`] then, and on a table without a `trial` sector or a
+    /// second app slot. Returns the status to send back, if any.
+    pub fn on_update(&mut self, update: &Update<'_>, on_trial: bool) -> Option<UpdateStatus> {
         self.heard = Instant::now();
-        let held = self.receiver.is_active().then(|| self.receiver.status().session);
         let (Some(mut slot), false) = (self.flash.slot(), on_trial) else {
-            return Self::refuse(update);
+            return Some(Self::refuse(update));
         };
-        let answer = match update {
-            Update::Begin(msg) => {
-                let status = self.receiver.begin(msg, &slot);
-                let accepted = matches!(status.state, OtaState::Receiving | OtaState::Verified);
-                Answer { status: Some(status), accepted }
-            }
-            Update::Chunk(msg) => Answer {
-                status: self.receiver.chunk(msg, &mut slot),
-                accepted: held == Some(msg.session),
-            },
-            Update::Commit(msg) => Answer {
-                status: Some(self.receiver.commit(msg, &mut slot)),
-                accepted: held == Some(msg.session),
-            },
-            Update::Abort(msg) => Answer {
-                status: Some(self.receiver.abort(msg)),
-                accepted: held == Some(msg.session),
-            },
+        let status = match update {
+            Update::Begin(msg) => Some(self.receiver.begin(msg, &slot)),
+            Update::Chunk(msg) => self.receiver.chunk(msg, &mut slot),
+            Update::Commit(msg) => Some(self.receiver.commit(msg, &mut slot)),
+            Update::Abort(msg) => Some(self.receiver.abort(msg)),
         };
         if self.receiver.is_active() {
             self.lingering = false;
         }
-        answer
+        status
     }
 
-    /// Refuse a frame without the receiver: a `begin` with [`OtaState::FlashError`], and
-    /// anything else with [`OtaState::Idle`], since no session can be open.
-    fn refuse(update: &Update<'_>) -> Answer {
+    /// Refuse a record without the receiver: a `begin` with [`UpdateState::FlashError`], and
+    /// anything else with [`UpdateState::Idle`], since no session can be open.
+    fn refuse(update: &Update<'_>) -> UpdateStatus {
         let (session, state) = match update {
-            Update::Begin(msg) => (msg.session, OtaState::FlashError),
-            Update::Chunk(msg) => (msg.session, OtaState::Idle),
-            Update::Commit(OtaCommitMsg { session }) | Update::Abort(OtaAbortMsg { session }) => {
-                (*session, OtaState::Idle)
+            Update::Begin(msg) => (msg.session, UpdateState::FlashError),
+            Update::Chunk(msg) => (msg.session, UpdateState::Idle),
+            Update::Commit(UpdateCommit { session }) | Update::Abort(UpdateAbort { session }) => {
+                (*session, UpdateState::Idle)
             }
         };
-        Answer { status: Some(OtaStatusMsg { session, state, next_offset: 0 }), accepted: false }
+        UpdateStatus { session, state, next_offset: 0 }
     }
 
     /// Switch to the verified image and reboot into it.
     ///
     /// Returns only if the switch failed before `otadata` selected the new slot, with the
-    /// [`OtaState::FlashError`] status to send. The node stays on the running image, and
+    /// [`UpdateState::FlashError`] status to send. The node stays on the running image, and
     /// the session is dropped so an identical `begin` starts afresh. Update mode lasts
-    /// until [`SILENCE`] passes without an update frame.
-    pub fn install(&mut self) -> OtaStatusMsg {
+    /// until [`SILENCE`] passes without an update record.
+    pub fn install(&mut self) -> UpdateStatus {
         let session = self.receiver.status().session;
         match self.flash.install() {
             Ok(notes) => {
@@ -186,7 +163,7 @@ impl Ota {
                 note!("could not switch to the new image: {}", err);
                 self.receiver.reset();
                 self.lingering = true;
-                OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 }
+                UpdateStatus { session, state: UpdateState::FlashError, next_offset: 0 }
             }
         }
     }

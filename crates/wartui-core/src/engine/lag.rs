@@ -1,10 +1,10 @@
-use wartui_proto::mac::{self, Mac};
-use wartui_proto::node;
+use wartui_proto::bus::Slot;
 
 use super::{FleetEngine, Now};
 
-/// A lag large enough that [`FleetEngine::air_is_live`] says no: an admin window has shut.
-pub(crate) const BEHIND_THE_AIR_US: u64 = node::ADMIN_WAIT_MS as u64 * 1_000;
+/// A lag large enough that [`FleetEngine::air_is_live`] says no: 100 ms, past which a heartbeat
+/// says what a node held then rather than now.
+pub(crate) const BEHIND_THE_AIR_US: u64 = 100_000;
 
 /// A change in whether the host is measurably behind the air.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl FleetEngine {
     /// (`wartui_bridge::serial`, `read_loop`), which is what was already past that queue. This is
     /// an estimate, not clock synchronization, with one job: keeping [`Self::send_admin`] from
     /// mistaking the past for the present.
-    pub(super) fn note_arrival(&mut self, src: Mac, rx_us: u32, now: Now) {
+    pub(super) fn note_arrival(&mut self, slot: Slot, rx_us: u32, now: Now) {
         // A first frame has nothing to be timed against, and the connection started caught up.
         if let Some((last_rx_us, last_mono)) = self.last_arrival {
             let bridge_elapsed_us = u64::from(rx_us.wrapping_sub(last_rx_us));
@@ -67,7 +67,7 @@ impl FleetEngine {
                     self.behind_since = Some(now.mono);
                     self.behind_peak_us = lag_us;
                     tracing::info!(
-                        src = %mac::full(&src),
+                        %slot,
                         last_rx_us,
                         rx_us,
                         bridge_elapsed_us,
@@ -101,8 +101,8 @@ impl FleetEngine {
         self.behind_peak_us = 0;
     }
 
-    /// Whether a frame being handled now is recent enough to act on. Only assignments care: a stale
-    /// heartbeat still proves the node and its radio, but its 100 ms window shut long ago.
+    /// Whether a record being handled now is recent enough to act on. Only assignments care: a stale
+    /// heartbeat still proves the node, but the epoch it reports is history.
     pub(super) fn air_is_live(&self) -> bool {
         self.backlog_lag_us < BEHIND_THE_AIR_US
     }

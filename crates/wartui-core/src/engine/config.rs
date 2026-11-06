@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use indexmap::IndexSet;
+use wartui_proto::bus::{ACK_TIMEOUT_MS, SEND_TRIES};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
@@ -9,6 +10,12 @@ use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 use super::{Command, FleetEngine};
 use crate::position::PositionChain;
 use crate::ubx;
+
+/// How long a record sent to a node waits for its `Delivered` before it is treated as
+/// undelivered: a second past the bridge's own give-up, so the bridge's answer comes first. A
+/// lost answer never comes.
+pub const SEND_TIMEOUT: Duration =
+    Duration::from_millis(ACK_TIMEOUT_MS * SEND_TRIES as u64 + 1_000);
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -26,9 +33,10 @@ pub struct EngineConfig {
     pub record_raw: bool,
     /// Where the host believes it is.
     pub position: PositionChain,
-    /// How long to wait for the bridge's verdict on an assignment before recording it unanswered.
-    /// Generous: the bridge blocks on the transmit callback, and a busy radio can take tens of
-    /// milliseconds.
+    /// How long to wait for the bridge's verdict on an assignment or a clear before recording it
+    /// unanswered: the host's backstop for a bridge that never answers. The bridge answers
+    /// `Undelivered` itself once its tries run out, so the default, [`SEND_TIMEOUT`], waits past
+    /// that.
     pub admin_timeout: Duration,
     /// Wi-Fi transmit power for every node's assignment, in ESP-IDF quarter-dBm units.
     /// [`FleetEngine::new`] clamps it to the host's range, so a bad value costs a clamp rather than
@@ -63,7 +71,7 @@ impl Default for EngineConfig {
             tail_len: 200,
             record_raw: false,
             position: PositionChain::empty(),
-            admin_timeout: Duration::from_secs(2),
+            admin_timeout: SEND_TIMEOUT,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             remember_ble: true,

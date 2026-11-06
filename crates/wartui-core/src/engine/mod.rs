@@ -4,15 +4,16 @@
 //! [`Event`]s stamped by the caller, and effects return as an [`ActionBatch`]. So the engine cannot
 //! block on the link, and tests run it against a simulated clock.
 //!
-//! Sending a node anything means allocating an epoch, waiting for the heartbeat that opens its
-//! 100 ms admin window, and counting the frame delivered only on its MAC-layer ack. The engine
+//! A node is known by its MAC and reached through the node-bus slot its latest heartbeat came
+//! from. Sending it anything means allocating an epoch, answering its heartbeat, and counting the
+//! record delivered only when the bridge says the node acknowledged it. The engine
 //! partitions the channel pool across live, heartbeating nodes, re-cutting when membership or the
 //! pool changes. Only the planner's re-cut decides what a node scans.
 //!
 //! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
-//! assignable and none holds it. [`Command::SetTxPower`] re-sends the plan in force under fresh
-//! epochs. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`] re-cuts the fleet
+//! assignable and none holds it. [`Command::SetTxPower`] records transmit powers the capture keeps
+//! and no radio uses. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`] re-cuts the fleet
 //! against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never
 //! captured.
 //!
@@ -30,18 +31,19 @@ mod replan;
 mod rx;
 mod snapshot;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_proto::bus::Slot;
 use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 use wartui_proto::tx_power::clamp_tx_power;
 
-pub use config::EngineConfig;
+pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
-pub use node::{Assignment, NodeState, PowerMismatch};
+pub use node::{Assignment, NodeState};
 pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};
 
 pub(crate) use lag::BEHIND_THE_AIR_US;
@@ -54,16 +56,19 @@ use crate::ubx;
 use admin::Pending;
 #[cfg(doc)]
 use replan::next_epoch;
-use rx::Rx;
+use rx::FromNode;
 
 /// The fleet's state and the rules that advance it.
 #[derive(Debug)]
 pub struct FleetEngine {
     config: EngineConfig,
     nodes: BTreeMap<Mac, NodeState>,
+    /// Which node each node-bus slot's latest heartbeat named. A sighting batch carries no
+    /// address, so this is how it finds its node.
+    slots: HashMap<Slot, Mac>,
     bridge: Option<BridgeInfo>,
     link_up: bool,
-    /// When the link last came up, `None` while down ([`Self::evict_stale_peers`]).
+    /// When the link last came up, `None` while down ([`Self::note_departures`]).
     link_up_since: Option<Instant>,
     link_error: Option<String>,
     counters: Counters,
@@ -75,7 +80,7 @@ pub struct FleetEngine {
     dropped_baseline: Option<u32>,
     last_status_poll: Option<Instant>,
     started_at_ms: i64,
-    /// Assignments and clears on the air, keyed by the id the bridge will echo back.
+    /// Assignments and clears in flight, keyed by the id the bridge will echo back.
     pending: BTreeMap<u16, Pending>,
     /// Wraps harmlessly: an id need only be unique among the few sends in flight.
     next_send_id: u16,
@@ -147,6 +152,7 @@ impl FleetEngine {
         config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
         Self {
             nodes: BTreeMap::new(),
+            slots: HashMap::new(),
             bridge: None,
             link_up: false,
             link_up_since: None,
@@ -182,7 +188,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, now, &mut batch),
+            Event::Command(command) => self.on_command(command, now),
             Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
@@ -190,33 +196,19 @@ impl FleetEngine {
                     chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
                 }));
-                // A node sends its sightings to whichever bridge last sent it an admin or clear
-                // frame. Heartbeats are broadcast and never tell it. `self.bridge` survives
-                // `Disconnected`, so a new MAC here means every node is aimed at a gone bridge
-                // while heartbeats look healthy. A re-issue puts an admin frame in each node's next
-                // window, which moves it over.
-                if self.bridge.as_ref().is_some_and(|bridge| bridge.mac != info.mac) {
-                    let macs: Vec<Mac> = self.nodes.keys().copied().collect();
-                    for mac in macs {
-                        self.reissue(mac);
-                    }
-                }
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
-                // Start caught up. Every frame from here on was produced after this connection
+                // Start caught up. Every record from here on was produced after this connection
                 // began: the bridge queues nothing for an absent host and clears its queue when one
                 // connects, and the transport drops what was already past that queue, which
                 // decodes ahead of `Ready` (`wartui_bridge::serial`, `read_loop`).
                 self.reset_arrivals();
-                // Its peer table starts empty, new bridge or rebooted, so refused nodes may fit
-                // now.
-                self.forget_peer_refusals();
                 // A new connection means a new baseline, whether or not the bridge rebooted.
                 self.dropped_baseline = None;
-                // Poll now: a restarted bridge is back at its firmware fallback power, and there is
-                // no status yet.
+                // Poll now: there is no status yet, and a restarted bridge's GPS receiver has
+                // forgotten its rate.
                 self.poll_bridge(now, &mut batch);
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
@@ -268,7 +260,7 @@ impl FleetEngine {
         // gone node is not a member. If it returns as the preferred node, `replan` hands the scan
         // back.
         let _ = self.ble_node.take_if(|_| ble_gone);
-        self.evict_stale_peers(now, batch);
+        self.note_departures(now);
         self.replan(now);
         let due = self
             .last_status_poll
@@ -278,70 +270,45 @@ impl FleetEngine {
         }
     }
 
-    /// Free the bridge's peer slot of every node past the topology timeout.
+    /// Log every node that has gone past the topology timeout, once.
     ///
-    /// Such a node is out of the plan, so the slot costs it nothing. Removals go on `urgent`:
-    /// `bulk` can drop them, leaving this host believing in a free slot, and they must beat the
-    /// assignment a re-admitted node gets on its next heartbeat. A returning node is re-peered by
-    /// its next send's `ensure_peer`.
-    ///
-    /// Waits until the link has been up a whole timeout. An outage silences every node at once, and
-    /// until heartbeats flow again after a reconnect, a live node looks a minute silent.
-    fn evict_stale_peers(&mut self, now: Now, batch: &mut ActionBatch) {
+    /// Such a node is out of the plan already. Waits until the link has been up a whole timeout:
+    /// an outage silences every node at once, and until heartbeats flow again after a reconnect,
+    /// a live node looks a minute silent.
+    fn note_departures(&mut self, now: Now) {
         let settled = self
             .link_up_since
             .is_some_and(|since| now.mono.duration_since(since) >= self.config.topology_timeout);
         if !settled {
             return;
         }
-        let stale: Vec<(Mac, Option<u64>)> = self
+        let gone: Vec<(Mac, Option<u64>)> = self
             .nodes
             .values()
-            .filter(|node| node.peered && !self.is_alive(node, now))
+            .filter(|node| node.last_heartbeat.is_some() && !node.departed)
+            .filter(|node| !self.is_alive(node, now))
             .map(|node| {
                 let silent = node.last_heartbeat.map(|last| now.mono.duration_since(last));
                 (node.mac, silent.map(|silent| silent.as_millis() as u64))
             })
             .collect();
-        if stale.is_empty() {
-            return;
-        }
-        for (mac, silent_ms) in stale {
+        for (mac, silent_ms) in gone {
             tracing::info!(mac = %mac::full(&mac), silent_ms, "node left the fleet");
-            batch.urgent.push(HostToBridge::RemovePeer { mac });
             if let Some(node) = self.nodes.get_mut(&mac) {
-                node.peered = false;
                 node.departed = true;
             }
         }
-        // A slot has freed, so the re-cut that follows takes refused nodes back.
-        self.forget_peer_refusals();
     }
 
-    /// Let the next re-cut try every node the bridge's peer table refused.
-    fn forget_peer_refusals(&mut self) {
-        for node in self.nodes.values_mut() {
-            node.peer_refused = false;
-        }
-    }
-
-    /// Ask the bridge how it is, and tell it what to transmit at.
+    /// Ask the bridge how it is.
     ///
-    /// The power rides every poll, not just the first. `bulk` drops rather than blocks, and nothing
-    /// notices a dropped `SetTxPower`: the bridge would sit at its firmware fallback while the
-    /// snapshot and link-budget reasoning read the configured value. Repeating with the poll
-    /// recovers that. It stays off `urgent`, which is kept small for what races an admin window. A
-    /// mid-run change also goes out at once ([`Self::update_bridge_tx_power`]).
-    /// `esp_wifi_set_max_tx_power` is idempotent and the bridge logs only changes, so the repeat
-    /// costs one small frame per interval.
-    ///
-    /// A bridge with a GPS receiver is also sent the receiver's rate, on the same reasoning: a
-    /// dropped write has nothing behind it, and the receiver forgets its configuration whenever
-    /// the dongle loses power ([`ubx::valset_rate`] writes RAM only). Rewriting the same values
-    /// is idempotent, and costs one 64-byte frame per interval.
+    /// A bridge with a GPS receiver is also sent the receiver's rate with every poll, not just the
+    /// first. `bulk` drops rather than blocks, so a dropped write has nothing behind it, and the
+    /// receiver forgets its configuration whenever the dongle loses power ([`ubx::valset_rate`]
+    /// writes RAM only). Rewriting the same values is idempotent, and costs one 64-byte frame per
+    /// interval.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
-        batch.bulk.push(HostToBridge::SetTxPower { power: self.config.bridge_tx_power });
         if self.bridge_has_gps() && self.config.position.bridge_gps().is_some() {
             let bytes = GpsWriteBytes::from_slice(&ubx::valset_rate(self.config.gps_rate_hz))
                 .expect("a rate write fits one GpsWrite");
@@ -366,17 +333,17 @@ impl FleetEngine {
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
-            BridgeToHost::Rx { src, dst, rssi, rx_us, payload } => {
-                let rx = Rx { src: *src, dst: *dst, rssi: *rssi, rx_us: *rx_us, payload };
-                // Before `on_rx`: heartbeats read `air_is_live`.
-                self.note_arrival(rx.src, rx.rx_us, now);
-                self.on_rx(&rx, now, batch);
+            BridgeToHost::FromNode { slot, rx_us, kind, body } => {
+                let rx = FromNode { slot: *slot, rx_us: *rx_us, kind: *kind, body };
+                // Before `on_from_node`: heartbeats read `air_is_live`.
+                self.note_arrival(rx.slot, rx.rx_us, now);
+                self.on_from_node(&rx, now, batch);
             }
-            BridgeToHost::SendResult { id, status, tx_us } => {
-                self.on_send_result(*id, *status, *tx_us, now, batch);
+            BridgeToHost::Delivered { id } => self.on_send_result(*id, None, now, batch),
+            BridgeToHost::Undelivered { id, reason } => {
+                self.on_send_result(*id, Some(*reason), now, batch);
             }
             BridgeToHost::Status {
-                peer_count,
                 rx_count,
                 dropped_tx,
                 uptime_ms,
@@ -392,7 +359,6 @@ impl FleetEngine {
                 };
                 self.dropped_baseline = Some(baseline);
                 self.bridge_status = Some(BridgeStatus {
-                    peer_count: *peer_count,
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
                     dropped_since_attach: dropped_tx - baseline,
@@ -400,7 +366,6 @@ impl FleetEngine {
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,
-                    peer_count: *peer_count,
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
                     uptime_ms: *uptime_ms,
@@ -431,15 +396,15 @@ impl FleetEngine {
 
     /// Whether a node can be given channels.
     ///
-    /// Alive is not enough. A node with no peer slot, that has not said what it is, or whose
-    /// firmware does not speak this build's layouts, heartbeats fine but never
-    /// scans its share. A share nobody scans is worse than one node fewer: the fleet covers less of
+    /// Alive is not enough. A node that has not said what it is, or whose firmware does not speak
+    /// this build's layouts, heartbeats fine but never scans its share. Nor does one whose slot
+    /// another node's heartbeat has taken, which this host cannot reach. A share nobody scans is worse than one node fewer: the fleet covers less of
     /// the pool than without it.
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
         self.is_alive(node, now)
             && node.capabilities.is_some_and(|caps| caps.version.compat_with_host().drivable())
-            && !node.peer_refused
+            && node.slot.is_some()
     }
 
     /// Running totals, for tests and for the CLI's non-interactive modes.

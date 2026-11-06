@@ -1,9 +1,8 @@
 //! The ring that decides whether a sighting is worth transmitting.
 //!
-//! The ring keeps a node's airtime down, and airtime is the scarce thing on a shared
-//! control channel. An access point beacons ten times a dwell, and a node returns to it
-//! every sweep. The store keeps every sighting it is given, so what the ring suppresses
-//! is lost for good. That is why suppression is not permanent.
+//! The ring keeps what a node sends down to what is new. An access point beacons ten times a
+//! dwell, and a node returns to it every sweep. The store keeps every sighting it is given, so
+//! what the ring suppresses is lost for good. That is why suppression is not permanent.
 //!
 //! An address held in the ring is reported again for two reasons, and no others:
 //!
@@ -136,7 +135,7 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
 
     /// Record that `mac` was reported at `now_ms`.
     ///
-    /// Call it once the sighting is on the air, not before. Suppressing an address the
+    /// Call it once the P4 has acknowledged the sighting, not before. Suppressing an address the
     /// host never received hides it until the refresh. A held address is updated in
     /// place, and keeps its place in the eviction order and in the index.
     pub fn record(&mut self, mac: [u8; 6], rssi: Option<i8>, now_ms: u32) {

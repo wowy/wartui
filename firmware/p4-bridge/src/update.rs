@@ -33,11 +33,11 @@ use esp_hal::time::Duration;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::ota::{Fault, Note, Ota};
 use wartui_firmware::reboot;
-use wartui_proto::air::{Board, OtaState, OtaStatusMsg};
+use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogLevel, LogStr, UPDATE_STATUS_MAX,
-    UpdateStatus,
+    UpdateStatusBytes,
 };
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
@@ -156,7 +156,7 @@ impl Updates {
     ///
     /// A `Begin` is refused while this image is on trial, and on a table without a `trial`
     /// sector or a second app slot, as the C6 refuses one ([`receive`]).
-    fn take(&mut self, op: Op<'_>) -> Option<OtaStatusMsg> {
+    fn take(&mut self, op: Op<'_>) -> Option<UpdateStatus> {
         let received = receive(&mut *self.receiver, op, self.ota.slot().as_mut(), self.trial);
         match received {
             Received::Status(status) => status,
@@ -166,7 +166,7 @@ impl Updates {
 
     /// Switch to the verified image and reboot into it. Returns only when the session is not
     /// verified, or the switch failed, with the status to send.
-    fn install(&mut self, session: u8) -> Option<OtaStatusMsg> {
+    fn install(&mut self, session: u8) -> Option<UpdateStatus> {
         let receiver = &mut *self.receiver;
         if !receiver.is_verified() || receiver.status().session != session {
             return Some(receiver.status());
@@ -180,7 +180,7 @@ impl Updates {
                     .lines
                     .push((None, text(format_args!("could not switch to the new image: {err}"))));
                 receiver.reset();
-                Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
+                Some(UpdateStatus { session, state: UpdateState::FlashError, next_offset: 0 })
             }
         }
     }
@@ -225,10 +225,10 @@ pub fn take(bytes: &[u8], shared: &Shared) {
 
 /// Send the host `status`. Out of line, as each message is, so the two never share a frame.
 #[inline(never)]
-fn answer(status: OtaStatusMsg, shared: &Shared) {
+fn answer(status: UpdateStatus, shared: &Shared) {
     let mut buf = [0u8; UPDATE_STATUS_MAX];
     let len = Op::Status(status).encode(&mut buf);
-    let status = UpdateStatus::from_slice(&buf[..len]).unwrap_or_default();
+    let status = UpdateStatusBytes::from_slice(&buf[..len]).unwrap_or_default();
     shared.push_host(&BridgeToHost::Update(status));
 }
 

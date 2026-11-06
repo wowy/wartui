@@ -7,9 +7,9 @@
 //! [`engine`] is a pure state machine, [`runtime`] owns the clock and does what it asks, [`store`]
 //! is the system of record, and [`export`] and [`analyze`] are views of it.
 //!
-//! wartui transmits to a node only in the 100 ms admin window it holds open after a heartbeat:
-//! channel assignments and dedup-ring clears. [`ota`] is the exception, and only after its first
-//! frame: a node that has accepted an update listens continuously until it ends.
+//! wartui sends a node something only in answer to its heartbeat: channel assignments and
+//! dedup-ring clears. [`ota`] is the exception, and only after its first record: a node that has
+//! accepted an update services the bus continuously until it ends.
 
 pub mod analyze;
 pub mod discover;

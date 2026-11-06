@@ -32,7 +32,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::ota::{OtaImage, OtaSession, Outcome, Phase, Progress};
 use wartui_core::runtime::{drive_ota, now};
-use wartui_proto::air::{Board, Capabilities, NODE_VERSION, Version};
+use wartui_proto::bus::{Board, Capabilities, Heartbeat, NODE_VERSION, UpType, Version};
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac::{self, Mac};
 
@@ -242,10 +242,11 @@ async fn listen(link: &mut LinkHandle, period: Duration) -> Result<BTreeMap<Mac,
             Ok(None) => bail!("the link closed"),
             Ok(Some(event)) => event,
         };
-        if let LinkEvent::Message(BridgeToHost::Rx { src, payload, .. }) = event
-            && let Ok(caps) = Capabilities::decode_prefix(&payload)
+        if let LinkEvent::Message(BridgeToHost::FromNode { kind, body, .. }) = event
+            && kind == UpType::Heartbeat.as_u8()
+            && let Ok((caps, mac)) = Heartbeat::identity(&body)
         {
-            heard.insert(src, caps);
+            heard.insert(mac, caps);
         }
     }
 }

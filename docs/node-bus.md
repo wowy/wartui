@@ -1,8 +1,8 @@
 # The node bus
 
-The node bus is SPI between the P4 bridge and its nodes. The P4 is master on two buses, A and B, and
-each bus has up to six nodes, one per CS line, called slots `A1` to `A6` and `B1` to `B6`. Today a
-node sends a copy of each heartbeat over the bus, and ESP-NOW carries everything as before.
+The node bus is SPI between the P4 bridge and its nodes, and the nodes' only link. The P4 is master
+on two buses, A and B, and each bus has up to six nodes, one per CS line, called slots `A1` to `A6`
+and `B1` to `B6`. Slot numbering leaves room for a seventh per bus (`A7`, `B7`).
 
 ## Pins
 
@@ -42,9 +42,29 @@ On the XIAO ESP32-C5:
   - Wired straight to the P4, one node has the IRQ line to itself. It is active high, and the P4
     pulls it down.
 
-Every transfer is a fixed 1,040 bytes each way. The framing, and the handshake that re-arms the
-node between transfers, are in the `//!` of
+Every transfer is a fixed 1,044 bytes each way. The framing, the acknowledgment, and the handshake
+that re-arms the node between transfers, are in the `//!` of
 [`crates/wartui-proto/src/bus/mod.rs`](../crates/wartui-proto/src/bus/mod.rs).
+
+## Messages
+
+A transfer carries records, each a type byte, a length and a body. The type byte is the message,
+numbered per direction. The P4 reads none of them: it forwards a node's records to the host as
+`FromNode`, and the host's `ToNode` records to the node. The layouts are in the `//!` of each
+message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/).
+
+| Up, node → P4 | Message | Body bytes | Down, P4 → node | Message | Body bytes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `Heartbeat` | 23 | 1 | `Assign` | 8 |
+| 2 | `Sightings` | up to 1,024 | 2 | `Clear` | 0 |
+| 3 | `UpdateStatus` | 6 | 3 | `UpdateBegin` | 41 |
+| | | | 4 | `UpdateChunk` | 6 to 1,029 |
+| | | | 5 | `UpdateCommit` | 1 |
+| | | | 6 | `UpdateAbort` | 1 |
+| | | | 7 | `UpdateConfirm` | 0 |
+
+A heartbeat is never resent. Every other record waits for the peer to acknowledge the transfer that
+carried it, and is resent until it is, up to three tries.
 
 ## Wiring two nodes without a carrier
 

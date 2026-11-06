@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use wartui_core::engine::{Snapshot, TailEntry};
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::RecordKind;
 use wartui_proto::mac;
 
 use super::bignum::big;
