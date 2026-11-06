@@ -52,7 +52,7 @@ fn rewrite_crc(buf: &mut [u8; TRANSFER_LEN]) {
 }
 
 #[test]
-fn bus_has_pinned_sizes() {
+fn bus_has_pinned_sizes_when_built() {
     assert_eq!(
         (MAGIC, BUS_VERSION, TRANSFER_LEN, HEADER_LEN, PAYLOAD_MAX, RECORD_MAX),
         (0x4257, 1, 1040, 10, 1028, 1025)
