@@ -1049,8 +1049,7 @@ fn read_frames<R: Read>(
                     // under a held connection — a C6 that restarted, or a P4 that
                     // rebooted and was asked again by the next host frame, while the
                     // CH343 stayed on the bus — and that has to be reported, or the
-                    // engine keeps the dead life's `BridgeInfo` and goes on believing
-                    // in a peer table the restart emptied. A second answer's uptime
+                    // engine keeps the dead life's `BridgeInfo`. A second answer's uptime
                     // keeps pace with the host's clock since the last `Ready`; a new
                     // life's falls below the last `Ready`'s, or well behind that pace even
                     // when above it, as when a C6 restarts seconds after a P4 reboot.
@@ -1278,8 +1277,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
+    use wartui_proto::bus::Slot;
     use wartui_proto::link::{
-        BridgeToHost, Chip, EspNowPayload, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
+        BridgeToHost, Chip, FromNodeBody, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
         MAX_HOST_FRAME, ShortStr, encode_frame, encode_host_frame,
     };
     use wartui_proto::reset::ResetCause;
@@ -1484,9 +1484,9 @@ mod tests {
         buf[..len].to_vec()
     }
 
-    fn rx(rssi: i8) -> BridgeToHost {
-        let payload = EspNowPayload::from_slice(b"WTUI").unwrap();
-        BridgeToHost::Rx { src: [1; 6], dst: [2; 6], rssi, rx_us: 0, payload }
+    fn rx(rx_us: u32) -> BridgeToHost {
+        let body = FromNodeBody::from_slice(b"body").unwrap();
+        BridgeToHost::FromNode { slot: Slot::new(0, 0).unwrap(), rx_us, kind: 1, body }
     }
 
     fn ready() -> BridgeToHost {
@@ -1507,9 +1507,9 @@ mod tests {
 
     #[test]
     fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
-        let mut bytes = frame(&rx(-10));
+        let mut bytes = frame(&rx(10));
         bytes.extend(frame(&ready()));
-        bytes.extend(frame(&rx(-20)));
+        bytes.extend(frame(&rx(20)));
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
@@ -1518,7 +1518,7 @@ mod tests {
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
         assert!(matches!(
             received.try_recv(),
-            Ok(LinkEvent::Message(BridgeToHost::Rx { rssi: -20, .. }))
+            Ok(LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. }))
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
@@ -1544,8 +1544,8 @@ mod tests {
     fn serial_link_stays_unannounced_when_only_frames_before_ready_arrive() {
         // Stale frames prove nothing about this connection, so `connect` still runs out of
         // patience and the next connection asks again.
-        let mut bytes = frame(&rx(-10));
-        bytes.extend(frame(&rx(-20)));
+        let mut bytes = frame(&rx(10));
+        bytes.extend(frame(&rx(20)));
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
@@ -1646,7 +1646,7 @@ mod tests {
         // sent frames before the answer.
         let mut reply = b"ESP-ROM:esp32p4-eco2-20240710\r\nrst:0x1".to_vec();
         reply.extend([0x00, 0xFF, 0x13, 0x00]);
-        reply.extend(frame(&rx(-40)));
+        reply.extend(frame(&rx(40)));
         reply.extend(frame(&ready()));
         let mut port = FakePort::answering(reply);
         assert_eq!(identify(&mut port, WAIT, WAIT), Some([1, 2, 3, 4, 5, 6]));
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn serial_probe_returns_none_when_nothing_answers() {
-        let mut port = FakePort::answering(frame(&rx(-40)));
+        let mut port = FakePort::answering(frame(&rx(40)));
         assert_eq!(identify(&mut port, WAIT, WAIT), None);
     }
 }

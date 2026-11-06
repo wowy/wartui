@@ -30,11 +30,11 @@ pub const EVENT_CAPACITY: usize = 4096;
 
 /// Depth of the urgent command queue, which carries channel assignments.
 ///
-/// Small, because anything queued here is racing a node's 100 ms admin window
-/// and a deep backlog would be stale by the time it went out.
+/// Small, because an assignment is answered by the next heartbeat and a deep backlog would
+/// be stale by the time it went out.
 pub const URGENT_CAPACITY: usize = 64;
 
-/// Depth of the bulk command queue: status polls, peer setup, resets.
+/// Depth of the bulk command queue: status polls, update records, resets.
 pub const BULK_CAPACITY: usize = 512;
 
 /// What the bridge announced about itself when it came up.
@@ -42,7 +42,7 @@ pub const BULK_CAPACITY: usize = 512;
 pub struct BridgeInfo {
     /// Which chip the firmware is running on.
     pub chip: Chip,
-    /// The bridge's MAC, which nodes see as the core's address.
+    /// The bridge's MAC: its C6's, which names the bridge.
     pub mac: Mac,
     /// Bridge firmware version.
     pub fw_version: String,
@@ -52,7 +52,7 @@ pub struct BridgeInfo {
     pub reset_cause: ResetCause,
     /// Where the previous life stopped, when the reset preserved it.
     pub last_phase: LoopPhase,
-    /// Bytes free in the radio blobs' heap at the moment it announced.
+    /// Bytes free in the C6's heap at the moment it announced.
     pub heap_free: u32,
     /// How long the bridge had been up when it announced itself.
     ///

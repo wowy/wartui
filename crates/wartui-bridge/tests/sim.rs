@@ -9,43 +9,54 @@ use std::time::Duration;
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
-use wartui_proto::link::{BridgeToHost, HostToBridge, SendPayload, SendStatus};
-use wartui_proto::mac::Mac;
+use wartui_proto::bus::{
+    Assign, Clear, DecodeError, DownType, Heartbeat, RecordKind, Slot, UpMsg, Version,
+};
+use wartui_proto::link::{BridgeToHost, HostToBridge, ToNodeBody, Undelivered};
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-/// The next node → core frame, as (source, the bytes it arrived as).
+/// One record a node sent, as the bridge forwarded it.
 ///
-/// Handed back raw rather than decoded because a `SightingMsg` borrows its
-/// SSID from the frame, so the caller has to own the bytes to hold one.
-async fn next_frame(link: &mut LinkHandle) -> (Mac, Vec<u8>) {
+/// Held as owned bytes because a `SightingMsg` borrows its SSID from the body, so the caller
+/// has to own the bytes to hold one.
+struct Rec {
+    slot: Slot,
+    kind: u8,
+    body: Vec<u8>,
+}
+
+impl Rec {
+    fn msg(&self) -> Result<UpMsg<'_>, DecodeError> {
+        UpMsg::decode(self.kind, &self.body)
+    }
+}
+
+/// The next record a node sent.
+async fn next_frame(link: &mut LinkHandle) -> Rec {
     loop {
-        match link.recv().await.expect("simulator keeps running") {
-            LinkEvent::Message(BridgeToHost::Rx { src, payload, .. }) => {
-                let frame = Frame::decode(&payload).expect("simulator emits valid frames");
-                if matches!(frame, Frame::Admin(_)) {
-                    continue;
-                }
-                return (src, payload.to_vec());
-            }
-            _ => continue,
+        if let LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. }) =
+            link.recv().await.expect("simulator keeps running")
+        {
+            let rec = Rec { slot, kind, body: body.to_vec() };
+            rec.msg().expect("simulator emits valid records");
+            return rec;
         }
     }
 }
 
-fn heartbeat_of(raw: &[u8]) -> Option<HeartbeatMsg> {
-    match Frame::decode(raw) {
-        Ok(Frame::Heartbeat(heartbeat)) => Some(heartbeat),
+fn heartbeat_of(rec: &Rec) -> Option<Heartbeat> {
+    match rec.msg() {
+        Ok(UpMsg::Heartbeat(heartbeat)) => Some(heartbeat),
         _ => None,
     }
 }
 
 /// Wait for the next heartbeat from `want`, returning when it arrived.
-async fn next_heartbeat_from(link: &mut LinkHandle, want: Mac) -> Instant {
+async fn next_heartbeat_from(link: &mut LinkHandle, want: Slot) -> Instant {
     loop {
-        let (src, raw) = next_frame(link).await;
-        if src == want && heartbeat_of(&raw).is_some() {
+        let rec = next_frame(link).await;
+        if rec.slot == want && heartbeat_of(&rec).is_some() {
             return Instant::now();
         }
     }
@@ -54,44 +65,47 @@ async fn next_heartbeat_from(link: &mut LinkHandle, want: Mac) -> Instant {
 /// Wait for the next heartbeat from `want`, returning when it arrived and the
 /// counter it carried — the sweep-count proof, since a heartbeat's own cadence
 /// is fixed and carries none.
-async fn next_heartbeat_counter_from(link: &mut LinkHandle, want: Mac) -> (Instant, u32) {
+async fn next_heartbeat_counter_from(link: &mut LinkHandle, want: Slot) -> (Instant, u32) {
     loop {
-        let (src, raw) = next_frame(link).await;
-        if src == want
-            && let Some(heartbeat) = heartbeat_of(&raw)
+        let rec = next_frame(link).await;
+        if rec.slot == want
+            && let Some(heartbeat) = heartbeat_of(&rec)
         {
             return (Instant::now(), heartbeat.counter);
         }
     }
 }
 
-/// Wait for the next heartbeat from `want`, returning the decoded frame.
-async fn next_heartbeat_msg_from(link: &mut LinkHandle, want: Mac) -> HeartbeatMsg {
+/// Wait for the next heartbeat from `want`, returning it decoded.
+async fn next_heartbeat_msg_from(link: &mut LinkHandle, want: Slot) -> Heartbeat {
     loop {
-        let (src, raw) = next_frame(link).await;
-        if src == want
-            && let Some(heartbeat) = heartbeat_of(&raw)
+        let rec = next_frame(link).await;
+        if rec.slot == want
+            && let Some(heartbeat) = heartbeat_of(&rec)
         {
             return heartbeat;
         }
     }
 }
 
-fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
-    let mut payload = SendPayload::new();
-    payload.extend_from_slice(&admin.encode()).expect("an assignment fits");
-    HostToBridge::SendEspNow { id: 1, dst, ensure_peer: true, payload }
+fn assign_command(slot: Slot, assign: Assign) -> HostToBridge {
+    let body = ToNodeBody::from_slice(&assign.encode()).expect("an assignment fits");
+    HostToBridge::ToNode { slot, id: 1, kind: DownType::Assign.as_u8(), body }
 }
 
-fn clear_command(dst: Mac, ensure_peer: bool) -> HostToBridge {
-    let mut payload = SendPayload::new();
-    payload.extend_from_slice(&ClearMsg.encode()).expect("a clear fits");
-    HostToBridge::SendEspNow { id: 1, dst, ensure_peer, payload }
+fn clear_command(slot: Slot) -> HostToBridge {
+    let body = ToNodeBody::from_slice(&Clear.encode()).expect("a clear fits");
+    HostToBridge::ToNode { slot, id: 1, kind: DownType::Clear.as_u8(), body }
+}
+
+/// A slot the default fleets leave empty.
+fn empty_slot() -> Slot {
+    Slot::new(1, 6).expect("B7")
 }
 
 /// An assignment for node 0, since almost every test needs one.
 ///
-/// A wartui node parks and collects nothing until told what to scan, so a test that
+/// A wartui node idles and collects nothing until told what to scan, so a test that
 /// wants to see anything has to do first what the host does on the first heartbeat.
 ///
 /// An empty `channels` with `ble` set is the Bluetooth-only assignment: that node
@@ -99,9 +113,9 @@ fn clear_command(dst: Mac, ensure_peer: bool) -> HostToBridge {
 /// thing the host never sends, which the node treats as never having been told
 /// anything.
 fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
-    link.send_urgent(admin_command(
-        SimTransport::node_mac(0),
-        AdminMsg { epoch: version, flags: AdminMsg::flags_for(ble), channels, tx_power: 8 },
+    link.send_urgent(assign_command(
+        SimTransport::node_slot(0),
+        Assign { epoch: version, flags: Assign::flags_for(ble), channels },
     ))
     .expect("queued");
 }
@@ -123,8 +137,8 @@ async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize
     let mut seen = HashSet::new();
     let mut reported = 0;
     'outer: while reported < sightings {
-        let (_, raw) = next_frame(&mut link).await;
-        let Ok(Frame::Sightings(batch)) = Frame::decode(&raw) else { continue };
+        let rec = next_frame(&mut link).await;
+        let Ok(UpMsg::Sightings(batch)) = rec.msg() else { continue };
         for (sighting, _) in batch.iter() {
             seen.insert(sighting.bssid);
             reported += 1;
@@ -146,13 +160,13 @@ async fn sim_transport_tracks_distinct_macs_when_neighborhood_is_moving_vs_parke
     assert_eq!(distinct_addresses(Some(2), 120).await, 120);
 }
 
-/// The next `SendResult` the bridge reports.
-async fn next_send_result(link: &mut LinkHandle) -> SendStatus {
+/// The next answer the bridge gives a `ToNode`.
+async fn next_send_result(link: &mut LinkHandle) -> Result<u16, Undelivered> {
     loop {
-        if let LinkEvent::Message(BridgeToHost::SendResult { status, .. }) =
-            link.recv().await.expect("running")
-        {
-            return status;
+        match link.recv().await.expect("running") {
+            LinkEvent::Message(BridgeToHost::Delivered { id }) => return Ok(id),
+            LinkEvent::Message(BridgeToHost::Undelivered { reason, .. }) => return Err(reason),
+            _ => {}
         }
     }
 }
@@ -178,14 +192,16 @@ async fn sim_bridge_receives_heartbeats_from_all_nodes_when_fleet_runs() {
     let config = SimConfig { node_count: 4, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
 
-    let mut seen: HashSet<Mac> = HashSet::new();
+    let mut seen: HashSet<(Slot, [u8; 6])> = HashSet::new();
     while seen.len() < 4 {
-        let (src, raw) = next_frame(&mut link).await;
-        if heartbeat_of(&raw).is_some() {
-            seen.insert(src);
+        let rec = next_frame(&mut link).await;
+        if let Some(heartbeat) = heartbeat_of(&rec) {
+            seen.insert((rec.slot, heartbeat.mac));
         }
     }
-    let expected: HashSet<Mac> = (0..4).map(SimTransport::node_mac).collect();
+    // Node i sits in slot i, and its heartbeat names its own MAC.
+    let expected: HashSet<(Slot, [u8; 6])> =
+        (0..4).map(|i| (SimTransport::node_slot(i), SimTransport::node_mac(i))).collect();
     assert_eq!(seen, expected);
 }
 
@@ -196,10 +212,7 @@ async fn sim_node_increments_heartbeat_counter_monotonically_when_operating() {
 
     let mut counters = Vec::new();
     while counters.len() < 3 {
-        if let LinkEvent::Message(BridgeToHost::Rx { payload, .. }) =
-            link.recv().await.expect("running")
-            && let Ok(Frame::Heartbeat(heartbeat)) = Frame::decode(&payload)
-        {
+        if let Some(heartbeat) = heartbeat_of(&next_frame(&mut link).await) {
             counters.push(heartbeat.counter);
         }
     }
@@ -214,8 +227,8 @@ async fn sim_bridge_emits_valid_sightings_with_negative_rssi_when_nodes_sniff() 
 
     let mut checked = 0;
     while checked < 20 {
-        let (_, raw) = next_frame(&mut link).await;
-        let Ok(Frame::Sightings(batch)) = Frame::decode(&raw) else { continue };
+        let rec = next_frame(&mut link).await;
+        let Ok(UpMsg::Sightings(batch)) = rec.msg() else { continue };
         for (sighting, _) in batch.iter() {
             assert!(sighting.rssi < 0, "signal strengths are negative dBm");
             checked += 1;
@@ -234,10 +247,10 @@ async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighborh
     let mut counts: HashMap<[u8; 6], usize> = HashMap::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (_, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) => sweeps += 1,
-            Ok(Frame::Sightings(batch)) => {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) => sweeps += 1,
+            Ok(UpMsg::Sightings(batch)) => {
                 for (sighting, _) in batch.iter() {
                     *counts.entry(sighting.bssid).or_default() += 1;
                 }
@@ -259,10 +272,10 @@ async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate()
     let mut ble = HashSet::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (_, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) => sweeps += 1,
-            Ok(Frame::Sightings(batch)) => {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) => sweeps += 1,
+            Ok(UpMsg::Sightings(batch)) => {
                 for (sighting, _) in batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble) {
                     ble.insert(sighting.bssid);
                 }
@@ -275,13 +288,9 @@ async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate()
 
 #[tokio::test(start_paused = true)]
 async fn sim_node_heartbeats_at_assigned_beat_when_holding_bluetooth_scan() {
-    // The heartbeat cadence is ASSIGNED_BEAT_MS, checked only between scans:
-    // firing one holds a 100 ms admin window open before the next scan can
-    // start, which delays the next check by that much. The schedule advances
-    // from the deadline rather than the fire time, so the lateness accumulates
-    // by one admin window every cycle and wraps once it passes a scan step —
-    // every gap stays within one scan step of ASSIGNED_BEAT_MS, and the mean
-    // over a whole wrap is exact.
+    // The heartbeat cadence is ASSIGNED_BEAT_MS, checked only between scans. The
+    // schedule advances from the deadline rather than the fire time, so every gap stays
+    // within one scan step of ASSIGNED_BEAT_MS, and the mean is exact.
     const SIM_SCAN_MS: u128 = 500; // mirrors the sim's own scan length
 
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
@@ -291,10 +300,10 @@ async fn sim_node_heartbeats_at_assigned_beat_when_holding_bluetooth_scan() {
     let mut beats = Vec::new();
     let mut ble = 0;
     while beats.len() < 12 {
-        let (_, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
-            Ok(Frame::Sightings(batch)) => {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
+            Ok(UpMsg::Sightings(batch)) => {
                 ble += batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble).count();
             }
             _ => {}
@@ -330,10 +339,10 @@ async fn sim_node_reports_only_ble_sightings_when_holding_ble_flag() {
     let mut ble = 0;
     let mut beats = 0;
     while beats < 4 {
-        let (_, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) => beats += 1,
-            Ok(Frame::Sightings(batch)) => {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) => beats += 1,
+            Ok(UpMsg::Sightings(batch)) => {
                 for (sighting, _) in batch.iter() {
                     if sighting.kind == RecordKind::Ble { ble += 1 } else { wifi += 1 }
                 }
@@ -346,9 +355,9 @@ async fn sim_node_reports_only_ble_sightings_when_holding_ble_flag() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_ble() {
-    // The one frame the host never sends. A node that took it literally would loop
-    // on nothing, so it counts as never having been told anything: it parks, which
+async fn sim_node_idles_without_sightings_when_assigned_empty_channels_without_ble() {
+    // The one assignment the host never sends. A node that took it literally would loop
+    // on nothing, so it counts as never having been told anything: it idles, which
     // means the idle beat and no sightings of any kind.
     let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
@@ -357,14 +366,14 @@ async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_b
     let mut sightings = 0;
     let mut beats = 0;
     while beats < 4 {
-        let (_, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) => beats += 1,
-            Ok(Frame::Sightings(batch)) => sightings += batch.iter().count(),
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) => beats += 1,
+            Ok(UpMsg::Sightings(batch)) => sightings += batch.iter().count(),
             _ => {}
         }
     }
-    assert_eq!(sightings, 0, "parked collects nothing");
+    assert_eq!(sightings, 0, "an idle node collects nothing");
 }
 
 #[tokio::test(start_paused = true)]
@@ -373,10 +382,10 @@ async fn sim_node_reports_epoch_zero_until_assigned_then_the_adopted_epoch() {
     // by the epoch on the next heartbeat rather than inferred from cadence.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
 
     let parked = next_heartbeat_msg_from(&mut link, node).await;
-    assert_eq!(parked.epoch, 0, "parked since boot, nothing adopted yet");
+    assert_eq!(parked.epoch, 0, "unassigned since boot, nothing adopted yet");
 
     assign(&link, 1, everything(), false);
 
@@ -390,7 +399,7 @@ async fn sim_node_reports_epoch_zero_until_assigned_then_the_adopted_epoch() {
 async fn sim_node_reports_new_epoch_when_channel_range_is_narrowed() {
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
     assign(&link, 1, everything(), false);
 
     next_heartbeat_msg_from(&mut link, node).await;
@@ -410,16 +419,13 @@ async fn sim_node_reports_new_epoch_when_channel_range_is_narrowed() {
 #[tokio::test(start_paused = true)]
 async fn sim_node_heartbeats_at_assigned_beat_when_sweeping() {
     // A one-channel share sweeps many times inside one heartbeat interval: the
-    // beat is checked only between dwells, so firing one holds a 100 ms admin
-    // window open before the next dwell can start, which delays the next check
-    // by that much. The schedule advances from the deadline rather than the
-    // fire time, so the lateness accumulates by one admin window every cycle
-    // and wraps once it passes a dwell — every gap stays within one dwell of
-    // ASSIGNED_BEAT_MS, and the mean over a whole wrap is exact, while the
-    // counter climbs by many sweeps between any two beats.
+    // beat is checked only between dwells, and the schedule advances from the
+    // deadline rather than the fire time, so every gap stays within one dwell of
+    // ASSIGNED_BEAT_MS and the mean is exact, while the counter climbs by many
+    // sweeps between any two beats.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
     let mut one = ChannelSet::empty();
     one.insert(0);
     assign(&link, 1, one, false);
@@ -452,28 +458,28 @@ async fn sim_node_heartbeats_at_assigned_beat_when_sweeping() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_waits_a_full_beat_when_reassigned_after_parking() {
+async fn sim_node_waits_a_full_beat_when_reassigned_after_idling() {
     // A stale `next_beat` left over from a share this node held before it
-    // parked must not fire on the very first dwell once it is reassigned.
+    // went idle must not fire on the very first dwell once it is reassigned.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
     let mut one = ChannelSet::empty();
     one.insert(0);
 
     assign(&link, 1, one, false);
     // Let its next_beat deadline pass at least once while assigned, so it is
-    // well in the past by the time this node parks.
+    // well in the past by the time this node goes idle.
     next_heartbeat_from(&mut link, node).await;
     next_heartbeat_from(&mut link, node).await;
 
-    // An admin frame with no channels and no Bluetooth flag is the one thing
+    // An assignment with no channels and no Bluetooth flag is the one thing
     // the host never sends, and this node treats it as never having been told
-    // anything: it parks.
+    // anything: it idles.
     assign(&link, 2, ChannelSet::empty(), false);
 
     // Drain idle heartbeats until a whole beat interval has passed while
-    // parked, so a stale deadline would be long overdue by the time this node
+    // idle, so a stale deadline would be long overdue by the time this node
     // is reassigned. Draining rather than sleeping blind is what keeps a
     // backlog of idle beats from being mistaken for the first fresh one below.
     let past_a_beat =
@@ -486,7 +492,7 @@ async fn sim_node_waits_a_full_beat_when_reassigned_after_parking() {
     assign(&link, 3, one, false);
     let first = next_heartbeat_from(&mut link, node).await;
     let gap = (first - last_idle_at).as_millis();
-    // At least a whole interval — the fix — never a mere dwell or admin window,
+    // At least a whole interval — the fix — never a mere dwell,
     // which is what the stale-deadline bug produced. The idle beat already in
     // flight when the reassignment lands can add up to one more IDLE_BEAT_MS,
     // since it is not cut short.
@@ -503,7 +509,7 @@ async fn sim_node_advances_counter_once_per_scan_when_holding_bluetooth_scan() {
     // heartbeat.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
     assign(&link, 1, ChannelSet::empty(), true);
 
     next_heartbeat_from(&mut link, node).await;
@@ -516,80 +522,51 @@ async fn sim_node_advances_counter_once_per_scan_when_holding_bluetooth_scan() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_returns_ack_ok_when_assignment_sent_to_active_node() {
+async fn sim_bridge_reports_delivered_when_assignment_sent_to_active_node() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
-
     assign(&link, 1, ChannelSet::from_run(IndexRun::new(4, 8)), false);
-    let _ = node;
-
-    loop {
-        if let LinkEvent::Message(BridgeToHost::SendResult { id, status, .. }) =
-            link.recv().await.expect("running")
-        {
-            assert_eq!(id, 1);
-            assert_eq!(status, SendStatus::AckOk);
-            return;
-        }
-    }
+    assert_eq!(next_send_result(&mut link).await, Ok(1));
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_returns_ack_fail_when_frame_sent_to_unreachable_node() {
-    // Clearing an assignment's dirty flag on this would be the firmware's bug;
-    // the host must be able to tell delivery from a successful enqueue.
+async fn sim_bridge_reports_no_node_when_assignment_sent_to_empty_slot() {
+    // The host must be able to tell delivery from a successful enqueue.
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
 
-    link.send_urgent(admin_command(
-        [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
-        AdminMsg {
-            epoch: 1,
-            flags: 0,
-            channels: ChannelSet::from_run(IndexRun::new(0, 3)),
-            tx_power: 8,
-        },
+    link.send_urgent(assign_command(
+        empty_slot(),
+        Assign { epoch: 1, flags: 0, channels: ChannelSet::from_run(IndexRun::new(0, 3)) },
     ))
     .expect("queued");
-
-    loop {
-        if let LinkEvent::Message(BridgeToHost::SendResult { status, .. }) =
-            link.recv().await.expect("running")
-        {
-            assert_eq!(status, SendStatus::AckFail);
-            return;
-        }
-    }
+    assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode));
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_returns_ack_ok_when_clear_sent_to_active_node() {
+async fn sim_bridge_reports_delivered_when_clear_sent_to_active_node() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
-
-    link.send_urgent(clear_command(node, true)).expect("queued");
-    assert_eq!(next_send_result(&mut link).await, SendStatus::AckOk);
+    link.send_urgent(clear_command(SimTransport::node_slot(0))).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, Ok(1));
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_returns_no_peer_when_clear_sent_to_unknown_node() {
+async fn sim_bridge_reports_no_node_when_clear_sent_to_empty_slot() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-
-    link.send_urgent(clear_command([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], false)).expect("queued");
-    assert_eq!(next_send_result(&mut link).await, SendStatus::NoPeer);
+    link.send_urgent(clear_command(empty_slot())).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode));
 }
 
 #[tokio::test(start_paused = true)]
 async fn sim_node_ignores_retransmitted_assignment_when_epoch_version_is_unchanged() {
-    // Nodes compare with `!=`, and a node that has never heard a core holds
+    // Nodes compare with `!=`, and a node that has never heard the host holds
     // version 0. Re-sending the version it already has changes nothing, which
     // is exactly why the host must persist a monotonic counter across restarts.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
+    let node = SimTransport::node_slot(0);
 
     assign(&link, 7, everything(), false);
     // Skip the sweep that straddles the change.
@@ -632,9 +609,9 @@ async fn sim_transport_produces_deterministic_sightings_when_seeded() {
         assign(&link, 1, everything(), true);
         let mut frames = Vec::new();
         while frames.len() < 10 {
-            let (_, raw) = next_frame(&mut link).await;
-            if matches!(Frame::decode(&raw), Ok(Frame::Sightings(_))) {
-                frames.push(raw);
+            let rec = next_frame(&mut link).await;
+            if matches!(rec.msg(), Ok(UpMsg::Sightings(_))) {
+                frames.push(rec.body);
             }
         }
         frames
@@ -651,66 +628,36 @@ async fn sim_fleet_restricts_ble_reports_to_assigned_node_when_partitioned() {
     // The shape the host sends: the scanner gets the flag and no channels, and the
     // whole pool goes to the node still sniffing.
     assign(&link, 1, ChannelSet::empty(), true);
-    link.send_urgent(admin_command(
-        SimTransport::node_mac(1),
-        AdminMsg { epoch: 1, flags: 0, channels: everything(), tx_power: 8 },
+    link.send_urgent(assign_command(
+        SimTransport::node_slot(1),
+        Assign { epoch: 1, flags: 0, channels: everything() },
     ))
     .expect("queued");
 
     // A room where an advertiser turns up in every slot of every scan, so a node
     // that was going to report one has had every chance to.
-    let mut ble_by_node: HashMap<Mac, usize> = HashMap::new();
+    let mut ble_by_node: HashMap<Slot, usize> = HashMap::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (src, raw) = next_frame(&mut link).await;
-        match Frame::decode(&raw) {
-            Ok(Frame::Heartbeat(_)) if src == SimTransport::node_mac(1) => sweeps += 1,
-            Ok(Frame::Sightings(batch)) => {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(_)) if rec.slot == SimTransport::node_slot(1) => sweeps += 1,
+            Ok(UpMsg::Sightings(batch)) => {
                 let ble = batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble).count();
                 if ble > 0 {
-                    *ble_by_node.entry(src).or_default() += ble;
+                    *ble_by_node.entry(rec.slot).or_default() += ble;
                 }
             }
             _ => {}
         }
     }
-    assert!(ble_by_node[&SimTransport::node_mac(0)] > 5, "the node that was asked");
-    assert_eq!(ble_by_node.get(&SimTransport::node_mac(1)), None, "and only that node");
-}
-
-#[tokio::test(start_paused = true)]
-async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simulated() {
-    // Reproduced without hardware so the host's `no admin ack` path can be
-    // exercised; see `SimConfig::ble_coexistence_failure`.
-    let config = SimConfig {
-        node_count: 1,
-        ble_coexistence_failure: true,
-        ble_chance: 0.0,
-        ..SimConfig::default()
-    };
-    let mut link = SimTransport::new(config).start().expect("starts");
-    let node = SimTransport::node_mac(0);
-
-    // The frame that switches Bluetooth on is acknowledged: the radio was not
-    // yet away on the other antenna when it arrived.
-    assign(&link, 1, everything(), true);
-    assert_eq!(next_send_result(&mut link).await, SendStatus::AckOk);
-    next_heartbeat_from(&mut link, node).await;
-
-    // Nothing after it is. An 802.11 acknowledgment comes from the receiver's
-    // MAC hardware, so this is indistinguishable from a node that is not there
-    // — and the frame really is dropped, which is why the operator cannot take
-    // the assignment back.
-    for epoch in 2..=4 {
-        assign(&link, epoch, everything(), false);
-        assert_eq!(next_send_result(&mut link).await, SendStatus::AckFail, "epoch {epoch}");
-    }
+    assert!(ble_by_node[&SimTransport::node_slot(0)] > 5, "the node that was asked");
+    assert_eq!(ble_by_node.get(&SimTransport::node_slot(1)), None, "and only that node");
 }
 
 #[test]
 fn sim_minor_behind_steps_back_one_minor_when_minor_is_above_zero() {
     use wartui_bridge::sim::minor_behind;
-    use wartui_proto::air::Version;
     assert_eq!(minor_behind(Version::new(0, 3, 7)), Version::new(0, 2, 7));
     assert_eq!(minor_behind(Version::new(2, 1, 0)), Version::new(2, 0, 0));
 }
@@ -718,5 +665,5 @@ fn sim_minor_behind_steps_back_one_minor_when_minor_is_above_zero() {
 #[test]
 #[should_panic(expected = "has no minor before it")]
 fn sim_minor_behind_panics_when_minor_is_zero() {
-    let _ = wartui_bridge::sim::minor_behind(wartui_proto::air::Version::new(1, 0, 4));
+    let _ = wartui_bridge::sim::minor_behind(Version::new(1, 0, 4));
 }
