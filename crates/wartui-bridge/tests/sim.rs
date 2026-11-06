@@ -10,9 +10,9 @@ use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{
-    Assign, Clear, DecodeError, DownType, Heartbeat, RecordKind, Slot, UpMsg, Version,
+    Assign, Clear, DecodeError, DownType, Heartbeat, NodeBoard, RecordKind, Slot, UpMsg, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge, ToNodeBody, Undelivered};
+use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome, ToNodeBody, Undelivered};
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
@@ -393,6 +393,44 @@ async fn sim_node_reports_epoch_zero_until_assigned_then_the_adopted_epoch() {
     next_heartbeat_msg_from(&mut link, node).await;
     let adopted = next_heartbeat_msg_from(&mut link, node).await;
     assert_eq!(adopted.epoch, 1, "the next clean heartbeat reports the adopted epoch");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_announces_fourteen_node_carrier_when_simulation_starts() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    match link.recv().await.expect("an event") {
+        LinkEvent::Connected(info) => assert_eq!(info.node_board, NodeBoard::Carrier14),
+        other => panic!("expected Connected first, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_boots_afresh_when_power_cycled() {
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_slot(0);
+    assign(&link, 1, everything(), false);
+    while next_heartbeat_msg_from(&mut link, node).await.epoch != 1 {}
+
+    link.send_bulk(HostToBridge::PowerCycle { slot: node }).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::PowerCycled { slot, outcome }) =
+            link.recv().await.expect("simulator keeps running")
+        {
+            assert_eq!((slot, outcome), (node, PowerOutcome::Done));
+            break;
+        }
+    }
+    // A heartbeat already on its way may arrive first; the reboot's follows it.
+    let mut rebooted = false;
+    for _ in 0..3 {
+        let beat = next_heartbeat_msg_from(&mut link, node).await;
+        if beat.epoch == 0 {
+            rebooted = true;
+            break;
+        }
+    }
+    assert!(rebooted, "the node forgot its assignment, as a real reboot does");
 }
 
 #[tokio::test(start_paused = true)]

@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
+use wartui_proto::bus::Slot;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
@@ -91,6 +92,16 @@ pub enum Command {
     SetExcludedSsids {
         /// Each SSID's bytes, matched exactly, in the operator's order.
         ssids: IndexSet<Vec<u8>>,
+    },
+
+    /// Ask the bridge's carrier board to switch the node in `slot` off and on.
+    ///
+    /// Sent at once, and answered by the bridge whatever it carries; the answer reaches the
+    /// operator as [`Snapshot::power_answer`](super::Snapshot::power_answer). Nothing in the
+    /// plan changes: the node reboots, and its heartbeats say so.
+    PowerCycle {
+        /// Which node, by the slot its heartbeat came from.
+        slot: Slot,
     },
 }
 

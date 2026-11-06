@@ -12,7 +12,7 @@ use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::bus::{
-    Board, Capabilities, MAX_SLOTS, NODE_VERSION, RecordKind, Slot, Version, wire_epoch,
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
 };
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -152,6 +152,7 @@ pub(super) fn busy() -> Snapshot {
             gps: false,
             radio: None,
             image: None,
+            node_board: NodeBoard::Bench,
         }),
         link_up: true,
         link_error: None,
@@ -223,7 +224,17 @@ pub(super) fn busy() -> Snapshot {
         },
         gps: None,
         excluded_ssids: Vec::new(),
+        power_answer: None,
     }
+}
+
+/// [`busy`] behind a bridge on `board`.
+pub(super) fn on_board(board: NodeBoard) -> Snapshot {
+    let mut snapshot = busy();
+    if let Some(bridge) = snapshot.bridge.as_mut() {
+        bridge.node_board = board;
+    }
+    snapshot
 }
 
 /// No bridge, no nodes, no position.

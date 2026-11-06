@@ -44,6 +44,7 @@
 
 use core::fmt::Write;
 
+use crate::bus::NodeBoard;
 use crate::link::{
     BridgeToHost, Chip, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueStat, QueueStats,
     RADIO_UPDATING, RadioInfo, RadioLinkStats, ShortStr,
@@ -146,6 +147,8 @@ pub struct Pair {
     bundled: [u8; DIGEST_LEN],
     /// The digest of the P4's own booted image, for `Ready`.
     own_image: Option<[u8; DIGEST_LEN]>,
+    /// What carries the nodes, for `Ready`.
+    node_board: NodeBoard,
     /// This P4 life has tried to update the C6.
     attempted: bool,
     /// How much of the image the C6 holds, in percent.
@@ -184,6 +187,7 @@ impl Pair {
             boot_ms,
             bundled,
             own_image: None,
+            node_board: NodeBoard::Bench,
             attempted: false,
             progress: 0,
             installed_at: None,
@@ -198,6 +202,13 @@ impl Pair {
     #[must_use]
     pub fn with_own_image(mut self, image: Option<[u8; DIGEST_LEN]>) -> Self {
         self.own_image = image;
+        self
+    }
+
+    /// The board the P4 read at boot, for `Ready`.
+    #[must_use]
+    pub fn with_node_board(mut self, board: NodeBoard) -> Self {
+        self.node_board = board;
         self
     }
 
@@ -443,6 +454,7 @@ impl Pair {
                 uptime_ms: hello.uptime_ms,
             }),
             image: self.own_image,
+            node_board: self.node_board,
         })
     }
 

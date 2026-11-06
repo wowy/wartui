@@ -1,5 +1,6 @@
 use wartui_bridge::BridgeInfo;
-use wartui_proto::bus::{Compat, RecordKind};
+use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
+use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, Plan};
 
@@ -149,9 +150,43 @@ pub struct Snapshot {
     pub gps: Option<crate::gps::GpsView>,
     /// The SSIDs never captured, as text for the settings modal to edit.
     pub excluded_ssids: Vec<String>,
+    /// The bridge's last answer to [`Command::PowerCycle`](super::Command::PowerCycle), for the
+    /// view to show once.
+    pub power_answer: Option<PowerAnswer>,
+}
+
+/// The bridge's answer to a power-cycle, as the operator reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerAnswer {
+    /// Counts the answers this engine has had, from 1, so the view tells a new one from the last.
+    pub id: u64,
+    /// What happened, in [`power_cycled_text`]'s words.
+    pub text: String,
+}
+
+/// What the operator reads of a power-cycle's `outcome` for `slot` on `board`.
+#[must_use]
+pub fn power_cycled_text(board: NodeBoard, slot: Slot, outcome: PowerOutcome) -> String {
+    let name = board.label(slot);
+    match outcome {
+        PowerOutcome::Done => format!("{name} power-cycled"),
+        PowerOutcome::NoCarrier => {
+            "this bridge has no carrier board, so it cannot switch node power".to_owned()
+        }
+        PowerOutcome::NotDriven => format!("{name} is not a slot on this {board}"),
+        PowerOutcome::Failed => {
+            format!("{name} was not power-cycled: the carrier's I/O expander did not answer")
+        }
+    }
 }
 
 impl Snapshot {
+    /// What carries the nodes, as the bridge last announced it: the bench before any has.
+    #[must_use]
+    pub fn node_board(&self) -> NodeBoard {
+        self.bridge.as_ref().map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+    }
+
     /// The nodes heard on another major or minor, as the header names them:
     /// `2 need update`, `1 host behind`, or `3 undrivable` for both. `None` when there are none.
     #[must_use]
@@ -257,6 +292,7 @@ impl FleetEngine {
                 .iter()
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
+            power_answer: self.power_answer.clone(),
         }
     }
 

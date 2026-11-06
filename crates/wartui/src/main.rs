@@ -28,6 +28,7 @@ mod config;
 mod export;
 mod flash;
 mod ota;
+mod power_cycle;
 mod reset;
 mod run;
 mod sniff;
@@ -73,6 +74,8 @@ enum Command {
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),
+    /// Switch one node off and on through the carrier board.
+    PowerCycle(power_cycle::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -94,9 +97,9 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`
-        // and `ota` read a broken one as no bridge remembered, and `ports` and `flash-fleet`
-        // never read it.
+        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
+        // `power-cycle` and `ota` read a broken one as no bridge remembered, and `ports` and
+        // `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -105,6 +108,7 @@ async fn main() -> Result<()> {
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
+        Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -584,6 +588,14 @@ mod tests {
     }
 
     #[test]
+    fn cli_parser_accepts_power_cycle_when_given_slot_bridge_and_config() {
+        let args = ["wartui", "power-cycle", "--slot", "N3", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::PowerCycle(_))));
+        // Which node is the whole question, so there is no default.
+        assert!(parse(["wartui", "power-cycle"]).is_err());
+    }
+
+    #[test]
     fn cli_parser_rejects_bridge_and_config_flags_when_passed_to_flash_fleet() {
         // It knows a P4 bridge by its USB IDs, so it has no use for either.
         for flag in [["--bridge", "/dev/x"], ["--config", "w.toml"]] {
@@ -716,6 +728,7 @@ mod tests {
                 gps: false,
                 radio: None,
                 image: None,
+                node_board: wartui_proto::bus::NodeBoard::Bench,
             })
         };
         for (phase, said) in [

@@ -19,7 +19,7 @@
 //! arrives as a [`BridgeToHost::FromNode`] of up to [`MAX_NODE_PAYLOAD`] bytes. The P4 reads
 //! neither; [`crate::bus`] has the messages.
 
-use crate::bus::Slot;
+use crate::bus::{NodeBoard, Slot};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::radio_link::update::OP_MAX;
@@ -222,6 +222,12 @@ pub enum HostToBridge {
         #[serde(with = "bytes")]
         body: ToNodeBody,
     },
+    /// Switch the node in `slot` off and on again, through the carrier board, answered by
+    /// [`BridgeToHost::PowerCycled`].
+    PowerCycle {
+        /// Which node.
+        slot: Slot,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -268,6 +274,9 @@ pub enum BridgeToHost {
         /// that takes updates over this link. `None` from one that does not. The host reads
         /// it to tell an installed image from a rollback.
         image: Option<[u8; DIGEST_LEN]>,
+        /// What carries the nodes, which the P4 reads at boot. It sets the slots driven and the
+        /// names an operator reads for them.
+        node_board: NodeBoard,
     },
     /// Reply to [`HostToBridge::GetStatus`].
     Status {
@@ -342,6 +351,27 @@ pub enum BridgeToHost {
         /// Why.
         reason: Undelivered,
     },
+    /// The answer to [`HostToBridge::PowerCycle`]. A request for a slot already waiting or
+    /// cycling joins that cycle, which answers once.
+    PowerCycled {
+        /// Echoes the request's slot.
+        slot: Slot,
+        /// How it went.
+        outcome: PowerOutcome,
+    },
+}
+
+/// How a [`HostToBridge::PowerCycle`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum PowerOutcome {
+    /// The node was switched off, then on again, and is powered now.
+    Done,
+    /// The bridge has no carrier board, so nothing switches node power.
+    NoCarrier,
+    /// The carrier does not drive that slot.
+    NotDriven,
+    /// The carrier's I/O expander did not answer.
+    Failed,
 }
 
 /// A bounded queue whose depth the firmware reports.

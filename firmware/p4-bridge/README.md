@@ -31,7 +31,24 @@ each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/
 
 ## Boards
 
-This firmware runs on the Waveshare ESP32-P4-WIFI6.
+This firmware runs on the Waveshare ESP32-P4-WIFI6, with its nodes wired straight to it (the
+bench) or on the wartui-carrier.
+
+## On the carrier
+
+At boot, before it builds the node buses, the P4 reads the carrier's I/O expander at 0x20 on I2C0
+(`src/carrier.rs`). The carrier it finds picks the CS pins and IRQ's polarity, and `Ready` reports
+it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with no carrier.
+
+- **A cold boot** powers every node, one every 200 ms.
+- **A reset of the P4** leaves running nodes running, and powers only a node that is off.
+- **A power-cycle** from the host holds one node off for 1 s, then powers it again.
+- **An expander that fails, or reads as no carrier,** is an error in every announcement. With
+  power out of reach, every power-cycle answers `Failed`.
+
+Each announcement also carries a line naming the carrier: `carrier-10: 10 node slots, 3 powered
+now, 7 already on`. [`docs/node-bus.md`](../../docs/node-bus.md) § "On the carrier board" has the
+port map and the pins.
 
 ## The link to the C6
 
@@ -168,8 +185,10 @@ fault instead. Wire it to the P4's header:
 | GND | GND |
 
 The receiver answers at `0x42`. The board has 2.2 kΩ pull-ups on both lines, and its ES8311 codec
-shares the bus at another address. The bridge always reads the bus. Without a receiver, every
-announcement carries "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)".
+shares the bus at another address. So does a carrier's I/O expander, at `0x20`: the GPS reader and
+the carrier each lock the bus for one transaction at a time. The bridge always reads the bus.
+Without a receiver, every announcement carries "no GPS receiver answered on the I2C bus
+(GPIO7/GPIO8)".
 
 ## Queue sizes
 

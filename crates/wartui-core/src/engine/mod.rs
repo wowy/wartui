@@ -14,7 +14,8 @@
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
 //! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi
-//! networks are never captured.
+//! networks are never captured. [`Command::PowerCycle`] asks the bridge's carrier to switch one
+//! node off and on, and the answer reaches the operator as [`Snapshot::power_answer`].
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -34,7 +35,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::bus::Slot;
+use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
 use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
@@ -42,7 +43,9 @@ use wartui_proto::plan::{Job, Plan};
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::{Assignment, NodeState};
-pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};
+pub use snapshot::{
+    BridgeStatus, Counters, NodeView, PowerAnswer, Snapshot, TailEntry, power_cycled_text,
+};
 
 pub(crate) use lag::BEHIND_US;
 pub(crate) use rx::advance_since_boot;
@@ -117,6 +120,8 @@ pub struct FleetEngine {
     behind_since: Option<Instant>,
     /// The largest lag measured during the spell [`Self::behind_since`] opened.
     behind_peak_us: u64,
+    /// The bridge's last answer to a power-cycle.
+    power_answer: Option<PowerAnswer>,
 }
 
 impl FleetEngine {
@@ -171,6 +176,7 @@ impl FleetEngine {
             lag_peak_us: 0,
             behind_since: None,
             behind_peak_us: 0,
+            power_answer: None,
             config,
         }
     }
@@ -180,13 +186,14 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, now),
+            Event::Command(command) => self.on_command(command, now, &mut batch),
             Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
                     chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
+                    node_board: info.node_board,
                 }));
                 self.bridge = Some(info);
                 self.link_up = true;
@@ -308,6 +315,17 @@ impl FleetEngine {
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
+    /// What carries the nodes, as the bridge last announced it: the bench before any has.
+    #[must_use]
+    pub fn node_board(&self) -> NodeBoard {
+        self.bridge.as_ref().map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+    }
+
+    /// `slot` as the operator reads it on [`Self::node_board`].
+    pub(crate) fn slot_label(&self, slot: Slot) -> SlotLabel {
+        self.node_board().label(slot)
+    }
+
     /// Whether the bridge connected now was built with a GPS port. `self.bridge` outlives a
     /// disconnect, so the link must be up too. The runtime reads this after each event to decide
     /// whether the host's search stands down, so the two never disagree about the bridge.
@@ -333,6 +351,12 @@ impl FleetEngine {
             BridgeToHost::Delivered { id } => self.on_send_result(*id, None, now, batch),
             BridgeToHost::Undelivered { id, reason } => {
                 self.on_send_result(*id, Some(*reason), now, batch);
+            }
+            BridgeToHost::PowerCycled { slot, outcome } => {
+                let text = power_cycled_text(self.node_board(), *slot, *outcome);
+                tracing::info!(slot = %self.slot_label(*slot), ?outcome, "{text}");
+                let id = self.power_answer.as_ref().map_or(1, |answer| answer.id + 1);
+                self.power_answer = Some(PowerAnswer { id, text });
             }
             BridgeToHost::Status {
                 rx_count,

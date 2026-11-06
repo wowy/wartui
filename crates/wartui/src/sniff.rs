@@ -13,7 +13,8 @@ use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::bus::{
-    Compat, DecodeError, Heartbeat, NODE_VERSION, RecordKind, SightingMsg, Slot, UpMsg, UpType,
+    Compat, DecodeError, Heartbeat, NODE_VERSION, NodeBoard, RecordKind, SightingMsg, Slot, UpMsg,
+    UpType,
 };
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac;
@@ -134,6 +135,9 @@ struct Counts {
     /// decoded message of any kind, or the transport saying why the link is down. An
     /// undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
+    /// What carries the nodes, from the bridge's announcement, which names each slot. The bench
+    /// until one arrives.
+    board: Option<NodeBoard>,
     total: u64,
     /// Sightings seen, across every batch — not the number of records.
     sighting: u64,
@@ -176,6 +180,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             );
             // A port, not a receiver: one that does not answer is a bridge `Error`.
             println!("#   {}", if info.gps { "gps port" } else { "no gps port" });
+            println!("#   nodes on {}", info.node_board);
+            counts.board = Some(info.node_board);
         }
         return;
     };
@@ -189,7 +195,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
     match message {
         BridgeToHost::FromNode { slot, rx_us, kind, body } => {
             counts.total += 1;
-            let head = format!("{rx_us:>10}us  {slot}");
+            let head = head(*rx_us, *slot, counts);
             record(*slot, &head, *kind, body, counts);
             if args.raw {
                 println!("      {}", hex(body));
@@ -243,7 +249,19 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         BridgeToHost::Undelivered { id, reason } => {
             println!("# record {id} undelivered: {reason:?}");
         }
+        // Answers `power-cycle`, which `sniff` never sends.
+        BridgeToHost::PowerCycled { slot, outcome } => {
+            let board = counts.board.unwrap_or(NodeBoard::Bench);
+            println!("# {}", wartui_core::engine::power_cycled_text(board, *slot, *outcome));
+        }
     }
+}
+
+/// The start of each line about a record: the bridge's stamp, and the slot as the operator
+/// reads it on the board the bridge announced.
+fn head(rx_us: u32, slot: Slot, counts: &Counts) -> String {
+    let board = counts.board.unwrap_or(NodeBoard::Bench);
+    format!("{rx_us:>10}us  {}", board.label(slot))
 }
 
 /// One record from the node in `slot`, decoded and counted as the engine reads it.
@@ -395,6 +413,28 @@ mod tests {
             host_uart_errors: 0,
         };
         assert!(heard(LinkEvent::Message(status)));
+    }
+
+    #[test]
+    fn sniff_cmd_names_slot_by_silk_when_bridge_announces_a_carrier() {
+        let b1 = Slot::new(1, 0).expect("B1");
+        let mut counts = Counts::default();
+        assert_eq!(head(7, b1, &counts), "         7us  B1");
+        let info = wartui_bridge::BridgeInfo {
+            chip: wartui_proto::link::Chip::Esp32P4,
+            mac: [0; 6],
+            fw_version: String::new(),
+            reset_cause: wartui_proto::reset::ResetCause::PowerOn,
+            last_phase: wartui_proto::link::LoopPhase::Unknown,
+            heap_free: 0,
+            uptime_ms: 0,
+            gps: false,
+            radio: None,
+            image: None,
+            node_board: NodeBoard::Carrier14,
+        };
+        handle(LinkEvent::Connected(info), &args(), &mut counts);
+        assert_eq!(head(7, b1, &counts), "         7us  N8");
     }
 
     #[test]

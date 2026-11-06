@@ -22,12 +22,12 @@ use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, 
 use wartui_core::ubx::valset_rate;
 use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, DownType, Heartbeat as HeartbeatMsg, MAX_SLOTS,
-    NODE_VERSION, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType,
+    NODE_VERSION, NodeBoard, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType,
     UpdateState, UpdateStatus, Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
-    BridgeToHost, Chip, FromNodeBody, HostToBridge, LinkError, LoopPhase, QueueId, QueueStat,
-    QueueStats, RadioLinkStats, Undelivered,
+    BridgeToHost, Chip, FromNodeBody, HostToBridge, LinkError, LoopPhase, PowerOutcome, QueueId,
+    QueueStat, QueueStats, RadioLinkStats, Undelivered,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, plan};
@@ -304,6 +304,11 @@ fn connected_with_gps() -> Event {
 }
 
 fn connected_bridge(mac: Mac, gps: bool) -> Event {
+    connected_board(mac, gps, NodeBoard::Bench)
+}
+
+/// A connect from a bridge whose nodes `board` carries.
+fn connected_board(mac: Mac, gps: bool, node_board: NodeBoard) -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
         chip: Chip::Esp32P4,
         mac,
@@ -317,6 +322,7 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
         gps,
         radio: None,
         image: None,
+        node_board,
     }))
 }
 
@@ -3308,6 +3314,45 @@ fn engine_reissues_nothing_when_same_bridge_reconnects() {
 
 fn clear_ring(mac: Option<Mac>) -> Event {
     Event::Command(Command::ClearRing { mac })
+}
+
+#[test]
+fn engine_sends_power_cycle_at_once_when_operator_asks() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected_board(NODE, false, NodeBoard::Carrier14), clock.at(0));
+    let slot = Slot::new(1, 0).expect("B1");
+
+    let batch = engine.handle(Event::Command(Command::PowerCycle { slot }), clock.at(1));
+
+    assert_eq!(batch.bulk, [HostToBridge::PowerCycle { slot }]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+}
+
+#[test]
+fn engine_names_power_cycle_outcome_when_bridge_answers() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected_board(NODE, false, NodeBoard::Carrier6), clock.at(0));
+    let b1 = Slot::new(1, 0).expect("B1");
+    let a5 = Slot::new(0, 4).expect("A5");
+    let cases = [
+        (b1, PowerOutcome::Done, "N4 power-cycled"),
+        (b1, PowerOutcome::NoCarrier, "this bridge has no carrier board, so it cannot switch"),
+        (a5, PowerOutcome::NotDriven, "A5 is not a slot on this carrier-6"),
+        (b1, PowerOutcome::Failed, "N4 was not power-cycled: the carrier's I/O expander did not"),
+    ];
+    let mut last_id = 0;
+    for (slot, outcome, want) in cases {
+        let answer = Event::Link(LinkEvent::Message(BridgeToHost::PowerCycled { slot, outcome }));
+        engine.handle(answer, clock.at(1));
+        let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+        let said = snapshot.power_answer.expect("an answer");
+        assert!(said.text.starts_with(want), "{outcome:?}: {}", said.text);
+        // The view shows each answer once, telling them apart by this.
+        assert!(said.id > last_id, "{outcome:?}");
+        last_id = said.id;
+    }
 }
 
 #[test]

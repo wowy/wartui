@@ -142,8 +142,8 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS
     section("capture")
-    cols = ("started_at", "ended_at", "bridge_mac", "bridge_chip", "bridge_fw", "channel_pool",
-            "notes", "simulated")
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_chip", "bridge_fw", "node_board",
+            "channel_pool", "notes", "simulated")
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
     end = row.get("ended_at")
@@ -163,6 +163,13 @@ def provenance(db, ctx):
         f"  bridge    {full(row.get('bridge_mac'))}  chip {row.get('bridge_chip')}  "
         f"fw {row.get('bridge_fw')}"
     )
+    board = row.get("node_board")
+    per_bus = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}.get(board)
+    if per_bus:
+        # Slots are stored by bus name; the operator read the silk.
+        print(f"  board     {board}  (slots below are bus names: A1 is N1, B1 is N{per_bus + 1})")
+    else:
+        print(f"  board     {board}")
     print(f"  pool      {row.get('channel_pool')}   simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")

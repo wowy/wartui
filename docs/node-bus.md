@@ -1,8 +1,10 @@
 # The node bus
 
 The node bus is SPI between the P4 bridge and its nodes, and the nodes' only link. The P4 is master
-on two buses, A and B, and each bus has up to six nodes, one per CS line, called slots `A1` to `A6`
-and `B1` to `B6`. Slot numbering leaves room for a seventh per bus (`A7`, `B7`).
+on two buses, A and B, and each node has its own CS line, called a slot: `A1` to `A7` and `B1` to
+`B7`. Wired straight to the P4, each bus takes six nodes. The wartui-carrier takes three, five or
+seven per bus, and names its sockets by the silk, `N1` to `Nn`
+([On the carrier board](#on-the-carrier-board)).
 
 ## Pins
 
@@ -15,10 +17,10 @@ On the ESP32-P4-WIFI6:
 | MISO, node → P4 | 22 | 29 |
 | IRQ, node → P4, one per bus | 23 | 28 |
 
-| CS, P4 → node | Slot 1 | Slot 2 | Slot 3 | Slot 4 | Slot 5 | Slot 6 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Bus A | 26 | 27 | 32 | 33 | 46 | 47 |
-| Bus B | 50 | 49 | 5 | 4 | 3 | 2 |
+| CS, P4 → node | Slot 1 | Slot 2 | Slot 3 | Slot 4 | Slot 5 | Slot 6 | Slot 7, 14-node carrier |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Bus A | 26 | 27 | 32 | 33 | 46 | 47 | 25 |
+| Bus B | 50 | 49 | 5 | 4 | 3 | 2 | 24 |
 
 On the XIAO ESP32-C5:
 
@@ -37,8 +39,9 @@ On the XIAO ESP32-C5:
   v0.7). The C5's are GPIO2, 3, 7 and 25–28 (ESP32-C5 datasheet v1.5), which is why the node
   leaves D2 and D3 (GPIO25 and 7) unused. esp-hal's generated docs also flag the P4's GPIO32 and
   33, which the datasheet does not.
-- **CS is active low and idles high.** The P4 drives each slot's CS as a plain output, high from
-  boot. The node pulls its CS up, so it reads idle with no P4 attached.
+- **CS is active low and idles high.** The P4 drives each slot its board wires as a plain output,
+  high from boot, and leaves the rest unconfigured. The node pulls its CS up, so it reads idle with
+  no P4 attached.
 - **MISO is pulled up on the P4**, so an empty slot reads constant bytes and fails the magic.
 - **IRQ is one line per bus.** A node drives D0 push-pull, high to ask for a transfer.
   - On the carrier board, each node's D0 drives its own driver, which pulls the bus's shared line
@@ -70,6 +73,41 @@ message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/).
 A heartbeat is never resent. Every other record waits for the peer to acknowledge the transfer that
 carried it, and is resent until it is, up to three tries.
 
+## On the carrier board
+
+The carrier comes with 6, 10 or 14 node sockets: 3, 5 or 7 per bus, from slot 1. Its I/O expander
+sits at 0x20 on I2C0 (SDA GPIO7, SCL GPIO8, 400 kHz), which it shares with the GPS receiver at 0x42.
+Driving a port high powers its node:
+
+| Bus A slot | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Port | P17 | P16 | P15 | P14 | P13 | P12 | P11 |
+
+| Bus B slot | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Port | P00 | P01 | P02 | P03 | P04 | P05 | P06 |
+
+- **The P4 reads the carrier from the expander at boot.** Each node enable is pulled down on the
+  board, so with every port an input, a wired socket's port reads low and a spare one high. No
+  answer at 0x20 is the bench, wired straight to the P4.
+- **A cold boot powers every node, one every 200 ms**, in slot order A1, B1, A2, B2. The P4 makes
+  every port an input, which turns every node off, writes the outputs low, makes only the node ports
+  outputs, then raises them in turn. At power-up every port is an input, so every node starts off.
+- **A P4 reset leaves running nodes running.** The expander keeps its registers through one, and the
+  P4 finds its own node ports set as outputs. It powers only a node whose output is low.
+- **Inputs that match no carrier are a broken board.** The P4 reports an error, powers nothing, and
+  drives no slot.
+- **A power-cycle holds one node off for 1 s**, then powers it again. The host asks for it with `p`
+  in the fleet view or `wartui power-cycle`. A node with its own USB plugged in stays powered.
+- **IRQ is active low**, as [Pin behavior](#pin-behavior) says, and the carrier pulls it up.
+- **GPIO25 and GPIO24 are the 14-node carrier's slot 7 CS lines.** They are the P4's
+  USB-Serial-JTAG pads, so only the 14 takes them from it. The carrier's CS pull-ups hold both high
+  until the P4 drives them.
+- **The silk names the sockets `N1` to `Nn`**, bus A first: `N1` to `Nk` is bus A, with *k* per
+  bus, and bus B follows. So `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. The fleet
+  view, `sniff`, `status` and `--slot` use the silk names. A capture stores the bus name, beside the
+  carrier in `capture.node_board`.
+
 ## What never changes
 
 Part of the bus is frozen, so firmware that keeps to it can always be updated over the bus by any
@@ -95,6 +133,7 @@ One XIAO ESP32-C5 per bus, on slots `A1` and `B1`:
 - Wire GND between the boards, and nothing between their 5V or 3V3 pins.
 - Keep the jumpers short.
 
-The P4 logs `bus A1 appeared` when the first good transfer arrives, then one line of counters per
-slot every 5 s. Run `wartui --log-file wartui.log run` to see them. Each node prints its own
-counters on its USB port every 10 s.
+The P4 logs `A1 appeared` when the first good transfer arrives, then one line of counters per
+slot every 5 s. On a carrier the line names the socket, `N1 appeared`. Run
+`wartui --log-file wartui.log run` to see them. Each node prints its own counters on its USB port
+every 10 s.

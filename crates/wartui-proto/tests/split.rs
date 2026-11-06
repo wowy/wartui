@@ -1,6 +1,7 @@
 //! The P4's pair state machine: radio up, `Ready` and `Status`.
 
 use heapless::Vec;
+use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
     BridgeToHost, Chip, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
 };
@@ -305,6 +306,24 @@ fn pair_ready_reports_gps_when_radio_is_up() {
     pair.on_hello(hello(900), 0, 1_000);
     match pair.ready(1_000) {
         Some(BridgeToHost::Ready { gps, .. }) => assert!(gps),
+        other => panic!("not a Ready: {other:?}"),
+    }
+}
+
+#[test]
+fn pair_ready_carries_node_board_when_given_one() {
+    let mut pair = pair();
+    pair.on_hello(hello(900), 0, 1_000);
+    match pair.ready(1_000) {
+        Some(BridgeToHost::Ready { node_board, .. }) => assert_eq!(node_board, NodeBoard::Bench),
+        other => panic!("not a Ready: {other:?}"),
+    }
+    let mut pair = self::pair().with_node_board(NodeBoard::Carrier10);
+    pair.on_hello(hello(900), 0, 1_000);
+    match pair.ready(1_000) {
+        Some(BridgeToHost::Ready { node_board, .. }) => {
+            assert_eq!(node_board, NodeBoard::Carrier10);
+        }
         other => panic!("not a Ready: {other:?}"),
     }
 }

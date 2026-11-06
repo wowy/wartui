@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use wartui_proto::beacon::visible_ssid;
-use wartui_proto::bus::{RecordKind, Slot};
+use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::{QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -224,6 +224,8 @@ pub struct BridgeSeen {
     pub chip: String,
     /// Its firmware version.
     pub fw_version: String,
+    /// What carries its nodes, which maps the stored bus slots to the silk names.
+    pub node_board: NodeBoard,
 }
 
 /// What became of one assignment this host sent. Every attempt gets a row, so "the fleet keeps

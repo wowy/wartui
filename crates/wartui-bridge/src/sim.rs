@@ -15,8 +15,10 @@
 //! latency and uptime are measured on, as it does node time. [`SimConfig::speed`]
 //! does not scale it: it is the bridge's clock, not a node's.
 //!
-//! Node `i` sits in node-bus slot `i` (`A1` up, then `B1`). The bridge answers each
-//! `ToNode` with `Delivered` once the node has it, or `Undelivered` for a slot with no node.
+//! Node `i` sits in node-bus slot `i` (`A1` up, then `B1`), on a fourteen-node carrier, so the
+//! view names it by the silk, `N1` up. The bridge answers each `ToNode` with `Delivered` once
+//! the node has it, or `Undelivered` for a slot with no node. A `PowerCycle` restarts the node in
+//! that slot, which heartbeats again from a fresh boot, and is answered `Done`.
 //!
 //! A node takes updates with the receiver the firmware links, into a slot held in memory,
 //! and follows the firmware's rules around it: it listens continuously in update mode,
@@ -30,14 +32,14 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DieTemp, DownMsg, Heartbeat, MAX_SLOTS, NODE_VERSION, RecordKind,
-    Security, SightingBatchWriter, SightingMsg, Slot, UpType, UpdateState, UpdateStatus, Vdd,
-    Version,
+    Assign, Board, Capabilities, DieTemp, DownMsg, Heartbeat, MAX_SLOTS, NODE_VERSION, NodeBoard,
+    RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType, UpdateState,
+    UpdateStatus, Vdd, Version,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::link::{
-    BridgeToHost, Chip, FromNodeBody, HostToBridge, LogLevel, LogStr, LoopPhase, RadioInfo,
-    Undelivered,
+    BridgeToHost, Chip, FromNodeBody, HostToBridge, LogLevel, LogStr, LoopPhase, PowerOutcome,
+    RadioInfo, Undelivered,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
@@ -169,6 +171,8 @@ enum SimCommand {
     Clear,
     Update(u8, Vec<u8>),
     Confirm,
+    /// The carrier switched the node off and on.
+    PowerCycle,
 }
 
 /// What the bridge needs to know to route a record to one node.
@@ -301,6 +305,8 @@ async fn run_bridge(
         }),
         // No image to name: it takes no update over the link.
         image: None,
+        // Every slot driven, so a full simulated fleet shows silk names.
+        node_board: NodeBoard::Carrier14,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
@@ -339,6 +345,13 @@ async fn run_bridge(
                     Ok(()) => BridgeToHost::Delivered { id },
                     Err(reason) => BridgeToHost::Undelivered { id, reason },
                 })
+            }
+            // An empty socket is switched off and on as well, so it is `Done` too.
+            HostToBridge::PowerCycle { slot } => {
+                if let Some(route) = routes.iter().find(|route| route.slot == slot) {
+                    let _ = route.tx.send(SimCommand::PowerCycle).await;
+                }
+                Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
         };
         if let Some(msg) = reply
@@ -861,6 +874,12 @@ async fn nap_until(
                     node.forget_reported();
                 }
                 Some(SimCommand::Confirm) => node.confirm(),
+                // A fresh boot of the image it runs, as a real power cycle looks.
+                Some(SimCommand::PowerCycle) => {
+                    let version = node.version;
+                    node.reboot(version);
+                    return Continue(());
+                }
                 Some(SimCommand::Update(kind, body)) => {
                     let Some(status) = node.update(kind, &body) else { continue };
                     let verified = status.state == UpdateState::Verified;

@@ -1,10 +1,11 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::bus::Slot;
 use wartui_proto::mac::{self, Mac};
 
 use super::Settings;
-use super::fleet::why_not_assignable;
+use super::fleet::{LOST_SLOT, why_not_assignable};
 use super::settings::{
     ConfigModal, ModalAction, apply, apply_excluded, save_ble_node, save_bridge,
 };
@@ -15,6 +16,9 @@ use crate::config;
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
+
+/// The notice when `p` is pressed behind a bridge with no carrier board.
+const NO_CARRIER: &str = "this bridge has no carrier board, so it cannot switch node power";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
 /// GPS modal, saved settings and upload.
@@ -39,6 +43,10 @@ pub(super) struct Ui {
     /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
     /// the next change rather than repeating every frame.
     bridge_tried: Option<(Option<Mac>, Option<String>)>,
+    /// The node `p` asks to power-cycle, by slot and address, while its confirm is open.
+    power_confirm: Option<(Slot, Mac)>,
+    /// The last power-cycle answer shown, so each is shown once.
+    power_shown: Option<u64>,
 }
 
 /// How long a notice replaces the footer's key help and totals.
@@ -113,6 +121,7 @@ impl Ui {
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
             KeyCode::Char('g') => self.open_gps(),
+            KeyCode::Char('p') => self.ask_power_cycle(snapshot),
             // Matched on the character: crossterm sends shift+r as `'R'`, not as
             // `'r'` with a modifier.
             KeyCode::Char('r') => self.clear_ring(snapshot, commands),
@@ -192,6 +201,76 @@ impl Ui {
             Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
+    }
+
+    /// Open the confirm to power-cycle the selected node, or say why not. A node needs only a
+    /// slot: one that has stopped heartbeating is what a power-cycle is for.
+    fn ask_power_cycle(&mut self, snapshot: &Snapshot) {
+        let Some(node) = snapshot.nodes.get(self.selected) else { return };
+        let target = node.state.mac;
+        // Refused here, so a bench bridge is never sent a request it can only refuse.
+        if !snapshot.node_board().is_carrier() {
+            self.say(NO_CARRIER.to_owned(), snapshot);
+            return;
+        }
+        let Some(slot) = node.state.slot else {
+            let why = if node.state.capabilities.is_none() {
+                "has not heartbeated yet, so nothing says which slot it is in"
+            } else {
+                LOST_SLOT
+            };
+            self.say(format!("{} {why}", mac::full(&target)), snapshot);
+            return;
+        };
+        self.notice = None;
+        self.power_confirm = Some((slot, target));
+    }
+
+    /// Whether the power-cycle confirm is open, and so takes every key.
+    pub(super) fn power_confirming(&self) -> bool {
+        self.power_confirm.is_some()
+    }
+
+    /// A key while the power-cycle confirm is open: `y` sends, anything else cancels.
+    pub(super) fn on_power_key(
+        &mut self,
+        key: KeyEvent,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
+        let Some((slot, target)) = self.power_confirm.take() else { return };
+        let name = snapshot.node_board().label(slot);
+        if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
+            self.say(format!("{name} not power-cycled"), snapshot);
+            return;
+        }
+        let said = match commands.try_send(Command::PowerCycle { slot }) {
+            Ok(()) => format!("power-cycling {name} ({})", mac::full(&target)),
+            Err(_) => ENGINE_BUSY.to_owned(),
+        };
+        self.say(said, snapshot);
+    }
+
+    /// The power-cycle confirm's lines, while it is open.
+    pub(super) fn power_confirm_lines(&self, snapshot: &Snapshot) -> Option<Vec<String>> {
+        let (slot, target) = self.power_confirm?;
+        let name = snapshot.node_board().label(slot);
+        Some(vec![
+            format!("power-cycle {name} ({})?", mac::full(&target)),
+            "Its node goes off for a second, then boots again.".to_owned(),
+            String::new(),
+            "y power-cycle · any other key cancels".to_owned(),
+        ])
+    }
+
+    /// Show the bridge's answer to a power-cycle, once.
+    pub(super) fn poll_power(&mut self, snapshot: &Snapshot) {
+        let Some(answer) = &snapshot.power_answer else { return };
+        if self.power_shown == Some(answer.id) {
+            return;
+        }
+        self.power_shown = Some(answer.id);
+        self.say(answer.text.clone(), snapshot);
     }
 
     /// Open the settings modal, seeded from what is in force.
@@ -397,6 +476,93 @@ mod tests {
             "got {:?}",
             ui.notice(snapshot.now_ms)
         );
+    }
+
+    fn press(code: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn ui_sends_power_cycle_when_p_then_y_is_pressed() {
+        use wartui_proto::bus::NodeBoard;
+        let snapshot = on_board(NodeBoard::Carrier14);
+        let slot = snapshot.nodes[0].state.slot.expect("a slot");
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('p'), &snapshot, &tx);
+        assert!(ui.power_confirming());
+        assert!(rx.try_recv().is_err(), "nothing before the answer");
+        let lines = ui.power_confirm_lines(&snapshot).expect("the confirm");
+        assert!(lines[0].starts_with("power-cycle N7 (02:00:5E:10:57:84)?"), "{lines:?}");
+
+        ui.on_power_key(press('y'), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::PowerCycle { slot });
+        assert!(!ui.power_confirming());
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.starts_with("power-cycling N7"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_p_then_n_is_pressed() {
+        use wartui_proto::bus::NodeBoard;
+        let snapshot = on_board(NodeBoard::Carrier14);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('p'), &snapshot, &tx);
+        ui.on_power_key(press('n'), &snapshot, &tx);
+        assert!(rx.try_recv().is_err());
+        assert!(!ui.power_confirming());
+        assert_eq!(ui.notice(snapshot.now_ms), Some("N7 not power-cycled"));
+    }
+
+    #[test]
+    fn ui_refuses_power_cycle_without_asking_when_bridge_has_no_carrier() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('p'), &snapshot, &tx);
+        assert!(!ui.power_confirming());
+        assert!(rx.try_recv().is_err());
+        let notice = ui.notice(snapshot.now_ms).expect("a reason");
+        assert!(notice.contains("no carrier board"), "{notice}");
+    }
+
+    #[test]
+    fn ui_refuses_power_cycle_when_node_has_no_slot() {
+        use wartui_proto::bus::NodeBoard;
+        let (tx, mut rx) = mpsc::channel(4);
+        for (row, want) in
+            [(unslotted(0x23), "lost its bus slot"), (unannounced(0x24), "which slot")]
+        {
+            let mut row = row;
+            row.state.slot = None;
+            let snapshot = Snapshot { nodes: vec![row], ..on_board(NodeBoard::Carrier6) };
+            let mut ui = Ui::default();
+            ui.on_key(press('p'), &snapshot, &tx);
+            assert!(!ui.power_confirming(), "{want}");
+            let notice = ui.notice(snapshot.now_ms).expect("a reason");
+            assert!(notice.contains(want), "{notice}");
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ui_shows_power_cycle_answer_once_when_it_arrives() {
+        use wartui_core::engine::PowerAnswer;
+        let mut snapshot = busy();
+        let mut ui = Ui::default();
+        let answer = PowerAnswer { id: 1, text: "N3 power-cycled".to_owned() };
+        snapshot.power_answer = Some(answer);
+        ui.poll_power(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("N3 power-cycled"));
+
+        // The same answer in the next snapshot does not bring the notice back.
+        ui.say("something since".to_owned(), &snapshot);
+        ui.poll_power(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
     }
 
     #[test]

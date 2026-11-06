@@ -22,7 +22,7 @@ use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, RecordKind, Slot, UpType, wire_epoch};
+use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType, wire_epoch};
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -1642,16 +1642,18 @@ fn store_records_bridge_when_bridge_announces() {
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
             chip: "Esp32C6".to_owned(),
             fw_version: "0.1.0".to_owned(),
+            node_board: NodeBoard::Carrier10,
         })],
     );
 
-    let (mac, chip, fw): (Vec<u8>, String, String) = conn
-        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM capture", [], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    let (mac, chip, fw, board): (Vec<u8>, String, String, String) = conn
+        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw, node_board FROM capture", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .expect("the capture row");
     assert_eq!(mac, vec![0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
     assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
+    assert_eq!(board, "carrier-10");
 }
 
 // ---------------------------------------------------------------------------

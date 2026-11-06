@@ -1027,6 +1027,7 @@ fn read_frames<R: Read>(
                     gps,
                     radio,
                     image,
+                    node_board,
                     ..
                 }) => {
                     state.announced.store(true, Ordering::Relaxed);
@@ -1074,6 +1075,7 @@ fn read_frames<R: Read>(
                         uptime_ms,
                         gps,
                         radio = ?radio,
+                        board = %node_board,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
@@ -1087,6 +1089,7 @@ fn read_frames<R: Read>(
                         gps,
                         radio,
                         image,
+                        node_board,
                     })
                 }
                 Ok(msg) => {
@@ -1277,7 +1280,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
-    use wartui_proto::bus::Slot;
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::{
         BridgeToHost, Chip, FromNodeBody, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
         MAX_HOST_FRAME, ShortStr, encode_frame, encode_host_frame,
@@ -1502,6 +1505,7 @@ mod tests {
             gps: false,
             radio: None,
             image: None,
+            node_board: NodeBoard::Bench,
         }
     }
 
@@ -1575,6 +1579,7 @@ mod tests {
                     gps: false,
                     radio: None,
                     image: None,
+                    node_board: NodeBoard::Bench,
                 }
             }
             _ => unreachable!(),

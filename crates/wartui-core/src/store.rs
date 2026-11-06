@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS capture (
   bridge_mac BLOB,
   bridge_chip TEXT,
   bridge_fw TEXT,
+  -- What carries the bridge's nodes: `bench`, `carrier-6`, `carrier-10` or `carrier-14`.
+  -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
+  node_board TEXT,
   channel_pool TEXT NOT NULL,
   notes TEXT,
   -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
@@ -92,7 +95,8 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
--- `slot` is the node-bus slot the heartbeat came from (`A1` to `B7`).
+-- `slot` is the node-bus slot the heartbeat came from, by its bus name (`A1` to `B7`) on
+-- every board. `capture.node_board` maps it to the carrier's silk name.
 -- `wifi_refused` and `ble_refused` are the node's since-boot refusal counts as
 -- the heartbeat carried them: raw, so a reboot shows as the value falling.
 -- `reset_cause` is why the node is
@@ -1184,13 +1188,15 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 // Which dongle produced this capture. Written when the bridge announces itself,
                 // always after the capture row exists, and again if it re-announces.
                 tx.prepare_cached(
-                    "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3
+                    "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3,
+                       node_board = ?4
                      WHERE id = 1",
                 )?
                 .execute(params![
                     &bridge.mac[..],
                     bridge.chip.as_str(),
-                    bridge.fw_version.as_str()
+                    bridge.fw_version.as_str(),
+                    bridge.node_board.name()
                 ])?;
             }
             Record::Assignment(a) => {

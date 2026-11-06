@@ -117,6 +117,7 @@ have no README; their `//!` module docs hold the detail.
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
+| `p`                    | Power-cycle the selected node through the carrier board, after asking        |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
@@ -171,7 +172,8 @@ Wi-Fi, and its `channels` column reads `bluetooth`.
 ## Limits
 
 - **Maximum fourteen nodes** (`plan::MAX_NODES`), seven slots on each of the two node buses. The
-  P4 drives six per bus today ([`docs/node-bus.md`](docs/node-bus.md)).
+  P4 drives seven per bus on the 14-node carrier, and six wired straight to it
+  ([`docs/node-bus.md`](docs/node-bus.md)).
 - **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
   and the footer says so.
 - **Channel 14 is never scanned**, because `esp-radio` can't tune it. It's Japan-only 802.11b, so

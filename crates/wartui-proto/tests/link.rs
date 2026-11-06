@@ -6,15 +6,15 @@
 
 use heapless::{String, Vec};
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, RecordKind, Security,
+    Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, RecordKind, Security,
     SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UpType, UpdateState, UpdateStatus, Vdd,
 };
 use wartui_proto::link::{
     BridgeToHost, Chip, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
     GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase, MAX_FRAME,
-    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, QueueId, QueueStat, QueueStats, RadioInfo,
-    RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes, crc16,
-    decode_frame, encode_frame, encode_host_frame,
+    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PowerOutcome, QueueId, QueueStat, QueueStats,
+    RadioInfo, RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
+    UpdateStatusBytes, crc16, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
@@ -40,6 +40,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
         body,
     })
     .expect("sample_commands has room");
+    v.push(HostToBridge::PowerCycle { slot: Slot::new(0, 6).expect("A7") })
+        .expect("sample_commands has room");
     v
 }
 
@@ -64,7 +66,7 @@ fn frame_body(frame: &[u8]) -> std::vec::Vec<u8> {
     decoded[1..len - 2].to_vec()
 }
 
-fn sample_events() -> Vec<BridgeToHost, 16> {
+fn sample_events() -> Vec<BridgeToHost, 24> {
     let mut writer = SightingBatchWriter::new(1);
     assert!(writer.push(&SightingMsg {
         kind: RecordKind::Wifi,
@@ -103,6 +105,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         gps: false,
         radio: None,
         image: None,
+        node_board: NodeBoard::Bench,
     })
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
@@ -119,6 +122,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         gps: true,
         radio: None,
         image: Some([0xD1; 32]),
+        node_board: NodeBoard::Carrier14,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::FromNode {
@@ -164,6 +168,12 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         next_offset: 4096,
     })))
     .expect("sample_events has room");
+    for outcome in
+        [PowerOutcome::Done, PowerOutcome::NoCarrier, PowerOutcome::NotDriven, PowerOutcome::Failed]
+    {
+        let slot = Slot::new(1, 0).expect("B1");
+        v.push(BridgeToHost::PowerCycled { slot, outcome }).expect("sample_events has room");
+    }
     v
 }
 
@@ -545,7 +555,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 6, "one of each");
+    assert_eq!(commands.len(), 7, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -561,6 +571,13 @@ fn link_codec_pins_variant_indices_when_encoded() {
         ),
         (7, BridgeToHost::Delivered { id: 1 }),
         (8, BridgeToHost::Undelivered { id: 1, reason: Undelivered::NoNode }),
+        (
+            9,
+            BridgeToHost::PowerCycled {
+                slot: Slot::new(0, 0).expect("A1"),
+                outcome: PowerOutcome::Done,
+            },
+        ),
     ];
     for (want, event) in &events {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
@@ -701,6 +718,7 @@ fn link_round_trips_ready_with_radio() {
             uptime_ms: u32::MAX,
         }),
         image: Some([0xA5; 32]),
+        node_board: NodeBoard::Carrier10,
     };
     assert_eq!(round_trip(&ready), ready);
 }
@@ -723,6 +741,58 @@ fn link_codec_pins_update_bytes_when_bridge_sends_a_status() {
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&event, &mut out).expect("encodes");
     assert_eq!(frame_body(&out[..n]), [5, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
+}
+
+#[test]
+fn link_codec_pins_power_cycle_bytes_when_host_asks() {
+    // Postcard's variant index, then the slot's byte: B3 is 9.
+    let cmd = HostToBridge::PowerCycle { slot: Slot::new(1, 2).expect("B3") };
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [6, 9]);
+}
+
+#[test]
+fn link_codec_pins_power_cycled_bytes_when_bridge_answers() {
+    let mut out = [0u8; MAX_FRAME];
+    for (outcome, code) in [
+        (PowerOutcome::Done, 0),
+        (PowerOutcome::NoCarrier, 1),
+        (PowerOutcome::NotDriven, 2),
+        (PowerOutcome::Failed, 3),
+    ] {
+        let event = BridgeToHost::PowerCycled { slot: Slot::new(0, 6).expect("A7"), outcome };
+        let n = encode_frame(&event, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [9, 6, code], "{outcome:?}");
+    }
+}
+
+#[test]
+fn link_codec_pins_node_board_as_last_byte_when_ready_is_encoded() {
+    // `node_board` is `Ready`'s last field, so its byte ends the body.
+    let mut out = [0u8; MAX_FRAME];
+    for (board, code) in [
+        (NodeBoard::Bench, 0),
+        (NodeBoard::Carrier6, 1),
+        (NodeBoard::Carrier10, 2),
+        (NodeBoard::Carrier14, 3),
+    ] {
+        let mut ready = sample_events().into_iter().next().expect("Ready is first");
+        if let BridgeToHost::Ready { node_board, .. } = &mut ready {
+            *node_board = board;
+        }
+        let n = encode_frame(&ready, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]).last(), Some(&code), "{board:?}");
+    }
+}
+
+#[test]
+fn link_refuses_ready_when_node_board_byte_names_none() {
+    let ready = sample_events().into_iter().next().expect("Ready is first");
+    let mut buf = [0u8; MAX_FRAME];
+    let mut bytes = postcard::to_slice(&ready, &mut buf).expect("encodes").to_vec();
+    *bytes.last_mut().expect("a body") = 4;
+    assert!(postcard::from_bytes::<BridgeToHost>(&bytes).is_err());
 }
 
 #[test]
@@ -759,6 +829,7 @@ fn link_round_trips_ready_when_image_is_present_or_absent() {
             gps: true,
             radio: None,
             image,
+            node_board: NodeBoard::Carrier6,
         };
         assert_eq!(round_trip(&ready), ready);
     }

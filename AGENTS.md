@@ -94,7 +94,8 @@ own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
-  slots, and the messages a node and the P4 exchange), `beacon`, `hci`, `dedup`, `link`,
+  slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
+  as the P4 reads it at boot), `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
   `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
@@ -110,7 +111,7 @@ own.
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI masters, and a FIFO
   UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
@@ -143,7 +144,8 @@ test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::
 pure state machine and `runtime::drive_ota` its driver (`crates/wartui-core/tests/ota.rs`).
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels are the planner's.
+ordered against each other. Only `b`, `c`, `p`, `r` and `R` get that far; channels are the
+planner's.
 
 ### Store is the system of record
 
@@ -242,8 +244,10 @@ is here rather than only in a `//!`.
   few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
   has confirmed is a share that may be nobody's.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
-  per bus, of which the P4 drives six today. A node is known by its MAC, which its heartbeat
-  carries, and reached through the slot that heartbeat came from (`bus::Slot`, `A1` to `B7`).
+  per bus on the 14-node carrier, and six on the bench (`bus::NodeBoard`). A node is known by its
+  MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
+  (`bus::Slot`, `A1` to `B7`). The operator reads a slot through its board's label, `N1` up on a
+  carrier, and the store keeps the bus name.
 - **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has
   acknowledged the transfer that carried it), never on a successful enqueue — and delivery is not
   adoption. Every heartbeat carries the epoch the node holds, or 0 for none, so the host can tell
@@ -357,6 +361,9 @@ edit stops; follow the pointer before changing the rule.
 - **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
   any node build, and a node never needs a wired flash.
   → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **The P4's I2C0 is shared** by the GPS reader and the carrier's I/O expander, behind one mutex.
+  Lock it per transaction, never across an await on anything but the bus, or one stalls the
+  other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
 - **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
   stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
   P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm

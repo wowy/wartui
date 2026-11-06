@@ -18,6 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
+use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -69,6 +70,7 @@ pub async fn run(args: Args) -> Result<()> {
         info.chip,
         info.fw_version
     );
+    println!("board      {}", board_line(info.node_board));
     println!("{}", super::last_reset_line(&info));
     // A split bridge's radio restarts on its own, and this is where its reason shows.
     if let Some(radio) = &info.radio {
@@ -122,6 +124,11 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// What carries the bridge's nodes, and the slots it drives.
+fn board_line(board: NodeBoard) -> String {
+    format!("{board}, {} node slots, {}", board.slot_count(), crate::text::slot_range(board))
 }
 
 /// The radio coprocessor behind a split bridge.
@@ -190,7 +197,10 @@ fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     Some(format!("{heard} Check the nodes are powered and wired to the bridge's node bus."))
 }
 
-async fn wait_for_ready(link: &mut wartui_bridge::LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
+/// The bridge's announcement, or why the link went down first.
+pub(crate) async fn wait_for_ready(
+    link: &mut wartui_bridge::LinkHandle,
+) -> Result<wartui_bridge::BridgeInfo> {
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
@@ -252,8 +262,11 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Awaited, awaited, diagnostic_lines, human_uptime, radio_line, silence_note};
+    use super::{
+        Awaited, awaited, board_line, diagnostic_lines, human_uptime, radio_line, silence_note,
+    };
     use wartui_bridge::LinkEvent;
+    use wartui_proto::bus::NodeBoard;
     use wartui_proto::link::{
         BridgeToHost, Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo,
     };
@@ -277,6 +290,12 @@ mod tests {
                 wartui_proto::mac::full(&radio.mac)
             )
         );
+    }
+
+    #[test]
+    fn status_prints_board_and_its_slots_when_bridge_announces() {
+        assert_eq!(board_line(NodeBoard::Bench), "bench, 12 node slots, A1 to A6 or B1 to B6");
+        assert_eq!(board_line(NodeBoard::Carrier10), "carrier-10, 10 node slots, N1 to N10");
     }
 
     #[test]

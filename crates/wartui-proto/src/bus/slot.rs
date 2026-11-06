@@ -2,10 +2,12 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(doc)]
+use super::NodeBoard;
+
 /// Buses a P4 drives: A and B.
 pub const BUSES: u8 = 2;
-/// Slots on one bus, one per CS line. The P4 drives the first six today; the seventh is room
-/// for a fourteen-node board without renumbering.
+/// Slots on one bus, one per CS line: seven on the 14-node carrier ([`NodeBoard`]).
 pub const PER_BUS: u8 = 7;
 /// Slots across both buses: the most nodes one bridge drives.
 pub const MAX_SLOTS: usize = (BUSES * PER_BUS) as usize;

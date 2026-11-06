@@ -17,6 +17,7 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
+use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
@@ -71,6 +72,8 @@ pub struct BridgeInfo {
     /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.
     /// `None` from a bridge that does not.
     pub image: Option<[u8; DIGEST_LEN]>,
+    /// What carries the nodes, which names their slots for the operator.
+    pub node_board: NodeBoard,
 }
 
 /// Something that happened on the link.

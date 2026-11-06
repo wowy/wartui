@@ -103,6 +103,7 @@ mod downlink;
 mod health;
 mod heartbeat;
 mod msg;
+mod node_board;
 mod record;
 mod security;
 mod sighting;
@@ -119,6 +120,7 @@ pub use heartbeat::{
     HEARTBEAT_PREFIX_LEN, Heartbeat,
 };
 pub use msg::{DecodeError, DownMsg, DownType, UpMsg, UpType};
+pub use node_board::{NodeBoard, NodeBoardError, SlotLabel};
 pub use record::{Packer, RECORD_HEADER_LEN, RECORD_MAX, Record, Records, records};
 pub use security::Security;
 pub use sighting::{
