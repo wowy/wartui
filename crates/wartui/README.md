@@ -783,8 +783,8 @@ nothing and says how many networks it left out.
   the first new sentence. A port named with `--gps` is always read, and its fix goes ahead of the
   bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a second (default 5) on every
   bridge status poll. `g` reports on a port named with `--gps` when there is one. Otherwise it
-  reports on the bridge's receiver while it is sending sentences, or when no host receiver is read
-  and a bridge is connected, and shows `bridge` as its port.
+  reports on the bridge's receiver while it is sending sentences, or when a bridge is connected and
+  no host receiver is read or found, and shows `bridge` as its port.
   `wartui sniff --verbose` prints the receiver's raw stream.
 - **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
   marked as test data: `upload` refuses it, and `export` warns.
@@ -809,16 +809,18 @@ nothing and says how many networks it left out.
   time, position, speed, the HDOP accuracy estimate (not a measurement), and the port. The right side
   lists each satellite in view with its signal strength and whether the fix uses it. `Esc`, `q` or
   `g` closes it.
-- **A named receiver that is missing is a fault; an unfound one is not.** Most GPS-less captures
-  never had one, so the header stays quiet; `--gps` asks for a port, so its absence is reported.
+- **A named receiver that is missing is a fault; an unfound one is not.** `--gps` asks for a port,
+  so its absence is reported as a fault. When neither the host nor the bridge has a receiver, the
+  header reads `gps no receiver`. Until the bridge says whether its port has one, it reads
+  `gps connecting`.
 - **A fix must be recent.** Past `--gps-max-age` seconds the position falls back a tier and the
   header says `gps fix is stale`. At driving speed a minute-old fix is another neighborhood, and
   falling back beats quietly claiming it. The reader logs that age limit too, even when the receiver
   is silent. The last fix is retained; a new fix logs recovery.
 - **The receiver runs on its own thread; nothing waits for it.** Capture starts at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
-  or the port's error. The search keeps running there, so a puck replugged into a *different* socket
-  is found under its new name.
+  `gps no receiver`, or the port's error. The search keeps running there, so a puck replugged into
+  a *different* socket is found under its new name.
 
 ## Reading the fleet table
 

@@ -445,12 +445,11 @@ mod tests {
 
     #[test]
     fn view_suppresses_gps_fault_line_when_no_receiver_was_found() {
-        // The search runs by default, and most captures have no receiver. Saying so
-        // every time would show a fault where there is none.
+        // A missing receiver is not a fault: the header names it, and the footer adds nothing.
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
-        // The key help names `g gps` on every screen.
-        assert!(!drawn.replace("g gps", "").contains("gps"), "{drawn}");
+        assert!(!drawn.contains("gps unreadable"), "{drawn}");
+        assert!(!drawn.contains("gps:"), "{drawn}");
         // A static position still keeps the unpositioned warning off screen.
         assert!(!drawn.contains("pos none"), "{drawn}");
     }

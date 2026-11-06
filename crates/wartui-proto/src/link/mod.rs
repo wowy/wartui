@@ -112,6 +112,10 @@ pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 /// every announcement. The simulator sends it too, as a P4 with nothing on the port.
 pub const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
 
+/// The P4's [`BridgeToHost::Log`] when a GPS receiver answers on its port after
+/// [`NO_GPS_RECEIVER`]. The host reads either text to tell whether the bridge has a receiver.
+pub const GPS_RECEIVER_ANSWERED: &str = "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
+
 /// The start of the P4's [`BridgeToHost::Error`] while it updates its C6
 /// (`split::Pair::fault`). `wartui flash-bridge` follows the C6's update by it.
 pub const RADIO_UPDATING: &str = "updating the radio";

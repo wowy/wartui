@@ -15,7 +15,7 @@ use wartui_core::ActionBatch;
 use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, StorePeaks, StoreStats,
 };
-use wartui_core::gps::{Gps, GpsConfig};
+use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
@@ -26,8 +26,9 @@ use wartui_proto::bus::{
     UpdateState, UpdateStatus, Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, HostToBridge, LinkError, LoopPhase, PowerOutcome, QueueId,
-    QueueStat, QueueStats, RadioLinkStats, Undelivered,
+    BridgeToHost, FromNodeBody, GPS_RECEIVER_ANSWERED, GpsBytes, HostToBridge, LinkError, LogStr,
+    LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats,
+    Undelivered,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, plan};
@@ -1612,6 +1613,78 @@ fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_no_brid
         clock.at(1),
     );
     assert_eq!(gps(&engine), None, "the bridge has gone");
+}
+
+/// An engine whose chain holds the bridge's receiver only, as under `--sim`, connected.
+fn bridge_only_engine(clock: &Clock) -> FleetEngine {
+    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let mut engine = engine(EngineConfig { position, ..Default::default() }, clock);
+    engine.handle(connected(), clock.at(1));
+    engine
+}
+
+/// The P4's report that no receiver answers on its GPS port.
+fn no_gps_receiver() -> Event {
+    let message = LogStr::try_from(NO_GPS_RECEIVER).expect("the text fits a LogStr");
+    Event::Link(LinkEvent::Message(BridgeToHost::Error { message }))
+}
+
+/// The GPS status the snapshot at `now` reports.
+fn shown_gps_status(engine: &FleetEngine, now: Now) -> GpsStatus {
+    engine.snapshot(now, StoreStats::default()).gps.expect("a receiver").status
+}
+
+#[test]
+fn engine_snapshot_shows_connecting_when_bridge_has_not_reported_its_receiver() {
+    let clock = Clock::new();
+    let engine = bridge_only_engine(&clock);
+    assert_eq!(shown_gps_status(&engine, clock.at(2)), GpsStatus::Connecting);
+}
+
+#[test]
+fn engine_snapshot_shows_no_receiver_when_bridge_reports_none_and_chain_has_no_host_receiver() {
+    let clock = Clock::new();
+    let mut engine = bridge_only_engine(&clock);
+    engine.handle(no_gps_receiver(), clock.at(1));
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    let gps = snapshot.gps.expect("a receiver");
+    assert_eq!(gps.status, GpsStatus::NoReceiver);
+    assert!(gps.via_bridge, "the bridge's receiver, as `g` names it");
+}
+
+#[test]
+fn engine_snapshot_shows_connecting_when_bridge_forwards_gps_bytes_after_reporting_none() {
+    let clock = Clock::new();
+    let mut engine = bridge_only_engine(&clock);
+    engine.handle(no_gps_receiver(), clock.at(1));
+    let bytes = GpsBytes::from_slice(GSV).expect("a sentence fits");
+    engine.handle(Event::Link(LinkEvent::Message(BridgeToHost::Gps { bytes })), clock.at(2));
+    // The runtime feeds the bytes to the receiver, not the engine, so it is not talking yet.
+    assert_eq!(shown_gps_status(&engine, clock.at(2)), GpsStatus::Connecting);
+}
+
+#[test]
+fn engine_snapshot_shows_connecting_when_bridge_says_its_receiver_answered() {
+    let clock = Clock::new();
+    let mut engine = bridge_only_engine(&clock);
+    engine.handle(no_gps_receiver(), clock.at(1));
+    let message = LogStr::try_from(GPS_RECEIVER_ANSWERED).expect("the text fits a LogStr");
+    engine.handle(Event::Link(LinkEvent::Message(BridgeToHost::Log { message })), clock.at(2));
+    assert_eq!(shown_gps_status(&engine, clock.at(2)), GpsStatus::Connecting);
+}
+
+#[test]
+fn engine_snapshot_shows_connecting_when_bridge_reconnects_after_reporting_none() {
+    // A new bridge life says again whether it has a receiver, right after its `Ready`.
+    let clock = Clock::new();
+    let mut engine = bridge_only_engine(&clock);
+    engine.handle(no_gps_receiver(), clock.at(1));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(2),
+    );
+    engine.handle(connected(), clock.at(3));
+    assert_eq!(shown_gps_status(&engine, clock.at(3)), GpsStatus::Connecting);
 }
 
 #[test]

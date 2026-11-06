@@ -36,7 +36,9 @@ use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
-use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
+use wartui_proto::link::{
+    BridgeToHost, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge, NO_GPS_RECEIVER,
+};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 
@@ -68,6 +70,10 @@ pub struct FleetEngine {
     /// address, so this is how it finds its node.
     slots: HashMap<Slot, Mac>,
     bridge: Option<BridgeInfo>,
+    /// Whether this bridge life last said no GPS receiver answers on its port
+    /// ([`NO_GPS_RECEIVER`]). Cleared when it forwards bytes or says the receiver answered
+    /// ([`GPS_RECEIVER_ANSWERED`]), and on every connect and disconnect.
+    bridge_lacks_gps: bool,
     link_up: bool,
     /// When the link last came up, `None` while down ([`Self::note_departures`]).
     link_up_since: Option<Instant>,
@@ -151,6 +157,7 @@ impl FleetEngine {
             nodes: BTreeMap::new(),
             slots: HashMap::new(),
             bridge: None,
+            bridge_lacks_gps: false,
             link_up: false,
             link_up_since: None,
             link_error: None,
@@ -195,6 +202,8 @@ impl FleetEngine {
                     node_board: info.node_board,
                 }));
                 self.bridge = Some(info);
+                // A new life. The P4 repeats its GPS fault right after `Ready`.
+                self.bridge_lacks_gps = false;
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
@@ -211,6 +220,7 @@ impl FleetEngine {
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
+                self.bridge_lacks_gps = false;
                 self.link_up_since = None;
                 self.link_error = Some(reason);
                 self.reset_arrivals();
@@ -391,13 +401,21 @@ impl FleetEngine {
                     host_uart_errors: *host_uart_errors,
                 }));
             }
-            // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the transport's to
-            // log, not the engine's. GPS bytes are the position chain's. An update status answers
+            // Bridge diagnostics are the transport's to log. The engine reads only the two that
+            // say whether the bridge has a GPS receiver, for the view.
+            BridgeToHost::Error { message } if message.as_str() == NO_GPS_RECEIVER => {
+                self.bridge_lacks_gps = true;
+            }
+            BridgeToHost::Log { message } if message.as_str() == GPS_RECEIVER_ANSWERED => {
+                self.bridge_lacks_gps = false;
+            }
+            // The bytes are the position chain's; that they came is the view's.
+            BridgeToHost::Gps { .. } => self.bridge_lacks_gps = false,
+            // `Ready` arrives as `LinkEvent::Connected`. An update status answers
             // `flash-bridge`, which `run` never is.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }
-            | BridgeToHost::Gps { .. }
             | BridgeToHost::Update(_) => {}
         }
     }

@@ -29,7 +29,7 @@ use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::gps::{self, ABSENT_PROBE_MS, BATCH_SLOTS, Bus, Watch};
-use wartui_proto::link::{GpsBytes, GpsWriteBytes, NO_GPS_RECEIVER};
+use wartui_proto::link::{GPS_RECEIVER_ANSWERED, GpsBytes, GpsWriteBytes, NO_GPS_RECEIVER};
 
 use crate::{I2cBus, Shared};
 
@@ -94,7 +94,7 @@ async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, G
         match changes.answered {
             Some(true) => {
                 shared.gps_fault.set(None);
-                shared.push_log("the GPS receiver answered on the I2C bus (GPIO7/GPIO8)");
+                shared.push_log(GPS_RECEIVER_ANSWERED);
             }
             Some(false) => {
                 shared.gps_fault.set(Some(NO_GPS_RECEIVER));
