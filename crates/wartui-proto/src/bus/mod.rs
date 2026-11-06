@@ -1,4 +1,5 @@
-//! The node bus: SPI between a P4 bridge, as master, and its nodes, as slaves.
+//! The node bus: SPI between a P4 bridge, as master, and its nodes, as slaves. The framing, the
+//! acknowledgment that makes it reliable, and the messages its records carry.
 //!
 //! The P4 clocks every transfer. Each one is exactly [`TRANSFER_LEN`] bytes each way,
 //! little-endian:
@@ -7,9 +8,9 @@
 //! |---|---|---|
 //! | 0 | 2 | [`MAGIC`] |
 //! | 2 | 1 | [`BUS_VERSION`] |
-//! | 3 | 1 | flags: bit 0 [`MORE`], the sender has more queued after this transfer; other bits zero |
+//! | 3 | 1 | flags: bit 0 [`MORE`], the sender has more queued after this transfer; bit 1 [`ACKS`], `ack` is valid; other bits zero |
 //! | 4 | 2 | seq: the sender's counter, +1 per transfer it arms, from 0 at boot |
-//! | 6 | 2 | ack: the last seq received from the peer under a good CRC, 0 before the first |
+//! | 6 | 2 | ack: with [`ACKS`], the seq of the last good transfer from the peer that carried records |
 //! | 8 | 2 | len: payload bytes, at most [`PAYLOAD_MAX`] |
 //! | 10 | len | payload: records ([`Packer`], [`records`]); bytes past `len` are zero |
 //! | [`CRC_OFFSET`] | 2 | CRC-16/CCITT-FALSE ([`crc16`]) over bytes `0..CRC_OFFSET` |
@@ -17,8 +18,8 @@
 //! **The length is fixed** because a slave is armed for one length before the master clocks,
 //! and cannot learn a length from the transfer it is in. A fixed full-duplex transfer is the
 //! path the P4–C6 bench proved error-free (`docs/p4-spi-link-findings.md`). [`TRANSFER_LEN`]
-//! carries one record holding the longest node frame, [`MAX_NODE_PAYLOAD`], and is a multiple
-//! of 4 for the DMA.
+//! carries one record holding the longest body either way, an [`UpdateChunk`] down, and is a
+//! multiple of 4 for the DMA.
 //!
 //! **A node re-arms after every transfer, and asks for one through IRQ.**
 //!
@@ -31,17 +32,68 @@
 //! A master that clocks a node before it has re-armed reads bytes that fail the magic. The
 //! master leaves a gap between transfers to one node, and retries after it.
 //!
-//! **The P4 checks only this framing**, then forwards the records verbatim. It needs no
-//! knowledge of what a node sends, so a change to a node's messages costs no P4 reflash.
+//! **A transfer that carries records is acknowledged; an idle one needs nothing.** Each end
+//! stamps `ack` with the seq of the last good record-carrying transfer it took from the peer
+//! ([`AckTracker`]), and sets [`ACKS`] once there is one, so seq 0 needs no special case. Idle
+//! transfers never move it, so an idle transfer that arrives in place of a lost data transfer
+//! cannot acknowledge it. Each direction of each slot is stop-and-wait ([`AckWait`]): a sender
+//! puts records in a transfer, then sends only idle transfers until the peer's `ack` names that
+//! transfer, or [`ACK_TIMEOUT_MS`] passes. It then sends the same records in a new transfer, as a
+//! MAC layer retries, and gives up after [`SEND_TRIES`]. So a resent record may arrive twice;
+//! every message here is safe to take twice. The P4 keeps a queue per slot ([`Downlink`]) and
+//! packs as many queued records as fit into each transfer.
+//!
+//! A sender that sends no records for 65,536 transfers and then sends at exactly the seq its
+//! peer last acknowledged reads a stale ack as its own.
+//!
+//! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
+//! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the
+//! messages are in [`UpMsg`] and [`DownMsg`]. The P4 needs no knowledge of them, so a change to
+//! a node's messages costs no P4 reflash.
+//!
+//! [`crc16`]: crate::link::crc16
 
-use crate::link::{MAX_NODE_PAYLOAD, crc16};
+use crate::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD, crc16};
 
+mod ack;
+mod assign;
+mod downlink;
+mod health;
+mod heartbeat;
+mod msg;
 mod record;
+mod security;
+mod sighting;
+mod slot;
+mod update;
+mod version;
 
-pub use record::{Packer, RECORD_HEADER_LEN, RECORD_MAX, Record, RecordType, Records, records};
+pub use ack::{ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, SEND_TRIES};
+pub use assign::{ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, CLEAR_LEN, Clear, wire_epoch};
+pub use downlink::{Downlink, FLIGHT_MAX, Ids};
+pub use health::{DieTemp, Vdd};
+pub use heartbeat::{
+    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
+    HEARTBEAT_PREFIX_LEN, Heartbeat,
+};
+pub use msg::{DecodeError, DownMsg, DownType, UpMsg, UpType};
+pub use record::{Packer, RECORD_HEADER_LEN, RECORD_MAX, Record, Records, records};
+pub use security::Security;
+pub use sighting::{
+    EXT_MAX, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
+    SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, SightingBatch, SightingBatchWriter,
+    SightingMsg,
+};
+pub use slot::{BUSES, MAX_SLOTS, PER_BUS, Slot, SlotError};
+pub use update::{
+    UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK, UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX,
+    UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN, UPDATE_STATUS_LEN, UpdateAbort, UpdateBegin,
+    UpdateChunk, UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus,
+};
+pub use version::{Compat, NODE_VERSION, Version};
 
 /// Bytes in every transfer, each way.
-pub const TRANSFER_LEN: usize = 1040;
+pub const TRANSFER_LEN: usize = 1044;
 /// The first two bytes of every transfer: "WB" in little-endian order.
 pub const MAGIC: u16 = 0x4257;
 /// This framing's version. A transfer naming another is not this build's to read.
@@ -54,26 +106,49 @@ pub const CRC_OFFSET: usize = TRANSFER_LEN - 2;
 pub const PAYLOAD_MAX: usize = CRC_OFFSET - HEADER_LEN;
 /// The flag that says the sender has more queued after this transfer.
 pub const MORE: u8 = 0x01;
+/// The flag that says `ack` names a transfer.
+pub const ACKS: u8 = 0x02;
 
 const _: () = assert!(TRANSFER_LEN.is_multiple_of(4), "DMA wants a multiple of 4");
-const _: () = assert!(RECORD_MAX >= MAX_NODE_PAYLOAD, "one transfer carries any node frame");
+const _: () = assert!(RECORD_MAX >= MAX_NODE_PAYLOAD, "one transfer carries any up body");
+const _: () = assert!(RECORD_MAX >= MAX_NODE_DOWN, "one transfer carries any down body");
 
 /// The fields a sender stamps on a transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
-    /// [`MORE`], or nothing.
+    /// [`MORE`] and [`ACKS`], or nothing.
     pub flags: u8,
     /// The sender's counter.
     pub seq: u16,
-    /// The last seq the sender received under a good CRC.
+    /// With [`ACKS`], the last record-carrying seq the sender took from its peer.
     pub ack: u16,
 }
 
 impl Header {
+    /// A header for transfer `seq`, acknowledging `ack` when there is one.
+    #[must_use]
+    pub const fn new(seq: u16, ack: Option<u16>, more: bool) -> Self {
+        let mut flags = if more { MORE } else { 0 };
+        let ack = match ack {
+            Some(ack) => {
+                flags |= ACKS;
+                ack
+            }
+            None => 0,
+        };
+        Self { flags, seq, ack }
+    }
+
     /// Whether the sender has more queued after this transfer.
     #[must_use]
     pub const fn more(&self) -> bool {
         self.flags & MORE != 0
+    }
+
+    /// The transfer this one acknowledges, if any.
+    #[must_use]
+    pub const fn acked(&self) -> Option<u16> {
+        if self.flags & ACKS != 0 { Some(self.ack) } else { None }
     }
 }
 
@@ -91,6 +166,12 @@ impl<'a> Transfer<'a> {
     #[must_use]
     pub fn records(&self) -> Records<'a> {
         records(self.payload)
+    }
+
+    /// Whether the transfer carries records, and so is to be acknowledged.
+    #[must_use]
+    pub const fn carries_records(&self) -> bool {
+        !self.payload.is_empty()
     }
 }
 
@@ -180,12 +261,6 @@ impl SeqCheck {
     #[must_use]
     pub const fn new() -> Self {
         Self { last: None }
-    }
-
-    /// The last seq noted, the ack to send back, or 0 before the first.
-    #[must_use]
-    pub fn ack(&self) -> u16 {
-        self.last.unwrap_or(0)
     }
 
     /// Notes `seq` and says how it follows the last. After a gap, `seq` is the new last.

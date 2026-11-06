@@ -7,8 +7,8 @@
 //! image running untrialed; `firmware/common/src/ota.rs` has the order.
 //!
 //! **The layout is fixed, and does not change before 1.0.** It is on-flash state that one
-//! firmware writes and the next reads across an update, possibly between minor versions, as
-//! the frozen update frames are ([`crate::air`]). The first word is the record:
+//! firmware writes and the next reads across an update, possibly between minor versions. The
+//! first word is the record:
 //! [`ARMED_MAGIC`] and the slot's OTA app number, 0 or 1, or all `0xFF` when nothing is on
 //! trial. The rest of the sector is the boot count, starting at [`COUNT_OFFSET`].
 //!

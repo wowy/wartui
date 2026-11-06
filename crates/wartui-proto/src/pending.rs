@@ -175,7 +175,7 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
     /// Take the oldest entry not yet taken, if there is one.
     ///
     /// The bound is `len`, not the array. The slots past `len` are an earlier dwell's or
-    /// scan's leavings or the blank fill, and would go on the air as if heard.
+    /// scan's leavings or the blank fill, and would be sent as if heard.
     pub fn take(&mut self) -> Option<T> {
         if self.taken >= self.len {
             return None;

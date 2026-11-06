@@ -75,7 +75,7 @@ const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 impl ChannelSet {
     /// The empty set.
     ///
-    /// Sent only alongside [`crate::air::ADMIN_FLAG_BLE`], where it means "Bluetooth is
+    /// Sent only alongside [`crate::bus::ASSIGN_FLAG_BLE`], where it means "Bluetooth is
     /// the whole of the job" (see [`Job::Bluetooth`]). Without the flag a node sent it
     /// would park, so the planner skips a node it has nothing for instead.
     ///

@@ -9,41 +9,18 @@ use crate::plan::ChannelSet;
 /// is 102.4 ms, and a shorter dwell can miss an access point entirely.
 pub const CHANNEL_DWELL_MS: u32 = 125;
 
-/// How long a node holds the control channel after its heartbeat.
+/// How often an unassigned node sends a heartbeat.
 ///
-/// An assignment must land inside this window, so the host sends one only just after a
-/// heartbeat. Once per [`ASSIGNED_BEAT_MS`], it is also time in which no channel is
-/// swept.
-///
-/// 100 ms is about five times the slowest the host answered across an hour of captured
-/// traffic (`docs/phase-4-findings.md`, "The admin window, from a captured hour"). A
-/// missed window costs one heartbeat interval, not the assignment: the node stays dirty,
-/// and the host re-sends on its next heartbeat.
-pub const ADMIN_WAIT_MS: u32 = 100;
-
-/// How long an unassigned node waits between heartbeats.
-///
-/// A node told nothing parks on the control channel, so this is its whole cycle. It is
-/// longer than [`ADMIN_WAIT_MS`], and short enough that joining a fleet costs a second.
+/// An unassigned node does nothing else, so this is its whole cycle, and short enough that
+/// joining a fleet costs a second.
 pub const IDLE_BEAT_MS: u32 = 1000;
 
-const _: () = assert!(
-    IDLE_BEAT_MS >= ADMIN_WAIT_MS,
-    "a parked node must hold the control channel for at least a full admin window"
-);
-
-/// How often an assigned node, sweeping or scanning Bluetooth, sends a heartbeat and
-/// holds [`ADMIN_WAIT_MS`] open.
+/// How often an assigned node, sweeping or scanning Bluetooth, sends a heartbeat.
 ///
-/// On a timer rather than once per sweep, so the window costs about 2% of the node's
-/// time at any fleet size. The price is latency: an assignment waits up to one interval
-/// for its window, and a missed window costs one more (`docs/duty-cycle-findings.md`).
+/// On a timer rather than once per sweep, so the heartbeat's cost is the same at any fleet
+/// size. The host reads liveness and the epoch held from it, so it is also how long the host
+/// may take to see an assignment adopted.
 pub const ASSIGNED_BEAT_MS: u32 = 5000;
-
-const _: () = assert!(
-    ASSIGNED_BEAT_MS >= ADMIN_WAIT_MS,
-    "an assigned node must hold the control channel for at least a full admin window"
-);
 
 /// Where a node is in its sweep of the set it was assigned.
 ///

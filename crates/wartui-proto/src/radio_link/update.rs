@@ -8,13 +8,13 @@
 //! | Op | Direction | Body |
 //! |---|---|---|
 //! | 1 `Begin` | P4 to C6 | session (1), len (4), SHA-256 of the whole image (32) |
-//! | 2 `Chunk` | P4 to C6 | session (1), offset (4), up to [`OTA_CHUNK`] image bytes to the payload's end |
+//! | 2 `Chunk` | P4 to C6 | session (1), offset (4), up to [`UPDATE_CHUNK`] image bytes to the payload's end |
 //! | 3 `Commit` | P4 to C6 | session (1) |
 //! | 4 `Install` | P4 to C6 | session (1) |
-//! | 5 `Status` | C6 to P4 | session (1), state (1, [`OtaState`]'s code), next offset (4) |
+//! | 5 `Status` | C6 to P4 | session (1), state (1, [`UpdateState`]'s code), next offset (4) |
 //!
-//! The C6 drives [`crate::ota::Receiver`] with these, as a node does with the air's update
-//! frames, so the receiver's flow control applies: a status on each sector flush, and on each
+//! The C6 drives [`crate::ota::Receiver`] with these, as a node does with the bus's update
+//! messages, so the receiver's flow control applies: a status on each sector flush, and on each
 //! duplicate or gap. [`receive`] is that step, shared by the C6 and the P4, which takes the same
 //! ops for its own image; each switches slots on `Install` itself. A fixed op reads its body and
 //! ignores anything after it, so a body can grow at its end.
@@ -46,8 +46,8 @@
 //!   waiting for its reboot is pointless. That refusal is [`Failure::SwitchFailed`], apart from
 //!   a [`Failure::Refused`] session, since the fix differs: the image arrived whole.
 
-use crate::air::{
-    OTA_CHUNK, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
+use crate::bus::{
+    UPDATE_CHUNK, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState, UpdateStatus, Version,
 };
 use crate::ota::image::DIGEST_LEN;
 use crate::ota::{Receiver, SECTOR, SectorSink};
@@ -62,7 +62,7 @@ pub const REPLY_WAIT_MS: u64 = 500;
 pub const TRIES: u32 = 5;
 
 /// The longest encoded op: a full chunk.
-pub const OP_MAX: usize = CHUNK_HEADER + OTA_CHUNK;
+pub const OP_MAX: usize = CHUNK_HEADER + UPDATE_CHUNK;
 
 const _: () = assert!(OP_MAX <= super::PAYLOAD_MAX);
 
@@ -89,7 +89,7 @@ pub enum Op<'a> {
         session: u8,
         /// Where `data` starts in the image.
         offset: u32,
-        /// At most [`OTA_CHUNK`] bytes.
+        /// At most [`UPDATE_CHUNK`] bytes.
         data: &'a [u8],
     },
     /// Check the image.
@@ -103,14 +103,14 @@ pub enum Op<'a> {
         session: u8,
     },
     /// Where the C6's session stands.
-    Status(OtaStatusMsg),
+    Status(UpdateStatus),
 }
 
 impl Op<'_> {
     /// Writes the op to the start of `out` and returns its length.
     ///
     /// # Panics
-    /// If `out` is shorter than the op, or a chunk's data is longer than [`OTA_CHUNK`].
+    /// If `out` is shorter than the op, or a chunk's data is longer than [`UPDATE_CHUNK`].
     pub fn encode(&self, out: &mut [u8]) -> usize {
         match *self {
             Op::Begin { session, len, sha256 } => {
@@ -122,7 +122,7 @@ impl Op<'_> {
                 BEGIN_LEN
             }
             Op::Chunk { session, offset, data } => {
-                assert!(data.len() <= OTA_CHUNK, "chunk of {} bytes", data.len());
+                assert!(data.len() <= UPDATE_CHUNK, "chunk of {} bytes", data.len());
                 let end = CHUNK_HEADER + data.len();
                 let out = &mut out[..end];
                 out[0] = op_code(self);
@@ -153,7 +153,7 @@ impl<'a> Op<'a> {
     /// Reads an op from a packet's payload.
     ///
     /// `None` for an op this build does not know, a payload shorter than its op, or a chunk
-    /// longer than [`OTA_CHUNK`].
+    /// longer than [`UPDATE_CHUNK`].
     #[must_use]
     pub fn decode(payload: &'a [u8]) -> Option<Self> {
         let (&op, body) = payload.split_first()?;
@@ -169,7 +169,7 @@ impl<'a> Op<'a> {
             2 => {
                 let b = body.get(..CHUNK_HEADER - 1)?;
                 let data = &body[CHUNK_HEADER - 1..];
-                if data.len() > OTA_CHUNK {
+                if data.len() > UPDATE_CHUNK {
                     return None;
                 }
                 Some(Op::Chunk { session: b[0], offset: le_u32(&b[1..5]), data })
@@ -178,9 +178,9 @@ impl<'a> Op<'a> {
             4 => Some(Op::Install { session: *body.first()? }),
             5 => {
                 let b = body.get(..STATUS_LEN - 1)?;
-                Some(Op::Status(OtaStatusMsg {
+                Some(Op::Status(UpdateStatus {
                     session: b[0],
-                    state: OtaState::from_u8(b[1]),
+                    state: UpdateState::from_u8(b[1]),
                     next_offset: le_u32(&b[2..6]),
                 }))
             }
@@ -193,7 +193,7 @@ impl<'a> Op<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Received {
     /// The status to send back, if there is one: a mid-sector chunk and a `Status` have none.
-    Status(Option<OtaStatusMsg>),
+    Status(Option<UpdateStatus>),
     /// `Install` for this session. The firmware switches slots if the receiver is verified for
     /// it, and otherwise answers with [`Receiver::status`].
     Install(u8),
@@ -202,8 +202,8 @@ pub enum Received {
 /// Hand `op` to `receiver`, writing into `slot`.
 ///
 /// `slot` is `None` on a table without a second app slot or a `trial` sector. A `Begin` is then
-/// refused with [`OtaState::FlashError`], as it is while the booted image is on `trial`, and a
-/// `Chunk` or `Commit` is answered [`OtaState::Idle`].
+/// refused with [`UpdateState::FlashError`], as it is while the booted image is on `trial`, and a
+/// `Chunk` or `Commit` is answered [`UpdateState::Idle`].
 pub fn receive<S: SectorSink>(
     receiver: &mut Receiver,
     op: Op<'_>,
@@ -216,37 +216,37 @@ pub fn receive<S: SectorSink>(
         (Op::Begin { session, len, sha256 }, Some(slot)) if !trial => {
             // The op names no version, and the receiver checks none.
             let version = Version::new(0, 0, 0);
-            let begin = OtaBeginMsg { session, len, sha256, version, board: receiver.board() };
+            let begin = UpdateBegin { session, len, sha256, version, board: receiver.board() };
             Some(receiver.begin(&begin, slot))
         }
-        (Op::Begin { session, .. }, _) => Some(at_start(session, OtaState::FlashError)),
+        (Op::Begin { session, .. }, _) => Some(at_start(session, UpdateState::FlashError)),
         (Op::Chunk { session, offset, data }, Some(slot)) => {
-            receiver.chunk(&OtaChunkMsg { session, offset, data }, slot)
+            receiver.chunk(&UpdateChunk { session, offset, data }, slot)
         }
         (Op::Commit { session }, Some(slot)) => {
-            Some(receiver.commit(&OtaCommitMsg { session }, slot))
+            Some(receiver.commit(&UpdateCommit { session }, slot))
         }
         (Op::Chunk { session, .. } | Op::Commit { session }, None) => {
-            Some(at_start(session, OtaState::Idle))
+            Some(at_start(session, UpdateState::Idle))
         }
     };
     Received::Status(status)
 }
 
 /// A status for `session` in `state`, with no bytes held.
-const fn at_start(session: u8, state: OtaState) -> OtaStatusMsg {
-    OtaStatusMsg { session, state, next_offset: 0 }
+const fn at_start(session: u8, state: UpdateState) -> UpdateStatus {
+    UpdateStatus { session, state, next_offset: 0 }
 }
 
 /// `state` when it refuses the session.
-const fn refusal(state: OtaState) -> Option<OtaState> {
+const fn refusal(state: UpdateState) -> Option<UpdateState> {
     match state {
-        OtaState::HashMismatch
-        | OtaState::WrongBoard
-        | OtaState::TooLarge
-        | OtaState::FlashError
-        | OtaState::Unknown(_) => Some(state),
-        OtaState::Idle | OtaState::Receiving | OtaState::Verified => None,
+        UpdateState::HashMismatch
+        | UpdateState::WrongBoard
+        | UpdateState::TooLarge
+        | UpdateState::FlashError
+        | UpdateState::Unknown(_) => Some(state),
+        UpdateState::Idle | UpdateState::Receiving | UpdateState::Verified => None,
     }
 }
 
@@ -280,10 +280,10 @@ pub enum Stage {
 pub enum Failure {
     /// The C6 reported this state: a hash mismatch, a flash error, another board or an image
     /// too large for its slot.
-    Refused(OtaState),
+    Refused(UpdateState),
     /// The C6 verified the image, then refused `Install` with this state: it could not switch
     /// to the new image.
-    SwitchFailed(OtaState),
+    SwitchFailed(UpdateState),
     /// [`TRIES`] sends of one op went unanswered.
     Silent,
     /// The C6 reported holding no session more than [`TRIES`] times.
@@ -397,7 +397,7 @@ impl<'a> Sender<'a> {
             Step::Begin => Some(self.ask(Asked::Begin, now_ms, out)),
             Step::Chunks => {
                 let start = self.offset;
-                let end = start.saturating_add(OTA_CHUNK as u32).min(len);
+                let end = start.saturating_add(UPDATE_CHUNK as u32).min(len);
                 self.offset = end;
                 if (end as usize).is_multiple_of(SECTOR) {
                     // The receiver flushes the sector and reports.
@@ -420,7 +420,7 @@ impl<'a> Sender<'a> {
 
     /// Take a status from the C6. One naming another session is ignored, and so is any but a
     /// refusal once `Install` went out.
-    pub fn on_status(&mut self, status: &OtaStatusMsg) {
+    pub fn on_status(&mut self, status: &UpdateStatus) {
         if status.session != self.session {
             return;
         }
@@ -436,7 +436,7 @@ impl<'a> Sender<'a> {
         }
         let len = self.len();
         match status.state {
-            OtaState::Receiving => {
+            UpdateState::Receiving => {
                 let next = status.next_offset.min(len);
                 // A chunk sent before the rewind to `next`, reporting the gap it fell in.
                 if self.rewound_to == Some(next) {
@@ -453,15 +453,15 @@ impl<'a> Sender<'a> {
                     self.offset = next;
                 }
             }
-            OtaState::Verified => {
+            UpdateState::Verified => {
                 self.asked = None;
                 self.acked = len;
                 self.step = Step::Install;
             }
             // The C6 holds no session: it lost it, so start again, at most `TRIES` times. Until
             // `Begin` is answered, an op sent before it may still report the lost session.
-            OtaState::Idle if self.step == Step::Begin => {}
-            OtaState::Idle => {
+            UpdateState::Idle if self.step == Step::Begin => {}
+            UpdateState::Idle => {
                 self.asked = None;
                 self.rewound_to = None;
                 self.restarts += 1;
@@ -520,7 +520,7 @@ impl<'a> Sender<'a> {
     }
 
     fn chunk(&self, start: u32, out: &mut [u8]) -> usize {
-        let end = (start as usize + OTA_CHUNK).min(self.image.len());
+        let end = (start as usize + UPDATE_CHUNK).min(self.image.len());
         let data = &self.image[start as usize..end];
         Op::Chunk { session: self.session, offset: start, data }.encode(out)
     }

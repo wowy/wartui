@@ -1,67 +1,55 @@
-//! Byte-exact checks on the frames wartui puts on the air.
+//! Byte-exact checks on the message bodies node-bus records carry.
 //!
 //! These vectors are written out by hand, and there is nothing else they could be:
 //! the wire is ours in both directions, so there is no second implementation to check
-//! against — only the rule that a byte written here is a byte a node in the field is
-//! already sending, and changing one is changing the protocol. So every vector spells
-//! out what it pins.
+//! against — only the rule that a byte written here is a byte a node is already sending,
+//! and changing one is changing the protocol. So every vector spells out what it pins.
 
-use wartui_proto::air::{
-    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Board, CLEAR_MSG_LEN, Capabilities, ClearMsg,
-    DecodeError, DieTemp, EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HEARTBEAT_PREFIX_LEN, HeartbeatMsg,
-    MAGIC, MsgType, OTA_ABORT_MSG_LEN, OTA_BEGIN_MSG_LEN, OTA_CHUNK, OTA_CHUNK_HEADER,
-    OTA_CHUNK_MSG_MAX, OTA_COMMIT_MSG_LEN, OTA_CONFIRM_MSG_LEN, OTA_STATUS_MSG_LEN, OtaAbortMsg,
-    OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind,
-    SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN,
-    SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg,
-    Vdd, Version, WIRE_VERSION,
+use wartui_proto::bus::{
+    ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, CLEAR_LEN, Capabilities, Clear, DecodeError,
+    DieTemp, DownMsg, DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
+    HEARTBEAT_PREFIX_LEN, Heartbeat, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX,
+    SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security,
+    SightingBatch, SightingBatchWriter, SightingMsg, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN,
+    UPDATE_CHUNK, UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
+    UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit,
+    UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
 };
-use wartui_proto::link::{MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD};
+use wartui_proto::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
 
-/// `WTUI`, version 1, then the type byte.
 const HEARTBEAT: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x00, 0x01, 0x02, // version 0.1.2
     0x01, // board: ESP32-C5
     0x01, // flags: 5g
+    0x02, 0x00, 0x00, 0x00, 0x0D, 0x20, // mac 02:00:00:00:0D:20
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x05, // epoch
     0x2A, 0x00, // wifi_refused 42, little-endian
     0x04, 0x03, // ble_refused 0x0304, little-endian
-    0x02, 0x01, // beat 0x0102, little-endian
-    0x07, // unsent 7
-    0x95, // dwell: channel 149
-    0x24, // prev_dwell: channel 36
-    0x18, // tx_power: 24 quarter-dBm, 6 dBm
     0x05, // reset_cause: brownout
     0x43, // vdd: code 67, 3304 mV
     0x51, // die_temp: code 81, 41 °C
 ];
 
-/// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
+/// A heartbeat from a node unassigned since boot: epoch 0, never sent by the host.
 const HEARTBEAT_NO_EPOCH: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x00, 0x01, 0x00, // version 0.1.0
     0x01, // board: ESP32-C5
     0x02, // flags: trial, 5 GHz clear
+    0x02, 0x00, 0x00, 0x00, 0x1A, 0x50, // mac 02:00:00:00:1A:50
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x00, // epoch: none held
     0x00, 0x00, // wifi_refused 0
     0x00, 0x00, // ble_refused 0
-    0x01, 0x00, // beat 1: the first heartbeat since boot
-    0x00, // unsent 0
-    0x00, // dwell: none, the node is parked
-    0x00, // prev_dwell: none, the first heartbeat since boot
-    0x08, // tx_power: 8 quarter-dBm, the 2 dBm boot default
     0x01, // reset_cause: power on
     0x00, // vdd: no reading
     0xFF, // die_temp: no reading
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
-/// for the whole frame.
+/// for the whole batch.
 const WIFI_RECORD: &[u8] = &[
     0x00, // kind: Wi-Fi
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // bssid
@@ -115,17 +103,15 @@ const BLE_MFGR_RECORD: &[u8] = &[
 
 /// One batch, carrying the one Wi-Fi record above.
 const SIGHTING_BATCH_1: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
     0x01, 0x00, // seq 1, little-endian
     0x01, // count
     0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
     b't', 0x00, // WIFI_RECORD
 ];
 
-/// A single-record BLE batch, for the tests that want `Frame::Sightings` on a
+/// A single-record BLE batch, for the tests that want `UpMsg::Sightings` on a
 /// BLE record without a Wi-Fi one alongside it.
 const SIGHTING_BATCH_BLE: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
     0x09, 0x00, // seq 9
     0x01, // count
     0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x00, // BLE_RECORD
@@ -133,7 +119,6 @@ const SIGHTING_BATCH_BLE: &[u8] = &[
 
 /// A mixed batch: Wi-Fi, then BLE, then the widest record there is.
 const SIGHTING_BATCH_3: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
     0x07, 0x00, // seq 7
     0x03, // count
     // WIFI_RECORD
@@ -147,40 +132,33 @@ const SIGHTING_BATCH_3: &[u8] = &[
     0xD0, 0x20, 0x00,
 ];
 
-const ADMIN: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
+const ASSIGN: &[u8] = &[
     0x07, // epoch
     0x00, // flags
     0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // indices 16..=23
-    0x08, // transmit power: 2 dBm
 ];
 
-const ADMIN_BLE: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
+const ASSIGN_BLE: &[u8] = &[
     0xC8, // epoch 200
-    0x01, // ADMIN_FLAG_BLE
+    0x01, // ASSIGN_FLAG_BLE
     0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
-    0x08, // transmit power: 2 dBm
 ];
 
 /// The assignment a node whose whole job is Bluetooth is sent: the flag, and an
-/// empty [`ChannelSet`]. The one frame carrying a mask of zero, and the reason an
+/// empty [`ChannelSet`]. The one assignment carrying a mask of zero, and the reason an
 /// empty mask means "Bluetooth is all of it" rather than "scan nothing".
-const ADMIN_BLE_ONLY: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
+const ASSIGN_BLE_ONLY: &[u8] = &[
     0x09, // epoch
-    0x01, // ADMIN_FLAG_BLE
+    0x01, // ASSIGN_FLAG_BLE
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no channels at all
-    0x08, // transmit power: 2 dBm
 ];
 
-/// Header only: the whole instruction is the type byte.
-const CLEAR: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x82];
+/// Empty: the whole instruction is the type byte.
+const CLEAR: &[u8] = &[];
 
 /// An update session opening: session 7, a 0x0001_E240-byte image (123456), a hash of
 /// 0x00..=0x1F, version 0.2.3, for an ESP32-C6.
 const OTA_BEGIN: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x83, // header
     0x07, // session
     0x40, 0xE2, 0x01, 0x00, // len 123456, little-endian
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // sha256
@@ -191,52 +169,33 @@ const OTA_BEGIN: &[u8] = &[
     0x02, // board: ESP32-C6
 ];
 
-/// A final chunk of three bytes. Data runs to the end of the frame; nothing says its length.
+/// A final chunk of three bytes. Data runs to the end of the body; nothing says its length.
 const OTA_CHUNK_SHORT: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x84, // header
     0x07, // session
     0x00, 0x04, 0x01, 0x00, // offset 0x0001_0400, little-endian
     0xAA, 0xBB, 0xCC, // data
 ];
 
-/// Header and session.
-const OTA_COMMIT: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x85, 0x07];
+/// The session.
+const OTA_COMMIT: &[u8] = &[0x07];
 
-/// Header and session.
-const OTA_ABORT: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x86, 0x07];
+/// The session.
+const OTA_ABORT: &[u8] = &[0x07];
 
-/// Header only: the whole instruction is the type byte.
-const OTA_CONFIRM: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x87];
+/// Empty: the whole instruction is the type byte.
+const OTA_CONFIRM: &[u8] = &[];
 
 /// A node answering session 7: receiving, and wanting offset 0x0000_2000 next.
 const OTA_STATUS: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x03, // header
     0x07, // session
     0x01, // state: receiving
     0x00, 0x20, 0x00, 0x00, // next_offset 8192, little-endian
 ];
 
-/// Every frame of ours above, for the checks that hold for all of them.
-const ALL_FRAMES: [&[u8]; 13] = [
-    HEARTBEAT,
-    SIGHTING_BATCH_1,
-    SIGHTING_BATCH_BLE,
-    SIGHTING_BATCH_3,
-    ADMIN,
-    ADMIN_BLE,
-    CLEAR,
-    OTA_BEGIN,
-    OTA_CHUNK_SHORT,
-    OTA_COMMIT,
-    OTA_ABORT,
-    OTA_CONFIRM,
-    OTA_STATUS,
-];
-
 #[test]
-fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
-    assert_eq!(HEARTBEAT.len(), HEARTBEAT_MSG_LEN);
-    assert_eq!(ADMIN.len(), ADMIN_MSG_LEN);
+fn bus_msg_codec_matches_expected_body_lengths_when_checking_constants() {
+    assert_eq!(HEARTBEAT.len(), HEARTBEAT_LEN);
+    assert_eq!(ASSIGN.len(), ASSIGN_LEN);
     assert_eq!(
         BLE_RECORD.len(),
         SIGHTING_RECORD_MIN,
@@ -253,89 +212,78 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
         SIGHTING_BATCH_HEADER + WIFI_RECORD.len(),
         "the header plus the one record it carries"
     );
-    assert_eq!(CLEAR.len(), CLEAR_MSG_LEN, "header only, nothing else");
-    // The point of the whole exercise: a heartbeat was 212 bytes and a
-    // sighting was 212 bytes, on a control channel every node shares. The
-    // ceiling is the 1024 bytes every node frame keeps to, and a batch is packed
+    assert_eq!(CLEAR.len(), CLEAR_LEN, "empty");
+    // The ceiling is the 1024 bytes every body a node sends keeps to, and a batch is packed
     // to fill exactly that many.
     const {
-        assert!(HEARTBEAT_MSG_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
-        assert!(SIGHTING_BATCH_MAX == 1024);
+        assert!(HEARTBEAT_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
+        assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
     };
 }
 
 #[test]
-fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
-    for frame in ALL_FRAMES {
-        assert_eq!(&frame[..4], MAGIC, "magic");
-        assert_eq!(frame[4], WIRE_VERSION, "version");
-    }
-}
-
-#[test]
-fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
-    let msg = HeartbeatMsg {
-        counter: 0x1234_5678,
-        epoch: 5,
+fn heartbeat_serializes_byte_for_byte_when_encoded_and_decoded() {
+    let msg = Heartbeat {
         capabilities: Capabilities {
             version: Version::new(0, 1, 2),
             board: Board::Esp32c5,
             five_ghz: true,
             trial: false,
         },
+        mac: [0x02, 0, 0, 0, 0x0D, 0x20],
+        counter: 0x1234_5678,
+        epoch: 5,
         wifi_refused: 42,
         ble_refused: 0x0304,
-        beat: 0x0102,
-        unsent: 7,
-        dwell: 149,
-        prev_dwell: 36,
-        tx_power: 24,
         reset_cause: ResetCause::Brownout,
         vdd: Vdd(67),
         die_temp: DieTemp(81),
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
-    assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
+    assert_eq!(Heartbeat::decode(HEARTBEAT), Ok(msg));
 }
 
 #[test]
-fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
-    let msg = HeartbeatMsg {
-        counter: 0x1234_5678,
-        epoch: 0,
+fn heartbeat_serializes_epoch_zero_when_node_holds_no_assignment() {
+    let msg = Heartbeat {
         capabilities: Capabilities {
             version: Version::new(0, 1, 0),
             board: Board::Esp32c5,
             five_ghz: false,
             trial: true,
         },
+        mac: [0x02, 0, 0, 0, 0x1A, 0x50],
+        counter: 0x1234_5678,
+        epoch: 0,
         wifi_refused: 0,
         ble_refused: 0,
-        beat: 1,
-        unsent: 0,
-        dwell: 0,
-        prev_dwell: 0,
-        tx_power: 8,
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
-    assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
+    assert_eq!(Heartbeat::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
 }
 
 #[test]
-fn heartbeat_msg_serializes_counter_as_little_endian_when_encoded() {
+fn heartbeat_carries_mac_after_prefix_when_encoded() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.mac, [0x02, 0, 0, 0, 0x0D, 0x20]);
+    assert_eq!(&HEARTBEAT[HEARTBEAT_PREFIX_LEN..HEARTBEAT_IDENTITY_LEN], &decoded.mac);
+}
+
+#[test]
+fn heartbeat_serializes_counter_as_little_endian_when_encoded() {
     // A counter read big-endian would still be monotonic, so the reboot
     // detector would never notice; only the bytes say which it is.
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
     assert_eq!(decoded.counter, 0x1234_5678);
     assert_eq!(&HEARTBEAT[11..15], &[0x78, 0x56, 0x34, 0x12]);
 }
 
 #[test]
-fn heartbeat_msg_serializes_refusal_counts_as_little_endian_when_encoded() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+fn heartbeat_serializes_refusal_counts_as_little_endian_when_encoded() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
     assert_eq!(decoded.wifi_refused, 42);
     assert_eq!(decoded.ble_refused, 0x0304);
     assert_eq!(&HEARTBEAT[16..18], &[0x2A, 0]);
@@ -343,61 +291,10 @@ fn heartbeat_msg_serializes_refusal_counts_as_little_endian_when_encoded() {
 }
 
 #[test]
-fn heartbeat_msg_round_trips_beat_when_encoded_at_its_offset() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!(decoded.beat, 0x0102);
-    assert_eq!(&HEARTBEAT[20..22], &[0x02, 0x01]);
-
-    let msg = HeartbeatMsg { beat: u16::MAX, ..decoded };
-    let frame = msg.encode();
-    assert_eq!(&frame[20..22], &[0xFF, 0xFF]);
-    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
-}
-
-#[test]
-fn heartbeat_msg_round_trips_unsent_when_encoded_at_its_offset() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!(decoded.unsent, 7);
-    assert_eq!(HEARTBEAT[22], 0x07);
-
-    let msg = HeartbeatMsg { unsent: u8::MAX, ..decoded };
-    let frame = msg.encode();
-    assert_eq!(frame[22], 0xFF);
-    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
-}
-
-#[test]
-fn heartbeat_msg_round_trips_dwell_when_encoded_at_its_offset() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!((decoded.dwell, decoded.prev_dwell), (149, 36));
-    assert_eq!(&HEARTBEAT[23..25], &[0x95, 0x24]);
-
-    let msg = HeartbeatMsg { dwell: 6, prev_dwell: 165, ..decoded };
-    let frame = msg.encode();
-    assert_eq!(&frame[23..25], &[0x06, 0xA5]);
-    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
-}
-
-#[test]
-fn heartbeat_msg_round_trips_tx_power_when_encoded_at_its_offset() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!(decoded.tx_power, 24);
-    assert_eq!(HEARTBEAT[25], 0x18);
-
-    // 0 is what a node sends when it could not read its radio's power.
-    for tx_power in [8, 80, 0] {
-        let msg = HeartbeatMsg { tx_power, ..decoded };
-        let frame = msg.encode();
-        assert_eq!(frame[25], tx_power.to_le_bytes()[0]);
-        assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
-    }
-}
-
-#[test]
-fn heartbeat_msg_round_trips_reset_cause_when_encoded_at_its_offset() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+fn heartbeat_round_trips_reset_cause_when_encoded_at_its_offset() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
     assert_eq!(decoded.reset_cause, ResetCause::Brownout);
-    assert_eq!(HEARTBEAT[26], 0x05);
+    assert_eq!(HEARTBEAT[20], 0x05);
 
     for reset_cause in [
         ResetCause::PowerOn,
@@ -408,23 +305,23 @@ fn heartbeat_msg_round_trips_reset_cause_when_encoded_at_its_offset() {
         ResetCause::External,
         ResetCause::Unknown,
     ] {
-        let msg = HeartbeatMsg { reset_cause, ..decoded };
-        let frame = msg.encode();
-        assert_eq!(frame[26], reset_cause.as_u8());
-        assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+        let msg = Heartbeat { reset_cause, ..decoded };
+        let body = msg.encode();
+        assert_eq!(body[20], reset_cause.as_u8());
+        assert_eq!(Heartbeat::decode(&body), Ok(msg));
     }
 }
 
 #[test]
-fn heartbeat_msg_round_trips_health_when_encoded_at_its_offsets() {
-    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+fn heartbeat_round_trips_health_when_encoded_at_its_offsets() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
     assert_eq!((decoded.vdd.mv(), decoded.die_temp.c()), (Some(3304), Some(41)));
-    assert_eq!(&HEARTBEAT[27..29], &[0x43, 0x51]);
+    assert_eq!(&HEARTBEAT[21..23], &[0x43, 0x51]);
 
-    let msg = HeartbeatMsg { vdd: Vdd::NONE, die_temp: DieTemp::NONE, ..decoded };
-    let frame = msg.encode();
-    assert_eq!(&frame[27..29], &[0x00, 0xFF]);
-    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+    let msg = Heartbeat { vdd: Vdd::NONE, die_temp: DieTemp::NONE, ..decoded };
+    let body = msg.encode();
+    assert_eq!(&body[21..23], &[0x00, 0xFF]);
+    assert_eq!(Heartbeat::decode(&body), Ok(msg));
 }
 
 #[test]
@@ -485,40 +382,41 @@ fn die_temp_displays_celsius_when_formatted() {
 }
 
 #[test]
-fn heartbeat_msg_decodes_unknown_reset_cause_when_byte_unassigned() {
+fn heartbeat_decodes_unknown_reset_cause_when_byte_unassigned() {
     // A node naming a cause this build has no name for is still a node.
-    let mut frame = HEARTBEAT.to_vec();
-    frame[26] = 0xEE;
-    let decoded = HeartbeatMsg::decode(&frame).expect("valid");
+    let mut body = HEARTBEAT.to_vec();
+    body[20] = 0xEE;
+    let decoded = Heartbeat::decode(&body).expect("valid");
     assert_eq!(decoded.reset_cause, ResetCause::Unknown);
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_twenty_five_byte_heartbeat() {
+fn heartbeat_rejects_body_when_node_sends_shorter_heartbeat() {
     // A node flashed from another tree, whose heartbeat is shorter. The engine counts
     // this as incompatible and asks for a reflash.
+    let got = HEARTBEAT_LEN - 2;
     assert_eq!(
-        HeartbeatMsg::decode(&HEARTBEAT[..25]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 25 })
+        Heartbeat::decode(&HEARTBEAT[..got]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_LEN, got })
     );
     assert_eq!(
-        Frame::decode(&HEARTBEAT[..25]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 25 })
+        UpMsg::decode(UpType::Heartbeat.as_u8(), &HEARTBEAT[..got]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_LEN, got })
     );
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_thirty_byte_heartbeat() {
-    // A longer frame is the dangerous half, because its leading bytes would parse.
+fn heartbeat_rejects_body_when_node_sends_longer_heartbeat() {
+    // A longer body is the dangerous half, because its leading bytes would parse.
     let mut longer = HEARTBEAT.to_vec();
     longer.push(0);
     assert_eq!(
-        HeartbeatMsg::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 30 })
+        Heartbeat::decode(&longer),
+        Err(DecodeError::BadLength { need: HEARTBEAT_LEN, got: HEARTBEAT_LEN + 1 })
     );
     assert_eq!(
-        Frame::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 30 })
+        UpMsg::decode(UpType::Heartbeat.as_u8(), &longer),
+        Err(DecodeError::BadLength { need: HEARTBEAT_LEN, got: HEARTBEAT_LEN + 1 })
     );
 }
 
@@ -675,7 +573,7 @@ fn sighting_msg_rejects_oversized_ssid_when_encoding_or_decoding() {
 #[test]
 fn sighting_msg_rejects_oversized_trailer_when_encoding_or_decoding() {
     // Refused on the way in, so a node cannot broadcast it, and on the way
-    // out, so a frame from a build with a wider trailer is named rather than
+    // out, so a batch from a build with a wider trailer is named rather than
     // half-read.
     let msg = SightingMsg {
         kind: RecordKind::Ble,
@@ -793,8 +691,8 @@ fn sighting_batch_writer_packs_mixed_records_byte_for_byte_when_built() {
 
 #[test]
 fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
-    // Eighty-three bare records and one carrying a seven-byte SSID sum to
-    // exactly 1015 bytes behind the nine-byte header: 1024 total, the batch
+    // Eighty-four bare records and one carrying a one-byte SSID sum to
+    // exactly 1021 bytes behind the three-byte header: 1024 total, the batch
     // ceiling, reached at exactly SIGHTINGS_PER_BATCH_MAX records.
     let minimal = SightingMsg {
         kind: RecordKind::Ble,
@@ -809,12 +707,12 @@ fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
     for _ in 0..SIGHTINGS_PER_BATCH_MAX - 1 {
         assert!(writer.push(&minimal));
     }
-    assert!(writer.push(&SightingMsg { ssid: b"7 bytes", ..minimal }));
+    assert!(writer.push(&SightingMsg { ssid: b"1", ..minimal }));
     assert_eq!(writer.len(), SIGHTINGS_PER_BATCH_MAX);
     assert_eq!(writer.as_bytes().len(), SIGHTING_BATCH_MAX);
 
     // One more record, however small, no longer fits: nothing is written, and
-    // the frame already on the air is unchanged.
+    // the batch already packed is unchanged.
     assert!(!writer.push(&minimal));
     assert_eq!(writer.len(), SIGHTINGS_PER_BATCH_MAX, "the refused push wrote nothing");
     assert_eq!(writer.as_bytes().len(), SIGHTING_BATCH_MAX);
@@ -824,43 +722,43 @@ fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
 }
 
 #[test]
-fn sighting_batch_rejects_frame_when_count_is_zero() {
-    let mut frame = SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER].to_vec();
-    frame[8] = 0; // count
+fn sighting_batch_rejects_body_when_count_is_zero() {
+    let mut body = SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER].to_vec();
+    body[2] = 0; // count
     assert_eq!(
-        SightingBatch::decode(&frame),
+        SightingBatch::decode(&body),
         Err(DecodeError::TooShort {
             need: SIGHTING_BATCH_HEADER + SIGHTING_RECORD_MIN,
-            got: frame.len(),
+            got: body.len(),
         })
     );
 }
 
 #[test]
-fn sighting_batch_rejects_frame_when_count_exceeds_records_present() {
-    let mut frame = SIGHTING_BATCH_1.to_vec();
-    frame[8] = 2; // claims a second record that is not there
+fn sighting_batch_rejects_body_when_count_exceeds_records_present() {
+    let mut body = SIGHTING_BATCH_1.to_vec();
+    body[2] = 2; // claims a second record that is not there
     assert_eq!(
-        SightingBatch::decode(&frame),
+        SightingBatch::decode(&body),
         Err(DecodeError::TooShort { need: SIGHTING_RECORD_MIN, got: 0 })
     );
 }
 
 #[test]
-fn sighting_batch_rejects_frame_when_trailing_bytes_follow_last_record() {
-    let mut frame = SIGHTING_BATCH_1.to_vec();
-    frame.extend_from_slice(BLE_RECORD); // count still says 1
+fn sighting_batch_rejects_body_when_trailing_bytes_follow_last_record() {
+    let mut body = SIGHTING_BATCH_1.to_vec();
+    body.extend_from_slice(BLE_RECORD); // count still says 1
     assert_eq!(
-        SightingBatch::decode(&frame),
+        SightingBatch::decode(&body),
         Err(DecodeError::BadLength {
             need: SIGHTING_BATCH_HEADER + WIFI_RECORD.len(),
-            got: frame.len(),
+            got: body.len(),
         })
     );
 }
 
 #[test]
-fn sighting_batch_rejects_whole_frame_when_second_record_is_malformed() {
+fn sighting_batch_rejects_whole_body_when_second_record_is_malformed() {
     // Validated whole before anything is yielded: a fault in the second
     // record must not let the first through.
     let second = SIGHTING_BATCH_HEADER + WIFI_RECORD.len();
@@ -903,19 +801,14 @@ fn security_enum_round_trips_to_wigle_tokens_when_converted() {
 }
 
 #[test]
-fn assignment_serializes_byte_for_byte_when_encoded_to_wire() {
-    let msg = AdminMsg {
-        epoch: 7,
-        flags: 0,
-        channels: ChannelSet::from_run(IndexRun::new(16, 23)),
-        tx_power: 8,
-    };
-    assert_eq!(msg.encode().as_slice(), ADMIN);
-    assert_eq!(AdminMsg::decode(ADMIN), Ok(msg));
+fn assign_serializes_byte_for_byte_when_encoded_to_wire() {
+    let msg = Assign { epoch: 7, flags: 0, channels: ChannelSet::from_run(IndexRun::new(16, 23)) };
+    assert_eq!(msg.encode().as_slice(), ASSIGN);
+    assert_eq!(Assign::decode(ASSIGN), Ok(msg));
 }
 
 #[test]
-fn admin_msg_serializes_channel_mask_as_little_endian_when_encoded() {
+fn assign_serializes_channel_mask_as_little_endian_when_encoded() {
     // Four indices chosen to straddle byte boundaries and to reach the top of
     // the forty-two, so a mask written big-endian — or in five bytes rather
     // than six — cannot produce these bytes.
@@ -923,172 +816,159 @@ fn admin_msg_serializes_channel_mask_as_little_endian_when_encoded() {
     for idx in [0, 6, 13, 41] {
         channels.insert(idx);
     }
-    let msg = AdminMsg { epoch: 200, flags: ADMIN_FLAG_BLE, channels, tx_power: 8 };
-    assert_eq!(msg.encode().as_slice(), ADMIN_BLE);
+    let msg = Assign { epoch: 200, flags: ASSIGN_FLAG_BLE, channels };
+    assert_eq!(msg.encode().as_slice(), ASSIGN_BLE);
 
-    let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
+    let back = Assign::decode(ASSIGN_BLE).expect("valid");
     assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 41]);
     assert!(back.scan_ble());
 }
 
 #[test]
-fn admin_msg_encodes_ble_flag_and_empty_mask_when_node_scans_bluetooth() {
-    let msg =
-        AdminMsg { epoch: 9, flags: ADMIN_FLAG_BLE, channels: ChannelSet::empty(), tx_power: 8 };
-    assert_eq!(msg.encode().as_slice(), ADMIN_BLE_ONLY);
+fn assign_encodes_ble_flag_and_empty_mask_when_node_scans_bluetooth() {
+    let msg = Assign { epoch: 9, flags: ASSIGN_FLAG_BLE, channels: ChannelSet::empty() };
+    assert_eq!(msg.encode().as_slice(), ASSIGN_BLE_ONLY);
 
-    let back = AdminMsg::decode(ADMIN_BLE_ONLY).expect("valid");
+    let back = Assign::decode(ASSIGN_BLE_ONLY).expect("valid");
     assert!(back.channels.is_empty(), "it sniffs nothing");
     assert!(back.scan_ble(), "and the flag is what says why");
-    assert_eq!(back.tx_power, 8);
 }
 
 #[test]
-fn admin_msg_preserves_unknown_flag_bits_when_round_tripped() {
+fn assign_preserves_unknown_flag_bits_when_round_tripped() {
     // A newer host setting a bit this build has no name for must not have it
     // quietly dropped on the way through.
-    let mut frame = ADMIN_BLE.to_vec();
-    frame[7] = 0b1000_0001;
-    let decoded = AdminMsg::decode(&frame).expect("valid");
+    let mut body = ASSIGN_BLE.to_vec();
+    body[1] = 0b1000_0001;
+    let decoded = Assign::decode(&body).expect("valid");
     assert_eq!(decoded.flags, 0b1000_0001);
     assert!(decoded.scan_ble());
-    assert_eq!(decoded.encode().as_slice(), frame.as_slice());
+    assert_eq!(decoded.encode().as_slice(), body.as_slice());
 }
 
 #[test]
-fn clear_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
-    assert_eq!(ClearMsg.encode().as_slice(), CLEAR);
-    assert_eq!(ClearMsg::decode(CLEAR), Ok(ClearMsg));
+fn clear_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(Clear.encode().as_slice(), CLEAR);
+    assert_eq!(Clear::decode(CLEAR), Ok(Clear));
 }
 
 #[test]
-fn clear_msg_rejects_frame_when_length_is_not_header_only() {
-    // Longer is the dangerous half, the same reasoning `BadLength` exists for
-    // everywhere else: a wider frame from a later build must not be adopted as
-    // a plausible clear.
-    let mut wider = CLEAR.to_vec();
-    wider.push(0xFF);
-    assert_eq!(
-        ClearMsg::decode(&wider),
-        Err(DecodeError::BadLength { need: CLEAR_MSG_LEN, got: CLEAR_MSG_LEN + 1 })
-    );
-
-    let shorter = &CLEAR[..CLEAR_MSG_LEN - 1];
-    assert_eq!(
-        ClearMsg::decode(shorter),
-        Err(DecodeError::TooShort { need: CLEAR_MSG_LEN, got: CLEAR_MSG_LEN - 1 })
-    );
+fn clear_rejects_body_when_not_empty() {
+    // The same reasoning `BadLength` exists for everywhere else: a wider body from a later
+    // build must not be taken as a plausible clear.
+    assert_eq!(Clear::decode(&[0xFF]), Err(DecodeError::BadLength { need: CLEAR_LEN, got: 1 }));
 }
 
 #[test]
-fn frame_decoder_dispatches_type_byte_to_corresponding_frame_when_decoded() {
-    assert!(matches!(Frame::decode(HEARTBEAT), Ok(Frame::Heartbeat(_))));
-    assert!(matches!(Frame::decode(SIGHTING_BATCH_1), Ok(Frame::Sightings(_))));
-    assert!(matches!(Frame::decode(SIGHTING_BATCH_BLE), Ok(Frame::Sightings(_))));
-    assert!(matches!(Frame::decode(ADMIN), Ok(Frame::Admin(_))));
-    assert!(matches!(Frame::decode(CLEAR), Ok(Frame::Clear(_))));
-    assert!(matches!(Frame::decode(OTA_BEGIN), Ok(Frame::OtaBegin(_))));
-    assert!(matches!(Frame::decode(OTA_CHUNK_SHORT), Ok(Frame::OtaChunk(_))));
-    assert!(matches!(Frame::decode(OTA_COMMIT), Ok(Frame::OtaCommit(_))));
-    assert!(matches!(Frame::decode(OTA_ABORT), Ok(Frame::OtaAbort(_))));
-    assert!(matches!(Frame::decode(OTA_CONFIRM), Ok(Frame::OtaConfirm(_))));
-    assert!(matches!(Frame::decode(OTA_STATUS), Ok(Frame::OtaStatus(_))));
+fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
+    let up = |kind: UpType, body| UpMsg::decode(kind.as_u8(), body);
+    let down = |kind: DownType, body| DownMsg::decode(kind.as_u8(), body);
+    assert!(matches!(up(UpType::Heartbeat, HEARTBEAT), Ok(UpMsg::Heartbeat(_))));
+    assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_1), Ok(UpMsg::Sightings(_))));
+    assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_BLE), Ok(UpMsg::Sightings(_))));
+    assert!(matches!(up(UpType::UpdateStatus, OTA_STATUS), Ok(UpMsg::UpdateStatus(_))));
+    assert!(matches!(down(DownType::Assign, ASSIGN), Ok(DownMsg::Assign(_))));
+    assert!(matches!(down(DownType::Clear, CLEAR), Ok(DownMsg::Clear(_))));
+    assert!(matches!(down(DownType::UpdateBegin, OTA_BEGIN), Ok(DownMsg::UpdateBegin(_))));
+    assert!(matches!(down(DownType::UpdateChunk, OTA_CHUNK_SHORT), Ok(DownMsg::UpdateChunk(_))));
+    assert!(matches!(down(DownType::UpdateCommit, OTA_COMMIT), Ok(DownMsg::UpdateCommit(_))));
+    assert!(matches!(down(DownType::UpdateAbort, OTA_ABORT), Ok(DownMsg::UpdateAbort(_))));
+    assert!(matches!(down(DownType::UpdateConfirm, OTA_CONFIRM), Ok(DownMsg::UpdateConfirm(_))));
 }
 
 #[test]
-fn msg_type_keeps_direction_in_high_bit_when_frame_is_an_update() {
-    // The high bit is the direction, clear for node → host and set for host → node, so a
-    // misrouted frame is a decode error.
-    assert_eq!(MsgType::OtaStatus.as_u8() & 0x80, 0);
-    for host_to_node in [
-        MsgType::OtaBegin,
-        MsgType::OtaChunk,
-        MsgType::OtaCommit,
-        MsgType::OtaAbort,
-        MsgType::OtaConfirm,
-    ] {
-        assert_eq!(host_to_node.as_u8() & 0x80, 0x80);
-        assert_eq!(MsgType::try_from(host_to_node.as_u8()), Ok(host_to_node));
+fn msg_types_number_each_direction_from_one_when_pinned() {
+    let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus];
+    for (byte, kind) in (1..).zip(up) {
+        assert_eq!(kind.as_u8(), byte);
+        assert_eq!(UpType::from_u8(byte), Some(kind));
     }
-    assert_eq!(MsgType::try_from(0x03), Ok(MsgType::OtaStatus));
+    let down = [
+        DownType::Assign,
+        DownType::Clear,
+        DownType::UpdateBegin,
+        DownType::UpdateChunk,
+        DownType::UpdateCommit,
+        DownType::UpdateAbort,
+        DownType::UpdateConfirm,
+    ];
+    for (byte, kind) in (1..).zip(down) {
+        assert_eq!(kind.as_u8(), byte);
+        assert_eq!(DownType::from_u8(byte), Some(kind));
+    }
+    assert_eq!(UpType::from_u8(0), None);
+    assert_eq!(UpType::from_u8(4), None);
+    assert_eq!(DownType::from_u8(8), None);
 }
 
 #[test]
-fn frame_decoder_rejects_payload_when_frame_type_mismatches() {
-    // Each decoder is reachable directly, and reading an assignment out of a
-    // heartbeat would be adopting four bytes of counter as a channel mask.
-    assert_eq!(AdminMsg::decode(HEARTBEAT), Err(DecodeError::UnknownType(0x01)));
-    assert_eq!(HeartbeatMsg::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
-    assert_eq!(SightingBatch::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
-    assert_eq!(OtaBeginMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
-    assert_eq!(OtaChunkMsg::decode(OTA_BEGIN), Err(DecodeError::UnknownType(0x83)));
-    assert_eq!(OtaCommitMsg::decode(OTA_ABORT), Err(DecodeError::UnknownType(0x86)));
-    assert_eq!(OtaAbortMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
-    assert_eq!(OtaConfirmMsg::decode(CLEAR), Err(DecodeError::UnknownType(0x82)));
-    assert_eq!(OtaStatusMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
+fn down_msg_encodes_body_when_written_into_buffer() {
+    let mut out = [0u8; MAX_NODE_DOWN];
+    let msg = DownMsg::Assign(Assign::decode(ASSIGN).expect("valid"));
+    assert_eq!(msg.kind(), DownType::Assign);
+    let len = msg.encode_into(&mut out).expect("fits");
+    assert_eq!(&out[..len], ASSIGN);
+    let chunk = DownMsg::UpdateChunk(UpdateChunk::decode(OTA_CHUNK_SHORT).expect("valid"));
+    let len = chunk.encode_into(&mut out).expect("fits");
+    assert_eq!(&out[..len], OTA_CHUNK_SHORT);
+    assert_eq!(DownMsg::Clear(Clear).encode_into(&mut out), Some(0));
 }
 
 #[test]
-fn wire_decoder_rejects_frame_when_magic_bytes_do_not_match() {
-    let mut frame = HEARTBEAT.to_vec();
-    frame[0] = b'X';
-    assert_eq!(Frame::decode(&frame), Err(DecodeError::BadMagic));
+fn msg_decoder_rejects_body_when_type_does_not_fit_it() {
+    // A record names its type, so a body read under the wrong one fails its length check:
+    // reading an assignment out of a heartbeat would be adopting counter bytes as a mask.
+    let down = |kind: DownType, body| DownMsg::decode(kind.as_u8(), body);
+    let up = |kind: UpType, body| UpMsg::decode(kind.as_u8(), body);
+    assert!(matches!(down(DownType::Assign, HEARTBEAT), Err(DecodeError::BadLength { .. })));
+    assert!(matches!(up(UpType::Heartbeat, ASSIGN), Err(DecodeError::BadLength { .. })));
+    assert!(matches!(down(DownType::UpdateBegin, OTA_COMMIT), Err(DecodeError::BadLength { .. })));
+    assert!(matches!(
+        down(DownType::UpdateConfirm, OTA_COMMIT),
+        Err(DecodeError::BadLength { .. })
+    ));
+    assert!(matches!(up(UpType::UpdateStatus, OTA_COMMIT), Err(DecodeError::BadLength { .. })));
 }
 
 #[test]
-fn wire_decoder_rejects_frame_when_wire_version_is_unsupported() {
-    // Without a version field, a frame of another shape could pass a length
-    // check and decode as something plausible. This is the field that stops that happening here.
-    let mut frame = HEARTBEAT.to_vec();
-    frame[4] = 2;
-    assert_eq!(Frame::decode(&frame), Err(DecodeError::BadVersion(2)));
-
-    let mut frame = ADMIN.to_vec();
-    frame[4] = 0;
-    assert_eq!(AdminMsg::decode(&frame), Err(DecodeError::BadVersion(0)));
+fn msg_decoder_rejects_record_when_type_byte_is_unknown() {
+    assert_eq!(UpMsg::decode(0x42, HEARTBEAT), Err(DecodeError::UnknownType(0x42)));
+    assert_eq!(DownMsg::decode(0x42, ASSIGN), Err(DecodeError::UnknownType(0x42)));
 }
 
 #[test]
-fn wire_decoder_rejects_frame_when_type_byte_is_unknown() {
-    let mut frame = HEARTBEAT.to_vec();
-    frame[5] = 0x42;
-    assert_eq!(Frame::decode(&frame), Err(DecodeError::UnknownType(0x42)));
-}
-
-#[test]
-fn wire_decoder_rejects_truncated_payload_when_frame_is_too_short() {
-    // Too short to carry a header at all, which is as far as `header` gets.
-    assert_eq!(Frame::decode(&HEARTBEAT[..4]), Err(DecodeError::TooShort { need: 6, got: 4 }));
-    // A batch needs its own header past the shared one: seq and count.
+fn msg_decoder_rejects_truncated_body_when_body_is_too_short() {
+    // A batch needs its own header: seq and count.
     assert_eq!(
-        Frame::decode(&SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER - 1]),
+        UpMsg::decode(UpType::Sightings.as_u8(), &SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER - 1]),
         Err(DecodeError::TooShort { need: SIGHTING_BATCH_HEADER, got: SIGHTING_BATCH_HEADER - 1 })
     );
     // The other two are each one size, so either side of it is a layout this
     // build does not read.
     assert_eq!(
-        Frame::decode(&HEARTBEAT[..HEARTBEAT_MSG_LEN - 1]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN - 1 })
+        UpMsg::decode(UpType::Heartbeat.as_u8(), &HEARTBEAT[..HEARTBEAT_LEN - 1]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_LEN, got: HEARTBEAT_LEN - 1 })
     );
     assert_eq!(
-        Frame::decode(&ADMIN[..ADMIN_MSG_LEN - 1]),
-        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN - 1 })
+        DownMsg::decode(DownType::Assign.as_u8(), &ASSIGN[..ASSIGN_LEN - 1]),
+        Err(DecodeError::BadLength { need: ASSIGN_LEN, got: ASSIGN_LEN - 1 })
     );
 }
 
 #[test]
-fn wire_codec_pins_heartbeat_prefix_when_inspecting_frames() {
-    // The frozen core: header, heartbeat type byte, then version, board and flags. A host
-    // a minor version ahead reads these bytes from this build's nodes, so none may move.
-    assert_eq!(HEARTBEAT_MSG_LEN, 29);
+fn heartbeat_pins_prefix_and_mac_when_inspecting_body() {
+    // Version, board and flags, then the MAC: what a host reads from a node on another
+    // layout to name it.
+    assert_eq!(HEARTBEAT_LEN, 23);
     assert_eq!(HEARTBEAT_PREFIX_LEN, 5);
-    assert_eq!(&HEARTBEAT[..11], &[0x57, 0x54, 0x55, 0x49, 0x01, 0x01, 0, 1, 2, 1, 1]);
+    assert_eq!(HEARTBEAT_IDENTITY_LEN, 11);
+    assert_eq!(&HEARTBEAT[..11], &[0, 1, 2, 1, 1, 0x02, 0, 0, 0, 0x0D, 0x20]);
 }
 
 #[test]
-fn heartbeat_prefix_decodes_version_board_and_flags_when_frame_is_exact() {
+fn heartbeat_prefix_decodes_version_board_and_flags_when_body_is_exact() {
     let prefix = Capabilities::decode_prefix(HEARTBEAT).expect("a heartbeat");
-    assert_eq!(prefix, HeartbeatMsg::decode(HEARTBEAT).expect("valid").capabilities);
+    assert_eq!(prefix, Heartbeat::decode(HEARTBEAT).expect("valid").capabilities);
     assert_eq!(prefix.version, Version::new(0, 1, 2));
     assert_eq!(prefix.board, Board::Esp32c5);
 }
@@ -1096,7 +976,7 @@ fn heartbeat_prefix_decodes_version_board_and_flags_when_frame_is_exact() {
 #[test]
 fn heartbeat_prefix_decodes_when_body_is_any_length_past_prefix() {
     // An older or newer minor's heartbeat: the prefix is all that is read.
-    let older = [0x57, 0x54, 0x55, 0x49, 0x01, 0x01, 0, 0, 7, 2, 0];
+    let older = [0, 0, 7, 2, 0];
     let caps = Capabilities::decode_prefix(&older).expect("prefix only");
     assert_eq!(caps.version, Version::new(0, 0, 7));
     assert_eq!(caps.board, Board::Esp32c6);
@@ -1105,78 +985,63 @@ fn heartbeat_prefix_decodes_when_body_is_any_length_past_prefix() {
     let mut longer = HEARTBEAT.to_vec();
     longer.extend_from_slice(&[0xAA; 40]);
     assert_eq!(Capabilities::decode_prefix(&longer), Capabilities::decode_prefix(HEARTBEAT));
+    assert_eq!(Heartbeat::identity(&longer), Heartbeat::identity(HEARTBEAT));
 }
 
 #[test]
-fn heartbeat_prefix_rejects_frame_when_body_is_shorter_than_prefix() {
+fn heartbeat_prefix_rejects_body_when_shorter_than_prefix() {
     assert_eq!(
-        Capabilities::decode_prefix(&HEARTBEAT[..10]),
+        Capabilities::decode_prefix(&HEARTBEAT[..4]),
+        Err(DecodeError::TooShort { need: 5, got: 4 })
+    );
+    assert_eq!(
+        Heartbeat::identity(&HEARTBEAT[..10]),
         Err(DecodeError::TooShort { need: 11, got: 10 })
     );
 }
 
 #[test]
-fn heartbeat_prefix_rejects_frame_when_not_a_heartbeat() {
-    assert_eq!(Capabilities::decode_prefix(ADMIN), Err(DecodeError::UnknownType(0x81)));
-    let mut bad_version = HEARTBEAT.to_vec();
-    bad_version[4] = 2;
-    assert_eq!(Capabilities::decode_prefix(&bad_version), Err(DecodeError::BadVersion(2)));
-    let mut bad_magic = HEARTBEAT.to_vec();
-    bad_magic[0] = b'X';
-    assert_eq!(Capabilities::decode_prefix(&bad_magic), Err(DecodeError::BadMagic));
-}
-
-#[test]
-fn wire_decoder_rejects_payload_when_fixed_frame_exceeds_expected_length() {
-    // The half of a layout change that would otherwise be silent: a wider
-    // assignment from a newer host has a valid header, a known type byte and
-    // enough bytes for every field this build knows, so a length check is the
-    // only thing between it and being adopted as a plausible wrong share.
-    // `WIRE_VERSION` does not move before 1.0, so this is that check.
-    let mut wider = ADMIN.to_vec();
+fn msg_decoder_rejects_body_when_fixed_body_exceeds_expected_length() {
+    // The half of a layout change that would otherwise be silent: a wider assignment from a
+    // newer host has a known type byte and enough bytes for every field this build knows, so
+    // a length check is the only thing between it and being adopted as a plausible wrong
+    // share.
+    let mut wider = ASSIGN.to_vec();
     wider.push(0xFF);
     assert_eq!(
-        Frame::decode(&wider),
-        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN + 1 })
-    );
-
-    let mut wider = HEARTBEAT.to_vec();
-    wider.push(0xFF);
-    assert_eq!(
-        Frame::decode(&wider),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN + 1 })
+        DownMsg::decode(DownType::Assign.as_u8(), &wider),
+        Err(DecodeError::BadLength { need: ASSIGN_LEN, got: ASSIGN_LEN + 1 })
     );
 }
 
 #[test]
-fn wire_codec_matches_expected_ota_frame_lengths_when_checking_constants() {
-    // Frozen until 1.0, so a host updates a node on any minor through them.
-    assert_eq!(OTA_BEGIN.len(), OTA_BEGIN_MSG_LEN);
-    assert_eq!(OTA_BEGIN_MSG_LEN, 47);
-    assert_eq!(OTA_CHUNK_HEADER, 11);
-    assert_eq!(OTA_CHUNK, 1024);
-    assert_eq!(OTA_CHUNK_MSG_MAX, 1035);
-    assert_eq!(OTA_COMMIT.len(), OTA_COMMIT_MSG_LEN);
-    assert_eq!(OTA_ABORT.len(), OTA_ABORT_MSG_LEN);
-    assert_eq!(OTA_COMMIT_MSG_LEN, 7);
-    assert_eq!(OTA_CONFIRM.len(), OTA_CONFIRM_MSG_LEN);
-    assert_eq!(OTA_CONFIRM_MSG_LEN, 6);
-    assert_eq!(OTA_STATUS.len(), OTA_STATUS_MSG_LEN);
-    assert_eq!(OTA_STATUS_MSG_LEN, 12);
+fn update_codec_matches_expected_body_lengths_when_checking_constants() {
+    assert_eq!(OTA_BEGIN.len(), UPDATE_BEGIN_LEN);
+    assert_eq!(UPDATE_BEGIN_LEN, 41);
+    assert_eq!(UPDATE_CHUNK_HEADER, 5);
+    assert_eq!(UPDATE_CHUNK, 1024);
+    assert_eq!(UPDATE_CHUNK_MAX, 1029);
+    assert_eq!(OTA_COMMIT.len(), UPDATE_COMMIT_LEN);
+    assert_eq!(OTA_ABORT.len(), UPDATE_ABORT_LEN);
+    assert_eq!(UPDATE_COMMIT_LEN, 1);
+    assert_eq!(OTA_CONFIRM.len(), UPDATE_CONFIRM_LEN);
+    assert_eq!(UPDATE_CONFIRM_LEN, 0);
+    assert_eq!(OTA_STATUS.len(), UPDATE_STATUS_LEN);
+    assert_eq!(UPDATE_STATUS_LEN, 6);
     // A chunk is longer than anything a node sends; the status keeps to the node ceiling.
     const {
-        assert!(OTA_CHUNK_MSG_MAX <= MAX_ESPNOW_V2_PAYLOAD);
-        assert!(OTA_CHUNK_MSG_MAX > MAX_NODE_PAYLOAD);
-        assert!(OTA_STATUS_MSG_LEN <= MAX_NODE_PAYLOAD);
+        assert!(UPDATE_CHUNK_MAX == MAX_NODE_DOWN);
+        assert!(UPDATE_CHUNK_MAX > MAX_NODE_PAYLOAD);
+        assert!(UPDATE_STATUS_LEN <= MAX_NODE_PAYLOAD);
     };
 }
 
-fn ota_begin() -> OtaBeginMsg {
+fn ota_begin() -> UpdateBegin {
     let mut sha256 = [0u8; 32];
     for (i, byte) in sha256.iter_mut().enumerate() {
         *byte = i as u8;
     }
-    OtaBeginMsg {
+    UpdateBegin {
         session: 7,
         len: 123_456,
         sha256,
@@ -1186,132 +1051,132 @@ fn ota_begin() -> OtaBeginMsg {
 }
 
 #[test]
-fn ota_begin_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+fn update_begin_serializes_byte_for_byte_when_encoded_and_decoded() {
     assert_eq!(ota_begin().encode().as_slice(), OTA_BEGIN);
-    assert_eq!(OtaBeginMsg::decode(OTA_BEGIN), Ok(ota_begin()));
+    assert_eq!(UpdateBegin::decode(OTA_BEGIN), Ok(ota_begin()));
 }
 
 #[test]
-fn ota_begin_msg_rejects_frame_when_length_differs() {
+fn update_begin_rejects_body_when_length_differs() {
     let mut wider = OTA_BEGIN.to_vec();
     wider.push(0);
     assert_eq!(
-        OtaBeginMsg::decode(&wider),
-        Err(DecodeError::BadLength { need: OTA_BEGIN_MSG_LEN, got: OTA_BEGIN_MSG_LEN + 1 })
+        UpdateBegin::decode(&wider),
+        Err(DecodeError::BadLength { need: UPDATE_BEGIN_LEN, got: UPDATE_BEGIN_LEN + 1 })
     );
     assert_eq!(
-        Frame::decode(&OTA_BEGIN[..OTA_BEGIN_MSG_LEN - 1]),
-        Err(DecodeError::BadLength { need: OTA_BEGIN_MSG_LEN, got: OTA_BEGIN_MSG_LEN - 1 })
+        UpdateBegin::decode(&OTA_BEGIN[..UPDATE_BEGIN_LEN - 1]),
+        Err(DecodeError::BadLength { need: UPDATE_BEGIN_LEN, got: UPDATE_BEGIN_LEN - 1 })
     );
 }
 
 #[test]
-fn ota_chunk_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
-    let chunk = OtaChunkMsg { session: 7, offset: 0x0001_0400, data: &[0xAA, 0xBB, 0xCC] };
-    let mut out = [0u8; OTA_CHUNK_MSG_MAX];
+fn update_chunk_serializes_byte_for_byte_when_encoded_and_decoded() {
+    let chunk = UpdateChunk { session: 7, offset: 0x0001_0400, data: &[0xAA, 0xBB, 0xCC] };
+    let mut out = [0u8; UPDATE_CHUNK_MAX];
     let len = chunk.encode_into(&mut out).expect("fits");
     assert_eq!(&out[..len], OTA_CHUNK_SHORT);
-    assert_eq!(OtaChunkMsg::decode(OTA_CHUNK_SHORT), Ok(chunk));
+    assert_eq!(UpdateChunk::decode(OTA_CHUNK_SHORT), Ok(chunk));
 }
 
 #[test]
-fn ota_chunk_msg_round_trips_when_data_is_a_full_chunk() {
-    let data: Vec<u8> = (0..OTA_CHUNK).map(|i| i as u8).collect();
-    let chunk = OtaChunkMsg { session: 1, offset: 4096, data: &data };
-    let mut out = [0u8; OTA_CHUNK_MSG_MAX];
-    assert_eq!(chunk.encode_into(&mut out), Some(OTA_CHUNK_MSG_MAX));
-    assert_eq!(OtaChunkMsg::decode(&out), Ok(chunk));
+fn update_chunk_round_trips_when_data_is_a_full_chunk() {
+    let data: Vec<u8> = (0..UPDATE_CHUNK).map(|i| i as u8).collect();
+    let chunk = UpdateChunk { session: 1, offset: 4096, data: &data };
+    let mut out = [0u8; UPDATE_CHUNK_MAX];
+    assert_eq!(chunk.encode_into(&mut out), Some(UPDATE_CHUNK_MAX));
+    assert_eq!(UpdateChunk::decode(&out), Ok(chunk));
 }
 
 #[test]
-fn ota_chunk_msg_rejects_frame_when_data_is_empty_or_longer_than_a_chunk() {
+fn update_chunk_rejects_body_when_data_is_empty_or_longer_than_a_chunk() {
     assert_eq!(
-        OtaChunkMsg::decode(&OTA_CHUNK_SHORT[..OTA_CHUNK_HEADER]),
-        Err(DecodeError::TooShort { need: OTA_CHUNK_HEADER + 1, got: OTA_CHUNK_HEADER })
+        UpdateChunk::decode(&OTA_CHUNK_SHORT[..UPDATE_CHUNK_HEADER]),
+        Err(DecodeError::TooShort { need: UPDATE_CHUNK_HEADER + 1, got: UPDATE_CHUNK_HEADER })
     );
-    let mut wider = [0u8; OTA_CHUNK_MSG_MAX + 1];
-    wider[..OTA_CHUNK_HEADER].copy_from_slice(&OTA_CHUNK_SHORT[..OTA_CHUNK_HEADER]);
+    let mut wider = [0u8; UPDATE_CHUNK_MAX + 1];
+    wider[..UPDATE_CHUNK_HEADER].copy_from_slice(&OTA_CHUNK_SHORT[..UPDATE_CHUNK_HEADER]);
     assert_eq!(
-        Frame::decode(&wider),
-        Err(DecodeError::BadLength { need: OTA_CHUNK_MSG_MAX, got: OTA_CHUNK_MSG_MAX + 1 })
+        UpdateChunk::decode(&wider),
+        Err(DecodeError::BadLength { need: UPDATE_CHUNK_MAX, got: UPDATE_CHUNK_MAX + 1 })
     );
 }
 
 #[test]
-fn ota_chunk_msg_refuses_to_encode_when_data_is_empty_or_too_long() {
-    let mut out = [0x5Au8; OTA_CHUNK_MSG_MAX];
-    let empty = OtaChunkMsg { session: 1, offset: 0, data: &[] };
+fn update_chunk_refuses_to_encode_when_data_is_empty_or_too_long() {
+    let mut out = [0x5Au8; UPDATE_CHUNK_MAX];
+    let empty = UpdateChunk { session: 1, offset: 0, data: &[] };
     assert_eq!(empty.encode_into(&mut out), None);
-    let long = [0u8; OTA_CHUNK + 1];
-    let long = OtaChunkMsg { session: 1, offset: 0, data: &long };
+    let long = [0u8; UPDATE_CHUNK + 1];
+    let long = UpdateChunk { session: 1, offset: 0, data: &long };
     assert_eq!(long.encode_into(&mut out), None);
-    let short_out = &mut [0u8; OTA_CHUNK_HEADER + 2];
-    let three = OtaChunkMsg { session: 1, offset: 0, data: &[1, 2, 3] };
+    let short_out = &mut [0u8; UPDATE_CHUNK_HEADER + 2];
+    let three = UpdateChunk { session: 1, offset: 0, data: &[1, 2, 3] };
     assert_eq!(three.encode_into(short_out), None);
     assert!(out.iter().all(|&b| b == 0x5A), "nothing written on a refusal");
 }
 
 #[test]
-fn ota_commit_and_abort_msgs_serialize_byte_for_byte_when_encoded_and_decoded() {
-    assert_eq!(OtaCommitMsg { session: 7 }.encode().as_slice(), OTA_COMMIT);
-    assert_eq!(OtaCommitMsg::decode(OTA_COMMIT), Ok(OtaCommitMsg { session: 7 }));
-    assert_eq!(OtaAbortMsg { session: 7 }.encode().as_slice(), OTA_ABORT);
-    assert_eq!(OtaAbortMsg::decode(OTA_ABORT), Ok(OtaAbortMsg { session: 7 }));
+fn update_commit_and_abort_serialize_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(UpdateCommit { session: 7 }.encode().as_slice(), OTA_COMMIT);
+    assert_eq!(UpdateCommit::decode(OTA_COMMIT), Ok(UpdateCommit { session: 7 }));
+    assert_eq!(UpdateAbort { session: 7 }.encode().as_slice(), OTA_ABORT);
+    assert_eq!(UpdateAbort::decode(OTA_ABORT), Ok(UpdateAbort { session: 7 }));
 
     let mut wider = OTA_COMMIT.to_vec();
     wider.push(0);
     assert_eq!(
-        Frame::decode(&wider),
-        Err(DecodeError::BadLength { need: OTA_COMMIT_MSG_LEN, got: OTA_COMMIT_MSG_LEN + 1 })
+        UpdateCommit::decode(&wider),
+        Err(DecodeError::BadLength { need: UPDATE_COMMIT_LEN, got: UPDATE_COMMIT_LEN + 1 })
     );
     assert_eq!(
-        Frame::decode(&OTA_ABORT[..OTA_ABORT_MSG_LEN - 1]),
-        Err(DecodeError::BadLength { need: OTA_ABORT_MSG_LEN, got: OTA_ABORT_MSG_LEN - 1 })
+        UpdateAbort::decode(&OTA_ABORT[..UPDATE_ABORT_LEN - 1]),
+        Err(DecodeError::BadLength { need: UPDATE_ABORT_LEN, got: UPDATE_ABORT_LEN - 1 })
     );
 }
 
 #[test]
-fn ota_confirm_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
-    assert_eq!(OtaConfirmMsg.encode().as_slice(), OTA_CONFIRM);
-    assert_eq!(OtaConfirmMsg::decode(OTA_CONFIRM), Ok(OtaConfirmMsg));
+fn update_confirm_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(UpdateConfirm.encode().as_slice(), OTA_CONFIRM);
+    assert_eq!(UpdateConfirm::decode(OTA_CONFIRM), Ok(UpdateConfirm));
     let mut wider = OTA_CONFIRM.to_vec();
     wider.push(0);
     assert_eq!(
-        OtaConfirmMsg::decode(&wider),
-        Err(DecodeError::BadLength { need: OTA_CONFIRM_MSG_LEN, got: OTA_CONFIRM_MSG_LEN + 1 })
+        UpdateConfirm::decode(&wider),
+        Err(DecodeError::BadLength { need: UPDATE_CONFIRM_LEN, got: UPDATE_CONFIRM_LEN + 1 })
     );
 }
 
 #[test]
-fn ota_status_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
-    let status = OtaStatusMsg { session: 7, state: OtaState::Receiving, next_offset: 8192 };
+fn update_status_serializes_byte_for_byte_when_encoded_and_decoded() {
+    let status = UpdateStatus { session: 7, state: UpdateState::Receiving, next_offset: 8192 };
     assert_eq!(status.encode().as_slice(), OTA_STATUS);
-    assert_eq!(OtaStatusMsg::decode(OTA_STATUS), Ok(status));
+    assert_eq!(UpdateStatus::decode(OTA_STATUS), Ok(status));
     let mut wider = OTA_STATUS.to_vec();
     wider.push(0);
     assert_eq!(
-        Frame::decode(&wider),
-        Err(DecodeError::BadLength { need: OTA_STATUS_MSG_LEN, got: OTA_STATUS_MSG_LEN + 1 })
+        UpdateStatus::decode(&wider),
+        Err(DecodeError::BadLength { need: UPDATE_STATUS_LEN, got: UPDATE_STATUS_LEN + 1 })
     );
 }
 
 #[test]
-fn ota_state_round_trips_every_byte_when_converted() {
+fn update_state_round_trips_every_byte_when_converted() {
     let named = [
-        (OtaState::Idle, 0),
-        (OtaState::Receiving, 1),
-        (OtaState::Verified, 2),
-        (OtaState::HashMismatch, 3),
-        (OtaState::WrongBoard, 4),
-        (OtaState::TooLarge, 5),
-        (OtaState::FlashError, 6),
+        (UpdateState::Idle, 0),
+        (UpdateState::Receiving, 1),
+        (UpdateState::Verified, 2),
+        (UpdateState::HashMismatch, 3),
+        (UpdateState::WrongBoard, 4),
+        (UpdateState::TooLarge, 5),
+        (UpdateState::FlashError, 6),
     ];
     for (state, byte) in named {
         assert_eq!(state.as_u8(), byte);
-        assert_eq!(OtaState::from_u8(byte), state);
+        assert_eq!(UpdateState::from_u8(byte), state);
     }
     for raw in 0..=u8::MAX {
-        assert_eq!(OtaState::from_u8(raw).as_u8(), raw);
+        assert_eq!(UpdateState::from_u8(raw).as_u8(), raw);
     }
-    assert_eq!(OtaState::from_u8(7), OtaState::Unknown(7));
+    assert_eq!(UpdateState::from_u8(7), UpdateState::Unknown(7));
 }

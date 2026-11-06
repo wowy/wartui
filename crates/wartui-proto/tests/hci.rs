@@ -1,6 +1,6 @@
 //! The four commands and one event a BLE scan is made of.
 
-use wartui_proto::air::{RecordKind, SIGHTING_RECORD_MAX, Security, SightingMsg};
+use wartui_proto::bus::{RecordKind, SIGHTING_RECORD_MAX, Security, SightingMsg};
 use wartui_proto::hci::{RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters};
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.

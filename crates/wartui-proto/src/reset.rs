@@ -1,6 +1,6 @@
 //! Why a board is running this boot: the bridge reports it in
 //! [`BridgeToHost::Ready`](crate::link::BridgeToHost::Ready), and a node in every
-//! [`HeartbeatMsg`](crate::air::HeartbeatMsg).
+//! [`Heartbeat`](crate::bus::Heartbeat).
 
 use core::fmt;
 
@@ -37,7 +37,7 @@ pub enum ResetCause {
 }
 
 impl ResetCause {
-    /// The cause's byte in a [`HeartbeatMsg`](crate::air::HeartbeatMsg).
+    /// The cause's byte in a [`Heartbeat`](crate::bus::Heartbeat).
     ///
     /// [`Self::Unknown`] is 0, so a zeroed byte reads as nothing known, and the named
     /// causes count up from 1 in declaration order. The codes are fixed: a new cause

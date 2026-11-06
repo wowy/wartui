@@ -14,7 +14,7 @@ use wartui_proto::plan::{
 
 const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
 
-const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=20;
+const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=14;
 
 const _: () = assert!(*FLEET_SIZES.end() as usize == MAX_NODES);
 
@@ -233,16 +233,15 @@ fn planner_distributes_all_index_runs_to_nodes_when_channel_count_permits() {
 }
 
 #[test]
-fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
+fn plan_encodes_fleet_metadata_into_assignment_when_generating_assign() {
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
-        let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE, 8).expect("assigned");
-        assert_eq!(admin.epoch, 9);
-        assert_eq!(admin.channels, p.channels_for(n).expect("assigned"));
+        let assign = p.assign_for(n, 9, wartui_proto::bus::ASSIGN_FLAG_BLE).expect("assigned");
+        assert_eq!(assign.epoch, 9);
+        assert_eq!(assign.channels, p.channels_for(n).expect("assigned"));
         // Flags are the caller's: which node scans Bluetooth is the operator's
         // decision, and the plan is what acts on it.
-        assert!(admin.scan_ble());
-        assert_eq!(admin.tx_power, 8);
+        assert!(assign.scan_ble());
     }
 }
 
@@ -300,17 +299,17 @@ fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
     // believing it is sweeping.
     let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Wifi]).expect("a valid fleet");
     assert!(
-        p.admin_for(0, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8)
-            .is_some_and(|admin| admin.channels.is_empty())
+        p.assign_for(0, 1, wartui_proto::bus::ASSIGN_FLAG_BLE)
+            .is_some_and(|assign| assign.channels.is_empty())
     );
-    assert!(p.admin_for(0, 1, 0, 8).is_none(), "an empty mask without the flag is refused");
-    assert!(p.admin_for(1, 1, 0, 8).is_some(), "and a real share needs no flag");
+    assert!(p.assign_for(0, 1, 0).is_none(), "an empty mask without the flag is refused");
+    assert!(p.assign_for(1, 1, 0).is_some(), "and a real share needs no flag");
 
     // A second Bluetooth slot is `None` either way: there is nothing to say to it, and
     // the flag does not invent something.
     let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Bluetooth]).expect("a valid fleet");
     assert!(p.channels_for(1).is_none());
-    assert!(p.admin_for(1, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8).is_none());
+    assert!(p.assign_for(1, 1, wartui_proto::bus::ASSIGN_FLAG_BLE).is_none());
 }
 
 #[test]
@@ -356,7 +355,7 @@ fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
 
 #[test]
 fn wire_epoch_cycles_non_zero_u8_range_when_epoch_counter_increments() {
-    use wartui_proto::air::wire_epoch;
+    use wartui_proto::bus::wire_epoch;
 
     // The host counts in a `u64`; the wire field is one byte and
     // the firmware never puts 0 in it, so a node holding a freshly-zeroed field

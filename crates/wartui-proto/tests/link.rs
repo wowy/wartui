@@ -5,58 +5,41 @@
 //! below and leave the suite passing.
 
 use heapless::{String, Vec};
-use wartui_proto::air::{
-    Board, Capabilities, DieTemp, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg, Vdd,
+use wartui_proto::bus::{
+    Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, RecordKind, Security,
+    SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UpType, UpdateState, UpdateStatus, Vdd,
 };
-use wartui_proto::air::{OtaState, OtaStatusMsg};
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, FrameAccumulator, GPS_FRAME, GPS_WRITE_MAX,
-    GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase,
-    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, QueueId, QueueStat,
-    QueueStats, RadioInfo, RadioLinkStats, SendPayload, SendStatus, UPDATE_STATUS_MAX, UpdateOp,
-    UpdateStatus, crc16, decode_frame, encode_frame, encode_host_frame,
+    BridgeToHost, Chip, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
+    GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase, MAX_FRAME,
+    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, QueueId, QueueStat, QueueStats, RadioInfo,
+    RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes, crc16,
+    decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
 fn sample_commands() -> Vec<HostToBridge, 16> {
-    let mut payload = Vec::new();
-    payload
-        .extend_from_slice(
-            &HeartbeatMsg {
-                counter: 42,
-                epoch: 0,
-                capabilities: Capabilities::here(Board::Esp32c5),
-                wifi_refused: 0,
-                ble_refused: 0,
-                beat: 1,
-                unsent: 0,
-                dwell: 0,
-                prev_dwell: 0,
-                tx_power: 8,
-                reset_cause: ResetCause::PowerOn,
-                vdd: Vdd::NONE,
-                die_temp: DieTemp::NONE,
-            }
-            .encode(),
-        )
-        .expect("a heartbeat fits a send");
+    let assign = Assign { epoch: 3, flags: 0, channels: wartui_proto::plan::ChannelSet::empty() };
+    let body = ToNodeBody::from_slice(&assign.encode()).expect("an assignment fits");
 
     let mut v = Vec::new();
-    v.push(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
-    v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
+    v.push(HostToBridge::Identify).expect("sample_commands has room");
     v.push(HostToBridge::GetStatus).expect("sample_commands has room");
     v.push(HostToBridge::Reset).expect("sample_commands has room");
-    v.push(HostToBridge::SetTxPower { power: 8 }).expect("sample_commands has room");
-    v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
-        .expect("sample_commands has room");
     v.push(HostToBridge::GpsWrite {
         bytes: GpsWriteBytes::from_slice(&[0xB5, 0x62, 0x06, 0x8A]).expect("fits"),
     })
     .expect("sample_commands has room");
     v.push(HostToBridge::Update(encoded_op(&Op::Begin { session: 7, len: 1234, sha256: [9; 32] })))
         .expect("sample_commands has room");
+    v.push(HostToBridge::ToNode {
+        slot: Slot::new(1, 2).expect("B3"),
+        id: 0xBEEF,
+        kind: DownType::Assign.as_u8(),
+        body,
+    })
+    .expect("sample_commands has room");
     v
 }
 
@@ -68,10 +51,10 @@ fn encoded_op(op: &Op<'_>) -> UpdateOp {
 }
 
 /// A status as a [`BridgeToHost::Update`] carries it.
-fn encoded_status(status: OtaStatusMsg) -> UpdateStatus {
+fn encoded_status(status: UpdateStatus) -> UpdateStatusBytes {
     let mut buf = [0u8; UPDATE_STATUS_MAX];
     let len = Op::Status(status).encode(&mut buf);
-    UpdateStatus::from_slice(&buf[..len]).expect("a status fits")
+    UpdateStatusBytes::from_slice(&buf[..len]).expect("a status fits")
 }
 
 /// The postcard bytes between a frame's version byte and its CRC.
@@ -92,8 +75,18 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         ssid: b"net",
         ext: &[],
     }));
-    let mut payload = Vec::new();
-    payload.extend_from_slice(writer.as_bytes()).expect("a batch fits the node ceiling");
+    let body = FromNodeBody::from_slice(writer.as_bytes()).expect("a batch fits the node ceiling");
+    let heartbeat = Heartbeat {
+        capabilities: Capabilities::here(Board::Esp32c5),
+        mac: [2, 0, 0, 0, 0, 1],
+        counter: 42,
+        epoch: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
+        reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
+    };
 
     let mut v = Vec::new();
     v.push(BridgeToHost::Ready {
@@ -128,12 +121,27 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         image: Some([0xD1; 32]),
     })
     .expect("sample_events has room");
-    v.push(BridgeToHost::Rx { src: [9; 6], dst: BROADCAST, rssi: -73, rx_us: 123_456, payload })
-        .expect("sample_events has room");
-    v.push(BridgeToHost::SendResult { id: 7, status: SendStatus::AckOk, tx_us: 999 })
-        .expect("sample_events has room");
+    v.push(BridgeToHost::FromNode {
+        slot: Slot::new(0, 0).expect("A1"),
+        rx_us: 123_456,
+        kind: UpType::Sightings.as_u8(),
+        body,
+    })
+    .expect("sample_events has room");
+    v.push(BridgeToHost::FromNode {
+        slot: Slot::new(1, 6).expect("B7"),
+        rx_us: 7,
+        kind: UpType::Heartbeat.as_u8(),
+        body: FromNodeBody::from_slice(&heartbeat.encode()).expect("fits"),
+    })
+    .expect("sample_events has room");
+    v.push(BridgeToHost::Delivered { id: 7 }).expect("sample_events has room");
+    for reason in
+        [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::TooLarge, Undelivered::Timeout]
+    {
+        v.push(BridgeToHost::Undelivered { id: 8, reason }).expect("sample_events has room");
+    }
     v.push(BridgeToHost::Status {
-        peer_count: 3,
         rx_count: 1000,
         dropped_tx: 0,
         uptime_ms: 60_000,
@@ -150,9 +158,9 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
     .expect("sample_events has room");
     v.push(BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNGGA,").expect("fits") })
         .expect("sample_events has room");
-    v.push(BridgeToHost::Update(encoded_status(OtaStatusMsg {
+    v.push(BridgeToHost::Update(encoded_status(UpdateStatus {
         session: 7,
-        state: OtaState::Receiving,
+        state: UpdateState::Receiving,
         next_offset: 4096,
     })))
     .expect("sample_events has room");
@@ -231,7 +239,8 @@ fn link_codec_terminates_frame_with_single_null_byte_when_cobs_encoded() {
 
 #[test]
 fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
-    let cmd = HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] };
+    let cmd =
+        HostToBridge::GpsWrite { bytes: GpsWriteBytes::from_slice(&[1, 2, 3]).expect("fits") };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
 
@@ -296,7 +305,9 @@ fn frame_accumulator_resynchronizes_cleanly_when_stream_contains_bootloader_nois
     // A bridge reset sprays ROM bootloader chatter down the same pipe before
     // the first real frame. Nothing before the next terminator should survive,
     // and everything after it should.
-    let cmd = HostToBridge::AddPeer { mac: [0xa, 0xb, 0xc, 0xd, 0xe, 0xf] };
+    let cmd = HostToBridge::GpsWrite {
+        bytes: GpsWriteBytes::from_slice(&[0xa, 0xb, 0xc]).expect("fits"),
+    };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
 
@@ -369,7 +380,7 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
 fn frame_accumulator_decodes_following_frame_when_truncated_frame_is_terminated() {
     // A frame cut short and closed with its own `0x00` fails alone. Without that terminator
     // the fragment would run into the next frame and cost both.
-    let first = HostToBridge::AddPeer { mac: [1; 6] };
+    let first = HostToBridge::GpsWrite { bytes: GpsWriteBytes::from_slice(&[1; 6]).expect("fits") };
     let second = HostToBridge::GetStatus;
     let mut out = [0u8; MAX_FRAME];
     let n = encode_host_frame(&first, &mut out).expect("encodes");
@@ -460,9 +471,14 @@ fn link_decoder_rejects_payload_when_frame_is_truncated() {
 }
 
 #[test]
-fn link_round_trips_v2_send_when_payload_is_full() {
-    let payload = SendPayload::from_slice(&[0xA5; MAX_ESPNOW_V2_PAYLOAD]).expect("fits");
-    let cmd = HostToBridge::SendEspNow { id: 7, dst: [1; 6], ensure_peer: true, payload };
+fn link_round_trips_to_node_when_body_is_full() {
+    let body = ToNodeBody::from_slice(&[0xA5; MAX_NODE_DOWN]).expect("fits");
+    let cmd = HostToBridge::ToNode {
+        slot: Slot::new(0, 5).expect("A6"),
+        id: 7,
+        kind: DownType::UpdateChunk.as_u8(),
+        body,
+    };
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     // Through the accumulator the bridge uses, so a frame that outgrew it would be
@@ -478,11 +494,16 @@ fn link_round_trips_v2_send_when_payload_is_full() {
 }
 
 #[test]
-fn link_round_trips_node_rx_when_payload_is_full_and_has_no_zeros() {
-    // COBS grows a frame by one byte per 254 without a zero, so a full node frame with
+fn link_round_trips_from_node_when_body_is_full_and_has_no_zeros() {
+    // COBS grows a frame by one byte per 254 without a zero, so a full node body with
     // none is the longest bridge-to-host frame there is.
-    let payload = EspNowPayload::from_slice(&[0xFF; MAX_NODE_PAYLOAD]).expect("fits");
-    let event = BridgeToHost::Rx { src: [9; 6], dst: [2; 6], rssi: -40, rx_us: u32::MAX, payload };
+    let body = FromNodeBody::from_slice(&[0xFF; MAX_NODE_PAYLOAD]).expect("fits");
+    let event = BridgeToHost::FromNode {
+        slot: Slot::new(1, 6).expect("B7"),
+        rx_us: u32::MAX,
+        kind: 0xFF,
+        body,
+    };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&event, &mut out).expect("encodes");
     // Through the accumulator the host uses, so a frame that outgrew it would be
@@ -498,8 +519,54 @@ fn link_round_trips_node_rx_when_payload_is_full_and_has_no_zeros() {
 }
 
 #[test]
-fn link_refuses_send_payload_when_longer_than_v2_ceiling() {
-    assert!(SendPayload::from_slice(&[0; MAX_ESPNOW_V2_PAYLOAD + 1]).is_err());
+fn link_refuses_to_node_body_when_longer_than_max_node_down() {
+    assert!(ToNodeBody::from_slice(&[0; MAX_NODE_DOWN + 1]).is_err());
+}
+
+#[test]
+fn link_refuses_slot_when_byte_names_none() {
+    // Postcard: `FromNode`'s index, then the slot byte. A slot past the last fails the decode.
+    let event = BridgeToHost::FromNode {
+        slot: Slot::new(1, 6).expect("B7"),
+        rx_us: 0,
+        kind: 1,
+        body: FromNodeBody::new(),
+    };
+    let mut body = [0u8; 64];
+    let used = postcard::to_slice(&event, &mut body).expect("fits");
+    assert_eq!(&used[..2], &[6, 13]);
+    let mut bad = used.to_vec();
+    bad[1] = 14;
+    assert!(postcard::from_bytes::<BridgeToHost>(&bad).is_err());
+}
+
+#[test]
+fn link_codec_pins_variant_indices_when_encoded() {
+    // Postcard writes a variant as its index, so these are the wire.
+    let mut buf = [0u8; MAX_HOST_FRAME];
+    let commands = sample_commands();
+    assert_eq!(commands.len(), 6, "one of each");
+    for (want, cmd) in (0u8..).zip(&commands) {
+        assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
+    }
+    let events = [
+        (
+            6,
+            BridgeToHost::FromNode {
+                slot: Slot::new(0, 0).expect("A1"),
+                rx_us: 0,
+                kind: 1,
+                body: FromNodeBody::new(),
+            },
+        ),
+        (7, BridgeToHost::Delivered { id: 1 }),
+        (8, BridgeToHost::Undelivered { id: 1, reason: Undelivered::NoNode }),
+    ];
+    for (want, event) in &events {
+        assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
+    }
+    let undelivered = BridgeToHost::Undelivered { id: 1, reason: Undelivered::Timeout };
+    assert_eq!(postcard::to_slice(&undelivered, &mut buf).expect("encodes"), [8, 1, 3]);
 }
 
 #[test]
@@ -526,7 +593,6 @@ fn link_round_trips_gps_write_when_bytes_are_full() {
 #[test]
 fn link_round_trips_status_when_rx_oversize_is_set() {
     let status = BridgeToHost::Status {
-        peer_count: 1,
         rx_count: 10,
         dropped_tx: 0,
         uptime_ms: 5_000,
@@ -553,12 +619,10 @@ fn queue_id_lists_every_variant_when_all_read() {
     for (index, id) in QueueId::ALL.into_iter().enumerate() {
         let declared = match id {
             QueueId::RadioUp => 0,
-            QueueId::RadioSendJobs => 1,
-            QueueId::RadioDown => 2,
-            QueueId::HostPriority => 3,
-            QueueId::HostBulk => 4,
-            QueueId::RadioUpPriority => 5,
-            QueueId::RadioJobs => 6,
+            QueueId::RadioDown => 1,
+            QueueId::HostPriority => 2,
+            QueueId::HostBulk => 3,
+            QueueId::NodeDown => 4,
         };
         assert_eq!(index, declared, "{id:?}");
     }
@@ -567,7 +631,10 @@ fn queue_id_lists_every_variant_when_all_read() {
 #[test]
 fn queue_id_places_queue_on_p4_when_it_runs_there() {
     let on_p4: std::vec::Vec<_> = QueueId::ALL.into_iter().filter(|id| id.on_p4()).collect();
-    assert_eq!(on_p4, [QueueId::RadioDown, QueueId::HostPriority, QueueId::HostBulk]);
+    assert_eq!(
+        on_p4,
+        [QueueId::RadioDown, QueueId::HostPriority, QueueId::HostBulk, QueueId::NodeDown]
+    );
 }
 
 #[test]
@@ -592,7 +659,6 @@ fn link_round_trips_status_with_queues_and_radio_link() {
             .expect("eight fit");
     }
     let status = BridgeToHost::Status {
-        peer_count: 1,
         rx_count: 10,
         dropped_tx: 0,
         uptime_ms: 5_000,
@@ -642,26 +708,26 @@ fn link_round_trips_ready_with_radio() {
 #[test]
 fn link_codec_pins_update_bytes_when_host_sends_an_op() {
     // Postcard's variant index, then the op as a byte string: its length, then the
-    // `radio_link::update` layout. The index is `Update`'s place at the end of `HostToBridge`.
+    // `radio_link::update` layout.
     let cmd = HostToBridge::Update(encoded_op(&Op::Commit { session: 0x42 }));
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    assert_eq!(frame_body(&out[..n]), [8, 2, 3, 0x42]);
+    assert_eq!(frame_body(&out[..n]), [4, 2, 3, 0x42]);
 }
 
 #[test]
 fn link_codec_pins_update_bytes_when_bridge_sends_a_status() {
     let status =
-        OtaStatusMsg { session: 0x42, state: OtaState::Verified, next_offset: 0x0001_2000 };
+        UpdateStatus { session: 0x42, state: UpdateState::Verified, next_offset: 0x0001_2000 };
     let event = BridgeToHost::Update(encoded_status(status));
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&event, &mut out).expect("encodes");
-    assert_eq!(frame_body(&out[..n]), [7, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
+    assert_eq!(frame_body(&out[..n]), [5, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
 }
 
 #[test]
 fn link_round_trips_update_when_op_is_a_full_chunk() {
-    let data = [0xFF; wartui_proto::air::OTA_CHUNK];
+    let data = [0xFF; UPDATE_CHUNK];
     let cmd =
         HostToBridge::Update(encoded_op(&Op::Chunk { session: 3, offset: 8192, data: &data }));
     let mut out = [0u8; MAX_HOST_FRAME];

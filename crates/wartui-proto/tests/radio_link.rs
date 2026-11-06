@@ -2,10 +2,7 @@
 
 use heapless::Vec;
 use wartui_proto::frame_ring::FrameRing;
-use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD,
-    QueueId, QueueStat, SendStatus, ShortStr, crc16,
-};
+use wartui_proto::link::{Chip, LogLevel, LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
     BODY_MAX, CORE_VERSION, CRC_LEN, Down, HEADER_LEN, HELLO_IMAGE_LEN, HELLO_LEN, Held, Hello,
     Kind, MAGIC, PAYLOAD_MAX, Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
@@ -15,16 +12,7 @@ use wartui_proto::radio_link::{
 use wartui_proto::reset::ResetCause;
 
 fn log(text: &str) -> Up {
-    Up::Message(BridgeToHost::Log { level: LogLevel::Info, message: text.try_into().unwrap() })
-}
-
-fn largest_send() -> Down {
-    Down::Command(HostToBridge::SendEspNow {
-        id: 0xBEEF,
-        dst: [0x12; 6],
-        ensure_peer: true,
-        payload: Vec::from_slice(&[0xA5; MAX_ESPNOW_V2_PAYLOAD]).unwrap(),
-    })
+    Up::Log { level: Some(LogLevel::Info), message: text.try_into().unwrap() }
 }
 
 /// A sealed `Hello` packet with a three-byte payload, for the tests that corrupt one.
@@ -490,8 +478,9 @@ fn radio_link_hello_decodes_none_when_short() {
 
 #[test]
 fn radio_link_packer_refuses_record_that_does_not_fit() {
-    let mut record = [0u8; PAYLOAD_MAX];
-    let len = encode_down(&largest_send(), &mut record).unwrap();
+    // A record a little over half a payload: one fits, a second does not.
+    let record = [0x5Au8; PAYLOAD_MAX / 2 + 1];
+    let len = record.len();
     let mut payload = [0u8; PAYLOAD_MAX];
     let mut packer = Packer::new(&mut payload);
     assert!(packer.push_encoded(&record[..len]));
@@ -512,49 +501,24 @@ fn radio_link_records_stop_when_len_is_zero() {
 #[test]
 fn radio_link_largest_messages_fit_one_packet() {
     let mut out = [0u8; BODY_MAX];
-    let down = encode_down(&largest_send(), &mut out).unwrap();
-    assert!(down + 2 <= PAYLOAD_MAX, "largest Down is {down} bytes");
-    let rx = Up::Message(BridgeToHost::Rx {
-        src: [0x34; 6],
-        dst: [0x56; 6],
-        rssi: -90,
-        rx_us: u32::MAX,
-        payload: Vec::from_slice(&[0x5A; MAX_NODE_PAYLOAD]).unwrap(),
-    });
-    let up = encode_up(&rx, &mut out).unwrap();
-    assert!(up + 2 <= PAYLOAD_MAX, "largest Up is {up} bytes");
-}
-
-#[test]
-fn radio_link_up_is_priority_when_not_a_received_frame() {
-    // The C6 queues these apart from the traffic, so a backlog of frames evicts frames.
-    let rx = Up::Message(BridgeToHost::Rx {
-        src: [1; 6],
-        dst: [2; 6],
-        rssi: -40,
-        rx_us: 0,
-        payload: Vec::new(),
-    });
-    assert!(!rx.is_priority());
-    let result =
-        Up::Message(BridgeToHost::SendResult { id: 1, status: SendStatus::AckOk, tx_us: 0 });
-    assert!(result.is_priority());
-    assert!(log("peer added").is_priority());
-    let error = Up::Message(BridgeToHost::Error { message: "no".try_into().unwrap() });
-    assert!(error.is_priority());
     let status = Up::RadioStatus(RadioStatus {
-        peer_count: 0,
-        rx_count: 0,
-        rx_oversize: 0,
-        heap_free: 0,
-        uptime_ms: 0,
-        queues: Vec::new(),
-        crc_fail: 0,
-        bad_magic: 0,
-        seq_gap: 0,
-        uart_errors: 0,
+        heap_free: u32::MAX,
+        uptime_ms: u32::MAX,
+        queues: Vec::from_slice(
+            &[QueueStat { queue: QueueId::RadioUp, capacity: u32::MAX, high_water: 0, dropped: 0 };
+                4],
+        )
+        .unwrap(),
+        crc_fail: u32::MAX,
+        bad_magic: u32::MAX,
+        seq_gap: u32::MAX,
+        uart_errors: u32::MAX,
     });
-    assert!(status.is_priority());
+    let line = Up::Log { level: None, message: LogStr::try_from("x".repeat(96).as_str()).unwrap() };
+    for up in [status, line] {
+        let len = encode_up(&up, &mut out).unwrap();
+        assert!(len + 2 <= PAYLOAD_MAX, "{up:?} is {len} bytes");
+    }
 }
 
 #[test]
@@ -562,28 +526,18 @@ fn radio_link_revision_golden_bytes() {
     const MSG: &str =
         "Up/Down encoding changed: bump radio_link::LINK_REVISION and update these bytes";
     let mut out = [0u8; 64];
+    assert_eq!(wartui_proto::radio_link::LINK_REVISION, 1, "{MSG}");
 
-    let down = Down::Command(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] });
+    let down = Down::GetRadioStatus;
     let len = encode_down(&down, &mut out).unwrap();
-    assert_eq!(out[..len], [0, 1, 1, 2, 3, 4, 5, 6], "{MSG}");
+    assert_eq!(out[..len], [0], "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), down);
 
     let mut queues = Vec::new();
     queues
         .push(QueueStat { queue: QueueId::RadioUp, capacity: 300, high_water: 2, dropped: 1 })
         .unwrap();
-    queues
-        .push(QueueStat {
-            queue: QueueId::RadioUpPriority,
-            capacity: 8192,
-            high_water: 3,
-            dropped: 0,
-        })
-        .unwrap();
     let up = Up::RadioStatus(RadioStatus {
-        peer_count: 3,
-        rx_count: 200,
-        rx_oversize: 4,
         heap_free: 5,
         uptime_ms: 6,
         queues,
@@ -595,87 +549,36 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_up(&up, &mut out).unwrap();
     #[rustfmt::skip]
     let expected = [
-        1,          // Up::RadioStatus
-        3,          // peer_count
-        0xC8, 0x01, // rx_count 200, varint
-        4, 5, 6,    // rx_oversize, heap_free, uptime_ms
-        2,          // queues: two entries
+        0,          // Up::RadioStatus
+        5, 6,       // heap_free, uptime_ms
+        1,          // queues: one entry
         0,          // QueueId::RadioUp
         0xAC, 0x02, // capacity 300, varint
         2, 1,       // high_water, dropped
-        5,          // QueueId::RadioUpPriority
-        0x80, 0x40, // capacity 8192, varint
-        3, 0,       // high_water, dropped
         7, 8, 9,    // crc_fail, bad_magic, seq_gap
         10,         // uart_errors
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), up);
+
+    let line = Up::Log { level: Some(LogLevel::Warn), message: "hi".try_into().unwrap() };
+    let len = encode_up(&line, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        1,          // Up::Log
+        1, 2,       // Some(LogLevel::Warn)
+        2, b'h', b'i', // message, length first
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), line);
+
+    let error = Up::Log { level: None, message: "no".try_into().unwrap() };
+    let len = encode_up(&error, &mut out).unwrap();
+    assert_eq!(out[..len], [1, 0, 2, b'n', b'o'], "{MSG}");
 }
 
 /// The records that carry the traffic: a change to any of their fields must move
 /// `LINK_REVISION` too.
-#[test]
-fn radio_link_revision_golden_bytes_for_traffic() {
-    const MSG: &str =
-        "Up/Down encoding changed: bump radio_link::LINK_REVISION and update these bytes";
-    let mut out = [0u8; 64];
-
-    let rx = Up::Message(BridgeToHost::Rx {
-        src: [1, 2, 3, 4, 5, 6],
-        dst: [0xFF; 6],
-        rssi: -40,
-        rx_us: 1_000,
-        payload: Vec::from_slice(&[0xAA, 0xBB, 0xCC]).unwrap(),
-    });
-    let len = encode_up(&rx, &mut out).unwrap();
-    #[rustfmt::skip]
-    let expected = [
-        0,                                  // Up::Message
-        1,                                  // BridgeToHost::Rx
-        1, 2, 3, 4, 5, 6,                   // src
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst
-        0xD8,                               // rssi -40
-        0xE8, 0x07,                         // rx_us 1000, varint
-        3, 0xAA, 0xBB, 0xCC,                // payload, length first
-    ];
-    assert_eq!(out[..len], expected, "{MSG}");
-    assert_eq!(decode_up(&out[..len]).unwrap(), rx);
-
-    let result =
-        Up::Message(BridgeToHost::SendResult { id: 0x1234, status: SendStatus::AckOk, tx_us: 300 });
-    let len = encode_up(&result, &mut out).unwrap();
-    #[rustfmt::skip]
-    let expected = [
-        0,          // Up::Message
-        2,          // BridgeToHost::SendResult
-        0xB4, 0x24, // id 0x1234, varint
-        0,          // SendStatus::AckOk
-        0xAC, 0x02, // tx_us 300, varint
-    ];
-    assert_eq!(out[..len], expected, "{MSG}");
-    assert_eq!(decode_up(&out[..len]).unwrap(), result);
-
-    let send = Down::Command(HostToBridge::SendEspNow {
-        id: 7,
-        dst: [9; 6],
-        ensure_peer: true,
-        payload: Vec::from_slice(&[1, 2]).unwrap(),
-    });
-    let len = encode_down(&send, &mut out).unwrap();
-    #[rustfmt::skip]
-    let expected = [
-        0,                // Down::Command
-        3,                // HostToBridge::SendEspNow
-        7,                // id
-        9, 9, 9, 9, 9, 9, // dst
-        1,                // ensure_peer
-        2, 1, 2,          // payload, length first
-    ];
-    assert_eq!(out[..len], expected, "{MSG}");
-    assert_eq!(decode_down(&out[..len]).unwrap(), send);
-}
-
 #[test]
 fn radio_link_seq_check_reports_gaps_when_seq_skips_or_restarts() {
     let mut check = SeqCheck::new();

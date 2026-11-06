@@ -38,8 +38,7 @@
 //! ([`crate::split`]). A C6 whose hello carries no digest cannot take the bundle and needs one
 //! wired flash.
 //!
-//! [`PAYLOAD_MAX`] is 2034 so one packet carries the largest [`Down`], a 1,470-byte
-//! [`HostToBridge::SendEspNow`](crate::link::HostToBridge::SendEspNow), without fragmentation.
+//! [`PAYLOAD_MAX`] is 2034, frozen with the rest, so one packet carries any [`update`] op.
 
 use crate::link::{CobsStream, FrameAccumulator, crc16};
 
