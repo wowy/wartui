@@ -36,9 +36,11 @@ On the XIAO ESP32-C5:
 - **CS is active low and idles high.** The P4 drives each slot's CS as a plain output, high from
   boot. The node pulls its CS up, so it reads idle with no P4 attached.
 - **MISO is pulled up on the P4**, so an empty slot reads constant bytes and fails the magic.
-- **IRQ is shared by a bus's nodes.** A node drives D0 high to ask for a transfer. On the carrier
-  board the line is active low. A node wired straight to the P4 makes it active high, and the P4
-  pulls it down.
+- **IRQ is one line per bus.** A node drives D0 push-pull, high to ask for a transfer.
+  - On the carrier board, each node's D0 drives its own driver, which pulls the bus's shared line
+    low. So the line is active low, and no two D0 pins are ever wired together.
+  - Wired straight to the P4, one node has the IRQ line to itself. It is active high, and the P4
+    pulls it down.
 
 Every transfer is a fixed 1,040 bytes each way. The framing, and the handshake that re-arms the
 node between transfers, are in the `//!` of
