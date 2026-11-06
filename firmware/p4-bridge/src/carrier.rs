@@ -16,7 +16,7 @@
 //! An expander that answers and then fails is an `Error` too, and leaves power control lost:
 //! every power-cycle answers `Failed`. The board is then the one the registers named, or, when
 //! none had, the fourteen with no slot driven, which broken also reports. A fault goes with
-//! every announcement, as the GPS fault does, and so does an `Info` line naming a carrier that
+//! every announcement, as the GPS fault does, and so does a `Log` line naming a carrier that
 //! came up and what it powered.
 //!
 //! **[`run`] powers the nodes one at a time, [`STAGGER`] apart**, in slot order A1, B1, A2, B2,
@@ -58,13 +58,17 @@ pub const POWER_OFF: Duration = Duration::from_secs(1);
 pub const TRANSACTION_TIMEOUT_MS: u64 = 10;
 /// Tries at switching a node back on before a cycle gives up and answers `Failed`.
 const ON_TRIES: u8 = 3;
+/// Tries at the expander's first read before the board is called the bench, so one glitch at
+/// boot does not hide a carrier. A bench board NACKs each at once, so they cost it little.
+const DETECT_TRIES: u8 = 3;
 
 /// The fault when the expander answered and then failed at boot.
 const LOST: &str = "the carrier's I/O expander stopped answering, so node power is out of reach";
 /// The fault when the expander's inputs name no carrier.
 const BROKEN: &str =
     "the carrier's I/O expander reads as no known carrier, so no node is powered or driven";
-/// The fault when a node could not be powered at boot.
+/// The fault while a failed write may have left a node off. The next write of the wanted state
+/// that lands clears it.
 const UNPOWERED: &str = "the carrier's I/O expander did not answer, so a node may be unpowered";
 
 /// What [`detect`] found.
@@ -135,7 +139,9 @@ pub fn detect(i2c: &mut I2c<'_, Blocking>) -> Carrier {
 }
 
 fn read_expander(i2c: &mut I2c<'_, Blocking>) -> Carrier {
-    let Ok(config) = read16(i2c, REG_CONFIG) else { return Carrier::bench() };
+    let Some(config) = (0..DETECT_TRIES).find_map(|_| read16(i2c, REG_CONFIG).ok()) else {
+        return Carrier::bench();
+    };
     let warm = warm_board(config);
     let Ok(output) = read16(i2c, REG_OUTPUT) else { return Carrier::lost(warm, LOST) };
     if let Some(board) = warm {
@@ -270,10 +276,8 @@ pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared
             }
             first = false;
             output |= port(slot);
-            if !write_output(i2c, output).await {
-                shared.power.fault.set(Some(UNPOWERED));
-                shared.push_error(UNPOWERED);
-            }
+            let landed = write_output(i2c, output).await;
+            note_powered(shared, landed);
         }
     }
     let power = &shared.power;
@@ -283,27 +287,42 @@ pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared
             power.wake.wait().await;
             continue;
         };
-        let outcome = cycle(i2c, &mut output, slot).await;
+        let outcome = cycle(i2c, shared, output, slot).await;
         power.requests.set(power.requests.get() & !request_bit(slot));
         answer(shared, slot, outcome);
     }
 }
 
-/// Switch `slot`'s node off, then on. `output` keeps the registers' wanted state, so a node a
-/// failed write left off is powered by the next write that lands.
-async fn cycle(i2c: &I2cBus, output: &mut u16, slot: Slot) -> PowerOutcome {
+/// Switch `slot`'s node off, then back to `output`, the registers' wanted state, which also
+/// powers any node a failed write left off.
+async fn cycle(i2c: &I2cBus, shared: &Shared, output: u16, slot: Slot) -> PowerOutcome {
     let bit = port(slot);
-    if !write_output(i2c, *output & !bit).await {
+    if !write_output(i2c, output & !bit).await {
         return PowerOutcome::Failed;
     }
     Timer::after(POWER_OFF).await;
     for _ in 0..ON_TRIES {
-        if write_output(i2c, *output).await {
+        if write_output(i2c, output).await {
+            note_powered(shared, true);
             return PowerOutcome::Done;
         }
         Timer::after(STAGGER).await;
     }
+    note_powered(shared, false);
     PowerOutcome::Failed
+}
+
+/// Note whether a write of the wanted state landed. One that did powers every node a failed
+/// write left off, so it clears [`UNPOWERED`], and only that fault. One that did not may leave
+/// a node off.
+fn note_powered(shared: &Shared, landed: bool) {
+    let fault = &shared.power.fault;
+    if !landed {
+        fault.set(Some(UNPOWERED));
+        shared.push_error(UNPOWERED);
+    } else if fault.get() == Some(UNPOWERED) {
+        fault.set(None);
+    }
 }
 
 /// Write both output registers, saying whether the expander took them in time.

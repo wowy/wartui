@@ -166,15 +166,16 @@ pub struct PowerAnswer {
     pub text: String,
 }
 
+/// Why a bridge with no carrier board cannot power-cycle a node, as the operator reads it.
+pub const NO_CARRIER: &str = "this bridge has no carrier board, so it cannot switch node power";
+
 /// What the operator reads of a power-cycle's `outcome` for `slot` on `board`.
 #[must_use]
 pub fn power_cycled_text(board: NodeBoard, slot: Slot, outcome: PowerOutcome) -> String {
     let name = board.label(slot);
     match outcome {
         PowerOutcome::Done => format!("{name} power-cycled"),
-        PowerOutcome::NoCarrier => {
-            "this bridge has no carrier board, so it cannot switch node power".to_owned()
-        }
+        PowerOutcome::NoCarrier => NO_CARRIER.to_owned(),
         PowerOutcome::NotDriven => format!("{name} is not a slot on this {board}"),
         PowerOutcome::Failed => {
             format!("{name} was not power-cycled: the carrier's I/O expander did not answer")

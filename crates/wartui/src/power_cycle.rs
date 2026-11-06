@@ -18,7 +18,7 @@ use clap::Args as ClapArgs;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{discover_bridges, probe_all};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_core::engine::power_cycled_text;
+use wartui_core::engine::{NO_CARRIER, power_cycled_text};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome};
 use wartui_proto::mac;
@@ -86,7 +86,7 @@ pub async fn run(args: Args) -> Result<()> {
 /// a carrier takes only the names it drives.
 fn slot_for(board: NodeBoard, name: &str) -> Result<Slot, String> {
     if !board.is_carrier() {
-        return Err("this bridge has no carrier board, so it cannot switch node power".to_owned());
+        return Err(NO_CARRIER.to_owned());
     }
     board.parse_label(name).ok_or_else(|| {
         format!(

@@ -18,7 +18,8 @@
 //! Node `i` sits in node-bus slot `i` (`A1` up, then `B1`), on a fourteen-node carrier, so the
 //! view names it by the silk, `N1` up. The bridge answers each `ToNode` with `Delivered` once
 //! the node has it, or `Undelivered` for a slot with no node. A `PowerCycle` restarts the node in
-//! that slot, which heartbeats again from a fresh boot, and is answered `Done`.
+//! that slot, which heartbeats again from a fresh boot, still on trial if it was, and is answered
+//! `Done`.
 //!
 //! A node takes updates with the receiver the firmware links, into a slot held in memory,
 //! and follows the firmware's rules around it: it listens continuously in update mode,
@@ -535,6 +536,15 @@ impl SimNode {
         }
     }
 
+    /// Restart on the image it runs, as the carrier's power switch does. A trial stays a trial,
+    /// and a rejected image's rollback stays due, since the trial sector survives the cut.
+    fn power_cycle(&mut self) {
+        let (trial, rollback) = (self.trial, self.rollback);
+        self.reboot(self.version);
+        self.trial = trial;
+        self.rollback = rollback;
+    }
+
     /// Start over on `version`, forgetting everything RAM held.
     fn reboot(&mut self, version: Version) {
         self.version = version;
@@ -876,10 +886,9 @@ async fn nap_until(
                     node.forget_reported();
                 }
                 Some(SimCommand::Confirm) => node.confirm(),
-                // A fresh boot of the image it runs, as a real power cycle looks.
+                // A fresh boot of the image it runs, still on trial if it was.
                 Some(SimCommand::PowerCycle) => {
-                    let version = node.version;
-                    node.reboot(version);
+                    node.power_cycle();
                     return Continue(());
                 }
                 Some(SimCommand::Update(kind, body)) => {
@@ -1125,5 +1134,43 @@ impl Xorshift {
         // Locally administered and unicast, so simulated devices are
         // distinguishable from anything real.
         [0x02, v[1], v[2], v[3], v[4], v[5]]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capabilities in the heartbeat `node` sends now.
+    async fn heartbeat_capabilities(node: &mut SimNode) -> Capabilities {
+        let (tx, mut rx) = mpsc::channel(1);
+        beat(&tx, node, tokio::time::Instant::now()).await.expect("the channel is open");
+        let Some(LinkEvent::Message(BridgeToHost::FromNode { body, .. })) = rx.recv().await else {
+            panic!("a heartbeat record");
+        };
+        Heartbeat::decode(&body).expect("a valid heartbeat").capabilities
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sim_node_reports_trial_in_heartbeat_when_power_cycled_on_trial_image() {
+        let mut node = SimNode::new(0, NODE_VERSION);
+        node.trial = true;
+        node.power_cycle();
+        assert!(heartbeat_capabilities(&mut node).await.trial);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sim_node_rolls_back_when_power_cycled_on_rejected_image() {
+        let old = minor_behind(NODE_VERSION);
+        let mut node = SimNode::new(0, NODE_VERSION);
+        node.trial = true;
+        node.rejecting = true;
+        let due = Duration::from_secs(3);
+        node.rollback = Some((old, tokio::time::Instant::now() + due));
+        node.power_cycle();
+        tokio::time::advance(due).await;
+        node.roll_back_if_due();
+        let capabilities = heartbeat_capabilities(&mut node).await;
+        assert_eq!((capabilities.version, capabilities.trial), (old, false));
     }
 }

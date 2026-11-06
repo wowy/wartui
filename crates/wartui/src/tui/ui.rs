@@ -1,6 +1,6 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
-use wartui_core::engine::{Command, Snapshot};
+use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
 use wartui_proto::mac::{self, Mac};
 
@@ -17,8 +17,9 @@ use crate::config;
 /// and closed the channel.
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 
-/// The notice when `p` is pressed behind a bridge with no carrier board.
-const NO_CARRIER: &str = "this bridge has no carrier board, so it cannot switch node power";
+/// The notice when a power-cycle is asked for with the link down. The transport holds commands
+/// while it reconnects, so one sent now would cut the node whenever the bridge comes back.
+const NOT_CONNECTED: &str = "the bridge is not connected, so it cannot switch node power";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
 /// GPS modal, saved settings and upload.
@@ -208,6 +209,10 @@ impl Ui {
     fn ask_power_cycle(&mut self, snapshot: &Snapshot) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
+        if !snapshot.link_up {
+            self.say(NOT_CONNECTED.to_owned(), snapshot);
+            return;
+        }
         // Refused here, so a bench bridge is never sent a request it can only refuse.
         if !snapshot.node_board().is_carrier() {
             self.say(NO_CARRIER.to_owned(), snapshot);
@@ -242,6 +247,11 @@ impl Ui {
         let name = snapshot.node_board().label(slot);
         if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
             self.say(format!("{name} not power-cycled"), snapshot);
+            return;
+        }
+        // The link may have dropped while the confirm was open.
+        if !snapshot.link_up {
+            self.say(NOT_CONNECTED.to_owned(), snapshot);
             return;
         }
         let said = match commands.try_send(Command::PowerCycle { slot }) {
@@ -515,6 +525,35 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(!ui.power_confirming());
         assert_eq!(ui.notice(snapshot.now_ms), Some("N7 not power-cycled"));
+    }
+
+    #[test]
+    fn ui_refuses_power_cycle_without_asking_when_link_is_down() {
+        use wartui_proto::bus::NodeBoard;
+        let snapshot = Snapshot { link_up: false, ..on_board(NodeBoard::Carrier14) };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('p'), &snapshot, &tx);
+        assert!(!ui.power_confirming());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ui.notice(snapshot.now_ms), Some(NOT_CONNECTED));
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_link_drops_before_power_cycle_is_confirmed() {
+        use wartui_proto::bus::NodeBoard;
+        let snapshot = on_board(NodeBoard::Carrier14);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('p'), &snapshot, &tx);
+        assert!(ui.power_confirming());
+        let down = Snapshot { link_up: false, ..snapshot };
+        ui.on_power_key(press('y'), &down, &tx);
+        assert!(rx.try_recv().is_err());
+        assert!(!ui.power_confirming());
+        assert_eq!(ui.notice(down.now_ms), Some(NOT_CONNECTED));
     }
 
     #[test]

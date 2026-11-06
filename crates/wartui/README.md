@@ -646,8 +646,9 @@ alone. `r` and `R` make a node forget every address it has reported, on its next
 running; see "Uploading to WDGWars".
 
 `p` asks before it power-cycles the selected node, and works on a node that has stopped
-heartbeating, as long as it has a slot. A bench bridge, with no carrier, refuses it. The bridge's
-answer replaces the key help for a few seconds; see "Power-cycling a node".
+heartbeating, as long as it has a slot. A bench bridge, with no carrier, refuses it, and so does a
+bridge that is not connected, even with the confirm already open. The bridge's answer replaces the
+key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 

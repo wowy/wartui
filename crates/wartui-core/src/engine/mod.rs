@@ -37,7 +37,8 @@ use std::time::Instant;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
 use wartui_proto::link::{
-    BridgeToHost, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge, NO_GPS_RECEIVER,
+    BridgeToHost, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge,
+    NO_GPS_RECEIVER,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
@@ -46,7 +47,8 @@ pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::{Assignment, NodeState};
 pub use snapshot::{
-    BridgeStatus, Counters, NodeView, PowerAnswer, Snapshot, TailEntry, power_cycled_text,
+    BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, Snapshot, TailEntry,
+    power_cycled_text,
 };
 
 pub(crate) use lag::BEHIND_US;
@@ -71,7 +73,7 @@ pub struct FleetEngine {
     slots: HashMap<Slot, Mac>,
     bridge: Option<BridgeInfo>,
     /// Whether this bridge life last said no GPS receiver answers on its port
-    /// ([`NO_GPS_RECEIVER`]). Cleared when it forwards bytes or says the receiver answered
+    /// ([`NO_GPS_RECEIVER`], or [`GPS_BUS_REFUSED`]). Cleared when it says the receiver answered
     /// ([`GPS_RECEIVER_ANSWERED`]), and on every connect and disconnect.
     bridge_lacks_gps: bool,
     link_up: bool,
@@ -401,21 +403,23 @@ impl FleetEngine {
                     host_uart_errors: *host_uart_errors,
                 }));
             }
-            // Bridge diagnostics are the transport's to log. The engine reads only the two that
+            // Bridge diagnostics are the transport's to log. The engine reads only those that
             // say whether the bridge has a GPS receiver, for the view.
-            BridgeToHost::Error { message } if message.as_str() == NO_GPS_RECEIVER => {
+            BridgeToHost::Error { message }
+                if matches!(message.as_str(), NO_GPS_RECEIVER | GPS_BUS_REFUSED) =>
+            {
                 self.bridge_lacks_gps = true;
             }
             BridgeToHost::Log { message } if message.as_str() == GPS_RECEIVER_ANSWERED => {
                 self.bridge_lacks_gps = false;
             }
-            // The bytes are the position chain's; that they came is the view's.
-            BridgeToHost::Gps { .. } => self.bridge_lacks_gps = false,
             // `Ready` arrives as `LinkEvent::Connected`. An update status answers
-            // `flash-bridge`, which `run` never is.
+            // `flash-bridge`, which `run` never is. GPS bytes are the runtime's, which feeds
+            // them to the position chain before the engine would see them.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }
+            | BridgeToHost::Gps { .. }
             | BridgeToHost::Update(_) => {}
         }
     }

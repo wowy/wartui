@@ -26,9 +26,9 @@ use wartui_proto::bus::{
     UpdateState, UpdateStatus, Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, GPS_RECEIVER_ANSWERED, GpsBytes, HostToBridge, LinkError, LogStr,
-    LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats,
-    Undelivered,
+    BridgeToHost, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, HostToBridge, LinkError,
+    LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats,
+    RadioLinkStats, Undelivered,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, plan};
@@ -1653,14 +1653,12 @@ fn engine_snapshot_shows_no_receiver_when_bridge_reports_none_and_chain_has_no_h
 }
 
 #[test]
-fn engine_snapshot_shows_connecting_when_bridge_forwards_gps_bytes_after_reporting_none() {
+fn engine_snapshot_shows_no_receiver_when_bridge_reports_its_gps_bus_refused() {
     let clock = Clock::new();
     let mut engine = bridge_only_engine(&clock);
-    engine.handle(no_gps_receiver(), clock.at(1));
-    let bytes = GpsBytes::from_slice(GSV).expect("a sentence fits");
-    engine.handle(Event::Link(LinkEvent::Message(BridgeToHost::Gps { bytes })), clock.at(2));
-    // The runtime feeds the bytes to the receiver, not the engine, so it is not talking yet.
-    assert_eq!(shown_gps_status(&engine, clock.at(2)), GpsStatus::Connecting);
+    let message = LogStr::try_from(GPS_BUS_REFUSED).expect("the text fits a LogStr");
+    engine.handle(Event::Link(LinkEvent::Message(BridgeToHost::Error { message })), clock.at(1));
+    assert_eq!(shown_gps_status(&engine, clock.at(2)), GpsStatus::NoReceiver);
 }
 
 #[test]

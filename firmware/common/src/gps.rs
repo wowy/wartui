@@ -61,7 +61,7 @@ use esp_hal::i2c::master::{Config, I2c, Instance};
 use esp_hal::time::Rate;
 use esp_hal::{Async, Blocking};
 use portable_atomic::{AtomicBool, Ordering};
-use wartui_proto::link::{GpsBytes, GpsWriteBytes};
+use wartui_proto::link::{GPS_BUS_REFUSED, GpsBytes, GpsWriteBytes};
 
 /// The receiver's I2C address, u-blox's default.
 const ADDRESS: u8 = 0x42;
@@ -159,16 +159,13 @@ pub fn bus_config() -> Config {
 ///
 /// # Errors
 ///
-/// When the peripheral refuses the configuration, a message for the host.
+/// When the peripheral refuses the configuration, [`GPS_BUS_REFUSED`] for the host.
 pub fn bus<'d>(
     i2c: impl Instance + 'd,
     sda: impl PeripheralInput<'d> + PeripheralOutput<'d>,
     scl: impl PeripheralInput<'d> + PeripheralOutput<'d>,
 ) -> Result<I2c<'d, Blocking>, &'static str> {
-    Ok(I2c::new(i2c, bus_config())
-        .map_err(|_| "the GPS port's I2C bus refused its configuration")?
-        .with_sda(sda)
-        .with_scl(scl))
+    Ok(I2c::new(i2c, bus_config()).map_err(|_| GPS_BUS_REFUSED)?.with_sda(sda).with_scl(scl))
 }
 
 /// The firmware's end of [`run`].

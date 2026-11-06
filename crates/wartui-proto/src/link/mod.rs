@@ -112,8 +112,13 @@ pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 /// every announcement. The simulator sends it too, as a P4 with nothing on the port.
 pub const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
 
+/// The P4's [`BridgeToHost::Error`] when its GPS port's bus refuses its configuration, repeated
+/// with every announcement. The host reads it as [`NO_GPS_RECEIVER`]; with a constant
+/// configuration it is near impossible.
+pub const GPS_BUS_REFUSED: &str = "the GPS port's I2C bus refused its configuration";
+
 /// The P4's [`BridgeToHost::Log`] when a GPS receiver answers on its port after
-/// [`NO_GPS_RECEIVER`]. The host reads either text to tell whether the bridge has a receiver.
+/// [`NO_GPS_RECEIVER`]. The host reads these texts to tell whether the bridge has a receiver.
 pub const GPS_RECEIVER_ANSWERED: &str = "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
 
 /// The start of the P4's [`BridgeToHost::Error`] while it updates its C6
