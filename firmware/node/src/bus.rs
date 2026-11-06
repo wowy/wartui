@@ -44,6 +44,8 @@ const TX_BUFS: usize = 3;
 const RECEIVED_MAX: usize = RX_BUFS - 2;
 /// How long the handler waits after CS rises for the DMA to report the transfer done.
 const SETTLE: Duration = Duration::from_micros(50);
+/// The bounds, in µs, of the settle histogram's spinning buckets.
+const SETTLE_BUCKETS_US: [u32; 3] = [5, 20, 45];
 /// How often [`service`] prints the counters.
 const REPORT_EVERY: Duration = Duration::from_millis(10_000);
 
@@ -76,6 +78,9 @@ struct Shared {
     arm_failed: u32,
     /// The longest wait after CS rose for the DMA to report the transfer done, in µs.
     settle_max_us: u32,
+    /// Edges by that wait: done at the first check, then spun under each of
+    /// [`SETTLE_BUCKETS_US`], then longer, timeouts included.
+    settle: [u32; SETTLE_BUCKETS_US.len() + 2],
 }
 
 static STATE: NonReentrantMutex<Option<Shared>> = NonReentrantMutex::new(None);
@@ -154,6 +159,7 @@ pub fn start(
         early: 0,
         arm_failed: 0,
         settle_max_us: 0,
+        settle: [0; SETTLE_BUCKETS_US.len() + 2],
     };
     for buf in rx {
         // RX_BUFS fits RX_BUFS.
@@ -189,17 +195,19 @@ impl Shared {
         };
         let edge = Instant::now();
         let until = edge + SETTLE;
+        let mut spun = false;
         while !transfer.is_done() {
+            spun = true;
             if Instant::now() >= until {
                 // Left armed: the slave finishes it on the master's next transfer, which
                 // then fails its checks at both ends, and the edge after that re-arms.
-                self.note_settle(edge);
+                self.note_settle(edge, spun);
                 self.early = self.early.wrapping_add(1);
                 self.armed = Some((transfer, carries));
                 return;
             }
         }
-        self.note_settle(edge);
+        self.note_settle(edge, spun);
         let (spi, (rx, tx)) = transfer.wait();
         self.transfers = self.transfers.wrapping_add(1);
         if self.received.is_full()
@@ -213,10 +221,17 @@ impl Shared {
         self.arm(spi);
     }
 
-    /// Keep the longest wait since `edge` for the transfer to report done.
-    fn note_settle(&mut self, edge: Instant) {
+    /// Keep the longest wait since `edge` for the transfer to report done, and count it in
+    /// its bucket. `spun` is whether the first check found it not done.
+    fn note_settle(&mut self, edge: Instant, spun: bool) {
         let us = u32::try_from((Instant::now() - edge).as_micros()).unwrap_or(u32::MAX);
         self.settle_max_us = self.settle_max_us.max(us);
+        let bucket = if spun {
+            1 + SETTLE_BUCKETS_US.iter().take_while(|&&bound| us >= bound).count()
+        } else {
+            0
+        };
+        self.settle[bucket] = self.settle[bucket].wrapping_add(1);
     }
 
     /// Arm the prepared transfer, or an idle one, and set IRQ to match. IRQ goes low when
@@ -351,14 +366,17 @@ impl Main {
 /// Print one line of counters.
 fn report() {
     let isr = STATE.with(|state| {
-        state.as_ref().map(|s| (s.transfers, s.unread, s.early, s.arm_failed, s.settle_max_us))
+        state
+            .as_ref()
+            .map(|s| (s.transfers, s.unread, s.early, s.arm_failed, s.settle_max_us, s.settle))
     });
-    let Some((transfers, unread, early, arm_failed, settle_max_us)) = isr else { return };
+    let Some((transfers, unread, early, arm_failed, settle_max_us, settle)) = isr else { return };
     let (good, magic, crc, version, len, gaps, replaced) = MAIN
         .with(|m| (m.good, m.bad_magic, m.bad_crc, m.other_version, m.bad_len, m.gaps, m.replaced));
     note!(
         "bus: {} transfers, {} good, {} magic, {} crc, {} version, {} len, {} gaps, {} unread, \
-         {} early, {} arm failed, {} replaced, {} us settle max",
+         {} early, {} arm failed, {} replaced, {} us settle max, settle 0/5/20/45/+: \
+         {}/{}/{}/{}/{}",
         transfers,
         good,
         magic,
@@ -370,7 +388,12 @@ fn report() {
         early,
         arm_failed,
         replaced,
-        settle_max_us
+        settle_max_us,
+        settle[0],
+        settle[1],
+        settle[2],
+        settle[3],
+        settle[4]
     );
 }
 
