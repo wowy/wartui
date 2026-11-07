@@ -380,8 +380,9 @@ or 11, so a node tuned elsewhere hears only their leakage.
 
 `BUS_HZ` went from 1 MHz to 4 MHz (cb73e56), with nothing else changed: no other timing on the
 P4 or the node was sized to a transfer, which now takes 2.09 ms instead of 8.35 ms. The nodes
-take the P4's clock, so they kept their firmware. Two 10-minute captures with all ten nodes on
-FPC antennas, five on each bus, the second right after the reflash:
+take the P4's clock, so they kept their firmware. Two 10-minute captures with all ten nodes,
+five on each bus: the 1 MHz one with N9's antenna missing, the 4 MHz one right after the
+reflash with every antenna fitted.
 
 | | 1 MHz (3e144f3) | 4 MHz (cb73e56) |
 | --- | --- | --- |
@@ -394,13 +395,17 @@ FPC antennas, five on each bus, the second right after the reflash:
 | Bridge frames dropped | 0 of 1,529 | 0 of 1,592 |
 | Networks | 131 | 143 |
 
-The latency falls by about 3.5 times, not 4, because the 1 ms gap each slot owes its node after
-a transfer stays. Each slot's transfer count is about the same at both clocks, since polling and
-the nodes' records set it, not the clock. The coverage difference is the air, not the bus.
+The latency falls by about 3.5 times, not 4. Fitting the two means to a fixed part and a part
+that scales with the clock leaves ~2 ms fixed (inferred from the two means): the 1 ms gap the
+P4 waits once per pass, after its last transfer, and each transfer's setup. Each slot's transfer
+count is about the same at both clocks, since polling and the nodes' records set it, not the
+clock. The network counts don't compare: the 1 MHz run had N9 deaf.
 
 The 14-node carrier, seven nodes on a bus, is still untested at either clock.
 
 ## Still open
+
+This list replaces the dated ones above.
 
 - A ten-node capture with the real antennas, for coverage.
 - Two fixes that need conditions this bench can't easily create: retrying each expander
