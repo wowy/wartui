@@ -20,8 +20,11 @@
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
 //! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
-//!   asserted by nothing this bus can serve, such as a node that never becomes present. The bus
-//!   counts it and runs the schedule below until IRQ is seen deasserted.
+//!   asserted by nothing this bus can serve, such as a node not yet present. The bus counts it
+//!   and runs the schedule below until IRQ is seen deasserted, a slot becomes present, or
+//!   [`STUCK_RETRY`] has passed. The retry is needed because a shared line under that schedule
+//!   may never deassert: each node holds it while its record waits for a poll, and a few nodes
+//!   together can hold it without a break.
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
 //!   clocked at once. One whose records wait for the node's ack is clocked every
 //!   [`ACK_POLL`], and no later than the wait's deadline.
@@ -86,6 +89,9 @@ const SLOT_GAP: Duration = Duration::from_millis(1);
 /// because the first pass after a node queues a record clocks the transfer it armed before,
 /// which is empty.
 const EMPTY_PASSES: u8 = 2;
+/// How long a stuck bus waits before trying IRQ service again. A line that really is held costs
+/// [`EMPTY_PASSES`] empty passes per retry, about 9% of the bus at 1 MHz with five nodes.
+const STUCK_RETRY: Duration = Duration::from_millis(1_000);
 /// How often each present slot's counters go to the host.
 const REPORT_EVERY: Duration = Duration::from_millis(5_000);
 
@@ -238,7 +244,7 @@ pub fn build(
         last_end: None,
         irq_since: None,
         empty_passes: 0,
-        irq_stuck: false,
+        stuck_at: None,
         stuck: 0,
         irq_us_sum: 0,
         irq_us_max: 0,
@@ -270,7 +276,7 @@ pub fn build(
         last_end: None,
         irq_since: None,
         empty_passes: 0,
-        irq_stuck: false,
+        stuck_at: None,
         stuck: 0,
         irq_us_sum: 0,
         irq_us_max: 0,
@@ -383,13 +389,14 @@ pub struct Controller {
     slots: &'static mut [Slot; PER_BUS],
     /// When the last transfer on this bus ended.
     last_end: Option<Instant>,
-    /// When IRQ was first seen asserted, until it is seen deasserted or a record arrives.
+    /// When IRQ was first seen asserted, until a record arrives or [`Controller::unlatch`].
     irq_since: Option<Instant>,
     /// IRQ passes in a row that brought nothing.
     empty_passes: u8,
-    /// Whether IRQ is stuck, until it is seen deasserted.
-    irq_stuck: bool,
-    /// Times IRQ was found stuck.
+    /// When IRQ was found stuck, until [`Controller::unlatch`].
+    stuck_at: Option<Instant>,
+    /// Times IRQ was found stuck. A line that stays held latches again after each retry, so
+    /// this grows about once every [`STUCK_RETRY`].
     stuck: u32,
     /// From IRQ first seen asserted to the start of the transfer that carried a record.
     irq_us_sum: u64,
@@ -412,12 +419,11 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
         }
         let any_present = controller.slots.iter().any(|s| s.present);
         let asserted = controller.irq.is_high() == controller.irq_active_high;
-        if !asserted {
-            controller.irq_since = None;
-            controller.empty_passes = 0;
-            controller.irq_stuck = false;
+        let retry = controller.stuck_at.is_some_and(|at| Instant::now() >= at + STUCK_RETRY);
+        if !asserted || retry {
+            controller.unlatch();
         }
-        if any_present && asserted && !controller.irq_stuck {
+        if any_present && asserted && controller.stuck_at.is_none() {
             controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
             for k in 0..per_bus {
@@ -435,7 +441,7 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
             } else {
                 controller.empty_passes = controller.empty_passes.saturating_add(1);
                 if controller.empty_passes >= EMPTY_PASSES {
-                    controller.irq_stuck = true;
+                    controller.stuck_at = Some(Instant::now());
                     controller.stuck = controller.stuck.wrapping_add(1);
                 }
             }
@@ -446,17 +452,20 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
                 }
             }
         } else {
-            let due = (0..per_bus)
+            let mut due = (0..per_bus)
                 .map(|i| controller.next_due(i, shared))
                 .min()
                 .unwrap_or(next_report)
                 .min(next_report);
+            if let Some(at) = controller.stuck_at {
+                due = due.min(at + STUCK_RETRY);
+            }
             // With IRQ already asserted and nobody present, only the timer can wake this, and
-            // the host queues nothing for an absent slot. Stuck, it waits for the deassert
-            // instead.
+            // the host queues nothing for an absent slot. Stuck, it waits for the deassert or
+            // the retry instead.
             if any_present {
                 // Asserted, or deasserted when stuck.
-                let high = controller.irq_active_high != controller.irq_stuck;
+                let high = controller.irq_active_high != controller.stuck_at.is_some();
                 let level = if high { Event::HighLevel } else { Event::LowLevel };
                 let woke = select3(controller.irq.wait_for(level), Timer::at(due), queued.wait());
                 if let Either3::First(()) = woke.await {
@@ -495,6 +504,14 @@ impl Controller {
     /// The CS line of slot `i`, which every driven slot has.
     fn cs(&mut self, i: usize) -> &mut Output<'static> {
         self.cs[i].as_mut().expect("a driven slot's CS")
+    }
+
+    /// Clear the stuck latch and start IRQ service afresh, so a line still held latches again
+    /// after [`EMPTY_PASSES`] empty passes.
+    fn unlatch(&mut self) {
+        self.irq_since = None;
+        self.empty_passes = 0;
+        self.stuck_at = None;
     }
 
     /// When slot `i` is next owed a transfer.
@@ -662,6 +679,8 @@ impl Controller {
         if !slot.present && matches!(outcome, Outcome::Good { .. }) {
             slot.present = true;
             shared.nodes.set_present(k, true);
+            // The node asserting a stuck line is usually the one that just arrived.
+            self.unlatch();
             self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present && slot.misses >= ABSENT_AFTER {
             slot.present = false;
