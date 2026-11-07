@@ -608,6 +608,25 @@ fn ota_session_fails_when_chunks_stay_undelivered_across_every_begin() {
 }
 
 #[test]
+fn ota_session_sends_no_further_chunk_when_answered_noimage() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+    let Some(HostToBridge::ToNodeChunk { id, .. }) = bench.queue.pop_front() else {
+        panic!("a chunk is queued")
+    };
+    bench.queue.clear();
+    bench.feed(OtaEvent::NoImage { id });
+    // The P4 lost its cache: another chunk would draw the same answer.
+    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::CacheLost)));
+    assert_eq!(bench.queued(), [Out::Abort], "the node is told to leave update mode");
+    bench.queue.clear();
+    bench.receiving(1024);
+    bench.feed(OtaEvent::Tick);
+    assert!(bench.queued().is_empty());
+}
+
+#[test]
 fn ota_session_begins_again_and_restarts_when_node_reboots_mid_stream() {
     let mut bench = Bench::new(&image(NEW));
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 8192);

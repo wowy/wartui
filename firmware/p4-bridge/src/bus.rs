@@ -688,12 +688,17 @@ impl Controller {
             self.slots[i].last_start = Some(start);
             self.slots[i].last_end = Some(end);
             let outcome = if clocked {
-                // The transfer carried the ack, whatever the node made of it, and brought the
-                // node's, if it had stamped one.
+                // A transfer with the magic carried the ack, whatever the node made of it, and
+                // brought the node's, if it had stamped one. One without it reached no armed
+                // node, so both stay owed while the node is present.
+                let owed = (self.slots[i].ack_owed, self.slots[i].fetch_ack);
                 self.slots[i].ack_owed = false;
                 self.slots[i].fetch_ack = false;
                 let outcome =
                     self.count(i, seq, rx_bytes(&wire.rx), (start, end), answers_irq, shared);
+                if matches!(outcome, Outcome::Empty) && self.slots[i].present {
+                    (self.slots[i].ack_owed, self.slots[i].fetch_ack) = owed;
+                }
                 // Bad magic: the node was not armed and took nothing, so the flight stays due
                 // and the retry carries it. Anything else may have reached the node.
                 if filled > 0 && !matches!(outcome, Outcome::Empty) {

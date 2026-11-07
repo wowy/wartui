@@ -570,7 +570,8 @@ are redrawn in place; otherwise each node gets a line at each phase change. Each
 (confirmed)` or `failed:` with the reason. A node that fails leaves the others updating, and keeps
 its old image. A node that reboots mid-transfer is picked up again on its next heartbeat, and the
 image starts over from the beginning. Any failure makes the run exit non-zero, and ctrl-c aborts
-every node still updating and stops. With `--log-file` and `RUST_LOG=wartui_core=debug`, the log
+every node still updating and stops. So does a bridge that loses the image mid-run, by rebooting
+or by not hearing the host for 15 s. With `--log-file` and `RUST_LOG=wartui_core=debug`, the log
 holds every frame sent, every send result, every status from a node and every phase change, as
 `key=value` fields.
 
@@ -596,7 +597,8 @@ update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
 
 | Failure                                       | What to do                                                                       |
 |-----------------------------------------------|----------------------------------------------------------------------------------|
-| `the bridge did not take the node image (…)`  | No node was updated. `no PSRAM`: the P4's PSRAM did not map; otherwise run again |
+| `the bridge did not take the node image (…)`  | That board's nodes were not updated. `no PSRAM`: PSRAM did not map; else rerun   |
+| `the bridge lost the node image; …`           | Run again: nodes it confirmed keep the new image, and the rest start over        |
 | `no answer to the update request in 30 s`     | Check `wartui sniff` hears it, and run again; persisting, `flash-fleet` it       |
 | `the node refused the update: …`              | Its partition table has no `trial` sector, or its flash failed: `flash-fleet` it |
 | `the image is larger than the node's …`       | Build a smaller image; the slot holds 1920 KiB                                   |

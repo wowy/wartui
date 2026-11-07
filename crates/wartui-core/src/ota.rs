@@ -19,7 +19,10 @@
 //! which the P4 builds the record. So the host link carries an image once however many nodes
 //! take it. The upload runs beside the `begin`s, and no chunk goes before
 //! [`OtaEvent::Cached`] says the P4 has checked the image's digest: a chunk from an image not yet
-//! cached is refused, and one from a corrupt copy would fail every node at once.
+//! cached is refused, and one from a corrupt copy would fail every node at once. A chunk answered
+//! `NoImage` after that means the P4 lost the image since, by rebooting or by its host gate
+//! closing, and every other session's chunks meet the same answer. So it fails the session
+//! ([`Failure::CacheLost`]) rather than counting as a send to retry, and the driver ends the fleet.
 //!
 //! **[`CHUNKS_IN_FLIGHT`] chunks are out at once**, so the next waits at the P4 while the node
 //! acknowledges the one before, and each `Delivered` or `Undelivered` sends one more. The P4's
@@ -198,6 +201,8 @@ pub enum Failure {
     Cancelled,
     /// The link to the bridge closed.
     LinkClosed,
+    /// The P4 answered a chunk `NoImage`: its cache lost the image it had checked.
+    CacheLost,
 }
 
 impl fmt::Display for Failure {
@@ -228,6 +233,7 @@ impl fmt::Display for Failure {
             Self::UnknownState(byte) => write!(f, "the node answered with unknown state {byte}"),
             Self::Cancelled => f.write_str("cancelled"),
             Self::LinkClosed => f.write_str("the link to the bridge closed"),
+            Self::CacheLost => f.write_str("the bridge lost the node image"),
         }
     }
 }
@@ -264,6 +270,12 @@ pub enum OtaEvent<'a> {
     Tick,
     /// The P4's cache holds the image, checked, so chunks may go.
     Cached,
+    /// The P4 answered the record the session gave `id` `NoImage`: its cache no longer holds the
+    /// image.
+    NoImage {
+        /// The id the session gave the record.
+        id: u16,
+    },
 }
 
 /// Where an update stands, for showing.
@@ -293,7 +305,9 @@ pub struct OtaImage {
 /// The ids a session gives its records: `next`, then every `step` after it, wrapping.
 ///
 /// Sessions sharing a link step past each other's ids, so a delivery answer matches only the
-/// session that sent it: session `index` of `count` takes [`Ids::of`].
+/// session that sent it: session `index` of `count` takes [`Ids::of`]. The ids wrap within the
+/// largest multiple of `step` a `u16` holds, so each stays `next` modulo `step`, and skip 0, which
+/// the engine never sends either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ids {
     /// The id the next record takes.
@@ -313,7 +327,14 @@ impl Ids {
 
     fn take(&mut self) -> u16 {
         let id = self.next;
-        self.next = self.next.wrapping_add(self.step);
+        let step = u32::from(self.step.max(1));
+        let span = (u32::from(u16::MAX) + 1) / step * step;
+        let next = match (u32::from(self.next) + step) % span {
+            0 => step,
+            next => next,
+        };
+        // Below `span`, which is at most 65,536, so it fits.
+        self.next = u16::try_from(next).unwrap_or(self.step);
         id
     }
 }
@@ -354,11 +375,9 @@ pub struct OtaSession {
     pending: Vec<Pending>,
     /// The next offset to send.
     next: u32,
-    /// The last `next_offset` the node reported.
-    reported: u32,
     /// The highest `next_offset` the node has reported since its `begin`; a status below it is
     /// stale.
-    high: u32,
+    reported: u32,
     /// Whether the node has accepted this session, so a failure owes it an abort.
     accepted: bool,
     /// Whether a failure has an abort to send.
@@ -413,7 +432,6 @@ impl OtaSession {
             pending: Vec::new(),
             next: 0,
             reported: 0,
-            high: 0,
             accepted: false,
             abort_owed: false,
             committed: false,
@@ -487,6 +505,11 @@ impl OtaSession {
             OtaEvent::Cached => {
                 self.cached = true;
                 self.send_next(now, &mut out);
+            }
+            OtaEvent::NoImage { id } => {
+                if self.pending.iter().any(|p| p.id == id && matches!(p.frame, Sent::Chunk(_))) {
+                    self.fail(now, Failure::CacheLost);
+                }
             }
         }
         if self.abort_owed {
@@ -591,14 +614,13 @@ impl OtaSession {
             (_, UpdateState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
             (_, UpdateState::Verified) => self.enter(now, Phase::AwaitReboot),
             (Phase::Streaming | Phase::Committing, UpdateState::Idle) => self.restart(now),
+            // A `begin` answers from where the node stands, which a reboot sets back to 0.
             (Phase::Begin, UpdateState::Receiving) => {
-                // A `begin` answers from where the node stands, which a reboot sets back to 0.
-                self.high = 0;
                 self.stream_from(now, status.next_offset, out);
             }
             // Overtaken by a newer status.
             (Phase::Streaming | Phase::Committing, UpdateState::Receiving)
-                if status.next_offset < self.high => {}
+                if status.next_offset < self.reported => {}
             // The last sector's own status, overtaken by the commit.
             (Phase::Committing, UpdateState::Receiving) if status.next_offset >= len => {}
             (Phase::Committing, UpdateState::Receiving) => {
@@ -619,7 +641,6 @@ impl OtaSession {
         }
         self.send_failures = 0;
         self.reported = offset;
-        self.high = offset;
         self.wait_status = None;
         self.status_timeouts = 0;
         self.next = self.next.max(offset);
@@ -717,7 +738,6 @@ impl OtaSession {
     fn stream_from(&mut self, now: Instant, offset: u32, out: &mut Vec<HostToBridge>) {
         self.enter(now, Phase::Streaming);
         self.reported = offset.min(self.begin.len);
-        self.high = self.reported;
         self.next = self.reported;
         self.send_next(now, out);
     }
@@ -839,5 +859,26 @@ impl OtaSession {
             && failure != Failure::Cancelled
             && matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing);
         self.finish(now, Outcome::Failed(failure));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_stay_in_their_own_class_when_they_wrap() {
+        for count in [3, 10] {
+            for index in 0..count {
+                let mut ids = Ids::of(index, count);
+                let class = (index + 1) % count;
+                // Past three wraps of the `u16`.
+                for _ in 0..3 * (usize::from(u16::MAX) / count + 1) {
+                    let id = ids.take();
+                    assert_ne!(id, 0, "session {index} of {count}");
+                    assert_eq!(usize::from(id) % count, class, "session {index} of {count}");
+                }
+            }
+        }
     }
 }

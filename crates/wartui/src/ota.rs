@@ -46,7 +46,7 @@ use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::ota::{Failure, Ids, OtaImage, OtaSession, Outcome, Phase, Progress};
-use wartui_core::runtime::{FleetReport, drive_fleet, now};
+use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now};
 use wartui_proto::bus::{
     Board, Capabilities, Heartbeat, NODE_VERSION, Slot, UpType, UpdateState, Version,
 };
@@ -230,19 +230,49 @@ pub async fn run(args: Args) -> Result<()> {
             .collect();
         let nodes: Vec<Mac> = members.iter().map(|&i| chosen[i].0).collect();
         let mut view = FleetView::new(&nodes, image.map(|image| image.bytes.len()));
-        let got =
-            update_fleet(&mut link, image, &mut sessions, &mut stop, |r| view.show(r)).await?;
+        let ended =
+            update_fleet(&mut link, image, &mut sessions, &mut stop, |r| view.show(r)).await;
+        // A fleet the bridge stopped still shows which nodes finished before it did.
+        let (got, stopped) = match ended {
+            Ok(got) => (got, None),
+            Err(error) => {
+                let got = sessions.iter().filter_map(|session| session.outcome().cloned());
+                (got.collect(), Some(error))
+            }
+        };
         view.finish(&got);
         outcomes.extend(got);
+        if stopped.is_some() {
+            return verdict(&outcomes, stopped);
+        }
         if outcomes.contains(&Outcome::Failed(Failure::Cancelled)) {
             break;
         }
     }
-    verdict(&outcomes)
+    verdict(&outcomes, None)
 }
 
-/// How a run ends: cancelled, a count of the nodes that failed, or nothing to report.
-fn verdict(outcomes: &[Outcome]) -> Result<()> {
+/// How a run ends: a fleet the bridge stopped, cancelled, a count of the nodes that failed, or
+/// nothing to report. `outcomes` are every node's that has one, `stopped`'s fleet included.
+fn verdict(outcomes: &[Outcome], stopped: Option<FleetError>) -> Result<()> {
+    match stopped {
+        Some(FleetError::Upload(failure)) => {
+            let why = cache_failure(failure);
+            let done =
+                outcomes.iter().filter(|outcome| matches!(outcome, Outcome::Done(_))).count();
+            let updated = match done {
+                0 => "nothing was updated".to_owned(),
+                1 => "1 node was updated before it".to_owned(),
+                n => format!("{n} nodes were updated before it"),
+            };
+            bail!("the bridge did not take the node image ({why}); {updated}");
+        }
+        Some(FleetError::CacheLost) => bail!(
+            "the bridge lost the node image; nodes already confirmed keep the new image, and \
+             running `wartui ota` again updates the rest from the start"
+        ),
+        None => {}
+    }
     if outcomes.contains(&Outcome::Failed(Failure::Cancelled)) {
         bail!("cancelled");
     }
@@ -283,12 +313,9 @@ async fn update_fleet(
     sessions: &mut [OtaSession],
     stop: impl Future<Output = ()>,
     report: impl FnMut(FleetReport<'_>),
-) -> Result<Vec<Outcome>> {
+) -> Result<Vec<Outcome>, FleetError> {
     drain(link).await;
-    drive_fleet(link, sessions, image, stop, report).await.map_err(|failure| {
-        let why = cache_failure(failure);
-        anyhow::anyhow!("the bridge did not take the node image ({why}); nothing was updated")
-    })
+    drive_fleet(link, sessions, image, stop, report).await
 }
 
 /// Why the cache refused or lost an upload, for an operator.
@@ -809,7 +836,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_updates_every_sim_node() {
+    async fn ota_cmd_updates_every_node_when_nothing_is_lost() {
         let (mut link, nodes, slots) = sim_fleet(4, None).await;
         let image = sim_image(6);
         let mut sessions = sessions(&nodes, &slots, &image);
@@ -818,11 +845,11 @@ mod tests {
                 .await
                 .expect("the upload");
         assert_eq!(outcomes, vec![Outcome::Done(NODE_VERSION); 4]);
-        assert!(verdict(&outcomes).is_ok());
+        assert!(verdict(&outcomes, None).is_ok());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_reports_one_failure_and_finishes_the_rest() {
+    async fn ota_cmd_finishes_the_rest_when_one_node_rolls_back() {
         let (mut link, nodes, slots) = sim_fleet(4, Some(2)).await;
         let image = sim_image(6);
         let mut sessions = sessions(&nodes, &slots, &image);
@@ -835,12 +862,12 @@ mod tests {
         for i in [0, 1, 3] {
             assert_eq!(outcomes[i], Outcome::Done(NODE_VERSION), "node {i}");
         }
-        let error = verdict(&outcomes).unwrap_err().to_string();
+        let error = verdict(&outcomes, None).unwrap_err().to_string();
         assert_eq!(error, "1 of 4 nodes failed to update");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_cancel_sends_abort_to_each_accepted_session() {
+    async fn ota_cmd_sends_one_abort_per_session_when_cancelled() {
         let (mut link, nodes, slots) = sim_fleet(4, None).await;
         // Long enough that every node is still streaming when the cancel lands.
         let image = sim_image(128);
@@ -877,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_updates_sim_node_when_cache_already_holds_the_image() {
+    async fn ota_cmd_updates_node_when_cache_already_holds_the_image() {
         let (mut link, nodes, slots) = sim_fleet(1, None).await;
         let image = sim_image(3);
         let mut first = sessions(&nodes, &slots, &image);
@@ -898,7 +925,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_sends_no_chunk_when_cache_has_not_verified() {
+    async fn ota_cmd_sends_no_chunk_when_cache_has_not_verified() {
         let no_image = Arc::new(AtomicU32::new(0));
         let config = SimConfig {
             node_count: 4,
@@ -934,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn ota_cmd_runs_a_fleet_per_board_with_confirms_in_the_first() {
+    fn ota_cmd_runs_a_fleet_per_board_with_confirms_first_when_boards_differ() {
         let node = |i: u8| [0x02, 0, 0, 0, 0, i];
         let c5 = Capabilities::here(Board::Esp32c5);
         let other = Capabilities::here(Board::Unknown(9));
@@ -949,5 +976,46 @@ mod tests {
             [(Some(Board::Esp32c5), vec![0, 3, 2]), (Some(Board::Unknown(9)), vec![1])]
         );
         assert_eq!(fleets(&[(node(0), c5, true)]), [(None, vec![0])]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ota_cmd_ends_the_fleet_when_bridge_loses_the_image_mid_run() {
+        let config = SimConfig {
+            node_count: 4,
+            speed: SPEED,
+            fleet_version: minor_behind(NODE_VERSION),
+            drop_cache_after: Some(20),
+            ..SimConfig::default()
+        };
+        let mut link = SimTransport::new(config).start().expect("starting the simulator");
+        connected(&mut link).await.expect("the simulator connects");
+        let nodes: Vec<Mac> = (0..4).map(SimTransport::node_mac).collect();
+        let (_, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
+        let image = sim_image(6);
+        let mut sessions = sessions(&nodes, &slots, &image);
+        let ended =
+            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), |_| {})
+                .await;
+        assert_eq!(ended, Err(FleetError::CacheLost));
+        // One session met the `NoImage`, and the rest were cancelled, not left to meet it too.
+        let outcomes: Vec<Outcome> = sessions.iter().filter_map(|s| s.outcome().cloned()).collect();
+        let lost = outcomes.iter().filter(|o| **o == Outcome::Failed(Failure::CacheLost)).count();
+        let cancelled = Outcome::Failed(Failure::Cancelled);
+        assert_eq!((lost, outcomes.iter().filter(|o| **o == cancelled).count()), (1, 3));
+        let error = verdict(&outcomes, Some(FleetError::CacheLost)).unwrap_err().to_string();
+        assert!(error.starts_with("the bridge lost the node image;"), "{error}");
+    }
+
+    #[test]
+    fn ota_cmd_counts_earlier_updates_when_a_later_upload_fails() {
+        let cancelled = Outcome::Failed(Failure::Cancelled);
+        let outcomes = [Outcome::Done(NEW), Outcome::Done(NEW), cancelled.clone()];
+        let failed = Some(FleetError::Upload(update::Failure::Silent));
+        let error = verdict(&outcomes, failed).unwrap_err().to_string();
+        let expected = "the bridge did not take the node image (it stopped answering); 2 nodes \
+                        were updated before it";
+        assert_eq!(error, expected);
+        let error = verdict(&[cancelled], failed).unwrap_err().to_string();
+        assert!(error.ends_with("; nothing was updated"), "{error}");
     }
 }

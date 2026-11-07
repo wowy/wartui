@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
-use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp};
+use wartui_proto::link::{BridgeToHost, HostToBridge, Undelivered, UpdateOp};
 use wartui_proto::mac;
 use wartui_proto::radio_link::update::{self, OP_MAX, Op, Sender, Stage};
 
@@ -222,6 +222,15 @@ pub enum FleetReport<'a> {
     Session(usize, &'a Progress),
 }
 
+/// Why [`drive_fleet`] ended a fleet before its sessions did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetError {
+    /// The P4 refused or lost the upload into its cache.
+    Upload(update::Failure),
+    /// The P4 answered a chunk `NoImage` after checking the image: it lost the image since.
+    CacheLost,
+}
+
 /// Run every node's update at once to its end, or until `stop` resolves, which cancels them all.
 /// Returns each session's outcome, in the order given.
 ///
@@ -229,8 +238,10 @@ pub enum FleetReport<'a> {
 /// and the sessions are told once the P4 has checked it ([`OtaEvent::Cached`]); none sends a
 /// chunk before. Without one, nothing is uploaded and no session is told, so pass it whenever a
 /// session streams. An upload the P4 refuses or loses cancels every session, which sends each its
-/// abort, and is the error. A `Begin` for the image the cache already holds is answered `Verified`
-/// at once, and the upload ends there.
+/// abort, and is the error. So is the first chunk answered `NoImage` once the image is checked
+/// ([`Failure::CacheLost`]), since every session's next chunk meets the same answer. The sessions
+/// keep their outcomes then. A `Begin` for the image the cache already holds is answered
+/// `Verified` at once, and the upload ends there.
 ///
 /// Every event goes to every session still running, and each reads only its own: its node's
 /// records, and the delivery answers to its own ids, which no two sessions share
@@ -243,18 +254,18 @@ pub enum FleetReport<'a> {
 /// can be read back by a script.
 ///
 /// # Errors
-/// Why the P4 refused or lost the upload.
+/// Why the P4 refused or lost the upload, or lost the image after checking it.
 pub async fn drive_fleet(
     link: &mut LinkHandle,
     sessions: &mut [OtaSession],
     image: Option<&OtaImage>,
     stop: impl std::future::Future<Output = ()>,
     mut report: impl FnMut(FleetReport<'_>),
-) -> Result<Vec<Outcome>, update::Failure> {
+) -> Result<Vec<Outcome>, FleetError> {
     tokio::pin!(stop);
     let started = tokio::time::Instant::now();
     let mut cache = image.map(|image| Sender::new(&image.bytes, image.sha256, &image.sha256));
-    let mut cache_failed = None;
+    let mut failed = None;
     let mut ticker = tokio::time::interval(OTA_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut phases: Vec<_> = sessions.iter().map(|session| session.progress().phase).collect();
@@ -281,7 +292,11 @@ pub async fn drive_fleet(
                 }
                 Some(LinkEvent::Message(BridgeToHost::Undelivered { id, reason })) => {
                     tracing::debug!(id, status = ?reason, "ota send result");
-                    feed(sessions, OtaEvent::Delivery { id, delivered: false }, &mut sends);
+                    let event = match reason {
+                        Undelivered::NoImage => OtaEvent::NoImage { id },
+                        _ => OtaEvent::Delivery { id, delivered: false },
+                    };
+                    feed(sessions, event, &mut sends);
                 }
                 Some(LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. })) => {
                     if kind == UpType::UpdateStatus.as_u8()
@@ -326,11 +341,20 @@ pub async fn drive_fleet(
             } else if let Stage::Failed(failure) = sender.stage() {
                 cache = None;
                 tracing::debug!(failure = ?failure, "ota cache failed");
-                cache_failed = Some(failure);
+                failed = Some(FleetError::Upload(failure));
                 let now = now();
                 for session in sessions.iter_mut() {
                     sends.extend(session.cancel(now));
                 }
+            }
+        }
+        let lost = Outcome::Failed(Failure::CacheLost);
+        if failed.is_none() && sessions.iter().any(|session| session.outcome() == Some(&lost)) {
+            tracing::debug!("ota cache lost");
+            failed = Some(FleetError::CacheLost);
+            let now = now();
+            for session in sessions.iter_mut() {
+                sends.extend(session.cancel(now));
             }
         }
         // Polled after every event, so the next op goes as soon as a status allows it.
@@ -367,7 +391,7 @@ pub async fn drive_fleet(
             report(FleetReport::Session(i, &now_progress));
         }
     }
-    if let Some(failure) = cache_failed {
+    if let Some(failure) = failed {
         return Err(failure);
     }
     Ok(sessions.iter().filter_map(|session| session.outcome().cloned()).collect())

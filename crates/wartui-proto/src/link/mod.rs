@@ -36,7 +36,7 @@ mod bytes;
 mod cache;
 mod frame;
 
-pub use cache::{cache_chunk_body, image_tag};
+pub use cache::{NodeImageCache, cache_chunk_body, image_tag};
 pub(crate) use frame::CobsStream;
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
