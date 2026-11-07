@@ -33,9 +33,13 @@
 //!   the slot is clocked every [`ACK_POLL`], and no later than the wait's deadline.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
-//!   [`ABSENT_AFTER`] transfers in a row that fail the magic.
+//!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed
+//!   since the last that had it. A node erasing flash cannot re-arm, so it fails the magic
+//!   until the erase ends, and a miss count alone would drop it mid-update.
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
+//!   If the retry fails too, the slot is not clocked again for [`MISS_BACKOFF`], in an IRQ pass
+//!   or as due work, so the bus does not spend its transfers on a node that cannot answer yet.
 //!
 //! Each slot has its own seq, so a node's gaps count only transfers meant for it. Log lines name a
 //! slot as the operator reads it, `N3` on a carrier ([`NodeBoard::label`]).
@@ -86,6 +90,14 @@ const ACK_POLL: Duration = Duration::from_millis(25);
 const PROBE_EVERY: Duration = Duration::from_millis(2_000);
 /// Transfers in a row failing the magic before a present slot is absent.
 const ABSENT_AFTER: u8 = 5;
+/// The least time from a present slot's last transfer with the magic to its absence. It outlasts
+/// a node's flash sector erase. A lost supply still takes every slot absent well inside
+/// `wartui_proto::carrier::DROP_WINDOW_MS` of the others: they all start missing at once, and
+/// each goes within a [`POLL_EVERY`] either side of this after the loss.
+const ABSENT_SPAN: Duration = Duration::from_millis(1_000);
+/// How long a present slot whose transfer and retry both failed the magic waits before it is
+/// clocked again, so a node erasing flash is not clocked through the erase.
+const MISS_BACKOFF: Duration = Duration::from_millis(10);
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
 const SLOT_GAP: Duration = Duration::from_millis(1);
@@ -309,6 +321,8 @@ struct Slot {
     present: bool,
     /// Transfers in a row that failed the magic.
     misses: u8,
+    /// When the last transfer with the magic ended.
+    heard: Option<Instant>,
     /// The P4's seq for this slot's next transfer.
     seq: u16,
     /// The node's seq.
@@ -340,6 +354,7 @@ impl Slot {
         Self {
             present: false,
             misses: 0,
+            heard: None,
             seq: 0,
             peer: SeqCheck::new(),
             tracker: AckTracker::new(),
@@ -364,14 +379,30 @@ impl Slot {
         if !self.present {
             return last + PROBE_EVERY;
         }
-        if self.ack_owed || downlink.has_work() {
-            return Instant::MIN;
+        let due = if self.ack_owed || downlink.has_work() {
+            Instant::MIN
+        } else {
+            match downlink.deadline_ms() {
+                Some(_) if self.fetch_ack => Instant::MIN,
+                Some(deadline) => (last + ACK_POLL).min(Instant::from_millis(deadline)),
+                None => last + POLL_EVERY,
+            }
+        };
+        due.max(self.held_until())
+    }
+
+    /// Until when this slot waits out a miss: [`MISS_BACKOFF`] after a present slot's last
+    /// transfer failed the magic, retry included, and otherwise [`Instant::MIN`].
+    fn held_until(&self) -> Instant {
+        match self.last_end {
+            Some(end) if self.present && self.misses > 0 => end + MISS_BACKOFF,
+            _ => Instant::MIN,
         }
-        match downlink.deadline_ms() {
-            Some(_) if self.fetch_ack => Instant::MIN,
-            Some(deadline) => (last + ACK_POLL).min(Instant::from_millis(deadline)),
-            None => last + POLL_EVERY,
-        }
+    }
+
+    /// Whether an IRQ pass may clock this slot at `now`: present, and not waiting out a miss.
+    fn clockable(&self, now: Instant) -> bool {
+        self.present && self.held_until() <= now
     }
 }
 
@@ -440,12 +471,14 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
         if !asserted || retry {
             controller.unlatch();
         }
-        if any_present && asserted && controller.stuck_at.is_none() {
+        let serving = any_present && asserted && controller.stuck_at.is_none();
+        let held = serving.then(|| controller.all_held(Instant::now())).flatten();
+        if serving && held.is_none() {
             controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
             for k in 0..per_bus {
                 let i = (rr + k) % per_bus;
-                if !controller.slots[i].present {
+                if !controller.slots[i].clockable(Instant::now()) {
                     continue;
                 }
                 if let Outcome::Good { records } = controller.exchange(i, true, shared).await {
@@ -480,7 +513,10 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
             // With IRQ already asserted and nobody present, only the timer can wake this, and
             // the host queues nothing for an absent slot. Stuck, it waits for the deassert or
             // the retry instead.
-            if any_present {
+            if let Some(until) = held {
+                // Every present slot waits out a miss under an asserted IRQ, so only the timer.
+                Timer::at(due.min(until)).await;
+            } else if any_present {
                 // Asserted, or deasserted when stuck.
                 let high = controller.irq_active_high != controller.stuck_at.is_some();
                 let level = if high { Event::HighLevel } else { Event::LowLevel };
@@ -529,6 +565,12 @@ impl Controller {
         self.irq_since = None;
         self.empty_passes = 0;
         self.stuck_at = None;
+    }
+
+    /// When every present slot waits out a miss at `now`, the earliest any may be clocked again.
+    fn all_held(&self, now: Instant) -> Option<Instant> {
+        let mut present = self.slots[..self.per_bus].iter().filter(|s| s.present);
+        present.try_fold(Instant::MAX, |at, s| (!s.clockable(now)).then(|| at.min(s.held_until())))
     }
 
     /// When slot `i` is next owed a transfer.
@@ -637,6 +679,7 @@ impl Controller {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 if !slot.present {
                     // A node that arrives may be a new life, whose seq restarts.
                     slot.tracker = AckTracker::new();
@@ -683,16 +726,19 @@ impl Controller {
             Err(VerifyError::BadCrc) => {
                 slot.crc = slot.crc.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
             Err(VerifyError::OtherVersion(_)) => {
                 slot.version = slot.version.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
             Err(VerifyError::BadLen) => {
                 slot.len = slot.len.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
         };
@@ -703,18 +749,18 @@ impl Controller {
             // The node asserting a stuck line is usually the one that just arrived.
             self.unlatch();
             self.line(shared, Some(i), format_args!("appeared"));
-        } else if slot.present && slot.misses >= ABSENT_AFTER {
+        } else if slot.present
+            && slot.misses >= ABSENT_AFTER
+            && slot.heard.is_none_or(|heard| end.saturating_duration_since(heard) >= ABSENT_SPAN)
+        {
             slot.present = false;
+            let misses = slot.misses;
             shared.nodes.set_present(k, false);
             crate::carrier::presence(shared, shared.nodes.present());
             shared.nodes.downlinks.borrow_mut()[k].drain(|id| {
                 shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::NoNode });
             });
-            self.line(
-                shared,
-                Some(i),
-                format_args!("gone after {ABSENT_AFTER} transfers without magic"),
-            );
+            self.line(shared, Some(i), format_args!("gone after {misses} transfers without magic"));
         }
         outcome
     }
