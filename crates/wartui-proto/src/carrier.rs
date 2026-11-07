@@ -24,9 +24,10 @@
 //!
 //! **The P4 cannot sense the node supply**, and stays up on its own USB-C while it is out. Its
 //! only sign is every present node going absent at once, which [`DropWatch`] looks for. A node
-//! the host asked to power-cycle drops for that reason, so its drop does not count. Nor does a
-//! lone node's: one node has no inrush to stagger, and its drop is no different from a crash
-//! or an operator pulling it.
+//! in a power-cycle drops for that reason, so its drop does not count, while one still waiting
+//! for its cycle has power and counts like any other. Nor does a lone node's drop count: one
+//! node has no inrush to stagger, and its drop is no different from a crash or an operator
+//! pulling it.
 
 use crate::bus::{NodeBoard, Slot};
 
@@ -144,8 +145,8 @@ impl DropWatch {
         Self { present: 0, dropped: 0, since_ms: 0, cycled: 0, cycled_until_ms: 0 }
     }
 
-    /// Note that `present` hold a node at `now_ms`, while `cycling` wait for a power-cycle or
-    /// are in one. Returns the slots that were present before every node dropped, once the last
+    /// Note that `present` hold a node at `now_ms`, while `cycling` are in a power-cycle now.
+    /// Returns the slots that were present before every node dropped, once the last
     /// of them goes within [`DROP_WINDOW_MS`] of the first, and only when there are two or more.
     pub fn note(&mut self, present: u16, cycling: u16, now_ms: u64) -> Option<u16> {
         if now_ms > self.cycled_until_ms {

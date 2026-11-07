@@ -46,12 +46,15 @@ it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with 
 - **Two or more present nodes dropping at once** read as a lost node supply. The P4 powers one
   slot at a time, any socket, until a node answers or the host asks for a power-cycle, then the
   rest, one every 100 ms.
+- **No node answering within 5 s of powering every node**, at boot or after a power-cycle request
+  ended that wait, reads as a lost node supply too, and the P4 powers one slot at a time again.
+  With no node seated, it goes on doing so.
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
   power out of reach, every power-cycle answers `Failed`.
 
-Each announcement also carries a line naming the carrier: `carrier-10: 10 node slots, 3 powered
-now, 7 already on`. [`docs/node-bus.md`](../../docs/node-bus.md) § "On the carrier board" has the
-port map and the pins.
+Each announcement also carries a line naming the carrier and what it powered at boot:
+`carrier-10: 10 node slots; at boot 3 powered, 7 already on`.
+[`docs/node-bus.md`](../../docs/node-bus.md) § "On the carrier board" has the port map and the pins.
 
 ## The link to the C6
 

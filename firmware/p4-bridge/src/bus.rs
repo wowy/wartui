@@ -202,20 +202,23 @@ static SLOTS_B: ConstStaticCell<[Slot; PER_BUS]> =
 static CONTROLLER_A: StaticCell<Controller> = StaticCell::new();
 static CONTROLLER_B: StaticCell<Controller> = StaticCell::new();
 
-/// Build both buses for `board`. Called once: the buffers and controllers are statics.
+/// Build both buses for `board`, each driving its first `per_bus` slots.
+/// Called once: the buffers and controllers are statics.
 ///
 /// Every CS line goes high before either controller is built, so no node sees a transfer start.
 /// Out of line, so what it builds is on this frame rather than `main`'s.
 #[inline(never)]
 pub fn build(
     board: NodeBoard,
+    per_bus: u8,
     (spi2, dma_a, a): (SPI2<'static>, DMA_AXI_CH0<'static>, Pins),
     (spi3, dma_b, b): (SPI3<'static>, DMA_AXI_CH1<'static>, Pins),
 ) -> (&'static mut Controller, &'static mut Controller) {
     let high = |pin: Option<AnyPin<'static>>| {
         pin.map(|pin| Output::new(pin, Level::High, OutputConfig::default()))
     };
-    let per_bus = |cs: &[Option<Output<'static>>]| cs.iter().take_while(|cs| cs.is_some()).count();
+    let per_bus = usize::from(per_bus);
+    debug_assert!([&a.cs, &b.cs].iter().all(|cs| cs[..per_bus].iter().all(Option::is_some)));
     let cs_a = a.cs.map(high);
     let cs_b = b.cs.map(high);
     let pulled_up = |pin| Input::new(pin, InputConfig::default().with_pull(Pull::Up));
@@ -235,7 +238,7 @@ pub fn build(
     let controller_a = CONTROLLER_A.init(Controller {
         bus: 0,
         board,
-        per_bus: per_bus(&cs_a),
+        per_bus,
         irq_active_high,
         cs: cs_a,
         irq: irq(a.irq),
@@ -267,7 +270,7 @@ pub fn build(
     let controller_b = CONTROLLER_B.init(Controller {
         bus: 1,
         board,
-        per_bus: per_bus(&cs_b),
+        per_bus,
         irq_active_high,
         cs: cs_b,
         irq: irq(b.irq),

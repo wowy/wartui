@@ -183,11 +183,16 @@ pub fn power_cycled_text(board: NodeBoard, slot: Slot, outcome: PowerOutcome) ->
     }
 }
 
+/// What carries the nodes, as `bridge` announced it: the bench before any bridge has.
+pub(super) fn announced_board(bridge: Option<&BridgeInfo>) -> NodeBoard {
+    bridge.map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+}
+
 impl Snapshot {
     /// What carries the nodes, as the bridge last announced it: the bench before any has.
     #[must_use]
     pub fn node_board(&self) -> NodeBoard {
-        self.bridge.as_ref().map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+        announced_board(self.bridge.as_ref())
     }
 
     /// The nodes heard on another major or minor, as the header names them:

@@ -329,7 +329,7 @@ impl FleetEngine {
     /// What carries the nodes, as the bridge last announced it: the bench before any has.
     #[must_use]
     pub fn node_board(&self) -> NodeBoard {
-        self.bridge.as_ref().map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+        snapshot::announced_board(self.bridge.as_ref())
     }
 
     /// `slot` as the operator reads it on [`Self::node_board`].

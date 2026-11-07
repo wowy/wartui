@@ -613,7 +613,10 @@ wartui power-cycle --slot N3 --bridge 44:C0
 It resolves one bridge as `wartui reset` does, and takes `--config PATH` as `status` does. `--slot`
 takes the carrier's silk names, `N1` to `N6`, `N10` or `N14`; another name is refused with the
 range. A bench bridge, with no carrier, is refused before anything is sent. A node with its own USB
-plugged in stays powered through a cycle. Nothing power-cycles a node on its own.
+plugged in stays powered through a cycle. When the bridge takes the node supply to be lost, it
+switches every node off and powers them again one at a time
+([`docs/node-bus.md`](../../docs/node-bus.md#on-the-carrier-board)). Otherwise nothing
+power-cycles a node on its own.
 
 The bridge answers once the node is powered again, or says why not:
 

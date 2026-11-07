@@ -526,6 +526,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
     let (bus_a, bus_b) = bus::build(
         carrier.board(),
+        carrier.per_bus(),
         (peripherals.SPI2, peripherals.DMA_AXI_CH0, pins_a),
         (peripherals.SPI3, peripherals.DMA_AXI_CH1, pins_b),
     );
