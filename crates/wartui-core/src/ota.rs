@@ -30,13 +30,15 @@
 //!
 //! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took
 //! the transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past
-//! a lost chunk arrives at the wrong offset. The node reports a status on each 4 KB sector it writes, so after the chunk
-//! that completes a sector the host waits for one. Any status moves the host to the offset it
-//! names, back or forward, except one below the highest offset the node has reported since its
-//! `begin`: that one was overtaken by a newer status, and acting on it would resend what the node
-//! already holds. Two more go unheeded, both written before the chunk they name reached the
-//! node, since resending for them would send the chunks after it twice: one naming a chunk
-//! still awaiting its delivery answer, and one naming the offset the host last went back to.
+//! an undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector
+//! it writes, so after the chunk that completes a sector the host waits for one. A status moves
+//! the host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot
+//! is FIFO and stop-and-wait, and a node whose inbox is full leaves the transfer unacknowledged, so
+//! it is resent rather than lost. So only an undelivered chunk or the timeout says a chunk was
+//! lost. A status naming an offset behind what was sent is the node's answer to a duplicate,
+//! written before the chunks after it arrived, and going back on it would resend chunks the node
+//! holds, each drawing another such status. The commit's answer is the exception: one naming bytes
+//! still missing streams from there.
 //! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the
 //! last offset the node reported: a node that has those bytes answers the duplicate with its
 //! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
@@ -357,9 +359,6 @@ pub struct OtaSession {
     /// The highest `next_offset` the node has reported since its `begin`; a status below it is
     /// stale.
     high: u32,
-    /// The offset sending last went back to, until a status names another: the statuses of
-    /// chunks sent before going back name it too.
-    rewound_to: Option<u32>,
     /// Whether the node has accepted this session, so a failure owes it an abort.
     accepted: bool,
     /// Whether a failure has an abort to send.
@@ -415,7 +414,6 @@ impl OtaSession {
             next: 0,
             reported: 0,
             high: 0,
-            rewound_to: None,
             accepted: false,
             abort_owed: false,
             committed: false,
@@ -612,27 +610,19 @@ impl OtaSession {
         }
     }
 
-    /// The node holds everything before `offset`, by a status no older than the last.
+    /// The node holds everything before `offset`, by a status no older than the last. Sending
+    /// moves forward to it, never back: the module docs give the rule.
     fn on_progress(&mut self, now: Instant, offset: u32, out: &mut Vec<HostToBridge>) {
-        // Written before the chunks sent since going back to `offset` arrived.
-        if self.rewound_to == Some(offset) {
+        // No further than the last: the answer to a duplicate.
+        if offset <= self.reported {
             return;
         }
-        if offset > self.high {
-            self.send_failures = 0;
-        }
+        self.send_failures = 0;
         self.reported = offset;
         self.high = offset;
         self.wait_status = None;
         self.status_timeouts = 0;
-        // Behind what was sent, a status means the chunk at `offset` was lost, unless that chunk
-        // is still awaiting its answer, so the status was written before it arrived.
-        let awaited = self.pending.iter().any(|p| p.frame == Sent::Chunk(offset));
-        let back = offset < self.next && !awaited;
-        self.rewound_to = back.then_some(offset);
-        if back || offset > self.next {
-            self.next = offset;
-        }
+        self.next = self.next.max(offset);
         self.send_next(now, out);
     }
 
@@ -663,7 +653,6 @@ impl OtaSession {
                     // Unless a status has since said the node holds it.
                     if offset >= self.reported && offset < self.next {
                         self.next = offset;
-                        self.rewound_to = Some(offset);
                     }
                     self.send_next(now, out);
                 }
@@ -713,7 +702,6 @@ impl OtaSession {
                 } else {
                     // The silence outlasted anything in flight.
                     self.next = self.reported;
-                    self.rewound_to = None;
                     self.send_next(now, out);
                 }
             }
@@ -833,7 +821,6 @@ impl OtaSession {
         self.phase = phase;
         self.phase_since = now;
         self.pending.clear();
-        self.rewound_to = None;
         self.wait_status = None;
         self.send_failures = 0;
         self.status_timeouts = 0;

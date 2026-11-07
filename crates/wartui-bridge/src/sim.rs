@@ -98,8 +98,8 @@ pub struct SimConfig {
     /// [`NODE_VERSION`] by default; `wartui ota --sim` sets an older one, so the fleet has
     /// something to update to.
     pub fleet_version: Version,
-    /// The index of one node that acknowledges this share of the update chunks sent to it
-    /// without reading them, as a node that dropped one on the floor does.
+    /// The index of one node that never acknowledges this share of the update chunks sent to it,
+    /// so the bridge answers them `Undelivered`, as a node bus transfer that fails every try is.
     /// `None` by default. A test knob, for the host's go-back.
     pub lossy_node: Option<(u8, f64)>,
     /// The index of one node whose updated image is never confirmed: it ignores the host
@@ -196,7 +196,7 @@ enum SimCommand {
 struct Route {
     slot: Slot,
     tx: mpsc::Sender<SimCommand>,
-    /// The share of update chunks acknowledged and not delivered ([`SimConfig::lossy_node`]).
+    /// The share of update chunks undelivered ([`SimConfig::lossy_node`]).
     chunk_loss: f64,
 }
 
@@ -479,8 +479,10 @@ async fn deliver(
         Ok(DownMsg::Assign(assign)) => SimCommand::Assign(assign),
         Ok(DownMsg::Clear(_)) => SimCommand::Clear,
         Ok(DownMsg::UpdateConfirm(_)) => SimCommand::Confirm,
-        // Acknowledged on the bus, and gone before the node read it.
-        Ok(DownMsg::UpdateChunk(_)) if rng.next_f64() < route.chunk_loss => return Ok(()),
+        // Never acknowledged on the bus. A delivered record reaches the node's inbox in order.
+        Ok(DownMsg::UpdateChunk(_)) if rng.next_f64() < route.chunk_loss => {
+            return Err(Undelivered::Timeout);
+        }
         Ok(
             DownMsg::UpdateBegin(_)
             | DownMsg::UpdateChunk(_)

@@ -23,8 +23,10 @@
 //!   since a node not yet present may be the one asserting.
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
-//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
-//!   asserted by nothing this bus can serve, such as a node not yet present. The bus counts it
+//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that clock every present slot and bring no
+//!   record mean the line is asserted by nothing this bus can serve, such as a node not yet
+//!   present. A pass that skips a slot waiting out [`MISS_BACKOFF`] does not count, since that
+//!   slot's node may be the one asserting. The bus counts a stuck line
 //!   and runs the schedule below until IRQ is seen deasserted, a slot becomes present, or
 //!   [`STUCK_RETRY`] has passed. The retry is needed because a shared line under that schedule
 //!   may never deassert: each node holds it while its record waits for a poll, and a few nodes
@@ -105,9 +107,9 @@ const MISS_BACKOFF: Duration = Duration::from_millis(20);
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
 const SLOT_GAP: Duration = Duration::from_millis(1);
-/// IRQ passes in a row with no record before the line counts as stuck. Two,
-/// because the first pass after a node queues a record clocks the transfer it armed before,
-/// which is empty.
+/// IRQ passes in a row, each clocking every present slot, with no record before the line counts
+/// as stuck. Two, because the first pass after a node queues a record clocks the transfer it
+/// armed before, which is empty.
 const EMPTY_PASSES: u8 = 2;
 /// How long a stuck bus waits before trying IRQ service again. A line that really is held costs
 /// [`EMPTY_PASSES`] empty passes per retry, about 3% of the bus at 4 MHz with five nodes.
@@ -524,9 +526,12 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
         if serving && held.is_none() {
             controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
+            // A present slot waiting out a miss, whose node may be the one asserting.
+            let mut skipped = false;
             for k in 0..per_bus {
                 let i = (rr + k) % per_bus;
                 if !controller.slots[i].clockable(Instant::now()) {
+                    skipped |= controller.slots[i].present;
                     continue;
                 }
                 let outcome = controller.exchange(i, true, shared).await;
@@ -540,10 +545,12 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
                 controller.empty_passes = 0;
             } else {
                 rr = (rr + 1) % per_bus;
-                controller.empty_passes = controller.empty_passes.saturating_add(1);
-                if controller.empty_passes >= EMPTY_PASSES {
-                    controller.stuck_at = Some(Instant::now());
-                    controller.stuck = controller.stuck.wrapping_add(1);
+                if !skipped {
+                    controller.empty_passes = controller.empty_passes.saturating_add(1);
+                    if controller.empty_passes >= EMPTY_PASSES {
+                        controller.stuck_at = Some(Instant::now());
+                        controller.stuck = controller.stuck.wrapping_add(1);
+                    }
                 }
             }
             let now = Instant::now();

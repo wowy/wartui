@@ -218,7 +218,7 @@ fn summarize(kind: u8, body: &[u8]) -> Out {
 enum Fate {
     /// Delivered and read; the node's answer comes back.
     Deliver,
-    /// Delivered and never read: the node's receive queue overflowed.
+    /// Delivered and never read, which the node bus never does: its delivery is in order.
     Lose,
     /// Undelivered, and not read.
     Undelivered,
@@ -595,10 +595,12 @@ fn ota_session_fails_when_chunks_stay_undelivered_across_every_begin() {
     let mut bench = Bench::new(&image(NEW));
     let mut fate = |out| if out == Out::Chunk(2048) { Fate::Undelivered } else { Fate::Deliver };
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Failed(Failure::NotAnswering));
-    // Each begin resumes at 2048 and sends it until the streak gives up on it.
+    // Each begin resumes at 2048 and sends it until the streak gives up on it. The first
+    // streak takes one more: its first failure comes before the status reporting 2048, which is
+    // progress and starts the count again.
     let per_begin = MAX_SEND_FAILURES as usize + 1;
     let begins = MAX_RESTARTS as usize + 1;
-    assert_eq!(bench.count(Out::Chunk(2048)), per_begin * begins);
+    assert_eq!(bench.count(Out::Chunk(2048)), per_begin * begins + 1);
     // The node holds the session throughout, so the status a chunk still out draws after each
     // return to the begin answers as the begin would.
     assert!(bench.count(Out::Begin) <= begins);
@@ -648,7 +650,7 @@ fn ota_session_goes_back_to_reported_offset_when_sector_status_is_lost() {
 }
 
 #[test]
-fn ota_session_goes_back_to_gap_when_node_reports_it() {
+fn ota_session_goes_back_to_reported_offset_when_delivered_chunk_is_dropped() {
     let mut bench = Bench::new(&image(NEW));
     let mut lost = false;
     let mut fate = |out| {
@@ -659,7 +661,7 @@ fn ota_session_goes_back_to_gap_when_node_reports_it() {
         Fate::Deliver
     };
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Done(NEW));
-    // 2048 arrived to a node wanting 1024, which said so; the host went back.
+    // The node's gap statuses name 1024 and send nothing back; the status timeout does.
     assert_eq!(bench.count(Out::Chunk(1024)), 2);
     bench.assert_image_written();
 }
@@ -788,22 +790,6 @@ fn ota_session_confirms_trial_node_when_started_to_confirm() {
     let beat = heartbeat(NEW, false);
     session.handle(now(1000), beat_from(SLOT, &beat));
     assert_eq!(session.outcome(), Some(&Outcome::Done(NEW)));
-}
-
-#[test]
-fn ota_session_ignores_stale_status_when_newer_one_arrived_first() {
-    let mut bench = Bench::new(&image(NEW));
-    // Stopped with chunk 7168 queued and the node's last status at 4096.
-    bench.run(&mut deliver, Duration::from_secs(5), |b| b.sent.contains(&Out::Chunk(6144)));
-    // Two gap statuses, the newer first: the older is stale and must not rewind the host.
-    let status =
-        |next_offset| UpdateStatus { session: SESSION, state: UpdateState::Receiving, next_offset };
-    bench.status(SLOT, status(6144));
-    bench.status(SLOT, status(5120));
-    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
-    assert_eq!(bench.count(Out::Chunk(6144)), 2, "rewound to the newer gap");
-    assert_eq!(bench.count(Out::Chunk(5120)), 1, "never to the stale one");
-    bench.assert_image_written();
 }
 
 #[test]
@@ -957,7 +943,7 @@ fn ota_session_rewinds_to_undelivered_chunk() {
 }
 
 #[test]
-fn ota_session_resends_from_status_offset_without_crossing_sector() {
+fn ota_session_resends_from_undelivered_chunk_only_when_status_falls_behind() {
     let mut bench = Bench::new(&image(NEW));
     bench.open();
     for offset in (0..4096).step_by(1024) {
@@ -965,35 +951,39 @@ fn ota_session_resends_from_status_offset_without_crossing_sector() {
     }
     bench.receiving(4096);
     bench.answer_chunk(4096, true);
-    bench.answer_chunk(5120, true);
-    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(7168)]);
-    // The node lost 4096, and says so on 5120.
+    bench.answer_chunk(5120, false);
+    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(5120)]);
+    bench.answer_chunk(6144, true);
+    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+    // The node's gap status on that 6144 names 5120, which is already on its way; a stale
+    // status names 4096. Neither sends anything back.
+    bench.receiving(5120);
     bench.receiving(4096);
-    let mut resent = Vec::new();
-    for offset in [6144, 7168, 4096, 5120, 6144, 7168] {
-        let before = bench.queue.len();
-        bench.answer_chunk(offset, true);
-        if bench.queue.len() == before {
-            resent.extend(bench.queued().last().copied());
-        }
-    }
-    assert_eq!(resent, [Out::Chunk(4096), Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)]);
+    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+    bench.answer_chunk(5120, true);
+    bench.answer_chunk(6144, true);
+    bench.answer_chunk(7168, true);
     assert_eq!(bench.queued(), [], "nothing past 8192 without its sector's status");
 }
 
 #[test]
-fn ota_session_ignores_status_when_it_names_a_chunk_awaiting_delivery() {
+fn ota_session_ignores_status_when_it_falls_behind_sent_chunks() {
     let mut bench = Bench::new(&image(NEW));
     bench.open();
     for offset in (0..4096).step_by(1024) {
         bench.answer_chunk(offset, true);
     }
     bench.receiving(4096);
-    // Written before 4096 arrived, as a duplicate's status is: resending would send it twice.
+    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+    // Answers to duplicates of earlier chunks, written before 4096 arrived. Delivery is in
+    // order, so they say nothing was lost, before the chunks' delivery or after it.
     bench.receiving(4096);
     assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
     bench.answer_chunk(4096, true);
-    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+    bench.answer_chunk(5120, true);
+    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(7168)]);
+    bench.receiving(4096);
+    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(7168)]);
 }
 
 #[test]
