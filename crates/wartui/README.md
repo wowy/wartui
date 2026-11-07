@@ -645,7 +645,8 @@ The bridge answers once the node is powered again, or says why not:
 The carrier has a header for a 4-pin PWM fan, a Noctua NF-A6x15 5V PWM. The bridge keeps its duty,
 0 to 100 %, in its own flash and boots into it, so the duty holds across its reboots and with no
 host attached; `wartui.toml` holds none. A bridge with nothing stored runs the fan at 100 %, as it
-does while it resets. At 0 % the fan turns at its own minimum.
+does while it resets. The fan stops at low duty: on the bench it needed 15 % to start from rest,
+kept turning down to 10 % once spinning, and stopped at 5 % and 0 %.
 
 ```sh
 wartui fan                  # the duty and speed now
@@ -961,7 +962,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
   radio link counters, and a `bridge_queue` row per queue it reported.
 - **`fan stopped at 40%: unplugged or stalled`**: the bridge read no tach pulse over a whole second
-  at a duty above 0 %. Check the fan header. At 0 % nothing is raised.
+  at 20 % or more, where the fan always turns. Check the fan header. Below 20 % nothing is raised,
+  since the fan may stop there by design.
 - **`4F:08 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
   fault, and the line stays for the run. `brownout` means check that node's supply; `software`,
   `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on

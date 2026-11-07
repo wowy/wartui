@@ -740,13 +740,14 @@ def bridge_fan(db):
     rpms = [r[1] for r in rows if r[1] is not None]
     print(f"  fan  duty {min(duties)}..{max(duties)}% ({len(set(duties))} distinct)  "
           f"rpm {spread(rpms)}")
-    stopped = sum(1 for duty, rpm in rows if duty > 0 and rpm == 0)
+    # 20 % is `FanDuty::TURNS_FROM`: below it the fan may stop by design.
+    stopped = sum(1 for duty, rpm in rows if duty >= 20 and rpm == 0)
     if stopped:
         flag("WARN", "bridge",
-             f"fan stopped in {stopped} status row(s): no tach pulse at a duty above 0%, so it "
+             f"fan stopped in {stopped} status row(s): no tach pulse at 20% or more, so it "
              "was unplugged or stalled",
              "SELECT id, rx_at, uptime_ms, fan_duty, fan_rpm FROM bridge_status "
-             "WHERE fan_duty > 0 AND fan_rpm = 0 ORDER BY id")
+             "WHERE fan_duty >= 20 AND fan_rpm = 0 ORDER BY id")
 
 
 def host(db, ctx):

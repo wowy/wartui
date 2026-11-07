@@ -10,6 +10,7 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -175,10 +176,10 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     {
         faults.push(reason);
     }
-    // No tach pulses above 0 %: unplugged or stalled. 0 % asks for the least the fan gives, so
-    // nothing is raised there.
+    // No tach pulses at a duty the fan turns at: unplugged or stalled. Below that, the fan may
+    // stop by design, so nothing is raised there.
     if let Some(fan) = snapshot.bridge_status.and_then(|status| status.fan)
-        && fan.duty.get() > 0
+        && fan.duty >= FanDuty::TURNS_FROM
         && fan.rpm == Some(0)
     {
         faults.push(format!("fan stopped at {}: unplugged or stalled", fan.duty));
@@ -644,12 +645,19 @@ mod tests {
     #[test]
     fn footer_reports_fan_stopped_when_duty_is_set_and_tach_reads_zero() {
         assert_eq!(faults(&with_fan(40, Some(0))), ["fan stopped at 40%: unplugged or stalled"]);
+        assert_eq!(faults(&with_fan(20, Some(0))), ["fan stopped at 20%: unplugged or stalled"]);
     }
 
     #[test]
-    fn footer_reports_no_fan_fault_when_fan_turns_or_is_unread_or_at_zero_duty() {
-        // Turning; not read yet since the bridge booted; and the least airflow asked for.
-        for snapshot in [with_fan(40, Some(1830)), with_fan(40, None), with_fan(0, Some(0))] {
+    fn footer_reports_no_fan_fault_when_fan_turns_or_is_unread_or_below_turning_duty() {
+        // Turning; not read yet since the bridge booted; and duties the fan may stop at.
+        for snapshot in [
+            with_fan(40, Some(1830)),
+            with_fan(40, None),
+            with_fan(0, Some(0)),
+            with_fan(10, Some(0)),
+            with_fan(19, Some(0)),
+        ] {
             assert!(faults(&snapshot).is_empty(), "{:?}", faults(&snapshot));
         }
         // No carrier.

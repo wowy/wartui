@@ -5,8 +5,11 @@
 //! is the share of each period GPIO51 is low, and [`pwm`] says how long the pin stays high. A
 //! GPIO51 that is not driven, as through a P4 reset, runs the fan at full speed, so 100 % is the
 //! channel stopped with the pin at its idle low ([`Pwm::Full`]): the P4 at full duty looks the
-//! same as the P4 in reset. 0 % holds the pin high ([`Pwm::GpioHigh`]), where the fan turns at
-//! its own minimum rather than stopping.
+//! same as the P4 in reset. 0 % holds the pin high ([`Pwm::GpioHigh`]).
+//!
+//! **The fan stops at low duty.** On the bench it kept turning down to 10 % once spinning, needed
+//! 15 % to start from rest, and stopped at 5 % and 0 %. So a tach reading 0 rpm is a fault only at
+//! [`FanDuty::TURNS_FROM`] and above; below it the fan may simply be stopped.
 //!
 //! **The tach gives [`TACH_PULSES_PER_REV`] falling edges a revolution**, about 117 a second at
 //! the fan's 3500 rpm. [`TachFilter`] drops edges closer than [`TACH_MIN_GAP_US`], which rejects
@@ -43,6 +46,11 @@ pub struct FanDuty(u8);
 impl FanDuty {
     /// Full speed: the duty with nothing stored, and the fan's speed while the P4 is in reset.
     pub const FULL: Self = Self(100);
+
+    /// The least duty the fan is sure to turn at, from rest or slowing: 15 % starts it on the
+    /// bench, and 10 % keeps it turning only once it is. A 0 rpm reading below this is the duty,
+    /// not a fault.
+    pub const TURNS_FROM: Self = Self(20);
 
     /// `pct` as a duty, or `None` over 100.
     #[must_use]
@@ -92,7 +100,7 @@ impl fmt::Display for FanDuty {
 pub enum Pwm {
     /// Nothing: the channel stopped, the pin at its idle low. Full speed.
     Full,
-    /// The pin held high: the fan's minimum.
+    /// The pin held high: 0 %, which stops the fan.
     GpioHigh,
     /// One period, repeated: the pin high for `gpio_high` ticks, then low for `gpio_low`.
     Wave {
