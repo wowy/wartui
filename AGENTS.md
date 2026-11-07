@@ -400,6 +400,14 @@ edit stops; follow the pointer before changing the rule.
   any other key usage an operator needs at a glance. Keep its tables identical to
   `crates/wartui/README.md` § "Keyboard commands", and change both together;
   `crates/wartui/tests/readme.rs` fails when they differ.
+- **The wartui-carrier's design stays private.** Its PCB designs and layouts are proprietary.
+  The P4's and the C5s' pinouts are public, so others can write code for the boards with this
+  repo as the example. Docs, comments, commit messages and PRs may give:
+  - pins and pin behavior: polarity, pulls, which lines are shared;
+  - bus speeds;
+  - the I/O expander's I2C address and its port→node map.
+
+  They never give part numbers, component values, the power circuit, the layout or dimensions.
 - Use American spellings at all times: in prose, doc comments, identifiers, test names and
   commit messages (`meters`, `behavior`, `color`, `recognize`).
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the
