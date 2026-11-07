@@ -15,12 +15,12 @@
 //!
 //! **Erase is lazy**, immediately before the first write it clears. Erasing the whole slot at
 //! `begin` would stall the node for seconds while the host waits on a status, and erases
-//! sectors a shorter image never reaches. A sink that can erases a [`BLOCK`] when the image
-//! reaches one, since a node takes nothing over its bus while flash is erased: on the
-//! carrier's nodes one block erase costs about 150–170 ms (inferred from update timings),
-//! where sixteen sector flushes, each erasing its sector, cost about 43 ms apiece. Otherwise,
-//! and where less than a block of the slot remains, it erases sector by sector. A block may
-//! run past the image's end, never past the slot.
+//! sectors a shorter image never reaches. A node takes nothing over its bus while its flash
+//! erases, so its sink erases a [`BLOCK`] at a time ([`SectorSink::erase_unit`]). On the
+//! carrier's nodes, each sector's erase and write leaves a node unreachable on the bus for about
+//! 43 ms (inferred from the P4's counters in a ten-node update), and one block erase for about
+//! 150–170 ms (inferred from update timings; the longest seen in a ten-node update was 243 ms).
+//! A unit's erase may run past the image's end, never past the slot's last whole sector.
 //!
 //! **A `begin` identical to a session receiving or verified changes nothing.** The host
 //! re-sends [`UpdateBegin`] when the status answering the first is lost, and restarting
@@ -51,10 +51,10 @@ use crate::bus::{
     UpdateStatus, Version,
 };
 
-/// Bytes in one flash sector: the unit erased, and the unit [`Receiver`] buffers.
+/// Bytes in one flash sector: the default erase unit, and the unit [`Receiver`] buffers.
 pub const SECTOR: usize = 4096;
 
-/// Bytes in one flash block: the unit [`SectorSink::erase_block`] erases, when it can.
+/// Bytes in one flash block: the node's [`SectorSink::erase_unit`].
 pub const BLOCK: usize = 65536;
 
 /// Unconfirmed boots of a new image before it is rolled back, on a node or either half of a P4
@@ -75,16 +75,15 @@ pub trait SectorSink {
     type Error;
     /// Bytes the target slot holds.
     fn capacity(&self) -> u32;
-    /// Erase the [`SECTOR`]-byte sector starting at `offset`, a multiple of [`SECTOR`].
+    /// Bytes the receiver erases at a time, a nonzero multiple of [`SECTOR`].
+    fn erase_unit(&self) -> u32 {
+        SECTOR as u32
+    }
+    /// Erase `[offset, offset + len)`. Both are multiples of [`SECTOR`].
     ///
     /// # Errors
     /// Whatever the flash reports.
-    fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error>;
-    /// Erase the [`BLOCK`]-byte block starting at `offset`, a multiple of [`BLOCK`], or `None`
-    /// when this sink cannot, and the receiver erases sector by sector.
-    fn erase_block(&mut self, _offset: u32) -> Option<Result<(), Self::Error>> {
-        None
-    }
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), Self::Error>;
     /// Write `data` at `offset`. `offset` and `data.len()` are multiples of 4.
     ///
     /// # Errors
@@ -116,8 +115,6 @@ impl Phase {
 struct Session {
     begin: UpdateBegin,
     next_offset: u32,
-    /// Bytes from the slot's start a block erase has already cleared.
-    erased_to: u32,
     phase: Phase,
     hasher: Sha256,
 }
@@ -150,8 +147,7 @@ impl Receiver {
         if msg.board != self.board {
             return refused(msg.session, UpdateState::WrongBoard);
         }
-        let whole_sectors = sink.capacity() / SECTOR as u32 * SECTOR as u32;
-        if msg.len == 0 || msg.len > whole_sectors {
+        if msg.len == 0 || msg.len > whole_sectors(sink) {
             return refused(msg.session, UpdateState::TooLarge);
         }
         if let Some(session) = &self.session
@@ -163,7 +159,6 @@ impl Receiver {
         self.session = Some(Session {
             begin: *msg,
             next_offset: 0,
-            erased_to: 0,
             phase: Phase::Receiving,
             hasher: Sha256::new(),
         });
@@ -204,7 +199,7 @@ impl Receiver {
             return None;
         }
         let start = session.next_offset - SECTOR as u32;
-        if flush(sink, start, &mut session.erased_to, &mut self.buf, SECTOR).is_err() {
+        if flush(sink, start, &mut self.buf, SECTOR).is_err() {
             session.phase = Phase::FlashError;
         }
         Some(self.status())
@@ -226,7 +221,7 @@ impl Receiver {
         let fill = session.next_offset as usize % SECTOR;
         if fill != 0 {
             let start = session.next_offset - fill as u32;
-            if flush(sink, start, &mut session.erased_to, &mut self.buf, fill).is_err() {
+            if flush(sink, start, &mut self.buf, fill).is_err() {
                 session.phase = Phase::FlashError;
                 return self.status();
             }
@@ -302,32 +297,31 @@ const fn refused(session: u8, state: UpdateState) -> UpdateStatus {
     UpdateStatus { session, state, next_offset: 0 }
 }
 
+/// Bytes from the slot's start to the end of its last whole sector: as far as an image or an
+/// erase reaches.
+fn whole_sectors<S: SectorSink>(sink: &S) -> u32 {
+    sink.capacity() / SECTOR as u32 * SECTOR as u32
+}
+
 /// Write the first `fill` bytes of `buf` into the sector at `start`, padded with 0xFF to a
-/// multiple of 4, erasing it first unless it lies below `erased_to`. The padding is what erased
-/// flash holds anyway.
+/// multiple of 4. The padding is what erased flash holds anyway.
 ///
-/// At a block boundary with a whole block left in the slot, a sink that can erases the block,
-/// and `erased_to` moves past it.
+/// A sector that starts an erase unit erases first, up to the next unit boundary or the slot's
+/// last whole sector, whichever comes first. A session flushes each sector once, in order, so
+/// this erases every unit it writes exactly once: a new session starts at offset 0, and one kept
+/// by an identical `begin` resumes after the sectors it already flushed.
 fn flush<S: SectorSink>(
     sink: &mut S,
     start: u32,
-    erased_to: &mut u32,
     buf: &mut [u8; SECTOR],
     fill: usize,
 ) -> Result<(), S::Error> {
     let padded = fill.next_multiple_of(4);
     buf[fill..padded].fill(0xFF);
-    if start >= *erased_to {
-        let whole_sectors = sink.capacity() / SECTOR as u32 * SECTOR as u32;
-        let block = (start as usize).is_multiple_of(BLOCK)
-            && start.checked_add(BLOCK as u32).is_some_and(|end| end <= whole_sectors);
-        match block.then(|| sink.erase_block(start)).flatten() {
-            Some(result) => {
-                result?;
-                *erased_to = start + BLOCK as u32;
-            }
-            None => sink.erase_sector(start)?,
-        }
+    let unit = sink.erase_unit();
+    if start.is_multiple_of(unit) {
+        let end = start.saturating_add(unit).min(whole_sectors(sink));
+        sink.erase(start, end - start)?;
     }
     sink.write(start, &buf[..padded])
 }

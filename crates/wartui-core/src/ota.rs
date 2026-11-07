@@ -100,8 +100,8 @@ use wartui_proto::ota::SECTOR;
 use crate::engine::{Now, SEND_TIMEOUT};
 
 /// How long to wait for the status a sector's last chunk is owed, or for a commit's answer,
-/// before resending. A sector write takes tens of milliseconds, and one behind a node's 64 KB
-/// block erase about 150–170 ms, so this outlasts either.
+/// before resending. It outlasts a node's slowest flush, a 64 KB block erase and the sector write
+/// behind it, whose timings are in `wartui_proto::ota`'s "Erase is lazy".
 pub const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Status timeouts in a row, about 10 s, after which the node is taken to have dropped the

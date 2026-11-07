@@ -66,12 +66,12 @@ impl SectorSink for Flash {
         0x1E_0000
     }
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), ()> {
         if self.fail {
             return Err(());
         }
-        let at = offset as usize;
-        self.flash[at..at + SECTOR].fill(0xFF);
+        let (at, len) = (offset as usize, len as usize);
+        self.flash[at..at + len].fill(0xFF);
         Ok(())
     }
 

@@ -50,7 +50,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
-use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
+use wartui_proto::ota::{Receiver, SectorSink};
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
@@ -714,10 +714,10 @@ impl SectorSink for SimSlot {
         self.capacity
     }
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
-        let at = offset as usize;
-        self.reach(at + SECTOR);
-        self.flash[at..at + SECTOR].fill(0xFF);
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), ()> {
+        let (at, len) = (offset as usize, len as usize);
+        self.reach(at + len);
+        self.flash[at..at + len].fill(0xFF);
         Ok(())
     }
 
@@ -1220,6 +1220,7 @@ impl Xorshift {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wartui_proto::ota::SECTOR;
 
     /// The capabilities in the heartbeat `node` sends now.
     async fn heartbeat_capabilities(node: &mut SimNode) -> Capabilities {

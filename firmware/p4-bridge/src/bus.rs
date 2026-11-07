@@ -103,8 +103,8 @@ const PROBE_EVERY: Duration = Duration::from_millis(2_000);
 /// Transfers in a row failing the magic before a present slot is absent.
 const ABSENT_AFTER: u8 = 5;
 /// The least time from a present slot's last transfer with the magic to its absence. It outlasts
-/// a node's 64 KB flash block erase, about 150–170 ms on the carrier's nodes (inferred from
-/// update timings). A lost supply still takes every slot absent well inside
+/// a node's 64 KB flash block erase, its longest time deaf to the bus, whose timings are in
+/// `wartui_proto::ota`'s "Erase is lazy". A lost supply still takes every slot absent well inside
 /// `wartui_proto::carrier::DROP_WINDOW_MS` of the others: they all start missing at once, and
 /// each goes within a [`POLL_EVERY`] either side of this after the loss.
 const ABSENT_SPAN: Duration = Duration::from_millis(1_000);
@@ -363,7 +363,10 @@ struct Slot {
     xfers: Xfers,
     /// The longest span this report period, in ms, that the slot went without a transfer with the
     /// magic while present: from the end of the last before a run of misses to the end of the
-    /// next. Reset after each report, so a long span in one period does not hide later ones.
+    /// next. A transfer with a bad CRC, length or version has the magic, so it ends a span. A span
+    /// is recorded when the node answers again: one still open at a report lands in the next
+    /// period, and one that ends with the slot going absent shows only as its `gone` line. Reset
+    /// after each report, so a long span in one period does not hide later ones.
     deaf_ms: u32,
 }
 

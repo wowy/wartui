@@ -16,7 +16,7 @@ use core::borrow::BorrowMut;
 
 use crate::bus::{UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpdateChunk, UpdateState, UpdateStatus};
 use crate::ota::image::DIGEST_LEN;
-use crate::ota::{Receiver, SECTOR, SectorSink};
+use crate::ota::{Receiver, SectorSink};
 use crate::radio_link::update::{Op, Received, receive};
 
 /// The tag a [`super::HostToBridge::ToNodeChunk`] names a cached image by: the first four bytes
@@ -138,8 +138,9 @@ impl SectorSink for Region<'_> {
     }
 
     /// Memory needs no erase.
-    fn erase_sector(&mut self, offset: u32) -> Result<(), OutOfRange> {
-        self.range(offset, SECTOR).map(|_| ())
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), OutOfRange> {
+        let len = usize::try_from(len).map_err(|_| OutOfRange)?;
+        self.range(offset, len).map(|_| ())
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), OutOfRange> {
