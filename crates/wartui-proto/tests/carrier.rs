@@ -1,7 +1,9 @@
-//! The carrier's I/O expander as the P4 reads it at boot.
+//! The carrier's I/O expander as the P4 reads it at boot, and the watch for a lost node supply.
 
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::carrier::{ALL_INPUTS, Decision, decide, port, ports, warm_board};
+use wartui_proto::carrier::{
+    ALL_INPUTS, DROP_WINDOW_MS, Decision, DropWatch, decide, port, ports, warm_board,
+};
 
 const CARRIERS: [NodeBoard; 3] = [NodeBoard::Carrier6, NodeBoard::Carrier10, NodeBoard::Carrier14];
 
@@ -83,4 +85,117 @@ fn carrier_reports_broken_board_when_inputs_match_no_carrier() {
         assert_eq!(decision, Decision::Broken, "{input:#06x}");
         assert_eq!(decision.power(), 0);
     }
+}
+
+/// The present-mask bit for `bus` slot `index`.
+fn bit(bus: u8, index: u8) -> u16 {
+    1 << Slot::new(bus, index).unwrap().as_u8()
+}
+
+/// A watch that has seen `present` arrive at time 0.
+fn watching(present: u16) -> DropWatch {
+    let mut watch = DropWatch::new();
+    assert_eq!(watch.note(present, 0, 0), None);
+    watch
+}
+
+#[test]
+fn drop_watch_reports_supply_loss_when_every_node_drops_within_window() {
+    let (a1, b1, a2) = (bit(0, 0), bit(1, 0), bit(0, 1));
+    let mut watch = watching(a1 | b1 | a2);
+    assert_eq!(watch.note(b1 | a2, 0, 10_000), None);
+    assert_eq!(watch.note(a2, 0, 10_700), None);
+    assert_eq!(watch.note(0, 0, 10_000 + DROP_WINDOW_MS), Some(a1 | b1 | a2));
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_a_node_stays_present() {
+    let (a1, b1) = (bit(0, 0), bit(1, 0));
+    let mut watch = watching(a1 | b1);
+    assert_eq!(watch.note(b1, 0, 10_000), None);
+    assert_eq!(watch.note(b1, 0, 10_500), None);
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_no_node_was_ever_present() {
+    let mut watch = DropWatch::new();
+    assert_eq!(watch.note(0, 0, 0), None);
+    assert_eq!(watch.note(0, 0, 10_000), None);
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_lone_node_drops() {
+    // One node has no inrush to stagger, and its drop may be a crash or an operator pulling it.
+    let a1 = bit(0, 0);
+    let mut watch = watching(a1);
+    assert_eq!(watch.note(0, 0, 10_000), None);
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_dropping_nodes_are_power_cycled() {
+    let (a1, b1) = (bit(0, 0), bit(1, 0));
+    let mut watch = watching(a1 | b1);
+    assert_eq!(watch.note(b1, a1 | b1, 10_000), None);
+    assert_eq!(watch.note(0, a1 | b1, 10_500), None);
+}
+
+#[test]
+fn drop_watch_leaves_out_node_when_it_drops_just_after_its_power_cycle() {
+    // A node is absent only some time after it loses power, which may be after its cycle ends.
+    let (a1, b1, a2) = (bit(0, 0), bit(1, 0), bit(0, 1));
+    let mut watch = watching(a1 | b1 | a2);
+    watch.cycled(a1, 10_000);
+    assert_eq!(watch.note(b1 | a2, 0, 10_000 + DROP_WINDOW_MS), None);
+    assert_eq!(watch.note(0, 0, 10_500 + DROP_WINDOW_MS), Some(b1 | a2));
+}
+
+#[test]
+fn drop_watch_counts_node_when_its_power_cycle_ended_long_before() {
+    let (a1, b1) = (bit(0, 0), bit(1, 0));
+    let mut watch = watching(a1 | b1);
+    watch.cycled(a1, 10_000);
+    assert_eq!(watch.note(b1, 0, 10_001 + DROP_WINDOW_MS), None);
+    assert_eq!(watch.note(0, 0, 10_500 + DROP_WINDOW_MS), Some(a1 | b1));
+}
+
+#[test]
+fn drop_watch_reports_supply_loss_when_others_drop_beside_a_cycled_node() {
+    let (a1, b1, a2) = (bit(0, 0), bit(1, 0), bit(0, 1));
+    let mut watch = watching(a1 | b1 | a2);
+    assert_eq!(watch.note(b1 | a2, a1, 10_000), None);
+    assert_eq!(watch.note(0, a1, 10_500), Some(b1 | a2));
+}
+
+#[test]
+fn drop_watch_reports_only_late_drops_when_earlier_ones_fall_outside_window() {
+    // Once A1 had gone, B1 and A2 alone were present, and both then dropped.
+    let (a1, b1, a2) = (bit(0, 0), bit(1, 0), bit(0, 1));
+    let mut watch = watching(a1 | b1 | a2);
+    assert_eq!(watch.note(b1 | a2, 0, 10_000), None);
+    assert_eq!(watch.note(a2, 0, 10_001 + DROP_WINDOW_MS), None);
+    assert_eq!(watch.note(0, 0, 10_500 + DROP_WINDOW_MS), Some(b1 | a2));
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_one_node_drops_long_after_the_rest() {
+    let (a1, b1) = (bit(0, 0), bit(1, 0));
+    let mut watch = watching(a1 | b1);
+    assert_eq!(watch.note(b1, 0, 10_000), None);
+    assert_eq!(watch.note(0, 0, 10_001 + DROP_WINDOW_MS), None);
+}
+
+#[test]
+fn drop_watch_reports_nothing_when_last_node_cycled_after_an_old_drop() {
+    let (a1, b1, a2) = (bit(0, 0), bit(1, 0), bit(0, 1));
+    let mut watch = watching(a1 | b1 | a2);
+    assert_eq!(watch.note(b1, 0, 10_000), None);
+    assert_eq!(watch.note(0, b1, 30_000), None);
+}
+
+#[test]
+fn drop_watch_reports_supply_loss_once_when_set_stays_empty() {
+    let (a1, b1) = (bit(0, 0), bit(1, 0));
+    let mut watch = watching(a1 | b1);
+    assert_eq!(watch.note(0, 0, 10_000), Some(a1 | b1));
+    assert_eq!(watch.note(0, 0, 10_100), None);
 }

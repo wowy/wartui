@@ -161,6 +161,11 @@ impl Nodes {
         (self.rx_count.get(), self.rx_oversize.get())
     }
 
+    /// Bit `k` is set while driven slot `k` holds a node.
+    pub fn present(&self) -> u16 {
+        self.present.get()
+    }
+
     fn is_present(&self, k: usize) -> bool {
         self.present.get() & (1 << k) != 0
     }
@@ -679,12 +684,14 @@ impl Controller {
         if !slot.present && matches!(outcome, Outcome::Good { .. }) {
             slot.present = true;
             shared.nodes.set_present(k, true);
+            crate::carrier::presence(shared, shared.nodes.present());
             // The node asserting a stuck line is usually the one that just arrived.
             self.unlatch();
             self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present && slot.misses >= ABSENT_AFTER {
             slot.present = false;
             shared.nodes.set_present(k, false);
+            crate::carrier::presence(shared, shared.nodes.present());
             shared.nodes.downlinks.borrow_mut()[k].drain(|id| {
                 shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::NoNode });
             });

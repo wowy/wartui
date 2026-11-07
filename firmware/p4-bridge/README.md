@@ -40,9 +40,12 @@ At boot, before it builds the node buses, the P4 reads the carrier's I/O expande
 (`src/carrier.rs`). The carrier it finds picks the CS pins and IRQ's polarity, and `Ready` reports
 it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with no carrier.
 
-- **A cold boot** powers every node, one every 200 ms.
+- **A cold boot** powers every node, one every 100 ms.
 - **A reset of the P4** leaves running nodes running, and powers only a node that is off.
 - **A power-cycle** from the host holds one node off for 1 s, then powers it again.
+- **Two or more present nodes dropping at once** read as a lost node supply. The P4 powers one
+  slot at a time, any socket, until a node answers or the host asks for a power-cycle, then the
+  rest, one every 100 ms.
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
   power out of reach, every power-cycle answers `Failed`.
 

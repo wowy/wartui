@@ -22,8 +22,9 @@
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
 //! - **the carrier** (`src/carrier.rs`) powers a carrier board's nodes one at a time at boot,
-//!   then power-cycles one whenever the host asks, through the I/O expander that shares I2C0
-//!   with the GPS. Each locks the bus per transaction;
+//!   then power-cycles one whenever the host asks, and staggers them again after a lost node
+//!   supply, through the I/O expander that shares I2C0 with the GPS. Each locks the bus per
+//!   transaction;
 //! - **the node buses** (`src/bus.rs`), one future per SPI controller, carry each node's records
 //!   to and from the host, and report link counters to it as log lines.
 //!

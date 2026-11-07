@@ -90,7 +90,7 @@ Driving a port high powers its node:
 - **The P4 reads the carrier from the expander at boot.** Each node enable is pulled down on the
   board, so with every port an input, a wired socket's port reads low and a spare one high. No
   answer at 0x20 is the bench, wired straight to the P4.
-- **A cold boot powers every node, one every 200 ms**, in slot order A1, B1, A2, B2. The P4 makes
+- **A cold boot powers every node, one every 100 ms**, in slot order A1, B1, A2, B2. The P4 makes
   every port an input, which turns every node off, writes the outputs low, makes only the node ports
   outputs, then raises them in turn. At power-up every port is an input, so every node starts off.
 - **A P4 reset leaves running nodes running.** The expander keeps its registers through one, and the
@@ -99,6 +99,11 @@ Driving a port high powers its node:
   drives no slot.
 - **A power-cycle holds one node off for 1 s**, then powers it again. The host asks for it with `p`
   in the fleet view or `wartui power-cycle`. A node with its own USB plugged in stays powered.
+- **Two or more present nodes dropping at once, and none left, read as a lost node supply**,
+  unless the host was power-cycling them. The P4 cannot sense the carrier's node supply and stays
+  up on its own USB-C. It writes every node port low, then switches on one slot at a time, giving
+  each 5 s to answer: the slots that were present first, in slot order, then every other slot.
+  Once a node answers, or the host asks for a power-cycle, it powers the rest, one every 100 ms.
 - **IRQ is active low**, as [Pin behavior](#pin-behavior) says, and the carrier pulls it up.
 - **GPIO25 and GPIO24 are the 14-node carrier's slot 7 CS lines.** They are the P4's
   USB-Serial-JTAG pads, so only the 14 takes them from it. The carrier's CS pull-ups hold both high

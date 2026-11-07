@@ -1,5 +1,6 @@
 //! The wartui-carrier's I/O expander as the P4 reads it at boot: which carrier this is, and
-//! which nodes to power. The firmware does the I2C around [`decide`].
+//! which nodes to power. The firmware does the I2C around [`decide`]. [`DropWatch`] tells the
+//! firmware when the carrier's node supply was likely lost.
 //!
 //! The expander sits at [`ADDRESS`] with sixteen ports, and driving a port high powers its
 //! node ([`port`]). Each enable is pulled down on the board, so a port that is an input reads
@@ -20,6 +21,12 @@
 //! - **Broken**: inputs that name no carrier. Nothing is powered and no slot is driven.
 //!
 //! As a 16-bit value, a register pair is `port1 << 8 | port0`.
+//!
+//! **The P4 cannot sense the node supply**, and stays up on its own USB-C while it is out. Its
+//! only sign is every present node going absent at once, which [`DropWatch`] looks for. A node
+//! the host asked to power-cycle drops for that reason, so its drop does not count. Nor does a
+//! lone node's: one node has no inrush to stagger, and its drop is no different from a crash
+//! or an operator pulling it.
 
 use crate::bus::{NodeBoard, Slot};
 
@@ -108,4 +115,68 @@ pub fn decide(config: u16, output: u16, input: u16) -> Decision {
         .into_iter()
         .find(|&board| input & wired == !ports(board) & wired)
         .map_or(Decision::Broken, |board| Decision::Cold { board })
+}
+
+/// How close together every present node's drops must fall to read as a lost supply. A node is
+/// absent about 1.5 s after it loses power.
+pub const DROP_WINDOW_MS: u64 = 2_000;
+
+/// Watches which slots hold a node, for every one dropping at once. A mask's bit `n` is slot
+/// byte `n` ([`Slot::as_u8`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DropWatch {
+    /// The slots present at the last change.
+    present: u16,
+    /// The slots that dropped since [`Self::since_ms`], cycled ones aside.
+    dropped: u16,
+    /// When the first of [`Self::dropped`] went.
+    since_ms: u64,
+    /// Slots whose cycle ended lately, so a late drop is still the cycle's.
+    cycled: u16,
+    /// Until when [`Self::cycled`] holds.
+    cycled_until_ms: u64,
+}
+
+impl DropWatch {
+    /// Nothing present yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { present: 0, dropped: 0, since_ms: 0, cycled: 0, cycled_until_ms: 0 }
+    }
+
+    /// Note that `present` hold a node at `now_ms`, while `cycling` wait for a power-cycle or
+    /// are in one. Returns the slots that were present before every node dropped, once the last
+    /// of them goes within [`DROP_WINDOW_MS`] of the first, and only when there are two or more.
+    pub fn note(&mut self, present: u16, cycling: u16, now_ms: u64) -> Option<u16> {
+        if now_ms > self.cycled_until_ms {
+            self.cycled = 0;
+        }
+        // A node arriving is no supply loss, and drops further apart are no single event.
+        if present & !self.present != 0 || now_ms.saturating_sub(self.since_ms) > DROP_WINDOW_MS {
+            self.dropped = 0;
+        }
+        let gone = self.present & !present & !cycling & !self.cycled;
+        self.present = present;
+        if gone != 0 {
+            if self.dropped == 0 {
+                self.since_ms = now_ms;
+            }
+            self.dropped |= gone;
+        }
+        if present != 0 {
+            return None;
+        }
+        let dropped = core::mem::take(&mut self.dropped);
+        (dropped.count_ones() >= 2).then_some(dropped)
+    }
+
+    /// The cycle of `slots` ended at `now_ms`. A node is absent only some time after it loses
+    /// power, so a drop within [`DROP_WINDOW_MS`] is still the cycle's.
+    pub fn cycled(&mut self, slots: u16, now_ms: u64) {
+        if now_ms > self.cycled_until_ms {
+            self.cycled = 0;
+        }
+        self.cycled |= slots;
+        self.cycled_until_ms = now_ms.saturating_add(DROP_WINDOW_MS);
+    }
 }

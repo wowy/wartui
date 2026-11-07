@@ -19,7 +19,7 @@
 //! every announcement, as the GPS fault does, and so does a `Log` line naming a carrier that
 //! came up and what it powered.
 //!
-//! **[`run`] powers the nodes one at a time, [`STAGGER`] apart**, in slot order A1, B1, A2, B2,
+//! **[`run`] powers the nodes one at a time, 100 ms apart**, in slot order A1, B1, A2, B2,
 //! so their inrush never adds up. Then it serves power-cycle requests forever, one at a time:
 //! output low, [`POWER_OFF`], output high, and `PowerCycled` once the node is powered again.
 //! Requests wait in a bitmask in [`Power`], so a request for a slot already waiting or cycling
@@ -27,13 +27,28 @@
 //! expander: `NoCarrier` on the bench, `NotDriven` for a slot the board does not drive, and
 //! `Failed` once control is lost.
 //!
+//! **After a lost node supply, [`run`] staggers the nodes again.** The P4 stays up on its own
+//! USB-C while the carrier's node supply is out, and the expander, on the P4's 3V3, keeps every
+//! node port high, so a returning supply would start every node at once. The P4 cannot sense
+//! the supply. Its sign is every present node dropping at once, two or more, which
+//! `wartui_proto::carrier::DropWatch` decides from each presence change. One node alone has no
+//! inrush to stagger, and its drop looks like a crash or a node pulled from its socket.
+//!
+//! [`run`] then writes every node port low, between requests, and switches on one slot at a
+//! time, the scout, for up to [`SCOUT_WAIT`]: first the slots that were present, then every
+//! other slot the board drives, round and round. Only one node's inrush meets a supply that has
+//! just returned, and a node seated in any socket ends the wait. A scout that answers means the
+//! supply is back, and the other ports are powered [`STAGGER`] apart. A power-cycle request
+//! ends the wait the same way, so no request waits on the supply, and [`run`] then serves it.
+//!
 //! **I2C0 is shared with the GPS reader.** [`run`] locks the bus for each transaction and never
 //! across a timer, so the receiver's polls go on between the steps of a power-up or a cycle.
 
 use core::cell::Cell;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::future::pending;
 
+use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
@@ -42,15 +57,20 @@ use esp_hal::i2c::master::{Error, I2c, SoftwareTimeout};
 use wartui_firmware::gps::bus_config;
 use wartui_proto::bus::{BUSES, NodeBoard, Slot};
 use wartui_proto::carrier::{
-    ADDRESS, ALL_INPUTS, Decision, REG_CONFIG, REG_INPUT, REG_OUTPUT, decide, port, ports,
-    warm_board,
+    ADDRESS, ALL_INPUTS, Decision, DropWatch, REG_CONFIG, REG_INPUT, REG_OUTPUT, decide, port,
+    ports, warm_board,
 };
 use wartui_proto::link::{BridgeToHost, LogStr, PowerOutcome};
 
-use crate::{I2cBus, Shared};
+use crate::{I2cBus, Shared, now_ms};
 
 /// The gap between powering one node and the next.
-pub const STAGGER: Duration = Duration::from_millis(200);
+pub const STAGGER: Duration = Duration::from_millis(100);
+/// The gap between a cycle's tries at switching its node back on.
+const ON_RETRY: Duration = Duration::from_millis(200);
+/// How long the scout has to answer after a lost supply. A node boots in under a second, and
+/// an absent slot is probed every 2 s.
+const SCOUT_WAIT: Duration = Duration::from_secs(5);
 /// How long a power-cycle holds a node off.
 pub const POWER_OFF: Duration = Duration::from_secs(1);
 /// The longest one expander transaction may take. Three bytes at 400 kHz take well under a
@@ -185,8 +205,14 @@ pub struct Power {
     control: bool,
     /// Bit `n` is set while slot byte `n` waits for a cycle or is in one.
     requests: Cell<u16>,
-    /// Raised by each request, so a waiting [`run`] looks again.
+    /// Raised by each request and each lost supply, so a waiting [`run`] looks again.
     wake: Signal<NoopRawMutex, ()>,
+    /// Watches presence for a lost supply.
+    watch: Cell<DropWatch>,
+    /// The slots present before every node dropped, while [`run`] has yet to recover them.
+    lost: Cell<u16>,
+    /// Raised by each presence change, so a waiting scout looks again.
+    presence: Signal<NoopRawMutex, ()>,
     /// Said with every announcement while set.
     fault: Cell<Option<&'static str>>,
     /// The nodes a carrier that came up powers at boot, and those it found on.
@@ -205,6 +231,9 @@ impl Power {
             control: carrier.control,
             requests: Cell::new(0),
             wake: Signal::new(),
+            watch: Cell::new(DropWatch::new()),
+            lost: Cell::new(0),
+            presence: Signal::new(),
             fault: Cell::new(carrier.fault),
             boot,
         }
@@ -236,6 +265,22 @@ pub fn request(shared: &Shared, slot: Slot) {
     }
 }
 
+/// Note that the slots in `present` hold a node, a mask by slot byte, and have [`run`] recover
+/// them when every node dropped at once. Nothing without power control.
+pub fn presence(shared: &Shared, present: u16) {
+    let power = &shared.power;
+    if !power.control {
+        return;
+    }
+    let mut watch = power.watch.get();
+    if let Some(lost) = watch.note(present, power.requests.get(), now_ms()) {
+        power.lost.set(power.lost.get() | lost);
+        power.wake.signal(());
+    }
+    power.watch.set(watch);
+    power.presence.signal(());
+}
+
 #[inline(never)]
 fn answer(shared: &Shared, slot: Slot, outcome: PowerOutcome) {
     shared.push_host(&BridgeToHost::PowerCycled { slot, outcome });
@@ -259,35 +304,49 @@ pub fn say(shared: &Shared) {
     }
 }
 
-/// Power the nodes [`detect`] left to power, then serve power-cycle requests forever. Waits
-/// forever on the bench, or with power out of reach.
+/// Send `args` to the host as a `Log` line.
+fn log(shared: &Shared, args: fmt::Arguments<'_>) {
+    let mut line = LogStr::new();
+    let _ = line.write_fmt(args);
+    shared.push_log(&line);
+}
+
+/// `board`'s slots in the order they are powered: A1, B1, A2, B2.
+fn stagger(board: NodeBoard) -> impl Iterator<Item = Slot> + Clone {
+    (0..board.per_bus()).flat_map(|index| (0..BUSES).filter_map(move |bus| Slot::new(bus, index)))
+}
+
+/// Power the nodes [`detect`] left to power, then serve power-cycle requests forever, and
+/// recover a lost supply between them. Waits forever on the bench, or with power out of reach.
 pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared) -> ! {
     let Some(i2c) = i2c.filter(|_| carrier.control) else { pending().await };
     let mut output = carrier.output;
     let mut first = true;
-    for index in 0..carrier.board.per_bus() {
-        for bus in 0..BUSES {
-            let Some(slot) = Slot::new(bus, index) else { continue };
-            if carrier.pending & port(slot) == 0 {
-                continue;
-            }
-            if !first {
-                Timer::after(STAGGER).await;
-            }
-            first = false;
-            output |= port(slot);
-            let landed = write_output(i2c, output).await;
-            note_powered(shared, landed);
+    for slot in stagger(carrier.board).filter(|&slot| carrier.pending & port(slot) != 0) {
+        if !first {
+            Timer::after(STAGGER).await;
         }
+        first = false;
+        output |= port(slot);
+        let landed = write_output(i2c, output).await;
+        note_powered(shared, landed);
     }
     let power = &shared.power;
     loop {
+        let lost = power.lost.take();
+        if lost != 0 {
+            recover(i2c, shared, carrier.board, output, lost).await;
+            continue;
+        }
         let requests = power.requests.get();
         let Some(slot) = Slot::from_u8(requests.trailing_zeros() as u8) else {
             power.wake.wait().await;
             continue;
         };
         let outcome = cycle(i2c, shared, output, slot).await;
+        let mut watch = power.watch.get();
+        watch.cycled(request_bit(slot), now_ms());
+        power.watch.set(watch);
         power.requests.set(power.requests.get() & !request_bit(slot));
         answer(shared, slot, outcome);
     }
@@ -306,10 +365,90 @@ async fn cycle(i2c: &I2cBus, shared: &Shared, output: u16, slot: Slot) -> PowerO
             note_powered(shared, true);
             return PowerOutcome::Done;
         }
-        Timer::after(STAGGER).await;
+        Timer::after(ON_RETRY).await;
     }
     note_powered(shared, false);
     PowerOutcome::Failed
+}
+
+/// Power `board`'s nodes again after every node dropped at once: one scout at a time, the
+/// slots in `lost` first, then the rest the board drives, until one answers or a power-cycle
+/// request waits. Then the rest of `output`, the wanted state, [`STAGGER`] apart.
+async fn recover(i2c: &I2cBus, shared: &Shared, board: NodeBoard, output: u16, lost: u16) {
+    if lost == 0 {
+        return;
+    }
+    log(
+        shared,
+        format_args!("{board}: every node dropped at once, so the node supply was likely lost"),
+    );
+    let off = output & !ports(board);
+    // A write that fails leaves nodes on, and the scout's write settles them.
+    let _ = write_output(i2c, off).await;
+    let was_lost = move |slot: &Slot| lost & request_bit(*slot) != 0;
+    let scouts =
+        stagger(board).filter(was_lost).chain(stagger(board).filter(move |s| !was_lost(s)));
+    let (scout, ended) = 'found: loop {
+        for slot in scouts.clone() {
+            match try_scout(i2c, shared, off, slot).await {
+                Scouted::Silent => {}
+                ended => break 'found (slot, ended),
+            }
+        }
+    };
+    let mut on = off | port(scout);
+    let mut powered = 1;
+    for slot in stagger(board).filter(|&slot| slot != scout && output & port(slot) != 0) {
+        Timer::after(STAGGER).await;
+        on |= port(slot);
+        note_powered(shared, write_output(i2c, on).await);
+        powered += 1;
+    }
+    let label = board.label(scout);
+    if ended == Scouted::Answered {
+        let why = format_args!("{label} answered, so the node supply is back");
+        log(shared, format_args!("{board}: {why}; {powered} node slots powered again"));
+    } else {
+        let why = "a power-cycle request ended the wait";
+        log(shared, format_args!("{board}: {why}; {powered} node slots powered again"));
+    }
+}
+
+/// How one scout's wait ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scouted {
+    /// Its node answered.
+    Answered,
+    /// A power-cycle request is waiting.
+    Requested,
+    /// Neither within [`SCOUT_WAIT`], so it is off again.
+    Silent,
+}
+
+/// Switch on `slot`'s node over `off`, and wait up to [`SCOUT_WAIT`] for it to answer or a
+/// power-cycle request to arrive. Without either, it is switched off again.
+async fn try_scout(i2c: &I2cBus, shared: &Shared, off: u16, slot: Slot) -> Scouted {
+    let power = &shared.power;
+    power.presence.reset();
+    note_powered(shared, write_output(i2c, off | port(slot)).await);
+    let bit = request_bit(slot);
+    let wait = async {
+        loop {
+            if shared.nodes.present() & bit != 0 {
+                return Scouted::Answered;
+            }
+            if power.requests.get() != 0 {
+                return Scouted::Requested;
+            }
+            // `run` reads the requests and the lost slots themselves, not the wake.
+            select(power.presence.wait(), power.wake.wait()).await;
+        }
+    };
+    let ended = with_timeout(SCOUT_WAIT, wait).await.unwrap_or(Scouted::Silent);
+    if ended == Scouted::Silent {
+        let _ = write_output(i2c, off).await;
+    }
+    ended
 }
 
 /// Note whether a write of the wanted state landed. One that did powers every node a failed
