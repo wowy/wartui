@@ -192,6 +192,20 @@ impl SectorSink for Slot<'_> {
         NorFlash::erase(self.flash, at, at + SECTOR_U32)
     }
 
+    /// The node's only: it takes nothing over its bus while flash is erased, and one block erase
+    /// costs it far less of that than sixteen sector erases. The C6 and the P4 serve links while
+    /// they update, which a block erase would stall longer than a sector erase does, and their
+    /// update speed does not matter. `None` when the slot is not block aligned.
+    #[cfg(feature = "esp32c5")]
+    fn erase_block(&mut self, offset: u32) -> Option<Result<(), Self::Error>> {
+        const BLOCK_U32: u32 = wartui_proto::ota::BLOCK as u32;
+        if !self.base.is_multiple_of(BLOCK_U32) {
+            return None;
+        }
+        let at = self.base + offset;
+        Some(NorFlash::erase(self.flash, at, at + BLOCK_U32))
+    }
+
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Self::Error> {
         NorFlash::write(self.flash, self.base + offset, data)
     }

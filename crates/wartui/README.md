@@ -579,10 +579,11 @@ holds every frame sent, every send result, every status from a node and every ph
 a few seconds.
 Each node's first frame goes at once to the slot the listen heard it in, and one that has moved
 since waits for its next heartbeat: up to 5 s on an assigned node, a second on a
-parked one. Then every node streams at once, the two buses side by side, and at each 4 KB sector
-boundary a node waits to erase and write the sector: about 68 ms when the slot holds an old image.
+parked one. Then every node streams at once, the two buses side by side. A node waits to write
+each 4 KB sector, and at each 64 KB block to erase the block first: about 150–170 ms when the slot
+holds an old image (inferred from update timings), during which it takes nothing over the bus.
 The reboot and confirmation add a few seconds more. A node's first update after a USB flash writes
-into a blank slot, so its sectors cost less ([`docs/ota-findings.md`](../../docs/ota-findings.md)).
+into a blank slot, so its erases cost less ([`docs/ota-findings.md`](../../docs/ota-findings.md)).
 
 **Trial, confirmation and rollback.** A verified image is switched to at once, and the node
 reboots into it on trial: the fleet table shows `;trial` after its version. The first frame it

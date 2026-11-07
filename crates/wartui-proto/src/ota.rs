@@ -13,9 +13,14 @@
 //! the host a window to pace itself by. It reports one on each duplicate or gap too, so the
 //! host goes back to the first byte the node lacks rather than guessing.
 //!
-//! **Erase is lazy**, one sector immediately before that sector's write. Erasing the whole
-//! slot at `begin` would stall the node for seconds while the host waits on a status, and
-//! erases sectors a shorter image never reaches.
+//! **Erase is lazy**, immediately before the first write it clears. Erasing the whole slot at
+//! `begin` would stall the node for seconds while the host waits on a status, and erases
+//! sectors a shorter image never reaches. A sink that can erases a [`BLOCK`] when the image
+//! reaches one, since a node takes nothing over its bus while flash is erased: on the
+//! carrier's nodes one block erase costs about 150–170 ms (inferred from update timings),
+//! where sixteen sector flushes, each erasing its sector, cost about 43 ms apiece. Otherwise,
+//! and where less than a block of the slot remains, it erases sector by sector. A block may
+//! run past the image's end, never past the slot.
 //!
 //! **A `begin` identical to a session receiving or verified changes nothing.** The host
 //! re-sends [`UpdateBegin`] when the status answering the first is lost, and restarting
@@ -49,6 +54,9 @@ use crate::bus::{
 /// Bytes in one flash sector: the unit erased, and the unit [`Receiver`] buffers.
 pub const SECTOR: usize = 4096;
 
+/// Bytes in one flash block: the unit [`SectorSink::erase_block`] erases, when it can.
+pub const BLOCK: usize = 65536;
+
 /// Unconfirmed boots of a new image before it is rolled back, on a node or either half of a P4
 /// bridge.
 ///
@@ -59,6 +67,7 @@ pub const SECTOR: usize = 4096;
 pub const TRIAL_BOOTS: u32 = 3;
 
 const _: () = assert!(SECTOR.is_multiple_of(UPDATE_CHUNK));
+const _: () = assert!(BLOCK.is_multiple_of(SECTOR));
 
 /// The flash slot an image is written into.
 pub trait SectorSink {
@@ -71,6 +80,11 @@ pub trait SectorSink {
     /// # Errors
     /// Whatever the flash reports.
     fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error>;
+    /// Erase the [`BLOCK`]-byte block starting at `offset`, a multiple of [`BLOCK`], or `None`
+    /// when this sink cannot, and the receiver erases sector by sector.
+    fn erase_block(&mut self, _offset: u32) -> Option<Result<(), Self::Error>> {
+        None
+    }
     /// Write `data` at `offset`. `offset` and `data.len()` are multiples of 4.
     ///
     /// # Errors
@@ -102,6 +116,8 @@ impl Phase {
 struct Session {
     begin: UpdateBegin,
     next_offset: u32,
+    /// Bytes from the slot's start a block erase has already cleared.
+    erased_to: u32,
     phase: Phase,
     hasher: Sha256,
 }
@@ -147,6 +163,7 @@ impl Receiver {
         self.session = Some(Session {
             begin: *msg,
             next_offset: 0,
+            erased_to: 0,
             phase: Phase::Receiving,
             hasher: Sha256::new(),
         });
@@ -187,7 +204,7 @@ impl Receiver {
             return None;
         }
         let start = session.next_offset - SECTOR as u32;
-        if flush(sink, start, &mut self.buf, SECTOR).is_err() {
+        if flush(sink, start, &mut session.erased_to, &mut self.buf, SECTOR).is_err() {
             session.phase = Phase::FlashError;
         }
         Some(self.status())
@@ -209,7 +226,7 @@ impl Receiver {
         let fill = session.next_offset as usize % SECTOR;
         if fill != 0 {
             let start = session.next_offset - fill as u32;
-            if flush(sink, start, &mut self.buf, fill).is_err() {
+            if flush(sink, start, &mut session.erased_to, &mut self.buf, fill).is_err() {
                 session.phase = Phase::FlashError;
                 return self.status();
             }
@@ -285,16 +302,32 @@ const fn refused(session: u8, state: UpdateState) -> UpdateStatus {
     UpdateStatus { session, state, next_offset: 0 }
 }
 
-/// Erase the sector at `start` and write the first `fill` bytes of `buf` into it, padded
-/// with 0xFF to a multiple of 4. The padding is what erased flash holds anyway.
+/// Write the first `fill` bytes of `buf` into the sector at `start`, padded with 0xFF to a
+/// multiple of 4, erasing it first unless it lies below `erased_to`. The padding is what erased
+/// flash holds anyway.
+///
+/// At a block boundary with a whole block left in the slot, a sink that can erases the block,
+/// and `erased_to` moves past it.
 fn flush<S: SectorSink>(
     sink: &mut S,
     start: u32,
+    erased_to: &mut u32,
     buf: &mut [u8; SECTOR],
     fill: usize,
 ) -> Result<(), S::Error> {
     let padded = fill.next_multiple_of(4);
     buf[fill..padded].fill(0xFF);
-    sink.erase_sector(start)?;
+    if start >= *erased_to {
+        let whole_sectors = sink.capacity() / SECTOR as u32 * SECTOR as u32;
+        let block = (start as usize).is_multiple_of(BLOCK)
+            && start.checked_add(BLOCK as u32).is_some_and(|end| end <= whole_sectors);
+        match block.then(|| sink.erase_block(start)).flatten() {
+            Some(result) => {
+                result?;
+                *erased_to = start + BLOCK as u32;
+            }
+            None => sink.erase_sector(start)?,
+        }
+    }
     sink.write(start, &buf[..padded])
 }

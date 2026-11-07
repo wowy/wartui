@@ -103,13 +103,14 @@ const PROBE_EVERY: Duration = Duration::from_millis(2_000);
 /// Transfers in a row failing the magic before a present slot is absent.
 const ABSENT_AFTER: u8 = 5;
 /// The least time from a present slot's last transfer with the magic to its absence. It outlasts
-/// a node's flash sector erase. A lost supply still takes every slot absent well inside
+/// a node's 64 KB flash block erase, about 150–170 ms on the carrier's nodes (inferred from
+/// update timings). A lost supply still takes every slot absent well inside
 /// `wartui_proto::carrier::DROP_WINDOW_MS` of the others: they all start missing at once, and
 /// each goes within a [`POLL_EVERY`] either side of this after the loss.
 const ABSENT_SPAN: Duration = Duration::from_millis(1_000);
 /// How long a present slot whose transfer and retry both failed the magic waits before it is
-/// clocked again: about half a node's sector erase, so a node erasing flash is clocked a couple of
-/// times through the erase rather than on every pass.
+/// clocked again: about half a node's sector erase, its shortest, so a node erasing flash is
+/// clocked a few times through an erase rather than on every pass.
 const MISS_BACKOFF: Duration = Duration::from_millis(20);
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
@@ -360,6 +361,10 @@ struct Slot {
     retries: u32,
     records: u32,
     xfers: Xfers,
+    /// The longest span this report period, in ms, that the slot went without a transfer with the
+    /// magic while present: from the end of the last before a run of misses to the end of the
+    /// next. Reset after each report, so a long span in one period does not hide later ones.
+    deaf_ms: u32,
 }
 
 impl Slot {
@@ -385,6 +390,7 @@ impl Slot {
             retries: 0,
             records: 0,
             xfers: Xfers::new(),
+            deaf_ms: 0,
         }
     }
 
@@ -759,6 +765,7 @@ impl Controller {
         let k = self.driven(i);
         let id = self.slot_id(i);
         let slot = &mut self.slots[i];
+        let (was_present, prev_misses, prev_heard) = (slot.present, slot.misses, slot.heard);
         let outcome = match verify(buf) {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
@@ -826,8 +833,18 @@ impl Controller {
                 Outcome::Bad
             }
         };
+        if was_present
+            && prev_misses > 0
+            && slot.misses == 0
+            && let Some(heard) = prev_heard
+        {
+            let ms =
+                u32::try_from(end.saturating_duration_since(heard).as_millis()).unwrap_or(u32::MAX);
+            slot.deaf_ms = slot.deaf_ms.max(ms);
+        }
         if !slot.present && matches!(outcome, Outcome::Good { .. }) {
             slot.present = true;
+            slot.deaf_ms = 0;
             shared.nodes.set_present(k, true);
             crate::carrier::presence(shared, shared.nodes.present());
             // The node asserting a stuck line is usually the one that just arrived.
@@ -849,9 +866,10 @@ impl Controller {
         outcome
     }
 
-    /// Send the bus's IRQ counters, then each present slot's, to the host. Nothing while no
-    /// slot is present, since IRQ is served only for present slots.
-    fn report(&self, shared: &Shared) {
+    /// Send the bus's IRQ counters, then each present slot's, to the host, and start each slot's
+    /// next `deaf` period. Nothing while no slot is present, since IRQ is served only for present
+    /// slots.
+    fn report(&mut self, shared: &Shared) {
         if !self.slots.iter().any(|s| s.present) {
             return;
         }
@@ -888,10 +906,13 @@ impl Controller {
                 shared,
                 Some(i),
                 format_args!(
-                    "xfer pass={} carry={} fetch={} owed={} poll={}",
-                    x.pass, x.carry, x.fetch, x.owed, x.poll
+                    "xfer pass={} carry={} fetch={} owed={} poll={} deaf={}",
+                    x.pass, x.carry, x.fetch, x.owed, x.poll, slot.deaf_ms
                 ),
             );
+        }
+        for slot in self.slots.iter_mut() {
+            slot.deaf_ms = 0;
         }
     }
 
