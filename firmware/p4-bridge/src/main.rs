@@ -17,7 +17,8 @@
 //!   host's poll;
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
-//!   (`src/update.rs`) and queues the host's records for its nodes;
+//!   (`src/update.rs`), queues the host's records for its nodes, and fills the node image cache
+//!   in PSRAM that their update chunks are built from (`src/cache.rs`);
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
@@ -48,6 +49,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod cache;
 mod carrier;
 mod config;
 mod gps;
@@ -96,6 +98,7 @@ use wartui_proto::radio_link::{
 };
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
+use crate::cache::Cache;
 use crate::carrier::{Carrier, Power};
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
 use crate::host::Presence;
@@ -198,6 +201,8 @@ pub struct Shared {
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
     updates: RefCell<&'static mut Updates>,
+    /// The node image the host uploaded, which update chunks are built from.
+    cache: RefCell<Cache>,
     /// The node buses' slots, as the host reader and both buses see them.
     nodes: bus::Nodes,
     /// The carrier's node power, as the host reader and the carrier future see it.
@@ -210,6 +215,7 @@ impl Shared {
         host: &'static mut HostFrames,
         down: &'static mut DownQueue,
         updates: &'static mut Updates,
+        cache: Cache,
         carrier: &Carrier,
     ) -> Self {
         Self {
@@ -240,6 +246,7 @@ impl Shared {
             gps_fault: Cell::new(None),
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
+            cache: RefCell::new(cache),
             nodes: bus::Nodes::new(carrier.per_bus()),
             power: Power::new(carrier),
         }
@@ -296,8 +303,8 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, what the carrier has to say, and what the P4's own image has
-    /// to say.
+    /// GPS fault if there is one, what the carrier and the node image cache have to say, and what
+    /// the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -311,6 +318,7 @@ impl Shared {
             self.push_error(why);
         }
         carrier::say(self);
+        cache::say(self);
         self.flush_update_lines();
     }
 
@@ -417,6 +425,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+    // The PSRAM, for the node image cache (`src/cache.rs`), mapped before the buses start.
+    let cache = Cache::new(peripherals.PSRAM);
     let boot = Instant::now();
 
     let mut own_mac = [0; 6];
@@ -534,7 +544,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
-    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, &carrier);
+    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier);
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
 

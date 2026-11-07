@@ -353,6 +353,14 @@ async fn run_bridge(
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
+            // No node image cache yet.
+            HostToBridge::CacheImage(_) => Some(BridgeToHost::Error {
+                message: LogStr::try_from("this bridge has no node image cache")
+                    .unwrap_or_default(),
+            }),
+            HostToBridge::ToNodeChunk { id, .. } => {
+                Some(BridgeToHost::Undelivered { id, reason: Undelivered::NoImage })
+            }
         };
         if let Some(msg) = reply
             && plumbing.events.send(LinkEvent::Message(msg)).await.is_err()

@@ -9,7 +9,8 @@
 //! and is answered `Delivered`, or `Undelivered` with why: no node in the slot, a full queue, a
 //! body too long, or no ack after every try. A slot that loses its node answers for everything
 //! it held. The host reader queues a record and raises its bus's signal, so a waiting scheduler
-//! wakes.
+//! wakes. The one record the P4 writes, an `UpdateChunk` it builds from its node image cache for
+//! a `ToNodeChunk` (`src/cache.rs`), is queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
@@ -26,8 +27,10 @@
 //!   may never deassert: each node holds it while its record waits for a poll, and a few nodes
 //!   together can hold it without a break.
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
-//!   clocked at once. One whose records wait for the node's ack is clocked every
-//!   [`ACK_POLL`], and no later than the wait's deadline.
+//!   clocked at once. One whose records wait for the node's ack is clocked once right after the
+//!   transfer that carried them, since the node stamps its ack on the very next transfer it arms
+//!   (`firmware/node/src/bus.rs`). If that one brings no ack, as when the node's inbox was full,
+//!   the slot is clocked every [`ACK_POLL`], and no later than the wait's deadline.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic.
@@ -74,9 +77,10 @@ pub const PER_BUS: usize = wartui_proto::bus::PER_BUS as usize;
 const DRIVEN: usize = 2 * PER_BUS;
 /// The longest a present slot goes unclocked.
 const POLL_EVERY: Duration = Duration::from_millis(250);
-/// How often a slot whose records wait for the node's ack is clocked. The node stamps its ack
-/// only once its main loop has checked the transfer, so the ack arrives on a later transfer
-/// than the records, and this is what fetches it.
+/// How often a slot whose records wait for the node's ack is clocked, once the transfer right
+/// after theirs brought no ack. The node stamps its ack only once it has queued the records, so
+/// the ack arrives on a later transfer than the records: normally the next one, which
+/// [`SLOT_GAP`] spaces, and otherwise one of these.
 const ACK_POLL: Duration = Duration::from_millis(25);
 /// How often an absent slot is probed.
 const PROBE_EVERY: Duration = Duration::from_millis(2_000);
@@ -314,6 +318,9 @@ struct Slot {
     /// The node's last good transfer carried records, and no transfer since has carried the
     /// ack.
     ack_owed: bool,
+    /// The last transfer carried a flight, so the next, which the node arms with its ack, is
+    /// due as soon as [`SLOT_GAP`] allows rather than after [`ACK_POLL`].
+    fetch_ack: bool,
     /// When the last transfer to this slot started and ended.
     last_start: Option<Instant>,
     last_end: Option<Instant>,
@@ -337,6 +344,7 @@ impl Slot {
             peer: SeqCheck::new(),
             tracker: AckTracker::new(),
             ack_owed: false,
+            fetch_ack: false,
             last_start: None,
             last_end: None,
             ok: 0,
@@ -360,6 +368,7 @@ impl Slot {
             return Instant::MIN;
         }
         match downlink.deadline_ms() {
+            Some(_) if self.fetch_ack => Instant::MIN,
             Some(deadline) => (last + ACK_POLL).min(Instant::from_millis(deadline)),
             None => last + POLL_EVERY,
         }
@@ -565,8 +574,10 @@ impl Controller {
             self.slots[i].last_start = Some(start);
             self.slots[i].last_end = Some(end);
             let outcome = if clocked {
-                // The transfer carried the ack, whatever the node made of it.
+                // The transfer carried the ack, whatever the node made of it, and brought the
+                // node's, if it had stamped one.
                 self.slots[i].ack_owed = false;
+                self.slots[i].fetch_ack = false;
                 let outcome =
                     self.count(i, seq, rx_bytes(&wire.rx), (start, end), answers_irq, shared);
                 // Bad magic: the node was not armed and took nothing, so the flight stays due
@@ -574,6 +585,7 @@ impl Controller {
                 if filled > 0 && !matches!(outcome, Outcome::Empty) {
                     let k = self.driven(i);
                     shared.nodes.downlinks.borrow_mut()[k].sent(seq, crate::now_ms());
+                    self.slots[i].fetch_ack = true;
                 }
                 outcome
             } else {

@@ -116,7 +116,9 @@ own.
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
   knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
-  carries the C6's, and updates it.
+  carries the C6's, and updates it. It caches a node image in PSRAM for `wartui ota`, and writes
+  the one record it builds from it, `UpdateChunk`, a layout in the bus's frozen core
+  (`src/cache.rs`).
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It holds the link for a future Bluetooth host link, and runs no radio today.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
@@ -176,7 +178,8 @@ is here rather than only in a `//!`.
   plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
-  the host as `FromNode` and from it as `ToNode`. Encode/decode is written out by hand, never by
+  the host as `FromNode` and from it as `ToNode`, save the `UpdateChunk`s it builds from its
+  node image cache. Encode/decode is written out by hand, never by
   transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/bus.rs` and
   `tests/wire.rs`. Link frames are up to 1152 bytes each way. `docs/node-bus.md` has the table.
 - **A wire change means updating every node at once.** `wartui-proto` is a path dependency of every
@@ -280,7 +283,8 @@ is here rather than only in a `//!`.
 - **`clippy::all` is denied workspace-wide, in every firmware too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
-  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Avoid `unsafe`
+  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`).
+  `firmware/p4-bridge` allows one, the slice over its mapped PSRAM (`cache::map`). Avoid `unsafe`
   wherever a safe route exists. Any further `unsafe` — a new
   `#[allow(unsafe_code)]`, or a new `unsafe` block inside a function already allowed — is the
   user's decision, made in review, never a convenience, and committing it needs their approval

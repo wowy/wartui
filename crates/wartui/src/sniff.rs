@@ -241,6 +241,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
 
         // Answers `flash-bridge`'s update ops, which `sniff` never sends.
         BridgeToHost::Update(status) => println!("# update status {}", hex(status)),
+        // Answers `ota`'s cache upload, which `sniff` never sends.
+        BridgeToHost::CacheImage(status) => println!("# cache status {}", hex(status)),
 
         // Answers to `ToNode`, which `sniff` never sends.
         BridgeToHost::Delivered { id } => println!("# record {id} delivered"),

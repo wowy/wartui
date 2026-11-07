@@ -414,13 +414,14 @@ impl FleetEngine {
                 self.bridge_lacks_gps = false;
             }
             // `Ready` arrives as `LinkEvent::Connected`. An update status answers
-            // `flash-bridge`, which `run` never is. GPS bytes are the runtime's, which feeds
-            // them to the position chain before the engine would see them.
+            // `flash-bridge`, and a cache status `ota`, which `run` never is. GPS bytes are the
+            // runtime's, which feeds them to the position chain before the engine would see them.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }
             | BridgeToHost::Gps { .. }
-            | BridgeToHost::Update(_) => {}
+            | BridgeToHost::Update(_)
+            | BridgeToHost::CacheImage(_) => {}
         }
     }
 
