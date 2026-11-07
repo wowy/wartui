@@ -11,18 +11,17 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
-    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES, OtaEvent,
-    OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
+    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES,
+    MAX_STATUS_TIMEOUTS, OtaEvent, OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
 use wartui_core::runtime::{drive_fleet, now};
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, NODE_VERSION, Slot, UPDATE_CHUNK,
     UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp, cache_chunk_body, image_tag};
+use wartui_proto::link::{BridgeToHost, HostToBridge, cache_chunk_body, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
-use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0, 0, 0, 0, 7];
@@ -259,8 +258,26 @@ impl Bench {
         Self::with_ids(image, from, Ids { next: 1, step: 1 })
     }
 
-    /// A bench whose node runs `from`, and whose session takes `ids`.
+    /// A bench whose node runs `from`, and whose session takes `ids`, with the image cached.
     fn with_ids(image: &OtaImage, from: Version, ids: Ids) -> Self {
+        let mut bench = Self::uncached(image, from, ids);
+        bench.feed(OtaEvent::Cached);
+        bench
+    }
+
+    /// A bench whose session starts from the node's slot, with the image cached.
+    fn seeded(image: &OtaImage) -> Self {
+        let mut bench = Self::uncached(image, OLD, Ids { next: 1, step: 1 });
+        let session =
+            OtaSession::new(NODE, OLD, image, SESSION, Ids { next: 1, step: 1 }, bench.now());
+        bench.session = session.with_slot(SLOT);
+        bench.feed(OtaEvent::Cached);
+        bench
+    }
+
+    /// A bench whose node runs `from`, and whose session takes `ids`, before the P4's cache holds
+    /// the image.
+    fn uncached(image: &OtaImage, from: Version, ids: Ids) -> Self {
         let start = Instant::now();
         let now = Now { mono: start, unix_ms: 0 };
         let mut node = Node::new();
@@ -444,6 +461,58 @@ fn ota_session_sends_begin_only_when_node_heartbeats() {
     bench.beat();
     bench.settle(&mut deliver);
     assert_eq!(bench.sent.first(), Some(&Out::Begin));
+}
+
+#[test]
+fn ota_session_sends_begin_on_first_tick_when_seeded_with_slot() {
+    let mut bench = Bench::seeded(&image(NEW));
+    assert!(bench.queue.is_empty(), "nothing before a tick: {:?}", bench.queue);
+    bench.feed(OtaEvent::Tick);
+    assert_eq!(bench.queued(), [Out::Begin]);
+    bench.feed(OtaEvent::Tick);
+    assert_eq!(bench.queued(), [Out::Begin], "one begin until a heartbeat");
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    bench.assert_image_written();
+}
+
+#[test]
+fn ota_session_waits_for_heartbeat_when_seeded_begin_is_undelivered() {
+    let mut bench = Bench::seeded(&image(NEW));
+    bench.feed(OtaEvent::Tick);
+    let Some(HostToBridge::ToNode { id, .. }) = bench.queue.pop_front() else {
+        panic!("the begin: {:?}", bench.queue);
+    };
+    // No node in the slot: it moved since it was heard.
+    bench.feed(OtaEvent::Delivery { id, delivered: false });
+    for _ in 0..10 {
+        bench.elapsed += Duration::from_millis(50);
+        bench.feed(OtaEvent::Tick);
+    }
+    assert!(bench.queue.is_empty(), "nothing before a heartbeat: {:?}", bench.queue);
+    bench.beat();
+    assert_eq!(bench.queued(), [Out::Begin]);
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+}
+
+#[test]
+fn ota_session_holds_chunks_when_image_is_not_cached() {
+    let image = image(NEW);
+    let mut bench = Bench::uncached(&image, OLD, Ids { next: 1, step: 1 });
+    bench.beat();
+    assert_eq!(bench.queued(), [Out::Begin]);
+    bench.queue.clear();
+    bench.receiving(0);
+    // Waiting on the cache is no silence from the node: no status timeout runs.
+    for _ in 0..(MAX_STATUS_TIMEOUTS * 20) {
+        bench.elapsed += Duration::from_millis(50);
+        bench.feed(OtaEvent::Tick);
+    }
+    assert!(bench.queue.is_empty(), "nothing before the cache: {:?}", bench.queue);
+    assert_eq!(bench.session.progress().phase, Phase::Streaming);
+    bench.feed(OtaEvent::Cached);
+    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    bench.assert_image_written();
 }
 
 #[test]
@@ -999,31 +1068,6 @@ fn sim_image(version: Version) -> OtaImage {
     OtaImage { board: Board::Esp32c5, ..image(version) }
 }
 
-/// Upload `image` into the bridge's node image cache, as `wartui ota` does first.
-async fn upload(link: &mut LinkHandle, image: &OtaImage) {
-    let send = |link: &LinkHandle, op: Op<'_>| {
-        let mut buf = [0u8; OP_MAX];
-        let len = op.encode(&mut buf);
-        let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits");
-        link.send_urgent(HostToBridge::CacheImage(op)).expect("queued");
-    };
-    let len = u32::try_from(image.bytes.len()).expect("a small image");
-    send(link, Op::Begin { session: 1, len, sha256: image.sha256 });
-    for (i, data) in image.bytes.chunks(UPDATE_CHUNK).enumerate() {
-        let offset = u32::try_from(i * UPDATE_CHUNK).expect("a small image");
-        send(link, Op::Chunk { session: 1, offset, data });
-    }
-    send(link, Op::Commit { session: 1 });
-    loop {
-        if let Some(LinkEvent::Message(BridgeToHost::CacheImage(bytes))) = link.recv().await
-            && let Some(Op::Status(status)) = Op::decode(&bytes)
-            && status.state == UpdateState::Verified
-        {
-            return;
-        }
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_roll_back() {
     let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
@@ -1046,7 +1090,6 @@ async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_
 
     let new = NODE_VERSION;
     let image = sim_image(new);
-    upload(&mut link, &image).await;
     let mut sessions: Vec<OtaSession> = nodes
         .iter()
         .enumerate()
@@ -1055,7 +1098,10 @@ async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_
             OtaSession::new(*node, old, &image, session, Ids::of(i, nodes.len()), now())
         })
         .collect();
-    let outcomes = drive_fleet(&mut link, &mut sessions, std::future::pending(), |_, _| {}).await;
+    let outcomes =
+        drive_fleet(&mut link, &mut sessions, Some(&image), std::future::pending(), |_| {})
+            .await
+            .expect("the upload");
     assert_eq!(outcomes[0], Outcome::Done(new));
     assert_eq!(outcomes[1], Outcome::Done(new), "chunk drops are recovered");
     assert_eq!(outcomes[2], Outcome::Failed(Failure::RolledBack(old)));

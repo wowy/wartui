@@ -110,6 +110,9 @@ pub struct SimConfig {
     /// switches and reboots all the same. `None` by default. A test knob, for the host's
     /// recovery from a lost `Verified`.
     pub mute_verified_node: Option<u8>,
+    /// Counts the chunk commands answered `NoImage`: each sent before the cache verified the
+    /// image it names. `None` by default. A test knob, for the host's wait on the upload.
+    pub no_image_answers: Option<Arc<AtomicU32>>,
 }
 
 impl Default for SimConfig {
@@ -126,6 +129,7 @@ impl Default for SimConfig {
             lossy_node: None,
             rejecting_node: None,
             mute_verified_node: None,
+            no_image_answers: None,
         }
     }
 }
@@ -265,7 +269,8 @@ impl SimTransport {
         }
 
         let events = plumbing.events.clone();
-        tokio::spawn(run_bridge(plumbing, routes, started, attached_tx));
+        let no_image = self.config.no_image_answers.clone();
+        tokio::spawn(run_bridge(plumbing, routes, started, attached_tx, no_image));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
                 node,
@@ -287,6 +292,7 @@ async fn run_bridge(
     routes: Vec<Route>,
     started: tokio::time::Instant,
     attached: tokio::sync::watch::Sender<bool>,
+    no_image: Option<Arc<AtomicU32>>,
 ) {
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
@@ -379,7 +385,12 @@ async fn run_bridge(
                 let kind = DownType::UpdateChunk.as_u8();
                 let delivered = match built {
                     Some(n) => deliver(&routes, slot, kind, &body[..n], &mut rng).await,
-                    None => Err(Undelivered::NoImage),
+                    None => {
+                        if let Some(count) = &no_image {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(Undelivered::NoImage)
+                    }
                 };
                 Some(match delivered {
                     Ok(()) => BridgeToHost::Delivered { id },

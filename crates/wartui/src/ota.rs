@@ -12,10 +12,12 @@
 //! before taking the update into its other slot.
 //!
 //! **The image crosses the host link once.** Every node of a board takes the same image, so the
-//! run uploads it into the bridge's node image cache ([`upload_cache`]), and each session then
-//! names its chunks by offset. Ten nodes cost one upload rather than ten copies of the image on
-//! the wire. The bridge caches one image, so a run with images for two boards updates one
-//! board's nodes, then the other's ([`fleets`]).
+//! run uploads it into the bridge's node image cache, and each session names its chunks by
+//! offset. Ten nodes cost one upload rather than ten copies of the image on the wire. The upload
+//! runs beside the sessions' `begin`s ([`drive_fleet`]), so a node is ready to take chunks by the
+//! time the bridge has checked the image, and none is sent one before. The bridge caches one
+//! image, so a run with images for two boards updates one board's nodes, then the other's
+//! ([`fleets`]).
 //!
 //! **Every chosen node updates at once**, one session each over the one link
 //! ([`drive_fleet`]). The host link stops being the limit once the image is cached, so the two
@@ -24,10 +26,11 @@
 //! the trial boot and rollback included, so a node that fails leaves the others running and its
 //! own old image in place.
 //!
-//! **Events that queued while the run was busy are thrown away** before the sessions start: a
-//! heartbeat that waited out an image build, the prompt or the upload is history, and each
-//! session starts from its node's next one. [`wartui_core::ota`] has the session's own
-//! reasoning.
+//! **Each session starts from the slot the listen heard its node in**, so its `begin` goes at
+//! once rather than on the node's next heartbeat. Events that queued while the run was busy are
+//! thrown away before the sessions start: a heartbeat that waited out an image build or the
+//! prompt is history. A node that moved since is found by its next heartbeat.
+//! [`wartui_core::ota`] has the session's own reasoning.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -43,13 +46,13 @@ use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::ota::{Failure, Ids, OtaImage, OtaSession, Outcome, Phase, Progress};
-use wartui_core::runtime::{drive_fleet, now};
+use wartui_core::runtime::{FleetReport, drive_fleet, now};
 use wartui_proto::bus::{
-    Board, Capabilities, Heartbeat, NODE_VERSION, UpType, UpdateState, Version,
+    Board, Capabilities, Heartbeat, NODE_VERSION, Slot, UpType, UpdateState, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp};
+use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::radio_link::update::{self, OP_MAX, Op, Sender, Stage};
+use wartui_proto::radio_link::update;
 
 use crate::flash::app::{self, AppImage, board_name};
 
@@ -165,7 +168,7 @@ pub async fn run(args: Args) -> Result<()> {
     };
     println!("bridge  {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("listening {} s for heartbeats", args.listen);
-    let heard = listen(&mut link, Duration::from_secs(args.listen)).await?;
+    let (heard, slots) = listen(&mut link, Duration::from_secs(args.listen)).await?;
     let targets = select(&heard, &args.nodes)?;
 
     let images = images(&args, &targets).await?;
@@ -214,16 +217,21 @@ pub async fn run(args: Args) -> Result<()> {
                 match image {
                     Some(image) if !confirm_only => {
                         let session = base.wrapping_add(u8::try_from(i).unwrap_or(0));
-                        OtaSession::new(node, caps.version, image, session, ids, now())
+                        let session =
+                            OtaSession::new(node, caps.version, image, session, ids, now());
+                        match slots.get(&node) {
+                            Some(slot) => session.with_slot(*slot),
+                            None => session,
+                        }
                     }
                     _ => OtaSession::confirm_trial(node, caps.version, ids, now()),
                 }
             })
             .collect();
         let nodes: Vec<Mac> = members.iter().map(|&i| chosen[i].0).collect();
-        let mut view = FleetView::new(&nodes);
-        let got = update_fleet(&mut link, image, &mut sessions, &mut stop, |i, p| view.show(i, p))
-            .await?;
+        let mut view = FleetView::new(&nodes, image.map(|image| image.bytes.len()));
+        let got =
+            update_fleet(&mut link, image, &mut sessions, &mut stop, |r| view.show(r)).await?;
         view.finish(&got);
         outcomes.extend(got);
         if outcomes.contains(&Outcome::Failed(Failure::Cancelled)) {
@@ -267,70 +275,20 @@ fn fleets(chosen: &[(Mac, Capabilities, bool)]) -> Vec<(Option<Board>, Vec<usize
     fleets
 }
 
-/// Update one fleet: upload `image` into the bridge's cache, when the fleet sends one, then drive
-/// every session at once until each has an outcome or `stop` resolves.
+/// Update one fleet: drive every session at once, uploading `image` into the bridge's cache
+/// meanwhile when the fleet sends one, until each has an outcome or `stop` resolves.
 async fn update_fleet(
     link: &mut LinkHandle,
     image: Option<&OtaImage>,
     sessions: &mut [OtaSession],
     stop: impl Future<Output = ()>,
-    progress: impl FnMut(usize, &Progress),
+    report: impl FnMut(FleetReport<'_>),
 ) -> Result<Vec<Outcome>> {
-    if let Some(image) = image {
-        let start = Instant::now();
-        upload_cache(link, image).await?;
-        println!(
-            "cache   {} KB to the bridge in {:.1} s",
-            image.bytes.len().div_ceil(1024),
-            start.elapsed().as_secs_f64()
-        );
-    }
     drain(link).await;
-    Ok(drive_fleet(link, sessions, stop, progress).await)
-}
-
-/// How often [`upload_cache`] polls its sender, for its silence deadline.
-const CACHE_TICK: Duration = Duration::from_millis(50);
-
-/// Upload `image` into the bridge's node image cache, until the bridge has checked its digest.
-///
-/// The bridge takes it as `CacheImage` ops in the layout it takes its own image in, driven by the
-/// same [`Sender`]. A `Begin` for the image the cache already holds is answered `Verified` at
-/// once, and the upload ends there. Nothing goes to a node before this returns.
-async fn upload_cache(link: &mut LinkHandle, image: &OtaImage) -> Result<()> {
-    let mut sender = Sender::new(&image.bytes, image.sha256, &image.sha256);
-    let start = Instant::now();
-    let mut tick = tokio::time::interval(CACHE_TICK);
-    loop {
-        if sender.is_verified() {
-            return Ok(());
-        }
-        if let Stage::Failed(failure) = sender.stage() {
-            let why = cache_failure(failure);
-            bail!("the bridge did not take the node image ({why}); nothing was updated");
-        }
-        let now = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let mut buf = [0u8; OP_MAX];
-        while let Some(len) = sender.next(now, &mut buf) {
-            let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
-            link.send_urgent(HostToBridge::CacheImage(op)).context("queueing a cache op")?;
-        }
-        tokio::select! {
-            _ = tick.tick() => {}
-            event = link.recv() => match event {
-                Some(LinkEvent::Message(BridgeToHost::CacheImage(bytes))) => {
-                    if let Some(Op::Status(status)) = Op::decode(&bytes) {
-                        sender.on_status(&status);
-                    }
-                }
-                Some(LinkEvent::Disconnected { reason }) => bail!(
-                    "the link dropped while sending the node image ({reason}); nothing was updated"
-                ),
-                Some(_) => {}
-                None => bail!("the link closed while sending the node image; nothing was updated"),
-            },
-        }
-    }
+    drive_fleet(link, sessions, image, stop, report).await.map_err(|failure| {
+        let why = cache_failure(failure);
+        anyhow::anyhow!("the bridge did not take the node image ({why}); nothing was updated")
+    })
 }
 
 /// Why the cache refused or lost an upload, for an operator.
@@ -377,21 +335,27 @@ async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
     }
 }
 
-/// Every node heartbeating within `period`, as its latest heartbeat's prefix says.
-async fn listen(link: &mut LinkHandle, period: Duration) -> Result<BTreeMap<Mac, Capabilities>> {
+/// Every node heartbeating within `period`, as its latest heartbeat's prefix says, and the slot
+/// that heartbeat came from.
+async fn listen(
+    link: &mut LinkHandle,
+    period: Duration,
+) -> Result<(BTreeMap<Mac, Capabilities>, HashMap<Mac, Slot>)> {
     let mut heard = BTreeMap::new();
+    let mut slots = HashMap::new();
     let deadline = tokio::time::Instant::now() + period;
     loop {
         let event = match tokio::time::timeout_at(deadline, link.recv()).await {
-            Err(_) => return Ok(heard),
+            Err(_) => return Ok((heard, slots)),
             Ok(None) => bail!("the link closed"),
             Ok(Some(event)) => event,
         };
-        if let LinkEvent::Message(BridgeToHost::FromNode { kind, body, .. }) = event
+        if let LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. }) = event
             && kind == UpType::Heartbeat.as_u8()
             && let Ok((caps, mac)) = Heartbeat::identity(&body)
         {
             heard.insert(mac, caps);
+            slots.insert(mac, slot);
         }
     }
 }
@@ -526,9 +490,11 @@ fn confirm() -> Result<bool> {
     Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
-/// Every node's progress: on a terminal, a line per node redrawn in place, and otherwise a line
-/// per node at each phase change. Then each node's outcome.
+/// The upload into the bridge's cache, and every node's progress: on a terminal, a line each
+/// redrawn in place, and otherwise a line at each change. Then each node's outcome.
 struct FleetView {
+    /// The upload's line, while the fleet sends an image.
+    cache: Option<CacheLine>,
     lines: Vec<ProgressLine>,
     tty: bool,
     /// Rows the last redraw wrote, which the next moves the cursor back over.
@@ -536,9 +502,28 @@ struct FleetView {
     drawn: Option<Instant>,
 }
 
+/// The upload of an image of `len` bytes into the bridge's cache, and how long it took once the
+/// bridge has checked it.
+struct CacheLine {
+    len: usize,
+    took: Option<Duration>,
+}
+
+impl CacheLine {
+    fn text(&self) -> String {
+        let kb = self.len.div_ceil(1024);
+        match self.took {
+            Some(took) => format!("cache   {kb} KB to the bridge in {:.1} s", took.as_secs_f64()),
+            None => format!("cache   sending {kb} KB to the bridge"),
+        }
+    }
+}
+
 impl FleetView {
-    fn new(nodes: &[Mac]) -> Self {
+    /// A view of `nodes`, and of an upload of `image` bytes when the fleet sends an image.
+    fn new(nodes: &[Mac], image: Option<usize>) -> Self {
         Self {
+            cache: image.map(|len| CacheLine { len, took: None }),
             lines: nodes.iter().map(|node| ProgressLine::new(*node)).collect(),
             tty: std::io::stdout().is_terminal(),
             rows: 0,
@@ -546,10 +531,25 @@ impl FleetView {
         }
     }
 
-    fn show(&mut self, i: usize, progress: &Progress) {
+    fn show(&mut self, report: FleetReport<'_>) {
         let now = Instant::now();
+        let (i, progress) = match report {
+            FleetReport::Cached(took) => {
+                let Some(cache) = &mut self.cache else { return };
+                cache.took = Some(took);
+                if self.tty {
+                    self.redraw(now);
+                } else {
+                    println!("{}", cache.text());
+                }
+                return;
+            }
+            FleetReport::Session(i, progress) => (i, progress),
+        };
+        // A node's rate counts from when it may stream: once the image is cached.
+        let cached = self.cache.as_ref().is_none_or(|cache| cache.took.is_some());
         let Some(line) = self.lines.get_mut(i) else { return };
-        let changed = line.update(progress, now);
+        let changed = line.update(progress, now, cached);
         if self.tty {
             let due =
                 self.drawn.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(250));
@@ -581,12 +581,15 @@ impl FleetView {
         if self.rows > 0 {
             let _ = write!(text, "\x1b[{}A", self.rows);
         }
+        if let Some(cache) = &self.cache {
+            let _ = writeln!(text, "\r\x1b[K{}", cache.text());
+        }
         for line in &self.lines {
             let _ = writeln!(text, "\r\x1b[K{}", line.text(now));
         }
         print!("{text}");
         let _ = std::io::stdout().flush();
-        self.rows = self.lines.len();
+        self.rows = self.lines.len() + usize::from(self.cache.is_some());
         self.drawn = Some(now);
     }
 }
@@ -613,9 +616,10 @@ impl ProgressLine {
         }
     }
 
-    /// Take the latest progress, returning whether its phase changed.
-    fn update(&mut self, progress: &Progress, now: Instant) -> bool {
-        if progress.phase == Phase::Streaming && self.streaming.is_none() {
+    /// Take the latest progress, returning whether its phase changed. The rate's clock starts
+    /// once the node is streaming and the image is `cached`.
+    fn update(&mut self, progress: &Progress, now: Instant, cached: bool) -> bool {
+        if cached && progress.phase == Phase::Streaming && self.streaming.is_none() {
             self.streaming = Some((now, progress.acked));
         }
         if progress.acked == progress.total && self.streamed.is_none() {
@@ -662,6 +666,8 @@ impl ProgressLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use sha2::{Digest, Sha256};
     use wartui_proto::bus::UpdateStatus;
 
@@ -750,8 +756,12 @@ mod tests {
     /// How much faster than real time the fake fleet runs.
     const SPEED: f64 = 20.0;
 
-    /// A simulated fleet of `count` nodes a minor behind, connected, every node heard.
-    async fn sim_fleet(count: u8, rejecting: Option<u8>) -> (LinkHandle, Vec<Mac>) {
+    /// A simulated fleet of `count` nodes a minor behind, connected, every node heard, and the
+    /// slot each was heard in.
+    async fn sim_fleet(
+        count: u8,
+        rejecting: Option<u8>,
+    ) -> (LinkHandle, Vec<Mac>, HashMap<Mac, Slot>) {
         let config = SimConfig {
             node_count: count,
             speed: SPEED,
@@ -762,9 +772,9 @@ mod tests {
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
         connected(&mut link).await.expect("the simulator connects");
         let nodes: Vec<Mac> = (0..count).map(SimTransport::node_mac).collect();
-        let heard = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
+        let (heard, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
         assert!(nodes.iter().all(|node| heard.contains_key(node)), "every node heard");
-        (link, nodes)
+        (link, nodes, slots)
     }
 
     /// An image of `sectors` sectors and a bit, for [`NODE_VERSION`].
@@ -774,26 +784,37 @@ mod tests {
         OtaImage { bytes: Arc::from(bytes), sha256, version: NODE_VERSION, board: Board::Esp32c5 }
     }
 
-    /// One session per node, as `run` starts them.
-    fn sessions(nodes: &[Mac], image: &OtaImage) -> Vec<OtaSession> {
-        let from = minor_behind(NODE_VERSION);
+    /// One session per node running `from`, as `run` starts them: each from the slot its node
+    /// was heard in.
+    fn sessions_from(
+        nodes: &[Mac],
+        slots: &HashMap<Mac, Slot>,
+        image: &OtaImage,
+        from: Version,
+    ) -> Vec<OtaSession> {
         nodes
             .iter()
             .enumerate()
             .map(|(i, node)| {
                 let session = 0x40 + u8::try_from(i).expect("a small fleet");
                 OtaSession::new(*node, from, image, session, Ids::of(i, nodes.len()), now())
+                    .with_slot(slots[node])
             })
             .collect()
     }
 
+    /// [`sessions_from`] nodes a minor behind.
+    fn sessions(nodes: &[Mac], slots: &HashMap<Mac, Slot>, image: &OtaImage) -> Vec<OtaSession> {
+        sessions_from(nodes, slots, image, minor_behind(NODE_VERSION))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ota_fleet_updates_every_sim_node() {
-        let (mut link, nodes) = sim_fleet(4, None).await;
+        let (mut link, nodes, slots) = sim_fleet(4, None).await;
         let image = sim_image(6);
-        let mut sessions = sessions(&nodes, &image);
+        let mut sessions = sessions(&nodes, &slots, &image);
         let outcomes =
-            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), |_, _| {})
+            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), |_| {})
                 .await
                 .expect("the upload");
         assert_eq!(outcomes, vec![Outcome::Done(NODE_VERSION); 4]);
@@ -802,11 +823,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn ota_fleet_reports_one_failure_and_finishes_the_rest() {
-        let (mut link, nodes) = sim_fleet(4, Some(2)).await;
+        let (mut link, nodes, slots) = sim_fleet(4, Some(2)).await;
         let image = sim_image(6);
-        let mut sessions = sessions(&nodes, &image);
+        let mut sessions = sessions(&nodes, &slots, &image);
         let outcomes =
-            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), |_, _| {})
+            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), |_| {})
                 .await
                 .expect("the upload");
         let old = minor_behind(NODE_VERSION);
@@ -820,14 +841,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn ota_fleet_cancel_sends_abort_to_each_accepted_session() {
-        let (mut link, nodes) = sim_fleet(4, None).await;
+        let (mut link, nodes, slots) = sim_fleet(4, None).await;
         // Long enough that every node is still streaming when the cancel lands.
         let image = sim_image(128);
-        let mut sessions = sessions(&nodes, &image);
+        let mut sessions = sessions(&nodes, &slots, &image);
         let streaming = tokio::sync::Notify::new();
         let mut seen = vec![false; nodes.len()];
-        let progress = |i: usize, p: &Progress| {
-            seen[i] |= p.phase == Phase::Streaming;
+        let progress = |report: FleetReport<'_>| {
+            if let FleetReport::Session(i, p) = report {
+                seen[i] |= p.phase == Phase::Streaming && p.acked > 0;
+            }
             if seen.iter().all(|s| *s) {
                 streaming.notify_one();
             }
@@ -854,13 +877,60 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ota_fleet_upload_ends_at_once_when_cache_holds_the_image() {
-        let (mut link, _) = sim_fleet(1, None).await;
+    async fn ota_fleet_updates_sim_node_when_cache_already_holds_the_image() {
+        let (mut link, nodes, slots) = sim_fleet(1, None).await;
         let image = sim_image(3);
-        upload_cache(&mut link, &image).await.expect("the first upload");
+        let mut first = sessions(&nodes, &slots, &image);
+        let outcomes =
+            update_fleet(&mut link, Some(&image), &mut first, std::future::pending(), |_| {})
+                .await
+                .expect("the first upload");
+        assert_eq!(outcomes, [Outcome::Done(NODE_VERSION)]);
         // The cache answers a `Begin` for the image it holds `Verified`. An `Install` after it
-        // would be refused, failing the upload.
-        upload_cache(&mut link, &image).await.expect("the second upload");
+        // would be refused, failing the upload. The node took the image on its new slot.
+        let slots = HashMap::from([(nodes[0], slots[&nodes[0]])]);
+        let mut again = sessions_from(&nodes, &slots, &image, NODE_VERSION);
+        let outcomes =
+            update_fleet(&mut link, Some(&image), &mut again, std::future::pending(), |_| {})
+                .await
+                .expect("the second upload");
+        assert_eq!(outcomes, [Outcome::Done(NODE_VERSION)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ota_fleet_sends_no_chunk_when_cache_has_not_verified() {
+        let no_image = Arc::new(AtomicU32::new(0));
+        let config = SimConfig {
+            node_count: 4,
+            speed: SPEED,
+            fleet_version: minor_behind(NODE_VERSION),
+            no_image_answers: Some(Arc::clone(&no_image)),
+            ..SimConfig::default()
+        };
+        let mut link = SimTransport::new(config).start().expect("starting the simulator");
+        connected(&mut link).await.expect("the simulator connects");
+        let nodes: Vec<Mac> = (0..4).map(SimTransport::node_mac).collect();
+        let (_, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
+        let image = sim_image(6);
+        let mut sessions = sessions(&nodes, &slots, &image);
+        let mut accepted_before_cached = 0;
+        let mut cached = false;
+        let report = |report: FleetReport<'_>| match report {
+            FleetReport::Cached(_) => cached = true,
+            FleetReport::Session(_, p) if !cached && p.phase == Phase::Streaming => {
+                accepted_before_cached += 1;
+            }
+            FleetReport::Session(..) => {}
+        };
+        let outcomes =
+            update_fleet(&mut link, Some(&image), &mut sessions, std::future::pending(), report)
+                .await
+                .expect("the upload");
+        assert_eq!(outcomes, vec![Outcome::Done(NODE_VERSION); 4]);
+        // The bridge answers `NoImage` to a chunk command from an image it has not verified.
+        assert_eq!(no_image.load(Ordering::Relaxed), 0, "a chunk went before the cache verified");
+        // The begins went beside the upload, not after it.
+        assert!(accepted_before_cached > 0, "a node took its begin before the cache verified");
     }
 
     #[test]

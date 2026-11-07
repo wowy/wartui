@@ -506,8 +506,8 @@ again, or any `wartui` command that opens the bridge.
 ### Updating over the air
 
 `ota` updates the nodes' firmware through the bridge, with no USB cable to them. It listens for
-heartbeats, shows what it would do with each node, asks, uploads the image once into the bridge's
-node image cache, then updates every chosen node at once. Nothing else may hold the bridge
+heartbeats, shows what it would do with each node, asks, then updates every chosen node at once
+while it uploads the image into the bridge's node image cache. Nothing else may hold the bridge
 meanwhile, so stop `run` first.
 
 ```sh
@@ -560,8 +560,9 @@ Only the heartbeat's version, board and flags are read, so a node `run` shows as
 one `ota` reaches. `ota` and `flash-fleet` update only an ESP32-C5: `ota` refuses any other board,
 and `flash-fleet` skips it. Without `--yes`, `ota` asks `[y/N]` before sending anything.
 
-**The image goes to the bridge first**, once, however many nodes take it, and the `cache` line
-says how long that took. The bridge checks its SHA-256 before sending any node a byte of it.
+**The image goes to the bridge once**, however many nodes take it, and the `cache` line says how
+long that took. It goes beside each node's update request, and no node gets a byte of it before
+the bridge has checked its SHA-256.
 
 **Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
 (`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). On a terminal the lines
@@ -575,7 +576,8 @@ holds every frame sent, every send result, every status from a node and every ph
 
 **How long it takes.** The upload to the bridge is bounded by its link, about 386 KB/s, so it takes
 a few seconds.
-Each node's first frame waits for its next heartbeat: up to 5 s on an assigned node, a second on a
+Each node's first frame goes at once to the slot the listen heard it in, and one that has moved
+since waits for its next heartbeat: up to 5 s on an assigned node, a second on a
 parked one. Then every node streams at once, the two buses side by side, and at each 4 KB sector
 boundary a node waits to erase and write the sector: about 68 ms when the slot holds an old image.
 The reboot and confirmation add a few seconds more. A node's first update after a USB flash writes
@@ -594,7 +596,7 @@ update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
 
 | Failure                                       | What to do                                                                       |
 |-----------------------------------------------|----------------------------------------------------------------------------------|
-| `the bridge did not take the node image (…)`  | No node was touched. `no PSRAM`: the P4's PSRAM did not map; otherwise run again |
+| `the bridge did not take the node image (…)`  | No node was updated. `no PSRAM`: the P4's PSRAM did not map; otherwise run again |
 | `no answer to the update request in 30 s`     | Check `wartui sniff` hears it, and run again; persisting, `flash-fleet` it       |
 | `the node refused the update: …`              | Its partition table has no `trial` sector, or its flash failed: `flash-fleet` it |
 | `the image is larger than the node's …`       | Build a smaller image; the slot holds 1920 KiB                                   |

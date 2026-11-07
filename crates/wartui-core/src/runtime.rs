@@ -19,11 +19,12 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp};
 use wartui_proto::mac;
+use wartui_proto::radio_link::update::{self, OP_MAX, Op, Sender, Stage};
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
-use crate::ota::{Failure, OtaEvent, OtaSession, Outcome, Progress};
+use crate::ota::{Failure, OtaEvent, OtaImage, OtaSession, Outcome, Progress};
 use crate::record::{CaptureSettings, Record};
 use crate::store::{Store, StoreReport};
 
@@ -212,25 +213,48 @@ fn stand_host_down(
 /// How often [`drive_fleet`] ticks its sessions: well inside their 500 ms status timeout.
 pub const OTA_TICK: Duration = Duration::from_millis(50);
 
+/// What [`drive_fleet`] reports as it goes, for showing.
+#[derive(Debug, Clone, Copy)]
+pub enum FleetReport<'a> {
+    /// The P4 checked the image uploaded into its cache, this long after the drive started.
+    Cached(Duration),
+    /// Session `index` stands at `progress`.
+    Session(usize, &'a Progress),
+}
+
 /// Run every node's update at once to its end, or until `stop` resolves, which cancels them all.
 /// Returns each session's outcome, in the order given.
+///
+/// `image`, when given, is uploaded into the P4's node image cache beside the sessions' `begin`s,
+/// and the sessions are told once the P4 has checked it ([`OtaEvent::Cached`]); none sends a
+/// chunk before. Without one, nothing is uploaded and no session is told, so pass it whenever a
+/// session streams. An upload the P4 refuses or loses cancels every session, which sends each its
+/// abort, and is the error. A `Begin` for the image the cache already holds is answered `Verified`
+/// at once, and the upload ends there.
 ///
 /// Every event goes to every session still running, and each reads only its own: its node's
 /// records, and the delivery answers to its own ids, which no two sessions share
 /// ([`crate::ota::Ids`]). A session that fails leaves the rest running. A cancel still sends each
-/// session's abort. `progress` is called for every session after every event, with its index,
-/// for showing.
+/// session's abort. `report` is called for every session after every event, and once when the
+/// cache holds the image, for showing.
 ///
-/// Every record sent, every delivery answer, every status from a node and every phase change is
-/// logged at debug level with structured fields, so a bench log of an update can be read back
-/// by a script.
+/// Every record sent, every delivery answer, every status from a node, every phase change and the
+/// upload's end are logged at debug level with structured fields, so a bench log of an update
+/// can be read back by a script.
+///
+/// # Errors
+/// Why the P4 refused or lost the upload.
 pub async fn drive_fleet(
     link: &mut LinkHandle,
     sessions: &mut [OtaSession],
+    image: Option<&OtaImage>,
     stop: impl std::future::Future<Output = ()>,
-    mut progress: impl FnMut(usize, &Progress),
-) -> Vec<Outcome> {
+    mut report: impl FnMut(FleetReport<'_>),
+) -> Result<Vec<Outcome>, update::Failure> {
     tokio::pin!(stop);
+    let started = tokio::time::Instant::now();
+    let mut cache = image.map(|image| Sender::new(&image.bytes, image.sha256, &image.sha256));
+    let mut cache_failed = None;
     let mut ticker = tokio::time::interval(OTA_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut phases: Vec<_> = sessions.iter().map(|session| session.progress().phase).collect();
@@ -240,29 +264,24 @@ pub async fn drive_fleet(
     let mut stopped = false;
     while sessions.iter().any(|session| session.outcome().is_none()) {
         let mut sends = Vec::new();
-        let mut each = |event: OtaEvent<'_>| {
-            let now = now();
-            for session in sessions.iter_mut().filter(|session| session.outcome().is_none()) {
-                sends.extend(session.handle(now, event));
-            }
-        };
         tokio::select! {
             () = &mut stop, if !stopped => {
                 stopped = true;
+                cache = None;
                 let now = now();
                 for session in sessions.iter_mut() {
                     sends.extend(session.cancel(now));
                 }
             }
-            _ = ticker.tick() => each(OtaEvent::Tick),
+            _ = ticker.tick() => feed(sessions, OtaEvent::Tick, &mut sends),
             event = link.recv() => match event {
                 Some(LinkEvent::Message(BridgeToHost::Delivered { id })) => {
                     tracing::debug!(id, status = "delivered", "ota send result");
-                    each(OtaEvent::Delivery { id, delivered: true });
+                    feed(sessions, OtaEvent::Delivery { id, delivered: true }, &mut sends);
                 }
                 Some(LinkEvent::Message(BridgeToHost::Undelivered { id, reason })) => {
                     tracing::debug!(id, status = ?reason, "ota send result");
-                    each(OtaEvent::Delivery { id, delivered: false });
+                    feed(sessions, OtaEvent::Delivery { id, delivered: false }, &mut sends);
                 }
                 Some(LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. })) => {
                     if kind == UpType::UpdateStatus.as_u8()
@@ -277,22 +296,56 @@ pub async fn drive_fleet(
                             "ota status"
                         );
                     }
-                    each(OtaEvent::FromNode { slot, kind, body: &body });
+                    feed(sessions, OtaEvent::FromNode { slot, kind, body: &body }, &mut sends);
+                }
+                Some(LinkEvent::Message(BridgeToHost::CacheImage(bytes))) => {
+                    if let Some(sender) = &mut cache
+                        && let Some(Op::Status(status)) = Op::decode(&bytes)
+                    {
+                        sender.on_status(&status);
+                    }
                 }
                 Some(_) => {}
                 None => {
                     let closed = Outcome::Failed(Failure::LinkClosed);
-                    return sessions
+                    return Ok(sessions
                         .iter()
                         .map(|session| session.outcome().cloned().unwrap_or_else(|| closed.clone()))
-                        .collect();
+                        .collect());
                 }
             },
+        }
+        // Never polled once verified: it would go on to `Install`, which the cache refuses.
+        if let Some(sender) = &cache {
+            if sender.is_verified() {
+                cache = None;
+                let elapsed = started.elapsed();
+                tracing::debug!(elapsed_ms = elapsed.as_millis(), "ota cache verified");
+                report(FleetReport::Cached(elapsed));
+                feed(sessions, OtaEvent::Cached, &mut sends);
+            } else if let Stage::Failed(failure) = sender.stage() {
+                cache = None;
+                tracing::debug!(failure = ?failure, "ota cache failed");
+                cache_failed = Some(failure);
+                let now = now();
+                for session in sessions.iter_mut() {
+                    sends.extend(session.cancel(now));
+                }
+            }
+        }
+        // Polled after every event, so the next op goes as soon as a status allows it.
+        if let Some(sender) = &mut cache {
+            let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let mut buf = [0u8; OP_MAX];
+            while let Some(len) = sender.next(now, &mut buf) {
+                let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
+                sends.push(HostToBridge::CacheImage(op));
+            }
         }
         for cmd in sends {
             log_send(&cmd);
             if let Err(e) = link.send_urgent(cmd) {
-                // The session's own timeouts resend it.
+                // The session's own timeouts resend it, and the upload's.
                 tracing::warn!("dropping an update record: {e}");
             }
         }
@@ -311,10 +364,21 @@ pub async fn drive_fleet(
                     tracing::debug!(node = %mac::full(&node), outcome = ?outcome, "ota outcome");
                 }
             }
-            progress(i, &now_progress);
+            report(FleetReport::Session(i, &now_progress));
         }
     }
-    sessions.iter().filter_map(|session| session.outcome().cloned()).collect()
+    if let Some(failure) = cache_failed {
+        return Err(failure);
+    }
+    Ok(sessions.iter().filter_map(|session| session.outcome().cloned()).collect())
+}
+
+/// Hand `event` to every session still running, gathering what they send.
+fn feed(sessions: &mut [OtaSession], event: OtaEvent<'_>, sends: &mut Vec<HostToBridge>) {
+    let now = now();
+    for session in sessions.iter_mut().filter(|session| session.outcome().is_none()) {
+        sends.extend(session.handle(now, event));
+    }
 }
 
 /// Log one update record at debug level.

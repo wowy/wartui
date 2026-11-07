@@ -16,8 +16,11 @@
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
 //! the next:
 //!
-//! - **IRQ asserted**: a pass over the present slots, round robin, one transfer each. Absent
-//!   slots are still probed on time, since a node not yet present may be the one asserting.
+//! - **IRQ asserted**: a pass over the present slots, round robin, one transfer each, that ends
+//!   at the first transfer to bring a record, and the next pass starts after that slot. A shared
+//!   line says only that some node waits, so clocking the rest once one has answered spends the
+//!   bus on nodes with nothing to send, or erasing flash. Absent slots are still probed on time,
+//!   since a node not yet present may be the one asserting.
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
 //! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
@@ -96,8 +99,9 @@ const ABSENT_AFTER: u8 = 5;
 /// each goes within a [`POLL_EVERY`] either side of this after the loss.
 const ABSENT_SPAN: Duration = Duration::from_millis(1_000);
 /// How long a present slot whose transfer and retry both failed the magic waits before it is
-/// clocked again, so a node erasing flash is not clocked through the erase.
-const MISS_BACKOFF: Duration = Duration::from_millis(10);
+/// clocked again: about half a node's sector erase, so a node erasing flash is clocked a couple of
+/// times through the erase rather than on every pass.
+const MISS_BACKOFF: Duration = Duration::from_millis(20);
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
 const SLOT_GAP: Duration = Duration::from_millis(1);
@@ -346,6 +350,7 @@ struct Slot {
     gaps: u32,
     retries: u32,
     records: u32,
+    xfers: Xfers,
 }
 
 impl Slot {
@@ -370,6 +375,7 @@ impl Slot {
             gaps: 0,
             retries: 0,
             records: 0,
+            xfers: Xfers::new(),
         }
     }
 
@@ -403,6 +409,48 @@ impl Slot {
     /// Whether an IRQ pass may clock this slot at `now`: present, and not waiting out a miss.
     fn clockable(&self, now: Instant) -> bool {
         self.present && self.held_until() <= now
+    }
+}
+
+/// Why a transfer ran, for its slot's `xfer` counts, each counted under the first that applies.
+/// A retry after a miss counts as the transfer it retries.
+#[derive(Clone, Copy)]
+enum Xfer {
+    /// Clocked in an IRQ pass.
+    Pass,
+    /// Carried a flight toward the node, outside a pass.
+    Carry,
+    /// Fetched the node's ack right after a flight.
+    Fetch,
+    /// Owed the node an ack.
+    Owed,
+    /// The periodic poll, a poll before a flight's deadline, or an absent slot's probe.
+    Poll,
+}
+
+/// A slot's transfers by why they ran, since boot.
+struct Xfers {
+    pass: u32,
+    carry: u32,
+    fetch: u32,
+    owed: u32,
+    poll: u32,
+}
+
+impl Xfers {
+    const fn new() -> Self {
+        Self { pass: 0, carry: 0, fetch: 0, owed: 0, poll: 0 }
+    }
+
+    fn note(&mut self, why: Xfer) {
+        let count = match why {
+            Xfer::Pass => &mut self.pass,
+            Xfer::Carry => &mut self.carry,
+            Xfer::Fetch => &mut self.fetch,
+            Xfer::Owed => &mut self.owed,
+            Xfer::Poll => &mut self.poll,
+        };
+        *count = count.wrapping_add(1);
     }
 }
 
@@ -481,14 +529,17 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
                 if !controller.slots[i].clockable(Instant::now()) {
                     continue;
                 }
-                if let Outcome::Good { records } = controller.exchange(i, true, shared).await {
-                    brought |= records;
+                let outcome = controller.exchange(i, true, shared).await;
+                if let Outcome::Good { records: true } = outcome {
+                    brought = true;
+                    rr = (i + 1) % per_bus;
+                    break;
                 }
             }
-            rr = (rr + 1) % per_bus;
             if brought {
                 controller.empty_passes = 0;
             } else {
+                rr = (rr + 1) % per_bus;
                 controller.empty_passes = controller.empty_passes.saturating_add(1);
                 if controller.empty_passes >= EMPTY_PASSES {
                     controller.stuck_at = Some(Instant::now());
@@ -588,6 +639,7 @@ impl Controller {
     /// a present slot fails the magic. `answers_irq` is whether it is part of an IRQ pass.
     async fn exchange(&mut self, i: usize, answers_irq: bool, shared: &Shared) -> Outcome {
         let mut retried = false;
+        let mut why = None;
         loop {
             if let Some(end) = self.slots[i].last_end {
                 Timer::at(end + SLOT_GAP).await;
@@ -596,7 +648,20 @@ impl Controller {
             let Some(Wire { spi, rx, mut tx }) = self.wire.take() else { return Outcome::Bad };
             let seq = self.slots[i].seq;
             let filled = self.prepare(i, tx_bytes(&mut tx), shared);
-            self.slots[i].seq = seq.wrapping_add(1);
+            let slot = &mut self.slots[i];
+            let why = *why.get_or_insert(if answers_irq {
+                Xfer::Pass
+            } else if filled > 0 {
+                Xfer::Carry
+            } else if slot.fetch_ack {
+                Xfer::Fetch
+            } else if slot.ack_owed {
+                Xfer::Owed
+            } else {
+                Xfer::Poll
+            });
+            slot.xfers.note(why);
+            slot.seq = seq.wrapping_add(1);
             let start = Instant::now();
             self.cs(i).set_low();
             // Bound before the await, so the `Result` is not held across it.
@@ -797,6 +862,15 @@ impl Controller {
                     slot.gaps,
                     slot.retries,
                     slot.records
+                ),
+            );
+            let x = &slot.xfers;
+            self.line(
+                shared,
+                Some(i),
+                format_args!(
+                    "xfer pass={} carry={} fetch={} owed={} poll={}",
+                    x.pass, x.carry, x.fetch, x.owed, x.poll
                 ),
             );
         }

@@ -6,16 +6,20 @@
 //! (`runtime::drive_fleet`) to queue. Several sessions share one link, each giving its records
 //! ids no other uses ([`Ids`]) and reading only its own node's records.
 //!
-//! **The first `begin` rides a heartbeat**, which names the node-bus slot the node sits in, so the
-//! session learns where to send from the node's own heartbeats. [`UpdateBegin`] goes out on each
-//! heartbeat from the node until a status for this session answers it. An accepted `begin` puts
-//! the node in update mode, where it services the bus continuously, and everything after it goes
-//! out as soon as it is due.
+//! **The `begin` follows the node's heartbeats**, which name the node-bus slot the node sits in.
+//! [`UpdateBegin`] goes out on each heartbeat from the node until a status for this session
+//! answers it. A session that knows the slot its node was last heard in
+//! ([`OtaSession::with_slot`]) sends its first `begin` there at once rather than waiting out a
+//! heartbeat; undelivered, it waits for the next heartbeat, which names where the node is now. An
+//! accepted `begin` puts the node in update mode, where it services the bus continuously, and
+//! everything after it goes out as soon as it is due.
 //!
 //! **Chunks go by reference.** The image is uploaded once into the P4's cache, and each chunk is
 //! a [`HostToBridge::ToNodeChunk`] naming the image by its tag, an offset and a length, from
 //! which the P4 builds the record. So the host link carries an image once however many nodes
-//! take it.
+//! take it. The upload runs beside the `begin`s, and no chunk goes before
+//! [`OtaEvent::Cached`] says the P4 has checked the image's digest: a chunk from an image not yet
+//! cached is refused, and one from a corrupt copy would fail every node at once.
 //!
 //! **[`CHUNKS_IN_FLIGHT`] chunks are out at once**, so the next waits at the P4 while the node
 //! acknowledges the one before, and each `Delivered` or `Undelivered` sends one more. The P4's
@@ -256,6 +260,8 @@ pub enum OtaEvent<'a> {
     },
     /// Time passing, for timeouts. A few times a second is enough.
     Tick,
+    /// The P4's cache holds the image, checked, so chunks may go.
+    Cached,
 }
 
 /// Where an update stands, for showing.
@@ -360,6 +366,10 @@ pub struct OtaSession {
     abort_owed: bool,
     /// Whether this session has sent its commit, before which no heartbeat is the new image.
     committed: bool,
+    /// Whether the P4's cache holds the image, before which no chunk goes.
+    cached: bool,
+    /// Whether a `begin` goes to `slot` on the next tick, before any heartbeat.
+    begin_due: bool,
     /// When the status the host is waiting on is overdue.
     wait_status: Option<Instant>,
     send_failures: u32,
@@ -374,7 +384,7 @@ impl OtaSession {
     ///
     /// `session` names it on the wire; the caller picks one a restarted host is unlikely to
     /// repeat. `ids` are the ids it gives its records, which no other session on the link
-    /// shares. The P4's cache must hold `image` before the session streams.
+    /// shares. Its chunks wait for [`OtaEvent::Cached`].
     #[must_use]
     pub fn new(
         node: Mac,
@@ -409,6 +419,8 @@ impl OtaSession {
             accepted: false,
             abort_owed: false,
             committed: false,
+            cached: false,
+            begin_due: false,
             wait_status: None,
             send_failures: 0,
             status_timeouts: 0,
@@ -416,6 +428,15 @@ impl OtaSession {
             confirm_acked: false,
             outcome: None,
         }
+    }
+
+    /// The node was last heard in `slot`, so the first `begin` goes there on the next
+    /// [`OtaEvent::Tick`] rather than on the node's next heartbeat.
+    #[must_use]
+    pub const fn with_slot(mut self, slot: Slot) -> Self {
+        self.slot = Some(slot);
+        self.begin_due = true;
+        self
     }
 
     /// Confirm a node already running `version` on trial, as an update ends: an
@@ -465,6 +486,10 @@ impl OtaSession {
                 _ => {}
             },
             OtaEvent::Tick => self.on_tick(now, &mut out),
+            OtaEvent::Cached => {
+                self.cached = true;
+                self.send_next(now, &mut out);
+            }
         }
         if self.abort_owed {
             self.abort_owed = false;
@@ -535,10 +560,7 @@ impl OtaSession {
             // Confirmed: by our confirm, or in `Committing` and `AwaitReboot` by the commits
             // resent after a lost `Verified`, which the new image heard.
             (Some(false), _) => self.finish(now, Outcome::Done(new)),
-            (None, Phase::Begin) => {
-                let begin = self.begin.encode();
-                self.send(now, Sent::Begin, DownType::UpdateBegin, &begin, out);
-            }
+            (None, Phase::Begin) => self.send_begin(now, out),
             (None, Phase::Streaming | Phase::Committing) => {}
             (None, Phase::AwaitReboot) => {
                 if now.duration_since(self.phase_since) >= REBOOT_GRACE {
@@ -677,6 +699,7 @@ impl OtaSession {
         let elapsed = now.duration_since(self.phase_since);
         match self.phase {
             Phase::Begin if elapsed >= BEGIN_TIMEOUT => self.fail(now, Failure::NoAnswer),
+            Phase::Begin if self.begin_due => self.send_begin(now, out),
             Phase::Streaming | Phase::Committing => {
                 if !self.wait_status.is_some_and(|deadline| now >= deadline) {
                     return;
@@ -713,9 +736,10 @@ impl OtaSession {
 
     /// Send chunks from `next` until [`CHUNKS_IN_FLIGHT`] are out or the next starts a sector
     /// the node has not reached, or the commit once the last chunk is delivered. With nothing out
-    /// and nothing to send, a status is awaited, for [`STATUS_TIMEOUT`].
+    /// and nothing to send, a status is awaited, for [`STATUS_TIMEOUT`]. Nothing goes, and nothing
+    /// is awaited, until the image is cached.
     fn send_next(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        if self.phase != Phase::Streaming {
+        if self.phase != Phase::Streaming || !self.cached {
             return;
         }
         while self.chunks_out() < CHUNKS_IN_FLIGHT {
@@ -750,6 +774,12 @@ impl OtaSession {
         self.pending.iter().filter(|p| matches!(p.frame, Sent::Chunk(_))).count()
     }
 
+    fn send_begin(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
+        self.begin_due = false;
+        let begin = self.begin.encode();
+        self.send(now, Sent::Begin, DownType::UpdateBegin, &begin, out);
+    }
+
     fn send_commit(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
         let commit = UpdateCommit { session: self.begin.session }.encode();
         self.committed = true;
@@ -762,8 +792,8 @@ impl OtaSession {
     }
 
     /// Send one record other than a chunk to the node's slot, which takes the place of the last
-    /// such record awaiting its answer. Nothing goes before a heartbeat has named the slot, and
-    /// every phase that sends begins on one.
+    /// such record awaiting its answer. Nothing goes before a heartbeat or [`Self::with_slot`]
+    /// has named the slot.
     fn send(
         &mut self,
         now: Instant,
