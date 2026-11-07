@@ -311,10 +311,29 @@ delivered, in 35–89 ms.
 The nodes had no antennas fitted, so the capture says nothing about coverage: 17 networks
 against 116 from two nodes with antennas in the same spot, heard 40–55 dB weaker.
 
+### A power-cycle during the check for a node (3e144f3), 2026-11-07
+
+With the supply off and the P4 scouting, `wartui power-cycle --slot N3`, then `--slot N5` as soon
+as N3's answer came, which lands inside the 5 s check that follows N3's cycle:
+
+| Time (UTC) | |
+| --- | --- |
+| 12:28:20.2 | N3's request ends the scouting |
+| 12:28:21.10 | `a power-cycle request ended the wait; 10 node slots powered again` |
+| ~12:28:22.1 | N3 cycled: 1.99 s at the CLI, as with 8494180 |
+| ~12:28:22.2 | N5's request, inside the check |
+| ~12:28:23.2 | N5 cycled: 1.08 s at the CLI |
+| 12:28:28.19 | `no node answered after power-up`, and scouting resumes |
+
+The check started again after N5's cycle. Before 3e144f3, N5 would have waited out the check
+and been answered about 6 s after it was sent.
+
 ### Still open
 
 - A ten-node capture with antennas, for coverage.
 - Two fixes that this bench can't provoke: retrying each expander transaction at boot, which
   needs an I2C glitch, and exempting only the node in a cycle now from the supply-loss count,
   which needs the supply to drop within about 1 s of a queued cycle.
+- Scouting the slots that held nodes first, after a request ends a recovery and the check that
+  follows finds no node (3e144f3).
 - 4 MHz.
