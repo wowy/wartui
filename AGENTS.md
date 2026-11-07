@@ -298,9 +298,12 @@ is here rather than only in a `//!`.
 Each of these is enforced in one place and explained there at length. The claim is here so an
 edit stops; follow the pointer before changing the rule.
 
-- **A record-carrying transfer is acknowledged, an idle one never**, and each direction of each
-  slot is stop-and-wait with resends, so an idle transfer cannot acknowledge lost data and every
-  message is safe to take twice. → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **A record-carrying transfer is acknowledged, an idle one never**, so an idle transfer cannot
+  acknowledge lost data. Toward the P4 each slot is stop-and-wait. Toward a node the P4 keeps two
+  numbered flights out and the node takes them strictly in order, dropping any flight past one it
+  missed, and any but a `SYNC` flight until it has taken one since boot. So delivery toward a node
+  stays in order: the host's update session counts on it. Every message is safe to take twice.
+  → `crates/wartui-proto/src/bus/mod.rs` `//!`, `crates/wartui-proto/src/bus/window.rs`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens CH343s and
   nothing else, which means finding a bridge never writes to a node, and `wartui reset` — which
   transmits before anything has identified itself — never sweeps at all. A CH343 reports a serial

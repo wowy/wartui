@@ -547,6 +547,63 @@ from the counters):
 | ~0.8 | IRQ-pass visits to slots that bring no record |
 | ~0.25 | misses while a node erases flash, with their retries |
 
+## A two-flight window toward the node, 2026-11-07
+
+09082e6 lets the P4 send a node's next flight in the transfer that fetches the previous one's
+ack: two flights out per slot toward the node, numbered in the header's flags, taken by the
+node strictly in order, and sent again at once from the oldest when a good transfer comes back
+without its ack. The uplink keeps its stop-and-wait. Each update session now sends a whole
+sector, four chunks, before waiting, so the P4 always has the next chunk queued. To make room,
+the P4's queue per slot grew from 4,096 to 4,160 bytes and its bulk queue toward the host
+shrank from 256 to 240 KB; its main stack is unchanged at 32 KB.
+
+The nodes moved to the new firmware by `wartui ota` through the old P4, with no wired flash: a
+node that has taken no flight since it booted takes the first one whatever its number, and its
+confirm was that flight. The P4 was flashed after.
+
+`wartui ota --force --yes`, all ten carrier-10 nodes at once, 4 MHz:
+
+| | fc36e65 | 09082e6 |
+| --- | --- | --- |
+| Confirmed | 10 of 10 | 10 of 10, twice |
+| Rate per node while sending | 22–23 KB/s | 29–30 KB/s |
+| Chunk sends and statuses (debug logging) | 8,840 and 2,220 | the same, none undelivered |
+| Stuck-IRQ latches per bus | 2–4 | 1 |
+| Whole run | 48–50 s | 40 s (42 s with debug logging) |
+
+Over the 40 s run, N1's transfers (from its `xfer` counters, N3, N6 and N8 agreeing):
+
+| | fc36e65 | 09082e6 |
+| --- | --- | --- |
+| Ack fetches | 659 | 152 |
+| Transfers per chunk, all kinds | about 2.8 | about 2.2 |
+
+The visits of IRQ passes are now the largest share, about 1,320 transfers for N1, some of them
+carrying chunks.
+
+### After the review fixes (8edcb87)
+
+A code review's fixes changed the rule in one way that matters on the bus: a node that has taken
+nothing since it booted now takes only a `SYNC` flight, and the P4 sends `SYNC` whenever a
+node's header shows it has taken nothing. Before, a node that rebooted in under 1 s kept its slot
+present, could take a later flight ahead of an earlier one, and the P4 would answer both
+`Delivered`. In a fleet update, 3 of 10 reboots never went absent. The fixes also pace a second
+go-back for the same flight by 25 ms, commit a flight at the node only once it is queued, and
+restart the timer of a flight that becomes the oldest.
+
+The P4 went first this time, then the nodes moved by `wartui ota` in 43 s, all ten confirmed:
+the old nodes take a `SYNC` flight, so the new P4 drives them, while a new node behind the old P4
+could miss its confirm after a quick reboot.
+
+| | 09082e6 | 8edcb87 |
+| --- | --- | --- |
+| Confirmed | 10 of 10, twice | 10 of 10, twice |
+| Rate per node while sending | 29–30 KB/s | 29–31 KB/s |
+| Chunk sends and statuses (debug logging) | 8,840 and 2,220 | 8,872 and 2,253 |
+| Whole run | 40 s (42 s with debug logging) | 39 s (41 s with debug logging) |
+
+The 32 extra chunk sends are resends, about 0.4%, and none was `Undelivered`.
+
 ## Still open
 
 This list replaces the dated ones above.

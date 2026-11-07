@@ -24,35 +24,34 @@
 //! closing, and every other session's chunks meet the same answer. So it fails the session
 //! ([`Failure::CacheLost`]) rather than counting as a send to retry, and the driver ends the fleet.
 //!
-//! **[`CHUNKS_IN_FLIGHT`] chunks are out at once**, so the next waits at the P4 while the node
-//! acknowledges the one before, and each `Delivered` or `Undelivered` sends one more. The P4's
-//! queue for a slot holds two with room. A chunk that starts a sector goes only once the node has
-//! reported the sectors before it written, so nothing is in flight while the node flushes one and
-//! at most two chunks reach its inbox, which holds two. An undelivered chunk sends from its offset
-//! again.
+//! **[`CHUNKS_IN_FLIGHT`] chunks are out at once**, a sector's worth, so the P4 has the next
+//! queued while two are on the bus. Each `Delivered` or `Undelivered` sends what the sector then
+//! allows, and the P4's queue for a slot holds four. A chunk that starts a sector goes only once
+//! the node has reported the sectors before it written, so nothing is in flight while the node
+//! flushes one. An undelivered chunk sends from its offset again.
 //!
-//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took
-//! the transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past
-//! an undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector
-//! it writes, so after the chunk that completes a sector the host waits for one. A status moves
-//! the host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot
-//! is FIFO and stop-and-wait, and a node whose inbox is full leaves the transfer unacknowledged, so
-//! it is resent rather than lost. So only an undelivered chunk or the timeout says a chunk was
-//! lost. A status naming an offset behind what was sent is the node's answer to a duplicate,
-//! written before the chunks after it arrived, and going back on it would resend chunks the node
-//! holds, each drawing another such status. The commit's answer is the exception: one naming bytes
-//! still missing streams from there.
-//! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the
-//! last offset the node reported: a node that has those bytes answers the duplicate with its
-//! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
-//! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
-//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered
-//! sends with no progress reported between them: a node rebooting acknowledges nothing for a
-//! second or so. Each returns to the `begin`, which an identical one resumes where the node's
-//! progress stands: from 0 after a reboot, which loses the receiver's state.
-//! [`MAX_RESTARTS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
-//! up after the node accepted it sends [`UpdateAbort`] once, so the node leaves update mode at
-//! once rather than after its 30 s of silence.
+//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took the
+//! transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past an
+//! undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector it
+//! writes, so after the chunk that completes a sector the host waits for one. A status moves the
+//! host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot is
+//! FIFO, and the node takes its flights strictly in order: one whose inbox is full leaves the
+//! transfer unacknowledged, and every later one too, so the P4 resends from it rather than losing
+//! it. So only an undelivered chunk or the timeout says a chunk was lost. A status naming an offset
+//! behind what was sent is the node's answer to a duplicate, written before the chunks after it
+//! arrived, and going back on it would resend chunks the node holds, each drawing another such
+//! status. The commit's answer is the exception: one naming bytes still missing streams from there.
+//! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the last
+//! offset the node reported: a node that has those bytes answers the duplicate with its status, and
+//! one that lacks them takes them. One rule recovers lost chunks and lost statuses alike. `Idle`
+//! means the node dropped the session (30 s of silence, or a reboot), and so does
+//! [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered sends
+//! with no progress reported between them: a node rebooting acknowledges nothing for a second or
+//! so. Each returns to the `begin`, which an identical one resumes where the node's progress
+//! stands: from 0 after a reboot, which loses the receiver's state. [`MAX_RESTARTS`] and
+//! [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives up after the node accepted
+//! it sends [`UpdateAbort`] once, so the node leaves update mode at once rather than after its 30 s
+//! of silence.
 //!
 //! **Success, rollback and silence are told apart by the heartbeat's prefix**: version and trial
 //! flag, which every minor reads. A node switches slots the moment it reports
@@ -112,9 +111,9 @@ pub const MAX_STATUS_TIMEOUTS: u32 = 20;
 /// to have rebooted or wandered off, and the update returns to its `begin`.
 pub const MAX_SEND_FAILURES: u32 = 10;
 
-/// Chunks a session has out at once, awaiting their delivery answers. The P4's queue for a
-/// slot holds two full chunks with room, and the node's inbox holds two.
-pub const CHUNKS_IN_FLIGHT: usize = 2;
+/// Chunks a session has out at once, awaiting their delivery answers: a sector. The P4's queue
+/// for a slot holds four full chunks, and keeps two of them on the bus at once.
+pub const CHUNKS_IN_FLIGHT: usize = 4;
 
 /// How long the `begin` is retried on heartbeats before the node is given up on: six heartbeats
 /// of an assigned node, thirty of an unassigned one.

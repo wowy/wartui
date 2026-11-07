@@ -8,7 +8,7 @@
 //! |---|---|---|
 //! | 0 | 2 | [`MAGIC`] |
 //! | 2 | 1 | [`BUS_VERSION`] |
-//! | 3 | 1 | flags: bit 0 [`ACKS`], `ack` is valid; other bits zero |
+//! | 3 | 1 | flags: [`ACKS`], `ack` is valid; from the P4, [`FLIGHT`] and [`SYNC`]; others zero |
 //! | 4 | 2 | seq: the sender's counter, +1 per transfer it arms, from 0 at boot |
 //! | 6 | 2 | ack: with [`ACKS`], the seq of the last good transfer from the peer that carried records |
 //! | 8 | 2 | len: payload bytes, at most [`PAYLOAD_MAX`] |
@@ -36,12 +36,22 @@
 //! stamps `ack` with the seq of the last good record-carrying transfer it took from the peer
 //! ([`AckTracker`]), and sets [`ACKS`] once there is one, so seq 0 needs no special case. Idle
 //! transfers never move it, so an idle transfer that arrives in place of a lost data transfer
-//! cannot acknowledge it. Each direction of each slot is stop-and-wait ([`AckWait`]): a sender
-//! puts records in a transfer, then sends only idle transfers until the peer's `ack` names that
-//! transfer, or [`ACK_TIMEOUT_MS`] passes. It then sends the same records in a new transfer, as a
-//! MAC layer retries, and gives up after [`SEND_TRIES`]. So a resent record may arrive twice;
-//! every message here is safe to take twice. The P4 keeps a queue per slot ([`Downlink`]) and
-//! packs as many queued records as fit into each transfer.
+//! cannot acknowledge it. A node stamps the transfer it arms with the ack of the one that just
+//! ended, so a good header names everything the node took before it.
+//!
+//! - **Node to P4, stop-and-wait** ([`AckWait`]): the node puts records in a transfer, then sends
+//!   only idle transfers until the P4's `ack` names that transfer, or [`ACK_TIMEOUT_MS`] passes.
+//!   It then sends the same records in a new transfer, as a MAC layer retries, and gives up after
+//!   [`SEND_TRIES`].
+//! - **P4 to node, a window of [`WINDOW`] numbered flights** ([`Downlink`]): the P4 sends the
+//!   next flight in the transfer that fetches the last one's ack, and the node takes flights
+//!   strictly in number order ([`FlightTaker`]). It drops a flight past one it has not taken,
+//!   unacknowledged, and the P4 sends the window again from the oldest flight a good header leaves
+//!   unacknowledged. So delivery toward a node is in order. The same timeout and tries are the
+//!   backstop.
+//!
+//! A resent record may arrive twice; every message here is safe to take twice. The P4 keeps a
+//! queue per slot ([`Downlink`]) and packs as many queued records as fit into each transfer.
 //!
 //! A sender that sends no records for 65,536 transfers and then sends at exactly the seq its
 //! peer last acknowledged reads a stale ack as its own.
@@ -49,11 +59,13 @@
 //! **Frozen forever, even before 1.0:**
 //!
 //! - the transfer: SPI mode 0 on the node's D8 SCLK, D10 MOSI, D9 MISO, D7 CS and D0 IRQ,
-//!   [`TRANSFER_LEN`], the header above with [`MAGIC`], [`BUS_VERSION`] and [`ACKS`],
-//!   [`HEADER_LEN`], [`PAYLOAD_MAX`], [`CRC_OFFSET`] and the CRC, with zeros past `len`;
+//!   [`TRANSFER_LEN`], the header above with [`MAGIC`], [`BUS_VERSION`], [`ACKS`], [`FLIGHT`] and
+//!   [`SYNC`], [`HEADER_LEN`], [`PAYLOAD_MAX`], [`CRC_OFFSET`] and the CRC, with zeros past `len`;
 //! - the handshake: the node re-arms after every transfer, and raises IRQ to ask for one;
-//! - the ack rule: `ack` names the last good record-carrying transfer, idle transfers never move
-//!   it, and each direction is stop-and-wait;
+//! - the ack rule: `ack` names the last good record-carrying transfer taken, and idle transfers
+//!   never move it; toward the P4 stop-and-wait, and toward a node a window of flights numbered
+//!   with [`FLIGHT`], taken strictly in order. A node that has taken none since boot takes only a
+//!   [`SYNC`] flight, and the P4 sends one on any header with no ack;
 //! - the record layout ([`RECORD_HEADER_LEN`], [`records`]), and a receiver skipping a type it
 //!   does not know;
 //! - the heartbeat's identity: up type 1 opens with the prefix and the node's MAC
@@ -111,10 +123,11 @@ mod sighting;
 mod slot;
 mod update;
 mod version;
+mod window;
 
 pub use ack::{ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, SEND_TRIES};
 pub use assign::{ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, CLEAR_LEN, Clear, wire_epoch};
-pub use downlink::{Downlink, FLIGHT_MAX, Ids};
+pub use downlink::{Downlink, FLIGHT_MAX, Ids, RESEND_GAP_MS};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
@@ -136,6 +149,7 @@ pub use update::{
     UpdateChunk, UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus,
 };
 pub use version::{Compat, NODE_VERSION, Version};
+pub use window::{FLIGHT_NUMBERS, FlightTag, FlightTaker, Take, WINDOW};
 
 /// Bytes in every transfer, each way.
 pub const TRANSFER_LEN: usize = 1044;
@@ -152,6 +166,10 @@ pub const CRC_OFFSET: usize = TRANSFER_LEN - 2;
 pub const PAYLOAD_MAX: usize = CRC_OFFSET - HEADER_LEN;
 /// The flag that says `ack` names a transfer.
 pub const ACKS: u8 = 0x01;
+/// The flag bits that number a flight from the P4, mod [`FLIGHT_NUMBERS`] ([`FlightTag`]).
+pub const FLIGHT: u8 = 0x06;
+/// The flag that tells a node to take this flight whatever number it expects.
+pub const SYNC: u8 = 0x08;
 
 const _: () = assert!(TRANSFER_LEN.is_multiple_of(4), "DMA wants a multiple of 4");
 const _: () = assert!(RECORD_MAX >= MAX_NODE_PAYLOAD, "one transfer carries any up body");
@@ -160,7 +178,7 @@ const _: () = assert!(RECORD_MAX >= MAX_NODE_DOWN, "one transfer carries any dow
 /// The fields a sender stamps on a transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Header {
-    /// [`ACKS`], or nothing.
+    /// [`ACKS`], and from the P4 a flight's [`FLIGHT`] and [`SYNC`].
     pub flags: u8,
     /// The sender's counter.
     pub seq: u16,
@@ -169,7 +187,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// A header for transfer `seq`, acknowledging `ack` when there is one.
+    /// A header for transfer `seq`, acknowledging `ack` when there is one, with no flight.
     #[must_use]
     pub const fn new(seq: u16, ack: Option<u16>) -> Self {
         match ack {

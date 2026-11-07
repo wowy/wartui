@@ -6,9 +6,9 @@
 
 use wartui_proto::bus::{
     ACK_TIMEOUT_MS, ACKS, AckPoll, AckTracker, AckWait, BUS_VERSION, CRC_OFFSET, DownType,
-    Downlink, FLIGHT_MAX, HEADER_LEN, Header, MAGIC, MAX_SLOTS, NodeBoard, PAYLOAD_MAX, Packer,
-    RECORD_HEADER_LEN, RECORD_MAX, SEND_TRIES, SeqCheck, SeqNote, Slot, TRANSFER_LEN, UpType,
-    VerifyError, records, seal, verify,
+    Downlink, FLIGHT, FLIGHT_MAX, FLIGHT_NUMBERS, FlightTag, HEADER_LEN, Header, MAGIC, MAX_SLOTS,
+    NodeBoard, PAYLOAD_MAX, Packer, RECORD_HEADER_LEN, RECORD_MAX, SEND_TRIES, SYNC, SeqCheck,
+    SeqNote, Slot, TRANSFER_LEN, UpType, VerifyError, WINDOW, records, seal, verify,
 };
 use wartui_proto::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD, Undelivered, crc16};
 
@@ -41,6 +41,22 @@ const ONE_RECORD: [u8; HEADER_LEN + 7] = [
 /// CRC-16/CCITT-FALSE 0x5E4E over those bytes and the zero padding, little-endian.
 const ONE_RECORD_CRC: [u8; 2] = [0x4E, 0x5E];
 
+/// The same record in flight 2, with SYNC: only the flags byte differs.
+#[rustfmt::skip]
+const FLIGHT_RECORD: [u8; HEADER_LEN + 7] = [
+    0x57, 0x42, // magic "WB"
+    0x01, // bus version 1
+    0x0D, // flags: ACKS, flight 2 in bits 1-2, SYNC in bit 3
+    0x07, 0x00, // seq 7
+    0x05, 0x00, // ack 5
+    0x07, 0x00, // len 7: one record
+    0x01, // record type 1
+    0x04, 0x00, // record len 4
+    0xDE, 0xAD, 0xBE, 0xEF, // the body
+];
+/// CRC-16/CCITT-FALSE 0xECA6 over those bytes and the zero padding, little-endian.
+const FLIGHT_RECORD_CRC: [u8; 2] = [0xA6, 0xEC];
+
 fn idle(seq: u16) -> [u8; TRANSFER_LEN] {
     let mut buf = [0u8; TRANSFER_LEN];
     seal(&mut buf, Header { flags: 0, seq, ack: 0 }, 0);
@@ -61,6 +77,7 @@ fn bus_has_pinned_sizes_when_built() {
         (0x4257, 1, 1044, 10, 1032, 1029)
     );
     assert_eq!((CRC_OFFSET, ACKS, RECORD_HEADER_LEN), (1042, 0x01, 3));
+    assert_eq!((FLIGHT, SYNC, FLIGHT_NUMBERS, WINDOW), (0x06, 0x08, 4, 2));
     assert_eq!(TRANSFER_LEN % 4, 0);
 }
 
@@ -85,6 +102,20 @@ fn bus_seals_pinned_bytes_when_record_packed() {
     assert_eq!(buf[..ONE_RECORD.len()], ONE_RECORD);
     assert!(buf[ONE_RECORD.len()..CRC_OFFSET].iter().all(|&b| b == 0));
     assert_eq!(buf[CRC_OFFSET..], ONE_RECORD_CRC);
+}
+
+/// These bytes are the frozen flight tag. They must never change.
+#[test]
+fn bus_seals_pinned_bytes_when_flight_tagged() {
+    let mut buf = [0xAAu8; TRANSFER_LEN];
+    let mut packer = Packer::new(&mut buf);
+    assert!(packer.push(1, &[0xDE, 0xAD, 0xBE, 0xEF]));
+    let tag = FlightTag { number: 2, sync: true };
+    packer.seal(Header::new(7, Some(5)).with_flight(tag));
+    assert_eq!(buf[..FLIGHT_RECORD.len()], FLIGHT_RECORD);
+    assert_eq!(buf[CRC_OFFSET..], FLIGHT_RECORD_CRC);
+    let header = verify(&buf).unwrap().header;
+    assert_eq!((header.flight(), header.acked()), (tag, Some(5)));
 }
 
 #[test]
@@ -450,11 +481,11 @@ fn downlink_packs_queued_records_into_one_flight_when_they_fit() {
     down.push(2, 2, &[]).unwrap();
     assert!(down.has_work());
     let mut buf = [0u8; TRANSFER_LEN];
-    let len = down.fill(&mut buf);
+    let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len), [(1, vec![0xAA; 8]), (2, vec![])]);
     down.sent(10, 0);
-    assert!(!down.has_work(), "stop and wait: nothing more until the ack");
-    assert_eq!(down.fill(&mut buf), 0);
+    assert!(!down.has_work(), "everything queued is out");
+    assert_eq!(down.fill(&mut buf, Header::default()), 0);
     assert_eq!(down.on_header(&Header::new(0, Some(9)), 11), None);
     assert_eq!(down.on_header(&Header::new(0, Some(10)), 11).unwrap(), [1, 2]);
     assert!(!down.has_work());
@@ -466,12 +497,12 @@ fn downlink_leaves_record_for_next_flight_when_it_does_not_fit() {
     down.push(1, 4, &[1; MAX_NODE_DOWN]).unwrap();
     down.push(2, 4, &[2; MAX_NODE_DOWN]).unwrap();
     let mut buf = [0u8; TRANSFER_LEN];
-    let len = down.fill(&mut buf);
+    let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len).len(), 1);
     down.sent(1, 0);
     assert_eq!(down.on_header(&Header::new(0, Some(1)), 2).unwrap(), [1]);
     assert!(down.has_work());
-    let len = down.fill(&mut buf);
+    let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len), [(4, vec![2; MAX_NODE_DOWN])]);
 }
 
@@ -482,7 +513,7 @@ fn downlink_caps_flight_when_records_exceed_flight_max() {
         down.push(id, 2, &[]).unwrap();
     }
     let mut buf = [0u8; TRANSFER_LEN];
-    let len = down.fill(&mut buf);
+    let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len).len(), FLIGHT_MAX);
 }
 
@@ -491,7 +522,7 @@ fn downlink_resends_same_flight_then_gives_up_when_unacked() {
     let mut down = Downlink::<FLIGHT_BYTES>::new();
     down.push(7, 1, b"assign").unwrap();
     let mut buf = [0u8; TRANSFER_LEN];
-    let first = down.fill(&mut buf);
+    let first = down.fill(&mut buf, Header::default());
     let sent = sent_records(&buf, first);
     let mut now = 0;
     down.sent(1, now);
@@ -499,7 +530,7 @@ fn downlink_resends_same_flight_then_gives_up_when_unacked() {
         now += ACK_TIMEOUT_MS;
         assert_eq!(down.poll(now), None);
         assert!(down.has_work());
-        let len = down.fill(&mut buf);
+        let len = down.fill(&mut buf, Header::default());
         assert_eq!(sent_records(&buf, len), sent, "a resend is the same records");
         down.sent(seq, now);
     }
@@ -513,10 +544,10 @@ fn downlink_ignores_ack_when_it_came_in_the_transfer_it_names() {
     let mut down = Downlink::<FLIGHT_BYTES>::new();
     down.push(3, 1, b"assign").unwrap();
     let mut buf = [0u8; TRANSFER_LEN];
-    down.fill(&mut buf);
+    down.fill(&mut buf, Header::default());
     down.sent(8, 0);
     assert_eq!(down.on_header(&Header::new(0, Some(8)), 8), None, "a restarted node's ack");
-    assert!(down.is_waiting());
+    assert!(down.deadline_ms().is_some(), "still waits for its ack");
     assert_eq!(down.on_header(&Header::new(0, Some(8)), 9).unwrap(), [3]);
 }
 
@@ -525,13 +556,13 @@ fn downlink_carries_same_flight_when_not_marked_sent() {
     let mut down = Downlink::<FLIGHT_BYTES>::new();
     down.push(5, 1, b"assign").unwrap();
     let mut buf = [0u8; TRANSFER_LEN];
-    let first = down.fill(&mut buf);
+    let first = down.fill(&mut buf, Header::default());
     let sent = sent_records(&buf, first);
     // The node took nothing, so the P4 never calls `sent`; a record queued since waits.
     down.push(6, 2, &[]).unwrap();
     assert!(down.has_work());
-    assert!(!down.is_waiting());
-    let len = down.fill(&mut buf);
+    assert_eq!(down.deadline_ms(), None, "nothing went out to wait on");
+    let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len), sent);
     down.sent(2, 0);
     assert_eq!(down.on_header(&Header::new(0, Some(2)), 3).unwrap(), [5]);
@@ -542,14 +573,14 @@ fn downlink_ignores_sent_when_ack_delivered_the_resend_first() {
     let mut down = Downlink::<FLIGHT_BYTES>::new();
     down.push(4, 1, b"assign").unwrap();
     let mut buf = [0u8; TRANSFER_LEN];
-    down.fill(&mut buf);
+    down.fill(&mut buf, Header::default());
     down.sent(1, 0);
     assert_eq!(down.poll(ACK_TIMEOUT_MS), None);
-    assert!(down.fill(&mut buf) > 0, "the resend is due");
+    assert!(down.fill(&mut buf, Header::default()) > 0, "the resend is due");
     // The P4 reads the node's header before marking the resend sent; it acks the first try.
     assert_eq!(down.on_header(&Header::new(0, Some(1)), 2).unwrap(), [4]);
     down.sent(2, ACK_TIMEOUT_MS);
-    assert!(!down.is_waiting());
+    assert_eq!(down.deadline_ms(), None);
     assert!(!down.has_work());
 }
 
@@ -568,11 +599,11 @@ fn downlink_drains_flight_and_queue_when_node_gone() {
         down.push(id, 4, &[0; MAX_NODE_DOWN]).unwrap();
     }
     let mut buf = [0u8; TRANSFER_LEN];
-    down.fill(&mut buf);
+    down.fill(&mut buf, Header::default());
     down.sent(1, 0);
     let mut ids = Vec::new();
     down.drain(|id| ids.push(id));
     assert_eq!(ids, [0, 1, 2]);
     assert!(!down.has_work());
-    assert!(!down.is_waiting());
+    assert_eq!(down.deadline_ms(), None);
 }

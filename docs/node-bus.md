@@ -75,7 +75,11 @@ frozen core.
 | | | | 7 | `UpdateConfirm` | 0 |
 
 A heartbeat is never resent. Every other record waits for the peer to acknowledge the transfer that
-carried it, and is resent until it is, up to three tries.
+carried it, and is resent until it is, up to three tries. A node sends one transfer of records at a
+time. The P4 sends a node up to two, numbered in the header's flags, and the node takes them
+strictly in order, so a record never reaches a node ahead of one sent before it. A node that has
+taken none since boot takes only one flagged `SYNC`, which the P4 sends whenever a node's header
+acknowledges nothing.
 
 ## On the carrier board
 

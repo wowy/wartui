@@ -510,7 +510,10 @@ fn ota_session_holds_chunks_when_image_is_not_cached() {
     assert!(bench.queue.is_empty(), "nothing before the cache: {:?}", bench.queue);
     assert_eq!(bench.session.progress().phase, Phase::Streaming);
     bench.feed(OtaEvent::Cached);
-    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(0), Out::Chunk(1024), Out::Chunk(2048), Out::Chunk(3072)]
+    );
     assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
     bench.assert_image_written();
 }
@@ -611,7 +614,10 @@ fn ota_session_fails_when_chunks_stay_undelivered_across_every_begin() {
 fn ota_session_sends_no_further_chunk_when_answered_noimage() {
     let mut bench = Bench::new(&image(NEW));
     bench.open();
-    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(0), Out::Chunk(1024), Out::Chunk(2048), Out::Chunk(3072)]
+    );
     let Some(HostToBridge::ToNodeChunk { id, .. }) = bench.queue.pop_front() else {
         panic!("a chunk is queued")
     };
@@ -922,18 +928,21 @@ fn ota_session_reads_heartbeat_prefix_when_node_runs_another_minor() {
 }
 
 #[test]
-fn ota_session_sends_two_chunks_before_any_delivery() {
+fn ota_session_sends_a_sector_of_chunks_before_any_delivery() {
     let mut bench = Bench::new(&image(NEW));
     bench.open();
-    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(0), Out::Chunk(1024), Out::Chunk(2048), Out::Chunk(3072)]
+    );
 }
 
 #[test]
-fn ota_session_sends_next_chunk_on_each_delivery() {
+fn ota_session_sends_no_chunk_past_sector_when_one_is_delivered() {
     let mut bench = Bench::new(&image(NEW));
     bench.open();
     bench.answer_chunk(0, true);
-    assert_eq!(bench.queued(), [Out::Chunk(1024), Out::Chunk(2048)]);
+    assert_eq!(bench.queued(), [Out::Chunk(1024), Out::Chunk(2048), Out::Chunk(3072)]);
 }
 
 #[test]
@@ -946,7 +955,10 @@ fn ota_session_holds_next_sector_until_status() {
     // The node writes the sector on its last chunk, and says so before the next goes.
     assert_eq!(bench.queued(), []);
     bench.receiving(4096);
-    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(4096), Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)]
+    );
 }
 
 #[test]
@@ -955,10 +967,16 @@ fn ota_session_rewinds_to_undelivered_chunk() {
     bench.open();
     bench.answer_chunk(0, true);
     bench.answer_chunk(1024, false);
-    assert_eq!(bench.queued(), [Out::Chunk(2048), Out::Chunk(1024)]);
-    // 2048 reached a node lacking 1024, which drops it, so it goes again after 1024.
+    // 2048 and 3072 reach a node lacking 1024, which drops them, so they go again after it.
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(2048), Out::Chunk(3072), Out::Chunk(1024), Out::Chunk(2048)]
+    );
     bench.answer_chunk(2048, true);
-    assert_eq!(bench.queued(), [Out::Chunk(1024), Out::Chunk(2048)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(3072), Out::Chunk(1024), Out::Chunk(2048), Out::Chunk(3072)]
+    );
 }
 
 #[test]
@@ -971,14 +989,18 @@ fn ota_session_resends_from_undelivered_chunk_only_when_status_falls_behind() {
     bench.receiving(4096);
     bench.answer_chunk(4096, true);
     bench.answer_chunk(5120, false);
-    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(5120)]);
+    assert_eq!(
+        bench.queued(),
+        [Out::Chunk(6144), Out::Chunk(7168), Out::Chunk(5120), Out::Chunk(6144)]
+    );
     bench.answer_chunk(6144, true);
-    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+    bench.answer_chunk(7168, true);
+    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)]);
     // The node's gap status on that 6144 names 5120, which is already on its way; a stale
     // status names 4096. Neither sends anything back.
     bench.receiving(5120);
     bench.receiving(4096);
-    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)]);
     bench.answer_chunk(5120, true);
     bench.answer_chunk(6144, true);
     bench.answer_chunk(7168, true);
@@ -993,11 +1015,12 @@ fn ota_session_ignores_status_when_it_falls_behind_sent_chunks() {
         bench.answer_chunk(offset, true);
     }
     bench.receiving(4096);
-    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+    let sector = [Out::Chunk(4096), Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)];
+    assert_eq!(bench.queued(), sector);
     // Answers to duplicates of earlier chunks, written before 4096 arrived. Delivery is in
     // order, so they say nothing was lost, before the chunks' delivery or after it.
     bench.receiving(4096);
-    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+    assert_eq!(bench.queued(), sector);
     bench.answer_chunk(4096, true);
     bench.answer_chunk(5120, true);
     assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(7168)]);
@@ -1018,7 +1041,7 @@ fn ota_session_ignores_delivery_for_another_sessions_id() {
             other => panic!("the session sent {other:?}"),
         })
         .collect();
-    assert_eq!(ids, [2, 5, 8], "the begin, then two chunks");
+    assert_eq!(ids, [2, 5, 8, 11, 14], "the begin, then a sector's four chunks");
     let queued = bench.queue.clone();
     bench.feed(OtaEvent::Delivery { id: 3, delivered: true });
     bench.feed(OtaEvent::Delivery { id: 4, delivered: false });

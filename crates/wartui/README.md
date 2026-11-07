@@ -137,8 +137,8 @@ of its output, after the export summary:
     1C:5A  120/s  2,310/min
     57:84  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
-  queue      host-bulk  peak 262,144/262,144 bytes  1,300 dropped
-  queue      node-down  peak 3,102/4,096 bytes  0 dropped
+  queue      host-bulk  peak 245,760/245,760 bytes  1,300 dropped
+  queue      node-down  peak 3,102/4,160 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
   host link  0 host_uart_errors
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
