@@ -185,7 +185,9 @@ CREATE TABLE IF NOT EXISTS observation (
 -- `RadioLinkStats` names them. `host_uart_errors` counts
 -- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
 -- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
--- flash.
+-- flash. `fan_duty` is the carrier's lid fan duty in force, in percent, and `fan_rpm` its speed
+-- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
+-- the bridge's first window since boot.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -203,7 +205,9 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   radio_link_radio_bad_magic INTEGER NOT NULL,
   radio_link_radio_seq_gap INTEGER NOT NULL,
   radio_link_radio_uart_errors INTEGER NOT NULL,
-  host_uart_errors INTEGER NOT NULL
+  host_uart_errors INTEGER NOT NULL,
+  fan_duty INTEGER,
+  fan_rpm INTEGER
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
@@ -1227,8 +1231,9 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         rx_oversize, radio_link_packets, radio_link_crc_fail,
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
-                        radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors,
+                        fan_duty, fan_rpm)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1247,6 +1252,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     radio_link.radio_seq_gap,
                     radio_link.radio_uart_errors,
                     status.host_uart_errors,
+                    status.fan.map(|fan| fan.duty.get()),
+                    status.fan.and_then(|fan| fan.rpm),
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1336,6 +1343,7 @@ mod tests {
             queues: Default::default(),
             radio_link: Default::default(),
             host_uart_errors: 0,
+            fan: None,
         })
     }
 

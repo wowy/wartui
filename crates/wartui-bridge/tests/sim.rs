@@ -12,6 +12,7 @@ use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{
     Assign, Clear, DecodeError, DownType, Heartbeat, NodeBoard, RecordKind, Slot, UpMsg, Version,
 };
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome, ToNodeBody, Undelivered};
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -637,6 +638,32 @@ async fn sim_bridge_answers_status_request_when_queried() {
             return;
         }
     }
+}
+
+/// The fan the next `Status` reports.
+async fn next_fan(link: &mut LinkHandle) -> Option<FanStats> {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { fan, .. }) =
+            link.recv().await.expect("running")
+        {
+            return fan;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_duty_set_when_host_sets_fan() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    let full = next_fan(&mut link).await.expect("a carrier has a fan");
+    assert_eq!(full.duty, FanDuty::FULL, "no flash, so it starts at full");
+
+    let duty = FanDuty::new(40).expect("in range");
+    link.send_bulk(HostToBridge::SetFan { duty }).expect("queued");
+    let set = next_fan(&mut link).await.expect("a carrier has a fan");
+
+    assert_eq!(set.duty, duty);
+    assert!(set.rpm.expect("a speed") < full.rpm.expect("a speed"), "slower at 40%");
 }
 
 #[tokio::test(start_paused = true)]

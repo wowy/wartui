@@ -7,6 +7,10 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
+//! The fan row lives on the bridge, not in the file. It shows the duty the bridge last reported,
+//! and `Enter` sends it only when the row moved; the bridge stores it and boots into it. It is
+//! never written to `wartui.toml`.
+//!
 //! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
 //! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
 //! the file's only writer within `run`, so the transport's thread never races it on a
@@ -23,6 +27,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
@@ -61,6 +66,7 @@ pub struct Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Pool,
+    Fan,
     RememberBle,
     RememberBridge,
     ExcludedSsids,
@@ -68,8 +74,9 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 5] = [
+const FIELDS: [Field; 6] = [
     Field::Pool,
+    Field::Fan,
     Field::RememberBle,
     Field::RememberBridge,
     Field::ExcludedSsids,
@@ -97,6 +104,10 @@ pub(super) struct ConfigModal {
     selected: Field,
     /// The pool row's current value, edited by `step`.
     pool: PoolArg,
+    /// The fan row's duty, or `None` while no bridge has reported a fan.
+    fan: Option<FanDuty>,
+    /// The duty the bridge reported when the modal opened, so `Enter` sends only a change.
+    fan_seed: Option<FanDuty>,
     /// Whether `b` remembers the node it gives the scan to.
     remember_ble: bool,
     /// Whether `run` remembers the bridge it connected to.
@@ -125,6 +136,19 @@ enum Page {
     },
 }
 
+/// How far one step moves the fan row, in percent.
+const FAN_STEP: u8 = 5;
+
+/// Step `current` by [`FAN_STEP`] in `delta`'s direction, stopping at 0 and 100.
+fn step_fan(current: FanDuty, delta: i8) -> FanDuty {
+    let pct = match delta.signum() {
+        1 => current.get().saturating_add(FAN_STEP).min(100),
+        -1 => current.get().saturating_sub(FAN_STEP),
+        _ => current.get(),
+    };
+    FanDuty::new(pct).unwrap_or(current)
+}
+
 /// `All → Eu → Us`, the order the pool row steps through.
 const POOL_STEPS: [PoolArg; 3] = [PoolArg::All, PoolArg::Eu, PoolArg::Us];
 
@@ -141,17 +165,20 @@ fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
 }
 
 impl ConfigModal {
-    /// Step the selected row by one. Every row wraps past its ends.
+    /// Step the selected row by one. The pool row wraps past its ends, and the fan row stops at
+    /// them.
     ///
     /// | Row | Step |
     /// |---|---|
     /// | pool | one place in [`POOL_STEPS`] |
+    /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
     /// | remember | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | key | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
         match self.selected {
             Field::Pool => self.pool = step_pool(self.pool, delta),
+            Field::Fan => self.fan = self.fan.map(|duty| step_fan(duty, delta)),
             Field::RememberBle => {
                 if delta != 0 {
                     self.remember_ble = !self.remember_ble;
@@ -185,9 +212,13 @@ pub(super) enum ModalAction {
 impl ConfigModal {
     /// Open the modal, seeded from what is in force.
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
+        // The bridge holds this one, so it is what its last `Status` said.
+        let fan = snapshot.bridge_status.and_then(|status| status.fan).map(|fan| fan.duty);
         Self {
             selected: Field::Pool,
             pool: snapshot.pool.into(),
+            fan,
+            fan_seed: fan,
             remember_ble: snapshot.remember_ble,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
@@ -349,11 +380,17 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    let Ok(mut permits) = commands.try_reserve_many(2) else {
+    // The fan goes only when its row moved, since the bridge stores every duty it is sent.
+    let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
+    let Ok(mut permits) = commands.try_reserve_many(2 + usize::from(fan.is_some())) else {
         return Err(ENGINE_BUSY);
     };
     let pool = ChannelPool::from(modal.pool);
-    for command in [Command::SetPool { pool }, Command::RememberBle { on: modal.remember_ble }] {
+    let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
+    for command in [Command::SetPool { pool }, Command::RememberBle { on: modal.remember_ble }]
+        .into_iter()
+        .chain(fan_command)
+    {
         if let Some(permit) = permits.next() {
             permit.send(command);
         }
@@ -365,6 +402,9 @@ pub(super) fn apply(
         (true, true) => format!("pool {pool} — the fleet re-cuts on each node's next heartbeat"),
         (true, false) => format!("pool {pool} — nodes take it once the fleet is in a plan"),
     };
+    if let Some(duty) = fan {
+        text.push_str(&format!("; fan {duty}, kept by the bridge"));
+    }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
         memory.set_enabled(modal.remember_bridge);
@@ -516,6 +556,11 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     let on_off = |on: bool| if on { "on" } else { "off" };
     let lines = vec![
         row("pool", &ChannelPool::from(modal.pool), Field::Pool),
+        match modal.fan {
+            Some(duty) => row("fan", &duty, Field::Fan),
+            // Nothing to step, so no arrows.
+            None => Line::from(Span::styled(format!("{:<18}  no fan", "fan"), styled(Field::Fan))),
+        },
         row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
         Line::from(Span::styled(
@@ -658,6 +703,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("still open").selected, Field::Fan);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("still open").selected, Field::RememberBle);
 
@@ -811,6 +858,8 @@ mod tests {
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        // Past the fan row.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -853,6 +902,8 @@ mod tests {
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        // Past the fan row.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -871,6 +922,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        // Past the fan row.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         let modal = ui.modal().expect("still open");
         assert_eq!(modal.selected, Field::RememberBle, "the row under the pool");
@@ -932,6 +985,8 @@ mod tests {
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the remember row moves. The pool row is left alone.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        // Past the fan row.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1827,5 +1882,119 @@ mod tests {
         assert_eq!(text.len(), 12, "fills the page exactly");
         assert_eq!(text[8], "net-19", "the cursor's row is the last one listed");
         assert_eq!(text[0], "net-11");
+    }
+
+    /// `busy()` with the bridge reporting the fan at `pct`.
+    fn fan_snapshot(pct: u8) -> Snapshot {
+        let mut snapshot = busy();
+        let duty = FanDuty::new(pct).expect("in range");
+        if let Some(status) = &mut snapshot.bridge_status {
+            status.fan = Some(wartui_proto::fan::FanStats { duty, rpm: Some(1830) });
+        }
+        snapshot
+    }
+
+    fn duty(pct: u8) -> FanDuty {
+        FanDuty::new(pct).expect("in range")
+    }
+
+    #[test]
+    fn ui_seeds_fan_row_from_bridge_status_when_modal_opened() {
+        let snapshot = fan_snapshot(40);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").fan, Some(duty(40)));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("fan               ◂ 40% ▸"), "{rendered}");
+    }
+
+    #[test]
+    fn ui_steps_fan_by_five_and_stops_at_ends_when_h_or_l_pressed() {
+        let snapshot = fan_snapshot(95);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        let fan = |ui: &Ui| ui.modal().expect("open").fan;
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(fan(&ui), Some(FanDuty::FULL));
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(fan(&ui), Some(FanDuty::FULL), "stops at 100 rather than wrapping");
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(fan(&ui), Some(duty(95)));
+
+        assert_eq!(step_fan(duty(3), -1), duty(0), "stops at 0");
+        assert_eq!(step_fan(duty(0), -1), duty(0));
+        assert_eq!(step_fan(duty(42), 1), duty(47));
+    }
+
+    #[test]
+    fn ui_shows_no_fan_and_steps_nothing_when_bridge_reports_none() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").fan, None);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("fan                 no fan"), "{rendered}");
+    }
+
+    #[test]
+    fn ui_sends_fan_duty_and_saves_none_of_it_when_enter_pressed_with_fan_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = fan_snapshot(40);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(matches!(rx.try_recv().unwrap(), Command::SetPool { .. }));
+        assert!(matches!(rx.try_recv().unwrap(), Command::RememberBle { .. }));
+        assert_eq!(rx.try_recv().unwrap(), Command::SetFanDuty { duty: duty(35) });
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("fan 35%, kept by the bridge"), "{notice}");
+        let file = std::fs::read_to_string(&target).expect("the other rows were saved");
+        assert!(!file.contains("fan"), "the bridge keeps it, not the file: {file}");
+    }
+
+    #[test]
+    fn ui_sends_no_fan_duty_when_enter_pressed_with_fan_row_unchanged() {
+        let snapshot = fan_snapshot(40);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        // Out and back: the duty the bridge already runs.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        let sent: Vec<Command> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!sent.iter().any(|cmd| matches!(cmd, Command::SetFanDuty { .. })), "{sent:?}");
+    }
+
+    #[test]
+    fn ui_sends_no_fan_duty_when_esc_pressed_with_fan_moved() {
+        let snapshot = fan_snapshot(40);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Fan, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "Esc leaves the bridge's duty alone");
     }
 }

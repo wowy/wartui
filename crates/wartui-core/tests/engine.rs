@@ -25,6 +25,7 @@ use wartui_proto::bus::{
     NODE_VERSION, NodeBoard, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType,
     UpdateState, UpdateStatus, Vdd, Version, wire_epoch,
 };
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{
     BridgeToHost, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, HostToBridge, LinkError,
     LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats,
@@ -1910,6 +1911,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             queues: Default::default(),
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
+            fan: None,
         }))
     };
 
@@ -1951,7 +1953,8 @@ fn engine_records_bridge_status_when_reply_arrives() {
         radio_seq_gap: 0,
         radio_uart_errors: 0,
     };
-    let status = |dropped_tx, uptime_ms, queues: &QueueStats, radio_link| {
+    let fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) });
+    let status = |dropped_tx, uptime_ms, queues: &QueueStats, radio_link, fan| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {
             rx_count: 1363,
             dropped_tx,
@@ -1960,6 +1963,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             queues: queues.clone(),
             radio_link,
             host_uart_errors: 0,
+            fan,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1974,10 +1978,10 @@ fn engine_records_bridge_status_when_reply_arrives() {
     };
 
     engine.handle(connected(), clock.at(1));
-    let first = engine.handle(status(1300, 3_240_000, &queues, radio_link), clock.at(2));
+    let first = engine.handle(status(1300, 3_240_000, &queues, radio_link, fan), clock.at(2));
     // Lower than before: the bridge rebooted, and the row keeps what it said.
     let rebooted = RadioLinkStats::default();
-    let second = engine.handle(status(2, 4_000, &QueueStats::new(), rebooted), clock.at(7));
+    let second = engine.handle(status(2, 4_000, &QueueStats::new(), rebooted, None), clock.at(7));
 
     assert_eq!(
         statuses(&first),
@@ -1991,6 +1995,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             queues,
             radio_link,
             host_uart_errors: 0,
+            fan,
         }]
     );
     assert_eq!(
@@ -2005,8 +2010,11 @@ fn engine_records_bridge_status_when_reply_arrives() {
             queues: QueueStats::new(),
             radio_link: rebooted,
             host_uart_errors: 0,
+            fan: None,
         }]
     );
+    let shown = engine.snapshot(clock.at(7), StoreStats::default()).bridge_status;
+    assert_eq!(shown.and_then(|status| status.fan), None, "the latest reply's fan");
 }
 
 #[test]
@@ -2027,6 +2035,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             queues: Default::default(),
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
+            fan: None,
         })),
         clock.at(4),
     );
@@ -3376,6 +3385,22 @@ fn engine_sends_power_cycle_at_once_when_operator_asks() {
 
     assert_eq!(batch.bulk, [HostToBridge::PowerCycle { slot }]);
     assert!(batch.urgent.is_empty() && batch.records.is_empty());
+}
+
+#[test]
+fn engine_sends_one_set_fan_at_once_when_operator_sets_a_duty() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected_board(NODE, NodeBoard::Carrier14), clock.at(0));
+    let duty = FanDuty::new(40).expect("in range");
+
+    let batch = engine.handle(Event::Command(Command::SetFanDuty { duty }), clock.at(1));
+
+    assert_eq!(batch.bulk, [HostToBridge::SetFan { duty }]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    // The bridge keeps the duty, so nothing re-sends it.
+    let later = engine.handle(Event::Tick, clock.at(30));
+    assert!(!later.bulk.iter().any(|cmd| matches!(cmd, HostToBridge::SetFan { .. })));
 }
 
 #[test]

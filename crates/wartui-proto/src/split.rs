@@ -43,6 +43,7 @@
 use core::fmt::Write;
 
 use crate::bus::NodeBoard;
+use crate::fan::FanStats;
 use crate::link::{
     BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING, RadioInfo,
     RadioLinkStats, ShortStr,
@@ -123,6 +124,8 @@ pub struct P4Counters {
     pub rx_count: u32,
     /// Node records too long to forward.
     pub rx_oversize: u32,
+    /// The carrier's lid fan, or `None` with no carrier.
+    pub fan: Option<FanStats>,
 }
 
 /// The P4's pair state.
@@ -502,6 +505,7 @@ impl Pair {
             host_uart_errors,
             rx_count,
             rx_oversize,
+            fan,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -531,6 +535,7 @@ impl Pair {
             queues,
             radio_link,
             host_uart_errors,
+            fan,
         }
     }
 }

@@ -411,6 +411,7 @@ mod tests {
             queues: wartui_proto::link::QueueStats::new(),
             radio_link: wartui_proto::link::RadioLinkStats::default(),
             host_uart_errors: 0,
+            fan: None,
         };
         assert!(heard(LinkEvent::Message(status)));
     }

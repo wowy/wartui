@@ -16,6 +16,7 @@
 //! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi
 //! networks are never captured. [`Command::PowerCycle`] asks the bridge's carrier to switch one
 //! node off and on, and the answer reaches the operator as [`Snapshot::power_answer`].
+//! [`Command::SetFanDuty`] sets the carrier's lid fan, whose duty the bridge keeps.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -378,6 +379,7 @@ impl FleetEngine {
                 queues,
                 radio_link,
                 host_uart_errors,
+                fan,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -390,6 +392,7 @@ impl FleetEngine {
                     dropped_tx: *dropped_tx,
                     dropped_since_attach: dropped_tx - baseline,
                     uptime_ms: *uptime_ms,
+                    fan: *fan,
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,
@@ -401,6 +404,7 @@ impl FleetEngine {
                     queues: queues.clone(),
                     radio_link: *radio_link,
                     host_uart_errors: *host_uart_errors,
+                    fan: *fan,
                 }));
             }
             // Bridge diagnostics are the transport's to log. The engine reads only those that

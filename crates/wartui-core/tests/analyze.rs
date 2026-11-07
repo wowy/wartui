@@ -51,6 +51,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         queues: QueueStats::new(),
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
+        fan: None,
     })
 }
 

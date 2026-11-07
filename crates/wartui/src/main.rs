@@ -26,6 +26,7 @@ mod bench;
 mod capture;
 mod config;
 mod export;
+mod fan;
 mod flash;
 mod ota;
 mod power_cycle;
@@ -76,6 +77,8 @@ enum Command {
     Reset(reset::Args),
     /// Switch one node off and on through the carrier board.
     PowerCycle(power_cycle::Args),
+    /// Read or set the carrier's lid fan duty, which the bridge keeps across its reboots.
+    Fan(fan::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -98,7 +101,7 @@ async fn main() -> Result<()> {
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
-        // `power-cycle` and `ota` read a broken one as no bridge remembered, and `ports` and
+        // `power-cycle`, `fan` and `ota` read a broken one as no bridge remembered, and `ports` and
         // `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
@@ -109,6 +112,7 @@ async fn main() -> Result<()> {
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
+        Some(Command::Fan(args)) => fan::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -590,6 +594,19 @@ mod tests {
         assert!(matches!(parse(args).unwrap().command, Some(Command::PowerCycle(_))));
         // Which node is the whole question, so there is no default.
         assert!(parse(["wartui", "power-cycle"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_fan_when_given_duty_bridge_and_config_or_nothing() {
+        let args = ["wartui", "fan", "40", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::Fan(_))));
+        assert!(matches!(parse(["wartui", "fan"]).unwrap().command, Some(Command::Fan(_))));
+    }
+
+    #[test]
+    fn cli_parser_rejects_fan_duty_when_over_100() {
+        assert!(parse(["wartui", "fan", "101"]).is_err());
+        assert!(parse(["wartui", "fan", "100"]).is_ok());
     }
 
     #[test]

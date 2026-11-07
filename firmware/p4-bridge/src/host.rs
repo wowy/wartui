@@ -20,10 +20,12 @@
 //!
 //! **Host→P4 bytes are lost while the P4 erases or writes its own flash.** Interrupts stay off
 //! for about 40 ms, the armed buffer lasts about 10 ms, and then the FIFO overflows. The link
-//! needs no flow control for it: the only flash work a host causes is an update of the P4's own
-//! image, and `wartui_proto::radio_link::update::Sender` waits for each sector's status and
-//! rewinds on `next_offset` and on silence. `Status.host_uart_errors` counts the reads that saw
-//! one or more line errors or overflows, not the errors themselves.
+//! needs no flow control for it. An update of the P4's own image is the flash work a host causes,
+//! and `wartui_proto::radio_link::update::Sender` waits for each sector's status and rewinds on
+//! `next_offset` and on silence. A `SetFan` that changes the duty writes one word, and one in 1024
+//! erases a sector first, which can lose the host's next frames (`src/fan.rs`).
+//! `Status.host_uart_errors` counts the reads that saw one or more line errors or overflows, not
+//! the errors themselves.
 //!
 //! **The gate opens on any host frame that decodes and closes after [`HOST_SILENCE`] without
 //! one.** The P4 cannot see the CH343's DTR, so a frame is the only sign that someone reads.
@@ -172,6 +174,7 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
             crate::cache::to_node_chunk(shared, *slot, *id, *image, *session, *offset, *len);
         }
+        HostToBridge::SetFan { duty } => crate::fan::set(shared, *duty),
     }
 }
 

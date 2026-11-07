@@ -31,7 +31,10 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 
     // The link-down reason goes in the fault box, which wraps. Here a narrow
     // terminal would clip it.
-    let first = vec![Span::raw(link)];
+    let mut first = vec![Span::raw(link)];
+    if let Some(fan) = fan(snapshot) {
+        first.push(Span::raw(format!("  {fan}")));
+    }
 
     let mut second = vec![
         Span::raw(format!("pool {}  ", snapshot.pool)),
@@ -47,6 +50,16 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         ),
         area,
     );
+}
+
+/// The carrier's lid fan as the bridge last reported it: `fan 40% 1830 rpm`, or `fan 40%` before
+/// its first tach reading. `None` with no carrier, or before the bridge's first `Status`.
+fn fan(snapshot: &Snapshot) -> Option<String> {
+    let fan = snapshot.bridge_status?.fan?;
+    Some(match fan.rpm {
+        Some(rpm) => format!("fan {} {rpm} rpm", fan.duty),
+        None => format!("fan {}", fan.duty),
+    })
 }
 
 /// Planner status: `N of M` nodes in the plan, or why there is no plan.
@@ -126,6 +139,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
+    use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::plan::{ChannelPool, plan};
 
     use super::*;
@@ -296,6 +310,37 @@ mod tests {
 
         snapshot.link_up = false;
         assert_eq!(header_border(&snapshot), Some(Color::Red));
+    }
+
+    /// `busy()` with the bridge reporting `fan`.
+    fn with_fan(fan: Option<FanStats>) -> Snapshot {
+        let mut snapshot = busy();
+        if let Some(status) = &mut snapshot.bridge_status {
+            status.fan = fan;
+        }
+        snapshot
+    }
+
+    #[test]
+    fn header_shows_fan_duty_and_speed_when_bridge_reports_a_reading() {
+        let duty = FanDuty::new(40).expect("in range");
+        let snapshot = with_fan(Some(FanStats { duty, rpm: Some(1830) }));
+        assert_eq!(fan(&snapshot).as_deref(), Some("fan 40% 1830 rpm"));
+        assert!(rendered(&snapshot).contains("fan 40% 1830 rpm"));
+    }
+
+    #[test]
+    fn header_shows_fan_duty_alone_when_bridge_has_no_reading_yet() {
+        let duty = FanDuty::new(40).expect("in range");
+        let snapshot = with_fan(Some(FanStats { duty, rpm: None }));
+        assert_eq!(fan(&snapshot).as_deref(), Some("fan 40%"));
+    }
+
+    #[test]
+    fn header_omits_fan_when_bridge_has_no_carrier() {
+        let snapshot = with_fan(None);
+        assert_eq!(fan(&snapshot), None);
+        assert!(!rendered(&snapshot).contains("fan "));
     }
 
     #[test]

@@ -208,6 +208,7 @@ pub(super) fn busy() -> Snapshot {
             dropped_tx: 1300,
             dropped_since_attach: 0,
             uptime_ms: 60_000,
+            fan: None,
         }),
         started_at_ms: EPOCH_MS,
         now_ms: EPOCH_MS + 60_000,

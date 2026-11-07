@@ -31,7 +31,7 @@ use esp_hal::peripherals::{FLASH, RTC_TIMER};
 use esp_hal::rtc_cntl::{Rtc, RwdtStage};
 use esp_hal::time::Duration;
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::ota::{Fault, Note, Ota};
+use wartui_firmware::ota::{Fault, Note, Ota, SettingsSector};
 use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
@@ -142,6 +142,11 @@ impl Updates {
             None => ota.lacks().map(|lacks| text(format_args!("{lacks}; updates refused"))),
         };
         Self { ota, receiver: RECEIVER.take(), trial, confirm_failed: false, rtc, lines, fault }
+    }
+
+    /// The sector the fan's duty is stored in (`src/fan.rs`), through the flash this owns.
+    pub fn settings(&mut self) -> Option<SettingsSector<'_>> {
+        self.ota.settings()
     }
 
     /// End this image's trial, if it is on one, and disarm the watchdog. A failure leaves it

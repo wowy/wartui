@@ -95,7 +95,8 @@ own.
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
-  as the P4 reads it at boot), `beacon`, `hci`, `dedup`, `link`,
+  as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave, tach reading and
+  stored record), `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
   `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
@@ -111,14 +112,15 @@ own.
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `power-cycle`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`fan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
   knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
   carries the C6's, and updates it. It caches a node image in PSRAM for `wartui ota`, and writes
   the one record it builds from it, `UpdateChunk`, a layout in the bus's frozen core
-  (`src/cache.rs`).
+  (`src/cache.rs`). On a carrier it drives the lid fan and keeps its duty in the `nvs` partition,
+  the one setting the bridge rather than the host holds (`src/fan.rs`).
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It holds the link for a future Bluetooth host link, and runs no radio today.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
@@ -130,7 +132,7 @@ own.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
-  updates on flash, the slot, the switch and the trial (`ota`).
+  updates on flash, the slot, the switch and the trial, and the P4's fan duty sector (`ota`).
   Each firmware depends on it by path and selects its chip feature in that dependency. It is its
   own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
 
