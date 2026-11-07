@@ -581,6 +581,29 @@ Over the 40 s run, N1's transfers (from its `xfer` counters, N3, N6 and N8 agree
 The visits of IRQ passes are now the largest share, about 1,320 transfers for N1, some of them
 carrying chunks.
 
+### After the review fixes (8edcb87)
+
+A code review's fixes changed the rule in one way that matters on the bus: a node that has taken
+nothing since it booted now takes only a `SYNC` flight, and the P4 sends `SYNC` whenever a
+node's header shows it has taken nothing. Before, a node that rebooted in under 1 s kept its slot
+present, could take a later flight ahead of an earlier one, and the P4 would answer both
+`Delivered`. In a fleet update, 3 of 10 reboots never went absent. The fixes also pace a second
+go-back for the same flight by 25 ms, commit a flight at the node only once it is queued, and
+restart the timer of a flight that becomes the oldest.
+
+The P4 went first this time, then the nodes moved by `wartui ota` in 43 s, all ten confirmed:
+the old nodes take a `SYNC` flight, so the new P4 drives them, while a new node behind the old P4
+could miss its confirm after a quick reboot.
+
+| | 09082e6 | 8edcb87 |
+| --- | --- | --- |
+| Confirmed | 10 of 10, twice | 10 of 10, twice |
+| Rate per node while sending | 29–30 KB/s | 29–31 KB/s |
+| Chunk sends and statuses (debug logging) | 8,840 and 2,220 | 8,872 and 2,253 |
+| Whole run | 40 s (42 s with debug logging) | 39 s (41 s with debug logging) |
+
+The 32 extra chunk sends are resends, about 0.4%, and none was `Undelivered`.
+
 ## Still open
 
 This list replaces the dated ones above.
