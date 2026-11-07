@@ -26,6 +26,11 @@
 //! reboots into a verified image on trial, and confirms it on the first record from the
 //! bridge it reads. [`SimConfig::lossy_node`] and
 //! [`SimConfig::rejecting_node`] are the failures an update has to survive or report.
+//!
+//! The bridge keeps the P4's node image cache, the same [`NodeImageCache`] over memory: a
+//! `CacheImage` upload fills it, and a `ToNodeChunk` is built from the verified image with the
+//! same [`cache_chunk_body`], then routed as a `ToNode` is, loss model included. Until an upload
+//! verifies, and from the next `Begin` on, a chunk command is answered `NoImage`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,19 +38,21 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DieTemp, DownMsg, Heartbeat, MAX_SLOTS, NODE_VERSION, NodeBoard,
-    RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType, UpdateState,
-    UpdateStatus, Vdd, Version,
+    Assign, Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION,
+    NodeBoard, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK_MAX,
+    UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome,
-    RadioInfo, RadioLinkStats, Undelivered,
+    BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, NodeImageCache,
+    PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
+    cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -90,8 +97,8 @@ pub struct SimConfig {
     /// [`NODE_VERSION`] by default; `wartui ota --sim` sets an older one, so the fleet has
     /// something to update to.
     pub fleet_version: Version,
-    /// The index of one node that acknowledges this share of the update chunks sent to it
-    /// without reading them, as a node that dropped one on the floor does.
+    /// The index of one node that never acknowledges this share of the update chunks sent to it,
+    /// so the bridge answers them `Undelivered`, as a node bus transfer that fails every try is.
     /// `None` by default. A test knob, for the host's go-back.
     pub lossy_node: Option<(u8, f64)>,
     /// The index of one node whose updated image is never confirmed: it ignores the host
@@ -102,6 +109,13 @@ pub struct SimConfig {
     /// switches and reboots all the same. `None` by default. A test knob, for the host's
     /// recovery from a lost `Verified`.
     pub mute_verified_node: Option<u8>,
+    /// Counts the chunk commands answered `NoImage`: each sent before the cache verified the
+    /// image it names. `None` by default. A test knob, for the host's wait on the upload.
+    pub no_image_answers: Option<Arc<AtomicU32>>,
+    /// The bridge's cache drops its image once it has built this many chunks from it, as a P4
+    /// that reboots or whose host gate closes does. `None` by default. A test knob, for the
+    /// host's answer to a lost cache.
+    pub drop_cache_after: Option<u32>,
 }
 
 impl Default for SimConfig {
@@ -118,6 +132,8 @@ impl Default for SimConfig {
             lossy_node: None,
             rejecting_node: None,
             mute_verified_node: None,
+            no_image_answers: None,
+            drop_cache_after: None,
         }
     }
 }
@@ -161,6 +177,9 @@ const TRIAL_BOOTS: u64 = wartui_proto::ota::TRIAL_BOOTS as u64;
 /// The bytes an update slot holds, as `firmware/node/partitions.csv` sizes it.
 const SLOT_CAPACITY: u32 = 0x1E_0000;
 
+/// The bytes the bridge's node image cache holds, the P4's `CACHE_MAX`.
+const CACHE_CAPACITY: usize = 2 * 1024 * 1024;
+
 /// What the bus delivers to a simulated node.
 ///
 /// Mirrors what the firmware reads from the P4's records: an assignment to adopt, a request
@@ -181,7 +200,7 @@ enum SimCommand {
 struct Route {
     slot: Slot,
     tx: mpsc::Sender<SimCommand>,
-    /// The share of update chunks acknowledged and not delivered ([`SimConfig::lossy_node`]).
+    /// The share of update chunks undelivered ([`SimConfig::lossy_node`]).
     chunk_loss: f64,
 }
 
@@ -254,7 +273,9 @@ impl SimTransport {
         }
 
         let events = plumbing.events.clone();
-        tokio::spawn(run_bridge(plumbing, routes, started, attached_tx));
+        let no_image = self.config.no_image_answers.clone();
+        let drop_cache = self.config.drop_cache_after;
+        tokio::spawn(run_bridge(plumbing, routes, started, attached_tx, no_image, drop_cache));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
                 node,
@@ -276,6 +297,8 @@ async fn run_bridge(
     routes: Vec<Route>,
     started: tokio::time::Instant,
     attached: tokio::sync::watch::Sender<bool>,
+    no_image: Option<Arc<AtomicU32>>,
+    mut drop_cache_after: Option<u32>,
 ) {
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
@@ -315,6 +338,7 @@ async fn run_bridge(
     let _ = attached.send(true);
 
     let mut rng = Xorshift::new(0x0DD5_EED5);
+    let mut cache = sim_cache();
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
@@ -353,6 +377,40 @@ async fn run_bridge(
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
+            HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
+                Some(op) => cache.take(op).map(cache_status),
+                None => Some(BridgeToHost::Error {
+                    message: LogStr::try_from("a cache op did not decode").unwrap_or_default(),
+                }),
+            },
+            HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
+                if drop_cache_after == Some(0) {
+                    cache.reset();
+                }
+                let mut body = [0u8; UPDATE_CHUNK_MAX];
+                let built = cache
+                    .image(image)
+                    .and_then(|bytes| cache_chunk_body(bytes, session, offset, len, &mut body));
+                let kind = DownType::UpdateChunk.as_u8();
+                let delivered = match built {
+                    Some(n) => {
+                        if let Some(left) = &mut drop_cache_after {
+                            *left = left.saturating_sub(1);
+                        }
+                        deliver(&routes, slot, kind, &body[..n], &mut rng).await
+                    }
+                    None => {
+                        if let Some(count) = &no_image {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(Undelivered::NoImage)
+                    }
+                };
+                Some(match delivered {
+                    Ok(()) => BridgeToHost::Delivered { id },
+                    Err(reason) => BridgeToHost::Undelivered { id, reason },
+                })
+            }
         };
         if let Some(msg) = reply
             && plumbing.events.send(LinkEvent::Message(msg)).await.is_err()
@@ -360,6 +418,21 @@ async fn run_bridge(
             return;
         }
     }
+}
+
+/// `status` as the cache answers it.
+fn cache_status(status: UpdateStatus) -> BridgeToHost {
+    let mut buf = [0u8; UPDATE_STATUS_MAX];
+    let len = Op::Status(status).encode(&mut buf);
+    BridgeToHost::CacheImage(UpdateStatusBytes::from_slice(&buf[..len]).unwrap_or_default())
+}
+
+/// The bridge's node image cache, as the P4 keeps it in PSRAM: the receiver boxed for its sector
+/// buffer.
+type SimCache = NodeImageCache<Box<Receiver>, Vec<u8>>;
+
+fn sim_cache() -> SimCache {
+    NodeImageCache::new(Box::new(Receiver::new(Board::Esp32c5)), vec![0; CACHE_CAPACITY])
 }
 
 /// Hand a record to whichever simulated node sits in `slot`.
@@ -375,8 +448,10 @@ async fn deliver(
         Ok(DownMsg::Assign(assign)) => SimCommand::Assign(assign),
         Ok(DownMsg::Clear(_)) => SimCommand::Clear,
         Ok(DownMsg::UpdateConfirm(_)) => SimCommand::Confirm,
-        // Acknowledged on the bus, and gone before the node read it.
-        Ok(DownMsg::UpdateChunk(_)) if rng.next_f64() < route.chunk_loss => return Ok(()),
+        // Never acknowledged on the bus. A delivered record reaches the node's inbox in order.
+        Ok(DownMsg::UpdateChunk(_)) if rng.next_f64() < route.chunk_loss => {
+            return Err(Undelivered::Timeout);
+        }
         Ok(
             DownMsg::UpdateBegin(_)
             | DownMsg::UpdateChunk(_)
@@ -467,7 +542,7 @@ impl SimNode {
             speed: 1.0,
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
             receiver: Box::new(Receiver::new(Board::Esp32c5)),
-            slot: SimSlot::default(),
+            slot: SimSlot::new(SLOT_CAPACITY),
             update_heard: tokio::time::Instant::now(),
             trial: false,
             rejecting: false,
@@ -614,12 +689,17 @@ impl SimNode {
 }
 
 /// An update slot held in memory, grown as it is written.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SimSlot {
     flash: Vec<u8>,
+    capacity: u32,
 }
 
 impl SimSlot {
+    const fn new(capacity: u32) -> Self {
+        Self { flash: Vec::new(), capacity }
+    }
+
     fn reach(&mut self, end: usize) {
         if self.flash.len() < end {
             self.flash.resize(end, 0xFF);
@@ -631,7 +711,7 @@ impl SectorSink for SimSlot {
     type Error = ();
 
     fn capacity(&self) -> u32 {
-        SLOT_CAPACITY
+        self.capacity
     }
 
     fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
@@ -1172,5 +1252,91 @@ mod tests {
         node.roll_back_if_due();
         let capabilities = heartbeat_capabilities(&mut node).await;
         assert_eq!((capabilities.version, capabilities.trial), (old, false));
+    }
+
+    /// Two sectors and a bit, so the upload ends on a partial sector.
+    fn cache_image() -> (Vec<u8>, [u8; 32]) {
+        use sha2::{Digest, Sha256};
+        let bytes: Vec<u8> = (0..2 * SECTOR + 100).map(|i| (i % 251) as u8).collect();
+        let sha256 = Sha256::digest(&bytes).into();
+        (bytes, sha256)
+    }
+
+    async fn started() -> LinkHandle {
+        let mut link = SimTransport::new(SimConfig { node_count: 1, ..SimConfig::default() })
+            .start()
+            .expect("starting the simulator");
+        while !matches!(link.recv().await, Some(LinkEvent::Connected(_))) {}
+        link
+    }
+
+    fn cache_op(link: &LinkHandle, op: &Op<'_>) {
+        let mut buf = [0u8; wartui_proto::radio_link::update::OP_MAX];
+        let len = op.encode(&mut buf);
+        let op = wartui_proto::link::UpdateOp::from_slice(&buf[..len]).expect("an op fits");
+        link.send_urgent(HostToBridge::CacheImage(op)).expect("queued");
+    }
+
+    /// The cache's next status.
+    async fn next_cache_status(link: &mut LinkHandle) -> UpdateStatus {
+        loop {
+            if let Some(LinkEvent::Message(BridgeToHost::CacheImage(bytes))) = link.recv().await
+                && let Some(Op::Status(status)) = Op::decode(&bytes)
+            {
+                return status;
+            }
+        }
+    }
+
+    /// Upload `bytes` into the cache, until it reports them verified.
+    async fn upload(link: &mut LinkHandle, bytes: &[u8], sha256: [u8; 32]) {
+        let len = u32::try_from(bytes.len()).expect("a small image");
+        cache_op(link, &Op::Begin { session: 1, len, sha256 });
+        assert_eq!(next_cache_status(link).await.state, UpdateState::Receiving);
+        let chunk = wartui_proto::bus::UPDATE_CHUNK;
+        for (i, data) in bytes.chunks(chunk).enumerate() {
+            let offset = u32::try_from(i * chunk).expect("a small image");
+            cache_op(link, &Op::Chunk { session: 1, offset, data });
+        }
+        cache_op(link, &Op::Commit { session: 1 });
+        while next_cache_status(link).await.state != UpdateState::Verified {}
+    }
+
+    /// Ask for the first chunk of the image tagged `image`, returning the bridge's answer.
+    async fn first_chunk(link: &mut LinkHandle, image: u32) -> BridgeToHost {
+        let slot = SimTransport::node_slot(0);
+        let cmd =
+            HostToBridge::ToNodeChunk { slot, id: 7, image, session: 9, offset: 0, len: 1024 };
+        link.send_urgent(cmd).expect("queued");
+        loop {
+            match link.recv().await {
+                Some(LinkEvent::Message(
+                    answer @ (BridgeToHost::Delivered { id: 7 }
+                    | BridgeToHost::Undelivered { id: 7, .. }),
+                )) => return answer,
+                Some(_) => {}
+                None => panic!("the link closed"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sim_delivers_tonodechunk_after_verified_upload() {
+        let mut link = started().await;
+        let (bytes, sha256) = cache_image();
+        upload(&mut link, &bytes, sha256).await;
+        let answer = first_chunk(&mut link, wartui_proto::link::image_tag(&sha256)).await;
+        assert_eq!(answer, BridgeToHost::Delivered { id: 7 });
+        // The node read it: it holds no session 9, and says so.
+        loop {
+            if let Some(LinkEvent::Message(BridgeToHost::FromNode { kind, body, .. })) =
+                link.recv().await
+                && kind == UpType::UpdateStatus.as_u8()
+            {
+                let status = UpdateStatus::decode(&body).expect("a status");
+                assert_eq!((status.session, status.state), (9, UpdateState::Idle));
+                return;
+            }
+        }
     }
 }

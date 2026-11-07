@@ -27,7 +27,8 @@ too.
 It is also the SPI controller of two node buses, which carry each node's records to and from the
 host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
 forwards what a node sends, queues what the host sends a node in that node's slot, and answers
-each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`).
+each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`). It
+writes one, the update chunks it builds from its node image cache, below.
 
 ## Boards
 
@@ -120,6 +121,18 @@ It announces its own MAC rather than the C6's, which is not the bridge `flash-br
 
 The P4 sends the host a line for each boot step: the trial boot's count, a rollback, the confirm,
 and any step that failed.
+
+## Node image cache
+
+`wartui ota` uploads the node image once, into the P4's PSRAM, then asks for each node's
+`UpdateChunk` by its offset in it, so the image crosses the host link once however many nodes take
+it (`src/cache.rs`). The upload goes through the same update receiver the P4's own image does, and
+the cache serves an image only once its SHA-256 checks. Until then, and for a chunk that names
+another image or runs past its end, the P4 answers `Undelivered` `NoImage`.
+
+The cache takes up to 2 MB, a node's app slot, of the board's 32 MB of PSRAM. A P4 whose PSRAM
+does not map refuses every upload and logs `node image cache: no PSRAM` to the first host it
+announces to; everything else runs. The cache is dropped when the host gate closes.
 
 ## The bundled radio image
 

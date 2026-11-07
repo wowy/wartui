@@ -59,7 +59,10 @@ that re-arms the node between transfers, are in the `//!` of
 A transfer carries records, each a type byte, a length and a body. The type byte is the message,
 numbered per direction. The P4 reads none of them: it forwards a node's records to the host as
 `FromNode`, and the host's `ToNode` records to the node. The layouts are in the `//!` of each
-message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/).
+message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/). The P4 writes one:
+the `UpdateChunk`s it builds from the node image it caches for `wartui ota`
+([`firmware/p4-bridge/src/cache.rs`](../firmware/p4-bridge/src/cache.rs)), whose layout is in the
+frozen core.
 
 | Up, node → P4 | Message | Body bytes | Down, P4 → node | Message | Body bytes |
 | --- | --- | --- | --- | --- | --- |

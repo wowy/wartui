@@ -403,6 +403,150 @@ clock. The network counts don't compare: the 1 MHz run had N9 deaf.
 
 The 14-node carrier, seven nodes on a bus, is still untested at either clock.
 
+## Node updates over the 4 MHz bus, 2026-11-07
+
+`wartui ota --force` to the same version (0.3.1), one node alone: 0D:20 in N5 on the
+carrier-10, nine other nodes running.
+
+| | 1 MHz bench (1 node) | 4 MHz carrier | 4 MHz carrier, ack fetched at once (ba62296) |
+| --- | --- | --- | --- |
+| Rate while sending | 24 KB/s | 21 KB/s | 32 KB/s |
+| Whole run | 45 s | 53 s | 39 s |
+| Outcome | confirmed | confirmed | confirmed |
+
+The whole run includes the 6 s listen and an incremental image build.
+
+- **The clock didn't help.** One chunk is in flight at a time, and each waited for the node's
+  ack, which the P4 fetched on its 25 ms poll, then for `Delivered` to reach the host.
+- **The P4 now fetches the ack right after the transfer that carried the chunk**, since the node
+  stamps it on the very next transfer it arms. That alone took the rate from 21 to 32 KB/s. The
+  25 ms poll stays for a transfer that brings no ack.
+- The same build adds a node image cache in the P4's PSRAM, which this run didn't use: the host
+  still sent every chunk itself.
+- After the reflash, the buses were clean on all ten slots, with IRQ latency unchanged at about
+  16 ms.
+
+### PSRAM on the P4
+
+A throwaway build, before the cache, measured the P4-WIFI6's PSRAM through esp-hal 1.2.2:
+
+| | |
+| --- | --- |
+| Mapped | 32 MB at `0x48000000`; a marker at each MB read back correct, so no aliasing |
+| Write 1 MB | 16.4 ms (64 MB/s) |
+| Read 1 MB back | 21.7 ms (48 MB/s), no wrong words |
+| Copy 1 KB into internal RAM | 23.5 µs mean, the same across all 32 MB; 0 of 1,000 wrong |
+| SHA-256 of 1 MB, in software | 192 ms (5 MB/s) |
+
+The buses, the GPS and the host link ran normally alongside it. Building a chunk from the cache
+costs about 24 µs, against about 3 ms on the bus to carry it.
+
+## Updating all ten nodes at once, 2026-11-07
+
+`wartui ota --force --yes` to the same version (0.3.1), all ten carrier-10 nodes at once, 4 MHz.
+The host uploads the image once into the P4's PSRAM cache and runs one session per node, each
+with two chunks out, sent by reference from the cache.
+
+| | 7e8be0d | ffde486 | f6f2d36 | fe1bde3 |
+| --- | --- | --- | --- | --- |
+| Cache upload, 884 KB | 2.6 s | 2.6 s | 2.6 s, beside the begins | 2.6 s, beside the begins |
+| Confirmed | 8 of 10 | 10 of 10 | 10 of 10 | 10 of 10, twice |
+| Rate per node while sending | ~15 KB/s | 13–23 KB/s | 10–11 KB/s | 23–24 KB/s |
+| Whole run | 74 s | 80 s | 100 s | 50 s and 48 s |
+
+The whole run includes the 6 s listen and an incremental image build.
+
+### Nodes erasing flash went absent (fixed in ffde486)
+
+On 7e8be0d, 0D:20 (N5) and 1A:50 (N10) failed with `node not answering`. Both went `gone after
+5 transfers without magic`, then `appeared` 2 s later, every 2–3 s for 17 s, still making
+progress between drops, so they weren't rebooting. Each drop answered their queued chunks
+`NoNode`, and after enough failed sends their sessions gave up.
+
+It wasn't those boards: alone, 04:E4 updated in 38 s and 0D:20 in 35 s, each with one drop, at
+its reboot. But even alone, a node counted 160–170 magic failures during its update, about one
+per 4 KB sector it writes. The reading, not yet measured directly: while a node erases a sector,
+its flash operation holds interrupts, so it can't re-arm. In a fleet, the shared IRQ line is
+nearly always asserted and each pass clocks every node, including one mid-erase, so five misses
+in a row came fast enough to mark a node absent.
+
+ffde486 makes absence need 1 s since the slot's last answer as well as five misses, and holds a
+slot that missed for 10 ms before clocking it again. All ten then confirmed.
+
+### Where the 80 s went (ffde486)
+
+- **Before any chunk:** the 6 s listen, the 2.6 s upload, and each session waiting up to 5 s
+  for its node's next heartbeat to send its `begin`.
+- **Sending:** most nodes finished in 41–49 s. 00:40 (N2) and 97:78 (N3), both on bus A, ran at
+  13 KB/s and finished at 67 s, so they set the time.
+- **Magic failures:** 580–790 per node on bus A and 64–320 on bus B. Why bus A has more is open.
+- **IRQ passes:** each node raises IRQ for each sector's status, and a pass clocks every node on
+  the bus, so most of a pass's transfers carry nothing.
+
+### Tuning that made it slower (f6f2d36)
+
+f6f2d36 started streaming sooner (each `begin` sent at once to the slot heard in the listen, the
+cache upload beside the begins), ended an IRQ pass at its first record, held a slot that missed
+for 20 ms instead of 10, and added a second counter line per slot, `xfer`, counting transfers by
+why they ran. The run took 100 s, every node at 10–11 KB/s. Two causes:
+
+- **A rewind loop in the host's session.** With debug logging, the host sent 15,915 chunks for
+  8,840 and drew 9,286 statuses for 2,220 sectors, 5,254 of them at mid-sector offsets; every
+  send was `Delivered`. A node alone sent none of these (884 sends, 222 statuses). A resent chunk
+  reached a node that had it, the node answered with a status naming where it stood, and that
+  status arrived after the session had moved on. The session read it as a lost chunk and resent
+  from it, and each resend drew more such statuses, every sector. On the node bus a `Delivered`
+  chunk has reached the node, in order, so a status behind what was sent is never a loss.
+- **The stuck-IRQ latch fired 27–32 times per bus** (3–8 on ffde486). A pass skipped a slot held
+  after a miss, which may be the node asserting IRQ, so the pass came back empty and counted
+  toward the latch. Each latch put the bus on polling for up to 1 s.
+
+The `xfer` lines also showed IRQ passes are most of a node's traffic: about 4,000 pass transfers
+per node, against about 1,000 carrying or fetching chunks.
+
+### Under a minute (fe1bde3)
+
+fe1bde3 stops the session moving back on a status: sending goes back only for an `Undelivered`
+chunk, the status timeout, or `Idle`. A pass that skipped a held slot no longer counts toward
+the stuck latch. With debug logging the host sent exactly 8,840 chunks and drew exactly 2,220
+statuses; the latch fired 3–4 times per bus. Every node sent at 23–24 KB/s, and the whole run took
+50 s, then 48 s without debug logging: about 9 s before the first chunk, about 39 s of sending,
+then the reboots and confirms.
+
+Nodes still miss transfers while they erase flash, 300–800 per node, but no longer go absent or
+cost the update. Keeping chunks flowing across a sector's end is the next lever.
+
+### After the review fixes (fc36e65)
+
+A code review's fixes changed the P4 in two places: a missed transfer no longer clears the ack
+the P4 owes a present node, and the cache's rules moved into `wartui-proto`, shared with the
+sim. The host now ends a fleet at once when the P4 has lost its cached image, rather than
+spending each session's retries. Rerun after flashing the P4:
+
+| | fe1bde3 | fc36e65 |
+| --- | --- | --- |
+| Confirmed | 10 of 10 | 10 of 10 |
+| Rate per node while sending | 23 KB/s | 22–23 KB/s |
+| Stuck-IRQ latches per bus | 3–4 | 2–4 |
+| Whole run | 48 s | 50 s |
+
+The 2 s is within what two runs of the same build differed by (48 and 50 s on fe1bde3).
+
+### Where the time goes now
+
+Each node needed about 2.8 transfers per chunk in the 48 s run (from the `xfer` counters,
+N1, N3, N6 and N8 agreeing), and each bus ran about 320 transfers a second against room for
+about 340 (a transfer is ~2.9 ms with its setup): the buses are about 94% busy. So a sector's
+stop costs a fleet little; fewer transfers per chunk is what would help. Roughly (inferred
+from the counters):
+
+| Transfers per chunk | What |
+| --- | --- |
+| ~1.0 | carrying the chunk |
+| ~0.75 | the ack fetch, which carries nothing toward the node |
+| ~0.8 | IRQ-pass visits to slots that bring no record |
+| ~0.25 | misses while a node erases flash, with their retries |
+
 ## Still open
 
 This list replaces the dated ones above.

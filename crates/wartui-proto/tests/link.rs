@@ -7,14 +7,16 @@
 use heapless::{String, Vec};
 use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, RecordKind, Security,
-    SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UpType, UpdateState, UpdateStatus, Vdd,
+    SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateChunk,
+    UpdateState, UpdateStatus, Vdd,
 };
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
     GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
     MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PowerOutcome, QueueId, QueueStat, QueueStats,
     RadioInfo, RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
-    UpdateStatusBytes, crc16, decode_frame, encode_frame, encode_host_frame,
+    UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
+    image_tag,
 };
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
@@ -42,7 +44,26 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     .expect("sample_commands has room");
     v.push(HostToBridge::PowerCycle { slot: Slot::new(0, 6).expect("A7") })
         .expect("sample_commands has room");
+    v.push(HostToBridge::CacheImage(encoded_op(&Op::Begin {
+        session: 2,
+        len: 905_000,
+        sha256: [5; 32],
+    })))
+    .expect("sample_commands has room");
+    v.push(sample_chunk_command()).expect("sample_commands has room");
     v
+}
+
+/// A [`HostToBridge::ToNodeChunk`] with every field distinct, so a pin shows their order.
+fn sample_chunk_command() -> HostToBridge {
+    HostToBridge::ToNodeChunk {
+        slot: Slot::new(1, 2).expect("B3"),
+        id: 0xBEEF,
+        image: 0x0403_0201,
+        session: 7,
+        offset: 4096,
+        len: 1024,
+    }
 }
 
 /// `op` as a [`HostToBridge::Update`] carries it.
@@ -133,7 +154,9 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Delivered { id: 7 }).expect("sample_events has room");
-    for reason in [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::Timeout] {
+    for reason in
+        [Undelivered::NoNode, Undelivered::QueueFull, Undelivered::Timeout, Undelivered::NoImage]
+    {
         v.push(BridgeToHost::Undelivered { id: 8, reason }).expect("sample_events has room");
     }
     v.push(BridgeToHost::Status {
@@ -164,6 +187,12 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         let slot = Slot::new(1, 0).expect("B1");
         v.push(BridgeToHost::PowerCycled { slot, outcome }).expect("sample_events has room");
     }
+    v.push(BridgeToHost::CacheImage(encoded_status(UpdateStatus {
+        session: 2,
+        state: UpdateState::Verified,
+        next_offset: 905_000,
+    })))
+    .expect("sample_events has room");
     v
 }
 
@@ -545,7 +574,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 7, "one of each");
+    assert_eq!(commands.len(), 9, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -568,12 +597,15 @@ fn link_codec_pins_variant_indices_when_encoded() {
                 outcome: PowerOutcome::Done,
             },
         ),
+        (10, BridgeToHost::CacheImage(UpdateStatusBytes::new())),
     ];
     for (want, event) in &events {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
     }
     let undelivered = BridgeToHost::Undelivered { id: 1, reason: Undelivered::Timeout };
     assert_eq!(postcard::to_slice(&undelivered, &mut buf).expect("encodes"), [8, 1, 2]);
+    let no_image = BridgeToHost::Undelivered { id: 1, reason: Undelivered::NoImage };
+    assert_eq!(postcard::to_slice(&no_image, &mut buf).expect("encodes"), [8, 1, 3]);
 }
 
 #[test]
@@ -817,4 +849,112 @@ fn link_round_trips_ready_when_image_is_present_or_absent() {
         };
         assert_eq!(round_trip(&ready), ready);
     }
+}
+
+#[test]
+fn link_tonodechunk_round_trips_through_postcard() {
+    let cmd = sample_chunk_command();
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+    assert_eq!(decoded, cmd);
+}
+
+#[test]
+fn link_codec_pins_tonodechunk_bytes_when_host_asks() {
+    // Postcard's variant index, the slot's byte (B3 is 9), then varints: id 0xBEEF, the tag
+    // 0x04030201, the session, offset 4096 and length 1024.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&sample_chunk_command(), &mut out).expect("encodes");
+    assert_eq!(
+        frame_body(&out[..n]),
+        [8, 9, 0xEF, 0xFD, 0x02, 0x81, 0x84, 0x8C, 0x20, 7, 0x80, 0x20, 0x80, 0x08]
+    );
+}
+
+#[test]
+fn link_cacheimage_round_trips() {
+    let data = [0xA5; UPDATE_CHUNK];
+    let cmd =
+        HostToBridge::CacheImage(encoded_op(&Op::Chunk { session: 3, offset: 8192, data: &data }));
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    // Through the accumulator the P4 uses, so a full chunk that outgrew it fails here.
+    let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
+    let mut decoded = None;
+    for &byte in &out[..n] {
+        if let Some(frame) = acc.push(byte) {
+            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+        }
+    }
+    assert_eq!(decoded, Some(cmd));
+
+    let status = UpdateStatus { session: 3, state: UpdateState::Receiving, next_offset: 9216 };
+    let event = BridgeToHost::CacheImage(encoded_status(status));
+    assert_eq!(round_trip(&event), event);
+}
+
+#[test]
+fn link_codec_pins_cacheimage_bytes_when_host_sends_an_op() {
+    let cmd = HostToBridge::CacheImage(encoded_op(&Op::Commit { session: 0x42 }));
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [7, 2, 3, 0x42]);
+}
+
+#[test]
+fn link_codec_pins_cacheimage_bytes_when_bridge_sends_a_status() {
+    let status =
+        UpdateStatus { session: 0x42, state: UpdateState::Verified, next_offset: 0x0001_2000 };
+    let event = BridgeToHost::CacheImage(encoded_status(status));
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [10, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
+}
+
+#[test]
+fn image_tag_reads_first_four_digest_bytes_little_endian() {
+    let mut sha256 = [0xFF; 32];
+    sha256[..4].copy_from_slice(&[1, 2, 3, 4]);
+    assert_eq!(image_tag(&sha256), 0x0403_0201);
+}
+
+/// An image whose bytes all differ from their neighbors, so an offset off by one shows.
+fn counting_image(len: usize) -> std::vec::Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn cache_chunk_body_matches_update_chunk_encoding() {
+    let image = counting_image(3000);
+    // A full chunk, and the short one that ends the image.
+    for (offset, len) in [(1024u32, 1024u16), (2048, 952)] {
+        let mut ours = [0u8; UPDATE_CHUNK_MAX];
+        let n = cache_chunk_body(&image, 9, offset, len, &mut ours).expect("in range");
+        let start = offset as usize;
+        let chunk = UpdateChunk { session: 9, offset, data: &image[start..start + len as usize] };
+        let mut want = [0u8; UPDATE_CHUNK_MAX];
+        let m = chunk.encode_into(&mut want).expect("encodes");
+        assert_eq!(&ours[..n], &want[..m], "offset {offset}");
+    }
+}
+
+#[test]
+fn cache_chunk_body_refuses_range_past_image_end() {
+    let image = counting_image(3000);
+    let mut out = [0u8; UPDATE_CHUNK_MAX];
+    assert_eq!(cache_chunk_body(&image, 1, 2048, 953, &mut out), None);
+    assert_eq!(cache_chunk_body(&image, 1, 3000, 1, &mut out), None);
+    assert_eq!(cache_chunk_body(&image, 1, u32::MAX, 1024, &mut out), None);
+    assert_eq!(out, [0; UPDATE_CHUNK_MAX], "nothing written");
+}
+
+#[test]
+fn cache_chunk_body_refuses_zero_and_oversize_len() {
+    let image = counting_image(4096);
+    let mut out = [0u8; UPDATE_CHUNK_MAX];
+    assert_eq!(cache_chunk_body(&image, 1, 0, 0, &mut out), None);
+    let oversize = u16::try_from(UPDATE_CHUNK + 1).expect("fits");
+    assert_eq!(cache_chunk_body(&image, 1, 0, oversize, &mut out), None);
+    assert_eq!(out, [0; UPDATE_CHUNK_MAX], "nothing written");
 }

@@ -18,6 +18,11 @@
 //! [`BridgeToHost::Delivered`] or [`BridgeToHost::Undelivered`]. Every record a node sends
 //! arrives as a [`BridgeToHost::FromNode`] of up to [`MAX_NODE_PAYLOAD`] bytes. The P4 reads
 //! neither; [`crate::bus`] has the messages.
+//!
+//! An update's chunks are the exception: the host uploads the image once into the P4's cache
+//! ([`HostToBridge::CacheImage`]), and a [`HostToBridge::ToNodeChunk`] asks the P4 to build each
+//! [`crate::bus::UpdateChunk`] from it ([`cache_chunk_body`]), answered like a
+//! [`HostToBridge::ToNode`].
 
 use crate::bus::{NodeBoard, Slot};
 use crate::mac::Mac;
@@ -28,8 +33,10 @@ use heapless::{String, Vec};
 use serde::Serialize;
 
 mod bytes;
+mod cache;
 mod frame;
 
+pub use cache::{NodeImageCache, cache_chunk_body, image_tag};
 pub(crate) use frame::CobsStream;
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
@@ -90,11 +97,12 @@ pub const GPS_WRITE_MAX: usize = 256;
 /// Bytes the host composed for the GPS receiver, in transit to the bridge.
 pub type GpsWriteBytes = Vec<u8, GPS_WRITE_MAX>;
 
-/// One encoded [`crate::radio_link::update::Op`] for a P4 bridge's own image, in transit to it.
+/// One encoded [`crate::radio_link::update::Op`] for a P4 bridge's own image or its node image
+/// cache, in transit to it.
 pub type UpdateOp = Vec<u8, OP_MAX>;
 
-/// The most bytes one [`BridgeToHost::Update`] carries: an encoded `Op::Status`, with room
-/// for its body to grow at the end.
+/// The most bytes one [`BridgeToHost::Update`] or [`BridgeToHost::CacheImage`] carries: an
+/// encoded `Op::Status`, with room for its body to grow at the end.
 pub const UPDATE_STATUS_MAX: usize = 16;
 
 /// One encoded `Op::Status`, in transit to the host.
@@ -149,7 +157,7 @@ pub enum LoopPhase {
     RadioLink,
 }
 
-/// Why the P4 could not deliver a [`HostToBridge::ToNode`].
+/// Why the P4 could not deliver a [`HostToBridge::ToNode`] or a [`HostToBridge::ToNodeChunk`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Undelivered {
     /// No node answers in that slot.
@@ -158,11 +166,15 @@ pub enum Undelivered {
     QueueFull,
     /// The node did not acknowledge the transfer that carried it, after every try.
     Timeout,
+    /// The P4's cache holds no verified image with the chunk's tag, or the chunk runs past that
+    /// image's end.
+    NoImage,
 }
 
 /// Commands the host sends to the bridge.
 ///
-/// The bridge understands framing, and nothing about what a node's bytes mean.
+/// The bridge understands framing, and nothing about what a node's bytes mean, except that it
+/// builds [`crate::bus::UpdateChunk`] records from its cache.
 // The payload variants dwarf the rest, but boxing them would need an allocator in the
 // bridge firmware, which this crate avoids. These values are built, serialized and
 // dropped, never stored in bulk.
@@ -211,6 +223,27 @@ pub enum HostToBridge {
     PowerCycle {
         /// Which node.
         slot: Slot,
+    },
+    /// One step of an upload into the P4's node image cache: a `Begin`, `Chunk` or `Commit` in
+    /// the [`crate::radio_link::update`] layout, which the P4 answers with a
+    /// [`BridgeToHost::CacheImage`]. The cache serves an image only once its digest checks.
+    CacheImage(#[serde(with = "bytes")] UpdateOp),
+    /// Send the node in `slot` an [`crate::bus::UpdateChunk`] of `len` bytes at `offset` from
+    /// the cached image tagged `image` ([`image_tag`]), answered by [`BridgeToHost::Delivered`]
+    /// or [`BridgeToHost::Undelivered`] as a [`HostToBridge::ToNode`] is.
+    ToNodeChunk {
+        /// Where the node sits.
+        slot: Slot,
+        /// Correlates the answer.
+        id: u16,
+        /// The cached image's [`image_tag`].
+        image: u32,
+        /// The node's update session.
+        session: u8,
+        /// Where in the image the chunk starts.
+        offset: u32,
+        /// Image bytes in the chunk, 1 to [`crate::bus::UPDATE_CHUNK`].
+        len: u16,
     },
 }
 
@@ -307,12 +340,13 @@ pub enum BridgeToHost {
         #[serde(with = "bytes")]
         body: FromNodeBody,
     },
-    /// The node acknowledged the transfer that carried [`HostToBridge::ToNode`] `id`.
+    /// The node acknowledged the transfer that carried [`HostToBridge::ToNode`] or
+    /// [`HostToBridge::ToNodeChunk`] `id`.
     Delivered {
         /// Echoes the request's `id`.
         id: u16,
     },
-    /// [`HostToBridge::ToNode`] `id` did not reach its node.
+    /// [`HostToBridge::ToNode`] or [`HostToBridge::ToNodeChunk`] `id` did not reach its node.
     Undelivered {
         /// Echoes the request's `id`.
         id: u16,
@@ -327,6 +361,9 @@ pub enum BridgeToHost {
         /// How it went.
         outcome: PowerOutcome,
     },
+    /// Where an upload into the node image cache stands: an `Op::Status` in the
+    /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::CacheImage`].
+    CacheImage(#[serde(with = "bytes")] UpdateStatusBytes),
 }
 
 /// How a [`HostToBridge::PowerCycle`] went.

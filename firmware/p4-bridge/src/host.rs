@@ -29,7 +29,8 @@
 //! one.** The P4 cannot see the CH343's DTR, so a frame is the only sign that someone reads.
 //! Opening clears both host queues, so a host never reads a backlog from before it attached,
 //! and announces this life. While the gate is closed nothing queues (`Shared::push_host`), and
-//! closing drops any update session (`update::host_gone`). The engine polls every 5 s, so three
+//! closing drops any update session and the cached node image (`update::host_gone`,
+//! `cache::host_gone`). The engine polls every 5 s, so three
 //! polls go missing before the gate closes on a running host.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
@@ -167,6 +168,10 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
             crate::bus::to_node(shared, *slot, *id, *kind, body);
         }
         HostToBridge::PowerCycle { slot } => crate::carrier::request(shared, *slot),
+        HostToBridge::CacheImage(op) => crate::cache::take(op, shared),
+        HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
+            crate::cache::to_node_chunk(shared, *slot, *id, *image, *session, *offset, *len);
+        }
     }
 }
 
@@ -228,6 +233,7 @@ async fn close_on_silence(shared: &Shared) -> ! {
         }
         presence.present.set(false);
         crate::update::host_gone(shared);
+        crate::cache::host_gone(shared);
     }
 }
 

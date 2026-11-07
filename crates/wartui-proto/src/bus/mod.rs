@@ -91,7 +91,8 @@
 //! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
 //! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the
 //! messages are in [`UpMsg`] and [`DownMsg`]. The P4 needs no knowledge of them, so a change to
-//! a node's messages costs no P4 reflash.
+//! a node's messages costs no P4 reflash. The exception is [`UpdateChunk`], which the P4 builds
+//! from its node image cache ([`crate::link::cache_chunk_body`]), and whose layout is in the core.
 //!
 //! [`crc16`]: crate::link::crc16
 

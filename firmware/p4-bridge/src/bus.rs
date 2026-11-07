@@ -9,30 +9,42 @@
 //! and is answered `Delivered`, or `Undelivered` with why: no node in the slot, a full queue, a
 //! body too long, or no ack after every try. A slot that loses its node answers for everything
 //! it held. The host reader queues a record and raises its bus's signal, so a waiting scheduler
-//! wakes.
+//! wakes. The one record the P4 writes, an `UpdateChunk` it builds from its node image cache for
+//! a `ToNodeChunk` (`src/cache.rs`), is queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
 //! the next:
 //!
-//! - **IRQ asserted**: a pass over the present slots, round robin, one transfer each. Absent
-//!   slots are still probed on time, since a node not yet present may be the one asserting.
+//! - **IRQ asserted**: a pass over the present slots, round robin, one transfer each, that ends
+//!   at the first transfer to bring a record, and the next pass starts after that slot. A shared
+//!   line says only that some node waits, so clocking the rest once one has answered spends the
+//!   bus on nodes with nothing to send, or erasing flash. Absent slots are still probed on time,
+//!   since a node not yet present may be the one asserting.
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
-//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
-//!   asserted by nothing this bus can serve, such as a node not yet present. The bus counts it
+//! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that clock every present slot and bring no
+//!   record mean the line is asserted by nothing this bus can serve, such as a node not yet
+//!   present. A pass that skips a slot waiting out [`MISS_BACKOFF`] does not count, since that
+//!   slot's node may be the one asserting. The bus counts a stuck line
 //!   and runs the schedule below until IRQ is seen deasserted, a slot becomes present, or
 //!   [`STUCK_RETRY`] has passed. The retry is needed because a shared line under that schedule
 //!   may never deassert: each node holds it while its record waits for a poll, and a few nodes
 //!   together can hold it without a break.
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
-//!   clocked at once. One whose records wait for the node's ack is clocked every
-//!   [`ACK_POLL`], and no later than the wait's deadline.
+//!   clocked at once. One whose records wait for the node's ack is clocked once right after the
+//!   transfer that carried them, since the node stamps its ack on the very next transfer it arms
+//!   (`firmware/node/src/bus.rs`). If that one brings no ack, as when the node's inbox was full,
+//!   the slot is clocked every [`ACK_POLL`], and no later than the wait's deadline.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
-//!   [`ABSENT_AFTER`] transfers in a row that fail the magic.
+//!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed
+//!   since the last that had it. A node erasing flash cannot re-arm, so it fails the magic
+//!   until the erase ends, and a miss count alone would drop it mid-update.
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
+//!   If the retry fails too, the slot is not clocked again for [`MISS_BACKOFF`], in an IRQ pass
+//!   or as due work, so the bus does not spend its transfers on a node that cannot answer yet.
 //!
 //! Each slot has its own seq, so a node's gaps count only transfers meant for it. Log lines name a
 //! slot as the operator reads it, `N3` on a carrier ([`NodeBoard::label`]).
@@ -74,20 +86,30 @@ pub const PER_BUS: usize = wartui_proto::bus::PER_BUS as usize;
 const DRIVEN: usize = 2 * PER_BUS;
 /// The longest a present slot goes unclocked.
 const POLL_EVERY: Duration = Duration::from_millis(250);
-/// How often a slot whose records wait for the node's ack is clocked. The node stamps its ack
-/// only once its main loop has checked the transfer, so the ack arrives on a later transfer
-/// than the records, and this is what fetches it.
+/// How often a slot whose records wait for the node's ack is clocked, once the transfer right
+/// after theirs brought no ack. The node stamps its ack only once it has queued the records, so
+/// the ack arrives on a later transfer than the records: normally the next one, which
+/// [`SLOT_GAP`] spaces, and otherwise one of these.
 const ACK_POLL: Duration = Duration::from_millis(25);
 /// How often an absent slot is probed.
 const PROBE_EVERY: Duration = Duration::from_millis(2_000);
 /// Transfers in a row failing the magic before a present slot is absent.
 const ABSENT_AFTER: u8 = 5;
+/// The least time from a present slot's last transfer with the magic to its absence. It outlasts
+/// a node's flash sector erase. A lost supply still takes every slot absent well inside
+/// `wartui_proto::carrier::DROP_WINDOW_MS` of the others: they all start missing at once, and
+/// each goes within a [`POLL_EVERY`] either side of this after the loss.
+const ABSENT_SPAN: Duration = Duration::from_millis(1_000);
+/// How long a present slot whose transfer and retry both failed the magic waits before it is
+/// clocked again: about half a node's sector erase, so a node erasing flash is clocked a couple of
+/// times through the erase rather than on every pass.
+const MISS_BACKOFF: Duration = Duration::from_millis(20);
 /// The least time between the end of one transfer to a slot and the start of the next, for
 /// the node to re-arm. The P4–C6 bench measured a re-arm at about 320 µs.
 const SLOT_GAP: Duration = Duration::from_millis(1);
-/// IRQ passes in a row with no record before the line counts as stuck. Two,
-/// because the first pass after a node queues a record clocks the transfer it armed before,
-/// which is empty.
+/// IRQ passes in a row, each clocking every present slot, with no record before the line counts
+/// as stuck. Two, because the first pass after a node queues a record clocks the transfer it
+/// armed before, which is empty.
 const EMPTY_PASSES: u8 = 2;
 /// How long a stuck bus waits before trying IRQ service again. A line that really is held costs
 /// [`EMPTY_PASSES`] empty passes per retry, about 3% of the bus at 4 MHz with five nodes.
@@ -305,6 +327,8 @@ struct Slot {
     present: bool,
     /// Transfers in a row that failed the magic.
     misses: u8,
+    /// When the last transfer with the magic ended.
+    heard: Option<Instant>,
     /// The P4's seq for this slot's next transfer.
     seq: u16,
     /// The node's seq.
@@ -314,6 +338,9 @@ struct Slot {
     /// The node's last good transfer carried records, and no transfer since has carried the
     /// ack.
     ack_owed: bool,
+    /// The last transfer carried a flight, so the next, which the node arms with its ack, is
+    /// due as soon as [`SLOT_GAP`] allows rather than after [`ACK_POLL`].
+    fetch_ack: bool,
     /// When the last transfer to this slot started and ended.
     last_start: Option<Instant>,
     last_end: Option<Instant>,
@@ -325,6 +352,7 @@ struct Slot {
     gaps: u32,
     retries: u32,
     records: u32,
+    xfers: Xfers,
 }
 
 impl Slot {
@@ -333,10 +361,12 @@ impl Slot {
         Self {
             present: false,
             misses: 0,
+            heard: None,
             seq: 0,
             peer: SeqCheck::new(),
             tracker: AckTracker::new(),
             ack_owed: false,
+            fetch_ack: false,
             last_start: None,
             last_end: None,
             ok: 0,
@@ -347,6 +377,7 @@ impl Slot {
             gaps: 0,
             retries: 0,
             records: 0,
+            xfers: Xfers::new(),
         }
     }
 
@@ -356,13 +387,72 @@ impl Slot {
         if !self.present {
             return last + PROBE_EVERY;
         }
-        if self.ack_owed || downlink.has_work() {
-            return Instant::MIN;
+        let due = if self.ack_owed || downlink.has_work() {
+            Instant::MIN
+        } else {
+            match downlink.deadline_ms() {
+                Some(_) if self.fetch_ack => Instant::MIN,
+                Some(deadline) => (last + ACK_POLL).min(Instant::from_millis(deadline)),
+                None => last + POLL_EVERY,
+            }
+        };
+        due.max(self.held_until())
+    }
+
+    /// Until when this slot waits out a miss: [`MISS_BACKOFF`] after a present slot's last
+    /// transfer failed the magic, retry included, and otherwise [`Instant::MIN`].
+    fn held_until(&self) -> Instant {
+        match self.last_end {
+            Some(end) if self.present && self.misses > 0 => end + MISS_BACKOFF,
+            _ => Instant::MIN,
         }
-        match downlink.deadline_ms() {
-            Some(deadline) => (last + ACK_POLL).min(Instant::from_millis(deadline)),
-            None => last + POLL_EVERY,
-        }
+    }
+
+    /// Whether an IRQ pass may clock this slot at `now`: present, and not waiting out a miss.
+    fn clockable(&self, now: Instant) -> bool {
+        self.present && self.held_until() <= now
+    }
+}
+
+/// Why a transfer ran, for its slot's `xfer` counts, each counted under the first that applies.
+/// A retry after a miss counts as the transfer it retries.
+#[derive(Clone, Copy)]
+enum Xfer {
+    /// Clocked in an IRQ pass.
+    Pass,
+    /// Carried a flight toward the node, outside a pass.
+    Carry,
+    /// Fetched the node's ack right after a flight.
+    Fetch,
+    /// Owed the node an ack.
+    Owed,
+    /// The periodic poll, a poll before a flight's deadline, or an absent slot's probe.
+    Poll,
+}
+
+/// A slot's transfers by why they ran, since boot.
+struct Xfers {
+    pass: u32,
+    carry: u32,
+    fetch: u32,
+    owed: u32,
+    poll: u32,
+}
+
+impl Xfers {
+    const fn new() -> Self {
+        Self { pass: 0, carry: 0, fetch: 0, owed: 0, poll: 0 }
+    }
+
+    fn note(&mut self, why: Xfer) {
+        let count = match why {
+            Xfer::Pass => &mut self.pass,
+            Xfer::Carry => &mut self.carry,
+            Xfer::Fetch => &mut self.fetch,
+            Xfer::Owed => &mut self.owed,
+            Xfer::Poll => &mut self.poll,
+        };
+        *count = count.wrapping_add(1);
     }
 }
 
@@ -431,26 +521,36 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
         if !asserted || retry {
             controller.unlatch();
         }
-        if any_present && asserted && controller.stuck_at.is_none() {
+        let serving = any_present && asserted && controller.stuck_at.is_none();
+        let held = serving.then(|| controller.all_held(Instant::now())).flatten();
+        if serving && held.is_none() {
             controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
+            // A present slot waiting out a miss, whose node may be the one asserting.
+            let mut skipped = false;
             for k in 0..per_bus {
                 let i = (rr + k) % per_bus;
-                if !controller.slots[i].present {
+                if !controller.slots[i].clockable(Instant::now()) {
+                    skipped |= controller.slots[i].present;
                     continue;
                 }
-                if let Outcome::Good { records } = controller.exchange(i, true, shared).await {
-                    brought |= records;
+                let outcome = controller.exchange(i, true, shared).await;
+                if let Outcome::Good { records: true } = outcome {
+                    brought = true;
+                    rr = (i + 1) % per_bus;
+                    break;
                 }
             }
-            rr = (rr + 1) % per_bus;
             if brought {
                 controller.empty_passes = 0;
             } else {
-                controller.empty_passes = controller.empty_passes.saturating_add(1);
-                if controller.empty_passes >= EMPTY_PASSES {
-                    controller.stuck_at = Some(Instant::now());
-                    controller.stuck = controller.stuck.wrapping_add(1);
+                rr = (rr + 1) % per_bus;
+                if !skipped {
+                    controller.empty_passes = controller.empty_passes.saturating_add(1);
+                    if controller.empty_passes >= EMPTY_PASSES {
+                        controller.stuck_at = Some(Instant::now());
+                        controller.stuck = controller.stuck.wrapping_add(1);
+                    }
                 }
             }
             let now = Instant::now();
@@ -471,7 +571,10 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
             // With IRQ already asserted and nobody present, only the timer can wake this, and
             // the host queues nothing for an absent slot. Stuck, it waits for the deassert or
             // the retry instead.
-            if any_present {
+            if let Some(until) = held {
+                // Every present slot waits out a miss under an asserted IRQ, so only the timer.
+                Timer::at(due.min(until)).await;
+            } else if any_present {
                 // Asserted, or deasserted when stuck.
                 let high = controller.irq_active_high != controller.stuck_at.is_some();
                 let level = if high { Event::HighLevel } else { Event::LowLevel };
@@ -522,6 +625,12 @@ impl Controller {
         self.stuck_at = None;
     }
 
+    /// When every present slot waits out a miss at `now`, the earliest any may be clocked again.
+    fn all_held(&self, now: Instant) -> Option<Instant> {
+        let mut present = self.slots[..self.per_bus].iter().filter(|s| s.present);
+        present.try_fold(Instant::MAX, |at, s| (!s.clockable(now)).then(|| at.min(s.held_until())))
+    }
+
     /// When slot `i` is next owed a transfer.
     fn next_due(&self, i: usize, shared: &Shared) -> Instant {
         let downlinks = shared.nodes.downlinks.borrow();
@@ -537,6 +646,7 @@ impl Controller {
     /// a present slot fails the magic. `answers_irq` is whether it is part of an IRQ pass.
     async fn exchange(&mut self, i: usize, answers_irq: bool, shared: &Shared) -> Outcome {
         let mut retried = false;
+        let mut why = None;
         loop {
             if let Some(end) = self.slots[i].last_end {
                 Timer::at(end + SLOT_GAP).await;
@@ -545,7 +655,20 @@ impl Controller {
             let Some(Wire { spi, rx, mut tx }) = self.wire.take() else { return Outcome::Bad };
             let seq = self.slots[i].seq;
             let filled = self.prepare(i, tx_bytes(&mut tx), shared);
-            self.slots[i].seq = seq.wrapping_add(1);
+            let slot = &mut self.slots[i];
+            let why = *why.get_or_insert(if answers_irq {
+                Xfer::Pass
+            } else if filled > 0 {
+                Xfer::Carry
+            } else if slot.fetch_ack {
+                Xfer::Fetch
+            } else if slot.ack_owed {
+                Xfer::Owed
+            } else {
+                Xfer::Poll
+            });
+            slot.xfers.note(why);
+            slot.seq = seq.wrapping_add(1);
             let start = Instant::now();
             self.cs(i).set_low();
             // Bound before the await, so the `Result` is not held across it.
@@ -565,15 +688,23 @@ impl Controller {
             self.slots[i].last_start = Some(start);
             self.slots[i].last_end = Some(end);
             let outcome = if clocked {
-                // The transfer carried the ack, whatever the node made of it.
+                // A transfer with the magic carried the ack, whatever the node made of it, and
+                // brought the node's, if it had stamped one. One without it reached no armed
+                // node, so both stay owed while the node is present.
+                let owed = (self.slots[i].ack_owed, self.slots[i].fetch_ack);
                 self.slots[i].ack_owed = false;
+                self.slots[i].fetch_ack = false;
                 let outcome =
                     self.count(i, seq, rx_bytes(&wire.rx), (start, end), answers_irq, shared);
+                if matches!(outcome, Outcome::Empty) && self.slots[i].present {
+                    (self.slots[i].ack_owed, self.slots[i].fetch_ack) = owed;
+                }
                 // Bad magic: the node was not armed and took nothing, so the flight stays due
                 // and the retry carries it. Anything else may have reached the node.
                 if filled > 0 && !matches!(outcome, Outcome::Empty) {
                     let k = self.driven(i);
                     shared.nodes.downlinks.borrow_mut()[k].sent(seq, crate::now_ms());
+                    self.slots[i].fetch_ack = true;
                 }
                 outcome
             } else {
@@ -625,6 +756,7 @@ impl Controller {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 if !slot.present {
                     // A node that arrives may be a new life, whose seq restarts.
                     slot.tracker = AckTracker::new();
@@ -671,16 +803,19 @@ impl Controller {
             Err(VerifyError::BadCrc) => {
                 slot.crc = slot.crc.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
             Err(VerifyError::OtherVersion(_)) => {
                 slot.version = slot.version.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
             Err(VerifyError::BadLen) => {
                 slot.len = slot.len.wrapping_add(1);
                 slot.misses = 0;
+                slot.heard = Some(end);
                 Outcome::Bad
             }
         };
@@ -691,18 +826,18 @@ impl Controller {
             // The node asserting a stuck line is usually the one that just arrived.
             self.unlatch();
             self.line(shared, Some(i), format_args!("appeared"));
-        } else if slot.present && slot.misses >= ABSENT_AFTER {
+        } else if slot.present
+            && slot.misses >= ABSENT_AFTER
+            && slot.heard.is_none_or(|heard| end.saturating_duration_since(heard) >= ABSENT_SPAN)
+        {
             slot.present = false;
+            let misses = slot.misses;
             shared.nodes.set_present(k, false);
             crate::carrier::presence(shared, shared.nodes.present());
             shared.nodes.downlinks.borrow_mut()[k].drain(|id| {
                 shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::NoNode });
             });
-            self.line(
-                shared,
-                Some(i),
-                format_args!("gone after {ABSENT_AFTER} transfers without magic"),
-            );
+            self.line(shared, Some(i), format_args!("gone after {misses} transfers without magic"));
         }
         outcome
     }
@@ -739,6 +874,15 @@ impl Controller {
                     slot.gaps,
                     slot.retries,
                     slot.records
+                ),
+            );
+            let x = &slot.xfers;
+            self.line(
+                shared,
+                Some(i),
+                format_args!(
+                    "xfer pass={} carry={} fetch={} owed={} poll={}",
+                    x.pass, x.carry, x.fetch, x.owed, x.poll
                 ),
             );
         }
