@@ -516,6 +516,37 @@ then the reboots and confirms.
 Nodes still miss transfers while they erase flash, 300–800 per node, but no longer go absent or
 cost the update. Keeping chunks flowing across a sector's end is the next lever.
 
+### After the review fixes (fc36e65)
+
+A code review's fixes changed the P4 in two places: a missed transfer no longer clears the ack
+the P4 owes a present node, and the cache's rules moved into `wartui-proto`, shared with the
+sim. The host now ends a fleet at once when the P4 has lost its cached image, rather than
+spending each session's retries. Rerun after flashing the P4:
+
+| | fe1bde3 | fc36e65 |
+| --- | --- | --- |
+| Confirmed | 10 of 10 | 10 of 10 |
+| Rate per node while sending | 23 KB/s | 22–23 KB/s |
+| Stuck-IRQ latches per bus | 3–4 | 2–4 |
+| Whole run | 48 s | 50 s |
+
+The 2 s is within what two runs of the same build differed by (48 and 50 s on fe1bde3).
+
+### Where the time goes now
+
+Each node needed about 2.8 transfers per chunk in the 48 s run (from the `xfer` counters,
+N1, N3, N6 and N8 agreeing), and each bus ran about 320 transfers a second against room for
+about 340 (a transfer is ~2.9 ms with its setup): the buses are about 94% busy. So a sector's
+stop costs a fleet little; fewer transfers per chunk is what would help. Roughly (inferred
+from the counters):
+
+| Transfers per chunk | What |
+| --- | --- |
+| ~1.0 | carrying the chunk |
+| ~0.75 | the ack fetch, which carries nothing toward the node |
+| ~0.8 | IRQ-pass visits to slots that bring no record |
+| ~0.25 | misses while a node erases flash, with their retries |
+
 ## Still open
 
 This list replaces the dated ones above.
