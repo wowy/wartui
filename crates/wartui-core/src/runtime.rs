@@ -209,40 +209,60 @@ fn stand_host_down(
     }
 }
 
-/// How often [`drive_ota`] ticks its session: well inside its 500 ms status timeout.
+/// How often [`drive_fleet`] ticks its sessions: well inside their 500 ms status timeout.
 pub const OTA_TICK: Duration = Duration::from_millis(50);
 
-/// Run one node's update to its end, or until `stop` resolves, which cancels it.
+/// Run every node's update at once to its end, or until `stop` resolves, which cancels them all.
+/// Returns each session's outcome, in the order given.
 ///
-/// Records from other nodes are handed to the session, which reads only its own node's.
-/// `progress` is called after every event, for showing.
+/// Every event goes to every session still running, and each reads only its own: its node's
+/// records, and the delivery answers to its own ids, which no two sessions share
+/// ([`crate::ota::Ids`]). A session that fails leaves the rest running. A cancel still sends each
+/// session's abort. `progress` is called for every session after every event, with its index,
+/// for showing.
 ///
-/// Every record sent, every delivery answer, every status from the node and every phase change is
+/// Every record sent, every delivery answer, every status from a node and every phase change is
 /// logged at debug level with structured fields, so a bench log of an update can be read back
 /// by a script.
-pub async fn drive_ota(
+pub async fn drive_fleet(
     link: &mut LinkHandle,
-    session: &mut OtaSession,
+    sessions: &mut [OtaSession],
     stop: impl std::future::Future<Output = ()>,
-    mut progress: impl FnMut(&Progress),
-) -> Outcome {
+    mut progress: impl FnMut(usize, &Progress),
+) -> Vec<Outcome> {
     tokio::pin!(stop);
     let mut ticker = tokio::time::interval(OTA_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut phase = session.progress().phase;
-    tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
-    loop {
-        let sends = tokio::select! {
-            () = &mut stop => session.cancel(now()),
-            _ = ticker.tick() => session.handle(now(), OtaEvent::Tick),
+    let mut phases: Vec<_> = sessions.iter().map(|session| session.progress().phase).collect();
+    for (session, phase) in sessions.iter().zip(&phases) {
+        tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
+    }
+    let mut stopped = false;
+    while sessions.iter().any(|session| session.outcome().is_none()) {
+        let mut sends = Vec::new();
+        let mut each = |event: OtaEvent<'_>| {
+            let now = now();
+            for session in sessions.iter_mut().filter(|session| session.outcome().is_none()) {
+                sends.extend(session.handle(now, event));
+            }
+        };
+        tokio::select! {
+            () = &mut stop, if !stopped => {
+                stopped = true;
+                let now = now();
+                for session in sessions.iter_mut() {
+                    sends.extend(session.cancel(now));
+                }
+            }
+            _ = ticker.tick() => each(OtaEvent::Tick),
             event = link.recv() => match event {
                 Some(LinkEvent::Message(BridgeToHost::Delivered { id })) => {
                     tracing::debug!(id, status = "delivered", "ota send result");
-                    session.handle(now(), OtaEvent::Delivery { id, delivered: true })
+                    each(OtaEvent::Delivery { id, delivered: true });
                 }
                 Some(LinkEvent::Message(BridgeToHost::Undelivered { id, reason })) => {
                     tracing::debug!(id, status = ?reason, "ota send result");
-                    session.handle(now(), OtaEvent::Delivery { id, delivered: false })
+                    each(OtaEvent::Delivery { id, delivered: false });
                 }
                 Some(LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. })) => {
                     if kind == UpType::UpdateStatus.as_u8()
@@ -257,46 +277,66 @@ pub async fn drive_ota(
                             "ota status"
                         );
                     }
-                    session.handle(now(), OtaEvent::FromNode { slot, kind, body: &body })
+                    each(OtaEvent::FromNode { slot, kind, body: &body });
                 }
-                Some(_) => Vec::new(),
-                None => return Outcome::Failed(Failure::LinkClosed),
+                Some(_) => {}
+                None => {
+                    let closed = Outcome::Failed(Failure::LinkClosed);
+                    return sessions
+                        .iter()
+                        .map(|session| session.outcome().cloned().unwrap_or_else(|| closed.clone()))
+                        .collect();
+                }
             },
-        };
+        }
         for cmd in sends {
-            if tracing::enabled!(tracing::Level::DEBUG)
-                && let HostToBridge::ToNode { slot, id, kind, body } = &cmd
-            {
-                let (kind, offset) = match DownMsg::decode(*kind, body) {
-                    Ok(DownMsg::UpdateBegin(_)) => ("begin", None),
-                    Ok(DownMsg::UpdateChunk(chunk)) => ("chunk", Some(chunk.offset)),
-                    Ok(DownMsg::UpdateCommit(_)) => ("commit", None),
-                    Ok(DownMsg::UpdateAbort(_)) => ("abort", None),
-                    Ok(DownMsg::UpdateConfirm(_)) => ("confirm", None),
-                    _ => ("other", None),
-                };
-                tracing::debug!(%slot, id, kind, offset, len = body.len(), "ota send");
-            }
+            log_send(&cmd);
             if let Err(e) = link.send_urgent(cmd) {
                 // The session's own timeouts resend it.
                 tracing::warn!("dropping an update record: {e}");
             }
         }
-        let now_progress = session.progress();
-        if now_progress.phase != phase {
-            phase = now_progress.phase;
-            tracing::debug!(
-                node = %mac::full(&session.node()),
-                phase = ?phase,
-                acked = now_progress.acked,
-                "ota phase"
-            );
+        for (i, (session, phase)) in sessions.iter().zip(&mut phases).enumerate() {
+            let now_progress = session.progress();
+            if now_progress.phase != *phase {
+                *phase = now_progress.phase;
+                tracing::debug!(
+                    node = %mac::full(&session.node()),
+                    phase = ?phase,
+                    acked = now_progress.acked,
+                    "ota phase"
+                );
+                if let Some(outcome) = session.outcome() {
+                    let node = session.node();
+                    tracing::debug!(node = %mac::full(&node), outcome = ?outcome, "ota outcome");
+                }
+            }
+            progress(i, &now_progress);
         }
-        progress(&now_progress);
-        if let Some(outcome) = session.outcome() {
-            tracing::debug!(outcome = ?outcome, "ota outcome");
-            return outcome.clone();
+    }
+    sessions.iter().filter_map(|session| session.outcome().cloned()).collect()
+}
+
+/// Log one update record at debug level.
+fn log_send(cmd: &HostToBridge) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    match cmd {
+        HostToBridge::ToNode { slot, id, kind, body } => {
+            let kind = match DownMsg::decode(*kind, body) {
+                Ok(DownMsg::UpdateBegin(_)) => "begin",
+                Ok(DownMsg::UpdateCommit(_)) => "commit",
+                Ok(DownMsg::UpdateAbort(_)) => "abort",
+                Ok(DownMsg::UpdateConfirm(_)) => "confirm",
+                _ => "other",
+            };
+            tracing::debug!(%slot, id, kind, len = body.len(), "ota send");
         }
+        HostToBridge::ToNodeChunk { slot, id, offset, len, .. } => {
+            tracing::debug!(%slot, id, kind = "chunk", offset, len, "ota send");
+        }
+        _ => {}
     }
 }
 

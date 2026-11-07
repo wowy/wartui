@@ -11,17 +11,18 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
-    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_RESTARTS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
-    OtaSession, Outcome, Phase, REBOOT_GRACE,
+    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES, OtaEvent,
+    OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
-use wartui_core::runtime::{drive_ota, now};
+use wartui_core::runtime::{drive_fleet, now};
 use wartui_proto::bus::{
-    Board, Capabilities, DieTemp, DownMsg, Heartbeat, NODE_VERSION, Slot, UpType, UpdateState,
-    UpdateStatus, Vdd, Version,
+    Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, NODE_VERSION, Slot, UPDATE_CHUNK,
+    UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp, cache_chunk_body, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
+use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0, 0, 0, 0, 7];
@@ -186,6 +187,22 @@ enum Out {
     Confirm,
 }
 
+/// The record `cmd` carries to its node: a `ToNode`'s, or the chunk a `ToNodeChunk` names, built
+/// from `image`, tagged `tag`, as the P4 builds it from its cache.
+fn record(cmd: &HostToBridge, image: &[u8], tag: u32) -> (Slot, u16, u8, Vec<u8>) {
+    match cmd {
+        HostToBridge::ToNode { slot, id, kind, body } => (*slot, *id, *kind, body.to_vec()),
+        HostToBridge::ToNodeChunk { slot, id, image: named, session, offset, len } => {
+            assert_eq!(*named, tag, "the chunk names the session's image");
+            let mut body = [0u8; UPDATE_CHUNK_MAX];
+            let n = cache_chunk_body(image, *session, *offset, *len, &mut body)
+                .expect("a chunk inside the image");
+            (*slot, *id, DownType::UpdateChunk.as_u8(), body[..n].to_vec())
+        }
+        other => panic!("the session sent {other:?}"),
+    }
+}
+
 fn summarize(kind: u8, body: &[u8]) -> Out {
     match DownMsg::decode(kind, body) {
         Ok(DownMsg::UpdateBegin(_)) => Out::Begin,
@@ -219,6 +236,9 @@ fn deliver(_: Out) -> Fate {
 /// The session, the node, and a clock.
 struct Bench {
     session: OtaSession,
+    /// The image the session sends, as the P4's cache holds it, and its tag.
+    image: Arc<[u8]>,
+    tag: u32,
     node: Node,
     /// The slot the node heartbeats from.
     slot: Slot,
@@ -236,12 +256,19 @@ impl Bench {
 
     /// A bench whose node runs `from`.
     fn from(image: &OtaImage, from: Version) -> Self {
+        Self::with_ids(image, from, Ids { next: 1, step: 1 })
+    }
+
+    /// A bench whose node runs `from`, and whose session takes `ids`.
+    fn with_ids(image: &OtaImage, from: Version, ids: Ids) -> Self {
         let start = Instant::now();
         let now = Now { mono: start, unix_ms: 0 };
         let mut node = Node::new();
         node.version = from;
         Self {
-            session: OtaSession::new(NODE, from, image, SESSION, 1, now),
+            session: OtaSession::new(NODE, from, image, SESSION, ids, now),
+            image: Arc::clone(&image.bytes),
+            tag: image_tag(&image.sha256),
             node,
             slot: SLOT,
             start,
@@ -275,6 +302,46 @@ impl Bench {
         self.feed(status_from(slot, &status.encode()));
     }
 
+    /// The node's status naming `next_offset`, from its slot.
+    fn receiving(&mut self, next_offset: u32) {
+        let status = UpdateStatus { session: SESSION, state: UpdateState::Receiving, next_offset };
+        self.status(SLOT, status);
+    }
+
+    /// Open the session: a heartbeat, and the node's status at 0 answering the `begin`.
+    fn open(&mut self) {
+        self.beat();
+        assert_eq!(self.queued(), [Out::Begin]);
+        self.queue.clear();
+        self.receiving(0);
+    }
+
+    /// What the session has queued and not yet sent, in order.
+    fn queued(&self) -> Vec<Out> {
+        self.queue
+            .iter()
+            .map(|cmd| {
+                let (_, _, kind, body) = record(cmd, &self.image, self.tag);
+                summarize(kind, &body)
+            })
+            .collect()
+    }
+
+    /// Answer the queued chunk at `offset`, `delivered` or not, without the node reading it.
+    fn answer_chunk(&mut self, offset: u32, delivered: bool) {
+        let at = self
+            .queue
+            .iter()
+            .position(
+                |cmd| matches!(cmd, HostToBridge::ToNodeChunk { offset: o, .. } if *o == offset),
+            )
+            .unwrap_or_else(|| panic!("chunk {offset} is queued: {:?}", self.queued()));
+        let Some(HostToBridge::ToNodeChunk { id, .. }) = self.queue.remove(at) else {
+            unreachable!("found above")
+        };
+        self.feed(OtaEvent::Delivery { id, delivered });
+    }
+
     /// Carry every queued record to the node, the delivery result back before the node's
     /// answer, until nothing is left to send.
     fn settle(&mut self, fate: &mut impl FnMut(Out) -> Fate) {
@@ -286,9 +353,7 @@ impl Bench {
         while !done(self)
             && let Some(cmd) = self.queue.pop_front()
         {
-            let HostToBridge::ToNode { slot, id, kind, body } = cmd else {
-                panic!("the session sent {cmd:?}");
-            };
+            let (slot, id, kind, body) = record(&cmd, &self.image, self.tag);
             assert_eq!(slot, self.slot, "sent to the slot the node heartbeats from");
             let out = summarize(kind, &body);
             self.sent.push(out);
@@ -465,7 +530,9 @@ fn ota_session_fails_when_chunks_stay_undelivered_across_every_begin() {
     let per_begin = MAX_SEND_FAILURES as usize + 1;
     let begins = MAX_RESTARTS as usize + 1;
     assert_eq!(bench.count(Out::Chunk(2048)), per_begin * begins);
-    assert_eq!(bench.count(Out::Begin), begins, "the first begin and every return to it");
+    // The node holds the session throughout, so the status a chunk still out draws after each
+    // return to the begin answers as the begin would.
+    assert!(bench.count(Out::Begin) <= begins);
     assert_eq!(bench.sent.last(), Some(&Out::Abort), "the node is told to leave update mode");
 }
 
@@ -641,7 +708,7 @@ fn ota_session_resends_confirm_when_its_delivery_is_lost_on_same_version() {
 fn ota_session_confirms_trial_node_when_started_to_confirm() {
     let start = Instant::now();
     let now = |ms| Now { mono: start + Duration::from_millis(ms), unix_ms: 0 };
-    let mut session = OtaSession::confirm_trial(NODE, NEW, 1, now(0));
+    let mut session = OtaSession::confirm_trial(NODE, NEW, Ids { next: 1, step: 1 }, now(0));
     let beat = heartbeat(NEW, true);
     let sends = session.handle(now(10), beat_from(SLOT, &beat));
     let [HostToBridge::ToNode { slot, id, kind, body }] = sends.as_slice() else {
@@ -780,6 +847,123 @@ fn ota_session_reads_heartbeat_prefix_when_node_runs_another_minor() {
     assert_eq!(queued, [Out::Begin]);
 }
 
+#[test]
+fn ota_session_sends_two_chunks_before_any_delivery() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    assert_eq!(bench.queued(), [Out::Chunk(0), Out::Chunk(1024)]);
+}
+
+#[test]
+fn ota_session_sends_next_chunk_on_each_delivery() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    bench.answer_chunk(0, true);
+    assert_eq!(bench.queued(), [Out::Chunk(1024), Out::Chunk(2048)]);
+}
+
+#[test]
+fn ota_session_holds_next_sector_until_status() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    for offset in (0..4096).step_by(1024) {
+        bench.answer_chunk(offset, true);
+    }
+    // The node writes the sector on its last chunk, and says so before the next goes.
+    assert_eq!(bench.queued(), []);
+    bench.receiving(4096);
+    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+}
+
+#[test]
+fn ota_session_rewinds_to_undelivered_chunk() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    bench.answer_chunk(0, true);
+    bench.answer_chunk(1024, false);
+    assert_eq!(bench.queued(), [Out::Chunk(2048), Out::Chunk(1024)]);
+    // 2048 reached a node lacking 1024, which drops it, so it goes again after 1024.
+    bench.answer_chunk(2048, true);
+    assert_eq!(bench.queued(), [Out::Chunk(1024), Out::Chunk(2048)]);
+}
+
+#[test]
+fn ota_session_resends_from_status_offset_without_crossing_sector() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    for offset in (0..4096).step_by(1024) {
+        bench.answer_chunk(offset, true);
+    }
+    bench.receiving(4096);
+    bench.answer_chunk(4096, true);
+    bench.answer_chunk(5120, true);
+    assert_eq!(bench.queued(), [Out::Chunk(6144), Out::Chunk(7168)]);
+    // The node lost 4096, and says so on 5120.
+    bench.receiving(4096);
+    let mut resent = Vec::new();
+    for offset in [6144, 7168, 4096, 5120, 6144, 7168] {
+        let before = bench.queue.len();
+        bench.answer_chunk(offset, true);
+        if bench.queue.len() == before {
+            resent.extend(bench.queued().last().copied());
+        }
+    }
+    assert_eq!(resent, [Out::Chunk(4096), Out::Chunk(5120), Out::Chunk(6144), Out::Chunk(7168)]);
+    assert_eq!(bench.queued(), [], "nothing past 8192 without its sector's status");
+}
+
+#[test]
+fn ota_session_ignores_status_when_it_names_a_chunk_awaiting_delivery() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.open();
+    for offset in (0..4096).step_by(1024) {
+        bench.answer_chunk(offset, true);
+    }
+    bench.receiving(4096);
+    // Written before 4096 arrived, as a duplicate's status is: resending would send it twice.
+    bench.receiving(4096);
+    assert_eq!(bench.queued(), [Out::Chunk(4096), Out::Chunk(5120)]);
+    bench.answer_chunk(4096, true);
+    assert_eq!(bench.queued(), [Out::Chunk(5120), Out::Chunk(6144)]);
+}
+
+#[test]
+fn ota_session_ignores_delivery_for_another_sessions_id() {
+    let mut bench = Bench::with_ids(&image(NEW), OLD, Ids { next: 2, step: 3 });
+    bench.beat();
+    bench.receiving(0);
+    let ids: Vec<u16> = bench
+        .queue
+        .iter()
+        .map(|cmd| match cmd {
+            HostToBridge::ToNode { id, .. } | HostToBridge::ToNodeChunk { id, .. } => *id,
+            other => panic!("the session sent {other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, [2, 5, 8], "the begin, then two chunks");
+    let queued = bench.queue.clone();
+    bench.feed(OtaEvent::Delivery { id: 3, delivered: true });
+    bench.feed(OtaEvent::Delivery { id: 4, delivered: false });
+    assert_eq!(bench.queue, queued, "nothing sent");
+    assert_eq!(bench.session.progress().phase, Phase::Streaming);
+}
+
+#[test]
+fn ota_session_sends_chunks_as_tonodechunk_with_image_tag() {
+    let image = image(NEW);
+    let mut bench = Bench::new(&image);
+    bench.open();
+    let HostToBridge::ToNodeChunk { slot, image: tag, session, offset, len, .. } = bench.queue[1]
+    else {
+        panic!("a chunk command: {:?}", bench.queue[1]);
+    };
+    assert_eq!((slot, tag, session), (SLOT, image_tag(&image.sha256), SESSION));
+    assert_eq!((offset, usize::from(len)), (1024, UPDATE_CHUNK));
+    // The last is what is left of the image.
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    bench.assert_image_written();
+}
+
 // End to end, against the simulated fleet.
 
 /// How much faster than real time the fake fleet runs.
@@ -815,8 +999,33 @@ fn sim_image(version: Version) -> OtaImage {
     OtaImage { board: Board::Esp32c5, ..image(version) }
 }
 
+/// Upload `image` into the bridge's node image cache, as `wartui ota` does first.
+async fn upload(link: &mut LinkHandle, image: &OtaImage) {
+    let send = |link: &LinkHandle, op: Op<'_>| {
+        let mut buf = [0u8; OP_MAX];
+        let len = op.encode(&mut buf);
+        let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits");
+        link.send_urgent(HostToBridge::CacheImage(op)).expect("queued");
+    };
+    let len = u32::try_from(image.bytes.len()).expect("a small image");
+    send(link, Op::Begin { session: 1, len, sha256: image.sha256 });
+    for (i, data) in image.bytes.chunks(UPDATE_CHUNK).enumerate() {
+        let offset = u32::try_from(i * UPDATE_CHUNK).expect("a small image");
+        send(link, Op::Chunk { session: 1, offset, data });
+    }
+    send(link, Op::Commit { session: 1 });
+    loop {
+        if let Some(LinkEvent::Message(BridgeToHost::CacheImage(bytes))) = link.recv().await
+            && let Some(Op::Status(status)) = Op::decode(&bytes)
+            && status.state == UpdateState::Verified
+        {
+            return;
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
-async fn drive_ota_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_roll_back() {
+async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_roll_back() {
     let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
     let mut link = SimTransport::new(SimConfig {
         node_count: 4,
@@ -837,15 +1046,16 @@ async fn drive_ota_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_ro
 
     let new = NODE_VERSION;
     let image = sim_image(new);
-    let mut next_id = 1;
-    let mut outcomes = Vec::new();
-    for (i, node) in nodes.iter().enumerate() {
-        let session = u8::try_from(0x40 + i).unwrap_or(1);
-        let mut ota = OtaSession::new(*node, old, &image, session, next_id, now());
-        let outcome = drive_ota(&mut link, &mut ota, std::future::pending(), |_| {}).await;
-        next_id = ota.next_id();
-        outcomes.push(outcome);
-    }
+    upload(&mut link, &image).await;
+    let mut sessions: Vec<OtaSession> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let session = u8::try_from(0x40 + i).unwrap_or(1);
+            OtaSession::new(*node, old, &image, session, Ids::of(i, nodes.len()), now())
+        })
+        .collect();
+    let outcomes = drive_fleet(&mut link, &mut sessions, std::future::pending(), |_, _| {}).await;
     assert_eq!(outcomes[0], Outcome::Done(new));
     assert_eq!(outcomes[1], Outcome::Done(new), "chunk drops are recovered");
     assert_eq!(outcomes[2], Outcome::Failed(Failure::RolledBack(old)));

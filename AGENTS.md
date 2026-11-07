@@ -143,7 +143,8 @@ place that reads a clock and performs actions. This is what makes liveness aging
 detection, assignment timing and auto-partitioning testable in microseconds against a clock the
 test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::now()`, I/O or
 `async` inside `engine`. An over-the-air update is split the same way: `ota::OtaSession` is the
-pure state machine and `runtime::drive_ota` its driver (`crates/wartui-core/tests/ota.rs`).
+pure state machine and `runtime::drive_fleet` its driver, running every node's session at once
+(`crates/wartui-core/tests/ota.rs`).
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
 ordered against each other. Only `b`, `c`, `p`, `r` and `R` get that far; channels are the

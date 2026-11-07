@@ -485,6 +485,14 @@ impl<'a> Sender<'a> {
         self.stage
     }
 
+    /// Whether the receiver has reported the image verified, so `Install` is all that is left.
+    /// The host's upload into the P4's node image cache ends here, since the cache installs
+    /// nothing.
+    #[must_use]
+    pub fn is_verified(&self) -> bool {
+        self.step == Step::Install
+    }
+
     /// The share of the image the C6 has reported holding, 0 to 100.
     #[must_use]
     pub fn percent(&self) -> u8 {

@@ -247,6 +247,24 @@ fn radio_link_update_sender_installs_image_when_c6_verifies_it() {
 }
 
 #[test]
+fn radio_link_update_sender_reports_verified_when_c6_verifies_image() {
+    let image = image(2 * SECTOR + 100);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    assert!(!sender.is_verified());
+    let mut out = [0u8; OP_MAX];
+    sender.next(0, &mut out).expect("the begin");
+    let receiving =
+        UpdateStatus { session: SESSION, state: UpdateState::Receiving, next_offset: 0 };
+    sender.on_status(&receiving);
+    assert!(!sender.is_verified());
+    let verified = UpdateStatus { session: SESSION, state: UpdateState::Verified, next_offset: 0 };
+    sender.on_status(&verified);
+    // Before `Install` goes, so a sender that wants none stops here.
+    assert!(sender.is_verified());
+    assert_eq!(sender.stage(), Stage::Sending);
+}
+
+#[test]
 fn radio_link_update_sender_rewinds_to_next_offset_when_status_names_a_gap() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
