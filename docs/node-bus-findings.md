@@ -328,12 +328,38 @@ as N3's answer came, which lands inside the 5 s check that follows N3's cycle:
 The check started again after N5's cycle. Before 3e144f3, N5 would have waited out the check
 and been answered about 6 s after it was sent.
 
+### Supply loss on 3e144f3, 2026-11-07
+
+**All ten seated.** Recovery behaves as it did on 4ac6c60:
+
+| Time (UTC) | |
+| --- | --- |
+| 12:31:02.86 | supply on; N1, the slot being scouted, appears |
+| 12:31:03.76 | `N1 answered, so the node supply is back; 10 node slots powered again` |
+| 12:31:04.86–.94 | the other nine appear |
+| 12:31:23.57–.84 | supply off; all ten gone within 0.27 s, then `every node dropped at once` |
+| 12:31:41.61 | supply on; N7 appears in its turn, after N1, N6 and N2 |
+| 12:31:42.51–43.86 | `N7 answered`, and the other nine appear |
+
+Across the drop and the return, N2 and N9 each counted one CRC error, every slot two retries,
+and bus B two stuck IRQs. IRQ served both buses again afterwards, and no slot counted another
+CRC, version, length or seq-gap error.
+
+**Only N4 and N9 seated, a request during recovery.** The two dropped together at 12:35:24.08,
+so recovery scouted N4 and N9 first. `wartui power-cycle --slot N1` at 12:36:10.6 ended the
+scouting and was answered in 1.99 s. The check that followed found no node at about 12:36:17.6,
+worked out from the answer and the 5 s check: the line came before the host's log was connected
+again. Scouting then resumed in 5 s turns.
+
+The supply was switched on during the second round. N4 appeared at 12:37:10.09, 2.5 s into the
+round's first turn, about a node's boot time, and N9 followed at 12:37:11.95. With the slots that
+held nodes carried through the request, a round starts N4, N9, N1, N6… Before 3e144f3 it started
+at N1, and N4 would have waited for the round's seventh turn, about 30 s later.
+
 ### Still open
 
 - A ten-node capture with antennas, for coverage.
 - Two fixes that this bench can't provoke: retrying each expander transaction at boot, which
   needs an I2C glitch, and exempting only the node in a cycle now from the supply-loss count,
   which needs the supply to drop within about 1 s of a queued cycle.
-- Scouting the slots that held nodes first, after a request ends a recovery and the check that
-  follows finds no node (3e144f3).
 - 4 MHz.
