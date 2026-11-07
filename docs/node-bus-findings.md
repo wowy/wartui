@@ -105,6 +105,48 @@ A throwaway build, before the cache, measured the P4-WIFI6's PSRAM through esp-h
 The buses, the GPS and the host link ran normally alongside it. Building a chunk from the cache
 costs about 24 µs, against about 3 ms on the bus to carry it.
 
+## Updating all ten nodes at once, 2026-11-07
+
+`wartui ota --force --yes` to the same version (0.3.1), all ten carrier-10 nodes at once, 4 MHz.
+The host uploads the image once into the P4's PSRAM cache and runs one session per node, each
+with two chunks out, sent by reference from the cache.
+
+| | 7e8be0d | ffde486 |
+| --- | --- | --- |
+| Cache upload | 884 KB in 2.6 s | 884 KB in 2.6 s |
+| Confirmed | 8 of 10 | 10 of 10 |
+| Rate per node while sending | about 15 KB/s | 13–23 KB/s |
+| Whole run | 74 s | 80 s |
+
+The whole run includes the 6 s listen and an incremental image build.
+
+### Nodes erasing flash went absent (fixed in ffde486)
+
+On 7e8be0d, 0D:20 (N5) and 1A:50 (N10) failed with `node not answering`. Both went `gone after
+5 transfers without magic`, then `appeared` 2 s later, every 2–3 s for 17 s, still making
+progress between drops, so they weren't rebooting. Each drop answered their queued chunks
+`NoNode`, and after enough failed sends their sessions gave up.
+
+It wasn't those boards: alone, 04:E4 updated in 38 s and 0D:20 in 35 s, each with one drop, at
+its reboot. But even alone, a node counted 160–170 magic failures during its update, about one
+per 4 KB sector it writes. The reading, not yet measured directly: while a node erases a sector,
+its flash operation holds interrupts, so it can't re-arm. In a fleet, the shared IRQ line is
+nearly always asserted and each pass clocks every node, including one mid-erase, so five misses
+in a row came fast enough to mark a node absent.
+
+ffde486 makes absence need 1 s since the slot's last answer as well as five misses, and holds a
+slot that missed for 10 ms before clocking it again. All ten then confirmed.
+
+### Where the 80 s went (ffde486)
+
+- **Before any chunk:** the 6 s listen, the 2.6 s upload, and each session waiting up to 5 s
+  for its node's next heartbeat to send its `begin`.
+- **Sending:** most nodes finished in 41–49 s. 00:40 (N2) and 97:78 (N3), both on bus A, ran at
+  13 KB/s and finished at 67 s, so they set the time.
+- **Magic failures:** 580–790 per node on bus A and 64–320 on bus B. Why bus A has more is open.
+- **IRQ passes:** each node raises IRQ for each sector's status, and a pass clocks every node on
+  the bus, so most of a pass's transfers carry nothing.
+
 ## Still open
 
 - A shared bus. Several nodes on one CS-selected bus, with MISO tri-stated by the node while
