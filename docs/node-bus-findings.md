@@ -642,6 +642,40 @@ Most of a sector's time in a fleet update is the 70–85 ms from its last chunk 
 much of that is the node's own flush. Keeping chunks flowing across a sector's end, so the
 flush overlaps the next sector's sending, is the lever left.
 
+## Erasing 64 KB at a time, 2026-11-07
+
+A node takes nothing over its bus while its flash erases or writes: esp-storage runs each
+operation in a critical section, so the node's CS-edge handler can't re-arm, and the P4 sees
+misses until it ends. Each 4 KB sector's erase and write left a node unreachable for about
+43 ms (inferred from the P4's counters in a ten-node update), so a fleet update spent about
+7–12 s of each node's time deaf. So keeping chunks flowing across a sector's end, the lever
+left above, comes down to how long each flush takes, not to the host's flow.
+
+7c7bd57 has the node erase its update slot a 64 KB block at a time, one ROM call when the image
+reaches the block, and only write at the other sectors. The C6 and the P4 keep erasing sector
+by sector: they serve links while they update, and their update speed doesn't matter. The P4's
+`xfer` line gained `deaf=`, the longest span in each report that a present slot went without a
+transfer with the magic. ba59d91, the review's fixes, made the erase unit a property of the
+flash target, with no change on the bus.
+
+`wartui ota --force --yes`, all ten carrier-10 nodes, 4 MHz, every node confirmed:
+
+| | 8edcb87 | 7c7bd57 | ba59d91 |
+| --- | --- | --- | --- |
+| Ten nodes | 39, 40, 41 s | 40, 32 s | 37, 31 s |
+| Rate per node while sending | 29–31 KB/s | 34–43 KB/s | 40–43 KB/s |
+| One node alone | 37 s, 38 KB/s | 21 s, 67 KB/s | 22 s, 65 KB/s |
+| Time each node spent deaf per update | about 7–12 s | about 2 s | — |
+| Longest deaf span while sending | under 110 ms | 243 ms | 239 ms |
+
+The first run of each build was the one that moved the nodes onto it. In 7c7bd57's first run,
+two nodes sent at 34 KB/s; a spike of the same node change ran in 30 and 33 s. A block erase
+costs about 150–170 ms (inferred from the deaf totals), and the longest seen is a quarter of
+the P4's 1 s absence span. No node went absent while chunks were sent; every `gone` line was a
+node rebooting into its new image.
+
+What remains of a sector's time in a fleet update is mostly the bus sending its chunks.
+
 ## Still open
 
 This list replaces the dated ones above.

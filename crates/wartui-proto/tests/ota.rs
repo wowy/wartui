@@ -5,24 +5,28 @@ use wartui_proto::bus::{
     Board, UPDATE_CHUNK, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState,
     UpdateStatus, Version,
 };
-use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
+use wartui_proto::ota::{BLOCK, Receiver, SECTOR, SectorSink};
 
 const BOARD: Board = Board::Esp32c6;
 const CAPACITY: u32 = 64 * SECTOR as u32;
+/// What a block-erasing sink records for the slot's first block.
+const ERASE_FIRST_BLOCK: Op = Op::Erase(0, BLOCK as u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
-    Erase(u32),
+    /// Offset and length.
+    Erase(u32, u32),
     Write(u32, usize),
 }
 
-/// A slot that behaves like NOR flash: erase sets a sector to 0xFF, and a write lands only
+/// A slot that behaves like NOR flash: erase sets its range to 0xFF, and a write lands only
 /// on erased bytes. It records every operation and fails every one once told to.
 struct FakeSink {
     capacity: u32,
     flash: Vec<u8>,
     ops: Vec<Op>,
     fail: bool,
+    unit: u32,
 }
 
 impl FakeSink {
@@ -34,17 +38,18 @@ impl FakeSink {
     /// the slot shows as a failed assertion rather than a panic in the fake.
     fn with_capacity(capacity: u32) -> Self {
         let backing = (capacity as usize).next_multiple_of(SECTOR);
-        Self { capacity, flash: vec![0; backing], ops: Vec::new(), fail: false }
+        let unit = SECTOR as u32;
+        Self { capacity, flash: vec![0; backing], ops: Vec::new(), fail: false, unit }
     }
 
-    fn erases(&self) -> Vec<u32> {
-        self.ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::Erase(at) => Some(*at),
-                Op::Write(..) => None,
-            })
-            .collect()
+    /// A slot of [`CAPACITY`] that erases a block at a time, as a node's does.
+    fn block_erasing() -> Self {
+        Self { unit: BLOCK as u32, ..Self::new() }
+    }
+
+    /// Every erase, in order.
+    fn erases(&self) -> Vec<Op> {
+        self.ops.iter().copied().filter(|op| matches!(op, Op::Erase(..))).collect()
     }
 }
 
@@ -55,14 +60,19 @@ impl SectorSink for FakeSink {
         self.capacity
     }
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
+    fn erase_unit(&self) -> u32 {
+        self.unit
+    }
+
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), ()> {
         assert_eq!(offset as usize % SECTOR, 0, "erase at a sector boundary");
-        assert!(offset + SECTOR as u32 <= self.capacity, "erase within the slot");
+        assert_eq!(len as usize % SECTOR, 0, "erase whole sectors");
+        assert!(offset + len <= self.capacity, "erase within the slot");
         if self.fail {
             return Err(());
         }
-        self.ops.push(Op::Erase(offset));
-        self.flash[offset as usize..offset as usize + SECTOR].fill(0xFF);
+        self.ops.push(Op::Erase(offset, len));
+        self.flash[offset as usize..(offset + len) as usize].fill(0xFF);
         Ok(())
     }
 
@@ -166,11 +176,12 @@ fn receiver_erases_each_sector_once_when_before_its_first_write() {
     send_all(&mut rx, &mut sink, 1, &image);
     rx.commit(&UpdateCommit { session: 1 }, &mut sink);
 
-    let sectors: Vec<u32> = (0..6).map(|i| i * SECTOR as u32).collect();
-    assert_eq!(sink.erases(), sectors, "one erase per sector, none beyond the image");
+    let sector = SECTOR as u32;
+    let erases: Vec<Op> = (0..6).map(|i| Op::Erase(i * sector, sector)).collect();
+    assert_eq!(sink.erases(), erases, "one erase per sector, none beyond the image");
     for (i, pair) in sink.ops.chunks(2).enumerate() {
-        let at = sectors[i];
-        assert!(matches!(pair, [Op::Erase(e), Op::Write(w, _)] if *e == at && *w == at));
+        let at = i as u32 * sector;
+        assert!(matches!(pair, [Op::Erase(e, _), Op::Write(w, _)] if *e == at && *w == at));
     }
 }
 
@@ -508,4 +519,110 @@ fn receiver_exposes_session_when_one_is_open() {
     assert!(rx.is_active());
     assert_eq!(rx.total_len(), Some(3000));
     assert_eq!(rx.version(), Some(Version::new(0, 2, 0)));
+}
+
+#[test]
+fn receiver_erases_block_then_tail_when_slot_ends_partway_into_a_block() {
+    // A slot of one block, two sectors and a fragment: the block erases whole, then the tail up
+    // to the last whole sector.
+    let capacity = (BLOCK + 2 * SECTOR + 100) as u32;
+    let image = image(BLOCK + 2 * SECTOR);
+    let (mut rx, mut sink) = (receiver(), FakeSink::with_capacity(capacity));
+    sink.unit = BLOCK as u32;
+    rx.begin(&begin_for(1, &image), &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(
+        rx.commit(&UpdateCommit { session: 1 }, &mut sink),
+        status(1, UpdateState::Verified, image.len() as u32)
+    );
+
+    let (block, tail) = (BLOCK as u32, 2 * SECTOR as u32);
+    assert_eq!(sink.erases(), [Op::Erase(0, block), Op::Erase(block, tail)]);
+    assert_eq!(&sink.flash[..image.len()], image.as_slice());
+}
+
+#[test]
+fn receiver_erases_whole_block_when_image_ends_partway_into_it() {
+    // The slot has room for the second block, so it erases whole though the image ends early.
+    let image = image(BLOCK + SECTOR + 5);
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    rx.begin(&begin_for(1, &image), &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(rx.commit(&UpdateCommit { session: 1 }, &mut sink).state, UpdateState::Verified);
+    assert_eq!(sink.erases(), [Op::Erase(0, BLOCK as u32), Op::Erase(BLOCK as u32, BLOCK as u32)]);
+    assert_eq!(&sink.flash[..image.len()], image.as_slice());
+}
+
+#[test]
+fn receiver_erases_block_again_when_begin_differs() {
+    let image = image(2 * SECTOR);
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    rx.begin(&begin_for(1, &image), &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+
+    // The fake refuses a write onto unerased flash, so the second pass must erase again.
+    rx.begin(&begin_for(2, &image), &sink);
+    send_all(&mut rx, &mut sink, 2, &image);
+    assert_eq!(rx.commit(&UpdateCommit { session: 2 }, &mut sink).state, UpdateState::Verified);
+    assert_eq!(sink.erases(), [ERASE_FIRST_BLOCK; 2]);
+}
+
+#[test]
+fn receiver_erases_block_again_when_identical_begin_follows_hash_mismatch() {
+    let image = image(2 * SECTOR);
+    let mut corrupt = image.clone();
+    corrupt[0] ^= 1;
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    let begin = begin_for(1, &image);
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &corrupt);
+    assert_eq!(rx.commit(&UpdateCommit { session: 1 }, &mut sink).state, UpdateState::HashMismatch);
+
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(rx.commit(&UpdateCommit { session: 1 }, &mut sink).state, UpdateState::Verified);
+    assert_eq!(sink.erases(), [ERASE_FIRST_BLOCK; 2]);
+}
+
+#[test]
+fn receiver_erases_block_again_when_begin_follows_abort() {
+    let image = image(2 * SECTOR);
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    let begin = begin_for(1, &image);
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &image[..SECTOR]);
+    rx.abort(&UpdateAbort { session: 1 });
+
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(rx.commit(&UpdateCommit { session: 1 }, &mut sink).state, UpdateState::Verified);
+    assert_eq!(sink.erases(), [ERASE_FIRST_BLOCK; 2]);
+}
+
+#[test]
+fn receiver_keeps_erased_block_when_identical_begin_resumes_session() {
+    let image = image(BLOCK);
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    let begin = begin_for(1, &image);
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &image[..3 * SECTOR]);
+    let resumed = rx.begin(&begin, &sink);
+    assert_eq!(resumed, status(1, UpdateState::Receiving, 3 * SECTOR as u32));
+
+    for offset in (3 * SECTOR..image.len()).step_by(UPDATE_CHUNK) {
+        rx.chunk(&chunk_at(1, &image, offset), &mut sink);
+    }
+    assert_eq!(rx.commit(&UpdateCommit { session: 1 }, &mut sink).state, UpdateState::Verified);
+    assert_eq!(sink.erases(), [ERASE_FIRST_BLOCK]);
+}
+
+#[test]
+fn receiver_reports_flash_error_when_block_erase_fails() {
+    let image = image(2 * SECTOR);
+    let (mut rx, mut sink) = (receiver(), FakeSink::block_erasing());
+    rx.begin(&begin_for(1, &image), &sink);
+    sink.fail = true;
+    let reports = send_all(&mut rx, &mut sink, 1, &image[..SECTOR]);
+    assert_eq!(reports.last(), Some(&Some(status(1, UpdateState::FlashError, SECTOR as u32))));
+    assert!(sink.ops.is_empty());
 }

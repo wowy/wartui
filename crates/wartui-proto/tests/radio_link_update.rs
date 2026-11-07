@@ -31,9 +31,9 @@ impl SectorSink for Slot {
         self.flash.len() as u32
     }
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
-        let at = offset as usize;
-        self.flash[at..at + SECTOR].fill(0xFF);
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), ()> {
+        let (at, len) = (offset as usize, len as usize);
+        self.flash[at..at + len].fill(0xFF);
         Ok(())
     }
 
