@@ -199,3 +199,73 @@ dropped no frames, and the host stored all of them.
 - **Several nodes on one bus.** Each bus held one node at a time, so no two nodes shared MISO.
 - **4 MHz.**
 - **The 14-node board's seventh CS on each bus** (GPIO25 and GPIO24).
+
+## A full carrier-10, 2026-11-06
+
+The same P4 and carrier, with a node in every socket, five per bus. The bus ran at 1 MHz.
+
+| Bus A | N1 `04:E4` | N2 `00:40` | N3 `97:78` | N4 `0A:28` | N5 `0D:20` |
+| --- | --- | --- | --- | --- | --- |
+| **Bus B** | **N6 `7E:3C`** | **N7 `EF:54`** | **N8 `F7:30`** | **N9 `E5:60`** | **N10 `1A:50`** |
+
+Every node heartbeated over the bus, with no CRC, version, length or seq-gap error on any slot.
+`wartui power-cycle` rebooted each of the ten with reset cause `power_on`, at two retries apiece.
+
+**Five nodes on one IRQ line cost a pass per record.** An IRQ pass clocks every present slot
+once, about 46 ms with five at 1 MHz. A record waits one or two passes:
+
+| IRQ-to-transfer latency, mean / max | Bus A | Bus B |
+| --- | --- | --- |
+| One node, any socket | 8.8–9.6 / 9.6 ms | 9.4–9.7 / 9.7 ms |
+| Five nodes, after a P4 reset (ed43819) | 34.5 / 69 ms | 36 / 69 ms |
+| Five nodes, after a cold start (03eefed) | 31.8 / 52 ms | 34.4 / 52 ms |
+
+### A stuck IRQ latch that could not clear (fixed in 03eefed)
+
+On ed43819, bus A came up from three cold starts in a row with `irq_n=2 stuck=1`, and stayed
+there for minutes. Its five nodes' heartbeats then arrived exactly 1,010 ms apart, the
+timed schedule's grid, where IRQ service gives each node's own cadence. Bus B latched once on
+each cold start and recovered.
+
+- At a cold start, nodes assert IRQ before the P4 has marked them present, so two passes over
+  the present slots bring nothing and the bus latches the line as stuck. That is intended.
+- The latch cleared only on seeing the line deasserted. Served by the timed schedule, each
+  node holds IRQ while its record waits for a poll, 250–500 ms of every second. Bus A's five
+  heartbeats were spread across the second, at about .07, .40, .62, .80 and .89 s, so the
+  line never deasserted.
+- Power-cycling any one node, even one with no part in the fault, opened a gap and returned
+  the bus to IRQ service.
+
+03eefed also clears the latch when a slot becomes present, and retries IRQ service every
+second. A cold start with all ten seated then counted no stuck line on either bus.
+
+**A short on the carrier held bus A's IRQ too.** N4's D0, the node's IRQ output, had been
+shorted to N3's 5 V pin. Once it was cleared, `0A:28` alone in N4 was served 22 IRQs for its
+22 records at 9.1 / 9.6 ms, with no stuck line. So its D0 and the carrier's IRQ input for N4
+both survived 5 V. The short does not explain the cold starts: bus A latched the same way after it
+was cleared.
+
+### The node supply lost while the P4 stays up (4ac6c60)
+
+The P4 ran from its own USB-C, connected to the host, while the carrier's supply was switched
+off for several seconds and back on. The host-side times are from `wartui sniff`:
+
+| Time | The P4 |
+| --- | --- |
+| 21:32:59.54–.78 | all ten nodes gone, each after 5 transfers without magic |
+| 21:33:00.05 | `every node dropped at once, so the node supply was likely lost`; every port low |
+| 21:33:00–05 | scout N1, supply still out: no answer, switched off |
+| ~21:33:05 | scout N6; the supply returns during its turn |
+| 21:33:09.72 | `N6 appeared` |
+| 21:33:11.05 | `N6 answered, so the node supply is back; 10 node slots powered again` |
+| 21:33:11.53–.82 | the other nine appear |
+
+The ten drops fell within 0.25 s of each other, well inside the 2 s window. The bridge dropped no
+frame. Before 4ac6c60, the expander kept every port high through the loss, so all ten started
+together when the supply returned.
+
+### Still open on the full carrier
+
+- A capture with all ten nodes assigned and recording.
+- A power-cycle request while the P4 scouts. Host tests cover only the detection.
+- 4 MHz, which cuts a five-node pass to about 12 ms.
