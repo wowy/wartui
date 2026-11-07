@@ -31,6 +31,7 @@ const HEARTBEAT: &[u8] = &[
     0x05, // reset_cause: brownout
     0x43, // vdd: code 67, 3304 mV
     0x51, // die_temp: code 81, 41 °C
+    0x40, 0x9C, 0x00, 0x00, // heap_free 40,000, little-endian
 ];
 
 /// A heartbeat from a node unassigned since boot: epoch 0, never sent by the host.
@@ -46,6 +47,7 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x01, // reset_cause: power on
     0x00, // vdd: no reading
     0xFF, // die_temp: no reading
+    0x00, 0x00, 0x00, 0x00, // heap_free 0
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -238,6 +240,7 @@ fn heartbeat_serializes_byte_for_byte_when_encoded_and_decoded() {
         reset_cause: ResetCause::Brownout,
         vdd: Vdd(67),
         die_temp: DieTemp(81),
+        heap_free: 40_000,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(Heartbeat::decode(HEARTBEAT), Ok(msg));
@@ -260,6 +263,7 @@ fn heartbeat_serializes_epoch_zero_when_node_holds_no_assignment() {
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 0,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(Heartbeat::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -322,6 +326,17 @@ fn heartbeat_round_trips_health_when_encoded_at_its_offsets() {
     let body = msg.encode();
     assert_eq!(&body[21..23], &[0x00, 0xFF]);
     assert_eq!(Heartbeat::decode(&body), Ok(msg));
+}
+
+#[test]
+fn heartbeat_serializes_heap_free_as_little_endian_when_encoded() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.heap_free, 40_000);
+    assert_eq!(&HEARTBEAT[23..27], &[0x40, 0x9C, 0, 0]);
+
+    let msg = Heartbeat { heap_free: u32::MAX, ..decoded };
+    assert_eq!(&msg.encode()[23..27], &[0xFF; 4]);
+    assert_eq!(Heartbeat::decode(&msg.encode()), Ok(msg));
 }
 
 #[test]
@@ -963,7 +978,7 @@ fn msg_decoder_rejects_truncated_body_when_body_is_too_short() {
 fn heartbeat_pins_prefix_and_mac_when_inspecting_body() {
     // Version, board and flags, then the MAC: what a host reads from a node on another
     // layout to name it.
-    assert_eq!(HEARTBEAT_LEN, 23);
+    assert_eq!(HEARTBEAT_LEN, 27);
     assert_eq!(HEARTBEAT_PREFIX_LEN, 5);
     assert_eq!(HEARTBEAT_IDENTITY_LEN, 11);
     assert_eq!(&HEARTBEAT[..11], &[0, 1, 2, 1, 1, 0x02, 0, 0, 0, 0x0D, 0x20]);

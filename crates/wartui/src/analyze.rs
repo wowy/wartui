@@ -114,26 +114,23 @@ fn losses_text(loss: &LossSummary) -> String {
         for queue in &bridge.queues {
             let _ = writeln!(
                 text,
-                "  {:<11}{}  peak {}/{} {}  {} dropped",
+                "  {:<11}{}  peak {}/{} bytes  {} dropped",
                 "queue",
                 queue.queue.name(),
                 thousands(queue.peak),
                 thousands(queue.capacity),
-                queue.queue.unit(),
                 thousands(queue.dropped)
             );
         }
         // Both are the P4's, and the host link's errors are said at 0 too: they answer whether
         // the host's frames reached the P4.
-        if let Some(radio_link) = &bridge.radio_link {
-            let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(radio_link));
-            let _ = writeln!(
-                text,
-                "  {:<11}{} host_uart_errors",
-                "host link",
-                thousands(bridge.host_uart_errors)
-            );
-        }
+        let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(&bridge.radio_link));
+        let _ = writeln!(
+            text,
+            "  {:<11}{} host_uart_errors",
+            "host link",
+            thousands(bridge.host_uart_errors)
+        );
     }
     if let Some(host) = &loss.host {
         let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
@@ -295,7 +292,7 @@ mod tests {
                 usb_lost: 0,
                 oversize: 0,
                 queues: vec![],
-                radio_link: None,
+                radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
             }),
             nodes: vec![
@@ -329,7 +326,7 @@ mod tests {
                 usb_lost: 0,
                 oversize: 0,
                 queues: vec![],
-                radio_link: None,
+                radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
             }),
             nodes: Vec::new(),
@@ -444,7 +441,7 @@ mod tests {
             usb_lost: 0,
             oversize: 0,
             queues: vec![],
-            radio_link: None,
+            radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
         });
         let text = losses_text(&loss);
@@ -464,12 +461,17 @@ mod tests {
                 usb_lost,
                 oversize: 0,
                 queues: vec![],
-                radio_link: None,
+                radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
             }),
             ..Default::default()
         };
-        losses_text(&loss)
+        first_line(&losses_text(&loss))
+    }
+
+    /// The report's first line, the bridge's, with its newline.
+    fn first_line(text: &str) -> String {
+        text.split_inclusive('\n').next().unwrap_or_default().to_owned()
     }
 
     #[test]
@@ -483,13 +485,13 @@ mod tests {
                 usb_lost: 0,
                 oversize: 42,
                 queues: vec![],
-                radio_link: None,
+                radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
             }),
             ..Default::default()
         };
         assert_eq!(
-            losses_text(&loss),
+            first_line(&losses_text(&loss)),
             "  bridge     1,000 frames received  10 dropped (1.0%)  host read 990  \
              42 oversize (not a node's)\n"
         );
@@ -527,8 +529,8 @@ mod tests {
         );
     }
 
-    /// A P4 split bridge's line, two of its queues and its radio link.
-    fn split_bridge(radio_link: Option<RadioLinkLoss>) -> LossSummary {
+    /// A bridge's line, two of its queues and its radio link.
+    fn bridge_with_link(radio_link: RadioLinkLoss) -> LossSummary {
         LossSummary {
             bridge: Some(BridgeLoss {
                 received: 1_000,
@@ -556,10 +558,12 @@ mod tests {
     #[test]
     fn analyze_report_prints_queue_lines_when_bridge_reports_queues() {
         assert_eq!(
-            losses_text(&split_bridge(None)),
+            losses_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() })),
             "  bridge     1,000 frames received  0 dropped (0.0%)  host read 1,000\n\
              \x20 queue      host-bulk  peak 1,024/262,144 bytes  0 dropped\n\
-             \x20 queue      node-down  peak 3,102/4,096 bytes  3 dropped\n"
+             \x20 queue      node-down  peak 3,102/4,096 bytes  3 dropped\n\
+             \x20 radio link 9 packets\n\
+             \x20 host link  0 host_uart_errors\n"
         );
     }
 
@@ -572,7 +576,7 @@ mod tests {
             radio_seq_gap: 4,
             ..Default::default()
         };
-        let text = losses_text(&split_bridge(Some(radio_link)));
+        let text = losses_text(&bridge_with_link(radio_link));
         assert!(
             text.contains(
                 "  radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap\n"
@@ -584,23 +588,17 @@ mod tests {
     #[test]
     fn analyze_report_prints_radio_link_packets_alone_when_link_is_clean() {
         let text =
-            losses_text(&split_bridge(Some(RadioLinkLoss { packets: 9, ..Default::default() })));
+            losses_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() }));
         assert!(text.contains("  radio link 9 packets\n"), "{text}");
     }
 
     #[test]
-    fn analyze_report_prints_host_uart_errors_even_at_zero_when_bridge_is_a_p4() {
-        let mut loss = split_bridge(Some(RadioLinkLoss { packets: 9, ..Default::default() }));
+    fn analyze_report_prints_host_uart_errors_even_at_zero_when_none_occurred() {
+        let mut loss = bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() });
         assert!(losses_text(&loss).ends_with("  host link  0 host_uart_errors\n"));
         loss.bridge.as_mut().unwrap().host_uart_errors = 1_204;
         let text = losses_text(&loss);
         assert!(text.ends_with("  host link  1,204 host_uart_errors\n"), "{text}");
-    }
-
-    #[test]
-    fn analyze_report_omits_radio_link_line_when_bridge_has_no_radio_link() {
-        let text = losses_text(&split_bridge(None));
-        assert!(!text.contains("radio link") && !text.contains("host link"), "{text}");
     }
 
     #[test]
@@ -624,6 +622,8 @@ mod tests {
         assert_eq!(
             text,
             "  bridge     31,821 frames received  0 dropped (0.0%)  host read 31,821\n\
+             \x20 radio link 0 packets\n\
+             \x20 host link  0 host_uart_errors\n\
              \x20 host       147 not stored: 140 retries  7 incompatible  0 store dropped  \
              behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204\n\
              \x20 health     under-voltage in 3 samples  throttled in 0  \
@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn analyze_report_omits_host_lines_when_no_host_rows() {
         let text = losses_text(&evening());
-        assert!(!text.contains("host "), "{text}");
+        assert!(!text.contains("  host       "), "{text}");
         assert!(!text.contains("health "), "{text}");
     }
 }

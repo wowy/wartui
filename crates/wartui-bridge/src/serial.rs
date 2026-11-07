@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, MAX_FRAME, MAX_HOST_FRAME, decode_frame, encode_host_frame,
+    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
+    decode_frame, encode_host_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -938,23 +938,12 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
     TransportError::Open { port: path.to_owned(), source: error.clone() }.to_string()
 }
 
-/// Puts a line the bridge sent in the log, at its own level; an `Error` has none and reads as a
-/// warning. Here rather than in the engine, which does no I/O and drops these frames.
+/// Puts a line the bridge sent in the log: a `Log` at info, an `Error` as a warning. Here rather
+/// than in the engine, which does no I/O and drops these frames.
 fn log_bridge_line(msg: &BridgeToHost) {
     match msg {
         BridgeToHost::Error { message } => tracing::warn!("bridge: {message}"),
-        BridgeToHost::Log { level: LogLevel::Debug, message } => {
-            tracing::debug!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Info, message } => {
-            tracing::info!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Warn, message } => {
-            tracing::warn!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Error, message } => {
-            tracing::error!("bridge: {message}");
-        }
+        BridgeToHost::Log { message } => tracing::info!("bridge: {message}"),
         _ => {}
     }
 }
@@ -1006,28 +995,15 @@ fn read_frames<R: Read>(
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
             let event = match decode_frame::<BridgeToHost>(frame) {
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version, .. })
-                    if proto_version != LINK_PROTO_VERSION =>
-                {
-                    let _ = (chip, mac, fw_version);
-                    return LinkError::VersionMismatch {
-                        ours: LINK_PROTO_VERSION,
-                        theirs: proto_version,
-                    }
-                    .to_string();
-                }
                 Ok(BridgeToHost::Ready {
-                    chip,
                     mac,
                     fw_version,
                     reset_cause,
                     last_phase,
-                    heap_free,
                     uptime_ms,
-                    gps,
+                    node_board,
                     radio,
                     image,
-                    ..
                 }) => {
                     state.announced.store(true, Ordering::Relaxed);
                     // Read by the sweep, which stops here and holds this board for
@@ -1065,26 +1041,22 @@ fn read_frames<R: Read>(
                     // Without it, a log of a link that dropped and came back ends
                     // at "opening the bridge" — as does one that never did.
                     tracing::info!(
-                        chip = ?chip,
                         mac = %mac::full(&mac),
                         fw = %fw_version.as_str(),
                         reset = ?reset_cause,
                         phase = ?last_phase,
-                        heap_free,
                         uptime_ms,
-                        gps,
+                        board = %node_board,
                         radio = ?radio,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
-                        chip,
                         mac,
                         fw_version: fw_version.as_str().to_owned(),
                         reset_cause,
                         last_phase,
-                        heap_free,
                         uptime_ms,
-                        gps,
+                        node_board,
                         radio,
                         image,
                     })
@@ -1277,10 +1249,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
-    use wartui_proto::bus::Slot;
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::{
-        BridgeToHost, Chip, FromNodeBody, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
-        MAX_HOST_FRAME, ShortStr, encode_frame, encode_host_frame,
+        BridgeToHost, FromNodeBody, HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, ShortStr,
+        encode_frame, encode_host_frame,
     };
     use wartui_proto::reset::ResetCause;
 
@@ -1491,15 +1463,12 @@ mod tests {
 
     fn ready() -> BridgeToHost {
         BridgeToHost::Ready {
-            chip: Chip::Esp32P4,
             mac: [1, 2, 3, 4, 5, 6],
             fw_version: ShortStr::new(),
-            proto_version: LINK_PROTO_VERSION,
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
-            heap_free: 0,
             uptime_ms: 0,
-            gps: false,
+            node_board: NodeBoard::Bench,
             radio: None,
             image: None,
         }
@@ -1562,21 +1531,16 @@ mod tests {
         // The CH343 stays on the bus, so the reboot arrives on the same connection: the
         // bootloader's log at the wrong rate, then a `Ready` whose uptime fell.
         let up = |uptime_ms| match ready() {
-            BridgeToHost::Ready { chip, mac, fw_version, proto_version, reset_cause, .. } => {
-                BridgeToHost::Ready {
-                    chip,
-                    mac,
-                    fw_version,
-                    proto_version,
-                    reset_cause,
-                    last_phase: LoopPhase::Unknown,
-                    heap_free: 0,
-                    uptime_ms,
-                    gps: false,
-                    radio: None,
-                    image: None,
-                }
-            }
+            BridgeToHost::Ready { mac, fw_version, reset_cause, .. } => BridgeToHost::Ready {
+                mac,
+                fw_version,
+                reset_cause,
+                last_phase: LoopPhase::Unknown,
+                uptime_ms,
+                node_board: NodeBoard::Bench,
+                radio: None,
+                image: None,
+            },
             _ => unreachable!(),
         };
         let mut bytes = frame(&up(50_000));

@@ -1,11 +1,12 @@
 //! The P4's pair state machine: radio up, `Ready` and `Status`.
 
 use heapless::Vec;
+use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
-    BridgeToHost, Chip, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
+    BridgeToHost, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
-use wartui_proto::radio_link::{Hello, LINK_REVISION, RadioStatus};
+use wartui_proto::radio_link::{Chip, Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{
     INSTALL_WAIT_MS, P4Counters, Pair, PairEvent, RADIO_SILENT_MS, RADIO_WAIT_MS, RadioState,
@@ -38,20 +39,19 @@ fn hello(uptime_ms: u32) -> Hello {
         reset_cause: ResetCause::Software,
         last_phase: LoopPhase::Boot,
         uptime_ms,
-        heap_free: 123_456,
-        image: Some(BUNDLED),
+        image: BUNDLED,
     }
 }
 
 /// A hello from a C6 running `image`.
-fn hello_running(uptime_ms: u32, image: Option<[u8; 32]>) -> Hello {
+fn hello_running(uptime_ms: u32, image: [u8; 32]) -> Hello {
     Hello { image, ..hello(uptime_ms) }
 }
 
 /// A pair updating a C6 that runs [`OTHER`].
 fn updating_pair() -> Pair {
     let mut pair = pair();
-    assert_eq!(pair.on_hello(hello_running(900, Some(OTHER)), 0, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello_running(900, OTHER), 0, 1_000), PairEvent::NewLife);
     pair
 }
 
@@ -87,10 +87,8 @@ fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
     assert_eq!(pair.on_tick(RADIO_WAIT_MS - 1), PairEvent::None);
     assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
     match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { chip, mac, radio, heap_free, .. }) => {
-            assert_eq!(chip, Chip::Esp32P4);
+        Some(BridgeToHost::Ready { mac, radio, .. }) => {
             assert_eq!(mac, C6_MAC);
-            assert_eq!(heap_free, 123_456);
             assert!(radio.is_some());
         }
         other => panic!("not a Ready: {other:?}"),
@@ -149,8 +147,6 @@ fn pair_refuses_records_and_reports_when_link_revision_differs() {
 fn pair_status_sums_host_and_radio_drops() {
     let mut pair = up_pair();
     pair.note_radio_status(RadioStatus {
-        heap_free: 1,
-        uptime_ms: 5_000,
         queues: Vec::from_slice(&[stat(QueueId::RadioUp, 4)]).unwrap(),
         crc_fail: 11,
         bad_magic: 12,
@@ -185,7 +181,7 @@ fn pair_status_sums_host_and_radio_drops() {
             uptime_ms,
             rx_oversize,
             queues,
-            radio_link: Some(radio_link),
+            radio_link,
             host_uart_errors,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
@@ -231,7 +227,7 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
     assert_eq!(pair.on_hello(hello(74), 2, 1_002), PairEvent::None);
     assert_eq!(uptime(pair.ready(1_002)), 74);
     match pair.status(1_002, p4_zero()) {
-        BridgeToHost::Status { radio_link: Some(link), .. } => assert_eq!(link.radio_crc_fail, 3),
+        BridgeToHost::Status { radio_link: link, .. } => assert_eq!(link.radio_crc_fail, 3),
         other => panic!("not a Status: {other:?}"),
     }
 }
@@ -300,11 +296,19 @@ fn pair_announces_radio_reset_cause_when_c6_restarts() {
 }
 
 #[test]
-fn pair_ready_reports_gps_when_radio_is_up() {
+fn pair_ready_carries_node_board_when_given_one() {
     let mut pair = pair();
     pair.on_hello(hello(900), 0, 1_000);
     match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { gps, .. }) => assert!(gps),
+        Some(BridgeToHost::Ready { node_board, .. }) => assert_eq!(node_board, NodeBoard::Bench),
+        other => panic!("not a Ready: {other:?}"),
+    }
+    let mut pair = self::pair().with_node_board(NodeBoard::Carrier10);
+    pair.on_hello(hello(900), 0, 1_000);
+    match pair.ready(1_000) {
+        Some(BridgeToHost::Ready { node_board, .. }) => {
+            assert_eq!(node_board, NodeBoard::Carrier10);
+        }
         other => panic!("not a Ready: {other:?}"),
     }
 }
@@ -332,15 +336,7 @@ fn pair_announces_new_life_when_link_revision_changes() {
 }
 
 fn radio_status() -> RadioStatus {
-    RadioStatus {
-        heap_free: 0,
-        uptime_ms: 0,
-        queues: Vec::new(),
-        crc_fail: 3,
-        bad_magic: 0,
-        seq_gap: 0,
-        uart_errors: 0,
-    }
+    RadioStatus { queues: Vec::new(), crc_fail: 3, bad_magic: 0, seq_gap: 0, uart_errors: 0 }
 }
 
 fn p4_zero() -> P4Counters {
@@ -432,7 +428,7 @@ fn pair_reads_records_when_updating_on_matching_revision() {
 #[test]
 fn pair_reads_no_records_when_updating_on_other_revision() {
     let mut pair = pair();
-    let mut other = hello_running(900, Some(OTHER));
+    let mut other = hello_running(900, OTHER);
     other.link_rev = LINK_REVISION + 1;
     pair.on_hello(other, 0, 1_000);
     assert!(matches!(pair.state(), RadioState::Updating(_)));
@@ -459,7 +455,7 @@ fn pair_bridges_stale_with_fault_when_digest_still_differs_after_attempt() {
     pair.note_seq(5_000);
     pair.note_installed(9_000);
     // Rolled back to the build it ran before.
-    assert_eq!(pair.on_hello(hello_running(80, Some(OTHER)), 0, 9_500), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello_running(80, OTHER), 0, 9_500), PairEvent::NewLife);
     assert!(matches!(pair.state(), RadioState::Stale(_)));
     assert!(pair.bridges());
     assert_eq!(pair.fault().unwrap(), "radio runs another build; the bundled image did not take");
@@ -469,7 +465,7 @@ fn pair_bridges_stale_with_fault_when_digest_still_differs_after_attempt() {
 fn pair_refuses_stale_radio_when_link_revision_differs() {
     let mut pair = updating_pair();
     pair.note_seq(5_000);
-    let mut other = hello_running(80, Some(OTHER));
+    let mut other = hello_running(80, OTHER);
     other.link_rev = LINK_REVISION + 1;
     assert_eq!(pair.on_hello(other, 0, 9_500), PairEvent::NewLife);
     assert!(matches!(pair.state(), RadioState::Mismatch(_)));
@@ -485,22 +481,10 @@ fn pair_goes_stale_when_update_fails() {
 }
 
 #[test]
-fn pair_reports_mismatch_with_header_fault_when_hello_has_no_digest() {
-    let mut pair = pair();
-    assert_eq!(pair.on_hello(hello_running(900, None), 0, 1_000), PairEvent::NewLife);
-    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
-    assert!(!pair.bridges());
-    assert_eq!(
-        pair.fault().unwrap(),
-        "radio predates bundled updates; flash it through the header once"
-    );
-}
-
-#[test]
 fn pair_updates_when_digest_is_zeros() {
     // A C6 that takes updates but could not read its own digest.
     let mut pair = pair();
-    pair.on_hello(hello_running(900, Some([0; 32])), 0, 1_000);
+    pair.on_hello(hello_running(900, [0; 32]), 0, 1_000);
     assert!(matches!(pair.state(), RadioState::Updating(_)));
 }
 
@@ -622,12 +606,13 @@ fn pair_clears_silent_fault_when_radio_restarts() {
 #[test]
 fn pair_does_not_fault_when_silent_in_mismatch() {
     let mut pair = pair();
-    pair.on_hello(hello_running(900, None), 0, 1_000);
+    // The bundled image, on another revision: nothing to update, and nothing to bridge.
+    pair.on_hello(Hello { link_rev: LINK_REVISION + 1, ..hello(900) }, 0, 1_000);
     assert!(matches!(pair.state(), RadioState::Mismatch(_)));
     pair.note_asked(5_000);
     assert_eq!(pair.next_deadline_ms(), None);
     assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::None);
-    assert!(pair.fault().unwrap().contains("predates"));
+    assert!(pair.fault().unwrap().contains("link revision"));
 }
 
 #[test]
@@ -635,11 +620,7 @@ fn pair_drops_silent_deadline_when_failed_update_leaves_mismatch() {
     // Armed while updating, then a state that gets no records: a deadline left behind would
     // have the radio clock wake forever.
     let mut pair = pair();
-    pair.on_hello(
-        Hello { link_rev: LINK_REVISION + 1, ..hello_running(900, Some(OTHER)) },
-        0,
-        1_000,
-    );
+    pair.on_hello(Hello { link_rev: LINK_REVISION + 1, ..hello_running(900, OTHER) }, 0, 1_000);
     pair.note_asked(5_000);
     pair.on_update_failed();
     assert!(matches!(pair.state(), RadioState::Mismatch(_)));

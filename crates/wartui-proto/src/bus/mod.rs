@@ -1,5 +1,5 @@
-//! The node bus: SPI between a P4 bridge, as master, and its nodes, as slaves. The framing, the
-//! acknowledgment that makes it reliable, and the messages its records carry.
+//! The node bus: SPI between a P4 bridge, the controller, and its nodes. The framing,
+//! the acknowledgment that makes it reliable, and the messages its records carry.
 //!
 //! The P4 clocks every transfer. Each one is exactly [`TRANSFER_LEN`] bytes each way,
 //! little-endian:
@@ -15,22 +15,22 @@
 //! | 10 | len | payload: records ([`Packer`], [`records`]); bytes past `len` are zero |
 //! | [`CRC_OFFSET`] | 2 | CRC-16/CCITT-FALSE ([`crc16`]) over bytes `0..CRC_OFFSET` |
 //!
-//! **The length is fixed** because a slave is armed for one length before the master clocks,
-//! and cannot learn a length from the transfer it is in. A fixed full-duplex transfer is the
-//! path the P4–C6 bench proved error-free (`docs/p4-spi-link-findings.md`). [`TRANSFER_LEN`]
-//! carries one record holding the longest body either way, an [`UpdateChunk`] down, and is a
-//! multiple of 4 for the DMA.
+//! **The length is fixed** because a node's SPI driver is armed for one length before the
+//! controller clocks, and cannot learn a length from the transfer it is in. A fixed full-duplex
+//! transfer is the path the P4–C6 bench proved error-free (`docs/p4-spi-link-findings.md`).
+//! [`TRANSFER_LEN`] carries one record holding the longest body either way, an [`UpdateChunk`]
+//! down, and is a multiple of 4 for the DMA.
 //!
 //! **A node re-arms after every transfer, and asks for one through IRQ.**
 //!
-//! 1. The node arms its slave with the next transfer before the master clocks.
-//! 2. The master clocks [`TRANSFER_LEN`] bytes with the node's CS low.
+//! 1. The node arms its SPI driver with the next transfer before the controller clocks.
+//! 2. The controller clocks [`TRANSFER_LEN`] bytes with the node's CS low.
 //! 3. CS rises, and the node arms the next transfer at once.
 //! 4. A node with a record to send drives IRQ until a transfer has carried it. IRQ is shared by
-//!    a bus's nodes, so the master polls each node in turn while it is asserted.
+//!    a bus's nodes, so the controller polls each node in turn while it is asserted.
 //!
-//! A master that clocks a node before it has re-armed reads bytes that fail the magic. The
-//! master leaves a gap between transfers to one node, and retries after it.
+//! A controller that clocks a node before it has re-armed reads bytes that fail the magic. The
+//! controller leaves a gap between transfers to one node, and retries after it.
 //!
 //! **A transfer that carries records is acknowledged; an idle one needs nothing.** Each end
 //! stamps `ack` with the seq of the last good record-carrying transfer it took from the peer
@@ -82,7 +82,7 @@
 //! A node may be reachable only through the bus, so any later host and P4 must be able to
 //! identify and update any node build, and a bus change never sends the user back to a wired
 //! flash. Everything else changes freely between builds and is named by the node's version in
-//! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, within what the node's SPI slave
+//! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, within what the node's SPI peripheral
 //! takes, which is the chip's limit rather than the image's; [`ACK_TIMEOUT_MS`] and
 //! [`SEND_TRIES`], as each sender's own policy; the P4's pins, and its scheduling beyond what it
 //! owes a node; up type 2, down types 1 and 2, and the heartbeat past its MAC. A core type code
@@ -103,6 +103,7 @@ mod downlink;
 mod health;
 mod heartbeat;
 mod msg;
+mod node_board;
 mod record;
 mod security;
 mod sighting;
@@ -119,6 +120,7 @@ pub use heartbeat::{
     HEARTBEAT_PREFIX_LEN, Heartbeat,
 };
 pub use msg::{DecodeError, DownMsg, DownType, UpMsg, UpType};
+pub use node_board::{NodeBoard, NodeBoardError, SlotLabel};
 pub use record::{Packer, RECORD_HEADER_LEN, RECORD_MAX, Record, Records, records};
 pub use security::Security;
 pub use sighting::{
@@ -209,7 +211,7 @@ impl<'a> Transfer<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyError {
     /// The first two bytes are not [`MAGIC`]: no transfer at all, such as an empty slot or a
-    /// slave that was not armed.
+    /// node that was not armed.
     BadMagic,
     /// The CRC does not match.
     BadCrc,

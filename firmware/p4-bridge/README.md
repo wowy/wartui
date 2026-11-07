@@ -4,8 +4,8 @@ The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs
 talks to the host with wartui's link protocol over UART0, which the board's CH343 carries to the
 Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on the board's SDIO
 traces. The C6 holds that link for a future Bluetooth host link
-([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting `Esp32P4` and
-both chips' diagnostics. The queue sizes are in `src/config.rs`.
+([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting both chips'
+diagnostics. The queue sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -24,14 +24,40 @@ and config, then `espflash save-image` on the result. A build fails if the saved
 appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
 too.
 
-It is also the SPI master of two node buses, which carry each node's records to and from the
+It is also the SPI controller of two node buses, which carry each node's records to and from the
 host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
 forwards what a node sends, queues what the host sends a node in that node's slot, and answers
 each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`).
 
 ## Boards
 
-This firmware runs on the Waveshare ESP32-P4-WIFI6.
+This firmware runs on the Waveshare ESP32-P4-WIFI6, with its nodes wired straight to it (the
+bench) or on the wartui-carrier.
+
+## On the carrier
+
+At boot, before it builds the node buses, the P4 reads the carrier's I/O expander at 0x20 on I2C0
+(`src/carrier.rs`). The carrier it finds picks the CS pins and IRQ's polarity, and `Ready` reports
+it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with no carrier.
+
+- **A cold boot** powers every node, one every 100 ms.
+- **A reset of the P4** leaves running nodes running, and powers only a node that is off.
+- **A power-cycle** from the host holds one node off for 1 s, then powers it again.
+- **Two or more present nodes dropping at once** read as a lost node supply. The P4 powers one
+  slot at a time, any socket, until a node answers or the host asks for a power-cycle, then the
+  rest, one every 100 ms.
+- **No node answering within 5 s of powering every node**, at boot or after a power-cycle request
+  ended that wait, reads as a lost node supply too, and the P4 powers one slot at a time again,
+  first the slots present before a lost supply. With no node seated, it goes on doing so. A
+  power-cycle request is served at once, also during those 5 s, and the 5 s start again after it.
+- **A node powered over its own USB** keeps the P4 from seeing a lost node supply; unplug it, or
+  power the carrier first.
+- **An expander that fails, or reads as no carrier,** is an error in every announcement. With
+  power out of reach, every power-cycle answers `Failed`.
+
+Each announcement also carries a line naming the carrier and what it powered at boot:
+`carrier-10: 10 node slots; at boot 3 powered, 7 already on`.
+[`docs/node-bus.md`](../../docs/node-bus.md) § "On the carrier board" has the port map and the pins.
 
 ## The link to the C6
 
@@ -117,7 +143,6 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 | --- | --- |
 | `updating the radio to the bundled image (n%)` | The update is under way; sent again every tenth of the image |
 | `radio runs another build; the bundled image did not take` | The C6 refused the image, stopped answering, or rolled back. The bridge still runs while the link revision matches |
-| `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
 | `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The P4 sends the C6 no records |
 | `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
 | `the radio has stopped answering; wartui reset restarts the bridge` | A host polled and no packet came from the C6 for 12 s, as when it hangs holding RTS. Ends when a packet arrives |
@@ -168,8 +193,10 @@ fault instead. Wire it to the P4's header:
 | GND | GND |
 
 The receiver answers at `0x42`. The board has 2.2 kΩ pull-ups on both lines, and its ES8311 codec
-shares the bus at another address. The bridge always reads the bus. Without a receiver, every
-announcement carries "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)".
+shares the bus at another address. So does a carrier's I/O expander, at `0x20`: the GPS reader and
+the carrier each lock the bus for one transaction at a time. The bridge always reads the bus.
+Without a receiver, every announcement carries "no GPS receiver answered on the I2C bus
+(GPIO7/GPIO8)".
 
 ## Queue sizes
 

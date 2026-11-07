@@ -125,7 +125,7 @@ pub enum GpsStatus {
         baud: u32,
     },
     /// Every port was listened to and none was a receiver. Distinct from [`GpsStatus::Failed`]
-    /// because it is not a fault and shows nothing (`nothing_found` says why).
+    /// because it is not a fault and raises no fault line (`nothing_found` says why).
     NoReceiver,
     /// Sentences are arriving and the receiver says it has no fix. Normal for
     /// the first half-minute after a cold start, and for indoors forever.
@@ -545,7 +545,7 @@ impl Gps {
         self.lock().tick(now_ms);
     }
 
-    fn set_status(&self, status: GpsStatus) {
+    pub(crate) fn set_status(&self, status: GpsStatus) {
         self.lock().set_status(status);
     }
 
@@ -778,8 +778,8 @@ impl Gps {
 /// What to say when a search came back with nothing.
 ///
 /// This is what makes searching by default bearable. A receiver nobody asked for or attached is not
-/// a fault, and a view with one line to say anything on must not spend it saying most captures have
-/// no GPS. So that case is silent, and the search runs again in case one is plugged in mid-capture.
+/// a fault, so the view names it in a word rather than a fault line, and the search runs again in
+/// case one is plugged in mid-capture.
 ///
 /// A receiver the operator *named* is the opposite: silence would leave a capture recording no
 /// position for no stated reason. So is one that *was* being read and has gone. A puck out of its

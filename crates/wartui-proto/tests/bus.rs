@@ -6,7 +6,7 @@
 
 use wartui_proto::bus::{
     ACK_TIMEOUT_MS, ACKS, AckPoll, AckTracker, AckWait, BUS_VERSION, CRC_OFFSET, DownType,
-    Downlink, FLIGHT_MAX, HEADER_LEN, Header, MAGIC, MAX_SLOTS, PAYLOAD_MAX, Packer,
+    Downlink, FLIGHT_MAX, HEADER_LEN, Header, MAGIC, MAX_SLOTS, NodeBoard, PAYLOAD_MAX, Packer,
     RECORD_HEADER_LEN, RECORD_MAX, SEND_TRIES, SeqCheck, SeqNote, Slot, TRANSFER_LEN, UpType,
     VerifyError, records, seal, verify,
 };
@@ -349,6 +349,93 @@ fn slot_refuses_byte_when_past_max_slots() {
     assert!(Slot::new(0, 7).is_none());
 }
 
+fn label(board: NodeBoard, bus: u8, index: u8) -> String {
+    board.label(Slot::new(bus, index).unwrap()).to_string()
+}
+
+#[test]
+fn node_board_labels_b1_by_silk_when_board_is_a_carrier() {
+    assert_eq!(label(NodeBoard::Bench, 1, 0), "B1");
+    assert_eq!(label(NodeBoard::Carrier6, 1, 0), "N4");
+    assert_eq!(label(NodeBoard::Carrier10, 1, 0), "N6");
+    assert_eq!(label(NodeBoard::Carrier14, 1, 0), "N8");
+}
+
+#[test]
+fn node_board_labels_last_slot_when_board_drives_it() {
+    assert_eq!(label(NodeBoard::Bench, 1, 5), "B6");
+    assert_eq!(label(NodeBoard::Carrier6, 1, 2), "N6");
+    assert_eq!(label(NodeBoard::Carrier10, 1, 4), "N10");
+    assert_eq!(label(NodeBoard::Carrier14, 1, 6), "N14");
+    assert_eq!(label(NodeBoard::Carrier14, 0, 6), "N7");
+}
+
+#[test]
+fn node_board_keeps_bus_name_when_slot_is_not_driven() {
+    assert_eq!(label(NodeBoard::Carrier6, 0, 3), "A4");
+    assert_eq!(label(NodeBoard::Carrier10, 1, 6), "B7");
+    assert_eq!(label(NodeBoard::Bench, 0, 6), "A7");
+}
+
+#[test]
+fn node_board_lists_driven_slots_bus_a_first_when_asked() {
+    for board in NodeBoard::ALL {
+        let slots: Vec<Slot> = board.slots().collect();
+        assert_eq!(slots.len(), usize::from(board.slot_count()), "{board}");
+        assert!(slots.iter().all(|&slot| board.drives(slot)), "{board}");
+        assert!(slots.windows(2).all(|w| w[0] < w[1]), "{board}");
+        let labels: Vec<String> = slots.iter().map(|&s| board.label(s).to_string()).collect();
+        if board.is_carrier() {
+            let silk: Vec<String> = (1..=board.slot_count()).map(|n| format!("N{n}")).collect();
+            assert_eq!(labels, silk, "{board}");
+        }
+    }
+    assert_eq!(NodeBoard::Bench.slots().last(), Slot::new(1, 5));
+}
+
+#[test]
+fn node_board_parses_every_label_it_gives_when_round_tripped() {
+    for board in NodeBoard::ALL {
+        for slot in board.slots() {
+            let text = board.label(slot).to_string();
+            assert_eq!(board.parse_label(&text), Some(slot), "{board} {text}");
+            assert_eq!(board.parse_label(&text.to_lowercase()), Some(slot), "{board} {text}");
+        }
+    }
+}
+
+#[test]
+fn node_board_refuses_label_when_board_does_not_take_it() {
+    let refused = [
+        (NodeBoard::Bench, ["A7", "B7", "N1", "A0", "", "C1"].as_slice()),
+        (NodeBoard::Carrier6, ["N0", "N7", "A1", "B1", "N", "N01", "N+1", "N1x", "1"].as_slice()),
+        (NodeBoard::Carrier10, ["N11", "N256", "A1"].as_slice()),
+        (NodeBoard::Carrier14, ["N15", "B7", "NN1", " N1"].as_slice()),
+    ];
+    for (board, names) in refused {
+        for name in names {
+            assert_eq!(board.parse_label(name), None, "{board} {name:?}");
+        }
+    }
+}
+
+#[test]
+fn node_board_names_board_when_displayed() {
+    let names: Vec<&str> = NodeBoard::ALL.iter().map(|b| b.name()).collect();
+    assert_eq!(names, ["bench", "carrier-6", "carrier-10", "carrier-14"]);
+    assert_eq!(NodeBoard::Carrier10.to_string(), "carrier-10");
+}
+
+#[test]
+fn node_board_pins_link_byte_when_encoded() {
+    let mut buf = [0u8; 4];
+    for (code, board) in (0u8..).zip(NodeBoard::ALL) {
+        assert_eq!(postcard::to_slice(&board, &mut buf).unwrap(), [code], "{board}");
+        assert_eq!(postcard::from_bytes::<NodeBoard>(&[code]).unwrap(), board);
+    }
+    assert!(postcard::from_bytes::<NodeBoard>(&[4]).is_err());
+}
+
 const FLIGHT_BYTES: usize = 4096;
 
 /// What a node makes of a transfer the downlink filled.
@@ -467,9 +554,8 @@ fn downlink_ignores_sent_when_ack_delivered_the_resend_first() {
 }
 
 #[test]
-fn downlink_refuses_record_when_queue_full_or_body_too_large() {
+fn downlink_refuses_record_when_queue_full() {
     let mut down = Downlink::<64>::new();
-    assert_eq!(down.push(1, 4, &[0; RECORD_MAX + 1]), Err(Undelivered::TooLarge));
     down.push(2, 1, &[0; 40]).unwrap();
     assert_eq!(down.push(3, 1, &[0; 40]), Err(Undelivered::QueueFull));
     assert_eq!(down.refused(), 1);

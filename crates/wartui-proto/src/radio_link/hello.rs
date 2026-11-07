@@ -13,8 +13,7 @@
 //! | 41 | 1 | `reset_cause` |
 //! | 42 | 1 | `last_phase` |
 //! | 43 | 4 | `uptime_ms` |
-//! | 47 | 4 | `heap_free` |
-//! | 51 | 32 | `image`, when present: the SHA-256 digest of the running app image |
+//! | 47 | 32 | `image`: the SHA-256 digest of the running app image |
 //!
 //! The enums travel as codes spelled out in `match` arms below rather than cast, so the
 //! hello's codes stay put whatever happens to the enums, and a code never changes meaning. A
@@ -23,23 +22,32 @@
 //! to.
 //!
 //! Fields are appended, never inserted, so the frozen part never moves. Decoders read the
-//! fields they know and ignore the rest. A C6 that takes updates over the link appends
-//! `image`; a 51-byte hello comes from one that does not. A C6 that takes updates but cannot
-//! read its own digest sends zeros, which name no image, so the P4 still updates it.
+//! fields they know and ignore the rest, and refuse a hello shorter than [`HELLO_LEN`]. A sender
+//! that cannot read its own digest sends zeros, which name no image, so the P4 still updates a
+//! C6 that does.
 
-use crate::link::{Chip, LoopPhase, ShortStr};
+use crate::link::{LoopPhase, ShortStr};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::reset::ResetCause;
 
-/// Bytes in an encoded [`Hello`] without [`Hello::image`].
-pub const HELLO_LEN: usize = 51;
+/// Where [`Hello::image`] starts.
+const IMAGE: usize = 47;
 
-/// Bytes in an encoded [`Hello`] with [`Hello::image`].
-pub const HELLO_IMAGE_LEN: usize = HELLO_LEN + DIGEST_LEN;
+/// Bytes in an encoded [`Hello`].
+pub const HELLO_LEN: usize = IMAGE + DIGEST_LEN;
 
 const FW_VERSION: usize = 9;
 const FW_VERSION_LEN: usize = 32;
+
+/// The chip a [`Hello`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    /// The board's radio coprocessor: code 1.
+    Esp32C6,
+    /// The bridge, which has no radio of its own: code 2.
+    Esp32P4,
+}
 
 /// Who is on the other end of the link, sent in a [`Kind::Hello`](super::Kind::Hello)
 /// packet.
@@ -61,24 +69,19 @@ pub struct Hello {
     pub last_phase: LoopPhase,
     /// Milliseconds since the sender's life started.
     pub uptime_ms: u32,
-    /// Bytes free in the sender's heap.
-    pub heap_free: u32,
     /// The digest espflash appends to the running app image
-    /// ([`crate::ota::image::appended_digest`]), which names the build. `None` from a sender
-    /// that takes no update over this link, the P4 among them: its updates come from the host.
-    pub image: Option<[u8; DIGEST_LEN]>,
+    /// ([`crate::ota::image::appended_digest`]), which names the build, or zeros when the sender
+    /// cannot read it. The P4 reads the C6's to decide whether to update it; the C6 does not read
+    /// the P4's, whose updates come from the host.
+    pub image: [u8; DIGEST_LEN],
 }
 
 impl Hello {
-    /// Writes the hello to the start of `out` and returns its length: [`HELLO_IMAGE_LEN`]
-    /// with an image, [`HELLO_LEN`] without.
+    /// Writes the hello to the start of `out` and returns its length, [`HELLO_LEN`].
     ///
     /// # Panics
     /// If `out` is shorter than that.
     pub fn encode(&self, out: &mut [u8]) -> usize {
-        if let Some(image) = &self.image {
-            out[HELLO_LEN..HELLO_IMAGE_LEN].copy_from_slice(image);
-        }
         let out = &mut out[..HELLO_LEN];
         out[0..2].copy_from_slice(&self.link_rev.to_le_bytes());
         out[2] = chip_code(self.chip);
@@ -88,16 +91,15 @@ impl Hello {
         version[..self.fw_version.len()].copy_from_slice(self.fw_version.as_bytes());
         out[41] = reset_cause_code(self.reset_cause);
         out[42] = loop_phase_code(self.last_phase);
-        out[43..47].copy_from_slice(&self.uptime_ms.to_le_bytes());
-        out[47..51].copy_from_slice(&self.heap_free.to_le_bytes());
-        if self.image.is_some() { HELLO_IMAGE_LEN } else { HELLO_LEN }
+        out[43..IMAGE].copy_from_slice(&self.uptime_ms.to_le_bytes());
+        out[IMAGE..].copy_from_slice(&self.image);
+        HELLO_LEN
     }
 
     /// Reads a hello from the start of `payload`.
     ///
     /// `None` when `payload` is shorter than [`HELLO_LEN`] or the chip is one this build
-    /// cannot name. A version that is not UTF-8 is cut at its last valid character. The image
-    /// is read when `payload` holds [`HELLO_IMAGE_LEN`] bytes or more.
+    /// cannot name. A version that is not UTF-8 is cut at its last valid character.
     #[must_use]
     pub fn decode(payload: &[u8]) -> Option<Self> {
         let b = payload.get(..HELLO_LEN)?;
@@ -119,23 +121,21 @@ impl Hello {
             reset_cause: reset_cause_from_code(b[41]),
             last_phase: loop_phase_from_code(b[42]),
             uptime_ms: u32::from_le_bytes([b[43], b[44], b[45], b[46]]),
-            heap_free: u32::from_le_bytes([b[47], b[48], b[49], b[50]]),
-            image: payload[HELLO_LEN..].first_chunk().copied(),
+            image: *b[IMAGE..].first_chunk()?,
         })
     }
 }
 
 const fn chip_code(chip: Chip) -> u8 {
     match chip {
-        Chip::Esp32C5 => 0,
         Chip::Esp32C6 => 1,
         Chip::Esp32P4 => 2,
     }
 }
 
+// Code 0 names no chip.
 const fn chip_from_code(code: u8) -> Option<Chip> {
     match code {
-        0 => Some(Chip::Esp32C5),
         1 => Some(Chip::Esp32C6),
         2 => Some(Chip::Esp32P4),
         _ => None,

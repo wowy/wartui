@@ -1,5 +1,6 @@
-//! The P4's end of the node bus: two SPI masters, each with up to [`SLOTS`] nodes behind its
-//! own CS (`docs/node-bus.md`).
+//! The P4's end of the node bus: two SPI controllers, each with up to [`PER_BUS`] nodes behind its
+//! own CS (`docs/node-bus.md`). The board `main` read at boot sets how many each drives: six on
+//! the bench, and three, five or seven on a carrier.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the stop-and-wait. The P4 checks
 //! framing only and reads no record. Each record a node sends goes to the host as a `FromNode`,
@@ -19,8 +20,11 @@
 //!   IRQ is read again only once the node clocked last has had [`SLOT_GAP`] to re-arm, since
 //!   until then its IRQ still says what the transfer just carried.
 //! - **IRQ stuck**: [`EMPTY_PASSES`] passes in a row that bring no record mean the line is
-//!   asserted by nothing this bus can serve, such as a node that never becomes present. The bus
-//!   counts it and runs the schedule below until IRQ is seen deasserted.
+//!   asserted by nothing this bus can serve, such as a node not yet present. The bus counts it
+//!   and runs the schedule below until IRQ is seen deasserted, a slot becomes present, or
+//!   [`STUCK_RETRY`] has passed. The retry is needed because a shared line under that schedule
+//!   may never deassert: each node holds it while its record waits for a poll, and a few nodes
+//!   together can hold it without a break.
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
 //!   clocked at once. One whose records wait for the node's ack is clocked every
 //!   [`ACK_POLL`], and no later than the wait's deadline.
@@ -30,10 +34,12 @@
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
 //!
-//! Each slot has its own seq, so a node's gaps count only transfers meant for it.
+//! Each slot has its own seq, so a node's gaps count only transfers meant for it. Log lines name a
+//! slot as the operator reads it, `N3` on a carrier ([`NodeBoard::label`]).
 //!
 //! **IRQ is active high on the bench**, where a node's D0 reaches the P4 directly: pulled down,
-//! so no node reads as no request. A carrier board inverts it ([`IRQ_ACTIVE_HIGH`]).
+//! so no node reads as no request. A carrier inverts it onto a shared line it pulls up, so there
+//! IRQ is active low and the P4 pulls it up too. A node drives D0 the same either way.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::Write;
@@ -52,26 +58,20 @@ use esp_hal::spi::master::{Config, Spi, SpiDma};
 use esp_hal::time::Rate;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::bus::{
-    AckTracker, Downlink, Header, SeqCheck, SeqNote, Slot as BusSlot, TRANSFER_LEN, VerifyError,
-    seal, verify,
+    AckTracker, Downlink, Header, NodeBoard, SeqCheck, SeqNote, Slot as BusSlot, TRANSFER_LEN,
+    VerifyError, seal, verify,
 };
-use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, LogLevel, LogStr, QueueId, QueueStat, Undelivered,
-};
+use wartui_proto::link::{BridgeToHost, FromNodeBody, LogStr, QueueId, QueueStat, Undelivered};
 
 use crate::Shared;
 use crate::config::NODE_DOWN_BYTES;
 
 /// The bus clock. 4 MHz is the target on the carrier.
 pub const BUS_HZ: u32 = 1_000_000;
-/// Nodes on one bus: the first six of its [`PER_BUS`](wartui_proto::bus::PER_BUS) slots.
-pub const SLOTS: usize = 6;
+/// Slots on one bus, as many as any board drives.
+pub const PER_BUS: usize = wartui_proto::bus::PER_BUS as usize;
 /// Slots across both buses.
-const DRIVEN: usize = 2 * SLOTS;
-/// Whether IRQ is asserted high. True for nodes wired straight to the P4; the carrier inverts
-/// it.
-// Chunk 4 detects the carrier and sets this at boot.
-pub const IRQ_ACTIVE_HIGH: bool = true;
+const DRIVEN: usize = 2 * PER_BUS;
 /// The longest a present slot goes unclocked.
 const POLL_EVERY: Duration = Duration::from_millis(250);
 /// How often a slot whose records wait for the node's ack is clocked. The node stamps its ack
@@ -89,6 +89,9 @@ const SLOT_GAP: Duration = Duration::from_millis(1);
 /// because the first pass after a node queues a record clocks the transfer it armed before,
 /// which is empty.
 const EMPTY_PASSES: u8 = 2;
+/// How long a stuck bus waits before trying IRQ service again. A line that really is held costs
+/// [`EMPTY_PASSES`] empty passes per retry, about 9% of the bus at 1 MHz with five nodes.
+const STUCK_RETRY: Duration = Duration::from_millis(1_000);
 /// How often each present slot's counters go to the host.
 const REPORT_EVERY: Duration = Duration::from_millis(5_000);
 
@@ -98,8 +101,8 @@ pub struct Pins {
     pub mosi: AnyPin<'static>,
     pub miso: AnyPin<'static>,
     pub irq: AnyPin<'static>,
-    /// Slot 1 first.
-    pub cs: [AnyPin<'static>; SLOTS],
+    /// Slot 1 first: a pin for each slot the board drives, then `None`.
+    pub cs: [Option<AnyPin<'static>>; PER_BUS],
 }
 
 /// One slot's queue toward its node.
@@ -112,7 +115,9 @@ static DOWNLINKS: ConstStaticCell<[NodeDown; DRIVEN]> =
 /// What the host reader and both buses share: which slots hold a node, each slot's queue toward
 /// it, and the counts of what came up.
 pub struct Nodes {
-    /// Indexed by [`driven`].
+    /// Slots per bus the board drives.
+    per_bus: u8,
+    /// Indexed by [`Nodes::driven`].
     downlinks: RefCell<&'static mut [NodeDown; DRIVEN]>,
     /// Bit `k` is set while driven slot `k` holds a node.
     present: Cell<u16>,
@@ -126,9 +131,11 @@ pub struct Nodes {
 }
 
 impl Nodes {
-    /// No node yet. Called once: the queues are a static.
-    pub fn new() -> Self {
+    /// No node yet, on a board driving `per_bus` slots on each bus. Called once: the queues are
+    /// a static.
+    pub fn new(per_bus: u8) -> Self {
         Self {
+            per_bus,
             downlinks: RefCell::new(DOWNLINKS.take()),
             present: Cell::new(0),
             queued: [Signal::new(), Signal::new()],
@@ -154,6 +161,11 @@ impl Nodes {
         (self.rx_count.get(), self.rx_oversize.get())
     }
 
+    /// Bit `k` is set while driven slot `k` holds a node.
+    pub fn present(&self) -> u16 {
+        self.present.get()
+    }
+
     fn is_present(&self, k: usize) -> bool {
         self.present.get() & (1 << k) != 0
     }
@@ -162,18 +174,17 @@ impl Nodes {
         let bits = self.present.get();
         self.present.set(if present { bits | 1 << k } else { bits & !(1 << k) });
     }
-}
 
-/// The index of `slot` among the driven slots, or `None` for one this P4 does not drive.
-fn driven(slot: BusSlot) -> Option<usize> {
-    let index = usize::from(slot.index());
-    (index < SLOTS).then(|| usize::from(slot.bus()) * SLOTS + index)
+    /// The index of `slot` among the driven slots, or `None` for one the board does not drive.
+    fn driven(&self, slot: BusSlot) -> Option<usize> {
+        (slot.index() < self.per_bus).then(|| usize::from(slot.as_u8()))
+    }
 }
 
 /// Queue one record from the host for the node in `slot`, or answer at once why not.
 pub fn to_node(shared: &Shared, slot: BusSlot, id: u16, kind: u8, body: &[u8]) {
     let nodes = &shared.nodes;
-    let queued = match driven(slot) {
+    let queued = match nodes.driven(slot) {
         Some(k) if nodes.is_present(k) => nodes.downlinks.borrow_mut()[k].push(id, kind, body),
         _ => Err(Undelivered::NoNode),
     };
@@ -183,28 +194,36 @@ pub fn to_node(shared: &Shared, slot: BusSlot, id: u16, kind: u8, body: &[u8]) {
     }
 }
 
-/// Each bus's slots and master, in statics so its future stays small.
-static SLOTS_A: ConstStaticCell<[Slot; SLOTS]> =
-    ConstStaticCell::new([const { Slot::new() }; SLOTS]);
-static SLOTS_B: ConstStaticCell<[Slot; SLOTS]> =
-    ConstStaticCell::new([const { Slot::new() }; SLOTS]);
-static MASTER_A: StaticCell<Master> = StaticCell::new();
-static MASTER_B: StaticCell<Master> = StaticCell::new();
+/// Each bus's slots and controller, in statics so its future stays small.
+static SLOTS_A: ConstStaticCell<[Slot; PER_BUS]> =
+    ConstStaticCell::new([const { Slot::new() }; PER_BUS]);
+static SLOTS_B: ConstStaticCell<[Slot; PER_BUS]> =
+    ConstStaticCell::new([const { Slot::new() }; PER_BUS]);
+static CONTROLLER_A: StaticCell<Controller> = StaticCell::new();
+static CONTROLLER_B: StaticCell<Controller> = StaticCell::new();
 
-/// Build both buses. Called once: the buffers and masters are statics.
+/// Build both buses for `board`, each driving its first `per_bus` slots.
+/// Called once: the buffers and controllers are statics.
 ///
-/// Every CS line goes high before either master is built, so no node sees a transfer start.
+/// Every CS line goes high before either controller is built, so no node sees a transfer start.
 /// Out of line, so what it builds is on this frame rather than `main`'s.
 #[inline(never)]
 pub fn build(
+    board: NodeBoard,
+    per_bus: u8,
     (spi2, dma_a, a): (SPI2<'static>, DMA_AXI_CH0<'static>, Pins),
     (spi3, dma_b, b): (SPI3<'static>, DMA_AXI_CH1<'static>, Pins),
-) -> (&'static mut Master, &'static mut Master) {
-    let high = |pin| Output::new(pin, Level::High, OutputConfig::default());
+) -> (&'static mut Controller, &'static mut Controller) {
+    let high = |pin: Option<AnyPin<'static>>| {
+        pin.map(|pin| Output::new(pin, Level::High, OutputConfig::default()))
+    };
+    let per_bus = usize::from(per_bus);
+    debug_assert!([&a.cs, &b.cs].iter().all(|cs| cs[..per_bus].iter().all(Option::is_some)));
     let cs_a = a.cs.map(high);
     let cs_b = b.cs.map(high);
     let pulled_up = |pin| Input::new(pin, InputConfig::default().with_pull(Pull::Up));
-    let irq_pull = if IRQ_ACTIVE_HIGH { Pull::Down } else { Pull::Up };
+    let irq_active_high = !board.is_carrier();
+    let irq_pull = if irq_active_high { Pull::Down } else { Pull::Up };
     let irq = |pin| Input::new(pin, InputConfig::default().with_pull(irq_pull));
     let config = Config::default().with_frequency(Rate::from_hz(BUS_HZ)).with_mode(Mode::_0);
 
@@ -216,8 +235,11 @@ pub fn build(
         .with_miso(miso_a.peripheral_input())
         .with_dma(dma_a)
         .into_async();
-    let master_a = MASTER_A.init(Master {
+    let controller_a = CONTROLLER_A.init(Controller {
         bus: 0,
+        board,
+        per_bus,
+        irq_active_high,
         cs: cs_a,
         irq: irq(a.irq),
         _miso: miso_a,
@@ -230,7 +252,7 @@ pub fn build(
         last_end: None,
         irq_since: None,
         empty_passes: 0,
-        irq_stuck: false,
+        stuck_at: None,
         stuck: 0,
         irq_us_sum: 0,
         irq_us_max: 0,
@@ -245,8 +267,11 @@ pub fn build(
         .with_miso(miso_b.peripheral_input())
         .with_dma(dma_b)
         .into_async();
-    let master_b = MASTER_B.init(Master {
+    let controller_b = CONTROLLER_B.init(Controller {
         bus: 1,
+        board,
+        per_bus,
+        irq_active_high,
         cs: cs_b,
         irq: irq(b.irq),
         _miso: miso_b,
@@ -259,16 +284,16 @@ pub fn build(
         last_end: None,
         irq_since: None,
         empty_passes: 0,
-        irq_stuck: false,
+        stuck_at: None,
         stuck: 0,
         irq_us_sum: 0,
         irq_us_max: 0,
         irq_n: 0,
     });
-    (master_a, master_b)
+    (controller_a, controller_b)
 }
 
-/// The master and the buffers it hands back after each transfer.
+/// The controller and the buffers it hands back after each transfer.
 struct Wire {
     spi: SpiDma<'static, Async>,
     rx: DmaRxBuf,
@@ -352,27 +377,34 @@ enum Outcome {
 }
 
 /// One bus and its slots.
-pub struct Master {
+pub struct Controller {
     /// 0 for A, 1 for B.
     bus: u8,
-    /// One per slot, high.
-    cs: [Output<'static>; SLOTS],
+    /// What carries the nodes, which names the slots in log lines.
+    board: NodeBoard,
+    /// Slots this bus drives, from slot 1.
+    per_bus: usize,
+    /// Whether IRQ is asserted high: on the bench, not on a carrier.
+    irq_active_high: bool,
+    /// One per driven slot, high.
+    cs: [Option<Output<'static>>; PER_BUS],
     /// Pulled to its inactive level.
     irq: Input<'static>,
     /// Held so its pull stays: an empty slot then reads constant bytes, which fail the magic.
     _miso: Input<'static>,
     /// Out only while a transfer runs.
     wire: Option<Wire>,
-    slots: &'static mut [Slot; SLOTS],
+    slots: &'static mut [Slot; PER_BUS],
     /// When the last transfer on this bus ended.
     last_end: Option<Instant>,
-    /// When IRQ was first seen asserted, until it is seen deasserted or a record arrives.
+    /// When IRQ was first seen asserted, until a record arrives or [`Controller::unlatch`].
     irq_since: Option<Instant>,
     /// IRQ passes in a row that brought nothing.
     empty_passes: u8,
-    /// Whether IRQ is stuck, until it is seen deasserted.
-    irq_stuck: bool,
-    /// Times IRQ was found stuck.
+    /// When IRQ was found stuck, until [`Controller::unlatch`].
+    stuck_at: Option<Instant>,
+    /// Times IRQ was found stuck. A line that stays held latches again after each retry, so
+    /// this grows about once every [`STUCK_RETRY`].
     stuck: u32,
     /// From IRQ first seen asserted to the start of the transfer that carried a record.
     irq_us_sum: u64,
@@ -380,64 +412,70 @@ pub struct Master {
     irq_n: u32,
 }
 
-/// Run one bus forever.
-pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
+/// Run one bus forever. A bus that drives no slot, on a broken carrier, waits forever.
+pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
+    if controller.per_bus == 0 {
+        core::future::pending().await
+    }
+    let per_bus = controller.per_bus;
     let mut rr = 0;
     let mut next_report = Instant::now() + REPORT_EVERY;
-    let queued = &shared.nodes.queued[usize::from(master.bus)];
+    let queued = &shared.nodes.queued[usize::from(controller.bus)];
     loop {
-        if let Some(end) = master.last_end {
+        if let Some(end) = controller.last_end {
             Timer::at(end + SLOT_GAP).await;
         }
-        let any_present = master.slots.iter().any(|s| s.present);
-        let asserted = master.irq.is_high() == IRQ_ACTIVE_HIGH;
-        if !asserted {
-            master.irq_since = None;
-            master.empty_passes = 0;
-            master.irq_stuck = false;
+        let any_present = controller.slots.iter().any(|s| s.present);
+        let asserted = controller.irq.is_high() == controller.irq_active_high;
+        let retry = controller.stuck_at.is_some_and(|at| Instant::now() >= at + STUCK_RETRY);
+        if !asserted || retry {
+            controller.unlatch();
         }
-        if any_present && asserted && !master.irq_stuck {
-            master.irq_since.get_or_insert_with(Instant::now);
+        if any_present && asserted && controller.stuck_at.is_none() {
+            controller.irq_since.get_or_insert_with(Instant::now);
             let mut brought = false;
-            for k in 0..SLOTS {
-                let i = (rr + k) % SLOTS;
-                if !master.slots[i].present {
+            for k in 0..per_bus {
+                let i = (rr + k) % per_bus;
+                if !controller.slots[i].present {
                     continue;
                 }
-                if let Outcome::Good { records } = master.exchange(i, true, shared).await {
+                if let Outcome::Good { records } = controller.exchange(i, true, shared).await {
                     brought |= records;
                 }
             }
-            rr = (rr + 1) % SLOTS;
+            rr = (rr + 1) % per_bus;
             if brought {
-                master.empty_passes = 0;
+                controller.empty_passes = 0;
             } else {
-                master.empty_passes = master.empty_passes.saturating_add(1);
-                if master.empty_passes >= EMPTY_PASSES {
-                    master.irq_stuck = true;
-                    master.stuck = master.stuck.wrapping_add(1);
+                controller.empty_passes = controller.empty_passes.saturating_add(1);
+                if controller.empty_passes >= EMPTY_PASSES {
+                    controller.stuck_at = Some(Instant::now());
+                    controller.stuck = controller.stuck.wrapping_add(1);
                 }
             }
             let now = Instant::now();
-            for i in 0..SLOTS {
-                if !master.slots[i].present && master.due(i, now, shared) {
-                    master.exchange(i, false, shared).await;
+            for i in 0..per_bus {
+                if !controller.slots[i].present && controller.due(i, now, shared) {
+                    controller.exchange(i, false, shared).await;
                 }
             }
         } else {
-            let due = (0..SLOTS)
-                .map(|i| master.next_due(i, shared))
+            let mut due = (0..per_bus)
+                .map(|i| controller.next_due(i, shared))
                 .min()
                 .unwrap_or(next_report)
                 .min(next_report);
+            if let Some(at) = controller.stuck_at {
+                due = due.min(at + STUCK_RETRY);
+            }
             // With IRQ already asserted and nobody present, only the timer can wake this, and
-            // the host queues nothing for an absent slot. Stuck, it waits for the deassert
-            // instead.
+            // the host queues nothing for an absent slot. Stuck, it waits for the deassert or
+            // the retry instead.
             if any_present {
                 // Asserted, or deasserted when stuck.
-                let high = IRQ_ACTIVE_HIGH != master.irq_stuck;
+                let high = controller.irq_active_high != controller.stuck_at.is_some();
                 let level = if high { Event::HighLevel } else { Event::LowLevel };
-                let woke = select3(master.irq.wait_for(level), Timer::at(due), queued.wait());
+                let woke = select3(controller.irq.wait_for(level), Timer::at(due), queued.wait());
                 if let Either3::First(()) = woke.await {
                     continue;
                 }
@@ -445,30 +483,43 @@ pub async fn run(master: &'static mut Master, shared: &Shared) -> ! {
                 Timer::at(due).await;
             }
             let now = Instant::now();
-            for i in 0..SLOTS {
-                if master.due(i, now, shared) {
-                    master.exchange(i, false, shared).await;
+            for i in 0..per_bus {
+                if controller.due(i, now, shared) {
+                    controller.exchange(i, false, shared).await;
                 }
             }
         }
         let now = Instant::now();
         if now >= next_report {
             next_report = now + REPORT_EVERY;
-            master.report(shared);
+            controller.report(shared);
         }
     }
 }
 
-impl Master {
+impl Controller {
     /// The index of slot `i` of this bus among the driven slots.
     fn driven(&self, i: usize) -> usize {
-        usize::from(self.bus) * SLOTS + i
+        usize::from(self.bus) * PER_BUS + i
     }
 
     /// The slot id of slot `i` of this bus, as the host names it.
     fn slot_id(&self, i: usize) -> BusSlot {
-        // `i` is below SLOTS, which is below PER_BUS.
+        // `i` is below `per_bus`, which is at most PER_BUS.
         BusSlot::new(self.bus, i as u8).expect("a driven slot")
+    }
+
+    /// The CS line of slot `i`, which every driven slot has.
+    fn cs(&mut self, i: usize) -> &mut Output<'static> {
+        self.cs[i].as_mut().expect("a driven slot's CS")
+    }
+
+    /// Clear the stuck latch and start IRQ service afresh, so a line still held latches again
+    /// after [`EMPTY_PASSES`] empty passes.
+    fn unlatch(&mut self) {
+        self.irq_since = None;
+        self.empty_passes = 0;
+        self.stuck_at = None;
     }
 
     /// When slot `i` is next owed a transfer.
@@ -496,7 +547,7 @@ impl Master {
             let filled = self.prepare(i, tx_bytes(&mut tx), shared);
             self.slots[i].seq = seq.wrapping_add(1);
             let start = Instant::now();
-            self.cs[i].set_low();
+            self.cs(i).set_low();
             // Bound before the await, so the `Result` is not held across it.
             let started = spi.transfer_buffers(TRANSFER_LEN, rx, TRANSFER_LEN, tx);
             let (wire, clocked) = match started {
@@ -508,7 +559,7 @@ impl Master {
                 // esp-hal refuses only a transfer past its DMA limit, which this is not.
                 Err((_, spi, rx, tx)) => (Wire { spi, rx, tx }, false),
             };
-            self.cs[i].set_high();
+            self.cs(i).set_high();
             let end = Instant::now();
             self.last_end = Some(end);
             self.slots[i].last_start = Some(start);
@@ -636,10 +687,14 @@ impl Master {
         if !slot.present && matches!(outcome, Outcome::Good { .. }) {
             slot.present = true;
             shared.nodes.set_present(k, true);
+            crate::carrier::presence(shared, shared.nodes.present());
+            // The node asserting a stuck line is usually the one that just arrived.
+            self.unlatch();
             self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present && slot.misses >= ABSENT_AFTER {
             slot.present = false;
             shared.nodes.set_present(k, false);
+            crate::carrier::presence(shared, shared.nodes.present());
             shared.nodes.downlinks.borrow_mut()[k].drain(|id| {
                 shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::NoNode });
             });
@@ -696,10 +751,10 @@ impl Master {
         let mut message = LogStr::new();
         let name = if self.bus == 0 { 'A' } else { 'B' };
         let _ = match i {
-            Some(i) => write!(message, "bus {} {}", self.slot_id(i), what),
+            Some(i) => write!(message, "{} {}", self.board.label(self.slot_id(i)), what),
             None => write!(message, "bus {name} {what}"),
         };
-        shared.push_line(Some(LogLevel::Info), message);
+        shared.push_log(&message);
     }
 }
 

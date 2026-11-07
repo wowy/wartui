@@ -1,8 +1,9 @@
 use wartui_proto::bus::wire_epoch;
+use wartui_proto::link::HostToBridge;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{self, ChannelPool, Job, Plan};
 
-use super::{Assignment, Command, FleetEngine, Now};
+use super::{ActionBatch, Assignment, Command, FleetEngine, Now};
 
 /// Allocate the next monotonic counter, skipping one whose wire epoch matches what the node's
 /// heartbeat says it holds.
@@ -20,15 +21,16 @@ pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
 }
 
 impl FleetEngine {
-    /// Take an operator's instruction. Nothing goes out from here: what changes for a node is sent
-    /// on its next heartbeat.
-    pub(super) fn on_command(&mut self, command: Command, now: Now) {
+    /// Take an operator's instruction. What changes for a node is sent on its next heartbeat, so
+    /// only a power-cycle, which is the bridge's to carry out, goes out from here.
+    pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::RememberBle { on } => self.on_remember_ble(on),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
             Command::SetPool { pool } => self.on_set_pool(pool),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
+            Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
         }
     }
 

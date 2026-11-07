@@ -42,6 +42,7 @@ pub(super) fn draw_fleet(
     }
     let header = Row::new(header).style(Style::new().add_modifier(Modifier::BOLD));
 
+    let board = snapshot.node_board();
     let rows: Vec<Row<'_>> = snapshot
         .nodes
         .iter()
@@ -55,7 +56,9 @@ pub(super) fn draw_fleet(
             let style = severity.style();
             let mut cells = vec![
                 Cell::from(node_label(node)),
-                Cell::from(node.state.slot.map_or_else(|| "—".to_owned(), |slot| slot.to_string())),
+                Cell::from(
+                    node.state.slot.map_or_else(|| "—".to_owned(), |s| board.label(s).to_string()),
+                ),
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
@@ -256,13 +259,17 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
         _ => {}
     }
     if state.slot.is_none() {
-        return Some("lost its bus slot to another node's heartbeat, so it cannot be reached");
+        return Some(LOST_SLOT);
     }
     if !node.assignable {
         return Some("is not heartbeating, so it cannot be assigned");
     }
     None
 }
+
+/// Why a heartbeating node has no slot, the notice when a key that needs one is refused.
+pub(super) const LOST_SLOT: &str =
+    "lost its bus slot to another node's heartbeat, so it cannot be reached";
 
 /// The state column: what the operator most needs to know about a node.
 ///
@@ -368,7 +375,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use wartui_core::engine::Assignment;
-    use wartui_proto::bus::{Capabilities, DieTemp, Vdd};
+    use wartui_proto::bus::{Capabilities, DieTemp, NodeBoard, Slot, Vdd};
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
     use super::*;
@@ -390,6 +397,23 @@ mod tests {
         assert!(rendered.contains("C5 57:84"));
         assert!(rendered.contains("—  57:86"), "a node that has not heartbeated has no chip yet");
         assert!(!rendered.contains("02:00:5E:10:57"), "and no row spells out the whole address");
+    }
+
+    #[test]
+    fn fleet_table_names_slot_by_silk_when_bridge_is_on_a_carrier() {
+        // Byte 7 is B1, the first slot of bus B.
+        let b1 = node(0x85, 0, true);
+        assert_eq!(b1.state.slot, Slot::new(1, 0));
+        let carrier = Snapshot { nodes: vec![b1.clone()], ..on_board(NodeBoard::Carrier14) };
+        let bench = Snapshot { nodes: vec![b1], ..on_board(NodeBoard::Bench) };
+
+        let row = |snapshot: &Snapshot| {
+            rendered(snapshot).lines().find(|line| line.contains("57:85")).map(str::to_owned)
+        };
+        let on_carrier = row(&carrier).expect("the node's row");
+        assert!(on_carrier.contains(" N8 "), "{on_carrier}");
+        let on_bench = row(&bench).expect("the node's row");
+        assert!(on_bench.contains(" B1 "), "{on_bench}");
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
 //! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi
-//! networks are never captured.
+//! networks are never captured. [`Command::PowerCycle`] asks the bridge's carrier to switch one
+//! node off and on, and the answer reaches the operator as [`Snapshot::power_answer`].
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -34,15 +35,21 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::bus::Slot;
-use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
+use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
+use wartui_proto::link::{
+    BridgeToHost, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge,
+    NO_GPS_RECEIVER,
+};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::{Assignment, NodeState};
-pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};
+pub use snapshot::{
+    BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, Snapshot, TailEntry,
+    power_cycled_text,
+};
 
 pub(crate) use lag::BEHIND_US;
 pub(crate) use rx::advance_since_boot;
@@ -65,6 +72,10 @@ pub struct FleetEngine {
     /// address, so this is how it finds its node.
     slots: HashMap<Slot, Mac>,
     bridge: Option<BridgeInfo>,
+    /// Whether this bridge life last said no GPS receiver answers on its port
+    /// ([`NO_GPS_RECEIVER`], or [`GPS_BUS_REFUSED`]). Cleared when it says the receiver answered
+    /// ([`GPS_RECEIVER_ANSWERED`]), and on every connect and disconnect.
+    bridge_lacks_gps: bool,
     link_up: bool,
     /// When the link last came up, `None` while down ([`Self::note_departures`]).
     link_up_since: Option<Instant>,
@@ -117,6 +128,8 @@ pub struct FleetEngine {
     behind_since: Option<Instant>,
     /// The largest lag measured during the spell [`Self::behind_since`] opened.
     behind_peak_us: u64,
+    /// The bridge's last answer to a power-cycle.
+    power_answer: Option<PowerAnswer>,
 }
 
 impl FleetEngine {
@@ -126,10 +139,10 @@ impl FleetEngine {
         CaptureSettings {
             pool: self.config.pool,
             record_raw: self.config.record_raw,
-            // The bridge's receiver is built for every run, so it counts only while a bridge with
-            // a GPS port is connected.
+            // The bridge's receiver is built for every run, so it counts only while a bridge is
+            // connected.
             gps: self.config.position.gps().is_some()
-                || (self.bridge_has_gps() && self.config.position.bridge_gps().is_some()),
+                || (self.bridge_connected() && self.config.position.bridge_gps().is_some()),
             gps_max_age: self.config.position.max_age(),
             remember_ble: self.remember_ble,
             preferred_ble: self.preferred_ble,
@@ -146,6 +159,7 @@ impl FleetEngine {
             nodes: BTreeMap::new(),
             slots: HashMap::new(),
             bridge: None,
+            bridge_lacks_gps: false,
             link_up: false,
             link_up_since: None,
             link_error: None,
@@ -171,6 +185,7 @@ impl FleetEngine {
             lag_peak_us: 0,
             behind_since: None,
             behind_peak_us: 0,
+            power_answer: None,
             config,
         }
     }
@@ -180,15 +195,17 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, now),
+            Event::Command(command) => self.on_command(command, now, &mut batch),
             Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
-                    chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
+                    node_board: info.node_board,
                 }));
                 self.bridge = Some(info);
+                // A new life. The P4 repeats its GPS fault right after `Ready`.
+                self.bridge_lacks_gps = false;
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
@@ -205,6 +222,7 @@ impl FleetEngine {
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
+                self.bridge_lacks_gps = false;
                 self.link_up_since = None;
                 self.link_error = Some(reason);
                 self.reset_arrivals();
@@ -300,7 +318,7 @@ impl FleetEngine {
     /// interval.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
-        if self.bridge_has_gps() && self.config.position.bridge_gps().is_some() {
+        if self.bridge_connected() && self.config.position.bridge_gps().is_some() {
             let bytes = GpsWriteBytes::from_slice(&ubx::valset_rate(self.config.gps_rate_hz))
                 .expect("a rate write fits one GpsWrite");
             batch.bulk.push(HostToBridge::GpsWrite { bytes });
@@ -308,12 +326,24 @@ impl FleetEngine {
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
-    /// Whether the bridge connected now was built with a GPS port. `self.bridge` outlives a
-    /// disconnect, so the link must be up too. The runtime reads this after each event to decide
-    /// whether the host's search stands down, so the two never disagree about the bridge.
+    /// What carries the nodes, as the bridge last announced it: the bench before any has.
     #[must_use]
-    pub fn bridge_has_gps(&self) -> bool {
-        self.link_up && self.bridge.as_ref().is_some_and(|bridge| bridge.gps)
+    pub fn node_board(&self) -> NodeBoard {
+        snapshot::announced_board(self.bridge.as_ref())
+    }
+
+    /// `slot` as the operator reads it on [`Self::node_board`].
+    pub(crate) fn slot_label(&self, slot: Slot) -> SlotLabel {
+        self.node_board().label(slot)
+    }
+
+    /// Whether a bridge is connected now, and so a GPS port: every P4 reads one. `self.bridge`
+    /// outlives a disconnect, so the link must be up too. The runtime reads this after each event
+    /// to decide whether the host's search stands down, so the two never disagree about the
+    /// bridge.
+    #[must_use]
+    pub fn bridge_connected(&self) -> bool {
+        self.link_up && self.bridge.is_some()
     }
 
     /// Where the host believes it is: the chain the runtime feeds the bridge's receiver through.
@@ -333,6 +363,12 @@ impl FleetEngine {
             BridgeToHost::Delivered { id } => self.on_send_result(*id, None, now, batch),
             BridgeToHost::Undelivered { id, reason } => {
                 self.on_send_result(*id, Some(*reason), now, batch);
+            }
+            BridgeToHost::PowerCycled { slot, outcome } => {
+                let text = power_cycled_text(self.node_board(), *slot, *outcome);
+                tracing::info!(slot = %self.slot_label(*slot), ?outcome, "{text}");
+                let id = self.power_answer.as_ref().map_or(1, |answer| answer.id + 1);
+                self.power_answer = Some(PowerAnswer { id, text });
             }
             BridgeToHost::Status {
                 rx_count,
@@ -367,9 +403,19 @@ impl FleetEngine {
                     host_uart_errors: *host_uart_errors,
                 }));
             }
-            // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the transport's to
-            // log, not the engine's. GPS bytes are the position chain's. An update status answers
-            // `flash-bridge`, which `run` never is.
+            // Bridge diagnostics are the transport's to log. The engine reads only those that
+            // say whether the bridge has a GPS receiver, for the view.
+            BridgeToHost::Error { message }
+                if matches!(message.as_str(), NO_GPS_RECEIVER | GPS_BUS_REFUSED) =>
+            {
+                self.bridge_lacks_gps = true;
+            }
+            BridgeToHost::Log { message } if message.as_str() == GPS_RECEIVER_ANSWERED => {
+                self.bridge_lacks_gps = false;
+            }
+            // `Ready` arrives as `LinkEvent::Connected`. An update status answers
+            // `flash-bridge`, which `run` never is. GPS bytes are the runtime's, which feeds
+            // them to the position chain before the engine would see them.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }

@@ -29,7 +29,7 @@ carried the fleet as before. The run was `wartui run` for 10.5 minutes.
 - **Bus B's 30 cm jumpers made no difference** at 1 MHz.
 - **The node re-arms in time.** Its CS-edge interrupt collects each transfer and arms the next.
   The 1 ms gap the P4 leaves after each transfer to a slot was always enough: no transfer arrived
-  at an unarmed slave, and none ended before its DMA reported done.
+  at an unarmed node, and none ended before its DMA reported done.
 - **The IRQ latency is about one transfer.** A transfer takes 8.3 ms at 1 MHz. When a heartbeat
   is queued, the node already has an idle transfer armed, so the P4 clocks that one first and
   collects the record on its next pass. The 18 ms maximum is two passes. At 4 MHz, a pass is
@@ -41,7 +41,7 @@ carried the fleet as before. The run was `wartui run` for 10.5 minutes.
 
 ## The DMA is done before the edge's handler looks
 
-A later build (db7155d) bins each CS edge by how long the handler waits for the slave's DMA to
+A later build (db7155d) bins each CS edge by how long the handler waits for the SPI driver's DMA to
 report the transfer done. Its limit is 50 µs. Both nodes were rebooted under a P4 that was
 already polling, and ran for 3 minutes:
 
@@ -61,7 +61,7 @@ already polling, and ran for 3 minutes:
 ## ESP-NOW carried on alongside
 
 The capture recorded 512 observations and 255 heartbeats, with no batch gaps. The engine saw no
-reboot from either node. So serving the slave from a GPIO interrupt did not disturb the
+reboot from either node. So serving the SPI driver from a GPIO interrupt did not disturb the
 promiscuous callback, the Bluetooth scan, or the ESP-NOW sends.
 
 `1A:50` joined with reset cause `watchdog` and `0D:20` with `external`. Both causes date from the
@@ -138,3 +138,228 @@ confirmed, its 6 s listen and the image build included.
 - **Rollback.** An update cancelled at `rebooting` sends no confirm. The node booted the new image
   as `trial boot 1 of 3`. Two resets through its USB counted boots 2 and 3, and the third rolled it
   back to the old slot and rebooted. It then heartbeated off trial, with nothing sent to it.
+
+## On the carrier-10, 2026-11-06
+
+The same P4 (`D0:1C`), seated on a 10-node carrier, with its CH343 as the host link. The P4 ran
+branch `feat/carrier-board` (ed43819), and the two nodes ran 1c614db's node firmware, both at
+1 MHz. A GPS receiver sat on I2C0 with the carrier's I/O expander. The nodes were the same two
+XIAO C5s, powered by their sockets alone.
+
+**Detection and boot.** `wartui status` named the board `carrier-10`, 10 node slots, N1 to N10.
+
+| Boot | The P4's carrier line |
+| --- | --- |
+| Carrier powered on | `10 powered now, 0 already on` |
+| P4 reset alone, through the CH343's EN line | `0 powered now, 10 already on` |
+
+After the P4-only reset, the expander kept its outputs and no socket was switched off. The P4
+reports that reset as `PowerOn`, because the CH343 pulls the chip's EN pin.
+
+**Every socket.** The two nodes moved through the sockets in pairs, one per bus: N1 and N6, N2
+and N7, and so on to N5 and N10. In each socket the node heartbeated, its IRQ was served, and
+`wartui power-cycle` rebooted it.
+
+| | Bus A, N1–N5 (`0D:20`) | Bus B, N6–N10 (`1A:50`) |
+| --- | --- | --- |
+| Heartbeats through the socket's CS | all five | all five |
+| IRQ-to-transfer latency, mean | 8.8–9.6 ms | 9.4–9.7 ms, 12.4 ms over N6's first 33 |
+| After `power-cycle` | heartbeat `#1`, reset `power_on` | heartbeat `#1`, reset `power_on` |
+| The other bus's node during the cycle | ran on unbroken | ran on unbroken |
+| CRC errors, by socket | N3 1, N4 4, others 0 | N8 5, others 0 |
+| Stuck IRQ | 1, at N3's move | 0 |
+
+- **The 1 s off time is enough.** Every cycled node came back with reset cause `power_on`, not
+  a brownout.
+- **A power-cycle costs two retries.** The P4 counts them while the node is still present and
+  silent, before it marks the node gone. A node left alone in its socket counted none.
+- **The CRC errors came while nodes were moved with the carrier powered.** The P4's uptime ran
+  unbroken from the move to N3 and N8 through N10. Each socket's count was already standing at
+  the first reading after a move, and none grew afterwards, over at least 100 good transfers per
+  socket and through its power-cycle. N5 and N10, also moved hot, counted none.
+- **The GPS shares I2C0 with the expander.** The receiver streamed NMEA, about 400 bytes a
+  second, through the power-cycles of N1 and N6, and got a fix.
+
+**A 10-minute capture with N1 and N6 undisturbed:**
+
+| | N1 (`0D:20`) | N6 (`1A:50`) |
+| --- | --- | --- |
+| Heartbeats recorded | 120 | 120 |
+| CRC, version, length or seq gap | 0 | 0 |
+| Retries during the run | 0 | 0 |
+| Stuck IRQ | 0 | 0 |
+| IRQ-to-transfer latency, mean / max | 9.6 / 18.1 ms | 9.7 / 18.2 ms |
+
+The capture recorded 380 observations from 116 networks. There were no batch gaps, and every
+observation had a GPS position. All three assignments were delivered in 34–35 ms. The bridge
+dropped no frames, and the host stored all of them.
+
+### Still open on the carrier
+
+- **Several nodes on one bus.** Each bus held one node at a time, so no two nodes shared MISO.
+- **4 MHz.**
+- **The 14-node board's seventh CS on each bus** (GPIO25 and GPIO24).
+
+## A full carrier-10, 2026-11-06
+
+The same P4 and carrier, with a node in every socket, five per bus. The bus ran at 1 MHz.
+
+| Bus A | N1 `04:E4` | N2 `00:40` | N3 `97:78` | N4 `0A:28` | N5 `0D:20` |
+| --- | --- | --- | --- | --- | --- |
+| **Bus B** | **N6 `7E:3C`** | **N7 `EF:54`** | **N8 `F7:30`** | **N9 `E5:60`** | **N10 `1A:50`** |
+
+Every node heartbeated over the bus, with no CRC, version, length or seq-gap error on any slot.
+`wartui power-cycle` rebooted each of the ten with reset cause `power_on`, at two retries apiece.
+
+**Five nodes on one IRQ line cost a pass per record.** An IRQ pass clocks every present slot
+once, about 46 ms with five at 1 MHz. A record waits one or two passes:
+
+| IRQ-to-transfer latency, mean / max | Bus A | Bus B |
+| --- | --- | --- |
+| One node, any socket | 8.8–9.6 / 9.6 ms | 9.4–9.7 / 9.7 ms |
+| Five nodes, after a P4 reset (ed43819) | 34.5 / 69 ms | 36 / 69 ms |
+| Five nodes, after a cold start (03eefed) | 31.8 / 52 ms | 34.4 / 52 ms |
+
+### A stuck IRQ latch that could not clear (fixed in 03eefed)
+
+On ed43819, bus A came up from three cold starts in a row with `irq_n=2 stuck=1`, and stayed
+there for minutes. Its five nodes' heartbeats then arrived exactly 1,010 ms apart, the
+timed schedule's grid, where IRQ service gives each node's own cadence. Bus B latched once on
+each cold start and recovered.
+
+- At a cold start, nodes assert IRQ before the P4 has marked them present, so two passes over
+  the present slots bring nothing and the bus latches the line as stuck. That is intended.
+- The latch cleared only on seeing the line deasserted. Served by the timed schedule, each
+  node holds IRQ while its record waits for a poll, 250–500 ms of every second. Bus A's five
+  heartbeats were spread across the second, at about .07, .40, .62, .80 and .89 s, so the
+  line never deasserted.
+- Power-cycling any one node, even one with no part in the fault, opened a gap and returned
+  the bus to IRQ service.
+
+03eefed also clears the latch when a slot becomes present, and retries IRQ service every
+second. A cold start with all ten seated then counted no stuck line on either bus.
+
+**A short on the carrier held bus A's IRQ too.** N4's D0, the node's IRQ output, had been
+shorted to N3's 5 V pin. Once it was cleared, `0A:28` alone in N4 was served 22 IRQs for its
+22 records at 9.1 / 9.6 ms, with no stuck line. So its D0 and the carrier's IRQ input for N4
+both survived 5 V. The short does not explain the cold starts: bus A latched the same way after it
+was cleared.
+
+### The node supply lost while the P4 stays up (4ac6c60)
+
+The P4 ran from its own USB-C, connected to the host, while the carrier's supply was switched
+off for several seconds and back on. The host-side times are from `wartui sniff`:
+
+| Time | The P4 |
+| --- | --- |
+| 21:32:59.54–.78 | all ten nodes gone, each after 5 transfers without magic |
+| 21:33:00.05 | `every node dropped at once, so the node supply was likely lost`; every port low |
+| 21:33:00–05 | scout N1, supply still out: no answer, switched off |
+| ~21:33:05 | scout N6; the supply returns during its turn |
+| 21:33:09.72 | `N6 appeared` |
+| 21:33:11.05 | `N6 answered, so the node supply is back; 10 node slots powered again` |
+| 21:33:11.53–.82 | the other nine appear |
+
+The ten drops fell within 0.25 s of each other, well inside the 2 s window. The bridge dropped no
+frame. Before 4ac6c60, the expander kept every port high through the loss, so all ten started
+together when the supply returned.
+
+### Still open on the full carrier
+
+- A capture with all ten nodes assigned and recording.
+- A power-cycle request while the P4 scouts. Host tests cover only the detection.
+- 4 MHz, which cuts a five-node pass to about 12 ms.
+
+### A P4 that starts before the node supply (e688afb)
+
+The carrier's supply was switched off, the P4's USB-C unplugged and plugged back in, and the
+supply switched on about 20 s later. Times are from the host's `--log-file`:
+
+| Time (UTC) | The P4 |
+| --- | --- |
+| 04:22:56.19 | a power-on reset; `at boot 10 powered, 0 already on`, into the dead supply |
+| 04:23:01.14 | `no node answered after power-up, so the node supply may be out`; every port low |
+| 04:23:01–16 | scouts N1, N6 and N2, 5 s each, unanswered |
+| 04:23:17.26 | `N7 appeared`: the supply returned during N7's turn |
+| 04:23:18.16 | `N7 answered, so the node supply is back; 10 node slots powered again` |
+| 04:23:19.25–.34 | the other nine appear |
+
+Before e688afb, the boot stagger left every port high in the dead supply, and nothing
+staggered the nodes when it returned.
+
+### A power-cycle while the P4 scouts (8494180)
+
+With the supply off and the P4 scouting, `wartui power-cycle --slot N3`:
+
+| | e688afb | 8494180 |
+| --- | --- | --- |
+| The request ends the scouting | after the 0.9 s stagger | after the 0.9 s stagger |
+| The cycle runs | after the 5 s check for a node | at once |
+| `N3 power-cycled` at the CLI | never: it gave up at 5 s | 1.98 s after the request |
+| Then | the check fails and scouting resumes | the check fails and scouting resumes |
+
+After the e688afb run, the supply was switched on during the resumed scouting. N3 answered in
+its turn, and the other nine followed 100 ms apart.
+
+### Ten nodes recording, without antennas (4ac6c60)
+
+A 10-minute capture with all ten nodes assigned, four or five channels each. The bus carried it
+cleanly: no new CRC, version, length or seq-gap error across 1,200 counter readings, no new
+stuck IRQ, no node lost, and none of the bridge's 1,234 frames dropped. Every assignment was
+delivered, in 35–89 ms.
+
+The nodes had no antennas fitted, so the capture says nothing about coverage: 17 networks
+against 116 from two nodes with antennas in the same spot, heard 40–55 dB weaker.
+
+### A power-cycle during the check for a node (3e144f3), 2026-11-07
+
+With the supply off and the P4 scouting, `wartui power-cycle --slot N3`, then `--slot N5` as soon
+as N3's answer came, which lands inside the 5 s check that follows N3's cycle:
+
+| Time (UTC) | |
+| --- | --- |
+| 12:28:20.2 | N3's request ends the scouting |
+| 12:28:21.10 | `a power-cycle request ended the wait; 10 node slots powered again` |
+| ~12:28:22.1 | N3 cycled: 1.99 s at the CLI, as with 8494180 |
+| ~12:28:22.2 | N5's request, inside the check |
+| ~12:28:23.2 | N5 cycled: 1.08 s at the CLI |
+| 12:28:28.19 | `no node answered after power-up`, and scouting resumes |
+
+The check started again after N5's cycle. Before 3e144f3, N5 would have waited out the check
+and been answered about 6 s after it was sent.
+
+### Supply loss on 3e144f3, 2026-11-07
+
+**All ten seated.** Recovery behaves as it did on 4ac6c60:
+
+| Time (UTC) | |
+| --- | --- |
+| 12:31:02.86 | supply on; N1, the slot being scouted, appears |
+| 12:31:03.76 | `N1 answered, so the node supply is back; 10 node slots powered again` |
+| 12:31:04.86–.94 | the other nine appear |
+| 12:31:23.57–.84 | supply off; all ten gone within 0.27 s, then `every node dropped at once` |
+| 12:31:41.61 | supply on; N7 appears in its turn, after N1, N6 and N2 |
+| 12:31:42.51–43.86 | `N7 answered`, and the other nine appear |
+
+Across the drop and the return, N2 and N9 each counted one CRC error, every slot two retries,
+and bus B two stuck IRQs. IRQ served both buses again afterwards, and no slot counted another
+CRC, version, length or seq-gap error.
+
+**Only N4 and N9 seated, a request during recovery.** The two dropped together at 12:35:24.08,
+so recovery scouted N4 and N9 first. `wartui power-cycle --slot N1` at 12:36:10.6 ended the
+scouting and was answered in 1.99 s. The check that followed found no node at about 12:36:17.6,
+worked out from the answer and the 5 s check: the line came before the host's log was connected
+again. Scouting then resumed in 5 s turns.
+
+The supply was switched on during the second round. N4 appeared at 12:37:10.09, 2.5 s into the
+round's first turn, about a node's boot time, and N9 followed at 12:37:11.95. With the slots that
+held nodes carried through the request, a round starts N4, N9, N1, N6… Before 3e144f3 it started
+at N1, and N4 would have waited for the round's seventh turn, about 30 s later.
+
+### Still open
+
+- A ten-node capture with antennas, for coverage.
+- Two fixes that this bench can't provoke: retrying each expander transaction at boot, which
+  needs an I2C glitch, and exempting only the node in a cycle now from the supply-loss count,
+  which needs the supply to drop within about 1 s of a queued cycle.
+- 4 MHz.

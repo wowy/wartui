@@ -346,7 +346,7 @@ fn main() -> ! {
     let scanning = scanner.is_some();
 
     // The node bus, on the XIAO's D7-D10 and D0 (`docs/node-bus.md`). Pulled up, so CS reads
-    // idle with no P4 attached. One pin, two readers: the slave takes it as CS, and
+    // idle with no P4 attached. One pin, two readers: the SPI driver takes it as CS, and
     // `bus` re-arms on its rising edge.
     let cs = Input::new(peripherals.GPIO12, InputConfig::default().with_pull(Pull::Up));
     let spi = Spi::new(peripherals.SPI2, Mode::_0)
@@ -481,12 +481,12 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// the host; the host treats sixty seconds of silence as a node that has left the fleet.
 /// `node.version` is the epoch this node holds, which is how the host tells adoption from a
 /// bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
-/// (`bus::send`). The rail voltage and die temperature are read between dwells, so the
-/// voltage read's PBUS excursion never lands in one.
+/// (`bus::send`). The rail voltage, die temperature and free heap are read between dwells, so
+/// the voltage read's PBUS excursion never lands in one.
 fn heartbeat(node: &Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped beat or stale after a reflash, and they are
-    // five bytes of twenty-three.
+    // five bytes of twenty-seven.
     let msg = Heartbeat {
         capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
         mac: node.mac,
@@ -497,6 +497,7 @@ fn heartbeat(node: &Node) {
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
         die_temp: die_temp(health::die_temp_c()),
+        heap_free: esp_alloc::HEAP.free() as u32,
     };
     bus::send(UpType::Heartbeat, &msg.encode());
 }

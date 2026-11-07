@@ -18,6 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
+use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -63,12 +64,8 @@ pub async fn run(args: Args) -> Result<()> {
         Ok(ready) => ready?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
     };
-    println!(
-        "bridge     {} on {:?}, firmware {}",
-        mac::full(&info.mac),
-        info.chip,
-        info.fw_version
-    );
+    println!("bridge     {}, firmware {}", mac::full(&info.mac), info.fw_version);
+    println!("board      {}", board_line(info.node_board));
     println!("{}", super::last_reset_line(&info));
     // A split bridge's radio restarts on its own, and this is where its reason shows.
     if let Some(radio) = &info.radio {
@@ -98,10 +95,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("dropped    {dropped_tx} frames");
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
-    // Read at the moment the bridge announced rather than now, which is close enough:
-    // nothing wartui writes allocates, and what matters is the trend across captures.
-    println!("heap free  {} bytes", info.heap_free);
-    for line in diagnostic_lines(&queues, radio_link.as_ref(), host_uart_errors) {
+    for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
 
@@ -124,52 +118,48 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// What carries the bridge's nodes, and the slots it drives.
+fn board_line(board: NodeBoard) -> String {
+    format!("{board}, {} node slots, {}", board.slot_count(), crate::text::slot_range(board))
+}
+
 /// The radio coprocessor behind a split bridge.
 fn radio_line(radio: &RadioInfo) -> String {
     format!(
-        "radio      {} on {:?}, firmware {}, reset {:?}, last phase {:?}",
+        "radio      {}, firmware {}, reset {:?}, last phase {:?}",
         mac::full(&radio.mac),
-        radio.chip,
         radio.fw_version,
         radio.reset_cause,
         radio.last_phase
     )
 }
 
-/// One line per reported queue, the UART link's counters when it has any, then the host link's
-/// line errors.
-fn diagnostic_lines(
-    queues: &QueueStats,
-    radio_link: Option<&RadioLinkStats>,
-    host_uart_errors: u32,
-) -> Vec<String> {
+/// One line per reported queue, the UART link's counters, then the host link's line errors.
+fn diagnostic_lines(queues: &QueueStats, s: &RadioLinkStats, host_uart_errors: u32) -> Vec<String> {
     let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
-    if let Some(s) = radio_link {
-        lines.push(format!(
-            "  radio link  packets {}  crc_fail {}  bad_magic {}  seq_gap {}  uart_errors {}  \
-             radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}  radio_uart_errors {}",
-            s.packets,
-            s.crc_fail,
-            s.bad_magic,
-            s.seq_gap,
-            s.uart_errors,
-            s.radio_crc_fail,
-            s.radio_bad_magic,
-            s.radio_seq_gap,
-            s.radio_uart_errors,
-        ));
-    }
+    lines.push(format!(
+        "  radio link  packets {}  crc_fail {}  bad_magic {}  seq_gap {}  uart_errors {}  \
+         radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}  radio_uart_errors {}",
+        s.packets,
+        s.crc_fail,
+        s.bad_magic,
+        s.seq_gap,
+        s.uart_errors,
+        s.radio_crc_fail,
+        s.radio_bad_magic,
+        s.radio_seq_gap,
+        s.radio_uart_errors,
+    ));
     lines.push(format!("  host link   uart_errors {host_uart_errors}"));
     lines
 }
 
 fn queue_line(stat: &QueueStat) -> String {
     format!(
-        "  queue {}  {}/{} {}  dropped {}",
+        "  queue {}  {}/{} bytes  dropped {}",
         stat.queue.name(),
         stat.high_water,
         stat.capacity,
-        stat.queue.unit(),
         stat.dropped
     )
 }
@@ -190,7 +180,10 @@ fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     Some(format!("{heard} Check the nodes are powered and wired to the bridge's node bus."))
 }
 
-async fn wait_for_ready(link: &mut wartui_bridge::LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
+/// The bridge's announcement, or why the link went down first.
+pub(crate) async fn wait_for_ready(
+    link: &mut wartui_bridge::LinkHandle,
+) -> Result<wartui_bridge::BridgeInfo> {
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
@@ -252,17 +245,19 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Awaited, awaited, diagnostic_lines, human_uptime, radio_line, silence_note};
+    use super::{
+        Awaited, awaited, board_line, diagnostic_lines, human_uptime, radio_line, silence_note,
+    };
     use wartui_bridge::LinkEvent;
+    use wartui_proto::bus::NodeBoard;
     use wartui_proto::link::{
-        BridgeToHost, Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo,
+        BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
     use wartui_proto::reset::ResetCause;
 
     #[test]
-    fn status_prints_radio_line_when_bridge_is_split() {
+    fn status_prints_radio_line_when_radio_answered() {
         let radio = RadioInfo {
-            chip: Chip::Esp32C6,
             mac: [0x58, 0x8c, 0x81, 0x00, 0x12, 0x34],
             fw_version: "0.1.0".try_into().expect("short"),
             reset_cause: ResetCause::Watchdog,
@@ -272,11 +267,16 @@ mod tests {
         assert_eq!(
             radio_line(&radio),
             format!(
-                "radio      {} on Esp32C6, firmware 0.1.0, reset Watchdog, \
-                 last phase RadioLink",
+                "radio      {}, firmware 0.1.0, reset Watchdog, last phase RadioLink",
                 wartui_proto::mac::full(&radio.mac)
             )
         );
+    }
+
+    #[test]
+    fn status_prints_board_and_its_slots_when_bridge_announces() {
+        assert_eq!(board_line(NodeBoard::Bench), "bench, 12 node slots, A1 to A6 or B1 to B6");
+        assert_eq!(board_line(NodeBoard::Carrier10), "carrier-10, 10 node slots, N1 to N10");
     }
 
     #[test]
@@ -307,19 +307,27 @@ mod tests {
             })
             .expect("room");
         assert_eq!(
-            diagnostic_lines(&queues, None, 0),
+            diagnostic_lines(&queues, &RadioLinkStats::default(), 0),
             [
                 "  queue host-bulk  1024/262144 bytes  dropped 0",
                 "  queue node-down  3102/4096 bytes  dropped 2",
                 "  queue radio-up  96/8192 bytes  dropped 0",
+                RADIO_LINK_CLEAN,
                 "  host link   uart_errors 0",
             ]
         );
     }
 
+    /// The radio link's line with every counter at zero.
+    const RADIO_LINK_CLEAN: &str = "  radio link  packets 0  crc_fail 0  bad_magic 0  seq_gap 0  \
+         uart_errors 0  radio_crc_fail 0  radio_bad_magic 0  radio_seq_gap 0  radio_uart_errors 0";
+
     #[test]
-    fn status_prints_only_host_link_when_queues_empty() {
-        assert_eq!(diagnostic_lines(&QueueStats::new(), None, 3), ["  host link   uart_errors 3"]);
+    fn status_prints_radio_and_host_link_when_queues_empty() {
+        assert_eq!(
+            diagnostic_lines(&QueueStats::new(), &RadioLinkStats::default(), 3),
+            [RADIO_LINK_CLEAN, "  host link   uart_errors 3"]
+        );
     }
 
     #[test]
@@ -368,7 +376,7 @@ mod tests {
             uptime_ms: 3,
             rx_oversize: 0,
             queues: QueueStats::new(),
-            radio_link: None,
+            radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
         };
         let event = LinkEvent::Message(status.clone());

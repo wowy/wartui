@@ -78,7 +78,7 @@ impl FleetEngine {
                     self.behind_since = Some(now.mono);
                     self.behind_peak_us = lag_us;
                     tracing::info!(
-                        %slot,
+                        slot = %self.slot_label(slot),
                         last_rx_us,
                         rx_us,
                         bridge_elapsed_us,

@@ -160,6 +160,7 @@ fn heartbeat_of(mac: Mac, version: Version, trial: bool) -> Vec<u8> {
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 0,
     }
     .encode()
     .to_vec()

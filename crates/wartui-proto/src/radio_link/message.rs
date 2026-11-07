@@ -17,12 +17,14 @@
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
 
-use crate::link::{LogLevel, LogStr, QueueStat};
+use crate::link::{LogStr, QueueStat};
 
 /// The revision of the [`Up`] and [`Down`] encoding, which [`Hello`](super::Hello)
 /// carries.
 ///
-/// Not frozen. Bump it whenever this module's types change shape; `radio_link_revision_golden_bytes` in `tests/radio_link.rs` fails until the bump.
+/// Not frozen. Held at 1 until 1.0, as [`crate::link::LINK_PROTO_VERSION`] is: both firmwares
+/// are flashed from one tree. `radio_link_revision_golden_bytes` in `tests/radio_link.rs` pins
+/// the encoding, and is re-pinned when these types change shape.
 pub const LINK_REVISION: u16 = 1;
 
 /// P4 to C6.
@@ -37,10 +39,13 @@ pub enum Down {
 pub enum Up {
     /// Reply to [`Down::GetRadioStatus`].
     RadioStatus(RadioStatus),
-    /// A line for the host: a `Log` at `level`, or an `Error` without one.
+    /// A line for the host's log.
     Log {
-        /// The severity, or `None` for an error.
-        level: Option<LogLevel>,
+        /// The text.
+        message: LogStr,
+    },
+    /// A fault for the host.
+    Error {
         /// The text.
         message: LogStr,
     },
@@ -49,10 +54,6 @@ pub enum Up {
 /// The C6's counters, which the P4 reports beside its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RadioStatus {
-    /// Bytes free in the C6's heap.
-    pub heap_free: u32,
-    /// Milliseconds since the C6's life started.
-    pub uptime_ms: u32,
     /// The C6's bounded queues.
     pub queues: Vec<QueueStat, 4>,
     /// Packets from the P4 that failed their CRC.

@@ -53,13 +53,13 @@ use wartui_firmware::reboot;
 use wartui_proto::bus::{UpdateState, UpdateStatus};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::heapless::Vec;
-use wartui_proto::link::{Chip, LogLevel, LogStr, LoopPhase, QueueId, QueueStat, ShortStr};
+use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
+    BAUD_RATE, BODY_MAX, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
     PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
     VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
@@ -109,20 +109,26 @@ impl Shared {
         }
     }
 
-    /// Send the P4 a line composed here: a `Log` at `level`, or an `Error` without one.
-    /// Text past a line's length is cut.
+    /// Send the P4 a `Log` composed here. Text past a line's length is cut.
     #[inline(never)]
-    pub fn line(&self, level: Option<LogLevel>, args: fmt::Arguments<'_>) {
-        let mut message = LogStr::new();
-        let _ = message.write_fmt(args);
-        self.push(&Up::Log { level, message });
+    pub fn log(&self, args: fmt::Arguments<'_>) {
+        self.push(&Up::Log { message: text(args) });
     }
 
-    /// Pass on what an update step had to say: a failure as an `Error`, anything else as an
-    /// `Info` line.
+    /// Send the P4 an `Error` composed here. Text past a line's length is cut.
+    #[inline(never)]
+    pub fn error(&self, args: fmt::Arguments<'_>) {
+        self.push(&Up::Error { message: text(args) });
+    }
+
+    /// Pass on what an update step had to say: a failure as an `Error`, anything else as a
+    /// `Log`.
     pub fn note(&self, note: &Note) {
-        let level = if matches!(note, Note::Failed(..)) { None } else { Some(LogLevel::Info) };
-        self.line(level, format_args!("{note}"));
+        if matches!(note, Note::Failed(..)) {
+            self.error(format_args!("{note}"));
+        } else {
+            self.log(format_args!("{note}"));
+        }
     }
 }
 
@@ -221,9 +227,7 @@ impl Link {
             reset_cause: self.cause,
             last_phase: self.phase,
             uptime_ms: self.boot.elapsed().as_millis() as u32,
-            // No heap: nothing on the C6 allocates.
-            heap_free: 0,
-            image: Some(self.updates.image),
+            image: self.updates.image,
         }
     }
 
@@ -275,7 +279,7 @@ impl Link {
         // Once per change, so a P4 sending garbage costs one line per packet at most.
         if self.undecoded != self.undecoded_said {
             self.undecoded_said = self.undecoded;
-            shared.line(None, format_args!("a P4 command did not decode"));
+            shared.error(format_args!("a P4 command did not decode"));
         }
     }
 
@@ -288,9 +292,9 @@ impl Link {
         match self.updates.ota.confirm() {
             Ok(()) => {
                 self.updates.trial = false;
-                shared.line(Some(LogLevel::Info), format_args!("image confirmed by the P4"));
+                shared.log(format_args!("image confirmed by the P4"));
             }
-            Err(err) => shared.line(None, format_args!("could not confirm the image: {err}")),
+            Err(err) => shared.error(format_args!("could not confirm the image: {err}")),
         }
     }
 
@@ -324,7 +328,7 @@ impl Link {
             // the rest.
             Ok(_) => reboot(),
             Err(err) => {
-                shared.line(None, format_args!("could not switch to the new image: {err}"));
+                shared.error(format_args!("could not switch to the new image: {err}"));
                 receiver.reset();
                 Some(UpdateStatus { session, state: UpdateState::FlashError, next_offset: 0 })
             }
@@ -353,8 +357,6 @@ impl Link {
             dropped: up.dropped(),
         });
         RadioStatus {
-            heap_free: 0,
-            uptime_ms: self.boot.elapsed().as_millis() as u32,
             queues,
             crc_fail: self.crc_fail,
             bad_magic: self.bad_magic,
@@ -471,4 +473,11 @@ async fn write_packets(
         }
         (tx, buf) = write.cancel();
     }
+}
+
+/// `args` as a line, cut at a line's length.
+fn text(args: fmt::Arguments<'_>) -> LogStr {
+    let mut message = LogStr::new();
+    let _ = message.write_fmt(args);
+    message
 }

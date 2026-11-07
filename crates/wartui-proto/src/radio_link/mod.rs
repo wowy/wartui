@@ -35,8 +35,7 @@
 //!
 //! The P4 image carries the C6's. At boot the P4 compares the digest in the C6's hello with
 //! the bundled image's, and sends the bundle over [`Kind::Update`] when they differ
-//! ([`crate::split`]). A C6 whose hello carries no digest cannot take the bundle and needs one
-//! wired flash.
+//! ([`crate::split`]).
 //!
 //! [`PAYLOAD_MAX`] is 2034, frozen with the rest, so one packet carries any [`update`] op.
 
@@ -46,7 +45,7 @@ mod hello;
 mod message;
 pub mod update;
 
-pub use hello::{HELLO_IMAGE_LEN, HELLO_LEN, Hello};
+pub use hello::{Chip, HELLO_LEN, Hello};
 pub use message::{
     Down, Held, LINK_REVISION, Packer, RECORD_MAX, RadioStatus, Up, decode_down, decode_up,
     encode_down, encode_up, records,

@@ -28,6 +28,7 @@ mod config;
 mod export;
 mod flash;
 mod ota;
+mod power_cycle;
 mod reset;
 mod run;
 mod sniff;
@@ -73,6 +74,8 @@ enum Command {
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),
+    /// Switch one node off and on through the carrier board.
+    PowerCycle(power_cycle::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -94,9 +97,9 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`
-        // and `ota` read a broken one as no bridge remembered, and `ports` and `flash-fleet`
-        // never read it.
+        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
+        // `power-cycle` and `ota` read a broken one as no bridge remembered, and `ports` and
+        // `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -105,6 +108,7 @@ async fn main() -> Result<()> {
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
+        Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -275,12 +279,9 @@ fn spec(bridge: &str) -> BridgeSpec {
 /// the kind of thing that should not be silent.
 fn describe(event: &LinkEvent) -> Option<String> {
     match event {
-        LinkEvent::Connected(info) => Some(format!(
-            "bridge {} on {:?}, firmware {}",
-            mac::full(&info.mac),
-            info.chip,
-            info.fw_version
-        )),
+        LinkEvent::Connected(info) => {
+            Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
+        }
         LinkEvent::Disconnected { reason } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
@@ -484,7 +485,7 @@ mod tests {
         BridgeInfo, BridgeSpec, Command, last_reset_line, no_boards_notice, parse, silence_notice,
         spec,
     };
-    use wartui_proto::link::{Chip, LoopPhase};
+    use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
 
     /// A P4 bridge's CH343 as the OS lists it.
@@ -581,6 +582,14 @@ mod tests {
             assert!(parse(["wartui", command, "--config", "w.toml"]).is_ok(), "{command}");
         }
         assert!(parse(["wartui", "flash-bridge", "--config", "w.toml"]).is_ok());
+    }
+
+    #[test]
+    fn cli_parser_accepts_power_cycle_when_given_slot_bridge_and_config() {
+        let args = ["wartui", "power-cycle", "--slot", "N3", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::PowerCycle(_))));
+        // Which node is the whole question, so there is no default.
+        assert!(parse(["wartui", "power-cycle"]).is_err());
     }
 
     #[test]
@@ -706,14 +715,12 @@ mod tests {
     fn last_reset_line_says_what_ran_last_when_phase_is_only_a_hint() {
         let line = |last_phase| {
             last_reset_line(&BridgeInfo {
-                chip: Chip::Esp32P4,
                 mac: [0; 6],
                 fw_version: String::new(),
                 reset_cause: ResetCause::PowerOn,
                 last_phase,
-                heap_free: 0,
                 uptime_ms: 0,
-                gps: false,
+                node_board: wartui_proto::bus::NodeBoard::Bench,
                 radio: None,
                 image: None,
             })

@@ -22,7 +22,7 @@ use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, RecordKind, Slot, UpType, wire_epoch};
+use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType, wire_epoch};
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -277,6 +277,7 @@ fn heartbeat() -> Heartbeat {
         reset_cause: ResetCause::PowerOn,
         vdd_mv: Some(3304),
         die_temp_c: Some(41),
+        heap_free: 40_000,
         live: true,
     }
 }
@@ -408,6 +409,15 @@ fn store_writes_health_readings_when_heartbeat_recorded() {
 }
 
 #[test]
+fn store_writes_heap_free_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![Record::Heartbeat(Heartbeat { heap_free: 37_120, ..heartbeat() })]);
+    let heap_free: i64 =
+        conn.query_row("SELECT heap_free FROM heartbeat", [], |r| r.get(0)).unwrap();
+    assert_eq!(heap_free, 37_120);
+}
+
+#[test]
 fn store_writes_every_node_column_when_node_recorded() {
     // The record sets every field, so any column the insert omits shows up as NULL or as a
     // default. `capabilities` is NULL for a node heard only by observation, so the record sets it.
@@ -446,7 +456,7 @@ fn store_writes_every_raw_frame_column_when_raw_frame_recorded() {
 }
 
 /// A status reply carrying `queues` and `radio_link`, the rest of it fixed.
-fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Record {
+fn bridge_status(queues: &[QueueStat], radio_link: RadioLinkStats) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + 5_000,
         rx_count: 4_000_000_000,
@@ -485,7 +495,7 @@ const QUEUES: [QueueStat; 2] = [
 #[test]
 fn store_round_trips_every_column_when_bridge_status_written() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&QUEUES, Some(RADIO_LINK))]);
+    let conn = write(&dir, vec![bridge_status(&QUEUES, RADIO_LINK)]);
     assert_insert_names_every_column(&conn, "bridge_status");
 
     let row: (i64, i64, i64, i64, i64, i64) = conn
@@ -518,7 +528,8 @@ fn store_round_trips_every_column_when_bridge_status_written() {
 #[test]
 fn store_writes_queue_rows_when_bridge_status_carries_queues() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&[], None), bridge_status(&QUEUES, None)]);
+    let conn =
+        write(&dir, vec![bridge_status(&[], RADIO_LINK), bridge_status(&QUEUES, RADIO_LINK)]);
 
     let parent: i64 =
         conn.query_row("SELECT MAX(id) FROM bridge_status", [], |r| r.get(0)).unwrap();
@@ -540,29 +551,6 @@ fn store_writes_queue_rows_when_bridge_status_carries_queues() {
             (parent, "node-down".to_owned(), 32, 20, 0),
         ]
     );
-}
-
-#[test]
-fn store_leaves_radio_link_columns_null_when_bridge_has_no_radio_link() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&[], None)]);
-
-    let nulls: i64 = conn
-        .query_row(
-            "SELECT (radio_link_packets IS NULL) + (radio_link_crc_fail IS NULL)
-                  + (radio_link_bad_magic IS NULL)
-                  + (radio_link_seq_gap IS NULL) + (radio_link_uart_errors IS NULL)
-                  + (radio_link_radio_crc_fail IS NULL) + (radio_link_radio_bad_magic IS NULL)
-                  + (radio_link_radio_seq_gap IS NULL) + (radio_link_radio_uart_errors IS NULL)
-             FROM bridge_status",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(nulls, 9);
-    let queues: i64 =
-        conn.query_row("SELECT COUNT(*) FROM bridge_queue", [], |r| r.get(0)).unwrap();
-    assert_eq!(queues, 0);
 }
 
 fn host_status(
@@ -1640,18 +1628,19 @@ fn store_records_bridge_when_bridge_announces() {
         &dir,
         vec![Record::Bridge(BridgeSeen {
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
-            chip: "Esp32C6".to_owned(),
             fw_version: "0.1.0".to_owned(),
+            node_board: NodeBoard::Carrier10,
         })],
     );
 
-    let (mac, chip, fw): (Vec<u8>, String, String) = conn
-        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM capture", [], |r| {
+    let (mac, fw, board): (Vec<u8>, String, String) = conn
+        .query_row("SELECT bridge_mac, bridge_fw, node_board FROM capture", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .expect("the capture row");
     assert_eq!(mac, vec![0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
-    assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
+    assert_eq!(fw, "0.1.0");
+    assert_eq!(board, "carrier-10");
 }
 
 // ---------------------------------------------------------------------------

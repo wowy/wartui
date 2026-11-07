@@ -18,12 +18,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
         (
-            format!(
-                "bridge {} ({:?}), fw v{} — link {state}",
-                mac::short(&bridge.mac),
-                bridge.chip,
-                bridge.fw_version
-            ),
+            format!("bridge {}, fw v{} — link {state}", mac::short(&bridge.mac), bridge.fw_version),
             if snapshot.link_up && snapshot.position.is_located() {
                 Color::Green
             } else {
@@ -87,10 +82,8 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
         )
     };
     let mut spans = vec![fix];
-    if let Some(gps) = &snapshot.gps
-        && let Some(span) = receiver(gps, snapshot.position.source)
-    {
-        spans.push(span);
+    if let Some(gps) = &snapshot.gps {
+        spans.push(receiver(gps, snapshot.position.source));
     }
     spans
 }
@@ -100,20 +93,20 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
 /// A GPS that stops supplying positions is otherwise easy to miss, because rows keep
 /// arriving with the fallback position. The note stays up until it is fixed.
 ///
-/// `None` when the search found no receiver, which is the usual case. The search runs
-/// by default, so saying so on every capture would be noise.
-fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
+/// `gps no receiver` when neither the host nor the bridge has one. Every P4 reads a GPS port,
+/// so its absence is worth a word.
+fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
     // Checked first: for `max_age` after an unplug, the source is still GPS but the
     // port is dead.
     if let GpsStatus::Failed(reason) = &gps.status {
-        return Some(Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow)));
+        return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
     }
     if source == PositionSource::Gps {
         let sats = match gps.status {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
             _ => String::new(),
         };
-        return Some(Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green)));
+        return Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green));
     }
     let text = match &gps.status {
         GpsStatus::Connecting => "  gps connecting".to_owned(),
@@ -123,9 +116,9 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
         GpsStatus::Searching => "  gps searching".to_owned(),
         GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
         GpsStatus::Failed(_) => "  gps unreadable".to_owned(),
-        GpsStatus::NoReceiver => return None,
+        GpsStatus::NoReceiver => "  gps no receiver".to_owned(),
     };
-    Some(Span::styled(text, Style::new().fg(Color::Yellow)))
+    Span::styled(text, Style::new().fg(Color::Yellow))
 }
 
 #[cfg(test)]
@@ -193,10 +186,16 @@ mod tests {
     }
 
     #[test]
-    fn view_omits_gps_status_when_no_receiver_is_present() {
-        // Most captures are static, so a permanent "gps: none" would be noise.
+    fn view_omits_gps_status_when_no_receiver_is_read() {
+        // `--no-gps`, or a run with no bridge and no search: there is nothing to report on.
         // The key help names `g gps` on every screen.
         assert!(!rendered(&busy()).replace("g gps", "").contains("gps"));
+    }
+
+    #[test]
+    fn view_displays_no_receiver_when_neither_host_nor_bridge_has_one() {
+        let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
+        assert!(rendered(&none).contains("gps no receiver"));
     }
 
     #[test]

@@ -141,7 +141,8 @@ impl FleetEngine {
             if self.slots.get(&old) == Some(&mac) {
                 self.slots.remove(&old);
             }
-            tracing::info!(mac = %mac::full(&mac), from = %old, to = %slot, "node moved slot");
+            let (from, to) = (self.slot_label(old), self.slot_label(slot));
+            tracing::info!(mac = %mac::full(&mac), %from, %to, "node moved slot");
         }
     }
 
@@ -154,6 +155,7 @@ impl FleetEngine {
         batch: &mut ActionBatch,
     ) {
         let FromNode { slot, .. } = *rx;
+        let label = self.slot_label(slot);
         let src = heartbeat.mac;
         self.see_node(src, now, Some(heartbeat.capabilities), batch);
         self.take_slot(slot, src);
@@ -173,7 +175,7 @@ impl FleetEngine {
             None => by_reset!(
                 heartbeat.reset_cause,
                 mac = %mac::full(&src),
-                %slot,
+                slot = %label,
                 capabilities = %heartbeat.capabilities,
                 reset = %heartbeat.reset_cause,
                 vdd = %heartbeat.vdd,
@@ -251,6 +253,7 @@ impl FleetEngine {
             reset_cause: heartbeat.reset_cause,
             vdd_mv: heartbeat.vdd.mv(),
             die_temp_c: heartbeat.die_temp.c(),
+            heap_free: heartbeat.heap_free,
             live,
         }));
 

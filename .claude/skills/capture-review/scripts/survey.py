@@ -142,8 +142,8 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS
     section("capture")
-    cols = ("started_at", "ended_at", "bridge_mac", "bridge_chip", "bridge_fw", "channel_pool",
-            "notes", "simulated")
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board",
+            "channel_pool", "notes", "simulated")
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
     end = row.get("ended_at")
@@ -160,9 +160,15 @@ def provenance(db, ctx):
             "SELECT started_at, ended_at FROM capture",
         )
     print(
-        f"  bridge    {full(row.get('bridge_mac'))}  chip {row.get('bridge_chip')}  "
-        f"fw {row.get('bridge_fw')}"
+        f"  bridge    {full(row.get('bridge_mac'))}  fw {row.get('bridge_fw')}"
     )
+    board = row.get("node_board")
+    per_bus = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}.get(board)
+    if per_bus:
+        # Slots are stored by bus name; the operator read the silk.
+        print(f"  board     {board}  (slots below are bus names: A1 is N1, B1 is N{per_bus + 1})")
+    else:
+        print(f"  board     {board}")
     print(f"  pool      {row.get('channel_pool')}   simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")
@@ -256,11 +262,16 @@ def nodes(db, ctx):
         print(f"  {len(rows)} nodes: more than a bridge's {MAX_NODES} slots, so some came and went")
 
 
+# The fall in a node's free heap across one boot that reads as a leak rather than the Wi-Fi
+# driver's own churn.
+HEAP_FALL_BYTES = 2048
+
+
 def heartbeats(db, ctx):
     section("heartbeats")
     # Row layout, read by index here and in assignments() and observations().
     rows = db.q("SELECT node_mac, id, rx_at, counter, epoch, slot, reset_cause, live, "
-                "wifi_refused, ble_refused, vdd_mv, die_temp_c FROM heartbeat "
+                "wifi_refused, ble_refused, vdd_mv, die_temp_c, heap_free FROM heartbeat "
                 "ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
@@ -282,8 +293,10 @@ def heartbeats(db, ctx):
         prev = None
         # The engine's `held_epoch`: the last live beat's epoch, None until one and after a restart.
         held = None
-        for r in hs:
-            (_, _, rx, counter, epoch, slot, cause, live, wr, br, _, _) = r
+        # Where the node's last boot in the capture starts, for its heap.
+        boot_start = 0
+        for i, r in enumerate(hs):
+            (_, _, rx, counter, epoch, slot, cause, live, wr, br, _, _, _) = r
             replayed += live == 0
             slots[slot] += 1
             if prev is not None:
@@ -296,6 +309,7 @@ def heartbeats(db, ctx):
                             or (live != 0 and epoch == 0 and held not in (None, 0)))
                 if rebooted:
                     reboots += 1
+                    boot_start = i
                     boots.append(cause)
                     ctx.setdefault("restarts", []).append((rx, mac, p_counter, counter, p_rx,
                                                            cause))
@@ -332,6 +346,22 @@ def heartbeats(db, ctx):
             print(f"        buffer full wifi {wifi_ref}  ble {ble_ref}  "
                   "(pending-buffer pressure, not loss)")
         node_sql = f"hex(node_mac)='{mac.hex().upper()}'"
+        heaps = [r[12] for r in hs]
+        if heaps:
+            print(f"        heap free    first {heaps[0]}  min {min(heaps)}  last {heaps[-1]}")
+            # Over the last boot alone, since a restart refills the heap. The driver's own churn
+            # moves it a little, so only a fall from the boot's first fifth to its last counts.
+            boot = heaps[boot_start:]
+            fifth = len(boot) // 5
+            if fifth >= 4:
+                fell = min(boot[:fifth]) - min(boot[-fifth:])
+                if fell > HEAP_FALL_BYTES:
+                    flag("WARN", "node",
+                         f"{short(mac)} free heap fell {fell} bytes across its last boot "
+                         f"({min(boot[:fifth])} -> {min(boot[-fifth:])} at the low points): "
+                         "a leak in the node firmware?",
+                         f"SELECT id, rx_at, counter, heap_free FROM heartbeat WHERE {node_sql} "
+                         "ORDER BY id")
         for at, a, b in moves[:5]:
             print(f"        moved        {a} -> {b} at {rel(at)}")
         if moves:
@@ -597,13 +627,6 @@ def bridge(db, ctx):
     bridge_host_uart(db)
 
 
-# Mirrors QueueId::unit in crates/wartui-proto/src/link/mod.rs.
-QUEUE_UNITS = {
-    "radio-up": "bytes", "radio-down": "bytes", "host-priority": "bytes", "host-bulk": "bytes",
-    "node-down": "bytes",
-}
-
-
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
 P4_QUEUES = {"radio-down", "host-priority", "host-bulk", "node-down"}
 DROPPED_TX_QUEUES = {"radio-up", "host-priority", "host-bulk"}
@@ -635,8 +658,7 @@ def bridge_queues(queues):
         print("  no queues reported")
         return
     for name, (capacity, peak, dropped, _, _) in queues.items():
-        unit = QUEUE_UNITS.get(name, "?")
-        print(f"  queue {name}  peak {peak}/{capacity} {unit} ({pct(peak, capacity)})  "
+        print(f"  queue {name}  peak {peak}/{capacity} bytes ({pct(peak, capacity)})  "
               f"dropped {dropped}")
         sql = ("SELECT s.id, s.rx_at, s.uptime_ms, q.capacity, q.high_water, q.dropped "
                "FROM bridge_queue q JOIN bridge_status s ON s.id = q.status_id "
@@ -645,7 +667,7 @@ def bridge_queues(queues):
             flag("WARN", "bridge", f"bridge queue {name} dropped {dropped} during the capture", sql)
         if capacity and peak >= 0.9 * capacity:
             flag("WARN", "bridge",
-                 f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} {unit} "
+                 f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} bytes "
                  "since the bridge booted: near full, so its WARTUI_* size is the lever", sql)
 
 
@@ -654,15 +676,14 @@ RADIO_LINK_COUNTERS = ("packets", "crc_fail", "bad_magic", "seq_gap", "uart_erro
 
 
 def bridge_radio_link(db, lives):
-    """The P4 split bridge's UART link counters over the capture, rebased across restarts.
+    """The P4–C6 UART link's counters over the capture, rebased across restarts.
 
     The uptime that dates a restart is the C6's. The `radio_*` counters restart with it; the P4's
     five run on, so they rebase only when they fall, as `RadioLinkLoss::advance` does. A P4 reboot
     whose counters regrow past the last row reads as no reboot, which is rare and only undercounts.
     """
     cols = ", ".join(f"radio_link_{c}" for c in RADIO_LINK_COUNTERS)
-    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE radio_link_packets IS NOT NULL "
-                "ORDER BY id")
+    rows = db.q(f"SELECT id, {cols} FROM bridge_status ORDER BY id")
     if not rows:
         return
     sums = dict.fromkeys(RADIO_LINK_COUNTERS, 0)

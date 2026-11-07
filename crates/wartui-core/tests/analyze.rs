@@ -49,7 +49,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         host_frames: host,
         rx_oversize: 0,
         queues: QueueStats::new(),
-        radio_link: None,
+        radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
     })
 }
@@ -92,7 +92,7 @@ fn radio_link_status_split(uptime_ms: u32, packets: u32, p4: u32, c6: u32) -> Re
         radio_seq_gap: 7 * c6,
         radio_uart_errors: 8 * c6,
     };
-    Record::BridgeStatus(BridgeStatusSeen { radio_link: Some(radio_link), ..seen })
+    Record::BridgeStatus(BridgeStatusSeen { radio_link, ..seen })
 }
 
 /// A status reply carrying a count of oversize node records dropped.
@@ -114,6 +114,7 @@ fn beat(node: Mac, at_ms: i64, counter: u32, wifi: u16, ble: u16) -> Record {
         reset_cause: ResetCause::PowerOn,
         vdd_mv: None,
         die_temp_c: None,
+        heap_free: 40_000,
         live: true,
     })
 }
@@ -313,7 +314,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             usb_lost: 870,
             oversize: 0,
             queues: vec![],
-            radio_link: None,
+            radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
         })
     );
@@ -339,7 +340,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             usb_lost: 673,
             oversize: 0,
             queues: vec![],
-            radio_link: None,
+            radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
         })
     );
@@ -472,12 +473,11 @@ fn analyze_rebases_p4_queue_drops_when_count_falls() {
 }
 
 #[test]
-fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
-    // A row without radio link counters between two with them changes nothing. The last row is a
-    // P4 reboot, which takes the C6 with it, so every counter falls and rebases.
+fn analyze_sums_radio_link_errors_when_p4_reboots() {
+    // The last row is a P4 reboot, which takes the C6 with it, so every counter falls and
+    // rebases.
     let (_dir, conn) = capture(vec![
         radio_link_status(60_000, 1_000, 2),
-        status(0, 0, 0, 62_000),
         radio_link_status(65_000, 1_500, 5),
         radio_link_status(4_000, 100, 1),
     ]);
@@ -486,7 +486,7 @@ fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
     let n = 3 + 1;
     assert_eq!(
         radio_link,
-        Some(RadioLinkLoss {
+        RadioLinkLoss {
             packets: 500 + 100,
             crc_fail: n,
             bad_magic: 2 * n,
@@ -496,7 +496,7 @@ fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
             radio_bad_magic: 6 * n,
             radio_seq_gap: 7 * n,
             radio_uart_errors: 8 * n,
-        })
+        }
     );
 }
 
@@ -535,7 +535,7 @@ fn analyze_rebases_only_radio_counters_when_c6_restarts() {
     let (p4, c6) = (3 + 2, 3 + 1);
     assert_eq!(
         bridge.radio_link,
-        Some(RadioLinkLoss {
+        RadioLinkLoss {
             packets: 500 + 100,
             crc_fail: p4,
             bad_magic: 2 * p4,
@@ -545,7 +545,7 @@ fn analyze_rebases_only_radio_counters_when_c6_restarts() {
             radio_bad_magic: 6 * c6,
             radio_seq_gap: 7 * c6,
             radio_uart_errors: 8 * c6,
-        })
+        }
     );
 }
 
@@ -575,7 +575,7 @@ fn analyze_skips_queue_rows_when_name_unknown() {
 fn analyze_reports_no_queues_when_bridge_has_none() {
     let (_dir, conn) = capture(vec![status(0, 10, 0, 60_000), status(5, 20, 0, 65_000)]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
-    assert_eq!((bridge.queues, bridge.radio_link), (vec![], None));
+    assert_eq!(bridge.queues, vec![]);
 }
 
 #[test]
@@ -723,7 +723,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             usb_lost: 30,
             oversize: 0,
             queues: vec![],
-            radio_link: None,
+            radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
         })
     );

@@ -12,12 +12,14 @@
 //! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
 //! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
 //! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes,
-//! and holds the messages a node and the P4 exchange over it.
+//! and holds the messages a node and the P4 exchange over it. [`carrier`] reads the carrier
+//! board's I/O expander at the P4's boot, and watches for a lost node supply.
 
 #![no_std]
 
 pub mod beacon;
 pub mod bus;
+pub mod carrier;
 pub mod config;
 pub mod dedup;
 pub mod frame_ring;

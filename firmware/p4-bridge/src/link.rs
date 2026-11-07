@@ -51,11 +51,12 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::Async;
 use esp_hal::uart::{UartRx, UartTx};
 use wartui_firmware::phase::mark;
-use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
+use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
 use wartui_proto::radio_link::{
-    BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
+    BODY_MAX, Chip, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
     PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, WIRE_MAX, decode_up,
     encode_packet, records, seal,
 };
@@ -105,6 +106,8 @@ pub struct Link {
     sender: Sender<'static>,
     /// The pair has heard of the install.
     install_noted: bool,
+    /// The digest of the P4's booted image, or zeros when it has none, for the hello.
+    image: [u8; DIGEST_LEN],
 }
 
 impl Link {
@@ -114,6 +117,7 @@ impl Link {
         cause: ResetCause,
         phase: LoopPhase,
         held: &'static mut Held,
+        image: [u8; DIGEST_LEN],
     ) -> Self {
         Self {
             boot,
@@ -128,6 +132,7 @@ impl Link {
             held,
             sender: Sender::new(RADIO_IMAGE, RADIO_SHA256, &RADIO_DIGEST),
             install_noted: false,
+            image,
         }
     }
 
@@ -140,10 +145,8 @@ impl Link {
             reset_cause: self.cause,
             last_phase: self.phase,
             uptime_ms: self.boot.elapsed().as_millis() as u32,
-            // No heap: nothing on the P4 allocates.
-            heap_free: 0,
-            // The C6 never updates the P4; the host does (`src/update.rs`).
-            image: None,
+            // The C6 does not read it: the host updates the P4 (`src/update.rs`).
+            image: self.image,
         }
     }
 
@@ -212,7 +215,8 @@ impl Link {
     #[inline(never)]
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
-            Ok(Up::Log { level, message }) => shared.push_line(level, message),
+            Ok(Up::Log { message }) => shared.push_log(&message),
+            Ok(Up::Error { message }) => shared.push_error(&message),
             Ok(Up::RadioStatus(status)) => {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());

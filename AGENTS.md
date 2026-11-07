@@ -94,7 +94,8 @@ own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
-  slots, and the messages a node and the P4 exchange), `beacon`, `hci`, `dedup`, `link`,
+  slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
+  as the P4 reads it at boot), `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
   `Mac` type and its
   text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
@@ -110,9 +111,9 @@ own.
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
-  a DMA UART to the host, through the board's CH343, the node bus's two SPI masters, and a FIFO
+  a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
   knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
   carries the C6's, and updates it.
@@ -143,7 +144,8 @@ test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::
 pure state machine and `runtime::drive_ota` its driver (`crates/wartui-core/tests/ota.rs`).
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels are the planner's.
+ordered against each other. Only `b`, `c`, `p`, `r` and `R` get that far; channels are the
+planner's.
 
 ### Store is the system of record
 
@@ -170,7 +172,7 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every node-bus
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
-  `Heartbeat` (23 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
+  `Heartbeat` (27 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
   plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
@@ -187,9 +189,8 @@ is here rather than only in a `//!`.
   `wartui ota` updates the nodes over the bus.
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
   protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
-  trees meet as an undecodable frame rather than a named mismatch, which is stated where the
-  constant is. Every addition to the link enums therefore goes on the end — postcard writes a
-  variant as its index and a struct's fields in order.
+  trees may meet as an undecodable frame rather than a named mismatch, which is stated where the
+  constant is.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
   bytes of company identifier, or nothing. The split is made once, in the engine's
@@ -242,8 +243,10 @@ is here rather than only in a `//!`.
   few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
   has confirmed is a share that may be nobody's.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
-  per bus, of which the P4 drives six today. A node is known by its MAC, which its heartbeat
-  carries, and reached through the slot that heartbeat came from (`bus::Slot`, `A1` to `B7`).
+  per bus on the 14-node carrier, and six on the bench (`bus::NodeBoard`). A node is known by its
+  MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
+  (`bus::Slot`, `A1` to `B7`). The operator reads a slot through its board's label, `N1` up on a
+  carrier, and the store keeps the bus name.
 - **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has
   acknowledged the transfer that carried it), never on a successful enqueue — and delivery is not
   adoption. Every heartbeat carries the epoch the node holds, or 0 for none, so the host can tell
@@ -357,6 +360,9 @@ edit stops; follow the pointer before changing the rule.
 - **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
   any node build, and a node never needs a wired flash.
   → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **The P4's I2C0 is shared** by the GPS reader and the carrier's I/O expander, behind one mutex.
+  Lock it per transaction, never across an await on anything but the bus, or one stalls the
+  other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
 - **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
   stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
   P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
@@ -394,6 +400,14 @@ edit stops; follow the pointer before changing the rule.
   any other key usage an operator needs at a glance. Keep its tables identical to
   `crates/wartui/README.md` § "Keyboard commands", and change both together;
   `crates/wartui/tests/readme.rs` fails when they differ.
+- **The wartui-carrier's design stays private.** Its PCB designs and layouts are proprietary.
+  The P4's and the C5s' pinouts are public, so others can write code for the boards with this
+  repo as the example. Docs, comments, commit messages and PRs may give:
+  - pins and pin behavior: polarity, pulls, which lines are shared;
+  - bus speeds;
+  - the I/O expander's I2C address and its port→node map.
+
+  They never give part numbers, component values, the power circuit, the layout or dimensions.
 - Use American spellings at all times: in prose, doc comments, identifiers, test names and
   commit messages (`meters`, `behavior`, `color`, `recognize`).
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the

@@ -13,7 +13,7 @@ needed in either.
 
 ## The setup
 
-esp-hal has no SDIO slave driver for the C6. Instead, SPI runs over the six SDIO traces the
+esp-hal has no SDIO device driver for the C6. Instead, SPI runs over the six SDIO traces the
 board already routes between the chips, through each chip's GPIO matrix:
 
 | Signal | P4 GPIO | C6 GPIO |
@@ -24,9 +24,9 @@ board already routes between the chips, through each chip's GPIO matrix:
 | CS, hardware, driven by the P4 | 15 | 21 |
 | READY, driven by the C6 | 6 | 2 (the spare 0 Ω link) |
 
-- The P4 is the SPI2 master, in mode 0 with DMA.
-- The C6 is the SPI2 slave with DMA. esp-hal marks that driver unstable, and it does single
-  transfers only.
+- The P4 is the SPI2 controller, in mode 0 with DMA.
+- The C6 runs esp-hal's `spi::slave` driver on SPI2, with DMA. esp-hal marks it unstable, and it
+  does single transfers only.
 - Every transaction is one full-duplex 1,036-byte transfer: a 10-byte header, a 1,024-byte
   payload and a CRC-16/CCITT-FALSE trailer.
 - The C6 arms its DMA, raises READY, and drops READY once the transfer completes. It sends a
@@ -273,7 +273,8 @@ released its EN.
 
 ## What this settles
 
-- SPI over the SDIO traces, with esp-hal 1.2's C6 slave, is reliable at up to at least 40 MHz.
+- SPI over the SDIO traces, with esp-hal 1.2's `spi::slave` driver on the C6, is reliable at up to
+  at least 40 MHz.
 - It already runs faster than the burst rate of two overlapping nodes. Double-buffering should
   bring it near the wire's ~4,800 transfers/s.
 - With two nodes bursting at once, 26.67 MHz and above forwarded everything that left the

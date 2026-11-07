@@ -1,11 +1,13 @@
 use wartui_bridge::BridgeInfo;
-use wartui_proto::bus::{Compat, RecordKind};
+use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
+use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, Plan};
 
 #[cfg(doc)]
 use super::rx::DUPLICATE_BATCH_WINDOW_US;
 use super::{FleetEngine, NodeState, Now, StoreStats};
+use crate::gps::{Gps, GpsStatus, GpsView};
 use crate::record::{Observation, ssid_text};
 
 /// Running totals, all of them since the engine started.
@@ -143,15 +145,56 @@ pub struct Snapshot {
     /// Where the host believes it is, resolved as of this snapshot.
     pub position: crate::position::Fix,
     /// What the GPS is doing, when one is read: a host receiver pinned with `--gps`, else the
-    /// bridge's receiver while it is sending sentences, else the host's, else the bridge's while
-    /// the connected bridge has a GPS port. Separate from [`Self::position`]: "no fix" and "no
-    /// receiver" look identical in a row but are different problems.
-    pub gps: Option<crate::gps::GpsView>,
+    /// bridge's receiver while it is sending sentences, else the host's unless its search found
+    /// nothing, else the bridge's while a bridge is connected. [`GpsStatus::NoReceiver`] when
+    /// neither end has a receiver. Separate from [`Self::position`]: "no fix" and "no receiver"
+    /// look identical in a row but are different problems.
+    pub gps: Option<GpsView>,
     /// The SSIDs never captured, as text for the settings modal to edit.
     pub excluded_ssids: Vec<String>,
+    /// The bridge's last answer to [`Command::PowerCycle`](super::Command::PowerCycle), for the
+    /// view to show once.
+    pub power_answer: Option<PowerAnswer>,
+}
+
+/// The bridge's answer to a power-cycle, as the operator reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerAnswer {
+    /// Counts the answers this engine has had, from 1, so the view tells a new one from the last.
+    pub id: u64,
+    /// What happened, in [`power_cycled_text`]'s words.
+    pub text: String,
+}
+
+/// Why a bridge with no carrier board cannot power-cycle a node, as the operator reads it.
+pub const NO_CARRIER: &str = "this bridge has no carrier board, so it cannot switch node power";
+
+/// What the operator reads of a power-cycle's `outcome` for `slot` on `board`.
+#[must_use]
+pub fn power_cycled_text(board: NodeBoard, slot: Slot, outcome: PowerOutcome) -> String {
+    let name = board.label(slot);
+    match outcome {
+        PowerOutcome::Done => format!("{name} power-cycled"),
+        PowerOutcome::NoCarrier => NO_CARRIER.to_owned(),
+        PowerOutcome::NotDriven => format!("{name} is not a slot on this {board}"),
+        PowerOutcome::Failed => {
+            format!("{name} was not power-cycled: the carrier's I/O expander did not answer")
+        }
+    }
+}
+
+/// What carries the nodes, as `bridge` announced it: the bench before any bridge has.
+pub(super) fn announced_board(bridge: Option<&BridgeInfo>) -> NodeBoard {
+    bridge.map_or(NodeBoard::Bench, |bridge| bridge.node_board)
 }
 
 impl Snapshot {
+    /// What carries the nodes, as the bridge last announced it: the bench before any has.
+    #[must_use]
+    pub fn node_board(&self) -> NodeBoard {
+        announced_board(self.bridge.as_ref())
+    }
+
     /// The nodes heard on another major or minor, as the header names them:
     /// `2 need update`, `1 host behind`, or `3 undrivable` for both. `None` when there are none.
     #[must_use]
@@ -182,21 +225,34 @@ pub struct BridgeStatus {
 
 impl FleetEngine {
     /// The receiver the view reports on, which is the one positioning the rows when any is. A host
-    /// receiver pinned with `--gps` first, as the chain resolves it; else the bridge's while the
-    /// connected bridge has a GPS port and its receiver is sending sentences, the rule the host's
-    /// search stands down by (`runtime::stand_host_down`); else the host's; else the bridge's while
-    /// the connected bridge has a GPS port, so a bridge-only run shows it connecting. A bridge
-    /// without one, simulated included, shows no receiver rather than one that never connects.
-    fn shown_gps(&self, now_ms: i64) -> Option<&crate::gps::Gps> {
+    /// receiver pinned with `--gps` first, as the chain resolves it; else the bridge's while a
+    /// bridge is connected and its receiver is sending sentences, the rule the host's search
+    /// stands down by (`runtime::stand_host_down`); else the host's, unless its search found
+    /// nothing; else the bridge's while a bridge is connected, so a bridge-only run shows it
+    /// connecting.
+    ///
+    /// The bridge's receiver shown silent reads [`GpsStatus::NoReceiver`] once the bridge says none
+    /// answers its port, so the operator learns that neither end has one.
+    fn shown_gps(&self, now_ms: i64) -> Option<GpsView> {
         let position = &self.config.position;
-        if let Some(pinned) = position.gps().filter(|gps| gps.is_pinned()) {
-            return Some(pinned);
+        let host = position.gps();
+        if let Some(pinned) = host.filter(|gps| gps.is_pinned()) {
+            return Some(pinned.view());
         }
-        let bridge = position.bridge_gps().filter(|_| self.bridge_has_gps());
-        match bridge {
-            Some(bridge) if bridge.is_talking(now_ms) => Some(bridge),
-            _ => position.gps().or(bridge),
+        let Some(bridge) = position.bridge_gps().filter(|_| self.bridge_connected()) else {
+            return host.map(Gps::view);
+        };
+        if bridge.is_talking(now_ms) {
+            return Some(bridge.view());
         }
+        let host = host.map(Gps::view).filter(|view| view.status != GpsStatus::NoReceiver);
+        Some(host.unwrap_or_else(|| {
+            let mut view = bridge.view();
+            if self.bridge_lacks_gps {
+                view.status = GpsStatus::NoReceiver;
+            }
+            view
+        }))
     }
 
     /// Build the view the UI renders. Taken per tick, not per event, so an observation burst is not
@@ -250,13 +306,14 @@ impl FleetEngine {
             started_at_ms: self.started_at_ms,
             now_ms: now.unix_ms,
             position: self.config.position.resolve(now.unix_ms),
-            gps: self.shown_gps(now.unix_ms).map(crate::gps::Gps::view),
+            gps: self.shown_gps(now.unix_ms),
             excluded_ssids: self
                 .config
                 .excluded_ssids
                 .iter()
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
+            power_answer: self.power_answer.clone(),
         }
     }
 
@@ -277,5 +334,80 @@ impl FleetEngine {
             rssi: observation.rssi,
             kind: observation.kind,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use wartui_bridge::{BridgeInfo, LinkEvent};
+    use wartui_proto::bus::NodeBoard;
+    use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, NO_GPS_RECEIVER};
+    use wartui_proto::reset::ResetCause;
+
+    use super::super::{EngineConfig, Event};
+    use super::*;
+    use crate::position::{DEFAULT_MAX_AGE, PositionChain};
+
+    /// An engine whose chain holds `host` and the bridge's receiver, connected to a bridge that
+    /// has said no receiver answers its port.
+    fn engine_without_bridge_receiver(host: &Gps, start: Instant) -> FleetEngine {
+        let position = PositionChain::empty()
+            .with_gps(host.clone())
+            .with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+        let now = Now { mono: start, unix_ms: 0 };
+        let mut engine = FleetEngine::new(EngineConfig { position, ..Default::default() }, now);
+        let info = BridgeInfo {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
+            fw_version: "0.1.0".to_owned(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            uptime_ms: 1_000,
+            node_board: NodeBoard::Bench,
+            radio: None,
+            image: None,
+        };
+        engine.handle(Event::Link(LinkEvent::Connected(info)), now);
+        let message = LogStr::try_from(NO_GPS_RECEIVER).expect("the text fits a LogStr");
+        engine.handle(Event::Link(LinkEvent::Message(BridgeToHost::Error { message })), now);
+        engine
+    }
+
+    /// The receiver the engine's snapshot reports on, a second after `start`.
+    fn shown(engine: &FleetEngine, start: Instant) -> GpsView {
+        let now = Now { mono: start + Duration::from_secs(1), unix_ms: 1_000 };
+        engine.snapshot(now, StoreStats::default()).gps.expect("a receiver")
+    }
+
+    #[test]
+    fn engine_snapshot_shows_no_receiver_when_host_search_and_bridge_found_none() {
+        let start = Instant::now();
+        let host = Gps::detached();
+        host.set_status(GpsStatus::NoReceiver);
+        let gps = shown(&engine_without_bridge_receiver(&host, start), start);
+        assert_eq!(gps.status, GpsStatus::NoReceiver);
+        assert!(gps.via_bridge, "the host's search found nothing, so the bridge's is shown");
+    }
+
+    #[test]
+    fn engine_snapshot_shows_host_status_when_host_is_scanning_and_bridge_found_none() {
+        let start = Instant::now();
+        let host = Gps::detached();
+        let scanning = GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 9_600 };
+        host.set_status(scanning.clone());
+        let engine = engine_without_bridge_receiver(&host, start);
+        assert_eq!(shown(&engine, start).status, scanning);
+    }
+
+    #[test]
+    fn engine_forgets_missing_bridge_receiver_when_bridge_disconnects() {
+        let start = Instant::now();
+        let mut engine = engine_without_bridge_receiver(&Gps::detached(), start);
+        assert!(engine.bridge_lacks_gps);
+        let now = Now { mono: start, unix_ms: 0 };
+        let reason = "unplugged".to_owned();
+        engine.handle(Event::Link(LinkEvent::Disconnected { reason }), now);
+        assert!(!engine.bridge_lacks_gps);
     }
 }

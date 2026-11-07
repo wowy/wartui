@@ -113,25 +113,25 @@ def build():
 def spawn(command, cols, rows):
     """Start `command` on a pty of exactly this size, as its own session leader.
 
-    The size is set on the slave before the fork so the first frame is already
-    drawn at it: a view that lays out at 80 columns and is then told it has 200
-    is a different bug from the one being looked for. The session and the
+    The size is set on the child's end, `tty`, before the fork, so the first
+    frame is already drawn at it: a view that lays out at 80 columns and is then
+    told it has 200 is a different bug from the one being looked for. The session and the
     `TIOCSCTTY` are for crossterm, which reads keys from `/dev/tty` when there
     is one.
     """
-    master, slave = os.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    pty, tty = os.openpty()
+    fcntl.ioctl(tty, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
     def session():
         os.setsid()
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-    proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, preexec_fn=session)
-    os.close(slave)
-    return proc, master
+    proc = subprocess.Popen(command, stdin=tty, stdout=tty, stderr=tty, preexec_fn=session)
+    os.close(tty)
+    return proc, pty
 
 
-def pump(master, stream, decoder, proc, seconds):
+def pump(pty, stream, decoder, proc, seconds):
     """Feed everything drawn for this long into `stream`; False if it stopped drawing.
 
     The decoder belongs to the whole render rather than to one call. A
@@ -139,7 +139,7 @@ def pump(master, stream, decoder, proc, seconds):
     read that splits one across two pumps — which `--keys` guarantees — would
     lose it to a replacement glyph in a decoder that is then thrown away.
 
-    A dead child is read as EOF or EIO on the master rather than as an exit
+    A dead child is read as EOF or EIO on `pty`, our end, rather than as an exit
     status, so both are the same answer here.
     """
     deadline = time.monotonic() + seconds
@@ -147,13 +147,13 @@ def pump(master, stream, decoder, proc, seconds):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return True
-        ready, _, _ = select.select([master], [], [], min(remaining, 0.1))
+        ready, _, _ = select.select([pty], [], [], min(remaining, 0.1))
         if not ready:
             if proc.poll() is not None:
                 return False
             continue
         try:
-            chunk = os.read(master, 65536)
+            chunk = os.read(pty, 65536)
         except OSError:
             return False
         if not chunk:
@@ -161,11 +161,11 @@ def pump(master, stream, decoder, proc, seconds):
         stream.feed(decoder.decode(chunk))
 
 
-def press(master, stream, decoder, proc, keys, settle):
+def press(pty, stream, decoder, proc, keys, settle):
     """Press each key and let the view redraw before the next one."""
     for key in keys:
-        os.write(master, key.encode())
-        if not pump(master, stream, decoder, proc, settle):
+        os.write(pty, key.encode())
+        if not pump(pty, stream, decoder, proc, settle):
             return False
     return True
 
@@ -185,10 +185,10 @@ def stop(proc):
     return proc.wait()
 
 
-def quit_cleanly(master, proc):
+def quit_cleanly(pty, proc):
     """`q` commits the last batch; anything still running after that is signaled."""
     try:
-        os.write(master, b"q")
+        os.write(pty, b"q")
     except OSError:
         pass
     return stop(proc)
@@ -289,11 +289,11 @@ def render(args, binary, db, config, lat, lon):
     screen = pyte.Screen(args.cols, args.rows)
     stream = pyte.Stream(screen)
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    proc, master = spawn(command, args.cols, args.rows)
+    proc, pty = spawn(command, args.cols, args.rows)
     try:
-        drawing = pump(master, stream, decoder, proc, args.after)
+        drawing = pump(pty, stream, decoder, proc, args.after)
         if drawing:
-            drawing = press(master, stream, decoder, proc, args.keys, args.settle)
+            drawing = press(pty, stream, decoder, proc, args.keys, args.settle)
 
         # Read the screen while it is still being drawn on. What the view emits
         # on its way out is the terminal's business, not part of the frame.
@@ -305,7 +305,7 @@ def render(args, binary, db, config, lat, lon):
                 print(f"  {y:>3},{x:<3} {text.strip():<40} {describe(style)}")
 
         if drawing:
-            quit_cleanly(master, proc)
+            quit_cleanly(pty, proc)
         else:
             # Whatever it managed to say is on the screen above — a clap usage
             # error, or a panic — so the note goes after it rather than into it.
@@ -314,7 +314,7 @@ def render(args, binary, db, config, lat, lon):
             print(f"\n# wartui stopped early, status {proc.returncode}", file=sys.stderr)
             return 1
     finally:
-        os.close(master)
+        os.close(pty)
     return 0
 
 

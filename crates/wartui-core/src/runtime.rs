@@ -9,8 +9,8 @@
 //! ([`crate::gps::Gps::feed_bytes`]) and never reach the engine, which reads positions through the
 //! chain like any other. While the connected bridge's receiver is sending sentences, the host's
 //! puck search stands down (`stand_host_down`); it resumes when the last one ages past the limit
-//! or the bridge disconnects. Whether the connected bridge has a GPS port is the engine's to say
-//! ([`FleetEngine::bridge_has_gps`]), read after the engine has seen each link event. Each
+//! or the bridge disconnects. Whether a bridge is connected is the engine's to say
+//! ([`FleetEngine::bridge_connected`]), read after the engine has seen each link event. Each
 //! connection, and each disconnect, starts the bridge's stream over.
 
 use std::sync::Arc;
@@ -118,8 +118,8 @@ pub async fn drive(
                 if let Some(gps) = &bridge_gps {
                     gps.feed_bytes(bytes, now_ms);
                 }
-                let has_gps = engine.bridge_has_gps();
-                stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), has_gps, now_ms);
+                let connected = engine.bridge_connected();
+                stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), connected, now_ms);
                 continue;
             }
             Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
@@ -157,8 +157,8 @@ pub async fn drive(
         settings.record(&store, engine.capture_settings(), now);
         if restands {
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let has_gps = engine.bridge_has_gps();
-            stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), has_gps, now_ms);
+            let connected = engine.bridge_connected();
+            stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), connected, now_ms);
         }
 
         if !batch.records.is_empty() {
@@ -192,20 +192,20 @@ pub async fn drive(
     store.close()
 }
 
-/// Stand the host's receiver down while the connected bridge has a GPS port and its receiver is
+/// Stand the host's receiver down while a bridge is connected and its receiver is
 /// sending sentences ([`crate::gps::Gps::is_talking`]), and let it search otherwise.
 ///
 /// Keyed on sentences, fix or not, so the operator can watch the bridge's receiver acquire. A
-/// GPS-built bridge whose receiver is unplugged or silent leaves the search running.
+/// bridge whose receiver is unplugged or silent leaves the search running.
 /// [`crate::gps::Gps::set_suspended`] leaves a port named with `--gps` alone.
 fn stand_host_down(
     host: Option<&crate::gps::Gps>,
     bridge: Option<&crate::gps::Gps>,
-    bridge_has_gps: bool,
+    bridge_connected: bool,
     now_ms: i64,
 ) {
     if let Some(host) = host {
-        host.set_suspended(bridge_has_gps && bridge.is_some_and(|gps| gps.is_talking(now_ms)));
+        host.set_suspended(bridge_connected && bridge.is_some_and(|gps| gps.is_talking(now_ms)));
     }
 }
 
@@ -365,11 +365,11 @@ mod tests {
         // No sky: sentences every epoch, and the operator watches the bridge's receiver acquire.
         let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
-        assert!(!host.suspended(), "a GPS-built bridge whose receiver says nothing");
+        assert!(!host.suspended(), "a bridge whose receiver says nothing");
         bridge.feed_bytes(GGA_NO_FIX, 1_000);
         bridge.feed_bytes(GSV, 1_000);
         stand_host_down(Some(&host), Some(&bridge), false, 1_000);
-        assert!(!host.suspended(), "sentences on a bridge without a GPS port");
+        assert!(!host.suspended(), "sentences with no bridge connected");
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
         assert!(host.suspended());
     }

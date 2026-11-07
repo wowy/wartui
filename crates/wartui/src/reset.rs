@@ -103,7 +103,8 @@ pub async fn run(args: Args) -> Result<()> {
     }
 }
 
-/// The one board to send `Reset` to, as the path to open it by.
+/// The one board to send `Reset` to, as the path to open it by. `power-cycle` resolves its bridge
+/// the same way, so its `PowerCycle` reaches no other bridge.
 ///
 /// Unnamed, it is the CH343 the bridge was remembered on, or the only one attached. An
 /// address, whole or its end, is matched by asking each CH343 `list` reads (`probe`). One no
@@ -112,7 +113,7 @@ pub async fn run(args: Args) -> Result<()> {
 /// saying nothing. A wedged bridge answers no probe, so an address or tail that names the
 /// remembered bridge goes to its remembered CH343 without one. A path is opened as given, with
 /// nothing listed: whether it exists is the question the open asks.
-async fn board_to_reset<Probe, Asked>(
+pub(crate) async fn board_to_reset<Probe, Asked>(
     named: Option<&str>,
     remembered: &crate::config::Bridge,
     list: impl FnOnce() -> Result<Vec<PortCandidate>, TransportError>,
@@ -221,12 +222,7 @@ fn rebooted(uptime_ms: u32, before: Option<u32>) -> bool {
 
 fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
     match info {
-        Some(info) => println!(
-            "back up: {} on {:?}, firmware {}",
-            mac::full(&info.mac),
-            info.chip,
-            info.fw_version
-        ),
+        Some(info) => println!("back up: {}, firmware {}", mac::full(&info.mac), info.fw_version),
         // Reachable when the bridge was announced on a connection this command did
         // not open: the transport reports one `Connected` per connection.
         None => println!("back up"),

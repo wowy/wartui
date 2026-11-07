@@ -12,9 +12,9 @@ use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::bus::{
-    Board, Capabilities, MAX_SLOTS, NODE_VERSION, RecordKind, Slot, Version, wire_epoch,
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
 };
-use wartui_proto::link::{Chip, LoopPhase};
+use wartui_proto::link::LoopPhase;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
 
@@ -142,14 +142,12 @@ pub(super) fn pending(last: u8) -> NodeView {
 pub(super) fn busy() -> Snapshot {
     Snapshot {
         bridge: Some(BridgeInfo {
-            chip: Chip::Esp32P4,
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
             fw_version: "0.1.0".to_owned(),
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
-            heap_free: 65_536,
             uptime_ms: 1_000,
-            gps: false,
+            node_board: NodeBoard::Bench,
             radio: None,
             image: None,
         }),
@@ -223,7 +221,17 @@ pub(super) fn busy() -> Snapshot {
         },
         gps: None,
         excluded_ssids: Vec::new(),
+        power_answer: None,
     }
+}
+
+/// [`busy`] behind a bridge on `board`.
+pub(super) fn on_board(board: NodeBoard) -> Snapshot {
+    let mut snapshot = busy();
+    if let Some(bridge) = snapshot.bridge.as_mut() {
+        bridge.node_board = board;
+    }
+    snapshot
 }
 
 /// No bridge, no nodes, no position.
