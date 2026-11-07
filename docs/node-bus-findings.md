@@ -269,3 +269,52 @@ together when the supply returned.
 - A capture with all ten nodes assigned and recording.
 - A power-cycle request while the P4 scouts. Host tests cover only the detection.
 - 4 MHz, which cuts a five-node pass to about 12 ms.
+
+### A P4 that starts before the node supply (e688afb)
+
+The carrier's supply was switched off, the P4's USB-C unplugged and plugged back in, and the
+supply switched on about 20 s later. Times are from the host's `--log-file`:
+
+| Time (UTC) | The P4 |
+| --- | --- |
+| 04:22:56.19 | a power-on reset; `at boot 10 powered, 0 already on`, into the dead supply |
+| 04:23:01.14 | `no node answered after power-up, so the node supply may be out`; every port low |
+| 04:23:01–16 | scouts N1, N6 and N2, 5 s each, unanswered |
+| 04:23:17.26 | `N7 appeared`: the supply returned during N7's turn |
+| 04:23:18.16 | `N7 answered, so the node supply is back; 10 node slots powered again` |
+| 04:23:19.25–.34 | the other nine appear |
+
+Before e688afb, the boot stagger left every port high in the dead supply, and nothing
+staggered the nodes when it returned.
+
+### A power-cycle while the P4 scouts (8494180)
+
+With the supply off and the P4 scouting, `wartui power-cycle --slot N3`:
+
+| | e688afb | 8494180 |
+| --- | --- | --- |
+| The request ends the scouting | after the 0.9 s stagger | after the 0.9 s stagger |
+| The cycle runs | after the 5 s check for a node | at once |
+| `N3 power-cycled` at the CLI | never: it gave up at 5 s | 1.98 s after the request |
+| Then | the check fails and scouting resumes | the check fails and scouting resumes |
+
+After the e688afb run, the supply was switched on during the resumed scouting. N3 answered in
+its turn, and the other nine followed 100 ms apart.
+
+### Ten nodes recording, without antennas (4ac6c60)
+
+A 10-minute capture with all ten nodes assigned, four or five channels each. The bus carried it
+cleanly: no new CRC, version, length or seq-gap error across 1,200 counter readings, no new
+stuck IRQ, no node lost, and none of the bridge's 1,234 frames dropped. Every assignment was
+delivered, in 35–89 ms.
+
+The nodes had no antennas fitted, so the capture says nothing about coverage: 17 networks
+against 116 from two nodes with antennas in the same spot, heard 40–55 dB weaker.
+
+### Still open
+
+- A ten-node capture with antennas, for coverage.
+- Two fixes that this bench can't provoke: retrying each expander transaction at boot, which
+  needs an I2C glitch, and exempting only the node in a cycle now from the supply-loss count,
+  which needs the supply to drop within about 1 s of a queued cycle.
+- 4 MHz.
