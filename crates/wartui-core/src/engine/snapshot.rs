@@ -1,5 +1,6 @@
 use wartui_bridge::BridgeInfo;
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
+use wartui_proto::fan::FanStats;
 use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, Plan};
@@ -221,6 +222,8 @@ pub struct BridgeStatus {
     pub dropped_since_attach: u32,
     /// Bridge uptime.
     pub uptime_ms: u32,
+    /// The carrier's lid fan, or `None` with no carrier.
+    pub fan: Option<FanStats>,
 }
 
 impl FleetEngine {

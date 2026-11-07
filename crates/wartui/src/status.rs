@@ -11,6 +11,8 @@
 //!
 //! `oversize` counts node records the bridge dropped for being longer than any node of
 //! this build sends: a node on another build.
+//!
+//! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::NodeBoard;
+use wartui_proto::fan::FanStats;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -86,6 +89,7 @@ pub async fn run(args: Args) -> Result<()> {
         queues,
         radio_link,
         host_uart_errors,
+        fan,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -95,6 +99,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("dropped    {dropped_tx} frames");
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
+    println!("fan        {}", fan_text(fan));
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
@@ -116,6 +121,16 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The lid fan's duty and speed, or why there is none.
+pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
+    match fan {
+        Some(FanStats { duty, rpm: Some(rpm) }) => format!("{duty}, {rpm} rpm"),
+        // The bridge reads its tach for a second after boot before it has a speed.
+        Some(FanStats { duty, rpm: None }) => format!("{duty}, rpm not read yet"),
+        None => "no carrier, so no fan".to_owned(),
+    }
 }
 
 /// What carries the bridge's nodes, and the slots it drives.
@@ -198,7 +213,7 @@ pub(crate) async fn wait_for_ready(
 ///
 /// A bridge announces a standing fault as an `Error` once a host connects, such as a P4
 /// updating its radio, and still answers the poll. The caller's timeout bounds the wait.
-async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Result<BridgeToHost> {
+pub(crate) async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Result<BridgeToHost> {
     loop {
         match awaited(link.recv().await)? {
             Awaited::Status(status) => return Ok(*status),
@@ -246,10 +261,12 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, awaited, board_line, diagnostic_lines, human_uptime, radio_line, silence_note,
+        Awaited, awaited, board_line, diagnostic_lines, fan_text, human_uptime, radio_line,
+        silence_note,
     };
     use wartui_bridge::LinkEvent;
     use wartui_proto::bus::NodeBoard;
+    use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
@@ -378,9 +395,22 @@ mod tests {
             queues: QueueStats::new(),
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
+            fan: None,
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));
+    }
+
+    #[test]
+    fn status_prints_fan_duty_and_speed_when_bridge_reports_one() {
+        let duty = FanDuty::new(40).expect("in range");
+        assert_eq!(fan_text(Some(FanStats { duty, rpm: Some(1830) })), "40%, 1830 rpm");
+        assert_eq!(fan_text(Some(FanStats { duty, rpm: None })), "40%, rpm not read yet");
+    }
+
+    #[test]
+    fn status_prints_no_carrier_when_bridge_reports_no_fan() {
+        assert_eq!(fan_text(None), "no carrier, so no fan");
     }
 
     #[test]

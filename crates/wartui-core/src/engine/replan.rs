@@ -22,7 +22,7 @@ pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
 
 impl FleetEngine {
     /// Take an operator's instruction. What changes for a node is sent on its next heartbeat, so
-    /// only a power-cycle, which is the bridge's to carry out, goes out from here.
+    /// only a power-cycle and a fan duty, which are the bridge's to carry out, go out from here.
     pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
@@ -31,6 +31,10 @@ impl FleetEngine {
             Command::SetPool { pool } => self.on_set_pool(pool),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
+            Command::SetFanDuty { duty } => {
+                batch.bulk.push(HostToBridge::SetFan { duty });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
         }
     }
 

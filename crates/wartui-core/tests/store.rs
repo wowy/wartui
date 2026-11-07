@@ -23,6 +23,7 @@ use wartui_core::store::{
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType, wire_epoch};
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -457,6 +458,16 @@ fn store_writes_every_raw_frame_column_when_raw_frame_recorded() {
 
 /// A status reply carrying `queues` and `radio_link`, the rest of it fixed.
 fn bridge_status(queues: &[QueueStat], radio_link: RadioLinkStats) -> Record {
+    let fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) });
+    bridge_status_with_fan(queues, radio_link, fan)
+}
+
+/// [`bridge_status`] with `fan` in place of its fan.
+fn bridge_status_with_fan(
+    queues: &[QueueStat],
+    radio_link: RadioLinkStats,
+    fan: Option<FanStats>,
+) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + 5_000,
         rx_count: 4_000_000_000,
@@ -467,6 +478,7 @@ fn bridge_status(queues: &[QueueStat], radio_link: RadioLinkStats) -> Record {
         queues: queues.iter().copied().collect(),
         radio_link,
         host_uart_errors: 4_000_000_003,
+        fan,
     })
 }
 
@@ -523,6 +535,33 @@ fn store_round_trips_every_column_when_bridge_status_written() {
     let host_uart: i64 =
         conn.query_row("SELECT host_uart_errors FROM bridge_status", [], |r| r.get(0)).unwrap();
     assert_eq!(host_uart, 4_000_000_003);
+    let fan: (Option<i64>, Option<i64>) = conn
+        .query_row("SELECT fan_duty, fan_rpm FROM bridge_status", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(fan, (Some(40), Some(1830)));
+}
+
+#[test]
+fn store_writes_null_fan_columns_when_bridge_has_no_carrier_or_no_reading_yet() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let unread = Some(FanStats { duty: FanDuty::FULL, rpm: None });
+    let conn = write(
+        &dir,
+        vec![
+            bridge_status_with_fan(&[], RADIO_LINK, None),
+            bridge_status_with_fan(&[], RADIO_LINK, unread),
+        ],
+    );
+    let rows: Vec<(Option<i64>, Option<i64>)> = conn
+        .prepare("SELECT fan_duty, fan_rpm FROM bridge_status ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, [(None, None), (Some(100), None)]);
 }
 
 #[test]

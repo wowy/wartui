@@ -625,6 +625,7 @@ def bridge(db, ctx):
     bridge_queues(queues)
     bridge_radio_link(db, lives)
     bridge_host_uart(db)
+    bridge_fan(db)
 
 
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
@@ -710,7 +711,8 @@ def bridge_host_uart(db):
     bytes lost or corrupted.
 
     A P4 count, so it rebases only when it falls, as `BridgeLoss::host_uart_errors` does. The P4
-    loses host bytes while it writes its own flash, which only `flash-bridge` makes it do.
+    loses host bytes while it erases its own flash, which `flash-bridge` makes it do, and one fan
+    duty change in 1024.
     """
     rows = db.q("SELECT host_uart_errors FROM bridge_status ORDER BY id")
     if not rows:
@@ -723,6 +725,30 @@ def bridge_host_uart(db):
              "or corrupted "
              "on the way in, which nothing but the P4's own flash work should cause",
              "SELECT id, rx_at, uptime_ms, host_uart_errors FROM bridge_status ORDER BY id")
+
+
+def bridge_fan(db):
+    """The carrier's lid fan over the capture: the duties it ran and the speeds it read.
+
+    Both columns are NULL with no carrier, and `fan_rpm` before the bridge's first tach window
+    and after a duty change, until the first window that began after it.
+    """
+    rows = db.q("SELECT fan_duty, fan_rpm FROM bridge_status WHERE fan_duty IS NOT NULL")
+    if not rows:
+        print("  fan  none reported (no carrier)")
+        return
+    duties = [r[0] for r in rows]
+    rpms = [r[1] for r in rows if r[1] is not None]
+    print(f"  fan  duty {min(duties)}..{max(duties)}% ({len(set(duties))} distinct)  "
+          f"rpm {spread(rpms)}")
+    # 20 % is `FanDuty::TURNS_FROM`: below it the fan may stop by design.
+    stopped = sum(1 for duty, rpm in rows if duty >= 20 and rpm == 0)
+    if stopped:
+        flag("WARN", "bridge",
+             f"fan stopped in {stopped} status row(s): no tach pulse at 20% or more, so it "
+             "was unplugged or stalled",
+             "SELECT id, rx_at, uptime_ms, fan_duty, fan_rpm FROM bridge_status "
+             "WHERE fan_duty >= 20 AND fan_rpm = 0 ORDER BY id")
 
 
 def host(db, ctx):

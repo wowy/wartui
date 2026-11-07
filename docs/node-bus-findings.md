@@ -676,6 +676,34 @@ node rebooting into its new image.
 
 What remains of a sector's time in a fleet update is mostly the bus sending its chunks.
 
+## The lid fan's duty and speed, 2026-11-07
+
+The P4 now drives the carrier's lid fan, a Noctua NF-A6x15 5V PWM, and reads its tach
+(`firmware/p4-bridge/src/fan.rs`). On the carrier-10 under D0:1C, set with `wartui fan` and read
+with `wartui status` after 10 s at each duty, three readings 1.5 s apart (each a 1 s count, so
+±30 rpm):
+
+| Duty | rpm |
+| --- | --- |
+| 100 % | 3690–3720 (3900 straight after the flash) |
+| 75 % | 2850 |
+| 50 % | 1920 |
+| 40 % | 1530–1560 |
+| 25 % | 870 |
+| 20 % | 600–660 |
+| 15 % | 390–420, starting from rest too |
+| 10 % | 240 stepping down from 15 %; 0 from rest |
+| 5 %, 0 % | 0: the fan stops |
+
+So the fan does not turn at a minimum speed at 0 %: it stops, and below 15 % it may not start. The
+`fan stopped` fault is raised only at 20 % and above (`FanDuty::TURNS_FROM`). Above 20 % speed
+rises close to linearly with duty, about 40 rpm a percent. 100 % ran a little over the fan's
+3500 rpm rating, which is ±10 %. Readings taken 2–3 s after a change were still settling: the fan
+takes several seconds to slow from 100 % to 40 %.
+
+The duty held across a reboot (`wartui fan 40`, `wartui reset`, 40 % at 6 s of uptime), read back
+from the first sector of the P4's `nvs` partition. No step reset the P4.
+
 ## Still open
 
 This list replaces the dated ones above.

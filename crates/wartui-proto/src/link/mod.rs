@@ -25,6 +25,7 @@
 //! [`HostToBridge::ToNode`].
 
 use crate::bus::{NodeBoard, Slot};
+use crate::fan::{FanDuty, FanStats};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::radio_link::update::OP_MAX;
@@ -245,6 +246,13 @@ pub enum HostToBridge {
         /// Image bytes in the chunk, 1 to [`crate::bus::UPDATE_CHUNK`].
         len: u16,
     },
+    /// Run the carrier's lid fan at `duty`, and store it so the P4 boots into it
+    /// ([`crate::fan`]). No answer: the next [`BridgeToHost::Status`] shows the duty in force,
+    /// and a failed save answers [`BridgeToHost::Error`]. A P4 with no carrier ignores it.
+    SetFan {
+        /// The duty to run and store.
+        duty: FanDuty,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -303,6 +311,8 @@ pub enum BridgeToHost {
         /// however many it saw. An overflow is host bytes lost, as when the P4 holds its
         /// interrupts off for its own flash work.
         host_uart_errors: u32,
+        /// The carrier's lid fan, or `None` with no carrier.
+        fan: Option<FanStats>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.

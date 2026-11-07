@@ -19,6 +19,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `power-cycle`  | Switch one node off and on through the carrier board; see "Power-cycling a node"    |
+| `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -315,9 +316,9 @@ wdgwars = ""
 wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
 an unknown `pool`, a malformed `node` or `mac`, any of them or `serial` beside its table's
 `remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
-refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle` and `ota` read only
-`[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop
-them.
+refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle`, `fan` and `ota`
+read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
+cannot stop them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save,
 `b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when the bridge it
@@ -339,9 +340,9 @@ bytes.
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
-takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `ota`
-and `flash-bridge`. A named file that is missing is refused; a missing default file silently means
-the built-in defaults.
+takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
+`ota` and `flash-bridge`. A named file that is missing is refused; a missing default file silently
+means the built-in defaults.
 
 ### Benchmarking the store
 
@@ -639,6 +640,31 @@ The bridge answers once the node is powered again, or says why not:
 - `N3 was not power-cycled: the carrier's I/O expander did not answer`: the bridge could not reach
   the switch. One that fails at boot is a `fault` in `wartui status` too.
 
+### The lid fan
+
+The carrier has a header for a 4-pin PWM fan, a Noctua NF-A6x15 5V PWM. The bridge keeps its duty,
+0 to 100 %, in its own flash and boots into it, so the duty holds across its reboots and with no
+host attached; `wartui.toml` holds none. A bridge with nothing stored runs the fan at 100 %, as it
+does while it resets. The fan stops at low duty: on the bench it needed 15 % to start from rest,
+kept turning down to 10 % once spinning, and stopped at 5 % and 0 %.
+
+```sh
+wartui fan                  # the duty and speed now
+wartui fan 40               # set 40 %, wait 2 s, then print the duty and the speed at it
+wartui fan 40 --bridge 44:C0
+```
+
+It resolves one bridge and takes `--config PATH` as `power-cycle` does. A bench bridge, with no
+carrier, has no fan and is refused. The bridge writes a duty only when it differs from the one it
+stored. One it could not save holds until its next reboot, and `wartui fan` prints the bridge's
+`fault` line saying so. Setting the same duty again retries the save.
+
+In `run`, settings' `fan` row shows the duty the bridge last reported and steps it by 5 %. `Enter`
+sends it only when the row moved; `no fan` means no status has reported one. While the link is up,
+the header shows the fan after the bridge, as `fan 40% 1830 rpm`, or `fan 40%` with no reading: in
+the bridge's first second, and for a second or two after a duty change, since no reading spans
+two duties. `wartui status` prints a `fan` line too.
+
 ## Keyboard commands
 
 | Key                    | What it does                                                                 |
@@ -667,15 +693,15 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                       |
-|---------------------|--------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                  |
-| `←` `→` / `h` `l`   | Change the selected row; values wrap at their ends                 |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                         |
-| `Enter`             | Apply every row and save it to `wartui.toml`                       |
-| `Esc` / `q`         | Close without changing anything                                    |
-| `ctrl-c`            | Quit                                                               |
+| Key                 | What it does                                                        |
+|---------------------|---------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                   |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
+| `Enter`             | Apply every row; save them to `wartui.toml`, the fan to the bridge  |
+| `Esc` / `q`         | Close without changing anything                                     |
+| `ctrl-c`            | Quit                                                                |
 
 On the `excluded ssids` page:
 
@@ -689,8 +715,9 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-The rows are the pool (`all → eu → us`), `remember bt node` (`off`, `on`), `remember bridge`
-(`off`, `on`), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are
+The rows are the pool (`all → eu → us`), the `fan` (0 to 100 %, by 5; see "The lid fan"),
+`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
+`wdgwars` API key. `excluded ssids` shows how many are
 listed, or `none`, and opens a page that lists them. While an SSID is being typed there, every
 letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already listed,
 and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the remembered
@@ -698,8 +725,9 @@ bridge but none of the rows, and returns to the rows; edits to the rows stay pen
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
-the engine and writes every row shown to `pool`, `excluded-ssids`, `[bluetooth]`, `[bridge]`, and
-`[api-keys]`, whatever was there, and settings closes. If the engine is not accepting commands,
+the engine and writes every row shown but the fan to `pool`, `excluded-ssids`, `[bluetooth]`,
+`[bridge]`, and `[api-keys]`, whatever was there, and settings closes. The fan goes to the bridge,
+which keeps it. If the engine is not accepting commands,
 nothing is sent or written, and settings stays open with its edits. A moved pool re-cuts the fleet.
 Each node takes its new share on its next heartbeat, emptying its dedup ring when its share
 changes.
@@ -934,6 +962,9 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   since the bridge booted, which is large and harmless on a dongle left powered with nothing
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
   radio link counters, and a `bridge_queue` row per queue it reported.
+- **`fan stopped at 40%: unplugged or stalled`**: the bridge read no tach pulse over a whole second
+  at 20 % or more, where the fan always turns. Check the fan header. Below 20 % nothing is raised,
+  since the fan may stop there by design.
 - **`4F:08 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
   fault, and the line stays for the run. `brownout` means check that node's supply; `software`,
   `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on

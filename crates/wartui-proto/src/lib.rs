@@ -13,7 +13,8 @@
 //! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
 //! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes,
 //! and holds the messages a node and the P4 exchange over it. [`carrier`] reads the carrier
-//! board's I/O expander at the P4's boot, and watches for a lost node supply.
+//! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
+//! carrier's lid fan: its duty, its PWM wave and tach reading, and the record the P4 stores.
 
 #![no_std]
 
@@ -22,6 +23,7 @@ pub mod bus;
 pub mod carrier;
 pub mod config;
 pub mod dedup;
+pub mod fan;
 pub mod frame_ring;
 pub mod hci;
 pub mod host_queue;

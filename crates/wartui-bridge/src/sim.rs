@@ -31,6 +31,10 @@
 //! `CacheImage` upload fills it, and a `ToNodeChunk` is built from the verified image with the
 //! same [`cache_chunk_body`], then routed as a `ToNode` is, loss model included. Until an upload
 //! verifies, and from the next `Begin` on, a chunk command is answered `NoImage`.
+//!
+//! Its board is a carrier, so it has a lid fan: a `SetFan` sets the duty `Status` reports, with a
+//! speed made up from it. It has no flash, so the duty lasts the simulator's life and starts at
+//! full.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -43,6 +47,7 @@ use wartui_proto::bus::{
     UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{
     BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, NodeImageCache,
     PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
@@ -291,6 +296,16 @@ impl SimTransport {
     }
 }
 
+/// The speed the simulated fan reports at `duty`, after the bench sweep in
+/// `docs/node-bus-findings.md` § "The lid fan's duty and speed": stopped below 15 %, and about
+/// 40 rpm a percent above it, from 450 rpm at 15 % to 3850 at full.
+fn sim_fan_rpm(duty: FanDuty) -> u16 {
+    match u16::from(duty.get()) {
+        pct @ 15.. => 40 * pct - 150,
+        _ => 0,
+    }
+}
+
 /// The dongle half: announces itself, routes records to nodes, answers status.
 async fn run_bridge(
     mut plumbing: crate::LinkPlumbing,
@@ -339,6 +354,7 @@ async fn run_bridge(
 
     let mut rng = Xorshift::new(0x0DD5_EED5);
     let mut cache = sim_cache();
+    let mut fan_duty = FanDuty::FULL;
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
@@ -355,6 +371,7 @@ async fn run_bridge(
                 queues: wartui_proto::link::QueueStats::new(),
                 radio_link: RadioLinkStats::default(),
                 host_uart_errors: 0,
+                fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
@@ -376,6 +393,11 @@ async fn run_bridge(
                     let _ = route.tx.send(SimCommand::PowerCycle).await;
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
+            }
+            // Answered by the next `Status`, as the P4's is.
+            HostToBridge::SetFan { duty } => {
+                fan_duty = duty;
+                None
             }
             HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
                 Some(op) => cache.take(op).map(cache_status),

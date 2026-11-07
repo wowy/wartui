@@ -10,6 +10,7 @@ use wartui_proto::bus::{
     SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateChunk,
     UpdateState, UpdateStatus, Vdd,
 };
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
     GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
@@ -51,6 +52,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     })))
     .expect("sample_commands has room");
     v.push(sample_chunk_command()).expect("sample_commands has room");
+    v.push(HostToBridge::SetFan { duty: FanDuty::new(40).expect("in range") })
+        .expect("sample_commands has room");
     v
 }
 
@@ -167,6 +170,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         queues: QueueStats::new(),
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
+        fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -574,7 +578,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 9, "one of each");
+    assert_eq!(commands.len(), 10, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -639,6 +643,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         queues: QueueStats::new(),
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
+        fan: None,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -715,6 +720,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
             radio_uart_errors: 8,
         },
         host_uart_errors: 9,
+        fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
     };
     assert_eq!(round_trip(&status), status);
 }
@@ -767,6 +773,52 @@ fn link_codec_pins_power_cycle_bytes_when_host_asks() {
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     assert_eq!(frame_body(&out[..n]), [6, 9]);
+}
+
+#[test]
+fn link_codec_pins_set_fan_bytes_when_host_sets_a_duty() {
+    // Postcard's variant index, then the duty's byte.
+    let cmd = HostToBridge::SetFan { duty: FanDuty::new(40).expect("in range") };
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [9, 40]);
+}
+
+#[test]
+fn link_refuses_set_fan_when_duty_is_over_100() {
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&HostToBridge::SetFan { duty: FanDuty::FULL }, &mut out)
+        .expect("encodes");
+    let mut body = frame_body(&out[..n]);
+    assert_eq!(body, [9, 100]);
+    body[1] = 101;
+    assert!(postcard::from_bytes::<HostToBridge>(&body).is_err());
+}
+
+#[test]
+fn link_codec_pins_fan_bytes_at_end_of_status_when_bridge_reports_one() {
+    // `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
+    let mut out = [0u8; MAX_FRAME];
+    let mut status = BridgeToHost::Status {
+        rx_count: 0,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: QueueStats::new(),
+        radio_link: RadioLinkStats::default(),
+        host_uart_errors: 0,
+        fan: None,
+    };
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let none = frame_body(&out[..n]);
+    assert_eq!(none.last(), Some(&0));
+    if let BridgeToHost::Status { fan, .. } = &mut status {
+        *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
+    }
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let some = frame_body(&out[..n]);
+    assert_eq!(some[..none.len() - 1], none[..none.len() - 1]);
+    assert_eq!(some[none.len() - 1..], [1, 40, 1, 0xAC, 0x02]);
 }
 
 #[test]

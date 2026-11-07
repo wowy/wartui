@@ -15,16 +15,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{discover_bridges, probe_all};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::{NO_CARRIER, power_cycled_text};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome};
 use wartui_proto::mac;
-
-/// How long the bridge has to announce itself, as `status` waits.
-const READY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 /// How long the bridge has to answer. The worst case, on a carrier whose node supply is out, is
 /// about 5 s: a cycle already running ahead of it (1 s off and its tries at power-on), up to 14
@@ -51,21 +46,8 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let remembered = crate::config::remembered_bridge(args.config.as_deref());
-    let named = args.bridge.as_deref();
-    let port =
-        crate::reset::board_to_reset(named, &remembered, discover_bridges, |found| async move {
-            probe_all(&found).await
-        })
-        .await?;
-    let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
-    let mut link = super::open(Some(&port), None, memory)?;
-
-    let info =
-        match tokio::time::timeout(READY_TIMEOUT, crate::status::wait_for_ready(&mut link)).await {
-            Ok(ready) => ready?,
-            Err(_) => bail!("{}", super::no_bridge_notice(named)),
-        };
+    let (mut link, info) =
+        super::connect_one(args.bridge.as_deref(), args.config.as_deref()).await?;
     let board = info.node_board;
     let slot = slot_for(board, &args.slot).map_err(anyhow::Error::msg)?;
 

@@ -57,6 +57,12 @@ it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with 
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
   power out of reach, every power-cycle answers `Failed`.
 
+- **The lid fan** runs at the duty stored in the first sector of the `nvs` partition, or 100 %
+  with none, from boot and with no host present. A host's `SetFan` changes it at once, and the P4
+  writes it only when it differs from the stored one. `Status` reports the duty and the tach's
+  speed (`src/fan.rs`). On the bench neither GPIO51 nor GPIO52 is configured and `SetFan` is
+  ignored.
+
 Each announcement also carries a line naming the carrier and what it powered at boot:
 `carrier-10: 10 node slots; at boot 3 powered, 7 already on`.
 [`docs/node-bus.md`](../../docs/node-bus.md) § "On the carrier board" has the port map and the pins.
@@ -89,7 +95,8 @@ CTS high, and the P4 waits rather than drops.
 The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is
 the port the bridge's link then runs on, so quit any `wartui` holding it first. The runner
 writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
-`otadata`, so the P4 boots the image just written.
+`otadata`, so the P4 boots the image just written. It leaves `nvs`, where the P4 keeps the lid
+fan's duty, as it was.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
 `cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive

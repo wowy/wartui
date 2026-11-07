@@ -2,6 +2,7 @@
 
 use heapless::Vec;
 use wartui_proto::bus::NodeBoard;
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{
     BridgeToHost, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
 };
@@ -173,6 +174,7 @@ fn pair_status_sums_host_and_radio_drops() {
         host_uart_errors: 9,
         rx_count: 40,
         rx_oversize: 2,
+        fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
     };
     match pair.status(3_000, p4) {
         BridgeToHost::Status {
@@ -183,9 +185,11 @@ fn pair_status_sums_host_and_radio_drops() {
             queues,
             radio_link,
             host_uart_errors,
+            fan,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
             assert_eq!(host_uart_errors, 9);
+            assert_eq!(fan.and_then(|fan| fan.rpm), Some(1830), "passed through");
             // The host's 6 and the C6's ring toward the P4, 4; never the node queues' refusals.
             assert_eq!(dropped_tx, 10);
             assert_eq!(uptime_ms, 2_900);
@@ -349,6 +353,7 @@ fn p4_zero() -> P4Counters {
         host_uart_errors: 0,
         rx_count: 0,
         rx_oversize: 0,
+        fan: None,
     }
 }
 

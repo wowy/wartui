@@ -27,7 +27,9 @@
 //!   supply, through the I/O expander that shares I2C0 with the GPS. Each locks the bus per
 //!   transaction;
 //! - **the node buses** (`src/bus.rs`), one future per SPI controller, carry each node's records
-//!   to and from the host, and report link counters to it as log lines.
+//!   to and from the host, and report link counters to it as log lines;
+//! - **the fan** (`src/fan.rs`), on a carrier only, drives the lid fan's PWM at the duty stored on
+//!   flash, which a host's `SetFan` changes, and reads its tach for `Status`.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -52,6 +54,7 @@
 mod cache;
 mod carrier;
 mod config;
+mod fan;
 mod gps;
 mod host;
 mod link;
@@ -60,7 +63,7 @@ mod update;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::{join, join3, join4};
+use embassy_futures::join::{join, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -207,6 +210,8 @@ pub struct Shared {
     nodes: bus::Nodes,
     /// The carrier's node power, as the host reader and the carrier future see it.
     power: Power,
+    /// The carrier's lid fan, or `None` on the bench.
+    fan: Option<&'static fan::Fan>,
 }
 
 impl Shared {
@@ -218,6 +223,8 @@ impl Shared {
         cache: Cache,
         carrier: &Carrier,
     ) -> Self {
+        // The stored duty, read on a carrier before the fan's future runs.
+        let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(updates));
         Self {
             // Here rather than in `main`, whose frame another `Pair` would grow.
             pair: RefCell::new(pair.with_node_board(carrier.board())),
@@ -249,6 +256,7 @@ impl Shared {
             cache: RefCell::new(cache),
             nodes: bus::Nodes::new(carrier.per_bus()),
             power: Power::new(carrier),
+            fan,
         }
     }
 
@@ -403,6 +411,7 @@ impl Shared {
             host_uart_errors: self.host_uart_errors.get(),
             rx_count,
             rx_oversize,
+            fan: self.fan.map(fan::Fan::stats),
         };
         let status = self.pair.borrow().status(now_ms(), counters);
         self.push_host(&status);
@@ -541,6 +550,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         (peripherals.SPI3, peripherals.DMA_AXI_CH1, pins_b),
     );
 
+    let fan_pins =
+        fan::Pins { rmt: peripherals.RMT, pwm: peripherals.GPIO51, tach: peripherals.GPIO52 };
+
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
@@ -556,10 +568,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             host::run(host_bus, &shared),
             gps::run(i2c, &shared),
         ),
-        join3(
+        join4(
             carrier::run(carrier, i2c.ok(), &shared),
             bus::run(bus_a, &shared),
             bus::run(bus_b, &shared),
+            fan::run(fan_pins, &shared),
         ),
     )
     .await {}

@@ -3,6 +3,7 @@ use std::time::Instant;
 use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::Slot;
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
@@ -102,6 +103,17 @@ pub enum Command {
     PowerCycle {
         /// Which node, by the slot its heartbeat came from.
         slot: Slot,
+    },
+
+    /// Ask the bridge to run the carrier's lid fan at `duty`, and keep it across its reboots.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, so
+    /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the duty in force without
+    /// waiting for the next poll. The bridge stores it, not the host. A bridge with no carrier
+    /// ignores it.
+    SetFanDuty {
+        /// The duty to run.
+        duty: FanDuty,
     },
 }
 

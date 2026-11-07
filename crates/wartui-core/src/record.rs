@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use wartui_proto::beacon::visible_ssid;
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
+use wartui_proto::fan::FanStats;
 use wartui_proto::link::{QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -108,6 +109,8 @@ pub struct BridgeStatusSeen {
     pub radio_link: RadioLinkStats,
     /// Line errors on the P4's host UART since its boot: bytes from this host lost or corrupted.
     pub host_uart_errors: u32,
+    /// Its lid fan: the duty in force and the last tach reading. `None` with no carrier.
+    pub fan: Option<FanStats>,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

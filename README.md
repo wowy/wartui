@@ -124,15 +124,15 @@ have no README; their `//!` module docs hold the detail.
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                       |
-|---------------------|--------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                  |
-| `←` `→` / `h` `l`   | Change the selected row; values wrap at their ends                 |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                         |
-| `Enter`             | Apply every row and save it to `wartui.toml`                       |
-| `Esc` / `q`         | Close without changing anything                                    |
-| `ctrl-c`            | Quit                                                               |
+| Key                 | What it does                                                        |
+|---------------------|---------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                   |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
+| `Enter`             | Apply every row; save them to `wartui.toml`, the fan to the bridge  |
+| `Esc` / `q`         | Close without changing anything                                     |
+| `ctrl-c`            | Quit                                                                |
 
 On the `excluded ssids` page:
 
