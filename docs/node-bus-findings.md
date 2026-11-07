@@ -138,3 +138,64 @@ confirmed, its 6 s listen and the image build included.
 - **Rollback.** An update cancelled at `rebooting` sends no confirm. The node booted the new image
   as `trial boot 1 of 3`. Two resets through its USB counted boots 2 and 3, and the third rolled it
   back to the old slot and rebooted. It then heartbeated off trial, with nothing sent to it.
+
+## On the carrier-10, 2026-11-06
+
+The same P4 (`D0:1C`), seated on a 10-node carrier, with its CH343 as the host link. The P4 ran
+branch `feat/carrier-board` (ed43819), and the two nodes ran 1c614db's node firmware, both at
+1 MHz. A GPS receiver sat on I2C0 with the carrier's I/O expander. The nodes were the same two
+XIAO C5s, powered by their sockets alone.
+
+**Detection and boot.** `wartui status` named the board `carrier-10`, 10 node slots, N1 to N10.
+
+| Boot | The P4's carrier line |
+| --- | --- |
+| Carrier powered on | `10 powered now, 0 already on` |
+| P4 reset alone, through the CH343's EN line | `0 powered now, 10 already on` |
+
+After the P4-only reset, the expander kept its outputs and no socket was switched off. The P4
+reports that reset as `PowerOn`, because the CH343 pulls the chip's EN pin.
+
+**Every socket.** The two nodes moved through the sockets in pairs, one per bus: N1 and N6, N2
+and N7, and so on to N5 and N10. In each socket the node heartbeated, its IRQ was served, and
+`wartui power-cycle` rebooted it.
+
+| | Bus A, N1–N5 (`0D:20`) | Bus B, N6–N10 (`1A:50`) |
+| --- | --- | --- |
+| Heartbeats through the socket's CS | all five | all five |
+| IRQ-to-transfer latency, mean | 8.8–9.6 ms | 9.4–9.7 ms, 12.4 ms over N6's first 33 |
+| After `power-cycle` | heartbeat `#1`, reset `power_on` | heartbeat `#1`, reset `power_on` |
+| The other bus's node during the cycle | ran on unbroken | ran on unbroken |
+| CRC errors, by socket | N3 1, N4 4, others 0 | N8 5, others 0 |
+| Stuck IRQ | 1, at N3's move | 0 |
+
+- **The 1 s off time is enough.** Every cycled node came back with reset cause `power_on`, not
+  a brownout.
+- **A power-cycle costs two retries.** The P4 counts them while the node is still present and
+  silent, before it marks the node gone. A node left alone in its socket counted none.
+- **The CRC errors came while nodes were moved with the carrier powered.** The P4's uptime ran
+  unbroken from the move to N3 and N8 through N10. Each socket's count was already standing at
+  the first reading after a move, and none grew afterwards, over at least 100 good transfers per
+  socket and through its power-cycle. N5 and N10, also moved hot, counted none.
+- **The GPS shares I2C0 with the expander.** The receiver streamed NMEA, about 400 bytes a
+  second, through the power-cycles of N1 and N6, and got a fix.
+
+**A 10-minute capture with N1 and N6 undisturbed:**
+
+| | N1 (`0D:20`) | N6 (`1A:50`) |
+| --- | --- | --- |
+| Heartbeats recorded | 120 | 120 |
+| CRC, version, length or seq gap | 0 | 0 |
+| Retries during the run | 0 | 0 |
+| Stuck IRQ | 0 | 0 |
+| IRQ-to-transfer latency, mean / max | 9.6 / 18.1 ms | 9.7 / 18.2 ms |
+
+The capture recorded 380 observations from 116 networks. There were no batch gaps, and every
+observation had a GPS position. All three assignments were delivered in 34–35 ms. The bridge
+dropped no frames, and the host stored all of them.
+
+### Still open on the carrier
+
+- **Several nodes on one bus.** Each bus held one node at a time, so no two nodes shared MISO.
+- **4 MHz.**
+- **The 14-node board's seventh CS on each bus** (GPIO25 and GPIO24).
