@@ -26,9 +26,11 @@ use wartui_proto::mac;
 /// How long the bridge has to announce itself, as `status` waits.
 const READY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
-/// How long the bridge has to answer: the node's second off, and a cycle already running ahead
-/// of it.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the bridge has to answer, in the worst case on a carrier whose node supply is out: a
+/// request that arrives during the bridge's 5 s wait for a node waits it out, then for up to 14
+/// nodes powered 100 ms apart, a cycle already running ahead of it (1 s off and its tries at
+/// power-on), and its own 1 s off.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(ClapArgs)]
 pub struct Args {

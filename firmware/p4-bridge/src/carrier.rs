@@ -44,11 +44,12 @@
 //! **A power-up into a dead supply is a lost supply too.** The P4 may boot before the node
 //! supply, or a request may end the scouting while the supply is still out. Every port is then
 //! raised into nothing, the supply starts every node at once, and with no node present
-//! `DropWatch` never fires. So after a stagger that raises every port, [`run`] waits up to
-//! [`SCOUT_WAIT`] for any node to be present. Without one, the supply is taken as out: [`run`]
-//! serves any waiting request, then scouts, every driven slot in stagger order. A board with no
-//! node seated scouts forever, and a node seated later is powered when the scout reaches its
-//! socket.
+//! `DropWatch` never fires. So after a stagger that raises every port, [`run`] serves any waiting
+//! request, then waits up to [`SCOUT_WAIT`] for any node to be present. Serving first answers a
+//! request that ended the scouting after its stagger and cycle, not after the wait as well.
+//! Without a node, the supply is taken as out, and [`run`] scouts, every driven slot in stagger
+//! order. A board with no node seated scouts forever, and a node seated later is powered when the
+//! scout reaches its socket.
 //!
 //! **I2C0 is shared with the GPS reader.** [`run`] locks the bus for each transaction and never
 //! across a timer, so the receiver's polls go on between the steps of a power-up or a cycle.
@@ -355,14 +356,13 @@ pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared
         note_powered(shared, landed);
     }
     let power = &shared.power;
-    // Whether the node supply is taken as out, with no node present to show it back.
-    let mut out = carrier.pending != 0 && !answered(shared, board).await;
+    let mut supply = if carrier.pending != 0 { Supply::Unchecked } else { Supply::On };
     loop {
         let lost = power.lost.take();
         if lost != 0 {
             let why = "every node dropped at once, so the node supply was likely lost";
             log(shared, format_args!("{board}: {why}"));
-            out = !recover(i2c, shared, board, output, lost).await;
+            supply = recover(i2c, shared, board, output, lost).await;
             continue;
         }
         let requests = power.requests.get();
@@ -377,17 +377,39 @@ pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared
             answer(shared, slot, outcome);
             continue;
         }
-        // Scouts only once no request waits, since a waiting one ends the scouting at once.
-        if out {
-            out = !recover(i2c, shared, board, output, 0).await;
-            continue;
-        }
-        power.wake.wait().await;
+        // Only once no request waits: a waiting one would end the scouting at once, and wait out
+        // the check.
+        supply = match supply {
+            Supply::Unchecked => {
+                if answered(shared, board).await {
+                    Supply::On
+                } else {
+                    Supply::Out
+                }
+            }
+            Supply::Out => recover(i2c, shared, board, output, 0).await,
+            Supply::On => {
+                power.wake.wait().await;
+                Supply::On
+            }
+        };
     }
 }
 
-/// Whether a node answers within [`SCOUT_WAIT`] of a power-up that raised every port. When none
-/// does, the node supply is taken as out, and that is logged.
+/// What [`run`] takes the node supply to be.
+#[derive(Clone, Copy)]
+enum Supply {
+    /// On, as far as [`run`] knows: a node answered after the last power-up that raised every
+    /// port, or none has run.
+    On,
+    /// Unknown: every port was raised and no node has answered yet, so [`answered`] decides.
+    Unchecked,
+    /// Out: [`recover`] scouts.
+    Out,
+}
+
+/// Whether a node is present within [`SCOUT_WAIT`], after a power-up that raised every port and
+/// the requests waiting on it. When none is, the node supply is taken as out, and that is logged.
 async fn answered(shared: &Shared, board: NodeBoard) -> bool {
     let power = &shared.power;
     let wait = async {
@@ -424,9 +446,15 @@ async fn cycle(i2c: &I2cBus, shared: &Shared, output: u16, slot: Slot) -> PowerO
 
 /// Power `board`'s nodes again with the node supply taken as out: one scout at a time, the
 /// slots in `lost` first, then the rest the board drives, until one answers or a power-cycle
-/// request waits. Then the rest of `output`, the wanted state, [`STAGGER`] apart. Says whether
-/// a node is present at the end.
-async fn recover(i2c: &I2cBus, shared: &Shared, board: NodeBoard, output: u16, lost: u16) -> bool {
+/// request waits. Then the rest of `output`, the wanted state, [`STAGGER`] apart. A scout that
+/// answered shows the supply on, and after a request it is unchecked.
+async fn recover(
+    i2c: &I2cBus,
+    shared: &Shared,
+    board: NodeBoard,
+    output: u16,
+    lost: u16,
+) -> Supply {
     let off = output & !ports(board);
     // A write that fails leaves nodes on, and the scout's write settles them.
     let _ = write_output(i2c, off).await;
@@ -455,8 +483,8 @@ async fn recover(i2c: &I2cBus, shared: &Shared, board: NodeBoard, output: u16, l
         _ => format_args!("a power-cycle request ended the wait"),
     };
     log(shared, format_args!("{board}: {why}; {powered} node slots powered again"));
-    // A scout that answered is present. After a request, the supply may still be out.
-    ended == Scouted::Answered || answered(shared, board).await
+    // After a request, the supply may still be out, and `run` checks once it has served it.
+    if ended == Scouted::Answered { Supply::On } else { Supply::Unchecked }
 }
 
 /// How one scout's wait ended.
