@@ -67,6 +67,44 @@ promiscuous callback, the Bluetooth scan, or the ESP-NOW sends.
 `1A:50` joined with reset cause `watchdog` and `0D:20` with `external`. Both causes date from the
 reset after `flash-fleet`, not from this run.
 
+## Node updates over the 4 MHz bus, 2026-11-07
+
+`wartui ota --force` to the same version (0.3.1), one node alone: 0D:20 in N5 on the
+carrier-10, nine other nodes running.
+
+| | 1 MHz bench (1 node) | 4 MHz carrier | 4 MHz carrier, ack fetched at once (ba62296) |
+| --- | --- | --- | --- |
+| Rate while sending | 24 KB/s | 21 KB/s | 32 KB/s |
+| Whole run | 45 s | 53 s | 39 s |
+| Outcome | confirmed | confirmed | confirmed |
+
+The whole run includes the 6 s listen and an incremental image build.
+
+- **The clock didn't help.** One chunk is in flight at a time, and each waited for the node's
+  ack, which the P4 fetched on its 25 ms poll, then for `Delivered` to reach the host.
+- **The P4 now fetches the ack right after the transfer that carried the chunk**, since the node
+  stamps it on the very next transfer it arms. That alone took the rate from 21 to 32 KB/s. The
+  25 ms poll stays for a transfer that brings no ack.
+- The same build adds a node image cache in the P4's PSRAM, which this run didn't use: the host
+  still sent every chunk itself.
+- After the reflash, the buses were clean on all ten slots, with IRQ latency unchanged at about
+  16 ms.
+
+### PSRAM on the P4
+
+A throwaway build, before the cache, measured the P4-WIFI6's PSRAM through esp-hal 1.2.2:
+
+| | |
+| --- | --- |
+| Mapped | 32 MB at `0x48000000`; a marker at each MB read back correct, so no aliasing |
+| Write 1 MB | 16.4 ms (64 MB/s) |
+| Read 1 MB back | 21.7 ms (48 MB/s), no wrong words |
+| Copy 1 KB into internal RAM | 23.5 µs mean, the same across all 32 MB; 0 of 1,000 wrong |
+| SHA-256 of 1 MB, in software | 192 ms (5 MB/s) |
+
+The buses, the GPS and the host link ran normally alongside it. Building a chunk from the cache
+costs about 24 µs, against about 3 ms on the bus to carry it.
+
 ## Still open
 
 - A shared bus. Several nodes on one CS-selected bus, with MISO tri-stated by the node while
