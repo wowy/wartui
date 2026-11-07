@@ -10,11 +10,14 @@
 //! acknowledged and not taken again.
 //!
 //! Numbers run mod [`FLIGHT_NUMBERS`], which tells the node's last flight, the one it expects,
-//! and the one after apart. A node that has taken nothing since boot takes whatever comes. A P4
-//! has no such way to learn where a node stands, so its first flight to a slot, and its first
-//! after giving one up, carries [`SYNC`]: the node takes it whatever its number. A [`SYNC`]
-//! flight goes alone, so a resend of it taken twice arrives next to itself, never after the
-//! flight behind it.
+//! and the one after apart. Neither end can learn where the other's numbering stands, so a
+//! [`SYNC`] flight sets it: the node takes it whatever its number. A node that has taken no
+//! flight since boot takes only a [`SYNC`] flight, since a flight taken on its number alone may
+//! be the second of two whose first it never saw, and its ack would deliver both. Its headers
+//! carry no ack, and the P4 answers any header without one by resending its oldest flight out
+//! with [`SYNC`]. It also tags its first flight to a slot, and its first after giving one up. A
+//! [`SYNC`] flight goes alone, so a resend of it taken twice arrives next to itself, never after
+//! the flight behind it.
 
 use super::{FLIGHT, Header, SYNC};
 
@@ -71,13 +74,14 @@ impl Header {
 /// What a node does with a record-carrying transfer from the P4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Take {
-    /// The next flight: queue it and acknowledge it.
+    /// The next flight: queue it, then [`FlightTaker::commit`] it and acknowledge it.
     Queue,
     /// A resend of the flight last taken: acknowledge it, and do not queue it again.
     Repeat,
     /// A flight to take, with no room for it: drop it unacknowledged.
     Full,
-    /// A flight past one the node has not taken: drop it unacknowledged.
+    /// A flight past one the node has not taken, or one without [`SYNC`] before the first taken
+    /// since boot: drop it unacknowledged.
     OutOfOrder,
 }
 
@@ -96,12 +100,12 @@ impl FlightTaker {
     }
 
     /// Decide on a record-carrying transfer from the P4 with `header`, when the inbox has
-    /// `room` or not. [`Take::Queue`] moves on to the next number; nothing else does.
-    pub fn take(&mut self, header: &Header, room: bool) -> Take {
+    /// `room` or not. Nothing moves until [`FlightTaker::commit`].
+    #[must_use]
+    pub fn take(&self, header: &Header, room: bool) -> Take {
         let tag = header.flight();
-        if let Some(expected) = self.expected
-            && !tag.sync
-        {
+        if !tag.sync {
+            let Some(expected) = self.expected else { return Take::OutOfOrder };
             if tag.number == back(expected) {
                 return Take::Repeat;
             }
@@ -109,11 +113,14 @@ impl FlightTaker {
                 return Take::OutOfOrder;
             }
         }
-        if !room {
-            return Take::Full;
-        }
-        self.expected = Some(forward(tag.number));
-        Take::Queue
+        if room { Take::Queue } else { Take::Full }
+    }
+
+    /// The flight `header` carries, which [`FlightTaker::take`] answered [`Take::Queue`], is in
+    /// the inbox: expect the next number. A flight that never reached the inbox is not
+    /// committed, so its resend reads as the next flight rather than a [`Take::Repeat`].
+    pub fn commit(&mut self, header: &Header) {
+        self.expected = Some(forward(header.flight().number));
     }
 }
 

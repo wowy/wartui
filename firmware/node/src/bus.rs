@@ -24,7 +24,8 @@
 //! acknowledged and not queued again. A flight that finds the inbox full is dropped, counted as
 //! `inbox full`, and so is every later one, counted as `out of order`, all unacknowledged. The
 //! P4 sends the window again from the dropped flight once the next transfer's ack shows it
-//! missing, so delivery stays in order.
+//! missing, so delivery stays in order. Until it has taken a flight since boot, the node drops
+//! every flight but a `SYNC` one as `out of order`.
 //!
 //! **A transfer's records are acknowledged on the very next transfer.** Once it is queued, its
 //! seq is the ack the handler stamps on the transfer it arms next, before the controller's next
@@ -307,12 +308,12 @@ impl Shared {
                     self.acked = true;
                 }
                 if transfer.carries_records() {
-                    let seq = transfer.header.seq;
-                    match self.taker.take(&transfer.header, !self.received.is_full()) {
-                        Take::Queue => Some((seq, transfer.payload.len())),
+                    let header = transfer.header;
+                    match self.taker.take(&header, !self.received.is_full()) {
+                        Take::Queue => Some((header, transfer.payload.len())),
                         Take::Repeat => {
                             self.repeats = self.repeats.wrapping_add(1);
-                            self.tracker.note_records(seq);
+                            self.tracker.note_records(header.seq);
                             None
                         }
                         Take::Full => {
@@ -345,12 +346,16 @@ impl Shared {
                 None
             }
         };
-        let Some((seq, len)) = queued else {
+        let Some((header, len)) = queued else {
             let _ = self.rx_free.push(rx);
             return;
         };
+        // Committed only once queued, so a flight the inbox refused is taken on its resend.
         match self.received.push_back((rx, len)) {
-            Ok(()) => self.tracker.note_records(seq),
+            Ok(()) => {
+                self.taker.commit(&header);
+                self.tracker.note_records(header.seq);
+            }
             Err((rx, _)) => {
                 self.unread = self.unread.wrapping_add(1);
                 let _ = self.rx_free.push(rx);

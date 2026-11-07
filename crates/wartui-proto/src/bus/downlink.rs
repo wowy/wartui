@@ -11,13 +11,23 @@
 //! delivers it and every flight before it. A good header from the node that does not acknowledge
 //! the oldest flight out means the node did not take it, since the node stamps every transfer it
 //! arms with the ack of everything it took before. So the oldest flight and every one after it
-//! are due again, at once, in order.
+//! are due again, in order: at once the first time, and [`RESEND_GAP_MS`] after the oldest
+//! flight's last send each time again with no flight delivered between. A node whose inbox stays
+//! full, or whose half keeps failing its checks, would otherwise draw resends at the bus's full
+//! rate.
+//!
+//! A header with no ack comes from a node that has taken no flight since boot, which takes only
+//! a [`SYNC`] flight. So the oldest flight out goes again tagged [`SYNC`], alone, then the rest
+//! in order; with none out, the next flight carries it.
 //!
 //! [`ACK_TIMEOUT_MS`] without word from the node is the backstop. Each timeout of the oldest flight
 //! sends the window again, and the [`SEND_TRIES`]th gives up on the whole window, answering every
 //! flight in it, so no later flight is taken ahead of an earlier one the node never took. A
 //! go-back does not restart the timer, so a node that drops the oldest flight on every try is
-//! given up on as surely as one that never answers.
+//! given up on as surely as one that never answers. A flight that becomes the oldest starts its
+//! timer from its last send, so it gets its full tries.
+//!
+//! [`SYNC`]: super::SYNC
 
 use heapless::Vec;
 
@@ -31,6 +41,10 @@ use crate::link::{MAX_NODE_DOWN, Undelivered};
 
 /// The most records one flight carries.
 pub const FLIGHT_MAX: usize = 16;
+
+/// The least time from a flight's last send to its resend, once a header has already sent it back
+/// since a flight was last delivered.
+pub const RESEND_GAP_MS: u64 = 25;
 
 /// The ids of the records one call answers, in the order they were queued: up to a window of
 /// flights.
@@ -49,6 +63,8 @@ struct Flight {
     due: bool,
     /// The transfer that carried it last.
     seq: Option<u16>,
+    /// When it last went out.
+    sent_ms: Option<u64>,
     /// When the try now running began: the first send since it was packed or last timed out.
     since_ms: Option<u64>,
     /// Timeouts so far.
@@ -63,6 +79,7 @@ impl Flight {
         tag: FlightTag { number: 0, sync: false },
         due: false,
         seq: None,
+        sent_ms: None,
         since_ms: None,
         timeouts: 0,
     };
@@ -75,14 +92,18 @@ pub struct Downlink<const B: usize> {
     flights: [Flight; WINDOW],
     head: usize,
     out: usize,
-    /// The number of the flight [`Downlink::fill`] put in the last transfer.
-    filled: Option<u8>,
+    /// The tag of the flight [`Downlink::fill`] put in the last transfer.
+    filled: Option<FlightTag>,
     /// The next flight's number.
     number: u8,
     /// Whether the node's numbering follows this window's. Until it does, the next flight
     /// carries [`SYNC`](super::SYNC): the first to this slot, and the first after giving up. False
     /// at rest, so a static of these is all zeros.
     synced: bool,
+    /// A header has sent the oldest flight back since a flight was last delivered.
+    went_back: bool,
+    /// When a paced go-back makes the window due again. Nothing goes out until then.
+    back_at: Option<u64>,
     /// Records refused because the queue was full.
     refused: u32,
 }
@@ -105,6 +126,8 @@ impl<const B: usize> Downlink<B> {
             filled: None,
             number: 0,
             synced: false,
+            went_back: false,
+            back_at: None,
             refused: 0,
         }
     }
@@ -133,35 +156,35 @@ impl<const B: usize> Downlink<B> {
     }
 
     /// Whether the next transfer to this slot should carry records: a flight is due, or the
-    /// window has room and records are queued.
+    /// window has room and records are queued, and no paced go-back holds them.
     #[must_use]
     pub fn has_work(&self) -> bool {
-        self.due().is_some() || (self.can_open() && !self.queue.is_empty())
+        self.back_at.is_none()
+            && (self.due().is_some() || (self.can_open() && !self.queue.is_empty()))
     }
 
-    /// Whether a flight that has gone out waits for its ack.
-    #[must_use]
-    pub fn is_waiting(&self) -> bool {
-        (0..self.out).any(|k| self.flight(k).seq.is_some())
-    }
-
-    /// When [`Downlink::poll`] next has something to say.
+    /// When [`Downlink::poll`] next has something to say: the oldest flight's timeout, or a
+    /// paced go-back.
     #[must_use]
     pub fn deadline_ms(&self) -> Option<u64> {
-        if self.out == 0 {
-            return None;
+        match (self.timeout_ms(), self.back_at) {
+            (Some(timeout), Some(back)) => Some(timeout.min(back)),
+            (timeout, back) => timeout.or(back),
         }
-        self.flight(0).since_ms.map(|since| since + ACK_TIMEOUT_MS)
     }
 
     /// Seal the next transfer in `buf` under `header`, tagged with its flight when it carries
     /// one, and return its payload's length: the oldest flight due, a new flight from the queue
     /// when the window has room, or 0.
     pub fn fill(&mut self, buf: &mut [u8; TRANSFER_LEN], header: Header) -> usize {
-        if self.due().is_none() && self.can_open() && !self.queue.is_empty() {
+        if self.back_at.is_none()
+            && self.due().is_none()
+            && self.can_open()
+            && !self.queue.is_empty()
+        {
             self.open();
         }
-        let Some(k) = self.due() else {
+        let Some(k) = self.due().filter(|_| self.back_at.is_none()) else {
             self.filled = None;
             seal(buf, header, 0);
             return 0;
@@ -169,27 +192,32 @@ impl<const B: usize> Downlink<B> {
         let flight = self.flight(k);
         let (len, tag) = (flight.len, flight.tag);
         buf[HEADER_LEN..HEADER_LEN + len].copy_from_slice(&flight.payload[..len]);
-        self.filled = Some(tag.number);
+        self.filled = Some(tag);
         seal(buf, header.with_flight(tag), len);
         len
     }
 
     /// The transfer [`Downlink::fill`] filled went out as `seq` at `now_ms`. Nothing when it
     /// carried no flight, or [`Downlink::on_header`] has since delivered it. It stays due when a
-    /// go-back since has made a flight ahead of it due, which the node drops it behind.
+    /// go-back since has made a flight ahead of it due, which the node drops it behind, and when a
+    /// header since has tagged it [`SYNC`](super::SYNC), which this send lacked.
     pub fn sent(&mut self, seq: u16, now_ms: u64) {
-        let Some(number) = self.filled.take() else { return };
-        let Some(k) = (0..self.out).find(|&k| self.flight(k).tag.number == number) else { return };
+        let Some(tag) = self.filled.take() else { return };
+        let Some(k) = (0..self.out).find(|&k| self.flight(k).tag.number == tag.number) else {
+            return;
+        };
         let behind_due = (0..k).any(|j| self.flight(j).due);
         let flight = self.flight_mut(k);
-        flight.due = behind_due;
+        flight.due = behind_due || flight.tag != tag;
         flight.seq = Some(seq);
+        flight.sent_ms = Some(now_ms);
         flight.since_ms.get_or_insert(now_ms);
     }
 
     /// Read a header from the node that arrived in the P4's transfer `carried_in`. Returns the
     /// ids of the flights it acknowledges, and makes the window due again from the oldest flight
-    /// that went out before it unacknowledged.
+    /// that went out before it unacknowledged. A header with no ack tags the oldest flight out,
+    /// or the next one, [`SYNC`](super::SYNC).
     ///
     /// An ack of `carried_in` itself is ignored: the node sealed that header before it saw this
     /// side's half of the transfer, so such an ack is stale, from a P4 that restarted. A stale ack
@@ -206,19 +234,32 @@ impl<const B: usize> Downlink<B> {
             }
             ids
         });
-        if self.out > 0 && self.flight(0).seq.is_some_and(|seq| seq != carried_in) {
-            self.go_back();
+        if header.acked().is_none() {
+            self.resync();
+        }
+        if self.out > 0 {
+            let oldest = self.flight(0);
+            // A resend of the oldest in this very transfer is past what this header can say.
+            let in_transit = self.filled.is_some_and(|tag| tag.number == oldest.tag.number);
+            if !in_transit && oldest.seq.is_some_and(|seq| seq != carried_in) {
+                self.send_back();
+            }
         }
         delivered
     }
 
-    /// Mark the window due again when the oldest flight's timeout passes, and return every
-    /// flight's ids once its last try has timed out.
+    /// Mark the window due again when a paced go-back or the oldest flight's timeout comes, and
+    /// return every flight's ids once its last try has timed out.
     pub fn poll(&mut self, now_ms: u64) -> Option<Ids> {
-        let deadline = self.deadline_ms()?;
+        if self.back_at.is_some_and(|back| now_ms >= back) {
+            self.back_at = None;
+            self.go_back();
+        }
+        let deadline = self.timeout_ms()?;
         if now_ms < deadline {
             return None;
         }
+        self.back_at = None;
         let oldest = self.flight_mut(0);
         oldest.timeouts = oldest.timeouts.saturating_add(1);
         oldest.since_ms = None;
@@ -279,9 +320,19 @@ impl<const B: usize> Downlink<B> {
         &mut self.flights[(self.head + k) % WINDOW]
     }
 
-    /// The oldest flight due, from the oldest out.
+    /// When the oldest flight's try now running times out.
+    fn timeout_ms(&self) -> Option<u64> {
+        if self.out == 0 {
+            return None;
+        }
+        self.flight(0).since_ms.map(|since| since + ACK_TIMEOUT_MS)
+    }
+
+    /// The oldest flight due, from the oldest out. Only the oldest, when it carries
+    /// [`SYNC`](super::SYNC), which goes alone.
     fn due(&self) -> Option<usize> {
-        (0..self.out).find(|&k| self.flight(k).due)
+        let reach = if self.out > 0 && self.flight(0).tag.sync { 1 } else { self.out };
+        (0..reach).find(|&k| self.flight(k).due)
     }
 
     /// Whether a new flight may go out: the window has room, and holds no [`SYNC`](super::SYNC)
@@ -294,6 +345,31 @@ impl<const B: usize> Downlink<B> {
     fn go_back(&mut self) {
         for k in 0..self.out {
             self.flight_mut(k).due = true;
+        }
+    }
+
+    /// A header shows the node dropped the oldest flight: go back at once the first time since a
+    /// flight was last delivered, and otherwise [`RESEND_GAP_MS`] after its last send.
+    fn send_back(&mut self) {
+        let oldest = self.flight(0);
+        if oldest.due || self.back_at.is_some() {
+            return;
+        }
+        if self.went_back {
+            self.back_at = Some(oldest.sent_ms.unwrap_or_default() + RESEND_GAP_MS);
+        } else {
+            self.went_back = true;
+            self.go_back();
+        }
+    }
+
+    /// The node has taken no flight since boot, so it takes only a [`SYNC`](super::SYNC)
+    /// flight: the oldest out, or the next opened when none is.
+    fn resync(&mut self) {
+        if self.out == 0 {
+            self.synced = false;
+        } else {
+            self.flight_mut(0).tag.sync = true;
         }
     }
 
@@ -330,11 +406,13 @@ impl<const B: usize> Downlink<B> {
         flight.tag = tag;
         flight.due = true;
         flight.seq = None;
+        flight.sent_ms = None;
         flight.since_ms = None;
         flight.timeouts = 0;
     }
 
-    /// Take the oldest flight out of the window, returning its ids.
+    /// Take the oldest flight out of the window, returning its ids. The next becomes the oldest,
+    /// and its timer starts from its last send.
     fn retire(&mut self) -> Vec<u16, FLIGHT_MAX> {
         let flight = self.flight_mut(0);
         flight.len = 0;
@@ -343,6 +421,12 @@ impl<const B: usize> Downlink<B> {
         let ids = core::mem::take(&mut flight.ids);
         self.head = (self.head + 1) % WINDOW;
         self.out -= 1;
+        self.went_back = false;
+        self.back_at = None;
+        if self.out > 0 {
+            let next = self.flight_mut(0);
+            next.since_ms = next.sent_ms;
+        }
         ids
     }
 }

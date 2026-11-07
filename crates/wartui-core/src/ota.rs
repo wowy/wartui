@@ -30,29 +30,28 @@
 //! the node has reported the sectors before it written, so nothing is in flight while the node
 //! flushes one. An undelivered chunk sends from its offset again.
 //!
-//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took
-//! the transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past
-//! an undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector
-//! it writes, so after the chunk that completes a sector the host waits for one. A status moves
-//! the host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot
-//! is FIFO, and the node takes its flights strictly in order: one whose inbox is full leaves the
+//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took the
+//! transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past an
+//! undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector it
+//! writes, so after the chunk that completes a sector the host waits for one. A status moves the
+//! host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot is
+//! FIFO, and the node takes its flights strictly in order: one whose inbox is full leaves the
 //! transfer unacknowledged, and every later one too, so the P4 resends from it rather than losing
-//! it. So only an undelivered chunk or the timeout says a chunk was lost. A status naming an
-//! offset behind what was sent is the node's answer to a duplicate, written before the chunks
-//! after it arrived, and going back on it would resend chunks the node holds, each drawing another
-//! such status. The commit's answer is the exception: one naming bytes
-//! still missing streams from there.
-//! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the
-//! last offset the node reported: a node that has those bytes answers the duplicate with its
-//! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
-//! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
-//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered
-//! sends with no progress reported between them: a node rebooting acknowledges nothing for a
-//! second or so. Each returns to the `begin`, which an identical one resumes where the node's
-//! progress stands: from 0 after a reboot, which loses the receiver's state.
-//! [`MAX_RESTARTS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
-//! up after the node accepted it sends [`UpdateAbort`] once, so the node leaves update mode at
-//! once rather than after its 30 s of silence.
+//! it. So only an undelivered chunk or the timeout says a chunk was lost. A status naming an offset
+//! behind what was sent is the node's answer to a duplicate, written before the chunks after it
+//! arrived, and going back on it would resend chunks the node holds, each drawing another such
+//! status. The commit's answer is the exception: one naming bytes still missing streams from there.
+//! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the last
+//! offset the node reported: a node that has those bytes answers the duplicate with its status, and
+//! one that lacks them takes them. One rule recovers lost chunks and lost statuses alike. `Idle`
+//! means the node dropped the session (30 s of silence, or a reboot), and so does
+//! [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered sends
+//! with no progress reported between them: a node rebooting acknowledges nothing for a second or
+//! so. Each returns to the `begin`, which an identical one resumes where the node's progress
+//! stands: from 0 after a reboot, which loses the receiver's state. [`MAX_RESTARTS`] and
+//! [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives up after the node accepted
+//! it sends [`UpdateAbort`] once, so the node leaves update mode at once rather than after its 30 s
+//! of silence.
 //!
 //! **Success, rollback and silence are told apart by the heartbeat's prefix**: version and trial
 //! flag, which every minor reads. A node switches slots the moment it reports

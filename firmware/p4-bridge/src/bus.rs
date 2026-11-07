@@ -10,9 +10,11 @@
 //! body too long, or no ack after every try. The [`Downlink`] keeps two flights out, numbered,
 //! and tags its first to a slot, and its first after giving up, with `SYNC`, since a P4 cannot
 //! know where a node's numbering stands. A slot that loses its node answers for everything it
-//! held, so its next flight carries `SYNC` too. The host reader queues a record and raises its
-//! bus's signal, so a waiting scheduler wakes. The one record the P4 writes, an `UpdateChunk` it builds from its node image cache for
-//! a `ToNodeChunk` (`src/cache.rs`), is queued and answered the same way.
+//! held, so its next flight carries `SYNC` too. A header with no ack, from a node that has taken
+//! nothing since boot, sends the oldest flight out again with `SYNC`. The host reader queues a
+//! record and raises its bus's signal, so a waiting scheduler wakes. The one record the P4
+//! writes, an `UpdateChunk` it builds from its node image cache for a `ToNodeChunk`
+//! (`src/cache.rs`), is queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
@@ -38,8 +40,9 @@
 //!   transfer that carried them, since the node stamps its ack on the very next transfer it arms
 //!   (`firmware/node/src/bus.rs`). That transfer carries the next flight when one is queued, so a
 //!   stream of records costs a transfer each. A header that leaves the oldest flight
-//!   unacknowledged makes the window due again at once. With nothing due, the slot is clocked
-//!   every [`ACK_POLL`] while flights wait, and no later than the oldest one's deadline.
+//!   unacknowledged makes the window due again: at once the first time, and after
+//!   `RESEND_GAP_MS` each time again. With nothing due, the slot is clocked every [`ACK_POLL`]
+//!   while flights wait, and no later than the [`Downlink`]'s deadline.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed

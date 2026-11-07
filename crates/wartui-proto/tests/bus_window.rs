@@ -4,63 +4,93 @@
 use std::collections::VecDeque;
 
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, AckTracker, CRC_OFFSET, Downlink, FlightTag, FlightTaker, Header, SEND_TRIES,
-    TRANSFER_LEN, Take, records, seal, verify,
+    ACK_TIMEOUT_MS, AckTracker, CRC_OFFSET, Downlink, FlightTag, FlightTaker, Header,
+    RESEND_GAP_MS, SEND_TRIES, TRANSFER_LEN, Take, records, seal, verify,
 };
 use wartui_proto::link::MAX_NODE_DOWN;
 
 const QUEUE: usize = 8192;
 /// The node firmware's inbox: `RECEIVED_MAX`.
 const INBOX: usize = 2;
+/// The P4 firmware's `ACK_POLL`: how often it clocks a slot whose flights wait, with nothing due.
+const ACK_POLL_MS: u64 = 25;
 
 /// A header from the P4 carrying flight `number`.
 fn flight(number: u8, sync: bool) -> Header {
     Header::new(1, None).with_flight(FlightTag { number, sync })
 }
 
-#[test]
-fn flight_taker_queues_any_number_when_nothing_taken_since_boot() {
+/// Take the flight `header` carries, and commit it when it is queued, as a node whose inbox
+/// accepts it does.
+fn take(taker: &mut FlightTaker, header: &Header, room: bool) -> Take {
+    let take = taker.take(header, room);
+    if take == Take::Queue {
+        taker.commit(header);
+    }
+    take
+}
+
+/// A taker past its first flight, which carried SYNC and was numbered `number`.
+fn synced(number: u8) -> FlightTaker {
     let mut taker = FlightTaker::new();
-    assert_eq!(taker.take(&flight(3, false), true), Take::Queue);
-    assert_eq!(taker.take(&flight(0, false), true), Take::Queue, "3 then 0: numbers wrap");
+    assert_eq!(take(&mut taker, &flight(number, true), true), Take::Queue);
+    taker
+}
+
+#[test]
+fn flight_taker_drops_flight_without_sync_when_nothing_taken_since_boot() {
+    let mut taker = FlightTaker::new();
+    // It may be the second of two whose first this node never saw.
+    assert_eq!(take(&mut taker, &flight(3, false), true), Take::OutOfOrder);
+    assert_eq!(take(&mut taker, &flight(0, false), true), Take::OutOfOrder);
+    assert_eq!(take(&mut taker, &flight(3, true), true), Take::Queue);
+    assert_eq!(take(&mut taker, &flight(0, false), true), Take::Queue, "3 then 0: numbers wrap");
 }
 
 #[test]
 fn flight_taker_repeats_when_number_is_last_taken() {
-    let mut taker = FlightTaker::new();
-    taker.take(&flight(1, false), true);
+    let mut taker = synced(1);
     // A repeat needs no room: nothing is queued.
-    assert_eq!(taker.take(&flight(1, false), false), Take::Repeat);
-    assert_eq!(taker.take(&flight(2, false), true), Take::Queue, "the repeat moved nothing");
+    assert_eq!(take(&mut taker, &flight(1, false), false), Take::Repeat);
+    assert_eq!(take(&mut taker, &flight(2, false), true), Take::Queue, "the repeat moved nothing");
 }
 
 #[test]
 fn flight_taker_drops_out_of_order_when_number_skips_ahead() {
-    let mut taker = FlightTaker::new();
-    taker.take(&flight(1, false), true);
-    assert_eq!(taker.take(&flight(3, false), true), Take::OutOfOrder);
-    assert_eq!(taker.take(&flight(0, false), true), Take::OutOfOrder, "two behind");
-    assert_eq!(taker.take(&flight(2, false), true), Take::Queue);
+    let mut taker = synced(1);
+    assert_eq!(take(&mut taker, &flight(3, false), true), Take::OutOfOrder);
+    assert_eq!(take(&mut taker, &flight(0, false), true), Take::OutOfOrder, "two behind");
+    assert_eq!(take(&mut taker, &flight(2, false), true), Take::Queue);
 }
 
 #[test]
 fn flight_taker_holds_number_when_inbox_full() {
-    let mut taker = FlightTaker::new();
-    taker.take(&flight(1, false), true);
-    assert_eq!(taker.take(&flight(2, false), false), Take::Full);
-    assert_eq!(taker.take(&flight(3, false), true), Take::OutOfOrder, "2 was not taken");
+    let mut taker = synced(1);
+    assert_eq!(take(&mut taker, &flight(2, false), false), Take::Full);
+    assert_eq!(take(&mut taker, &flight(3, false), true), Take::OutOfOrder, "2 was not taken");
+    assert_eq!(take(&mut taker, &flight(2, false), true), Take::Queue);
+}
+
+#[test]
+fn flight_taker_queues_resend_when_flight_was_not_committed() {
+    let taker = synced(1);
+    // The inbox refused flight 2 after the taker said to queue it, so it was never committed.
     assert_eq!(taker.take(&flight(2, false), true), Take::Queue);
+    assert_eq!(taker.take(&flight(2, false), true), Take::Queue, "not a repeat");
 }
 
 #[test]
 fn flight_taker_adopts_number_when_sync_set() {
-    let mut taker = FlightTaker::new();
-    taker.take(&flight(1, false), true);
-    assert_eq!(taker.take(&flight(1, true), true), Take::Queue, "SYNC outranks a repeat");
-    assert_eq!(taker.take(&flight(0, true), true), Take::Queue);
-    assert_eq!(taker.take(&flight(1, false), true), Take::Queue);
-    assert_eq!(taker.take(&flight(3, true), false), Take::Full);
-    assert_eq!(taker.take(&flight(2, false), true), Take::Queue, "a full drop adopts nothing");
+    let mut taker = synced(1);
+    assert_eq!(take(&mut taker, &flight(1, true), true), Take::Queue, "SYNC outranks a repeat");
+    assert_eq!(take(&mut taker, &flight(0, true), true), Take::Queue);
+    assert_eq!(take(&mut taker, &flight(1, false), true), Take::Queue);
+    assert_eq!(take(&mut taker, &flight(3, true), false), Take::Full);
+    assert_eq!(
+        take(&mut taker, &flight(2, false), true),
+        Take::Queue,
+        "a full drop adopts nothing"
+    );
 }
 
 /// A full-sized body naming record `id`, so each record is a flight of its own, as a chunk is.
@@ -68,6 +98,11 @@ fn body(id: u16) -> Vec<u8> {
     let mut body = vec![0; MAX_NODE_DOWN];
     body[..2].copy_from_slice(&id.to_le_bytes());
     body
+}
+
+/// A flight's tag, as a transfer that carries it reads.
+const fn tag(number: u8, sync: bool) -> Option<FlightTag> {
+    Some(FlightTag { number, sync })
 }
 
 /// The tag of a transfer the P4 sealed, when it carries a flight.
@@ -179,6 +214,7 @@ impl Node {
                         .map(|record| u16::from_le_bytes([record.body[0], record.body[1]]))
                         .collect();
                     self.inbox.push_back(ids);
+                    self.taker.commit(&transfer.header);
                     self.tracker.note_records(transfer.header.seq);
                 }
                 Take::Repeat => self.tracker.note_records(transfer.header.seq),
@@ -249,14 +285,24 @@ impl P4 {
         self.seq = self.seq.wrapping_add(1);
     }
 
-    /// Clean transfers until nothing is queued or out, draining the node after each.
+    /// Clean transfers from `now_ms` until nothing is queued or out, draining the node after
+    /// each. As the P4 schedules a slot: at once while records are due or a flight just went
+    /// out, and otherwise at the window's deadline, no later than [`ACK_POLL_MS`].
     fn settle(&mut self, node: &mut Node, now_ms: u64) {
+        let mut now = now_ms;
         for _ in 0..16 {
-            if !self.down.has_work() && !self.down.is_waiting() {
+            if !self.down.has_work() && self.down.deadline_ms().is_none() {
                 return;
             }
-            self.exchange(node, Wire::Clean, now_ms);
+            self.exchange(node, Wire::Clean, now);
             node.drain();
+            let carried = self.carried.last().copied().flatten().is_some();
+            if !carried
+                && !self.down.has_work()
+                && let Some(deadline) = self.down.deadline_ms()
+            {
+                now = deadline.clamp(now, now + ACK_POLL_MS);
+            }
         }
         panic!("the window never settled");
     }
@@ -381,20 +427,83 @@ fn window_takes_sync_flight_when_p4_restarts_mid_stream() {
 }
 
 #[test]
-fn window_takes_next_flight_whatever_its_number_when_node_reboots() {
+fn window_resends_flight_with_sync_when_node_reboots() {
     let (mut p4, mut node) = started();
     p4.push([1]);
     p4.settle(&mut node, 0);
+    // The node reboots without the slot going absent, so the P4's next flight lacks SYNC.
     let mut node = Node::boot();
     p4.push([2]);
     p4.settle(&mut node, 0);
-    assert_eq!(p4.carried.last().copied().flatten(), None, "the last transfer fetched the ack");
-    assert_eq!(p4.numbers(), [1, 2]);
-    assert_eq!(node.takes, [Take::Queue]);
+    // The header of the transfer that carried flight 2 has no ack, so the next one resends it
+    // with SYNC; the last fetches its ack.
+    assert_eq!(p4.carried, [tag(1, false), None, tag(2, false), tag(2, true), None]);
+    assert_eq!(node.takes, [Take::OutOfOrder, Take::Queue]);
     assert_eq!(
         (p4.delivered.as_slice(), node.took.as_slice()),
         ([1, 2].as_slice(), [2].as_slice())
     );
+}
+
+#[test]
+fn window_takes_both_flights_in_order_when_node_reboots_with_second_due_first() {
+    let (mut p4, mut node) = started();
+    p4.push([1, 2]);
+    // Flight 1 goes out and the node takes nothing; it reboots before the next transfer, and the
+    // slot never goes absent.
+    p4.exchange(&mut node, Wire::P4HalfBad, 0);
+    let mut node = Node::boot();
+    p4.settle(&mut node, 0);
+    // Flight 2 goes first, to a node that has taken nothing since boot. Its header, with no ack,
+    // sends flight 1 again with SYNC, alone: flight 2 waits for its ack.
+    assert_eq!(p4.carried, [tag(1, false), tag(2, false), tag(1, true), None, tag(2, false), None]);
+    assert_eq!(node.takes, [Take::OutOfOrder, Take::Queue, Take::Queue]);
+    assert_eq!(
+        (p4.delivered.as_slice(), node.took.as_slice()),
+        ([1, 2].as_slice(), [1, 2].as_slice()),
+        "each taken once, in order, and nothing delivered that was not taken"
+    );
+}
+
+#[test]
+fn downlink_resends_oldest_with_sync_when_header_has_no_ack() {
+    let mut down = Downlink::<QUEUE>::new();
+    let mut buf = [0u8; TRANSFER_LEN];
+    down.push(0, 4, &body(0)).unwrap();
+    down.fill(&mut buf, Header::default());
+    down.sent(0, 0);
+    assert_eq!(down.on_header(&Header::new(0, Some(0)), 1).unwrap(), [0]);
+    down.push(1, 4, &body(1)).unwrap();
+    down.push(2, 4, &body(2)).unwrap();
+    down.fill(&mut buf, Header::default());
+    assert_eq!(tag_of(&buf), tag(1, false));
+    down.sent(1, 0);
+    down.fill(&mut buf, Header::default());
+    assert_eq!(tag_of(&buf), tag(2, false));
+    down.sent(2, 0);
+    // A header with no ack: the node has taken nothing since boot.
+    assert_eq!(down.on_header(&Header::new(0, None), 3), None);
+    down.fill(&mut buf, Header::default());
+    assert_eq!(tag_of(&buf), tag(1, true));
+    down.sent(3, 0);
+    assert!(!down.has_work(), "flight 2 waits behind a SYNC flight, which goes alone");
+    assert_eq!(down.on_header(&Header::new(0, Some(3)), 4).unwrap(), [1]);
+    down.fill(&mut buf, Header::default());
+    assert_eq!(tag_of(&buf), tag(2, false));
+}
+
+#[test]
+fn downlink_tags_next_flight_sync_when_header_has_no_ack_and_none_out() {
+    let mut down = Downlink::<QUEUE>::new();
+    let mut buf = [0u8; TRANSFER_LEN];
+    down.push(0, 4, &body(0)).unwrap();
+    down.fill(&mut buf, Header::default());
+    down.sent(0, 0);
+    assert_eq!(down.on_header(&Header::new(0, Some(0)), 1).unwrap(), [0]);
+    assert_eq!(down.on_header(&Header::new(0, None), 2), None);
+    down.push(1, 4, &body(1)).unwrap();
+    down.fill(&mut buf, Header::default());
+    assert_eq!(tag_of(&buf), Some(FlightTag { number: 1, sync: true }));
 }
 
 #[test]
@@ -449,4 +558,77 @@ fn downlink_seals_flight_records_under_header_when_filled() {
     let ids: Vec<u16> =
         records(transfer.payload).map(|r| u16::from_le_bytes([r.body[0], r.body[1]])).collect();
     assert_eq!(ids, [9]);
+}
+
+#[test]
+fn window_paces_resends_when_headers_keep_lacking_ack() {
+    let (mut p4, mut node) = started();
+    p4.push([1]);
+    // The node never reads the P4's half. A transfer each millisecond, well inside the timeout,
+    // is far more than the P4 clocks a slot.
+    let mut sends = Vec::new();
+    for now in 0..200 {
+        p4.exchange(&mut node, Wire::P4HalfBad, now);
+        if p4.carried.last().copied().flatten().is_some() {
+            sends.push(now);
+        }
+        if sends.len() >= 3 && p4.carried.last().copied().flatten().is_none() {
+            assert!(!p4.down.has_work(), "a paced go-back holds the resend");
+            assert!(p4.down.deadline_ms().is_some_and(|at| at > now));
+        }
+    }
+    // The first go-back resends in the transfer after the one that fetched its header.
+    assert_eq!(sends[..2], [0, 2]);
+    assert!(sends.len() > 4, "resends keep coming: {sends:?}");
+    for pair in sends[1..].windows(2) {
+        assert!(pair[1] - pair[0] >= RESEND_GAP_MS, "{sends:?}");
+    }
+}
+
+/// Fill the next transfer as `seq` and mark it sent at `now_ms` when it carries a flight.
+fn send(down: &mut Downlink<QUEUE>, seq: &mut u16, now_ms: u64) -> Option<FlightTag> {
+    let mut buf = [0u8; TRANSFER_LEN];
+    let len = down.fill(&mut buf, Header::new(*seq, None));
+    if len > 0 {
+        down.sent(*seq, now_ms);
+    }
+    *seq += 1;
+    tag_of(&buf)
+}
+
+#[test]
+fn downlink_gives_next_flight_full_tries_when_it_becomes_oldest() {
+    let mut down = Downlink::<QUEUE>::new();
+    let mut seq = 0;
+    // Past the first flight, which carries SYNC and goes alone.
+    down.push(0, 4, &body(0)).unwrap();
+    send(&mut down, &mut seq, 0);
+    assert_eq!(down.on_header(&Header::new(0, Some(0)), seq).unwrap(), [0]);
+    down.push(1, 4, &body(1)).unwrap();
+    down.push(2, 4, &body(2)).unwrap();
+    // Flights 1 and 2 go out, and time out twice.
+    for now in [0, ACK_TIMEOUT_MS, 2 * ACK_TIMEOUT_MS] {
+        assert_eq!(down.poll(now), None);
+        assert_eq!(send(&mut down, &mut seq, now).map(|tag| tag.number), Some(1));
+        assert_eq!(send(&mut down, &mut seq, now).map(|tag| tag.number), Some(2));
+    }
+    // The node takes flight 1's last send and drops flight 2's.
+    let last_send = 2 * ACK_TIMEOUT_MS;
+    let now = last_send + 10;
+    assert_eq!(down.on_header(&Header::new(0, Some(seq - 2)), seq).unwrap(), [1]);
+    assert_eq!(down.deadline_ms(), Some(last_send + ACK_TIMEOUT_MS), "timed from its last send");
+    let mut timeouts = 0;
+    let mut at = now;
+    assert_eq!(send(&mut down, &mut seq, at).map(|tag| tag.number), Some(2));
+    loop {
+        at = down.deadline_ms().unwrap();
+        if let Some(ids) = down.poll(at) {
+            assert_eq!(ids, [2]);
+            break;
+        }
+        timeouts += 1;
+        assert!(send(&mut down, &mut seq, at).is_some());
+    }
+    assert_eq!(timeouts + 1, SEND_TRIES);
+    assert_eq!(at, last_send + u64::from(SEND_TRIES) * ACK_TIMEOUT_MS);
 }

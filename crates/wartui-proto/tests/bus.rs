@@ -547,7 +547,7 @@ fn downlink_ignores_ack_when_it_came_in_the_transfer_it_names() {
     down.fill(&mut buf, Header::default());
     down.sent(8, 0);
     assert_eq!(down.on_header(&Header::new(0, Some(8)), 8), None, "a restarted node's ack");
-    assert!(down.is_waiting());
+    assert!(down.deadline_ms().is_some(), "still waits for its ack");
     assert_eq!(down.on_header(&Header::new(0, Some(8)), 9).unwrap(), [3]);
 }
 
@@ -561,7 +561,7 @@ fn downlink_carries_same_flight_when_not_marked_sent() {
     // The node took nothing, so the P4 never calls `sent`; a record queued since waits.
     down.push(6, 2, &[]).unwrap();
     assert!(down.has_work());
-    assert!(!down.is_waiting());
+    assert_eq!(down.deadline_ms(), None, "nothing went out to wait on");
     let len = down.fill(&mut buf, Header::default());
     assert_eq!(sent_records(&buf, len), sent);
     down.sent(2, 0);
@@ -580,7 +580,7 @@ fn downlink_ignores_sent_when_ack_delivered_the_resend_first() {
     // The P4 reads the node's header before marking the resend sent; it acks the first try.
     assert_eq!(down.on_header(&Header::new(0, Some(1)), 2).unwrap(), [4]);
     down.sent(2, ACK_TIMEOUT_MS);
-    assert!(!down.is_waiting());
+    assert_eq!(down.deadline_ms(), None);
     assert!(!down.has_work());
 }
 
@@ -605,5 +605,5 @@ fn downlink_drains_flight_and_queue_when_node_gone() {
     down.drain(|id| ids.push(id));
     assert_eq!(ids, [0, 1, 2]);
     assert!(!down.has_work());
-    assert!(!down.is_waiting());
+    assert_eq!(down.deadline_ms(), None);
 }

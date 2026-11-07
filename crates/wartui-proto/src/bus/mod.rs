@@ -60,12 +60,12 @@
 //!
 //! - the transfer: SPI mode 0 on the node's D8 SCLK, D10 MOSI, D9 MISO, D7 CS and D0 IRQ,
 //!   [`TRANSFER_LEN`], the header above with [`MAGIC`], [`BUS_VERSION`], [`ACKS`], [`FLIGHT`] and
-//!   [`SYNC`],
-//!   [`HEADER_LEN`], [`PAYLOAD_MAX`], [`CRC_OFFSET`] and the CRC, with zeros past `len`;
+//!   [`SYNC`], [`HEADER_LEN`], [`PAYLOAD_MAX`], [`CRC_OFFSET`] and the CRC, with zeros past `len`;
 //! - the handshake: the node re-arms after every transfer, and raises IRQ to ask for one;
 //! - the ack rule: `ack` names the last good record-carrying transfer taken, and idle transfers
 //!   never move it; toward the P4 stop-and-wait, and toward a node a window of flights numbered
-//!   with [`FLIGHT`] and [`SYNC`], taken strictly in order;
+//!   with [`FLIGHT`], taken strictly in order. A node that has taken none since boot takes only a
+//!   [`SYNC`] flight, and the P4 sends one on any header with no ack;
 //! - the record layout ([`RECORD_HEADER_LEN`], [`records`]), and a receiver skipping a type it
 //!   does not know;
 //! - the heartbeat's identity: up type 1 opens with the prefix and the node's MAC
@@ -127,7 +127,7 @@ mod window;
 
 pub use ack::{ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, SEND_TRIES};
 pub use assign::{ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, CLEAR_LEN, Clear, wire_epoch};
-pub use downlink::{Downlink, FLIGHT_MAX, Ids};
+pub use downlink::{Downlink, FLIGHT_MAX, Ids, RESEND_GAP_MS};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
