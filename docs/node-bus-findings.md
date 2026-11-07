@@ -356,10 +356,30 @@ round's first turn, about a node's boot time, and N9 followed at 12:37:11.95. Wi
 held nodes carried through the request, a round starts N4, N9, N1, N6… Before 3e144f3 it started
 at N1, and N4 would have waited for the round's seventh turn, about 30 s later.
 
+### Ten nodes recording, with FPC antennas (3e144f3), 2026-11-07
+
+Two captures with all ten nodes on FPC antennas: 10 minutes with N9's antenna missing, then 3
+minutes with it fitted. Each node is compared by its RSSI on APs it heard while tuned to their
+channel, against the median of the other nodes on the same APs. Most shared sightings are heard
+from a neighbouring 2.4 GHz channel, which arrives weaker, so those are left out.
+
+| | 10 min, N9 without antenna | 3 min, all fitted |
+| --- | --- | --- |
+| Networks | 131 | 110 |
+| E5:60 in N9 | 5 sightings, 46 dB below the others | 53 sightings, 1 dB above |
+| The other nine | 6 dB below to 9 dB above | 4 dB below to 4 dB above |
+| Errors on the bus | none: no CRC, magic, version, length, seq-gap or retry, no stuck IRQ | none |
+| Bridge frames dropped | 0 of 1,529 | 0 of 550 |
+| Assignments delivered in | 35–122 ms | 35–113 ms |
+
+Every heartbeat arrived in both. A missing antenna costs the same as in the antenna-less run,
+40–55 dB. How much a node hears still depends on its channels: nearly every AP here is on 1, 6
+or 11, so a node tuned elsewhere hears only their leakage.
+
 ### Still open
 
-- A ten-node capture with antennas, for coverage.
-- Two fixes that this bench can't provoke: retrying each expander transaction at boot, which
-  needs an I2C glitch, and exempting only the node in a cycle now from the supply-loss count,
-  which needs the supply to drop within about 1 s of a queued cycle.
+- A ten-node capture with the real antennas, for coverage.
+- Two fixes that need conditions this bench can't easily create: retrying each expander
+  transaction at boot, which needs an I2C glitch, and exempting only the node in a cycle now
+  from the supply-loss count, which needs the supply to drop within about 1 s of a queued cycle.
 - 4 MHz.
