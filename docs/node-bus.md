@@ -106,10 +106,13 @@ Driving a port high powers its node:
   Once a node answers, or the host asks for a power-cycle, it powers the rest, one every 100 ms.
 - **No node answering within 5 s of powering every node reads as a lost node supply too.** The P4
   may boot before the node supply, or a power-cycle request may end the wait while the supply is
-  still out. The P4 serves any waiting power-cycle before those 5 s, so a request that ends the wait
-  is answered once the nodes are powered and its own cycle is done. Without a node, it writes every
-  node port low and switches on one slot at a time as above, every slot in slot order. With no node
-  seated, it goes on doing so, and a node seated later is powered when its slot's turn comes.
+  still out. A power-cycle request is served at once, also during those 5 s, and the 5 s start
+  again after it. Without a node, it writes every node port low and switches on one slot at a time
+  as above, first the slots present before a lost supply. With no node seated, it goes on doing
+  so, and a node seated later is powered when its slot's turn comes.
+- **A node powered over its own USB keeps the P4 from seeing a lost node supply**, since it stays
+  present, and a returning supply starts the other nodes together. Unplug it, or power the carrier
+  first.
 - **IRQ is active low**, as [Pin behavior](#pin-behavior) says, and the carrier pulls it up.
 - **GPIO25 and GPIO24 are the 14-node carrier's slot 7 CS lines.** They are the P4's
   USB-Serial-JTAG pads, so only the 14 takes them from it. The carrier's CS pull-ups hold both high

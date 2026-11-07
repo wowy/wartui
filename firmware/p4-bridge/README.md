@@ -47,8 +47,11 @@ it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with 
   slot at a time, any socket, until a node answers or the host asks for a power-cycle, then the
   rest, one every 100 ms.
 - **No node answering within 5 s of powering every node**, at boot or after a power-cycle request
-  ended that wait, reads as a lost node supply too, and the P4 powers one slot at a time again.
-  With no node seated, it goes on doing so.
+  ended that wait, reads as a lost node supply too, and the P4 powers one slot at a time again,
+  first the slots present before a lost supply. With no node seated, it goes on doing so. A
+  power-cycle request is served at once, also during those 5 s, and the 5 s start again after it.
+- **A node powered over its own USB** keeps the P4 from seeing a lost node supply; unplug it, or
+  power the carrier first.
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
   power out of reach, every power-cycle answers `Failed`.
 
