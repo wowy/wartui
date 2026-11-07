@@ -13,15 +13,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{discover_bridges, probe_all};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::fan::{FanDuty, TACH_WINDOW_MS};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 
-/// How long the bridge has to announce itself, and to answer the status request.
+/// How long the bridge has to answer the status request.
 const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 /// How long a new duty runs before its speed is read: two tach windows, so one whole window ran
@@ -51,21 +49,8 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let remembered = crate::config::remembered_bridge(args.config.as_deref());
-    let named = args.bridge.as_deref();
-    let port =
-        crate::reset::board_to_reset(named, &remembered, discover_bridges, |found| async move {
-            probe_all(&found).await
-        })
-        .await?;
-    let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
-    let mut link = super::open(Some(&port), None, memory)?;
-
-    let info =
-        match tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_ready(&mut link)).await {
-            Ok(ready) => ready?,
-            Err(_) => bail!("{}", super::no_bridge_notice(named)),
-        };
+    let (mut link, info) =
+        super::connect_one(args.bridge.as_deref(), args.config.as_deref()).await?;
     has_fan(info.node_board).map_err(anyhow::Error::msg)?;
 
     let duty = args.duty.and_then(FanDuty::new);

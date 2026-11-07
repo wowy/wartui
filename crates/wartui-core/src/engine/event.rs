@@ -107,9 +107,10 @@ pub enum Command {
 
     /// Ask the bridge to run the carrier's lid fan at `duty`, and keep it across its reboots.
     ///
-    /// Sent once, at once. The bridge stores it, not the host, and the next
-    /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the duty in force. A
-    /// bridge with no carrier ignores it.
+    /// Sent once, at once, with a `GetStatus` behind it, so
+    /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the duty in force without
+    /// waiting for the next poll. The bridge stores it, not the host. A bridge with no carrier
+    /// ignores it.
     SetFanDuty {
         /// The duty to run.
         duty: FanDuty,

@@ -177,8 +177,9 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults.push(reason);
     }
     // No tach pulses at a duty the fan turns at: unplugged or stalled. Below that, the fan may
-    // stop by design, so nothing is raised there.
-    if let Some(fan) = snapshot.bridge_status.and_then(|status| status.fan)
+    // stop by design, so nothing is raised there. With the link down the reading is stale.
+    if snapshot.link_up
+        && let Some(fan) = snapshot.bridge_status.and_then(|status| status.fan)
         && fan.duty >= FanDuty::TURNS_FROM
         && fan.rpm == Some(0)
     {
@@ -662,6 +663,13 @@ mod tests {
         }
         // No carrier.
         assert!(faults(&quiet()).is_empty());
+    }
+
+    #[test]
+    fn footer_reports_no_fan_fault_when_link_is_down() {
+        let mut snapshot = with_fan(40, Some(0));
+        snapshot.link_up = false;
+        assert!(faults(&snapshot).is_empty(), "{:?}", faults(&snapshot));
     }
 
     #[test]

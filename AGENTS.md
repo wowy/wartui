@@ -418,6 +418,8 @@ edit stops; follow the pointer before changing the rule.
   - the I/O expander's I2C address and its port→node map.
 
   They never give part numbers, component values, the power circuit, the layout or dimensions.
+  The lid fan's model, a Noctua NF-A6x15 5V PWM, may be named: it is the operator's fan, plugged
+  into the header, not a part of the board.
 - Use American spellings at all times: in prose, doc comments, identifiers, test names and
   commit messages (`meters`, `behavior`, `color`, `recognize`).
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the

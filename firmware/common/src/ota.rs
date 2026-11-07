@@ -510,7 +510,7 @@ fn note(notes: &mut Notes, item: Note) {
     let _ = notes.push(item);
 }
 
-/// Find the booted slot, the other app slot and the `trial` sector.
+/// Find the booted slot, the other app slot, the `trial` sector and the settings sector.
 fn locate(
     flash: &mut FlashStorage<'static>,
     table: &mut [u8; PARTITION_TABLE_MAX_LEN],
@@ -534,8 +534,11 @@ fn locate(
         .find_partition(PartitionType::Data(DataPartitionSubType::Undefined))?
         .filter(|entry| entry.len() >= SECTOR_U32)
         .map(|entry| entry.offset());
+    // A lookup that fails is no settings sector, so the fan's duty never costs an update.
     let settings = pt
-        .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))?
+        .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+        .ok()
+        .flatten()
         .filter(|entry| entry.label_as_str() == "nvs" && entry.len() >= SECTOR_U32)
         .map(|entry| entry.offset());
     Ok(Layout { booted: booted_slot, target, trial, settings })

@@ -403,7 +403,7 @@ pub(super) fn apply(
         (true, false) => format!("pool {pool} — nodes take it once the fleet is in a plan"),
     };
     if let Some(duty) = fan {
-        text.push_str(&format!("; fan {duty}, kept by the bridge"));
+        text.push_str(&format!("; fan {duty} sent to the bridge"));
     }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
@@ -1964,7 +1964,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Command::SetFanDuty { duty: duty(35) });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("fan 35%, kept by the bridge"), "{notice}");
+        assert!(notice.contains("fan 35% sent to the bridge"), "{notice}");
         let file = std::fs::read_to_string(&target).expect("the other rows were saved");
         assert!(!file.contains("fan"), "the bridge keeps it, not the file: {file}");
     }

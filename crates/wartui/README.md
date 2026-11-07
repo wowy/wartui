@@ -657,12 +657,13 @@ wartui fan 40 --bridge 44:C0
 It resolves one bridge and takes `--config PATH` as `power-cycle` does. A bench bridge, with no
 carrier, has no fan and is refused. The bridge writes a duty only when it differs from the one it
 stored. One it could not save holds until its next reboot, and `wartui fan` prints the bridge's
-`fault` line saying so.
+`fault` line saying so. Setting the same duty again retries the save.
 
 In `run`, settings' `fan` row shows the duty the bridge last reported and steps it by 5 %. `Enter`
-sends it only when the row moved; `no fan` means no status has reported one. The header shows the
-fan after the bridge, as `fan 40% 1830 rpm`, or `fan 40%` in the bridge's first second, before it
-has a reading. `wartui status` prints a `fan` line too.
+sends it only when the row moved; `no fan` means no status has reported one. While the link is up,
+the header shows the fan after the bridge, as `fan 40% 1830 rpm`, or `fan 40%` with no reading: in
+the bridge's first second, and for a second or two after a duty change, since no reading spans
+two duties. `wartui status` prints a `fan` line too.
 
 ## Keyboard commands
 

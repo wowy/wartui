@@ -15,7 +15,8 @@
 //! the fan's 3500 rpm. [`TachFilter`] drops edges closer than [`TACH_MIN_GAP_US`], which rejects
 //! ringing on the line, and the P4 counts what it keeps over each [`TACH_WINDOW_MS`]. Until the
 //! first whole window after boot, [`FanStats::rpm`] is `None`, so a fresh boot never reads as a
-//! stopped fan.
+//! stopped fan. It is `None` again from a duty change until a window that began after it ends, so
+//! no reading spans two duties.
 //!
 //! **The P4 keeps the duty, not the host.** It boots into the stored one, or [`FanDuty::FULL`]
 //! with none, and holds it with no host present. [`store`] is the record's layout on flash.
@@ -170,7 +171,8 @@ pub fn rpm(edges: u32, window_ms: u32) -> u16 {
 pub struct FanStats {
     /// The duty in force.
     pub duty: FanDuty,
-    /// The speed over the last whole tach window, or `None` before the first since boot.
+    /// The speed over the last whole tach window, or `None` before the first since boot or since
+    /// the duty last changed.
     pub rpm: Option<u16>,
 }
 

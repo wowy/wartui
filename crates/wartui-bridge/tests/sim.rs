@@ -667,6 +667,18 @@ async fn sim_bridge_reports_duty_set_when_host_sets_fan() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_fan_stopped_when_duty_is_below_15_percent() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    // As the bench fan: stopped at 10 %, turning from 15 %.
+    for (pct, turns) in [(10, false), (15, true)] {
+        let duty = FanDuty::new(pct).expect("in range");
+        link.send_bulk(HostToBridge::SetFan { duty }).expect("queued");
+        let fan = next_fan(&mut link).await.expect("a carrier has a fan");
+        assert_eq!(fan.rpm.expect("a speed") > 0, turns, "{pct}%");
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn sim_transport_produces_deterministic_sightings_when_seeded() {
     async fn first_sightings(seed: u64) -> Vec<Vec<u8>> {
         let config = SimConfig { node_count: 1, seed, ..SimConfig::default() };

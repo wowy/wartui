@@ -3388,7 +3388,7 @@ fn engine_sends_power_cycle_at_once_when_operator_asks() {
 }
 
 #[test]
-fn engine_sends_one_set_fan_at_once_when_operator_sets_a_duty() {
+fn engine_sends_one_set_fan_and_a_status_poll_when_operator_sets_a_duty() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected_board(NODE, NodeBoard::Carrier14), clock.at(0));
@@ -3396,7 +3396,8 @@ fn engine_sends_one_set_fan_at_once_when_operator_sets_a_duty() {
 
     let batch = engine.handle(Event::Command(Command::SetFanDuty { duty }), clock.at(1));
 
-    assert_eq!(batch.bulk, [HostToBridge::SetFan { duty }]);
+    // The bridge sets the duty before it answers the poll, so the `Status` carries it.
+    assert_eq!(batch.bulk, [HostToBridge::SetFan { duty }, HostToBridge::GetStatus]);
     assert!(batch.urgent.is_empty() && batch.records.is_empty());
     // The bridge keeps the duty, so nothing re-sends it.
     let later = engine.handle(Event::Tick, clock.at(30));

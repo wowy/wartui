@@ -52,9 +52,13 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     );
 }
 
-/// The carrier's lid fan as the bridge last reported it: `fan 40% 1830 rpm`, or `fan 40%` before
-/// its first tach reading. `None` with no carrier, or before the bridge's first `Status`.
+/// The carrier's lid fan as the bridge last reported it: `fan 40% 1830 rpm`, or `fan 40%` with no
+/// tach reading. `None` with no carrier, before the bridge's first `Status`, and with the link
+/// down, when that report is stale.
 fn fan(snapshot: &Snapshot) -> Option<String> {
+    if !snapshot.link_up {
+        return None;
+    }
     let fan = snapshot.bridge_status?.fan?;
     Some(match fan.rpm {
         Some(rpm) => format!("fan {} {rpm} rpm", fan.duty),
@@ -334,6 +338,15 @@ mod tests {
         let duty = FanDuty::new(40).expect("in range");
         let snapshot = with_fan(Some(FanStats { duty, rpm: None }));
         assert_eq!(fan(&snapshot).as_deref(), Some("fan 40%"));
+    }
+
+    #[test]
+    fn header_omits_fan_when_link_is_down() {
+        let duty = FanDuty::new(40).expect("in range");
+        let mut snapshot = with_fan(Some(FanStats { duty, rpm: Some(1830) }));
+        snapshot.link_up = false;
+        assert_eq!(fan(&snapshot), None);
+        assert!(!rendered(&snapshot).contains("fan "));
     }
 
     #[test]

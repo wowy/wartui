@@ -31,7 +31,10 @@ impl FleetEngine {
             Command::SetPool { pool } => self.on_set_pool(pool),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
-            Command::SetFanDuty { duty } => batch.bulk.push(HostToBridge::SetFan { duty }),
+            Command::SetFanDuty { duty } => {
+                batch.bulk.push(HostToBridge::SetFan { duty });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
         }
     }
 

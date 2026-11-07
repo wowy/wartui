@@ -296,10 +296,14 @@ impl SimTransport {
     }
 }
 
-/// The speed the simulated fan reports at `duty`: 700 rpm at 0 %, where a real fan turns at its
-/// minimum, to 3500 rpm at full.
+/// The speed the simulated fan reports at `duty`, after the bench sweep in
+/// `docs/node-bus-findings.md` § "The lid fan's duty and speed": stopped below 15 %, and about
+/// 40 rpm a percent above it, from 450 rpm at 15 % to 3850 at full.
 fn sim_fan_rpm(duty: FanDuty) -> u16 {
-    700 + 28 * u16::from(duty.get())
+    match u16::from(duty.get()) {
+        pct @ 15.. => 40 * pct - 150,
+        _ => 0,
+    }
 }
 
 /// The dongle half: announces itself, routes records to nodes, answers status.

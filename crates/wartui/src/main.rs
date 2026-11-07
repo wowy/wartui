@@ -271,6 +271,27 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
     .context("opening the link")
 }
 
+/// Open the one bridge `named` resolves to, as `wartui reset` resolves it
+/// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
+/// `Ready`. `fan` and `power-cycle` connect through this.
+async fn connect_one(
+    named: Option<&str>,
+    config: Option<&Path>,
+) -> Result<(LinkHandle, BridgeInfo)> {
+    let remembered = crate::config::remembered_bridge(config);
+    let port =
+        reset::board_to_reset(named, &remembered, serial::discover_bridges, |found| async move {
+            serial::probe_all(&found).await
+        })
+        .await?;
+    let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
+    let mut link = open(Some(&port), None, memory)?;
+    match tokio::time::timeout(CONNECT_NOTICE_AFTER, status::wait_for_ready(&mut link)).await {
+        Ok(ready) => Ok((link, ready?)),
+        Err(_) => anyhow::bail!("{}", no_bridge_notice(named)),
+    }
+}
+
 /// How a `--bridge` value was meant. Parsing it cannot fail: what is not an address
 /// is a path, and whether that path exists is the transport's question.
 fn spec(bridge: &str) -> BridgeSpec {

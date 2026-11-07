@@ -9,10 +9,10 @@
 //! **The P4 is the duty's system of record.** It boots into the duty stored in the first sector
 //! of its `nvs` partition, or 100 % when none is stored or the partition does not read, before
 //! the futures start, and holds it with no host present. A `SetFan` ([`set`]) applies at once and
-//! is written only when it differs from the stored duty, so a repeat costs no flash. Each write
-//! parks core 1, as every P4 flash write does (`wartui_firmware::ota`), and one change in 1024
-//! erases the sector first. A write that fails leaves the duty applied until reboot and says so
-//! to the host.
+//! is written only when it differs from the stored duty, so a repeat costs a sector read and no
+//! flash write. Each write parks core 1, as every P4 flash write does (`wartui_firmware::ota`),
+//! and one change in 1024 erases the sector first. A write that fails leaves the duty applied
+//! until reboot and says so to the host, and the same `SetFan` again retries it.
 //!
 //! **GPIO51 is inverted**: high holds the fan's PWM input low. The RMT drives it, since this
 //! esp-hal has no LEDC driver for the P4. Its counter runs at [`RMT_HZ`], so one 40 µs period at
@@ -24,6 +24,9 @@
 //! **GPIO52 counts falling edges**, which the board pulls up, so it needs no pull of its own.
 //! [`TachFilter`] drops ringing, and each [`TACH_WINDOW_MS`] gives one reading. No fan plugged in
 //! reads 0 rpm.
+//!
+//! **No reading spans a duty change.** A change discards the window in progress, and the speed
+//! reads `None` until a window that began after it ends, so a reading is one duty's.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
@@ -76,8 +79,10 @@ pub struct Pins {
 pub struct Fan {
     /// The duty in force.
     duty: Cell<FanDuty>,
-    /// The last whole window's speed, `None` before the first.
+    /// The last whole window's speed, `None` before the first and since a duty change.
     rpm: Cell<Option<u16>>,
+    /// Bumped on each duty change, so [`count`] discards a window that spans one.
+    generation: Cell<u32>,
     /// Raised when `duty` changes, so [`run`] applies it.
     changed: Signal<NoopRawMutex, ()>,
     sector: RefCell<&'static mut [u8; SECTOR]>,
@@ -101,6 +106,7 @@ impl Fan {
         FAN.init_with(|| Self {
             duty: Cell::new(stored.unwrap_or(FanDuty::FULL)),
             rpm: Cell::new(None),
+            generation: Cell::new(0),
             changed: Signal::new(),
             sector: RefCell::new(sector),
         })
@@ -112,16 +118,17 @@ impl Fan {
     }
 }
 
-/// A `SetFan`: run at `duty` now, and store it when it differs from the stored duty. Ignored with
-/// no carrier, and a no-op at the duty in force.
+/// A `SetFan`: run at `duty` now, unless it is the duty in force, and store it when it differs
+/// from the stored duty, so a repeat retries a save that failed. Ignored with no carrier.
 #[inline(never)]
 pub fn set(shared: &Shared, duty: FanDuty) {
     let Some(fan) = shared.fan else { return };
-    if fan.duty.get() == duty {
-        return;
+    if fan.duty.get() != duty {
+        fan.duty.set(duty);
+        fan.rpm.set(None);
+        fan.generation.set(fan.generation.get().wrapping_add(1));
+        fan.changed.signal(());
     }
-    fan.duty.set(duty);
-    fan.changed.signal(());
     if let Err(why) = save(shared, fan, duty) {
         let mut message = LogStr::new();
         let _ = write!(message, "fan duty {duty} not saved, so it holds until reboot: {why}");
@@ -239,11 +246,13 @@ fn apply(output: Output, wave: Pwm) -> Output {
     }
 }
 
-/// Count tach edges over each window, and report the speed once it ends.
+/// Count tach edges over each window, and report the speed once it ends, unless the duty
+/// changed during it.
 async fn count(mut tach: Input<'static>, fan: &Fan) -> ! {
     let window = Duration::from_millis(u64::from(TACH_WINDOW_MS));
     let mut filter = TachFilter::new();
     loop {
+        let generation = fan.generation.get();
         let end = Instant::now() + window;
         let mut edges = 0u32;
         while let Either::First(()) = select(tach.wait_for_falling_edge(), Timer::at(end)).await {
@@ -251,6 +260,8 @@ async fn count(mut tach: Input<'static>, fan: &Fan) -> ! {
                 edges = edges.saturating_add(1);
             }
         }
-        fan.rpm.set(Some(rpm(edges, TACH_WINDOW_MS)));
+        if fan.generation.get() == generation {
+            fan.rpm.set(Some(rpm(edges, TACH_WINDOW_MS)));
+        }
     }
 }

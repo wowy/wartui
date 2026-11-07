@@ -730,7 +730,8 @@ def bridge_host_uart(db):
 def bridge_fan(db):
     """The carrier's lid fan over the capture: the duties it ran and the speeds it read.
 
-    Both columns are NULL with no carrier, and `fan_rpm` before the bridge's first tach window.
+    Both columns are NULL with no carrier, and `fan_rpm` before the bridge's first tach window
+    and after a duty change, until the first window that began after it.
     """
     rows = db.q("SELECT fan_duty, fan_rpm FROM bridge_status WHERE fan_duty IS NOT NULL")
     if not rows:
