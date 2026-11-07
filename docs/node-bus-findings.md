@@ -604,6 +604,44 @@ could miss its confirm after a quick reboot.
 
 The 32 extra chunk sends are resends, about 0.4%, and none was `Undelivered`.
 
+## Fewer empty IRQ-pass visits, tried and dropped, 2026-11-07
+
+One node updated alone runs at 38 KB/s, against 29–31 KB/s per node with all ten at once, so a
+fleet update is partly held back by the bus. Most of what the bus spends that carries nothing is
+IRQ-pass visits. A node that has just flushed a sector prepares its status behind a transfer it
+armed before the status existed. So the first clock finds that node empty, and the pass walks the
+other slots, often twice, before the status comes. With one node updating, each of its four idle
+neighbours on the bus was clocked about 600 times in 30 s.
+
+Two P4-only changes were tried, neither committed:
+
+- **Replies first.** A slot whose last flight was just acknowledged, with nothing more queued,
+  goes first in IRQ passes for up to 250 ms, since its node is likely about to answer. The first
+  empty visit ends the pass, so the next pass starts with that slot again.
+- **Round 2, work and replies first.** On top of that, while IRQ is served, each round also
+  clocks every slot with work due before the pass. That work includes the ack owed for a record,
+  so this one also changed how sighting batches are served.
+
+`wartui ota --force --yes`, all ten carrier-10 nodes, 4 MHz, every node confirmed. The third
+run of each ran with debug logging, and the per-sector rows are means from those runs:
+
+| | 8edcb87 | Replies first | Round 2 |
+| --- | --- | --- | --- |
+| Ten nodes | 39, 40, 41 s | 46, 41, 45 s | 44, 47, 47 s |
+| Last chunk delivered to the status at the host | 85.5 ms | 72.8 ms | 88.6 ms |
+| First chunk sent to the 4th delivered | 55.7 ms | 69.5 ms | 62.1 ms |
+| One node alone | 38 KB/s | 44 KB/s | not run |
+
+Replies first found statuses 13 ms sooner and cut the idle neighbours' visits to about 250, but
+while IRQ is asserted, a slot with chunks to send is clocked only by passes, and the shorter
+passes reached it less often. Round 2 served those slots in every round, which made both halves
+of the sector no better than before. Neither helped the ten-node update, which is the case that
+matters, and round 2 put sighting service at risk for nothing, so both were dropped.
+
+Most of a sector's time in a fleet update is the 70–85 ms from its last chunk to its status, and
+much of that is the node's own flush. Keeping chunks flowing across a sector's end, so the
+flush overlaps the next sector's sending, is the lever left.
+
 ## Still open
 
 This list replaces the dated ones above.
