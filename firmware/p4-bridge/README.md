@@ -27,7 +27,8 @@ too.
 It is also the SPI controller of two node buses, which carry each node's records to and from the
 host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
 forwards what a node sends, queues what the host sends a node in that node's slot, and answers
-each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`). It
+each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`). Two
+transfers of records are out to a node at once, and the node takes them in order. It
 writes one, the update chunks it builds from its node image cache, below.
 
 ## Boards
@@ -224,10 +225,10 @@ as a drop in `Status`.
 
 | Variable | Default | Holds |
 | --- | --- | --- |
-| `WARTUI_P4_HOST_BULK_BYTES` | 262144 | frames for the host that may be evicted: node records, GPS bytes and logs |
+| `WARTUI_P4_HOST_BULK_BYTES` | 245760 | frames for the host that may be evicted: node records, GPS bytes and logs |
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
-| `WARTUI_P4_NODE_DOWN_BYTES` | 4096 | per slot, the host's records for that node waiting behind the one transfer in flight; a full queue answers `Undelivered` |
+| `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |
 
 The C6 link's baud rate (4 Mbaud) is fixed, as part of its frozen core. The host link's is
 `wartui_proto::link::HOST_BAUD`.

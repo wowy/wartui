@@ -18,11 +18,13 @@
 //! finished transfer would fill with idle ones and push out the P4's records. Instead the
 //! handler verifies each transfer as it ends and counts what fails. A good transfer's header
 //! goes to the uplink's wait ([`deliver`]) and the seq check at once. A transfer with no records
-//! has nothing more to give, and its buffer goes straight back. One with records waits in
-//! [`Shared::received`] for the main loop ([`take`]). The P4's stop-and-wait keeps one
-//! record-carrying transfer per slot in flight, so [`RECEIVED_MAX`] is enough. When it is full
-//! the transfer is dropped, counted as `inbox full` and left unacknowledged, so the P4 sends it
-//! again after its timeout.
+//! has nothing more to give, and its buffer goes straight back. One with records carries a
+//! numbered flight, which [`FlightTaker`] takes strictly in order: the next flight waits in
+//! [`Shared::received`] for the main loop ([`take`]), and a resend of the last one taken is
+//! acknowledged and not queued again. A flight that finds the inbox full is dropped, counted as
+//! `inbox full`, and so is every later one, counted as `out of order`, all unacknowledged. The
+//! P4 sends the window again from the dropped flight once the next transfer's ack shows it
+//! missing, so delivery stays in order.
 //!
 //! **A transfer's records are acknowledged on the very next transfer.** Once it is queued, its
 //! seq is the ack the handler stamps on the transfer it arms next, before the controller's next
@@ -52,8 +54,8 @@ use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use static_cell::ConstStaticCell;
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, HEADER_LEN, Header, PAYLOAD_MAX, Packer,
-    RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, UpType, VerifyError, seal, verify,
+    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, FlightTaker, HEADER_LEN, Header, PAYLOAD_MAX,
+    Packer, RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, Take, UpType, VerifyError, seal, verify,
 };
 use wartui_proto::heapless::{Deque, Vec};
 
@@ -108,8 +110,10 @@ struct Shared {
     seq: u16,
     /// The P4's seq, across good transfers.
     peer: SeqCheck,
-    /// The P4's last record-carrying transfer that was queued: the ack to stamp.
+    /// The P4's last record-carrying transfer that was queued or repeated: the ack to stamp.
     tracker: AckTracker,
+    /// Which flight from the P4 to take next.
+    taker: FlightTaker,
     /// [`deliver`]'s wait for its ack, started when its records are armed.
     wait: AckWait,
     /// The P4 acknowledged the transfer [`Shared::wait`] waits on.
@@ -125,8 +129,12 @@ struct Shared {
     /// Transfers with records the handler could not keep. Nothing drops one today: the guard
     /// is counted rather than assumed.
     unread: u32,
-    /// Transfers with records dropped unacknowledged because [`Shared::received`] was full.
+    /// Flights dropped unacknowledged because [`Shared::received`] was full.
     inbox_full: u32,
+    /// Flights dropped unacknowledged behind one not taken.
+    out_of_order: u32,
+    /// Resends of the flight last taken, acknowledged and not queued again.
+    repeats: u32,
     /// The handler's longest run, edge to return, in µs.
     handler_max_us: u32,
     /// CS edges with the transfer not done: the controller ended one early.
@@ -202,6 +210,7 @@ pub fn start(
         seq: 0,
         peer: SeqCheck::new(),
         tracker: AckTracker::new(),
+        taker: FlightTaker::new(),
         wait: AckWait::new(),
         acked: false,
         transfers: 0,
@@ -213,6 +222,8 @@ pub fn start(
         gaps: 0,
         unread: 0,
         inbox_full: 0,
+        out_of_order: 0,
+        repeats: 0,
         handler_max_us: 0,
         early: 0,
         arm_failed: 0,
@@ -278,8 +289,9 @@ impl Shared {
     }
 
     /// Check a finished transfer: count it, give a good one's header to the seq check and the
-    /// uplink's wait, and queue it when it carries records and there is room, which is what it
-    /// is acknowledged for. Anything not queued goes straight back to the free buffers.
+    /// uplink's wait, and queue it when it carries the next flight and there is room, which is
+    /// what it is acknowledged for. A repeat of the last flight is acknowledged too. Anything not
+    /// queued goes straight back to the free buffers.
     #[esp_hal::ram]
     fn take_transfer(&mut self, rx: DmaRxBuf) {
         // This transfer's own seq: `seq` advances only on a successful arm, and this transfer
@@ -294,13 +306,26 @@ impl Shared {
                 if self.wait.on_header(&transfer.header, carried_in) {
                     self.acked = true;
                 }
-                match transfer.carries_records() {
-                    false => None,
-                    true if self.received.is_full() => {
-                        self.inbox_full = self.inbox_full.wrapping_add(1);
-                        None
+                if transfer.carries_records() {
+                    let seq = transfer.header.seq;
+                    match self.taker.take(&transfer.header, !self.received.is_full()) {
+                        Take::Queue => Some((seq, transfer.payload.len())),
+                        Take::Repeat => {
+                            self.repeats = self.repeats.wrapping_add(1);
+                            self.tracker.note_records(seq);
+                            None
+                        }
+                        Take::Full => {
+                            self.inbox_full = self.inbox_full.wrapping_add(1);
+                            None
+                        }
+                        Take::OutOfOrder => {
+                            self.out_of_order = self.out_of_order.wrapping_add(1);
+                            None
+                        }
                     }
-                    true => Some((transfer.header.seq, transfer.payload.len())),
+                } else {
+                    None
                 }
             }
             Err(VerifyError::BadMagic) => {
@@ -628,6 +653,8 @@ struct Counts {
     gaps: u32,
     unread: u32,
     inbox_full: u32,
+    out_of_order: u32,
+    repeats: u32,
     early: u32,
     arm_failed: u32,
     handler_max_us: u32,
@@ -647,6 +674,8 @@ fn report() {
         gaps: s.gaps,
         unread: s.unread,
         inbox_full: s.inbox_full,
+        out_of_order: s.out_of_order,
+        repeats: s.repeats,
         early: s.early,
         arm_failed: s.arm_failed,
         handler_max_us: s.handler_max_us,
@@ -657,8 +686,9 @@ fn report() {
     let (replaced, resent, undelivered) = MAIN.with(|m| (m.replaced, m.resent, m.undelivered));
     note!(
         "bus: {} transfers, {} good, {} magic, {} crc, {} version, {} len, {} gaps, {} unread, \
-         {} inbox full, {} early, {} arm failed, {} replaced, {} resent, {} undelivered, \
-         {} us handler max, {} us settle max, settle 0/5/20/45/+: {}/{}/{}/{}/{}",
+         {} inbox full, {} out of order, {} repeats, {} early, {} arm failed, {} replaced, \
+         {} resent, {} undelivered, {} us handler max, {} us settle max, \
+         settle 0/5/20/45/+: {}/{}/{}/{}/{}",
         c.transfers,
         c.good,
         c.magic,
@@ -668,6 +698,8 @@ fn report() {
         c.gaps,
         c.unread,
         c.inbox_full,
+        c.out_of_order,
+        c.repeats,
         c.early,
         c.arm_failed,
         replaced,

@@ -2,14 +2,16 @@
 //! own CS (`docs/node-bus.md`). The board `main` read at boot sets how many each drives: six on
 //! the bench, and three, five or seven on a carrier.
 //!
-//! `wartui_proto::bus` has the framing, the handshake and the stop-and-wait. The P4 checks
+//! `wartui_proto::bus` has the framing, the handshake and the acknowledgment. The P4 checks
 //! framing only and reads no record. Each record a node sends goes to the host as a `FromNode`,
 //! and its transfer is acknowledged in the next one to that slot. Each `ToNode` the host sends
 //! waits in its slot's [`Downlink`] until a transfer carries it and the node acknowledges it,
 //! and is answered `Delivered`, or `Undelivered` with why: no node in the slot, a full queue, a
-//! body too long, or no ack after every try. A slot that loses its node answers for everything
-//! it held. The host reader queues a record and raises its bus's signal, so a waiting scheduler
-//! wakes. The one record the P4 writes, an `UpdateChunk` it builds from its node image cache for
+//! body too long, or no ack after every try. The [`Downlink`] keeps two flights out, numbered,
+//! and tags its first to a slot, and its first after giving up, with `SYNC`, since a P4 cannot
+//! know where a node's numbering stands. A slot that loses its node answers for everything it
+//! held, so its next flight carries `SYNC` too. The host reader queues a record and raises its
+//! bus's signal, so a waiting scheduler wakes. The one record the P4 writes, an `UpdateChunk` it builds from its node image cache for
 //! a `ToNodeChunk` (`src/cache.rs`), is queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
@@ -34,8 +36,10 @@
 //! - **Work for a node**: a present slot with records due, or that owes its node an ack, is
 //!   clocked at once. One whose records wait for the node's ack is clocked once right after the
 //!   transfer that carried them, since the node stamps its ack on the very next transfer it arms
-//!   (`firmware/node/src/bus.rs`). If that one brings no ack, as when the node's inbox was full,
-//!   the slot is clocked every [`ACK_POLL`], and no later than the wait's deadline.
+//!   (`firmware/node/src/bus.rs`). That transfer carries the next flight when one is queued, so a
+//!   stream of records costs a transfer each. A header that leaves the oldest flight
+//!   unacknowledged makes the window due again at once. With nothing due, the slot is clocked
+//!   every [`ACK_POLL`] while flights wait, and no later than the oldest one's deadline.
 //! - **Otherwise**: each present slot every [`POLL_EVERY`], and each absent one every
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed
@@ -71,7 +75,7 @@ use esp_hal::time::Rate;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::bus::{
     AckTracker, Downlink, Header, NodeBoard, SeqCheck, SeqNote, Slot as BusSlot, TRANSFER_LEN,
-    VerifyError, seal, verify,
+    VerifyError, verify,
 };
 use wartui_proto::link::{BridgeToHost, FromNodeBody, LogStr, QueueId, QueueStat, Undelivered};
 
@@ -130,7 +134,7 @@ pub struct Pins {
 /// One slot's queue toward its node.
 type NodeDown = Downlink<NODE_DOWN_BYTES>;
 
-/// Every driven slot's queue, bus A's first. Static: each holds a flight and a queue.
+/// Every driven slot's queue, bus A's first. Static: each holds two flights and a queue.
 static DOWNLINKS: ConstStaticCell<[NodeDown; DRIVEN]> =
     ConstStaticCell::new([const { Downlink::new() }; DRIVEN]);
 
@@ -422,7 +426,7 @@ enum Xfer {
     Pass,
     /// Carried a flight toward the node, outside a pass.
     Carry,
-    /// Fetched the node's ack right after a flight.
+    /// Fetched the node's ack right after a flight, carrying none.
     Fetch,
     /// Owed the node an ack.
     Owed,
@@ -724,17 +728,17 @@ impl Controller {
     /// gave up on, then carry what the queue has due. Returns the payload's length.
     #[inline(never)]
     fn prepare(&self, i: usize, buf: &mut [u8; TRANSFER_LEN], shared: &Shared) -> usize {
+        let slot = &self.slots[i];
+        let header = Header::new(slot.seq, slot.tracker.ack());
         let (gave_up, len) = {
             let mut downlinks = shared.nodes.downlinks.borrow_mut();
             let downlink = &mut downlinks[self.driven(i)];
             let gave_up = downlink.poll(crate::now_ms());
-            (gave_up, downlink.fill(buf))
+            (gave_up, downlink.fill(buf, header))
         };
         for id in gave_up.into_iter().flatten() {
             shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::Timeout });
         }
-        let slot = &self.slots[i];
-        seal(buf, Header::new(slot.seq, slot.tracker.ack()), len);
         len
     }
 
