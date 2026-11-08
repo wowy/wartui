@@ -40,6 +40,10 @@ pub struct NodeState {
     /// The node chip's 3.3 V rail, from its latest heartbeat. [`Vdd::NONE`] before one, or
     /// when that heartbeat's read failed.
     pub vdd: Vdd,
+    /// The first [`Vdd`] reading heard from this node, which [`Self::supply_dropped`] compares
+    /// against. [`Vdd::NONE`] before one. It survives the node's reboots, since the offset it
+    /// stands in for is the chip's.
+    pub vdd_baseline: Vdd,
     /// The node's die temperature, from its latest heartbeat. [`DieTemp::NONE`] before one, or
     /// when that heartbeat's read failed.
     pub die_temp: DieTemp,
@@ -124,12 +128,20 @@ pub struct Assignment {
     pub counter: u64,
 }
 
-/// The C5's minimum recommended supply, in millivolts. Its brown-out detector resets the chip at
-/// 2.7 V by default, and nothing here changes that, so a rail below this is close.
-const LOW_VDD_MV: u16 = 3000;
+/// How far a node's rail reading must fall below its first, in millivolts, to count as a drop.
+///
+/// The reading has a per-chip offset, so only a change on one node means anything. On two XIAO
+/// ESP32-C5s a meter read 3.288 V and 3.294 V where the chip read 3.136 V and 2.980 V. Readings
+/// come in 12 mV steps and a healthy node's does not move, so this is well clear of noise.
+pub(crate) const SUPPLY_DROP_MV: u16 = 150;
 /// A warning on the die, which runs above ambient, so it comes well before the board around it
 /// reaches this temperature.
 const HOT_DIE_C: i16 = 70;
+
+/// Whether a rail reading of `mv` is a drop from the node's first reading, `baseline_mv`.
+pub(crate) const fn supply_dropped_from(baseline_mv: u16, mv: u16) -> bool {
+    baseline_mv.saturating_sub(mv) >= SUPPLY_DROP_MV
+}
 
 impl NodeState {
     /// A node that has just been heard from for the first time.
@@ -147,6 +159,7 @@ impl NodeState {
             heartbeats: 0,
             observations: 0,
             vdd: Vdd::NONE,
+            vdd_baseline: Vdd::NONE,
             die_temp: DieTemp::NONE,
             capabilities: None,
             departed: false,
@@ -186,10 +199,14 @@ impl NodeState {
             .is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
     }
 
-    /// Whether the latest heartbeat's rail reading is below [`LOW_VDD_MV`]. `false` without one.
+    /// Whether the latest heartbeat's rail reading is at least [`SUPPLY_DROP_MV`] below
+    /// [`Self::vdd_baseline`]. `false` without one, and again once the reading recovers.
     #[must_use]
-    pub fn low_vdd(&self) -> bool {
-        self.vdd.mv().is_some_and(|mv| mv < LOW_VDD_MV)
+    pub fn supply_dropped(&self) -> bool {
+        self.vdd_baseline
+            .mv()
+            .zip(self.vdd.mv())
+            .is_some_and(|(baseline, mv)| supply_dropped_from(baseline, mv))
     }
 
     /// Whether the latest heartbeat's die reading is at or above [`HOT_DIE_C`]. `false` without
@@ -197,5 +214,26 @@ impl NodeState {
     #[must_use]
     pub fn hot(&self) -> bool {
         self.die_temp.c().is_some_and(|c| c >= HOT_DIE_C)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A `Vdd` moves in 12 mV steps and misses 150 exactly, so the edge is tested in raw millivolts.
+    #[test]
+    fn supply_drop_trips_when_fall_is_exactly_the_threshold() {
+        assert!(supply_dropped_from(3300, 3300 - SUPPLY_DROP_MV));
+    }
+
+    #[test]
+    fn supply_drop_stays_clear_when_fall_is_one_millivolt_short() {
+        assert!(!supply_dropped_from(3300, 3300 - SUPPLY_DROP_MV + 1));
+    }
+
+    #[test]
+    fn supply_drop_stays_clear_when_reading_rises() {
+        assert!(!supply_dropped_from(3000, 3300));
     }
 }

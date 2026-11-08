@@ -16,7 +16,8 @@ const VDD_STEP_MV: u16 = 12;
 ///
 /// `mV = 2500 + 12 × code` for codes 1 to 255, so 2.512 V to 5.560 V. Code 0 is no
 /// reading. It measures the rail the regulator feeds the chip, not the board's 5 V input,
-/// so a sagging supply shows here once the regulator can no longer hold 3.3 V.
+/// so a sagging supply shows here once the regulator can no longer hold 3.3 V. It reads low by a
+/// per-chip offset, so only a change on one node means anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vdd(pub u8);
 

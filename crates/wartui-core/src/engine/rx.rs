@@ -244,6 +244,9 @@ impl FleetEngine {
         node.off_bus = false;
         node.heartbeats += 1;
         node.vdd = heartbeat.vdd;
+        if node.vdd_baseline.mv().is_none() {
+            node.vdd_baseline = heartbeat.vdd;
+        }
         node.die_temp = heartbeat.die_temp;
         batch.records.push(Record::Heartbeat(Heartbeat {
             node_mac: src,

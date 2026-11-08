@@ -25,8 +25,9 @@ pub fn vdd_mv() -> u16 {
     // taking no arguments and touching no memory of ours. Disassembled, it switches the
     // PBUS into debug mode, routes VDD3P3 to SAR2 over the analog I2C bus, reads SAR2,
     // restores the PBUS, and scales the reading (×206/100 on the C6, ×236/100 on the
-    // C5). It returns 0 before the PHY is initialized. The unit is millivolts, reading
-    // 50 to 100 mV below a multimeter on the board's 3V3 pin.
+    // C5). It returns 0 before the PHY is initialized. The unit is millivolts, reading low
+    // by a per-chip offset: on two XIAO ESP32-C5s, a multimeter on the 3V3 pin read 3.288 V
+    // and 3.294 V where this returned 3.136 V and 2.980 V.
     unsafe { phy_get_vdd33() }
 }
 

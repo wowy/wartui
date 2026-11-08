@@ -151,7 +151,7 @@ of its output, after the export summary:
   buffer full wifi 18,220  ble 1,203
   loss by node
     N3   batches 12  heartbeats 699  buffer full ble 1,203
-    N11  batches 200  heartbeats 2,757  buffer full wifi 18,220
+    N11  batches 200  heartbeats 2,757  buffer full wifi 18,220  supply drop
 ```
 
 | Line           | What it counts                                                                  |
@@ -173,6 +173,10 @@ order, so one that moved appears once. A node with no heartbeat, or any node in 
 carrier, goes by the last two octets of its address and sorts after the labels. Two nodes whose
 latest heartbeats name one slot, as when a board is replaced, each get their address after the
 label (`N3 57:84`).
+
+`supply drop` on a `loss by node` row means a node's rail reading fell 150 mV or more below its
+first in the capture, even if it later recovered. `analyze` prints no figure, and
+[Reading the fleet table](#reading-the-fleet-table) says why.
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
 They are half-open: a sighting and one exactly a second earlier share no one-second window, so a
@@ -944,22 +948,27 @@ The `channels` column shows where an assignment stands
 | cyan             | The Bluetooth node                                |
 
 The line under the table shows the selected node's last two address octets, its firmware and its
-latest supply and die readings: `N1 C5 57:84  0.1.0;5g  3.30 V  41 °C`, with `—` for a node that
-has sent none or whose read failed. It is the one place the main screen shows a node's address,
-which `flash-fleet --skip` and the OS's device names go by.
+latest die reading: `N1 C5 57:84  0.1.0;5g  41 °C`, with `—` for a node that has sent none or whose
+read failed. `supply drop` follows it when the node's supply has fallen. It is the one place the
+main screen shows a node's address, which `flash-fleet --skip` and the OS's device names go by.
 
 The firmware is its version, then `;5g` for a radio that reaches 5 GHz. A node on an older version
 than this build's adds an arrow and this build's version: `0.1.2;5g ↑0.1.3`. A different patch is
 still driven; an older major or minor is `needs update` and a newer one `host behind`.
 
-The voltage is the chip's 3.3 V rail, not the board's 5 V input, and the die runs well above the
-air around it. A reading out of range is yellow on that line, and turns an `alive` node's `state`
-yellow too; any other state keeps its own color:
+Either warning is yellow on that line, and turns an `alive` node's `state` yellow too; any other
+state keeps its own color:
 
-| Reading | Warns at       | Why                                                           |
-|---------|----------------|---------------------------------------------------------------|
-| Voltage | below 3.00 V   | The C5's minimum recommended supply; the chip resets at 2.7 V |
-| Die     | 70 °C or above | A warning; the die runs hotter than ambient                   |
+| Reading | Warns at                               | Why                                         |
+|---------|----------------------------------------|---------------------------------------------|
+| Voltage | 150 mV or more below its first reading | The node's supply fell; only a change shows |
+| Die     | 70 °C or above                         | A warning; the die runs hotter than ambient |
+
+The voltage is the chip's 3.3 V rail, not the board's 5 V input. No figure is shown, because each
+chip reads low by an offset of its own: two boards a meter put at 3.288 V and 3.294 V read 3.136 V
+and 2.980 V. So the first reading since wartui started is that node's baseline, through its reboots,
+and the warning clears if the reading recovers. A node already low at its first heartbeat cannot be
+seen this way.
 
 A `stale`, `off bus`, `no slot`, `no heartbeat`, `needs update`, or `host behind` node is out of
 the plan: nothing sent would reach it, it has not yet said what it is, or its frames are not this

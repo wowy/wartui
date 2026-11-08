@@ -205,6 +205,9 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         if let Some(figures) = buffer_full(node.wifi_refused, node.ble_refused) {
             let _ = write!(line, "  {figures}");
         }
+        if node.supply_drop {
+            line.push_str("  supply drop");
+        }
         let _ = writeln!(text, "{line}");
     }
     text
@@ -388,6 +391,7 @@ mod tests {
                     heartbeats: 699,
                     wifi_refused: 0,
                     ble_refused: 1_203,
+                    supply_drop: false,
                 },
                 NodeLoss {
                     mac: NODE_57,
@@ -396,6 +400,7 @@ mod tests {
                     heartbeats: 2_757,
                     wifi_refused: 18_220,
                     ble_refused: 0,
+                    supply_drop: false,
                 },
             ],
             host: None,
@@ -785,6 +790,19 @@ mod tests {
             rows(&losses_text(&loss, &names), "  loss by node"),
             ["    N1     batches 1", "    1C:5A  batches 1"]
         );
+    }
+
+    #[test]
+    fn analyze_report_marks_only_the_dropped_node_when_a_supply_drop_is_recorded() {
+        let dropped = NodeLoss { supply_drop: true, ..lost(NODE_1C, a(1)) };
+        let loss = node_losses(vec![lost(NODE_57, a(0)), dropped]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let text = losses_text(&loss, &names);
+        assert_eq!(
+            rows(&text, "  loss by node"),
+            ["    N1  batches 1", "    N2  batches 1  supply drop"]
+        );
+        assert!(!text.contains(" V"), "no voltage figure: {text}");
     }
 
     #[test]

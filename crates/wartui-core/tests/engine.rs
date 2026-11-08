@@ -1226,6 +1226,72 @@ fn engine_clears_health_readings_when_later_heartbeat_carries_none() {
     assert_eq!((node.vdd, node.die_temp), (Vdd::NONE, DieTemp::NONE));
 }
 
+/// Whether `NODE` shows a supply drop after heartbeats carrying each of `readings`, in millivolts.
+/// A reading of 0 is a failed read.
+fn supply_dropped_after(readings: &[u16]) -> bool {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    for (i, &mv) in readings.iter().enumerate() {
+        let n = u32::try_from(i).expect("a short list") + 1;
+        let beat = heartbeat_reading(NODE, n, Vdd::from_mv(mv), DieTemp::NONE);
+        engine.handle(beat, clock.at(u64::from(n)));
+    }
+    engine.nodes().find(|n| n.mac == NODE).expect("the node").supply_dropped()
+}
+
+#[test]
+fn engine_shows_no_supply_drop_when_low_first_reading_stays_put() {
+    assert!(!supply_dropped_after(&[2920, 2920, 2920]));
+}
+
+#[test]
+fn engine_shows_no_supply_drop_when_fall_is_just_under_threshold() {
+    // 144 mV, the last whole step short of 150.
+    assert!(!supply_dropped_after(&[3304, 3160]));
+}
+
+#[test]
+fn engine_shows_supply_drop_when_fall_reaches_threshold() {
+    // 156 mV, the first whole step past 150. `engine::node`'s unit tests cover exactly 150.
+    assert!(supply_dropped_after(&[3304, 3148]));
+}
+
+#[test]
+fn engine_clears_supply_drop_when_reading_recovers() {
+    assert!(!supply_dropped_after(&[3304, 3148, 3304]));
+}
+
+#[test]
+fn engine_keeps_supply_baseline_when_node_restarts() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat_reading(NODE, 100, Vdd::from_mv(3304), DieTemp::NONE), clock.at(1));
+    // The counter falls, so this is a restart, and its low reading still compares with the first.
+    engine.handle(heartbeat_reading(NODE, 1, Vdd::from_mv(3148), DieTemp::NONE), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.reboots, 1);
+    assert_eq!(node.vdd_baseline, Vdd::from_mv(3304));
+    assert!(node.supply_dropped());
+}
+
+#[test]
+fn engine_skips_missing_reading_when_setting_supply_baseline() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat_reading(NODE, 1, Vdd::NONE, DieTemp::NONE), clock.at(1));
+    engine.handle(heartbeat_reading(NODE, 2, Vdd::from_mv(3148), DieTemp::NONE), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.vdd_baseline, Vdd::from_mv(3148));
+    assert!(!node.supply_dropped());
+}
+
+#[test]
+fn engine_shows_no_supply_drop_when_latest_reading_is_missing() {
+    assert!(!supply_dropped_after(&[3304, 0]));
+}
+
 /// What a node a minor version behind this build announces.
 fn outdated_capabilities() -> Capabilities {
     let version = minor_behind(NODE_VERSION);
