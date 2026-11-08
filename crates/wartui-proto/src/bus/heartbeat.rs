@@ -156,8 +156,8 @@ impl Capabilities {
     }
 }
 
-/// The form the fleet table, logs and the store column show: `0.1.0;5g`, with `;trial`
-/// for an unconfirmed image. Only the prefix bytes travel; this is for reading.
+/// The form logs and the store column show: `0.1.0;5g`, with `;trial` for an unconfirmed
+/// image. Only the prefix bytes travel; this is for reading.
 impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.version)?;
