@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn ui_refuses_power_cycle_without_asking_when_bridge_has_no_carrier() {
-        let snapshot = busy();
+        let snapshot = on_board(wartui_proto::bus::NodeBoard::NoCarrier);
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
 

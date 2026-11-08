@@ -152,7 +152,7 @@ fn slots_text(board: NodeBoard, present: u32) -> String {
 /// What carries the bridge's nodes, and the slots it drives.
 fn board_line(board: NodeBoard) -> String {
     if !board.is_carrier() {
-        return format!("{board}, so no node is driven");
+        return board.to_string();
     }
     format!("{board}, {} node slots, {}", board.slot_count(), crate::text::slot_range(board))
 }
@@ -316,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn status_prints_no_node_driven_when_bridge_has_no_carrier() {
-        assert_eq!(board_line(NodeBoard::NoCarrier), "no carrier, so no node is driven");
+    fn status_prints_board_as_no_carrier_when_bridge_has_no_carrier() {
+        assert_eq!(board_line(NodeBoard::NoCarrier), "no carrier");
     }
 
     #[test]
