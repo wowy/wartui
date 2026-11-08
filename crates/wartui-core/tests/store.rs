@@ -112,16 +112,15 @@ fn open_at(path: &std::path::Path) -> Store {
 }
 
 #[test]
-fn store_records_scan_table_when_capture_created() {
+fn store_records_bus_version_when_capture_created() {
     let dir = tempfile::tempdir().expect("temp dir");
     store(&dir).close();
     let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
-    let channels: String = conn
-        .query_row("SELECT v FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
-        .expect("ordered scan table provenance");
-    let expected =
-        wartui_proto::plan::SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
-    assert_eq!(channels, expected);
+    // The scan table is a code constant, so it says nothing about a capture.
+    let scan: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
+        .expect("scan table count");
+    assert_eq!(scan, 0);
     let version: String = conn
         .query_row("SELECT v FROM kv WHERE k = 'capture.bus_version'", [], |r| r.get(0))
         .expect("bus version provenance");
@@ -161,7 +160,7 @@ fn store_records_initial_provenance_when_capture_created() {
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
     assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
-    assert!(settings.contains("preferred_ble=none;ble_node=none;"), "{settings}");
+    assert!(settings.ends_with(";preferred_ble=none;ble_node=none"), "{settings}");
     assert_eq!(store.close().dropped, 0);
 }
 
@@ -180,7 +179,7 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
             sequence: sequence as u64,
             at_ms,
             settings: wartui_core::record::CaptureSettings {
-                topology_timeout: std::time::Duration::from_secs(60 + sequence as u64),
+                gps_max_age: std::time::Duration::from_secs(5 + sequence as u64),
                 ..settings
             },
         })
@@ -197,7 +196,9 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
     assert_eq!(rows.len(), 3);
     for (i, (key, value)) in rows.iter().enumerate() {
         assert_eq!(key, &format!("capture.settings.{i:020}"));
-        assert!(value.contains(&format!("topology_timeout_ms={};", 60_000 + i * 1000)), "{value}");
+        assert!(value.contains(&format!("gps_max_age_ms={};", 5_000 + i * 1000)), "{value}");
+        // Fixed engine timings are no operator's choice, so a settings row leaves them out.
+        assert!(!value.contains("timeout") && !value.contains("status_interval"), "{value}");
     }
     assert!(rows[2].1.contains(&format!("at_ms={};", EPOCH_MS - 1)));
     let unknown: i64 = conn

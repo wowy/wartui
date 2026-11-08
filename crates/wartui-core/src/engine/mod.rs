@@ -153,9 +153,6 @@ impl FleetEngine {
             remember_ble: self.remember_ble,
             preferred_ble: self.preferred_ble,
             ble_node: self.ble_node,
-            topology_timeout: self.config.topology_timeout,
-            status_interval: self.config.status_interval,
-            admin_timeout: self.config.admin_timeout,
         }
     }
     /// Start an engine. `now` fixes the session's start time.

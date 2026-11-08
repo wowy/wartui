@@ -17,8 +17,8 @@ pub const SEND_TIMEOUT: Duration =
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// How long without a heartbeat before a node stops counting towards topology. Matches the
-    /// firmware's 60 s node timeout.
+    /// How long without a heartbeat before a node stops counting towards topology: the host's own
+    /// choice of how long a silent node keeps its share.
     pub topology_timeout: Duration,
     /// How often to ask the bridge for its counters.
     pub status_interval: Duration,

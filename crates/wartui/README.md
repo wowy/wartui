@@ -61,7 +61,6 @@ The capture records the host build and its settings in SQLite metadata:
 | `capture.host_build` | Content-derived host source identity, including uncommitted edits |
 | `capture.core_version` | Core crate version |
 | `capture.release_tag` | Release tag, when the host was built with one |
-| `capture.scan_channels` | The host's ordered scan table, which gives stored channel indices their meaning |
 | `capture.bus_version` | The node-bus version the host understands |
 | `capture.settings.initial` | Initial host settings, normalized by the engine |
 | `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
