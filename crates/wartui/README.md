@@ -67,8 +67,8 @@ The capture records the host build and its settings in SQLite metadata:
 | `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
 
 Settings include the channel pool, raw recording, positioning configuration and Bluetooth
-preference. The pool is the one the bridge reports, `none` before its first status. They describe
-desired host settings, not a radio's acknowledgment or adoption.
+preference. The pool is the one the bridge reports, `none` before its first status; the rest are
+desired host settings. None of them says a node adopted anything.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
@@ -660,10 +660,10 @@ stored. One it could not save holds until its next reboot, and `wartui fan` prin
 `fault` line saying so. Setting the same duty again retries the save.
 
 In `run`, settings' `fan` row shows the duty the bridge last reported and steps it by 5 %. `Enter`
-sends it only when the row moved; `no fan` means no status has reported one. While the link is up,
-the header shows the fan after the bridge, as `fan 40% 1830 rpm`, or `fan 40%` with no reading: in
-the bridge's first second, and for a second or two after a duty change, since no reading spans
-two duties. `wartui status` prints a `fan` line too.
+sends it only when the row moved; `no fan` means the bridge reported none, and `no bridge` that the
+link is down. While the link is up, the header shows the fan after the bridge, as
+`fan 40% 1830 rpm`, or `fan 40%` with no reading: in the bridge's first second, and for a second or
+two after a duty change, since no reading spans two duties. `wartui status` prints a `fan` line too.
 
 ### The channel pool
 
@@ -683,8 +683,8 @@ it differs from the one it stored. One it could not save holds until its next re
 save.
 
 In `run`, settings' `pool` row shows the pool the bridge last reported. `Enter` sends it only when
-the row moved; `no bridge` means no status has reported one. A pool changed while the link is down
-may never reach the bridge, and the next status shows what the bridge holds. The header shows the
+the row moved; `no bridge` means the link is down or no status has reported a pool yet, so there is
+nothing to send it to. The header shows the
 pool once the bridge has reported one, and `wartui status` prints a `pool` line too.
 
 ## Keyboard commands

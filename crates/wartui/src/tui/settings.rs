@@ -109,6 +109,9 @@ pub(super) struct ConfigModal {
     fan: Option<FanDuty>,
     /// The duty the bridge reported when the modal opened, so `Enter` sends only a change.
     fan_seed: Option<FanDuty>,
+    /// Whether the link was up when the modal opened. While it is down, both bridge rows are
+    /// `None`: a value sent then would be dropped, not stored.
+    bridge_up: bool,
     /// Whether `b` remembers the node it gives the scan to.
     remember_ble: bool,
     /// Whether `run` remembers the bridge it connected to.
@@ -213,14 +216,22 @@ pub(super) enum ModalAction {
 impl ConfigModal {
     /// Open the modal, seeded from what is in force.
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
-        // The bridge holds these two, so they are what its last `Status` said.
-        let fan = snapshot.bridge_status.and_then(|status| status.fan).map(|fan| fan.duty);
+        // The bridge holds these two, so they are what its last `Status` said, and nothing while
+        // the link is down.
+        let bridge_up = snapshot.link_up;
+        let pool = snapshot.pool.filter(|_| bridge_up);
+        let fan = snapshot
+            .bridge_status
+            .and_then(|status| status.fan)
+            .map(|fan| fan.duty)
+            .filter(|_| bridge_up);
         Self {
             selected: Field::Pool,
-            pool: snapshot.pool,
-            pool_seed: snapshot.pool,
+            pool,
+            pool_seed: pool,
             fan,
             fan_seed: fan,
+            bridge_up,
             remember_ble: snapshot.remember_ble,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
@@ -567,7 +578,10 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         match modal.fan {
             Some(duty) => row("fan", &duty, Field::Fan),
             // Nothing to step, so no arrows.
-            None => Line::from(Span::styled(format!("{:<18}  no fan", "fan"), styled(Field::Fan))),
+            None => {
+                let why = if modal.bridge_up { "no fan" } else { "no bridge" };
+                Line::from(Span::styled(format!("{:<18}  {why}", "fan"), styled(Field::Fan)))
+            }
         },
         row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
@@ -1969,6 +1983,36 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("fan                 no fan"), "{rendered}");
+    }
+
+    #[test]
+    fn ui_shows_no_bridge_on_both_bridge_rows_and_sends_neither_when_link_is_down() {
+        let mut snapshot = fan_snapshot(40);
+        snapshot.pool = Some(ChannelPool::Eu);
+        snapshot.link_up = false;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        let right = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        select(Field::Pool, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(right, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").selected, Field::Fan);
+        ui.on_modal_key(right, &snapshot, &tx);
+        let modal = ui.modal().expect("open");
+        assert_eq!((modal.pool, modal.fan), (None, None));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("pool                no bridge"), "{rendered}");
+        assert!(rendered.contains("fan                 no bridge"), "{rendered}");
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+        let sent: Vec<Command> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !sent.iter().any(|c| matches!(c, Command::SetPool { .. } | Command::SetFanDuty { .. })),
+            "{sent:?}"
+        );
     }
 
     #[test]
