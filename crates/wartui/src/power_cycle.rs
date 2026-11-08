@@ -69,15 +69,7 @@ pub async fn run(args: Args) -> Result<()> {
 /// The slot `name` means on `board`, or why it is refused: a bridge with no carrier switches no
 /// power, and a carrier takes only the names it drives.
 fn slot_for(board: NodeBoard, name: &str) -> Result<Slot, String> {
-    if !board.is_carrier() {
-        return Err(NO_CARRIER.to_owned());
-    }
-    board.parse_label(name).ok_or_else(|| {
-        format!(
-            "{name:?} is not a slot on this {board}: name one of {}",
-            crate::text::slot_range(board)
-        )
-    })
+    crate::text::carrier_slot_named(board, name, NO_CARRIER)
 }
 
 /// Wait for the answer about `slot`, printing each fault the bridge reports meanwhile.

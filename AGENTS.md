@@ -96,7 +96,7 @@ own.
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
-  `settings` (the records the P4 keeps its fan duty and channel pool in), `beacon`, `hci`, `dedup`,
+  `settings` (the records the P4 keeps its fan duty, channel pool and Bluetooth slot in), `beacon`, `hci`, `dedup`,
   `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
   `Mac` type and its
@@ -113,16 +113,16 @@ own.
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `power-cycle`/`fan`/`pool`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`fan`/`pool`/`bluetooth`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
   knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
   carries the C6's, and updates it. It caches a node image in PSRAM for `wartui ota`, and writes
   the one record it builds from it, `UpdateChunk`, a layout in the bus's frozen core
-  (`src/cache.rs`). On a carrier it drives the lid fan (`src/fan.rs`). It keeps the fan's duty and
-  the channel pool in the `nvs` partition, the settings the bridge rather than the host holds
-  (`src/settings.rs`).
+  (`src/cache.rs`). On a carrier it drives the lid fan (`src/fan.rs`). It keeps the fan's duty,
+  the channel pool and the Bluetooth slot in the `nvs` partition, the settings the bridge rather
+  than the host holds (`src/settings.rs`).
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It holds the link for a future Bluetooth host link, and runs no radio today.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
@@ -231,15 +231,15 @@ is here rather than only in a `//!`.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's
-  without asking who put it there. `Command::AssignBle` is one operator
-  decision, and it is an *input* to the planner rather than an exception to it: it names the node
-  whose job is Bluetooth, and the planner is what deals that node nothing and hands its share
-  round. The remembered Bluetooth node is that same decision carried forward — across a restart,
-  or a node's return to the fleet — and reaches the planner the same way. So moving the scan
-  re-cuts the whole pool, and `replan` — not `reissue` — is what delivers both ends of the move.
-  The pool is the other input, and it is the bridge's: the planner cuts the pool the bridge's
-  `Status` reports, and cuts nothing before the first. `Command::SetPool` only asks the bridge to
-  change it. Either way it changes what the planner cuts, never who holds which share.
+  without asking who put it there. The Bluetooth slot is one input to the planner rather than an
+  exception to it, and it is the bridge's: kept in NVS beside the pool and reported in `Status`.
+  `Command::AssignBle` only asks the bridge to change it. The planner deals `Job::Bluetooth` to the
+  node heartbeating from that slot, which takes no channels while its share is handed round, and
+  an empty slot means no node scans. So moving the scan re-cuts the whole pool, and `replan` — not
+  `reissue` — is what delivers both ends of the move. The pool is the other input, and it is the
+  bridge's too: the planner cuts the pool the bridge's `Status` reports, and cuts nothing before
+  the first. `Command::SetPool` only asks the bridge to change it. Either way it changes what the
+  planner cuts, never who holds which share.
 - **Only heartbeating nodes are assignable or in the plan** — an assignment answers a heartbeat,
   and goes to the slot that heartbeat came from. A node whose slot the bridge's `Status` shows
   absent leaves the plan at that `Status`, until its next heartbeat. The 20 s heartbeat timeout is
@@ -346,14 +346,14 @@ edit stops; follow the pointer before changing the rule.
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
   `ASSIGN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
-  `b`, or carried forward from the node `b` last chose, which `wartui.toml` remembers. The node
+  `b`, which asks the bridge to hold the slot whose node scans; the bridge keeps it in NVS. The node
   holding it is dealt no channels and is counted in `Plan::node_count` anyway, because that reports
   the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
   is sent only with the flag beside it; without it, a node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::assign_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `assign_for`;
-  `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
-  `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
+  `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle`;
+  `crates/wartui-core/src/engine/replan.rs`, `on_bridge_ble` / `replan`;
   `docs/phase-2-findings.md`
 - **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains
   the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the gap is the

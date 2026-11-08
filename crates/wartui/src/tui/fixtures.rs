@@ -157,8 +157,7 @@ pub(super) fn busy() -> Snapshot {
         pool: Some(ChannelPool::All),
         plan: None,
         ble_node: None,
-        preferred_ble: None,
-        remember_ble: true,
+        ble_slot: None,
         nodes: vec![
             assigned(0x84),
             unannounced(0x85),
@@ -173,6 +172,8 @@ pub(super) fn busy() -> Snapshot {
         tail: (0..40)
             .map(|n| TailEntry {
                 node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
+                // Where `node(0x84)` sits: A7, `N7`.
+                slot: Slot::new(0, 6).expect("A7"),
                 rx_at_ms: EPOCH_MS + i64::from(n) * 1000,
                 bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, n],
                 ssid: if n % 3 == 0 { String::new() } else { format!("network {n}") },

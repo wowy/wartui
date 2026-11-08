@@ -167,7 +167,7 @@ fn store_records_initial_provenance_when_capture_created() {
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
     assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
-    assert!(settings.ends_with(";preferred_ble=none;ble_node=none"), "{settings}");
+    assert!(settings.ends_with(";ble_slot=none;ble_node=none"), "{settings}");
     assert_eq!(store.close().dropped, 0);
 }
 

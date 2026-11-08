@@ -23,6 +23,7 @@ use wartui_proto::reset::ResetCause;
 
 mod analyze;
 mod bench;
+mod bluetooth;
 mod capture;
 mod config;
 mod export;
@@ -82,6 +83,8 @@ enum Command {
     Fan(fan::Args),
     /// Read or set the channel pool, which the bridge keeps across its reboots.
     Pool(pool::Args),
+    /// Read or set the slot whose node scans Bluetooth, which the bridge keeps across its reboots.
+    Bluetooth(bluetooth::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -104,8 +107,8 @@ async fn main() -> Result<()> {
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
-        // `power-cycle`, `fan`, `pool` and `ota` read a broken one as no bridge remembered, and
-        // `ports` and `flash-fleet` never read it.
+        // `power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read a broken one as no bridge
+        // remembered, and `ports` and `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
         Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
         Some(Command::Fan(args)) => fan::run(args).await,
         Some(Command::Pool(args)) => pool::run(args).await,
+        Some(Command::Bluetooth(args)) => bluetooth::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -277,7 +281,7 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
 
 /// Open the one bridge `named` resolves to, as `wartui reset` resolves it
 /// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
-/// `Ready`. `fan`, `pool` and `power-cycle` connect through this.
+/// `Ready`. `fan`, `pool`, `bluetooth` and `power-cycle` connect through this.
 async fn connect_one(
     named: Option<&str>,
     config: Option<&Path>,
@@ -635,6 +639,20 @@ mod tests {
         assert!(matches!(parse(args).unwrap().command, Some(Command::PowerCycle(_))));
         // Which node is the whole question, so there is no default.
         assert!(parse(["wartui", "power-cycle"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_bluetooth_when_given_slot_bridge_and_config() {
+        let args = ["wartui", "bluetooth", "N3", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::Bluetooth(_))));
+        let args = ["wartui", "bluetooth", "none", "--bridge", "44:C0"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::Bluetooth(_))));
+    }
+
+    #[test]
+    fn cli_parser_accepts_bluetooth_when_given_nothing() {
+        let cli = parse(["wartui", "bluetooth"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Bluetooth(_))));
     }
 
     #[test]

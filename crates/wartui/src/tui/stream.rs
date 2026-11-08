@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use wartui_core::engine::{Snapshot, TailEntry};
-use wartui_proto::bus::RecordKind;
+use wartui_proto::bus::{NodeBoard, RecordKind};
 use wartui_proto::mac;
 
 use super::bignum::big;
@@ -59,8 +59,15 @@ pub(super) fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     // Newest last, and only as many as fit. The tail holds up to 200, but the pane
     // shows a couple of dozen.
     let visible = usize::from(table.height.saturating_sub(1));
-    let rows: Vec<Row<'_>> =
-        snapshot.tail.iter().rev().take(visible).rev().map(observation_row).collect();
+    let board = snapshot.node_board();
+    let rows: Vec<Row<'_>> = snapshot
+        .tail
+        .iter()
+        .rev()
+        .take(visible)
+        .rev()
+        .map(|entry| observation_row(board, entry))
+        .collect();
 
     let widths = [
         Constraint::Length(8),
@@ -126,7 +133,7 @@ fn kind_style(kind: RecordKind) -> Style {
     }
 }
 
-fn observation_row(entry: &TailEntry) -> Row<'static> {
+fn observation_row(board: NodeBoard, entry: &TailEntry) -> Row<'static> {
     let kind = kind_style(entry.kind);
     let ssid = if entry.ssid.is_empty() {
         let text = if entry.kind == RecordKind::Wifi { "<hidden>" } else { "<n/a>" };
@@ -136,8 +143,8 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
     };
     Row::new(vec![
         Cell::from(clock(entry.rx_at_ms)),
-        // The same octets the fleet table names the node by.
-        Cell::from(mac::short(&entry.node_mac).to_string()),
+        // The same name the fleet table gives the node.
+        Cell::from(board.label(entry.slot).to_string()),
         Cell::from(mac::full(&entry.bssid).to_string()).style(kind),
         Cell::from(if entry.channel == 0 { "—".to_owned() } else { entry.channel.to_string() }),
         Cell::from(entry.rssi.to_string()),
@@ -154,6 +161,18 @@ mod tests {
     use crate::tui::draw;
     use crate::tui::fixtures::*;
     use crate::tui::ui::Ui;
+
+    #[test]
+    fn stream_names_node_by_slot_when_rendering_observations() {
+        // `busy` is a carrier-14, and its stream comes from A7, `N7`.
+        let snapshot = Snapshot { nodes: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        let rows: Vec<&str> =
+            screen.lines().filter(|line| line.contains("AA:BB:CC:DD:EE")).collect();
+        assert!(!rows.is_empty(), "{screen}");
+        assert!(rows.iter().all(|row| row.contains(" N7 ")), "{screen}");
+        assert!(rows.iter().all(|row| !row.contains("57:84")), "{screen}");
+    }
 
     #[test]
     fn approx_shortens_to_three_figures_when_count_has_more() {

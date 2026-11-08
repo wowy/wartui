@@ -1,5 +1,6 @@
-//! The settings the P4 keeps on flash: the lid fan's duty and the channel pool, in the first
-//! sector of its `nvs` partition. `wartui_proto::settings` has the records' layout.
+//! The settings the P4 keeps on flash: the lid fan's duty, the channel pool and the Bluetooth
+//! slot, in the first sector of its `nvs` partition. `wartui_proto::settings` has the records'
+//! layout.
 //!
 //! **The P4 is the settings' system of record.** It reads the sector once at boot, on every
 //! board, before the futures start ([`boot`]), and runs what it holds, or the defaults when
@@ -14,6 +15,7 @@ use core::fmt::{self, Write as _};
 use static_cell::ConstStaticCell;
 use wartui_firmware::ota::Fault;
 use wartui_proto::ChannelPool;
+use wartui_proto::bus::Slot;
 use wartui_proto::link::LogStr;
 use wartui_proto::ota::SECTOR;
 use wartui_proto::settings::{self, Setting, Stored, Write, write_for};
@@ -49,6 +51,18 @@ pub fn set_pool(shared: &Shared, pool: ChannelPool) {
     if let Err(why) = save(shared, Setting::Pool(pool)) {
         let mut message = LogStr::new();
         let _ = write!(message, "pool {pool} not saved, so it holds until reboot: {why}");
+        shared.push_error(&message);
+    }
+}
+
+/// A `SetBle`: give the scan to `slot`'s node, or to none, now, and store it when the sector does
+/// not hold it, as [`set_pool`] does.
+#[inline(never)]
+pub fn set_ble(shared: &Shared, slot: Option<Slot>) {
+    shared.ble.set(slot);
+    if let Err(why) = save(shared, Setting::Ble(slot)) {
+        let mut message = LogStr::new();
+        let _ = write!(message, "bluetooth slot not saved, so it holds until reboot: {why}");
         shared.push_error(&message);
     }
 }

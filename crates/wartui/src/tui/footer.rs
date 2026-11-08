@@ -11,11 +11,10 @@ use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
-use crate::text::thousands;
+use crate::text::{node_name, thousands};
 
 /// Draw the footer into `area`. `faults` are already wrapped by [`fault_lines`].
 pub(super) fn draw_footer(
@@ -191,7 +190,7 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     // log goes only to `--log-file`.
     for view in &snapshot.nodes {
         let node = &view.state;
-        let name = mac::short(&node.mac);
+        let name = node_name(snapshot.node_board(), node.slot, &node.mac);
         if let Some(cause) = node.fault_restart {
             let times = if node.fault_restarts > 1 {
                 format!(" (×{})", node.fault_restarts)
@@ -620,11 +619,21 @@ mod tests {
         snapshot.nodes[2].state.fault_restart = Some(ResetCause::Brownout);
         snapshot.nodes[2].state.fault_restarts = 1;
         let screen = rendered(&snapshot);
-        assert!(screen.contains("57:86 restarted: brownout"), "{screen}");
+        // `busy` is a carrier-14, and byte 0x86 is B2, `N9`.
+        assert!(screen.contains("N9 restarted: brownout"), "{screen}");
         assert!(!screen.contains("(×"), "{screen}");
 
         snapshot.nodes[2].state.fault_restarts = 3;
-        assert_eq!(faults(&snapshot), ["57:86 restarted: brownout (×3)"]);
+        assert_eq!(faults(&snapshot), ["N9 restarted: brownout (×3)"]);
+    }
+
+    #[test]
+    fn footer_names_node_by_address_when_node_has_no_slot() {
+        let mut snapshot = quiet();
+        snapshot.nodes[2].state.slot = None;
+        snapshot.nodes[2].state.fault_restart = Some(ResetCause::Brownout);
+        snapshot.nodes[2].state.fault_restarts = 1;
+        assert_eq!(faults(&snapshot), ["57:86 restarted: brownout"]);
     }
 
     #[test]

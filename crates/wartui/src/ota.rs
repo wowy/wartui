@@ -42,19 +42,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::ota::{Failure, Ids, OtaImage, OtaSession, Outcome, Phase, Progress};
 use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now};
 use wartui_proto::bus::{
-    Board, Capabilities, Heartbeat, NODE_VERSION, Slot, UpType, UpdateState, Version,
+    Board, Capabilities, Heartbeat, NODE_VERSION, NodeBoard, Slot, UpType, UpdateState, Version,
 };
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::update;
 
 use crate::flash::app::{self, AppImage, board_name};
+use crate::text::node_name;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -69,10 +69,10 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Update this node, by address or the end of it (`A1:B0`). Repeatable. Every node heard
-    /// by default.
-    #[arg(long = "node", value_name = "MAC", value_parser = node_arg)]
-    nodes: Vec<BridgeSpec>,
+    /// A node to update, by the slot name the fleet table shows (`N3`). Repeatable. Every node
+    /// heard by default.
+    #[arg(long = "node", value_name = "SLOT")]
+    nodes: Vec<String>,
 
     /// Send this app-only image, to the nodes of the board it was built for, rather than
     /// building or downloading one.
@@ -107,14 +107,17 @@ pub struct Args {
     sim: Option<u8>,
 }
 
-/// A `--node` value: an address, or the end of one.
-fn node_arg(text: &str) -> Result<BridgeSpec, String> {
-    match text.parse::<BridgeSpec>() {
-        Ok(BridgeSpec::Path(_)) | Err(_) => {
-            Err(format!("'{text}' is not an address like 3C:DC:75:84:A1:B0, or the end of one"))
-        }
-        Ok(spec) => Ok(spec),
+/// The slots `names` mean on `board`. A bridge with no carrier has no slot names to take.
+fn slots_named(board: NodeBoard, names: &[String]) -> Result<Vec<Slot>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
     }
+    if !board.is_carrier() {
+        return Err("this bridge has no carrier board, so no slot has a name to pick a node by; \
+                    leave out --node to update every node heard"
+            .to_owned());
+    }
+    names.iter().map(|name| crate::text::slot_named(board, name)).collect()
 }
 
 /// What the run does with one node.
@@ -166,10 +169,17 @@ pub async fn run(args: Args) -> Result<()> {
         Ok(info) => info?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
     };
+    let board = info.node_board;
+    let named = slots_named(board, &args.nodes).map_err(anyhow::Error::msg)?;
     println!("bridge  {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("listening {} s for heartbeats", args.listen);
-    let (heard, slots) = listen(&mut link, Duration::from_secs(args.listen)).await?;
-    let targets = select(&heard, &args.nodes)?;
+    let listen_for = Duration::from_secs(args.listen);
+    let (heard, slots) = listen(&mut link, listen_for).await?;
+    let targets = select(&heard, &slots, &named, board, listen_for)?;
+    let names: HashMap<Mac, String> = targets
+        .iter()
+        .map(|(node, _)| (*node, node_name(board, slots.get(node).copied(), node)))
+        .collect();
 
     let images = images(&args, &targets).await?;
     let plan: Vec<(Mac, Capabilities, Option<Version>, Action)> = targets
@@ -179,7 +189,7 @@ pub async fn run(args: Args) -> Result<()> {
             (*node, *caps, image, decide(caps, image, args.force))
         })
         .collect();
-    print_table(&plan);
+    print_table(&plan, &names);
 
     let chosen: Vec<(Mac, Capabilities, bool)> = plan
         .iter()
@@ -228,7 +238,7 @@ pub async fn run(args: Args) -> Result<()> {
                 }
             })
             .collect();
-        let nodes: Vec<Mac> = members.iter().map(|&i| chosen[i].0).collect();
+        let nodes: Vec<String> = members.iter().map(|&i| names[&chosen[i].0].clone()).collect();
         let mut view = FleetView::new(&nodes, image.map(|image| image.bytes.len()));
         let ended =
             update_fleet(&mut link, image, &mut sessions, &mut stop, |r| view.show(r)).await;
@@ -363,7 +373,8 @@ async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
 }
 
 /// Every node heartbeating within `period`, as its latest heartbeat's prefix says, and the slot
-/// that heartbeat came from.
+/// that heartbeat came from. A slot names the node heard from it last: a node another node's
+/// heartbeat displaced keeps its place among those heard, with no slot.
 async fn listen(
     link: &mut LinkHandle,
     period: Duration,
@@ -382,6 +393,7 @@ async fn listen(
             && let Ok((caps, mac)) = Heartbeat::identity(&body)
         {
             heard.insert(mac, caps);
+            slots.retain(|_, held| *held != slot);
             slots.insert(mac, slot);
         }
     }
@@ -392,35 +404,30 @@ async fn drain(link: &mut LinkHandle) {
     while let Ok(Some(_)) = tokio::time::timeout(Duration::ZERO, link.recv()).await {}
 }
 
-/// The nodes `--node` names among those heard, or every one heard.
+/// The nodes heard in the `named` slots of `board`, or every one heard when none is named.
 fn select(
     heard: &BTreeMap<Mac, Capabilities>,
-    specs: &[BridgeSpec],
+    slots: &HashMap<Mac, Slot>,
+    named: &[Slot],
+    board: NodeBoard,
+    listened: Duration,
 ) -> Result<Vec<(Mac, Capabilities)>> {
     if heard.is_empty() {
         bail!("no node heartbeated; check they are powered and in range of the bridge");
     }
-    if specs.is_empty() {
+    if named.is_empty() {
         return Ok(heard.iter().map(|(node, caps)| (*node, *caps)).collect());
     }
     let mut chosen = BTreeMap::new();
-    for spec in specs {
-        let matching: Vec<(&Mac, &Capabilities)> =
-            heard.iter().filter(|(node, _)| spec.matches_address(node)).collect();
-        match matching.as_slice() {
-            [] => bail!("no node heard is {spec}"),
-            [(node, caps)] => {
-                chosen.insert(**node, **caps);
-            }
-            several => {
-                let names: Vec<String> =
-                    several.iter().map(|(node, _)| mac::full(node).to_string()).collect();
-                bail!(
-                    "several nodes heard end with {spec} ({}); name one by more of its address",
-                    names.join(", ")
-                );
-            }
-        }
+    for slot in named {
+        let Some((node, caps)) = slots
+            .iter()
+            .find(|(_, held)| *held == slot)
+            .and_then(|(node, _)| heard.get(node).map(|caps| (*node, *caps)))
+        else {
+            bail!("no node heartbeated from {} in {}s", board.label(*slot), listened.as_secs());
+        };
+        chosen.insert(node, caps);
     }
     Ok(chosen.into_iter().collect())
 }
@@ -490,22 +497,35 @@ async fn images(args: &Args, targets: &[(Mac, Capabilities)]) -> Result<HashMap<
         .collect())
 }
 
-fn print_table(plan: &[(Mac, Capabilities, Option<Version>, Action)]) {
+fn print_table(
+    plan: &[(Mac, Capabilities, Option<Version>, Action)],
+    names: &HashMap<Mac, String>,
+) {
     println!();
-    println!("{:<7}  {:<14}  {:<8}  {:<8}  action", "node", "board", "version", "image");
+    for line in table(plan, names) {
+        println!("{line}");
+    }
+    println!();
+}
+
+/// The table's lines, header first, each node by the name in `names`.
+fn table(
+    plan: &[(Mac, Capabilities, Option<Version>, Action)],
+    names: &HashMap<Mac, String>,
+) -> Vec<String> {
+    let mut lines =
+        vec![format!("{:<7}  {:<14}  {:<8}  {:<8}  action", "node", "board", "version", "image")];
     for (node, caps, image, action) in plan {
         let image = image.map_or_else(|| "—".to_owned(), |v| v.to_string());
         let version =
             if caps.trial { format!("{};trial", caps.version) } else { caps.version.to_string() };
-        println!(
-            "{:<7}  {:<14}  {:<8}  {:<8}  {action}",
-            mac::short(node).to_string(),
+        let name = names.get(node).cloned().unwrap_or_else(|| mac::short(node).to_string());
+        lines.push(format!(
+            "{name:<7}  {:<14}  {version:<8}  {image:<8}  {action}",
             board_name(caps.board),
-            version,
-            image
-        );
+        ));
     }
-    println!();
+    lines
 }
 
 /// Ask on the terminal. `run` has already refused when standard input is not one.
@@ -547,11 +567,12 @@ impl CacheLine {
 }
 
 impl FleetView {
-    /// A view of `nodes`, and of an upload of `image` bytes when the fleet sends an image.
-    fn new(nodes: &[Mac], image: Option<usize>) -> Self {
+    /// A view of the nodes `nodes` names, and of an upload of `image` bytes when the fleet sends
+    /// an image.
+    fn new(nodes: &[String], image: Option<usize>) -> Self {
         Self {
             cache: image.map(|len| CacheLine { len, took: None }),
-            lines: nodes.iter().map(|node| ProgressLine::new(*node)).collect(),
+            lines: nodes.iter().map(|node| ProgressLine::new(node.clone())).collect(),
             tty: std::io::stdout().is_terminal(),
             rows: 0,
             drawn: None,
@@ -633,14 +654,8 @@ struct ProgressLine {
 }
 
 impl ProgressLine {
-    fn new(node: Mac) -> Self {
-        Self {
-            node: mac::short(&node).to_string(),
-            progress: None,
-            outcome: None,
-            streaming: None,
-            streamed: None,
-        }
+    fn new(node: String) -> Self {
+        Self { node, progress: None, outcome: None, streaming: None, streamed: None }
     }
 
     /// Take the latest progress, returning whether its phase changed. The rate's clock starts
@@ -760,24 +775,52 @@ mod tests {
         assert_eq!(action, Action::Update);
     }
 
-    #[test]
-    fn ota_cmd_selects_nodes_by_address_tail_when_named() {
-        let a = [0x3C, 0xDC, 0x75, 0x84, 0xA1, 0xB0];
-        let b = [0x3C, 0xDC, 0x75, 0x84, 0x57, 0xB0];
+    #[tokio::test(start_paused = true)]
+    async fn ota_cmd_selects_nodes_by_slot_when_named() {
+        // The simulator is a carrier-14 and puts node 0 in A1, `N1`, and node 1 in A2.
+        let (_link, nodes, slots) = sim_fleet(2, None).await;
         let heard: BTreeMap<Mac, Capabilities> =
-            [(a, caps(NEW, false)), (b, caps(NEW, false))].into();
-        assert_eq!(select(&heard, &[]).unwrap().len(), 2);
-        let chosen = select(&heard, &[node_arg("A1:B0").unwrap()]).unwrap();
-        assert_eq!(chosen.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [a]);
-        assert!(select(&heard, &[node_arg("00:01").unwrap()]).is_err());
-        let error = select(&heard, &[node_arg("B0").unwrap()]).unwrap_err().to_string();
-        assert!(error.contains("several nodes"), "{error}");
+            nodes.iter().map(|node| (*node, caps(NEW, false))).collect();
+        let board = NodeBoard::Carrier14;
+        let listened = Duration::from_secs(6);
+        let pick = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+            let named = slots_named(board, &names).map_err(anyhow::Error::msg)?;
+            select(&heard, &slots, &named, board, listened)
+        };
+
+        assert_eq!(pick(&[]).unwrap().len(), 2, "none named picks every node heard");
+        let chosen = pick(&["N1"]).unwrap();
+        assert_eq!(chosen.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [nodes[0]]);
+        let error = pick(&["N3"]).unwrap_err().to_string();
+        assert_eq!(error, "no node heartbeated from N3 in 6s");
+        let error = pick(&["N15"]).unwrap_err().to_string();
+        assert!(error.contains("N1 to N14"), "{error}");
     }
 
     #[test]
-    fn ota_cmd_refuses_node_arg_when_it_is_not_an_address() {
-        assert!(node_arg("/dev/ttyACM0").is_err());
-        assert!(node_arg("3C:DC:75:84:A1:B0").is_ok());
+    fn ota_cmd_refuses_slot_name_when_bridge_has_no_carrier() {
+        assert_eq!(slots_named(NodeBoard::NoCarrier, &[]), Ok(Vec::new()));
+        let refused = slots_named(NodeBoard::NoCarrier, &["N1".to_owned()]).expect_err("refused");
+        assert!(refused.contains("no carrier board"), "{refused}");
+    }
+
+    #[test]
+    fn ota_cmd_names_node_by_slot_when_printing_table() {
+        let (named, slotless) = ([0x02, 0, 0, 0, 0, 1], [0x02, 0, 0, 0, 0x57, 0x84]);
+        let board = NodeBoard::Carrier14;
+        let names: HashMap<Mac, String> = [
+            (named, node_name(board, Slot::new(0, 0), &named)),
+            (slotless, node_name(board, None, &slotless)),
+        ]
+        .into();
+        let plan = [
+            (named, caps(Version::new(0, 0, 9), false), Some(NEW), Action::Update),
+            (slotless, caps(NEW, false), Some(NEW), Action::Same(NEW)),
+        ];
+        let lines = table(&plan, &names);
+        assert!(lines[1].starts_with("N1       esp32c5"), "{lines:?}");
+        assert!(lines[2].starts_with("57:84    esp32c5"), "{lines:?}");
     }
 
     /// How much faster than real time the fake fleet runs.

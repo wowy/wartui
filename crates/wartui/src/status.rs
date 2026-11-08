@@ -93,6 +93,7 @@ pub async fn run(args: Args) -> Result<()> {
         host_uart_errors,
         fan,
         pool,
+        ble,
         present,
     } = status
     else {
@@ -105,6 +106,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
     println!("pool       {pool}");
+    println!("bluetooth  {}", ble_text(info.node_board, ble));
     println!("slots      {}", slots_text(info.node_board, present));
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
@@ -137,6 +139,11 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
         Some(FanStats { duty, rpm: None }) => format!("{duty}, rpm not read yet"),
         None => "no carrier, so no fan".to_owned(),
     }
+}
+
+/// The slot whose node scans Bluetooth, by its board's name, or `none`.
+pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
+    ble.map_or_else(|| "none".to_owned(), |slot| board.label(slot).to_string())
 }
 
 /// The slots `present` names, as `board` labels them, or `none`.
@@ -280,11 +287,11 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, awaited, board_line, diagnostic_lines, fan_text, human_uptime, radio_line,
-        silence_note, slots_text,
+        Awaited, awaited, ble_text, board_line, diagnostic_lines, fan_text, human_uptime,
+        radio_line, silence_note, slots_text,
     };
     use wartui_bridge::LinkEvent;
-    use wartui_proto::bus::NodeBoard;
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
@@ -313,6 +320,13 @@ mod tests {
     fn status_prints_board_and_its_slots_when_bridge_announces() {
         assert_eq!(board_line(NodeBoard::Carrier6), "carrier-6, 6 node slots, N1 to N6");
         assert_eq!(board_line(NodeBoard::Carrier10), "carrier-10, 10 node slots, N1 to N10");
+    }
+
+    #[test]
+    fn status_prints_ble_slot_by_board_label_when_bridge_reports_one() {
+        let b2 = Slot::new(1, 1);
+        assert_eq!(ble_text(NodeBoard::Carrier14, b2), "N9");
+        assert_eq!(ble_text(NodeBoard::Carrier14, None), "none");
     }
 
     #[test]
@@ -421,6 +435,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            ble: None,
             present: 0,
         };
         let event = LinkEvent::Message(status.clone());

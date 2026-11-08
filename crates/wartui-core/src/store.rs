@@ -981,13 +981,13 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
     };
     format!(
         "version=1;at_ms={at_ms};pool={};record_raw={};gps={};gps_max_age_ms={};\
-         remember_ble={};preferred_ble={};ble_node={}",
+         ble_slot={};ble_node={}",
         pool_name(settings.pool),
         settings.record_raw,
         settings.gps,
         settings.gps_max_age.as_millis(),
-        settings.remember_ble,
-        mac(settings.preferred_ble),
+        // The bus name, as the store keeps every slot.
+        settings.ble_slot.map_or_else(|| "none".to_owned(), |slot| slot.to_string()),
         mac(settings.ble_node),
     )
 }

@@ -17,7 +17,7 @@
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API key, so a first-time operator has a place to paste one. It
 //! never rewrites an existing file at startup. Its view does, through one save path: the
-//! settings modal, `b`, and a change to the bridge the transport remembers.
+//! settings modal, and a change to the bridge the transport remembers.
 //! `flash-bridge` saves the board it found and flashed as the bridge, unless remembering
 //! is off, so `run` and the next `flash-bridge` open the new bridge first. A board named
 //! with `--bridge` is often some other device, and is not saved.
@@ -44,38 +44,12 @@ pub struct Config {
     /// byte-for-byte. Declared before the tables, since TOML root keys must come first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_ssids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Bluetooth::is_empty")]
-    pub bluetooth: Bluetooth,
     #[serde(default, skip_serializing_if = "Bridge::is_empty")]
     pub bridge: Bridge,
     #[serde(default, skip_serializing_if = "Gps::is_empty")]
     pub gps: Gps,
     #[serde(default)]
     pub api_keys: ApiKeys,
-}
-
-/// The `[bluetooth]` table: whether giving a node the scan (`b`) remembers it, and the
-/// node remembered. `remember` absent means on. `node` is written the way `wartui ports`
-/// prints a MAC, and is refused beside `remember = false`, which forgets it.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Bluetooth {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remember: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "write_mac",
-        deserialize_with = "read_node"
-    )]
-    pub node: Option<Mac>,
-}
-
-impl Bluetooth {
-    /// Whether neither key is set, so `save` writes no `[bluetooth]` table at all.
-    fn is_empty(&self) -> bool {
-        self.remember.is_none() && self.node.is_none()
-    }
 }
 
 /// The `[bridge]` table: whether `run` and `flash-bridge` remember the bridge, and the
@@ -137,10 +111,6 @@ fn write_mac<S: Serializer>(mac: &Option<Mac>, serializer: S) -> Result<S::Ok, S
     }
 }
 
-fn read_node<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Mac>, D::Error> {
-    read_mac("bluetooth.node", deserializer)
-}
-
 fn read_bridge_mac<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Mac>, D::Error> {
     read_mac("bridge.mac", deserializer)
 }
@@ -176,9 +146,6 @@ impl Config {
                 GPS_RATE_HZ.start(),
                 GPS_RATE_HZ.end()
             );
-        }
-        if self.bluetooth.remember == Some(false) && self.bluetooth.node.is_some() {
-            bail!("bluetooth.node is set while bluetooth.remember = false, which forgets it");
         }
         if self.bridge.remember == Some(false) && self.bridge.mac.is_some() {
             bail!("bridge.mac is set while bridge.remember = false, which forgets it");
@@ -473,8 +440,8 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeys, Bluetooth, Bridge, Config, Gps, create_if_missing, default_path_in,
-        excluded_ssid_bytes, load, load_from, path, remembered_bridge_from, save,
+        ApiKeys, Bridge, Config, Gps, create_if_missing, default_path_in, excluded_ssid_bytes,
+        load, load_from, path, remembered_bridge_from, save,
     };
     use std::ffi::OsStr;
 
@@ -557,7 +524,7 @@ mod tests {
     fn config_loader_rejects_unknown_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bluetooth]\nremember = true\ntypo = 1\n").unwrap();
+        std::fs::write(&path, "[bridge]\nremember = true\ntypo = 1\n").unwrap();
         assert!(load(Some(&path)).is_err());
     }
 
@@ -623,35 +590,12 @@ mod tests {
     }
 
     #[test]
-    fn config_loader_reads_bluetooth_table() {
+    fn config_loader_rejects_bluetooth_table() {
+        // The bridge holds the Bluetooth slot, so the table is as unknown as any other.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bluetooth]\nremember = true\nnode = \"aa:BB:cc:01:02:03\"\n")
-            .unwrap();
-        let config = load(Some(&path)).unwrap();
-        assert_eq!(config.bluetooth.remember, Some(true));
-        assert_eq!(config.bluetooth.node, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
-    }
-
-    #[test]
-    fn config_loader_rejects_malformed_bluetooth_node() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bluetooth]\nnode = \"AA:BB:CC\"\n").unwrap();
-        let error = load(Some(&path)).unwrap_err();
-        let chain = format!("{error:#}");
-        assert!(chain.contains("bluetooth.node"), "{chain}");
-    }
-
-    #[test]
-    fn config_loader_rejects_bluetooth_node_when_remember_is_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bluetooth]\nremember = false\nnode = \"AA:BB:CC:01:02:03\"\n")
-            .unwrap();
-        let error = load(Some(&path)).unwrap_err();
-        let chain = format!("{error:#}");
-        assert!(chain.contains("bluetooth.node"), "{chain}");
+        std::fs::write(&path, "[bluetooth]\nremember = true\n").unwrap();
+        assert!(load(Some(&path)).is_err());
     }
 
     #[test]
@@ -664,7 +608,6 @@ mod tests {
     fn full() -> Config {
         Config {
             excluded_ssids: vec!["HomeNet".to_owned(), "Pixel 9".to_owned()],
-            bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
             bridge: Bridge {
                 remember: Some(true),
                 mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]),
@@ -679,7 +622,6 @@ mod tests {
     fn rate_only(rate: u8) -> Config {
         Config {
             excluded_ssids: Vec::new(),
-            bluetooth: Bluetooth::default(),
             bridge: Bridge::default(),
             gps: Gps { bridge_rate_hz: Some(rate) },
             api_keys: ApiKeys::default(),
@@ -708,23 +650,6 @@ mod tests {
         assert_eq!(saved.gps.bridge_rate_hz, Some(2));
         assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
         assert_eq!(saved.api_keys.wdgwars, "abc123def456");
-    }
-
-    #[test]
-    fn config_save_writes_bluetooth_table_that_reloads() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-
-        save(&target, &full()).unwrap();
-
-        let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.bluetooth.remember, Some(true));
-        assert_eq!(saved.bluetooth.node, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(
-            text.contains("node = \"AA:BB:CC:01:02:03\""),
-            "as `wartui ports` prints it: {text}"
-        );
     }
 
     #[test]
@@ -851,7 +776,6 @@ mod tests {
     fn config_loader_rejects_bridge_mac_when_malformed() {
         let chain = load_error("[bridge]\nmac = \"AA:BB:CC\"\n");
         assert!(chain.contains("bridge.mac"), "{chain}");
-        assert!(!chain.contains("bluetooth.node"), "{chain}");
     }
 
     #[test]
@@ -952,7 +876,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         std::fs::write(
             &target,
-            "# notes\nexcluded-ssids = [\"HomeNet\"]\n[bluetooth]\nremember = false\n",
+            "# notes\nexcluded-ssids = [\"HomeNet\"]\n[bridge]\nremember = false\n",
         )
         .unwrap();
 
@@ -960,7 +884,7 @@ mod tests {
 
         let saved = load(Some(&target)).unwrap();
         assert!(saved.excluded_ssids.is_empty(), "the file holds only what was saved");
-        assert_eq!(saved.bluetooth.remember, None);
+        assert_eq!(saved.bridge.remember, None);
         assert_eq!(saved.gps.bridge_rate_hz, Some(3));
     }
 

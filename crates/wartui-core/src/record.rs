@@ -295,10 +295,9 @@ pub struct CaptureSettings {
     pub gps: bool,
     /// Fix arrival-age limit, independent of receiver timestamps.
     pub gps_max_age: Duration,
-    /// Whether Bluetooth choices are remembered.
-    pub remember_ble: bool,
-    /// Remembered Bluetooth node, if enabled.
-    pub preferred_ble: Option<Mac>,
+    /// Slot whose node scans Bluetooth, as the bridge reports it. `None` for no node, and before
+    /// its first `Status`.
+    pub ble_slot: Option<Slot>,
     /// Node the host currently gives the Bluetooth job, if any.
     pub ble_node: Option<Mac>,
 }

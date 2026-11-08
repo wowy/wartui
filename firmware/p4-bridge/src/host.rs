@@ -177,6 +177,7 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         }
         HostToBridge::SetFan { duty } => crate::fan::set(shared, *duty),
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
+        HostToBridge::SetBle { slot } => crate::settings::set_ble(shared, *slot),
     }
 }
 

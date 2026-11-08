@@ -162,8 +162,9 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
-is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans
-Bluetooth; the planner then shares that node's channels among the rest.
+is the reason it exists. No key or flag assigns channels to a node. `b`, or `wartui bluetooth`,
+only picks which node scans Bluetooth; the planner then shares that node's channels among the
+rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
@@ -177,7 +178,8 @@ The default, `all`, is every channel a node can tune; `us` and `eu` are what the
 permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
-Wi-Fi, and its `channels` column reads `bluetooth`.
+Wi-Fi, and its `channels` column reads `bluetooth`. Give the scan to a node with `b` or
+`wartui bluetooth N3`. The bridge keeps the slot across its reboots.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
 [`crates/wartui/README.md`](crates/wartui/README.md).**

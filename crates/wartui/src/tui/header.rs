@@ -36,9 +36,14 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         first.push(Span::raw(format!("  {fan}")));
     }
 
-    // No pool before the bridge's first `Status`.
+    // No pool before the bridge's first `Status`, and no `bt` before it either or while no
+    // node scans. The slot shows whether or not its node is heartbeating, so a scan held by a
+    // silent node is not invisible.
     let mut second: Vec<Span> =
         snapshot.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
+    if let Some(slot) = snapshot.ble_slot {
+        second.push(Span::raw(format!("bt {}  ", snapshot.node_board().label(slot))));
+    }
     second.extend([
         planning(snapshot),
         Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms))),
@@ -145,6 +150,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::plan::{ChannelPool, plan};
 
@@ -184,6 +190,16 @@ mod tests {
         let mut snapshot = busy();
         snapshot.pool = None;
         assert!(!rendered(&snapshot).contains("pool"), "{}", rendered(&snapshot));
+    }
+
+    #[test]
+    fn header_displays_ble_slot_when_bridge_holds_one() {
+        let mut snapshot = on_board(NodeBoard::Carrier14);
+        snapshot.ble_slot = Slot::from_u8(2);
+        assert!(rendered(&snapshot).contains("bt N3"), "{}", rendered(&snapshot));
+
+        snapshot.ble_slot = None;
+        assert!(!rendered(&snapshot).contains("bt N"), "{}", rendered(&snapshot));
     }
 
     #[test]

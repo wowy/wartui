@@ -9,7 +9,8 @@
 //!
 //! The pool and fan rows live on the bridge, not in the file. Each shows what the bridge last
 //! reported, and `Enter` sends it only when the row moved; the bridge stores it and boots into
-//! it. Neither is ever written to `wartui.toml`.
+//! it. Neither is ever written to `wartui.toml`. The bridge holds the Bluetooth slot too, which
+//! `b` sets rather than a row here.
 //!
 //! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
 //! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
@@ -28,7 +29,6 @@ use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
 use wartui_proto::fan::FanDuty;
-use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;
@@ -46,8 +46,8 @@ pub struct Settings {
     /// Where `wartui.toml` is written. `None` when there is no default location and no
     /// `--config`.
     pub config_path: Option<PathBuf>,
-    /// The file as last loaded or saved. `b` rewrites only the Bluetooth node from this
-    /// copy, and a remembered bridge only the bridge.
+    /// The file as last loaded or saved. A remembered bridge rewrites only the bridge from
+    /// this copy.
     pub saved: config::Config,
     /// The bridge `run` remembers, and whether it remembers one. Shared with the
     /// transport, so the remember-bridge switch takes effect on the next reconnect and
@@ -65,21 +65,14 @@ pub struct Settings {
 enum Field {
     Pool,
     Fan,
-    RememberBle,
     RememberBridge,
     ExcludedSsids,
     WdgwarsKey,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 6] = [
-    Field::Pool,
-    Field::Fan,
-    Field::RememberBle,
-    Field::RememberBridge,
-    Field::ExcludedSsids,
-    Field::WdgwarsKey,
-];
+const FIELDS: [Field; 5] =
+    [Field::Pool, Field::Fan, Field::RememberBridge, Field::ExcludedSsids, Field::WdgwarsKey];
 
 impl Field {
     /// The row below. The last row stays put rather than wrapping.
@@ -112,8 +105,6 @@ pub(super) struct ConfigModal {
     /// Whether the link was up when the modal opened. While it is down, both bridge rows are
     /// `None`: a value sent then would be dropped, not stored.
     bridge_up: bool,
-    /// Whether `b` remembers the node it gives the scan to.
-    remember_ble: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
     /// The WDGWars API key, typed or pasted. Empty means not set.
@@ -183,11 +174,6 @@ impl ConfigModal {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
             Field::Fan => self.fan = self.fan.map(|duty| step_fan(duty, delta)),
-            Field::RememberBle => {
-                if delta != 0 {
-                    self.remember_ble = !self.remember_ble;
-                }
-            }
             Field::RememberBridge => {
                 if delta != 0 {
                     self.remember_bridge = !self.remember_bridge;
@@ -232,7 +218,6 @@ impl ConfigModal {
             fan,
             fan_seed: fan,
             bridge_up,
-            remember_ble: snapshot.remember_ble,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
             // Nor this one. It is what the file holds, hand edits included.
@@ -397,17 +382,13 @@ pub(super) fn apply(
     // it is sent.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
-    let wanted = 1 + usize::from(pool.is_some()) + usize::from(fan.is_some());
+    let wanted = usize::from(pool.is_some()) + usize::from(fan.is_some());
     let Ok(mut permits) = commands.try_reserve_many(wanted) else {
         return Err(ENGINE_BUSY);
     };
     let pool_command = pool.map(|pool| Command::SetPool { pool });
     let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
-    for command in pool_command
-        .into_iter()
-        .chain([Command::RememberBle { on: modal.remember_ble }])
-        .chain(fan_command)
-    {
+    for command in pool_command.into_iter().chain(fan_command) {
         if let Some(permit) = permits.next() {
             permit.send(command);
         }
@@ -434,7 +415,7 @@ pub(super) fn apply(
             text.push_str("; bridge forgotten — each start scans for it");
         }
     }
-    text.push_str(&save_outcome(modal, snapshot, settings));
+    text.push_str(&save_outcome(modal, settings));
     Ok(text)
 }
 
@@ -465,23 +446,11 @@ pub(super) fn apply_excluded(
 /// saved, or why it did not.
 ///
 /// Overwrites the whole file, hand edits included. The rows are already applied, so a
-/// failed save loses only the file.
-///
-/// With remember on, the node saved is the remembered one, else the current holder of
-/// the scan. The engine makes the same choice when the row turns on, and it keeps a
-/// remembered node that has not been heard from yet. On success the written config
-/// becomes [`Settings::saved`].
-fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Settings) -> String {
+/// failed save loses only the file. On success the written config becomes
+/// [`Settings::saved`].
+fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> String {
     let written = config::Config {
         excluded_ssids: modal.excluded.clone(),
-        bluetooth: config::Bluetooth {
-            remember: Some(modal.remember_ble),
-            node: if modal.remember_ble {
-                snapshot.preferred_ble.or(snapshot.ble_node)
-            } else {
-                None
-            },
-        },
         bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None, serial: None },
         // Not on the modal, so kept as the file last had it.
         gps: settings.saved.gps.clone(),
@@ -489,19 +458,6 @@ fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Setting
     };
     save(settings, written)
         .map(|path| format!("; saved to {}", path.display()))
-        .unwrap_or_else(|error| error)
-}
-
-/// Save the Bluetooth node `b` just chose to `wartui.toml`, and return the notice
-/// suffix in the style of [`save_outcome`]. Nothing outside `[bluetooth]` changes.
-pub(super) fn save_ble_node(settings: &mut Settings, node: Option<Mac>) -> String {
-    // Force `remember = true`. `b` saves only while the engine remembers, but after a
-    // failed save `saved` may still say off, and `load` rejects off beside a node.
-    let mut written = settings.saved.clone();
-    written.bluetooth = config::Bluetooth { remember: Some(true), node };
-    let done = if node.is_some() { "remembered" } else { "forgotten" };
-    save(settings, written)
-        .map(|path| format!("; {done} in {}", path.display()))
         .unwrap_or_else(|error| error)
 }
 
@@ -534,7 +490,7 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 12, frame.area());
+    let area = centered_rect(48, 11, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -583,7 +539,6 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
                 Line::from(Span::styled(format!("{:<18}  {why}", "fan"), styled(Field::Fan)))
             }
         },
-        row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
         Line::from(Span::styled(
             format!("{:<18}  {} ›", "excluded ssids", excluded_count(&modal.excluded)),
@@ -693,7 +648,7 @@ mod tests {
     #[test]
     fn ui_opens_modal_with_snapshot_values_when_c_key_is_pressed() {
         let mut snapshot = busy();
-        snapshot.remember_ble = false;
+        snapshot.pool = Some(ChannelPool::Us);
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
 
@@ -701,7 +656,7 @@ mod tests {
 
         let modal = ui.modal().expect("the modal opened");
         assert_eq!(modal.selected, Field::Pool);
-        assert!(!modal.remember_ble);
+        assert_eq!(modal.pool, Some(ChannelPool::Us));
         assert!(rx.try_recv().is_err(), "opening the modal sends nothing");
     }
 
@@ -734,7 +689,6 @@ mod tests {
         assert!(rendered.contains("pool                no bridge"), "{rendered}");
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "no pool to send");
     }
 
@@ -746,8 +700,6 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("still open").selected, Field::Fan);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal().expect("still open").selected, Field::RememberBle);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -817,7 +769,6 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
-        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.starts_with("pool EU sent to the bridge;"), "{notice}");
@@ -837,7 +788,6 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "no SetPool");
     }
 
@@ -846,20 +796,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let mut snapshot = busy();
-        // Holds the scan but is not remembered, so the save falls back on the holder.
+        // The bridge's to keep, so nothing about it reaches the file.
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
+        snapshot.ble_slot = snapshot.nodes[0].state.slot;
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert!(rx.try_recv().is_ok(), "the live change still goes out");
+        assert!(rx.try_recv().is_err(), "nothing moved, so nothing goes out");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains(&target.display().to_string()), "{notice}");
-        let saved = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(saved.bluetooth.remember, Some(true));
-        assert_eq!(saved.bluetooth.node, Some(snapshot.nodes[0].state.mac));
+        let text = std::fs::read_to_string(&target).expect("saved");
+        assert!(!text.contains("bluetooth"), "{text}");
     }
 
     #[test]
@@ -886,12 +836,14 @@ mod tests {
     fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_one_queue_slot_free() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = busy();
+        let snapshot = fan_snapshot(40);
         let (tx, mut rx) = mpsc::channel(2);
         tx.try_send(Command::ClearRing { mac: None }).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        // The pool row moved, so the modal sends two commands.
+        // The pool and fan rows moved, so the modal sends two commands.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -913,9 +865,6 @@ mod tests {
         tx.try_send(Command::ClearRing { mac: None }).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        // Past the fan row.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -923,7 +872,7 @@ mod tests {
         // Open with the edit, so the operator can press Enter again once the engine
         // takes commands.
         let modal = ui.modal().expect("still open");
-        assert!(!modal.remember_ble, "the edit survives");
+        assert_eq!(modal.pool, Some(ChannelPool::Eu), "the edit survives");
         assert!(!target.exists(), "nothing was written");
         assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
     }
@@ -937,6 +886,7 @@ mod tests {
         tx.try_send(Command::ClearRing { mac: None }).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
@@ -948,69 +898,25 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_remember_ble_and_saves_it_when_enter_pressed() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        let mut snapshot = busy();
-        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
-        snapshot.preferred_ble = snapshot.ble_node;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        // Past the fan row.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: false });
-        let file = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(file.bluetooth.remember, Some(false));
-        assert_eq!(file.bluetooth.node, None, "turning it off forgets the node");
-        assert_eq!(ui.saved().bluetooth.remember, Some(false), "the view knows it too");
-    }
-
-    #[test]
-    fn ui_toggles_remember_row_when_h_or_l_pressed() {
-        let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        // Past the fan row.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        let modal = ui.modal().expect("still open");
-        assert_eq!(modal.selected, Field::RememberBle, "the row under the pool");
-        assert!(modal.remember_ble, "seeded from the snapshot");
-
-        for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &snapshot, &tx);
-            assert_eq!(ui.modal().expect("still open").remember_ble, expected, "{key} flips it");
-        }
-    }
-
-    #[test]
     fn ui_overwrites_hand_edit_made_mid_run_when_enter_pressed() {
         // Enter saves what the modal shows, not what the file holds. A hand edit made
         // while the modal is open is overwritten like anything else.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[bluetooth]\nremember = true\n").unwrap();
-        let mut snapshot = busy();
-        snapshot.remember_ble = false;
+        std::fs::write(&target, "[bridge]\nremember = false\n").unwrap();
+        let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         // Hand-edited while the modal is open: a different list and remember switch.
-        let edit = "excluded-ssids = [\"Hand\"]\n[bluetooth]\nremember = true\n";
+        let edit = "excluded-ssids = [\"Hand\"]\n[bridge]\nremember = false\n";
         std::fs::write(&target, edit).unwrap();
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.excluded_ssids, snapshot.excluded_ssids, "the modal's list wins");
-        assert_eq!(saved.bluetooth.remember, Some(false));
+        assert_eq!(saved.bridge.remember, Some(true), "the modal's switch wins");
     }
 
     #[test]
@@ -1121,7 +1027,7 @@ mod tests {
         let mut ui = Ui::default();
         select_remember_bridge(&mut ui, &snapshot, &tx);
         let modal = ui.modal().expect("still open");
-        assert_eq!(modal.selected, Field::RememberBridge, "the row under remember bt node");
+        assert_eq!(modal.selected, Field::RememberBridge, "the row under the fan");
         assert!(modal.remember_bridge, "seeded from the handle, on by default");
 
         for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
@@ -1135,7 +1041,7 @@ mod tests {
         config::load(Some(&dir.join("wartui.toml"))).expect("a valid file").bridge
     }
 
-    const OTHER_BRIDGE: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
+    const OTHER_BRIDGE: wartui_proto::mac::Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
 
     #[test]
     fn ui_forgets_bridge_and_saves_off_when_remember_bridge_turned_off() {
@@ -1200,22 +1106,6 @@ mod tests {
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(!notice.contains("bridge forgotten"), "{notice}");
         assert!(!notice.contains("bridge remembered"), "{notice}");
-    }
-
-    #[test]
-    fn ui_keeps_remembered_bridge_when_b_saves_node() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
-        let snapshot = busy();
-        let node = snapshot.nodes[0].state.mac;
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
-
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-
-        let file = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
-        assert_eq!(file.bluetooth.node, Some(node));
-        assert_eq!(file.bridge.mac, Some(OTHER_BRIDGE), "every save carries the bridge");
     }
 
     #[test]
@@ -1398,11 +1288,11 @@ mod tests {
 
         assert!(rendered.contains("settings"), "{rendered}");
         assert!(rendered.contains("pool"), "{rendered}");
-        assert!(rendered.contains("remember bt node"), "{rendered}");
+        assert!(!rendered.contains("remember bt node"), "the bridge keeps that: {rendered}");
         assert!(!rendered.contains("tx power"), "{rendered}");
         assert!(rendered.contains("remember bridge"), "{rendered}");
         // The view behind it is still live, not blanked out.
-        assert!(rendered.contains("C5 57:84"), "{rendered}");
+        assert!(rendered.contains(" N7 C5 "), "{rendered}");
     }
 
     /// Open the modal and walk down to the `wdgwars` row.
@@ -2027,7 +1917,6 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert!(matches!(rx.try_recv().unwrap(), Command::RememberBle { .. }));
         assert_eq!(rx.try_recv().unwrap(), Command::SetFanDuty { duty: duty(35) });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");

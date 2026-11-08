@@ -531,6 +531,11 @@ mod tests {
 
     /// A bridge `Status` reporting `pool`, which is how the engine's pool changes.
     fn pool_status(pool: ChannelPool) -> Event {
+        status(pool, None)
+    }
+
+    /// A bridge `Status` reporting `pool` and the Bluetooth slot `ble`.
+    fn status(pool: ChannelPool, ble: Option<wartui_proto::bus::Slot>) -> Event {
         Event::Link(wartui_bridge::LinkEvent::Message(BridgeToHost::Status {
             rx_count: 0,
             dropped_tx: 0,
@@ -541,6 +546,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool,
+            ble,
             present: 0,
         }))
     }
@@ -568,7 +574,7 @@ mod tests {
         let reversed = Now { unix_ms: 999, ..clock };
         engine.handle(pool_status(ChannelPool::Eu), reversed);
         log.record(&store, engine.capture_settings(), reversed);
-        engine.handle(Event::Command(Command::RememberBle { on: false }), reversed);
+        engine.handle(status(ChannelPool::Eu, wartui_proto::bus::Slot::new(0, 2)), reversed);
         log.record(&store, engine.capture_settings(), reversed);
         assert_eq!(log.next_sequence, 4);
         log.finish(&store);
@@ -587,7 +593,7 @@ mod tests {
         assert!(values[0].contains("pool=none;"));
         assert!(values[1].contains("at_ms=1000;pool=us;"));
         assert!(values[2].contains("at_ms=999;pool=eu;"));
-        assert!(values[3].contains("remember_ble=false;"));
+        assert!(values[3].contains("ble_slot=A3;"));
     }
 
     /// A store whose one-slot queue is full, and the receiver that frees it.

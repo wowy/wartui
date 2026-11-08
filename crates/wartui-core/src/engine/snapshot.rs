@@ -80,6 +80,8 @@ pub struct NodeView {
 pub struct TailEntry {
     /// Which node reported it.
     pub node_mac: Mac,
+    /// The slot it reported from.
+    pub slot: Slot,
     /// Unix milliseconds of receipt.
     pub rx_at_ms: i64,
     /// The observed BSSID.
@@ -114,11 +116,11 @@ pub struct Snapshot {
     pub plan: Option<Plan>,
     /// Which node is scanning Bluetooth, if any.
     pub ble_node: Option<Mac>,
-    /// The node the scan returns to whenever it is assignable and none holds it.
-    pub preferred_ble: Option<Mac>,
-    /// Whether giving a node the scan records it as [`Self::preferred_ble`].
-    pub remember_ble: bool,
-    /// Every node, ordered by MAC so the table does not reshuffle itself.
+    /// The slot whose node scans Bluetooth, as the bridge reports it. `None` for no node, and
+    /// before its first `Status`.
+    pub ble_slot: Option<Slot>,
+    /// Every node, ordered by slot as the carrier lays them out, then the slotless ones by MAC, so
+    /// the table holds still.
     pub nodes: Vec<NodeView>,
     /// Nodes heartbeating inside the topology timeout and on the bus. Can exceed
     /// [`Self::assignable`]: a node with no declared radio is alive but undrivable.
@@ -266,7 +268,7 @@ impl FleetEngine {
     /// a redraw burst.
     #[must_use]
     pub fn snapshot(&self, now: Now, store: StoreStats) -> Snapshot {
-        let nodes: Vec<NodeView> = self
+        let mut nodes: Vec<NodeView> = self
             .nodes
             .values()
             .map(|state| NodeView {
@@ -276,6 +278,7 @@ impl FleetEngine {
                 state: state.clone(),
             })
             .collect();
+        nodes.sort_by_key(|n| (n.state.slot.is_none(), n.state.slot, n.state.mac));
         let alive = nodes.iter().filter(|n| n.alive).count();
         let assignable = nodes.iter().filter(|n| n.assignable).count();
         let undrivable = |wanted: Compat| {
@@ -298,8 +301,7 @@ impl FleetEngine {
             pool: self.pool,
             plan: self.plan,
             ble_node: self.ble_node,
-            preferred_ble: self.preferred_ble,
-            remember_ble: self.remember_ble,
+            ble_slot: self.ble_slot,
             nodes,
             alive,
             assignable,
@@ -334,6 +336,7 @@ impl FleetEngine {
         }
         self.tail.push_back(TailEntry {
             node_mac: observation.node_mac,
+            slot: observation.slot,
             rx_at_ms: observation.rx_at_ms,
             bssid: observation.bssid,
             ssid: ssid_text(&observation.ssid),

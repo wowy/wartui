@@ -753,6 +753,30 @@ async fn sim_bridge_reports_pool_set_when_host_sets_pool() {
     assert_eq!(next_pool(&mut link).await, ChannelPool::Us);
 }
 
+/// The Bluetooth slot the next `Status` reports.
+async fn next_ble(link: &mut LinkHandle) -> Option<Slot> {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { ble, .. }) =
+            link.recv().await.expect("running")
+        {
+            return ble;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_ble_slot_set_when_host_sets_ble() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    assert_eq!(next_ble(&mut link).await, None, "no node scans until told");
+
+    let a2 = Slot::new(0, 1);
+    link.send_bulk(HostToBridge::SetBle { slot: a2 }).expect("queued");
+    assert_eq!(next_ble(&mut link).await, a2);
+    link.send_bulk(HostToBridge::SetBle { slot: None }).expect("queued");
+    assert_eq!(next_ble(&mut link).await, None);
+}
+
 #[tokio::test(start_paused = true)]
 async fn sim_transport_produces_deterministic_sightings_when_seeded() {
     async fn first_sightings(seed: u64) -> Vec<Vec<u8>> {

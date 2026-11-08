@@ -390,6 +390,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     let mut rng = Xorshift::new(0x0DD5_EED5);
     let mut cache = sim_cache();
     let mut fan_duty = FanDuty::FULL;
+    // As a P4 with nothing stored: no node scans Bluetooth.
+    let mut ble = None;
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
@@ -408,6 +410,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 host_uart_errors: 0,
                 fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
                 pool,
+                ble,
                 present: present.load(Ordering::Relaxed),
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
@@ -432,9 +435,13 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
-            // Both answered by the next `Status`, as the P4's are.
+            // All three answered by the next `Status`, as the P4's are.
             HostToBridge::SetPool { pool: wanted } => {
                 pool = wanted;
+                None
+            }
+            HostToBridge::SetBle { slot } => {
+                ble = slot;
                 None
             }
             HostToBridge::SetFan { duty } => {

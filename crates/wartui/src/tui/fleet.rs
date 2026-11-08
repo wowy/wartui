@@ -12,11 +12,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::line;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::bus::{Board, Compat, NODE_VERSION, Version};
+use wartui_proto::bus::{Board, Compat, NODE_VERSION, NodeBoard, Version};
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -34,9 +35,9 @@ pub(super) fn draw_fleet(
     // The `lost` column appears once a node has lost a batch, like the footer's
     // `lost N`. A column of zeros wastes width.
     let show_lost = snapshot.nodes.iter().any(|n| n.state.batches_lost > 0);
-    let lost_at = 4;
+    let lost_at = 2;
 
-    let mut header = vec!["node", "slot", "beats", "obs", "last", "channels", "state"];
+    let mut header = vec!["node", "obs", "last", "channels", "state"];
     if show_lost {
         header.insert(lost_at, "lost");
     }
@@ -55,11 +56,7 @@ pub(super) fn draw_fleet(
             }
             let style = severity.style();
             let mut cells = vec![
-                Cell::from(node_label(node)),
-                Cell::from(
-                    node.state.slot.map_or_else(|| "—".to_owned(), |s| board.label(s).to_string()),
-                ),
-                Cell::from(node.state.heartbeats.to_string()),
+                Cell::from(node_label(board, node)),
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
                 Cell::from(channels_cell(node)),
@@ -73,9 +70,7 @@ pub(super) fn draw_fleet(
         .collect();
 
     let mut widths = vec![
-        Constraint::Length(8),
-        Constraint::Length(4),
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(CHANNELS_WIDTH),
@@ -86,9 +81,31 @@ pub(super) fn draw_fleet(
     }
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
     let block = Block::bordered().title(title);
-    let [table_area, health_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(block.inner(area));
+    let inner = block.inner(area);
+    // The rows matter most: the rule goes first as the box shrinks, then the health line.
+    let (table_area, rule_area, health_area) = match inner.height {
+        0..=2 => (inner, None, None),
+        3 => {
+            let [table, health] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            (table, None, Some(health))
+        }
+        _ => {
+            let [table, rule, health] = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            (table, Some(rule), Some(health))
+        }
+    };
     frame.render_widget(block, area);
+    if let Some(rule) = rule_area {
+        // Across the whole box, so its ends join the border on either side.
+        let across = Rect { x: area.x, width: area.width, ..rule };
+        frame.render_widget(rule_line(across.width), across);
+    }
     let table = Table::new(rows, widths)
         .header(header)
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
@@ -98,9 +115,22 @@ pub(super) fn draw_fleet(
         .with_selected((!snapshot.nodes.is_empty()).then_some(selected));
     frame.render_stateful_widget(table, table_area, &mut state);
     *offset = state.offset();
-    if let Some(node) = snapshot.nodes.get(selected) {
-        frame.render_widget(health_line(node), health_area);
+    if let Some(node) = snapshot.nodes.get(selected)
+        && let Some(health_area) = health_area
+    {
+        frame.render_widget(health_line(board, node), health_area);
     }
+}
+
+/// The rule between the rows and the health line, `├───┤`, `width` columns wide.
+fn rule_line(width: u16) -> Line<'static> {
+    let inner = usize::from(width.saturating_sub(2));
+    Line::from(format!(
+        "{}{}{}",
+        line::NORMAL.vertical_right,
+        line::NORMAL.horizontal.repeat(inner),
+        line::NORMAL.vertical_left
+    ))
 }
 
 /// How much a node's state asks of the operator, which decides its color.
@@ -127,16 +157,22 @@ impl Severity {
     }
 }
 
-/// The selected node's firmware and its latest supply and die readings, `—` for none,
-/// each out-of-range reading in the warning style. The table has no width left for
-/// them, so they show for one node at a time.
-fn health_line(node: &NodeView) -> Line<'static> {
+/// The selected node's address, firmware and latest supply and die readings, `—` for none,
+/// each out-of-range reading in the warning style: `N7 C5 57:84  0.1.0;5g  3.30 V  41 °C`.
+/// The table has no width left for them, so they show for one node at a time, and this is the
+/// one place the main screen shows a node's address.
+fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
     let state = &node.state;
     let vdd = state.vdd.to_string();
     let temp = state.die_temp.to_string();
     let warn = |bad: bool| if bad { Severity::Warning.style() } else { Style::new() };
     Line::from(vec![
-        Span::raw(format!("{}  {}  ", node_label(node), version_label(node, NODE_VERSION))),
+        Span::raw(format!(
+            "{} {}  {}  ",
+            node_label(board, node).trim_start(),
+            mac::short(&state.mac),
+            version_label(node, NODE_VERSION)
+        )),
         Span::styled(vdd, warn(state.low_vdd())),
         Span::raw("  "),
         Span::styled(temp, warn(state.hot())),
@@ -207,19 +243,23 @@ fn lost_cell(node: &NodeView) -> String {
     }
 }
 
-/// The node's chip and the last two octets of its address: `C5 57:84`.
-///
-/// The chip comes from the board its heartbeats announce. A node heard only through sightings shows
-/// `—` until its first heartbeat, and a board this build has no name for shows `??`.
-fn node_label(node: &NodeView) -> String {
-    let chip = match node.state.capabilities.map(|caps| caps.board) {
+/// The node's slot label and chip, `" N7 C5"`: the slot right-aligned to three columns, so `N1`,
+/// `N14` and `—` (no slot) line up with the chip beside them.
+fn node_label(board: NodeBoard, node: &NodeView) -> String {
+    let slot = node.state.slot.map_or_else(|| "—".to_owned(), |slot| board.label(slot).to_string());
+    format!("{slot:>3} {}", chip(node))
+}
+
+/// The node's chip, from the board its heartbeats announce. A node heard only through sightings
+/// shows `—` until its first heartbeat, and a board this build has no name for shows `??`.
+fn chip(node: &NodeView) -> &'static str {
+    match node.state.capabilities.map(|caps| caps.board) {
         Some(Board::Esp32c5) => "C5",
         Some(Board::Esp32c6) => "C6",
         Some(Board::Esp32p4) => "P4",
         Some(Board::Unknown(_)) => "??",
-        None => "— ",
-    };
-    format!("{chip} {}", mac::short(&node.state.mac))
+        None => "—",
+    }
 }
 
 /// The node's firmware and flags, `0.1.0;5g`, with `here` (the version this host was
@@ -391,19 +431,27 @@ mod tests {
     use crate::tui::ui::Ui;
 
     #[test]
-    fn fleet_table_displays_chip_and_mac_suffix_when_rendering_nodes() {
+    fn fleet_table_names_node_by_slot_and_chip_when_rendering_nodes() {
+        // `busy` is a carrier-14: byte 0x84 is A7, `N7`, and 0x86 is B2, `N9`.
+        let mut slotless = node(0x88, 0, true);
+        slotless.state.slot = None;
         let snapshot = Snapshot {
-            nodes: vec![node(0x84, 0, true), unannounced(0x86)],
+            nodes: vec![node(0x84, 0, true), unannounced(0x86), slotless],
             tail: Vec::new(),
             ..busy()
         };
-        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
-        let rendered = terminal.backend().to_string();
+        let screen = rendered(&snapshot);
+        let rows: Vec<&str> = screen
+            .lines()
+            .skip_while(|line| !line.contains("channels"))
+            .skip(1)
+            .take_while(|line| !line.contains('├'))
+            .collect();
 
-        assert!(rendered.contains("C5 57:84"));
-        assert!(rendered.contains("—  57:86"), "a node that has not heartbeated has no chip yet");
-        assert!(!rendered.contains("02:00:5E:10:57"), "and no row spells out the whole address");
+        assert!(rows.iter().any(|row| row.contains(" N7 C5 ")), "{screen}");
+        assert!(rows.iter().any(|row| row.contains(" N9 — ")), "no chip before a heartbeat");
+        assert!(rows.iter().any(|row| row.contains("  — C5 ")), "no slot: {screen}");
+        assert!(rows.iter().all(|row| !row.contains("57:")), "no row shows an address: {screen}");
     }
 
     #[test]
@@ -415,13 +463,13 @@ mod tests {
         let bare = Snapshot { nodes: vec![b1], ..on_board(NodeBoard::NoCarrier) };
 
         let row = |snapshot: &Snapshot| {
-            rendered(snapshot).lines().find(|line| line.contains("57:85")).map(str::to_owned)
+            rendered(snapshot).lines().find(|line| line.contains(" C5 ")).map(str::to_owned)
         };
         let on_carrier = row(&carrier).expect("the node's row");
-        assert!(on_carrier.contains(" N8 "), "{on_carrier}");
+        assert!(on_carrier.contains(" N8 C5 "), "{on_carrier}");
         // With no carrier the slot keeps its bus name.
         let no_carrier = row(&bare).expect("the node's row");
-        assert!(no_carrier.contains(" B1 "), "{no_carrier}");
+        assert!(no_carrier.contains(" B1 C5 "), "{no_carrier}");
     }
 
     #[test]
@@ -589,12 +637,12 @@ mod tests {
         let rendered = terminal.backend().to_string();
 
         let adopted_row =
-            rendered.lines().find(|line| line.contains("57:84")).expect("the adopted node's row");
+            rendered.lines().find(|line| line.contains(" N7 C5 ")).expect("the adopted node's row");
         assert!(adopted_row.contains("bluetooth"), "got {adopted_row}");
         assert!(!adopted_row.contains("bluetooth…"), "adopted, not pending: {adopted_row}");
 
         let pending_row =
-            rendered.lines().find(|line| line.contains("57:87")).expect("the pending node's row");
+            rendered.lines().find(|line| line.contains("N10 C5 ")).expect("the pending node's row");
         assert!(pending_row.contains("bluetooth…"), "got {pending_row}");
     }
 
@@ -655,7 +703,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains(&format!("C5 57:84  {NODE_VERSION};5g  3.30 V  41 °C")),
+            screen.contains(&format!("N7 C5 57:84  {NODE_VERSION};5g  3.30 V  41 °C")),
             "{screen}"
         );
 
@@ -664,7 +712,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains(&format!("C5 57:85  {NODE_VERSION};5g  —  —")),
+            screen.contains(&format!("N8 C5 57:85  {NODE_VERSION};5g  —  —")),
             "no reading is a dash: {screen}"
         );
     }
@@ -710,7 +758,7 @@ mod tests {
             let line: Vec<&str> =
                 (area.left()..area.right()).map(|x| buffer[(x, y)].symbol()).collect();
             let text = line.concat();
-            if !text.contains("57:84") || !text.contains(label) {
+            if !text.contains(" N7 C5 ") || !text.contains(label) {
                 return None;
             }
             let x = line.windows(label.len()).position(|w| w.concat() == label)?;
@@ -718,10 +766,10 @@ mod tests {
         })
     }
 
-    /// The fleet table's header line. Found by `slot` and `beats`, since "lost" can appear
+    /// The fleet table's header line. Found by `node` and `channels`, since "lost" can appear
     /// elsewhere on screen.
     fn fleet_header(screen: &str) -> String {
-        let header = |line: &&str| line.contains("slot") && line.contains("beats");
+        let header = |line: &&str| line.contains("node") && line.contains("channels");
         screen.lines().find(header).unwrap_or_default().to_owned()
     }
 
@@ -729,6 +777,8 @@ mod tests {
     fn fleet_table_scrolls_to_selected_node_when_nodes_exceed_visible_rows() {
         let mut snapshot = busy();
         snapshot.nodes = (0..15u8).map(|last| node(last, 0, true)).collect();
+        // Slot 14 wraps to `N1`, so the last node goes slotless to keep its row unique.
+        snapshot.nodes[14].state.slot = None;
         snapshot.alive = 15;
         snapshot.assignable = 15;
         snapshot.tail = Vec::new();
@@ -746,8 +796,12 @@ mod tests {
         }
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("57:0E"), "the selected node scrolled into view: {rendered}");
-        assert!(!rendered.contains("57:00"), "the first node should have scrolled off: {rendered}");
+        assert!(rendered.contains("  — C5 "), "the selected node scrolled into view: {rendered}");
+        assert!(rendered.contains("57:0E"), "and its health line shows: {rendered}");
+        assert!(
+            !rendered.contains(" N1 C5 "),
+            "the first node should have scrolled off: {rendered}"
+        );
 
         // Moving the cursor up one row inside the window must not move the window.
         // The offset kept in `Ui` is what stops a recompute from row 0.
@@ -763,13 +817,48 @@ mod tests {
 
     #[test]
     fn node_label_names_chip_from_board_when_node_has_heartbeated() {
-        assert!(node_label(&node(0x84, 0, true)).starts_with("C5 "));
+        let board = NodeBoard::Carrier14;
+        assert_eq!(node_label(board, &node(0x84, 0, true)), " N7 C5");
         let mut c6 = node(0x84, 0, true);
         c6.state.capabilities = Some(Capabilities::here(Board::Esp32c6));
-        assert_eq!(node_label(&c6), "C6 57:84");
+        assert_eq!(node_label(board, &c6), " N7 C6");
         let mut unknown = node(0x84, 0, true);
         unknown.state.capabilities = Some(Capabilities::here(Board::Unknown(0x40)));
-        assert_eq!(node_label(&unknown), "?? 57:84");
+        assert_eq!(node_label(board, &unknown), " N7 ??");
+        assert_eq!(node_label(board, &unannounced(0x84)), " N7 —");
+    }
+
+    #[test]
+    fn node_label_aligns_slot_when_slot_is_two_digits_or_none() {
+        let board = NodeBoard::Carrier14;
+        // Byte 0x8B is B7, `N14`.
+        assert_eq!(node_label(board, &node(0x8B, 0, true)), "N14 C5");
+        assert_eq!(node_label(board, &unslotted(0x84)), "  — C5");
+    }
+
+    #[test]
+    fn fleet_table_draws_rule_when_above_health_line() {
+        let snapshot = Snapshot { nodes: vec![node(0x84, 0, true)], tail: Vec::new(), ..busy() };
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let buffer = terminal.backend().buffer();
+        let cells = |y: u16| -> Vec<&str> {
+            (buffer.area.left()..buffer.area.right()).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let find = |needle: &str| {
+            (buffer.area.top()..buffer.area.bottom())
+                .find(|&y| cells(y).concat().contains(needle))
+                .expect(needle)
+        };
+        // The fleet box's corners, on its title line.
+        let top = cells(find(" fleet — "));
+        let left = top.iter().position(|&c| c == "┌").expect("the box's left corner");
+        let right = left + top[left..].iter().position(|&c| c == "┐").expect("its right corner");
+
+        let rule = cells(find("N7 C5 57:84") - 1);
+        assert_eq!(rule[left], "├", "{}", rule.concat());
+        assert_eq!(rule[right], "┤", "{}", rule.concat());
+        assert!(rule[left + 1..right].iter().all(|&c| c == "─"), "{}", rule.concat());
     }
 
     #[test]
@@ -814,16 +903,16 @@ mod tests {
         assert!(screen.contains("host behind"), "{screen}");
         assert!(!screen.contains("needs update"), "{screen}");
         // The health line: the node's version alone, no arrow toward this build's.
-        assert!(screen.contains(&format!("C5 57:84  {caps}  ")), "{screen}");
+        assert!(screen.contains(&format!("N7 C5 57:84  {caps}  ")), "{screen}");
     }
 
     #[test]
     fn fleet_table_shows_needs_update_and_version_when_node_runs_older_minor() {
         let snapshot = Snapshot { nodes: vec![outdated(0x84)], tail: Vec::new(), ..busy() };
         let screen = rendered(&snapshot);
-        let row = screen.lines().find(|line| line.contains("57:84  ")).unwrap_or_default();
+        let row = screen.lines().find(|line| line.contains(" N7 C5 ")).unwrap_or_default();
         assert!(screen.contains("needs update"), "{screen}");
-        assert!(row.contains("C5 57:84"), "{screen}");
+        assert!(row.contains("needs update"), "{screen}");
         let older = outdated(0x84).state.capabilities.expect("set").version;
         assert!(screen.contains(&format!("{older};5g ↑{NODE_VERSION}")), "{screen}");
     }

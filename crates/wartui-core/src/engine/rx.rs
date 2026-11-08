@@ -315,8 +315,8 @@ impl FleetEngine {
     /// assignable ([`FleetEngine::is_assignable`]): nothing past the prefix is this build's
     /// layout, so its counter, epoch and refusals mean nothing here. It is answered with nothing
     /// and sets no `last_heartbeat`. If it holds the Bluetooth scan, the scan is withdrawn now rather
-    /// than when it ages out, and the preferred node stays as it is, so the node takes the scan
-    /// back once it can be driven again.
+    /// than when it ages out, and the bridge's Bluetooth slot stays as it is, so the node takes the
+    /// scan back once it can be driven again.
     fn on_outdated_heartbeat(
         &mut self,
         rx: &FromNode<'_>,
@@ -345,10 +345,8 @@ impl FleetEngine {
         }
         node.capabilities = Some(capabilities);
         node.heartbeats += 1;
-        // `replan` hands the scan to the preferred node only when it is assignable, which this
-        // node is not, so it reads as absent until it can be driven again.
-        let _ = self.ble_node.take_if(|mac| *mac == src);
-        // A node that was in the plan on a compatible build leaves it now.
+        // A node that was in the plan on a compatible build leaves it now, and with it the
+        // Bluetooth scan: `replan` gives the scan only to an assignable node.
         self.replan(now);
     }
 

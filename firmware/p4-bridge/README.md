@@ -173,10 +173,11 @@ A refused or silent update also sends one line naming why: `the radio refused th
 
 ## Settings
 
-The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
-fan's duty and the channel pool. It reads them once at boot and runs them with no host present,
-or 100 % and `All` with none stored. A host's `SetFan` or `SetPool` applies at once and is written
-only when the sector does not hold it. `Status` reports both (`src/settings.rs`).
+The P4 keeps three settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty, the channel pool and the Bluetooth slot. It reads them once at boot and runs them with
+no host present, or 100 %, `All` and no Bluetooth slot with none stored. A host's `SetFan`,
+`SetPool` or `SetBle` applies at once and is written only when the sector does not hold it.
+`Status` reports all three (`src/settings.rs`).
 
 ## The host link
 

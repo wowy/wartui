@@ -96,7 +96,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_records_settings_history_when_operator_changes_pool_and_remembering() {
+async fn drive_records_settings_history_when_operator_changes_pool_and_ble_slot() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("settings.db");
     let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
@@ -121,12 +121,19 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_rememberi
         .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
         .await
         .expect("same pool");
-    // The bridge's answer, so the pool and remembering change in separate rows.
+    // The bridge's answer, so the pool and the Bluetooth slot change in separate rows.
     snapshot_rx
         .wait_for(|s| s.pool == Some(wartui_proto::plan::ChannelPool::Us))
         .await
         .expect("the bridge takes the pool");
-    command_tx.send(Command::RememberBle { on: false }).await.expect("remember command");
+    command_tx
+        .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
+        .await
+        .expect("ble command");
+    snapshot_rx
+        .wait_for(|s| s.ble_node.is_some())
+        .await
+        .expect("the bridge takes the slot and its node the scan");
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop_tx.send(()).expect("stop");
     assert_eq!(capture.await.expect("capture").dropped, 0);
@@ -142,8 +149,9 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_rememberi
     assert_eq!(values.len(), 4, "initial settings and three changes, not the repeated request");
     assert!(values[0].contains("pool=none;"), "before the bridge's first `Status`");
     assert!(values[1].contains("pool=all;"));
-    assert!(values[2].contains("pool=us;") && values[2].contains("remember_ble=true;"));
-    assert!(values[3].contains("pool=us;") && values[3].contains("remember_ble=false;"));
+    assert!(values[2].contains("pool=us;") && values[2].contains("ble_slot=none;"));
+    let node = wartui_proto::mac::full(&SimTransport::node_mac(0)).to_string();
+    assert!(values[3].contains("ble_slot=A1;") && values[3].ends_with(&format!("ble_node={node}")));
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written
@@ -190,7 +198,7 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     // ring, while the access points are all reported in the first sweep. Without a
     // live stream there is nothing for the second fix to be attached to.
     command_tx
-        .send(Command::AssignBle { mac: Some(SimTransport::node_mac(0)) })
+        .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
         .await
         .expect("the engine is listening");
     tokio::time::sleep(Duration::from_millis(700)).await;
