@@ -88,7 +88,7 @@ def slot_name(k):
     return f"{'AB'[k // PER_BUS]}{k % PER_BUS + 1}"
 
 
-BOARD = None  # capture.node_board, or None if the capture has no such column or value.
+BOARD = None  # capture.node_board, or None while it is NULL.
 LATEST_SLOT = {}  # mac -> the bus name its latest heartbeat came from, with a carrier
 
 
@@ -114,8 +114,8 @@ def load_slots(db):
 
 def name(mac):
     """What the operator calls a node: its slot's label, or its last two octets with no slot.
-    Nodes whose latest heartbeats name one slot swapped during the capture, so each adds its
-    octets, as `wartui analyze` does."""
+    Nodes whose latest heartbeats name one slot each add their octets, as `wartui analyze` does.
+    """
     slot = LATEST_SLOT.get(mac)
     if slot is None:
         return short(mac)
@@ -234,9 +234,6 @@ def provenance(db, ctx):
     section("capture")
     cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "notes",
             "simulated")
-    # A capture from before the column has no board, and so no labels.
-    have = {r[1] for r in db.q("PRAGMA table_info(capture)")}
-    cols = tuple(c for c in cols if c in have)
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
     end = row.get("ended_at")
@@ -521,7 +518,7 @@ def heartbeats(db, ctx):
         macs = [name(m) for m in sorted({r[1] for r in g}, key=node_order)]
         at = g[0][0]
         silent = max(r[0] - r[4] for r in g)
-        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]}"
+        detail = ", ".join(f"{named(r[1])} counter {r[2]}->{r[3]}"
                            + (f" reset {r[5]}" if r[5] is not None else "") for r in g)
         causes = sorted({f"{name(r[1])} {r[5]}" for r in g if r[5] is not None})
         print(f"  restart near {rel(at)}: {', '.join(macs)}  (longest silence {dur(silent)})"

@@ -170,9 +170,9 @@ of its output, after the export summary:
 
 `peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
 order, so one that moved appears once. A node with no heartbeat, or any node in a capture with no
-carrier, goes by the last two octets of its address and sorts after the labels. Two nodes that end
-on one slot, having swapped during the capture, each get their address after the label
-(`N3 57:84`).
+carrier, goes by the last two octets of its address and sorts after the labels. Two nodes whose
+latest heartbeats name one slot, as when a board is replaced, each get their address after the
+label (`N3 57:84`).
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
 They are half-open: a sighting and one exactly a second earlier share no one-second window, so a
@@ -629,9 +629,10 @@ wartui power-cycle --slot N3 --bridge 44:C0
 
 It resolves one bridge as `wartui reset` does, and takes `--config PATH` as `status` does. `--slot`
 takes the carrier's silk names, `N1` to `N6`, `N10` or `N14`; another name is refused with the
-range. A bridge with no carrier is refused before anything is sent. A node with its own USB
-plugged in stays powered through a cycle. When the bridge takes the node supply to be lost, it
-switches every node off and powers them again one at a time
+range (`"N7" is not a slot on this carrier-6: name one of N1 to N6`). A bridge with no carrier is
+refused before anything is sent. A node with its own USB plugged in stays powered through a cycle.
+When the bridge takes the node supply to be lost, it switches every node off and powers them again
+one at a time
 ([`docs/node-bus.md`](../../docs/node-bus.md#on-the-carrier-board)). Otherwise nothing
 power-cycles a node on its own.
 
@@ -640,7 +641,6 @@ The bridge answers once the node is powered again, or says why not:
 - `N3 power-cycled`: done.
 - `this bridge has no carrier board, so it cannot switch node power`: the bridge found no
   wartui-carrier at boot.
-- `"N7" is not a slot on this carrier-6: name one of N1 to N6`: the carrier has no socket there.
 - `N3 was not power-cycled: the carrier's I/O expander did not answer`: the bridge could not reach
   the switch. One that fails at boot is a `fault` in `wartui status` too.
 

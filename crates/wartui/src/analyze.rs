@@ -6,15 +6,15 @@
 //! says how each figure is counted. Standard output, because nothing else is written there.
 //!
 //! Nodes go by slot label, as on the main screen, and by address tail with no slot. Two nodes whose
-//! last heartbeats name one slot swapped during the capture, so each gets its tail after the label
-//! wherever it appears in the report.
+//! last heartbeats name one slot each get their tail after the label, wherever they appear in the
+//! report.
 
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{
-    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, node_board, peaks,
+    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
@@ -38,10 +38,9 @@ pub fn run(args: Args) -> Result<()> {
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = args.selection.filter(&config);
     let summary = wigle_csv(&conn, &filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
-    let peak = peaks(&conn).context("reading how fast sightings arrived")?;
     let loss = losses(&conn).context("reading what the capture lost")?;
-    let board = node_board(&conn).context("reading what carried the nodes")?;
-    let names = NodeNames::new(board, &loss);
+    let peak = peaks(&conn, &loss.slots()).context("reading how fast sightings arrived")?;
+    let names = NodeNames::new(loss.board, &loss);
     print!(
         "{} rows to export\n{}{}{}",
         thousands(summary.rows),
@@ -400,6 +399,7 @@ mod tests {
                 },
             ],
             host: None,
+            ..Default::default()
         }
     }
 
@@ -432,6 +432,7 @@ mod tests {
                 battery_min_mv: Some(3_618),
                 ..Default::default()
             }),
+            ..Default::default()
         }
     }
 
@@ -797,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_report_adds_tail_only_to_rows_sharing_a_slot_when_nodes_swapped() {
+    fn analyze_report_adds_tail_only_to_rows_sharing_a_slot_when_another_node_took_it() {
         let loss = node_losses(vec![lost(NODE_1C, a(2)), lost(NODE_57, a(2)), lost(NODE_90, B7)]);
         let names = NodeNames::new(NodeBoard::Carrier14, &loss);
         assert_eq!(
