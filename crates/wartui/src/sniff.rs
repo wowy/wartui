@@ -178,7 +178,11 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 "#   reset {:?}, last phase {:?}, up {}ms",
                 info.reset_cause, info.last_phase, info.uptime_ms
             );
-            println!("#   nodes on {}", info.node_board);
+            if info.node_board.is_carrier() {
+                println!("#   nodes on {}", info.node_board);
+            } else {
+                println!("#   {}, so no node is driven", info.node_board);
+            }
             counts.board = Some(info.node_board);
         }
         return;
