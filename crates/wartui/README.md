@@ -138,8 +138,8 @@ of its output, after the export summary:
   peak wifi  1,790/s  39,880/min
   peak ble   120/s  2,310/min
   peak by node
-    1C:5A  120/s  2,310/min
-    57:84  1,790/s  39,880/min
+    N3   120/s  2,310/min
+    N11  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   queue      host-bulk  peak 245,760/245,760 bytes  1,300 dropped
   queue      node-down  peak 3,102/4,160 bytes  0 dropped
@@ -150,15 +150,15 @@ of its output, after the export summary:
   batches    212 lost between node and host
   buffer full wifi 18,220  ble 1,203
   loss by node
-    1C:5A  batches 12  heartbeats 699  buffer full ble 1,203
-    57:84  batches 200  heartbeats 2,757  buffer full wifi 18,220
+    N3   batches 12  heartbeats 699  buffer full ble 1,203
+    N11  batches 200  heartbeats 2,757  buffer full wifi 18,220
 ```
 
 | Line           | What it counts                                                                  |
 |----------------|---------------------------------------------------------------------------------|
 | `peak`         | The most sightings in any one second and any one minute, across the fleet       |
 | `peak wifi`    | The same for Wi-Fi sightings alone; `peak ble` for BLE                          |
-| `peak by node` | The same for each node, by address                                              |
+| `peak by node` | The same for each node, by slot label; see below                                |
 | `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
 | `radio link`   | Packets on the P4–C6 link, and its link errors that are not zero                |
@@ -167,6 +167,12 @@ of its output, after the export summary:
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
+
+`peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
+order, so one that moved appears once. A node with no heartbeat, or any node in a capture with no
+carrier, goes by the last two octets of its address and sorts after the labels. Two nodes that end
+on one slot, having swapped during the capture, each get their address after the label
+(`N3 57:84`).
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
 They are half-open: a sighting and one exactly a second earlier share no one-second window, so a

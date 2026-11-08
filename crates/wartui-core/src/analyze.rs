@@ -50,11 +50,17 @@
 //! the host's `rx_at`, so a backlog replayed after a reconnect counts as the burst it was on the
 //! link. Rows are walked by `id`, like the heartbeats, and every window restarts where `rx_at`
 //! steps back: sorting would merge two real intervals into one and invent a peak.
+//!
+//! Per-node figures name each node's slot, the one its latest heartbeat (by `id`) came from, and
+//! list nodes in slot order, which on a carrier is `N1` up. A node that moved so appears once, and
+//! two nodes can end on one slot when they swapped during the capture. `heartbeat.slot` means
+//! something to the operator only through `capture.node_board`, so with no carrier, or none known,
+//! no node has a slot.
 
 use std::collections::{BTreeMap, VecDeque};
 
-use rusqlite::{Connection, Row};
-use wartui_proto::bus::RecordKind;
+use rusqlite::{Connection, OptionalExtension, Row};
+use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
@@ -66,7 +72,8 @@ use crate::store::parse_kind;
 pub struct LossSummary {
     /// The bridge's own counts, or `None` when the capture holds no status reply.
     pub bridge: Option<BridgeLoss>,
-    /// One entry per node that sent a heartbeat or lost a batch, sorted by address.
+    /// One entry per node that sent a heartbeat or lost a batch: by slot, then slotless nodes by
+    /// address.
     pub nodes: Vec<NodeLoss>,
     /// The host's own figures, or `None` when the capture holds no `host_status` row.
     pub host: Option<HostLoss>,
@@ -212,6 +219,8 @@ pub struct HostLoss {
 pub struct NodeLoss {
     /// The node's address.
     pub mac: Mac,
+    /// The slot its latest heartbeat came from. `None` with no heartbeat or no carrier.
+    pub slot: Option<Slot>,
     /// Sighting batches lost between the node and the host. Exact, from `batch_gap`.
     pub batches_lost: u64,
     /// Heartbeats the capture holds.
@@ -233,7 +242,7 @@ pub struct PeakSummary {
     pub wifi: Peak,
     /// BLE sightings alone. A kind this build does not know counts in `total` and its node only.
     pub ble: Peak,
-    /// One entry per node that stored a sighting, sorted by address.
+    /// One entry per node that stored a sighting: by slot, then slotless nodes by address.
     pub nodes: Vec<NodePeak>,
     /// Times `rx_at` fell between consecutive rows. Every window restarts there, so a peak
     /// around a step is a lower bound.
@@ -254,6 +263,8 @@ pub struct Peak {
 pub struct NodePeak {
     /// The node's address.
     pub mac: Mac,
+    /// The slot its latest heartbeat came from. `None` with no heartbeat or no carrier.
+    pub slot: Option<Slot>,
     /// Its sightings' peaks.
     pub peak: Peak,
 }
@@ -265,7 +276,48 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let mut nodes: BTreeMap<Mac, NodeLoss> = BTreeMap::new();
     heartbeats(conn, &mut nodes)?;
     batches(conn, &mut nodes)?;
-    Ok(LossSummary { bridge, nodes: nodes.into_values().collect(), host: host(conn)? })
+    let slots = latest_slots(conn)?;
+    let mut nodes: Vec<NodeLoss> = nodes.into_values().collect();
+    for node in &mut nodes {
+        node.slot = slots.get(&node.mac).copied();
+    }
+    nodes.sort_by_key(|node| slot_order(node.slot, node.mac));
+    Ok(LossSummary { bridge, nodes, host: host(conn)? })
+}
+
+/// What carried the capture's nodes. No carrier for a capture whose bridge never announced itself
+/// or named a board this build does not know.
+pub fn node_board(conn: &Connection) -> rusqlite::Result<NodeBoard> {
+    let name: Option<String> = conn
+        .query_row("SELECT node_board FROM capture", [], |row| row.get(0))
+        .optional()?
+        .flatten();
+    let known = name.and_then(|name| NodeBoard::ALL.into_iter().find(|b| b.name() == name));
+    Ok(known.unwrap_or(NodeBoard::NoCarrier))
+}
+
+/// The slot each node's latest heartbeat came from, or nothing with no carrier. A slot this build
+/// cannot read is left out.
+fn latest_slots(conn: &Connection) -> rusqlite::Result<BTreeMap<Mac, Slot>> {
+    let mut slots = BTreeMap::new();
+    if !node_board(conn)?.is_carrier() {
+        return Ok(slots);
+    }
+    // With `MAX`, SQLite takes the bare `slot` from the row holding the maximum.
+    let mut stmt =
+        conn.prepare("SELECT node_mac, slot, MAX(id) FROM heartbeat GROUP BY node_mac")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if let Some(slot) = Slot::parse(row.get_ref(1)?.as_str()?) {
+            slots.insert(row.get(0)?, slot);
+        }
+    }
+    Ok(slots)
+}
+
+/// Sorts by slot, with slotless nodes after and ties by address.
+fn slot_order(slot: Option<Slot>, mac: Mac) -> (bool, Option<Slot>, Mac) {
+    (slot.is_none(), slot, mac)
 }
 
 /// The most sightings that came over the link in any one second and any one minute, from every
@@ -300,8 +352,12 @@ pub fn peaks(conn: &Connection) -> rusqlite::Result<PeakSummary> {
     summary.total = total.peak();
     summary.wifi = wifi.peak();
     summary.ble = ble.peak();
-    summary.nodes =
-        nodes.into_iter().map(|(mac, rate)| NodePeak { mac, peak: rate.peak() }).collect();
+    let slots = latest_slots(conn)?;
+    summary.nodes = nodes
+        .into_iter()
+        .map(|(mac, rate)| NodePeak { mac, slot: slots.get(&mac).copied(), peak: rate.peak() })
+        .collect();
+    summary.nodes.sort_by_key(|node| slot_order(node.slot, node.mac));
     Ok(summary)
 }
 
