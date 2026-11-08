@@ -165,7 +165,6 @@ impl Severity {
 fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
     let state = &node.state;
     let temp = state.die_temp.to_string();
-    let warn = |bad: bool| if bad { Severity::Warning.style() } else { Style::new() };
     let mut spans = vec![
         Span::raw(format!(
             "{} {}  {}  ",
@@ -173,7 +172,7 @@ fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
             mac::short(&state.mac),
             version_label(node, NODE_VERSION)
         )),
-        Span::styled(temp, warn(state.hot())),
+        Span::styled(temp, if state.hot() { Severity::Warning.style() } else { Style::new() }),
     ];
     if state.supply_dropped() {
         spans.push(Span::raw("  "));

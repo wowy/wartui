@@ -26,8 +26,8 @@ pub fn vdd_mv() -> u16 {
     // PBUS into debug mode, routes VDD3P3 to SAR2 over the analog I2C bus, reads SAR2,
     // restores the PBUS, and scales the reading (×206/100 on the C6, ×236/100 on the
     // C5). It returns 0 before the PHY is initialized. The unit is millivolts, reading low
-    // by a per-chip offset: on two XIAO ESP32-C5s, a multimeter on the 3V3 pin read 3.288 V
-    // and 3.294 V where this returned 3.136 V and 2.980 V.
+    // by a per-chip offset. `crates/wartui/README.md` § "Reading the fleet table" has the
+    // measurements.
     unsafe { phy_get_vdd33() }
 }
 
