@@ -47,7 +47,8 @@
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed
 //!   since the last that had it. A node erasing flash cannot re-arm, so it fails the magic
-//!   until the erase ends, and a miss count alone would drop it mid-update.
+//!   until the erase ends, and a miss count alone would drop it mid-update. Each `Status` tells
+//!   the host which slots are present, and its planner drops a node whose slot is absent.
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
 //!   If the retry fails too, the slot is not clocked again for [`MISS_BACKOFF`], in an IRQ pass
@@ -149,8 +150,8 @@ pub struct Nodes {
     per_bus: u8,
     /// Indexed by [`Nodes::driven`].
     downlinks: RefCell<&'static mut [NodeDown; DRIVEN]>,
-    /// Bit `k` is set while driven slot `k` holds a node.
-    present: Cell<u16>,
+    /// Bit `k` is set while driven slot `k` holds a node. `k` is the slot's [`BusSlot`] byte.
+    present: Cell<u32>,
     /// One per bus, raised when the host queues a record for one of its slots.
     queued: [Signal<NoopRawMutex, ()>; 2],
     /// Node records forwarded to the host.
@@ -191,8 +192,8 @@ impl Nodes {
         (self.rx_count.get(), self.rx_oversize.get())
     }
 
-    /// Bit `k` is set while driven slot `k` holds a node.
-    pub fn present(&self) -> u16 {
+    /// Bit `k` is set while driven slot `k` holds a node. `k` is the slot's [`BusSlot`] byte.
+    pub fn present(&self) -> u32 {
         self.present.get()
     }
 

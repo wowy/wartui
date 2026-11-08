@@ -239,6 +239,8 @@ impl FleetEngine {
         node.last_ble_refused = Some(heartbeat.ble_refused);
         node.counter = Some(heartbeat.counter);
         node.last_heartbeat = Some(now.mono);
+        // Back on the bus: this heartbeat came through its slot.
+        node.off_bus = false;
         node.heartbeats += 1;
         node.vdd = heartbeat.vdd;
         node.die_temp = heartbeat.die_temp;

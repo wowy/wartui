@@ -241,9 +241,12 @@ is here rather than only in a `//!`.
   `Status` reports, and cuts nothing before the first. `Command::SetPool` only asks the bridge to
   change it. Either way it changes what the planner cuts, never who holds which share.
 - **Only heartbeating nodes are assignable or in the plan** — an assignment answers a heartbeat,
-  and goes to the slot that heartbeat came from. `stale`, `no heartbeat` and silence are deliberately distinct
-  states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
-  indices *are* the wire format.
+  and goes to the slot that heartbeat came from. A node whose slot the bridge's `Status` shows
+  absent leaves the plan at that `Status`, until its next heartbeat. The 20 s heartbeat timeout is
+  the backstop for a node that answers the bus but has stopped heartbeating
+  (`crates/wartui-core/src/engine/mod.rs`, `on_bus`). `stale`, `off bus`, `no heartbeat` and
+  silence are deliberately distinct states, and `SCAN_CHANNELS` order is load-bearing: never sort
+  or deduplicate it, because those indices *are* the wire format.
 - **A node is only in the plan once it has said what it is.** `FleetEngine::is_assignable`
   refuses a node whose heartbeats carry no `bus::Capabilities`, or whose version does not speak
   `bus::NODE_VERSION` (another major or minor), alongside one whose bus slot another node's

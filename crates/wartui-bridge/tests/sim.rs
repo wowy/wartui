@@ -434,6 +434,59 @@ async fn sim_node_boots_afresh_when_power_cycled() {
     assert!(rebooted, "the node forgot its assignment, as a real reboot does");
 }
 
+/// The presence mask the next `Status` reports.
+async fn next_present(link: &mut LinkHandle) -> u32 {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { present, .. }) =
+            link.recv().await.expect("running")
+        {
+            return present;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_populated_slots_present_when_nodes_have_booted() {
+    let config = SimConfig { node_count: 3, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    for index in 0..3 {
+        next_heartbeat_from(&mut link, SimTransport::node_slot(index)).await;
+    }
+    assert_eq!(next_present(&mut link).await, 0b111, "A1 to A3, and no empty slot");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_slot_absent_when_power_cycled_until_node_boots() {
+    let config = SimConfig { node_count: 2, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_slot(0);
+    next_heartbeat_from(&mut link, node).await;
+    next_heartbeat_from(&mut link, SimTransport::node_slot(1)).await;
+    assert_eq!(next_present(&mut link).await, 0b11);
+
+    link.send_bulk(HostToBridge::PowerCycle { slot: node }).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::PowerCycled { .. }) =
+            link.recv().await.expect("running")
+        {
+            break;
+        }
+    }
+    let cycled = Instant::now();
+    // The paused clock moves only through timers, so the node is still inside its second-long
+    // hold at each of these, however the tasks are scheduled.
+    assert_eq!(next_present(&mut link).await, 0b10, "A1 is off once the cycle is answered");
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(next_present(&mut link).await, 0b10, "and stays off through the hold");
+    link.send_urgent(clear_command(node)).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode), "no node to take it");
+
+    let back = next_heartbeat_from(&mut link, node).await;
+    assert!(back - cycled >= Duration::from_secs(1), "not before the hold ends");
+    assert_eq!(next_present(&mut link).await, 0b11, "A1 is back once its node boots");
+}
+
 #[tokio::test(start_paused = true)]
 async fn sim_node_reports_new_epoch_when_channel_range_is_narrowed() {
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };

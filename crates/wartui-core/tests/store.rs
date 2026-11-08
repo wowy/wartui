@@ -501,6 +501,8 @@ fn bridge_status_with_fan(
         radio_link,
         host_uart_errors: 4_000_000_003,
         fan,
+        // A1, A3 and B3, and the top bit, so the column holds the whole u32.
+        slots_present: 0x8000_0205,
     })
 }
 
@@ -563,6 +565,9 @@ fn store_round_trips_every_column_when_bridge_status_written() {
         })
         .unwrap();
     assert_eq!(fan, (Some(40), Some(1830)));
+    let present: i64 =
+        conn.query_row("SELECT slots_present FROM bridge_status", [], |r| r.get(0)).unwrap();
+    assert_eq!(present, 0x8000_0205);
 }
 
 #[test]

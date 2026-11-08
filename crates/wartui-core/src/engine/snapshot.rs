@@ -66,8 +66,11 @@ pub struct Counters {
 pub struct NodeView {
     /// Everything known about the node.
     pub state: NodeState,
-    /// Whether it has heartbeated inside the topology timeout.
+    /// Whether it has heartbeated inside the topology timeout and is on the bus
+    /// ([`FleetEngine::is_alive`]).
     pub alive: bool,
+    /// Whether its slot is on the bus, as far as the bridge has said ([`FleetEngine::on_bus`]).
+    pub on_bus: bool,
     /// Whether it can take an assignment ([`FleetEngine::is_assignable`]).
     pub assignable: bool,
 }
@@ -117,8 +120,8 @@ pub struct Snapshot {
     pub remember_ble: bool,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
-    /// Nodes heartbeating inside the topology timeout. Can exceed [`Self::assignable`]: a node
-    /// with no declared radio is alive but undrivable.
+    /// Nodes heartbeating inside the topology timeout and on the bus. Can exceed
+    /// [`Self::assignable`]: a node with no declared radio is alive but undrivable.
     pub alive: usize,
     /// How many can take an assignment: exactly the set the planner partitions.
     pub assignable: usize,
@@ -268,6 +271,7 @@ impl FleetEngine {
             .values()
             .map(|state| NodeView {
                 alive: self.is_alive(state, now),
+                on_bus: self.on_bus(state),
                 assignable: self.is_assignable(state, now),
                 state: state.clone(),
             })

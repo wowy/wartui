@@ -261,6 +261,9 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     if state.slot.is_none() {
         return Some(LOST_SLOT);
     }
+    if !node.on_bus {
+        return Some("is off the node bus, so it cannot be reached");
+    }
     if !node.assignable {
         return Some("is not heartbeating, so it cannot be assigned");
     }
@@ -274,7 +277,8 @@ pub(super) const LOST_SLOT: &str =
 /// The state column: what the operator most needs to know about a node.
 ///
 /// `stale`: sightings arrive, heartbeats do not. The node cannot be assigned. This
-/// differs from silence, which has other causes.
+/// differs from silence, which has other causes. `off bus`: the bridge's `Status` shows the
+/// node's slot absent, so the node lost power, crashed or was unplugged.
 fn node_state(node: &NodeView) -> (String, Severity) {
     let state = &node.state;
     // Ahead of `no heartbeat`: a node on another major or minor has its heartbeats read
@@ -286,6 +290,9 @@ fn node_state(node: &NodeView) -> (String, Severity) {
     }
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Severity::Warning);
+    }
+    if state.slot.is_some() && !node.on_bus {
+        return ("off bus".to_owned(), Severity::Warning);
     }
     // Ahead of `stale`. A node whose slot another node's heartbeat took is unreachable
     // until its own heartbeat names a slot again.
@@ -532,6 +539,16 @@ mod tests {
         let view = unslotted(0x21);
         let (label, _) = node_state(&view);
         assert_eq!(label, "no slot");
+    }
+
+    #[test]
+    fn node_state_returns_off_bus_label_when_heartbeating_node_slot_is_absent() {
+        let mut view = node(0x21, 0, false);
+        view.alive = false;
+        view.on_bus = false;
+        assert_eq!(node_state(&view), ("off bus".to_owned(), Severity::Warning));
+        let why = why_not_assignable(&view).expect("refused");
+        assert!(why.contains("off the node bus"), "{why}");
     }
 
     #[test]

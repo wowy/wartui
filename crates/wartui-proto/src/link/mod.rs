@@ -324,6 +324,11 @@ pub enum BridgeToHost {
         fan: Option<FanStats>,
         /// The channel pool the bridge holds, which the host's planner deals.
         pool: ChannelPool,
+        /// Bit n is set while the P4 counts the slot whose [`Slot`] byte is n present. A slot is
+        /// present after one good transfer, and absent after five in a row fail the magic, once
+        /// a second has passed since the last good one (`firmware/p4-bridge/src/bus.rs`). A u32,
+        /// so a board with more slots than [`crate::bus::MAX_SLOTS`] fits without a wire change.
+        present: u32,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.

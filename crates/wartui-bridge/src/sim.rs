@@ -18,8 +18,10 @@
 //! Node `i` sits in node-bus slot `i` (`A1` up, then `B1`), on a fourteen-node carrier, so the
 //! view names it by the silk, `N1` up. The bridge answers each `ToNode` with `Delivered` once
 //! the node has it, or `Undelivered` for a slot with no node. A `PowerCycle` restarts the node in
-//! that slot, which heartbeats again from a fresh boot, still on trial if it was, and is answered
-//! `Done`.
+//! that slot, which is answered `Done` at once, stays dark for the carrier's [`POWER_OFF`], and
+//! heartbeats again from a fresh boot, still on trial if it was. `Status` reports every node's slot
+//! present from the start, and a slot absent through a `PowerCycle`'s hold, when a record for it is
+//! answered `NoNode` as on the P4.
 //!
 //! A node takes updates with the receiver the firmware links, into a slot held in memory,
 //! and follows the firmware's rules around it: it listens continuously in update mode,
@@ -187,6 +189,11 @@ const TRIAL_BOOTS: u64 = wartui_proto::ota::TRIAL_BOOTS as u64;
 /// The bytes an update slot holds, as `firmware/node/partitions.csv` sizes it.
 const SLOT_CAPACITY: u32 = 0x1E_0000;
 
+/// How long the carrier holds a power-cycled node off, the P4's `POWER_OFF`
+/// (`firmware/p4-bridge/src/carrier.rs`). On the bridge's clock, so [`SimConfig::speed`] does not
+/// scale it.
+const POWER_OFF: Duration = Duration::from_secs(1);
+
 /// The bytes the bridge's node image cache holds, the P4's `CACHE_MAX`.
 const CACHE_CAPACITY: usize = 2 * 1024 * 1024;
 
@@ -263,6 +270,7 @@ impl SimTransport {
 
         let mut routes: Vec<Route> = Vec::new();
         let mut fleet = Vec::new();
+        let present = Arc::new(AtomicU32::new(0));
         let count = self.config.node_count.min(u8::try_from(MAX_SLOTS).unwrap_or(u8::MAX));
         for index in 0..count {
             let (admin_tx, admin_rx) = mpsc::channel(8);
@@ -279,21 +287,27 @@ impl SimTransport {
             let mut node = SimNode::new(index, version);
             node.rejecting = self.config.rejecting_node == Some(index);
             node.mute_verified = self.config.mute_verified_node == Some(index);
+            node.present = Arc::clone(&present);
+            // Plugged in before the host attached, as a real fleet is: present from the start.
+            present.fetch_or(Self::node_slot(index).bit(), Ordering::Relaxed);
             fleet.push((node, admin_rx));
         }
 
         let events = plumbing.events.clone();
         let no_image = self.config.no_image_answers.clone();
-        let drop_cache = self.config.drop_cache_after;
+        let drop_cache_after = self.config.drop_cache_after;
         let pool = self.config.pool;
         tokio::spawn(run_bridge(
             plumbing,
-            routes,
-            started,
-            attached_tx,
-            no_image,
-            drop_cache,
-            pool,
+            Bridge {
+                routes,
+                present,
+                started,
+                attached: attached_tx,
+                no_image,
+                drop_cache_after,
+                pool,
+            },
         ));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
@@ -320,16 +334,22 @@ fn sim_fan_rpm(duty: FanDuty) -> u16 {
     }
 }
 
-/// The dongle half: announces itself, routes records to nodes, answers status.
-async fn run_bridge(
-    mut plumbing: crate::LinkPlumbing,
+/// What the dongle half starts with.
+struct Bridge {
     routes: Vec<Route>,
+    /// Bit n set while the node in the slot whose byte is n has booted, as `Status` reports it.
+    present: Arc<AtomicU32>,
     started: tokio::time::Instant,
     attached: tokio::sync::watch::Sender<bool>,
     no_image: Option<Arc<AtomicU32>>,
-    mut drop_cache_after: Option<u32>,
-    mut pool: ChannelPool,
-) {
+    drop_cache_after: Option<u32>,
+    pool: ChannelPool,
+}
+
+/// The dongle half: announces itself, routes records to nodes, answers status.
+async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
+    let Bridge { routes, present, started, attached, no_image, mut drop_cache_after, mut pool } =
+        bridge;
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
@@ -388,6 +408,7 @@ async fn run_bridge(
                 host_uart_errors: 0,
                 fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
                 pool,
+                present: present.load(Ordering::Relaxed),
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
@@ -398,7 +419,7 @@ async fn run_bridge(
                     .unwrap_or_default(),
             }),
             HostToBridge::ToNode { slot, id, kind, body } => {
-                Some(match deliver(&routes, slot, kind, &body, &mut rng).await {
+                Some(match deliver(&routes, &present, slot, kind, &body, &mut rng).await {
                     Ok(()) => BridgeToHost::Delivered { id },
                     Err(reason) => BridgeToHost::Undelivered { id, reason },
                 })
@@ -406,6 +427,7 @@ async fn run_bridge(
             // An empty socket is switched off and on as well, so it is `Done` too.
             HostToBridge::PowerCycle { slot } => {
                 if let Some(route) = routes.iter().find(|route| route.slot == slot) {
+                    present.fetch_and(!slot.bit(), Ordering::Relaxed);
                     let _ = route.tx.send(SimCommand::PowerCycle).await;
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
@@ -439,7 +461,7 @@ async fn run_bridge(
                         if let Some(left) = &mut drop_cache_after {
                             *left = left.saturating_sub(1);
                         }
-                        deliver(&routes, slot, kind, &body[..n], &mut rng).await
+                        deliver(&routes, &present, slot, kind, &body[..n], &mut rng).await
                     }
                     None => {
                         if let Some(count) = &no_image {
@@ -477,15 +499,21 @@ fn sim_cache() -> SimCache {
     NodeImageCache::new(Box::new(Receiver::new(Board::Esp32c5)), vec![0; CACHE_CAPACITY])
 }
 
-/// Hand a record to whichever simulated node sits in `slot`.
+/// Hand a record to whichever simulated node sits in `slot`. A slot `present` shows absent, as
+/// through a power cycle's hold, has no node to take it, as on the P4.
 async fn deliver(
     routes: &[Route],
+    present: &AtomicU32,
     slot: Slot,
     kind: u8,
     body: &[u8],
     rng: &mut Xorshift,
 ) -> Result<(), Undelivered> {
-    let route = routes.iter().find(|route| route.slot == slot).ok_or(Undelivered::NoNode)?;
+    let route = routes
+        .iter()
+        .find(|route| route.slot == slot)
+        .filter(|_| present.load(Ordering::Relaxed) & slot.bit() != 0)
+        .ok_or(Undelivered::NoNode)?;
     let command = match DownMsg::decode(kind, body) {
         Ok(DownMsg::Assign(assign)) => SimCommand::Assign(assign),
         Ok(DownMsg::Clear(_)) => SimCommand::Clear,
@@ -558,6 +586,8 @@ struct SimNode {
     mute_verified: bool,
     /// The image to roll back to, and when, while a rejected one is on trial.
     rollback: Option<(Version, tokio::time::Instant)>,
+    /// The fleet's slots with a booted node, which the bridge's `Status` reports.
+    present: Arc<AtomicU32>,
 }
 
 impl SimNode {
@@ -590,7 +620,14 @@ impl SimNode {
             rejecting: false,
             mute_verified: false,
             rollback: None,
+            present: Arc::default(),
         }
+    }
+
+    /// Mark this node's slot present, as the P4 does on the first good transfer after a boot: an
+    /// idle one, which comes before the node's first heartbeat.
+    fn booted(&self) {
+        self.present.fetch_or(self.bus_slot.bit(), Ordering::Relaxed);
     }
 
     /// Whether the node is in update mode: heartbeating every second, listening throughout.
@@ -660,6 +697,7 @@ impl SimNode {
         self.reboot(self.version);
         self.trial = trial;
         self.rollback = rollback;
+        self.booted();
     }
 
     /// Start over on `version`, forgetting everything RAM held.
@@ -1008,8 +1046,11 @@ async fn nap_until(
                     node.forget_reported();
                 }
                 Some(SimCommand::Confirm) => node.confirm(),
-                // A fresh boot of the image it runs, still on trial if it was.
+                // Off for the carrier's hold, missing whatever is sent meanwhile, then a fresh boot
+                // of the image it runs, still on trial if it was.
                 Some(SimCommand::PowerCycle) => {
+                    tokio::time::sleep(POWER_OFF).await;
+                    while admin_rx.try_recv().is_ok() {}
                     node.power_cycle();
                     return Continue(());
                 }

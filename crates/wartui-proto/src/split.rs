@@ -129,6 +129,8 @@ pub struct P4Counters {
     pub fan: Option<FanStats>,
     /// The channel pool in force.
     pub pool: ChannelPool,
+    /// The slots that hold a node, bit n for [`crate::bus::Slot`] byte n.
+    pub present: u32,
 }
 
 /// The P4's pair state.
@@ -510,6 +512,7 @@ impl Pair {
             rx_oversize,
             fan,
             pool,
+            present,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -541,6 +544,7 @@ impl Pair {
             host_uart_errors,
             fan,
             pool,
+            present,
         }
     }
 }

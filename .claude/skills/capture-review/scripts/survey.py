@@ -30,7 +30,11 @@ NOT_FAULTS = ("power_on", "external")
 MAX_NODES = 14
 
 # Mirrors EngineConfig::topology_timeout in crates/wartui-core/src/engine/config.rs.
-TOPOLOGY_TIMEOUT_MS = 60000
+TOPOLOGY_TIMEOUT_MS = 20000
+
+# Mirrors bus::PER_BUS and bus::MAX_SLOTS in crates/wartui-proto/src/bus/slot.rs.
+PER_BUS = 7
+MAX_SLOTS = 14
 
 # Mirrors EngineConfig::status_interval in crates/wartui-core/src/engine/config.rs.
 STATUS_INTERVAL_MS = 5000
@@ -69,6 +73,11 @@ def full(mac):
     if isinstance(mac, (bytes, bytearray)):
         return ":".join(f"{b:02X}" for b in mac)
     return str(mac)
+
+
+def slot_name(k):
+    """The bus name of the slot whose byte is `k`, as `heartbeat.slot` stores it."""
+    return f"{'AB'[k // PER_BUS]}{k % PER_BUS + 1}"
 
 
 def utc(ms):
@@ -643,6 +652,7 @@ def bridge(db, ctx):
     bridge_radio_link(db, lives)
     bridge_host_uart(db)
     bridge_fan(db)
+    bridge_slots(db)
 
 
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
@@ -766,6 +776,56 @@ def bridge_fan(db):
              "was unplugged or stalled",
              "SELECT id, rx_at, uptime_ms, fan_duty, fan_rpm FROM bridge_status "
              "WHERE fan_duty >= 20 AND fan_rpm = 0 ORDER BY id")
+
+
+def bridge_slots(db):
+    """Each slot that went off the bus after it was first present: when, and for how long.
+
+    `slots_present` is the P4's mask, bit n for the slot whose byte is n. A slot is absent after
+    five failed transfers over at least a second, and the engine drops its node from the plan on
+    that `Status` (`on_bus`). A bridge restart (`uptime_ms` falls) drops every slot at once, so an
+    absence that begins on the first row after one is the bridge's, not its node's.
+    """
+    rows = db.q("SELECT rx_at, uptime_ms, slots_present FROM bridge_status ORDER BY id")
+    if not rows:
+        return
+    first = [slot_name(k) for k in range(MAX_SLOTS) if rows[0][2] >> k & 1]
+    last = [slot_name(k) for k in range(MAX_SLOTS) if rows[-1][2] >> k & 1]
+    print(f"  slots  first {' '.join(first) or 'none'}  last {' '.join(last) or 'none'}")
+    restarts = {i for i in range(1, len(rows)) if rows[i][1] < rows[i - 1][1]}
+    restart_spells = set()  # row indices of restarts that some slot's absence began on
+    for k in range(MAX_SLOTS):
+        seen = False
+        gone = None  # row index the current absence began on
+        spells = []  # (row index it began on, ms or None while still absent at the end)
+        for i, (at, _, mask) in enumerate(rows):
+            present = bool(mask >> k & 1)
+            if present and gone is not None:
+                spells.append((gone, at - rows[gone][0]))
+                gone = None
+            elif not present and seen and gone is None:
+                gone = i
+            seen = seen or present
+        if gone is not None:
+            spells.append((gone, None))
+        restart_spells |= {i for i, _ in spells if i in restarts}
+        spells = [(i, ms) for i, ms in spells if i not in restarts]
+        if not spells:
+            continue
+        name = slot_name(k)
+        for i, ms in spells[:5]:
+            span = f"for {dur(ms)}" if ms is not None else "to the end"
+            print(f"  slot {name} off the bus at {rel(rows[i][0])} {span}")
+        if len(spells) > 5:
+            print(f"  slot {name} off the bus {len(spells) - 5} more time(s)")
+        flag("WARN", "bridge",
+             f"slot {name} dropped off the bus {len(spells)} time(s) mid-capture: its node lost "
+             "power, crashed or was unplugged, or the host power-cycled it",
+             f"SELECT id, rx_at, uptime_ms, slots_present FROM bridge_status "
+             f"WHERE (slots_present >> {k}) & 1 = 0 ORDER BY id")
+    for i in sorted(restart_spells):
+        print(f"  bridge restart at {rel(rows[i][0])}: all slots absent until their nodes "
+              "answered")
 
 
 def host(db, ctx):

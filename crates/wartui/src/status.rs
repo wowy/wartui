@@ -13,7 +13,8 @@
 //! this build sends: a node on another build.
 //!
 //! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed. `pool` is
-//! the channel pool the bridge holds, which `run`'s planner deals.
+//! the channel pool the bridge holds, which `run`'s planner deals. `slots` names the slots the
+//! bridge counts a node in, as the operator reads them on its board.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::bus::NodeBoard;
+use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
@@ -92,6 +93,7 @@ pub async fn run(args: Args) -> Result<()> {
         host_uart_errors,
         fan,
         pool,
+        present,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -103,6 +105,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
     println!("pool       {pool}");
+    println!("slots      {}", slots_text(info.node_board, present));
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
@@ -134,6 +137,16 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
         Some(FanStats { duty, rpm: None }) => format!("{duty}, rpm not read yet"),
         None => "no carrier, so no fan".to_owned(),
     }
+}
+
+/// The slots `present` names, as `board` labels them, or `none`.
+fn slots_text(board: NodeBoard, present: u32) -> String {
+    let labels: Vec<String> = (0..MAX_SLOTS as u8)
+        .filter_map(Slot::from_u8)
+        .filter(|slot| present & slot.bit() != 0)
+        .map(|slot| board.label(slot).to_string())
+        .collect();
+    if labels.is_empty() { "none".to_owned() } else { labels.join(" ") }
 }
 
 /// What carries the bridge's nodes, and the slots it drives.
@@ -265,7 +278,7 @@ fn human_uptime(ms: u32) -> String {
 mod tests {
     use super::{
         Awaited, awaited, board_line, diagnostic_lines, fan_text, human_uptime, radio_line,
-        silence_note,
+        silence_note, slots_text,
     };
     use wartui_bridge::LinkEvent;
     use wartui_proto::bus::NodeBoard;
@@ -400,6 +413,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            present: 0,
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));
@@ -410,6 +424,19 @@ mod tests {
         let duty = FanDuty::new(40).expect("in range");
         assert_eq!(fan_text(Some(FanStats { duty, rpm: Some(1830) })), "40%, 1830 rpm");
         assert_eq!(fan_text(Some(FanStats { duty, rpm: None })), "40%, rpm not read yet");
+    }
+
+    #[test]
+    fn status_prints_present_slots_by_board_label_when_bridge_reports_them() {
+        // A1, A2 and B1: bytes 0, 1 and 7.
+        let present = 1 << 0 | 1 << 1 | 1 << 7;
+        assert_eq!(slots_text(NodeBoard::Bench, present), "A1 A2 B1");
+        assert_eq!(slots_text(NodeBoard::Carrier14, present), "N1 N2 N8");
+    }
+
+    #[test]
+    fn status_prints_none_when_no_slot_is_present() {
+        assert_eq!(slots_text(NodeBoard::Bench, 0), "none");
     }
 
     #[test]

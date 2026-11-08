@@ -541,6 +541,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool,
+            present: 0,
         }))
     }
 

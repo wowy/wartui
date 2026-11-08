@@ -413,6 +413,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            present: 0,
         };
         assert!(heard(LinkEvent::Message(status)));
     }

@@ -904,6 +904,7 @@ bench, and the carrier's silk name, `N1` up, on a carrier. `B1` is `N4` on the 6
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
 | `alive`        | Heartbeating, so it can be given channels                                                                                                   |
 | `stale`        | Still being heard, but not heartbeating, so it cannot be given channels                                                                     |
+| `off bus`      | The bridge no longer hears its slot on the node bus: it lost power, crashed or was unplugged                                                |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no admin ack` | The bridge could not deliver its assignment, or never answered; see [How channels are assigned](#how-channels-are-assigned)                 |
 | `no slot`      | Another node's heartbeat came from its node-bus slot, so it cannot be reached until its own heartbeat names a slot                          |
@@ -937,13 +938,13 @@ yellow too; any other state keeps its own color:
 | Voltage | below 3.00 V   | The C5's minimum recommended supply; the chip resets at 2.7 V |
 | Die     | 70 °C or above | A warning; the die runs hotter than ambient                   |
 
-A `stale`, `no slot`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
-nothing sent would reach it, it has not yet said what it is, or its frames are not this build's, so
-its share might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
-heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats
-from a `needs update` or `host behind` node are not counted among the footer's frames from an older
-firmware. Once its heartbeat has named its version, its sighting batches are, since none of them is
-recorded.
+A `stale`, `off bus`, `no slot`, `no heartbeat`, `needs update`, or `host behind` node is out of
+the plan: nothing sent would reach it, it has not yet said what it is, or its frames are not this
+build's, so its share might be nobody's. `b` on one says which state it is, because the fix
+differs: wait for a heartbeat, find out why heartbeats stopped, check the node's power and seat,
+update the node with `ota`, or update wartui. Heartbeats from a `needs update` or `host behind`
+node are not counted among the footer's frames from an older firmware. Once its heartbeat has
+named its version, its sighting batches are, since none of them is recorded.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the
@@ -1055,6 +1056,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
 - **`pool  …`**: the channel pool the bridge holds, which `run` deals; see "Channel pools".
+- **`slots  …`**: the slots the bridge hears a node in, by the board's names (`A1 A2 B1`, or
+  `N1 N2 N8` on a carrier), or `none`.
 
 `wartui reset` takes about thirty seconds to fail on a node named by path. The board it is for
 answers nothing, so it transmits before anything has identified itself. A node that is not reading
@@ -1084,12 +1087,12 @@ a connect starts from the 100 ms the engine assumes rather than from a measureme
 bridge sends is logged as `bridge: …`, faults at `warn`, such as `the radio has stopped answering`.
 Each node's membership changes are logged once each:
 
-| Message               | When                                              |
-| --------------------- | ------------------------------------------------- |
-| `node joined`         | its first heartbeat this run                      |
-| `node left the fleet` | a minute after its last heartbeat                 |
-| `node returned`       | its first heartbeat after `node left the fleet`   |
-| `node restarted`      | its heartbeat counter fell, or its epoch reset    |
+| Message               | When                                                                                                 |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `node joined`         | its first heartbeat this run                                                                         |
+| `node left the fleet` | its slot goes off the bus (`reason="off bus"`), or 20 s after its last heartbeat (`reason="silent"`) |
+| `node returned`       | its first heartbeat after `node left the fleet`                                                      |
+| `node restarted`      | its heartbeat counter fell, or its epoch reset                                                       |
 
 `RUST_LOG=debug` adds GPS probe attempts, each retry, undecodable frames, and dropped bulk
 commands.

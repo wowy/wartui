@@ -13,7 +13,8 @@ use wartui_bridge::sim::minor_behind;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
-    Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, StorePeaks, StoreStats,
+    Command, Counters, EngineConfig, Event, FleetEngine, HostSample, NodeView, Now, StorePeaks,
+    StoreStats,
 };
 use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
@@ -79,8 +80,17 @@ fn engine_on(pool: ChannelPool, config: EngineConfig, clock: &Clock) -> FleetEng
     engine
 }
 
-/// A `Status` with every counter zero, reporting `pool`: where the planner learns its pool.
+/// Every slot on the bus, as a `Status` from a full carrier reports it.
+const ALL_PRESENT: u32 = (1 << MAX_SLOTS) - 1;
+
+/// A `Status` with every counter zero and every slot present, reporting `pool`: where the planner
+/// learns its pool.
 fn pool_status(pool: ChannelPool) -> Event {
+    slots_status(pool, ALL_PRESENT)
+}
+
+/// [`pool_status`] showing only the slots in `present`.
+fn slots_status(pool: ChannelPool, present: u32) -> Event {
     Event::Link(LinkEvent::Message(BridgeToHost::Status {
         rx_count: 0,
         dropped_tx: 0,
@@ -91,7 +101,13 @@ fn pool_status(pool: ChannelPool) -> Event {
         host_uart_errors: 0,
         fan: None,
         pool,
+        present,
     }))
+}
+
+/// Every slot but `mac`'s present.
+fn without(mac: Mac) -> u32 {
+    ALL_PRESENT & !slot_of(mac).bit()
 }
 
 thread_local! {
@@ -1931,6 +1947,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            present: ALL_PRESENT,
         }))
     };
 
@@ -1984,6 +2001,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan,
             pool: ChannelPool::All,
+            present: ALL_PRESENT,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2016,6 +2034,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             radio_link,
             host_uart_errors: 0,
             fan,
+            slots_present: ALL_PRESENT,
         }]
     );
     assert_eq!(
@@ -2031,6 +2050,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             radio_link: rebooted,
             host_uart_errors: 0,
             fan: None,
+            slots_present: ALL_PRESENT,
         }]
     );
     let shown = engine.snapshot(clock.at(7), StoreStats::default()).bridge_status;
@@ -2057,6 +2077,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            present: ALL_PRESENT,
         })),
         clock.at(4),
     );
@@ -3145,6 +3166,11 @@ fn engine_reissues_under_new_epoch_when_rebooted_node_rejoins() {
     );
 }
 
+/// The default topology timeout, in whole seconds: the tests about it count from this.
+fn timeout_s() -> u64 {
+    EngineConfig::default().topology_timeout.as_secs()
+}
+
 /// Whether the engine has marked `mac` as gone from the fleet.
 fn departed(engine: &FleetEngine, mac: Mac) -> bool {
     engine.nodes().find(|node| node.mac == mac).expect("the node").departed
@@ -3158,14 +3184,199 @@ fn engine_marks_node_departed_when_silent_past_topology_timeout() {
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
 
-    engine.handle(Event::Tick, clock.at(60));
-    assert!(!departed(&engine, NODE), "59 s silent is inside the timeout");
-    engine.handle(Event::Tick, clock.at(62));
+    let t = timeout_s();
+    engine.handle(Event::Tick, clock.at(t));
+    assert!(!departed(&engine, NODE), "a second short of the timeout is inside it");
+    engine.handle(Event::Tick, clock.at(t + 2));
     assert!(departed(&engine, NODE));
 
     // Its next heartbeat brings it back.
-    engine.handle(heartbeat(NODE, 2), clock.at(70));
+    engine.handle(heartbeat(NODE, 2), clock.at(t + 10));
     assert!(!departed(&engine, NODE));
+}
+
+/// The snapshot's row for `mac`.
+fn view_of(engine: &FleetEngine, mac: Mac, now: Now) -> NodeView {
+    let snapshot = engine.snapshot(now, StoreStats::default());
+    snapshot.nodes.into_iter().find(|view| view.state.mac == mac).expect("the node")
+}
+
+#[test]
+fn engine_deals_whole_pool_to_other_node_when_status_shows_slot_absent() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 2);
+
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(2));
+
+    // On that `Status`, with no tick between and the node's heartbeat well inside the timeout.
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 1);
+    assert_eq!(snapshot.alive, 1);
+    let other = engine.nodes().find(|n| n.mac == OTHER).expect("filed");
+    assert_eq!(other.desired.expect("dealt").channels, ChannelPool::Us.channels());
+    let gone = view_of(&engine, NODE, clock.at(2));
+    assert!(!gone.alive && !gone.on_bus && !gone.assignable, "{gone:?}");
+}
+
+#[test]
+fn engine_returns_node_to_plan_when_heartbeat_follows_absent_status() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(2));
+
+    // Plugged back in: its next heartbeat is newer than the `Status` that missed it.
+    engine.handle(heartbeat(NODE, 2), clock.at(3));
+
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 2);
+    let back = view_of(&engine, NODE, clock.at(3));
+    assert!(back.alive && back.on_bus && back.assignable, "{back:?}");
+}
+
+#[test]
+fn engine_keeps_node_out_of_plan_when_slot_returns_without_heartbeat() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(2));
+
+    // Its slot answers again, but no heartbeat has said which node is there or what it holds: a
+    // rebooting node, or another one pushed into the socket.
+    engine.handle(pool_status(ChannelPool::Us), clock.at(7));
+    let snapshot = engine.snapshot(clock.at(7), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 1);
+    assert!(!view_of(&engine, NODE, clock.at(7)).on_bus);
+
+    engine.handle(heartbeat(NODE, 2), clock.at(8));
+    let snapshot = engine.snapshot(clock.at(8), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 2);
+    assert!(view_of(&engine, NODE, clock.at(8)).on_bus);
+}
+
+#[test]
+fn engine_releases_bluetooth_scan_when_status_shows_its_node_slot_absent() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    engine.handle(Event::Tick, clock.at(1));
+    assert_eq!(engine.snapshot(clock.at(1), StoreStats::default()).ble_node, Some(NODE));
+
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(2));
+
+    // On that `Status`, with no tick between.
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!(snapshot.ble_node, None);
+    let other = engine.nodes().find(|n| n.mac == OTHER).expect("filed");
+    assert_eq!(other.desired.expect("dealt").channels, ChannelPool::Us.channels());
+}
+
+#[test]
+fn engine_decides_membership_by_heartbeats_when_no_status_has_arrived() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!((snapshot.alive, snapshot.assignable), (2, 2));
+    assert!(snapshot.nodes.iter().all(|view| view.on_bus), "nothing has said otherwise");
+    // Past the timeout, heartbeats alone still decide.
+    let snapshot = engine.snapshot(clock.at(1 + timeout_s()), StoreStats::default());
+    assert_eq!(snapshot.alive, 0);
+}
+
+#[test]
+fn engine_drops_present_node_from_plan_when_heartbeats_stop_for_topology_timeout() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    let t = timeout_s();
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    // A node that answers the bus but has stopped heartbeating: its slot stays present.
+    for (counter, at) in (1..).zip((1..=t + 1).step_by(5)) {
+        engine.handle(heartbeat(OTHER, counter), clock.at(at));
+        engine.handle(pool_status(ChannelPool::Us), clock.at(at));
+    }
+
+    engine.handle(Event::Tick, clock.at(t));
+    let snapshot = engine.snapshot(clock.at(t), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 2, "a second short is inside it");
+    engine.handle(Event::Tick, clock.at(t + 1));
+    let snapshot = engine.snapshot(clock.at(t + 1), StoreStats::default());
+    assert_eq!(snapshot.plan.expect("a plan").node_count(), 1);
+    let silent = view_of(&engine, NODE, clock.at(t + 1));
+    assert!(!silent.alive && silent.on_bus, "{silent:?}");
+}
+
+#[test]
+fn engine_ignores_earlier_slot_mask_when_link_reconnects() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(2));
+    assert!(!view_of(&engine, NODE, clock.at(2)).on_bus);
+
+    // The bridge may have restarted meanwhile, so its old mask says nothing about now.
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(3),
+    );
+    engine.handle(connected(), clock.at(4));
+    let view = view_of(&engine, NODE, clock.at(5));
+    assert!(view.on_bus && view.alive, "{view:?}");
+
+    engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(6));
+    assert!(!view_of(&engine, NODE, clock.at(6)).on_bus, "a new `Status` applies");
+}
+
+#[test]
+fn engine_logs_off_bus_reason_when_status_shows_node_slot_absent() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(delivered(id), clock.at(1));
+    // Departures are logged once the link has been up a whole timeout.
+    let t = timeout_s();
+    engine.handle(heartbeat(NODE, 2), clock.at(t - 5));
+
+    let lines = Logs::during(|| {
+        engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(t + 1));
+        engine.handle(Event::Tick, clock.at(t + 1));
+    });
+
+    let left: Vec<&String> = lines.iter().filter(|line| line.contains("node left")).collect();
+    assert_eq!(left.len(), 1, "logged once: {lines:?}");
+    assert!(left[0].contains("reason=\"off bus\""), "{left:?}");
+    assert!(left[0].contains("silent_ms=6000"), "{left:?}");
+}
+
+#[test]
+fn engine_logs_second_off_bus_departure_when_node_returns_by_heartbeat_and_drops_again() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let t = timeout_s();
+    engine.handle(heartbeat(NODE, 1), clock.at(t - 5));
+
+    let lines = Logs::during(|| {
+        engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(t + 1));
+        engine.handle(heartbeat(NODE, 2), clock.at(t + 5));
+        engine.handle(slots_status(ChannelPool::Us, without(NODE)), clock.at(t + 10));
+    });
+
+    let named = |message: &str| lines.iter().filter(|line| line.contains(message)).count();
+    assert_eq!(named("node left the fleet"), 2, "{lines:?}");
+    assert_eq!(named("node returned"), 1, "{lines:?}");
+    assert!(departed(&engine, NODE), "gone again");
 }
 
 #[test]
@@ -3179,7 +3390,7 @@ fn engine_marks_node_departed_when_silent_since_reconnect() {
     // A port reopen announces the bridge too. The node says nothing for the whole
     // timeout after it, so it has gone.
     engine.handle(connected(), clock.at(2));
-    engine.handle(Event::Tick, clock.at(62));
+    engine.handle(Event::Tick, clock.at(2 + timeout_s()));
     assert!(departed(&engine, NODE));
 }
 
@@ -4016,15 +4227,17 @@ fn engine_logs_node_left_when_heartbeats_stop_for_topology_timeout() {
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
 
-    // Eviction waits until the link has been up a whole timeout, which it has by 62 s.
+    // Eviction waits until the link has been up a whole timeout, which it has by then.
+    let t = timeout_s();
     let lines = Logs::during(|| {
-        engine.handle(Event::Tick, clock.at(62));
-        engine.handle(Event::Tick, clock.at(63));
+        engine.handle(Event::Tick, clock.at(t + 2));
+        engine.handle(Event::Tick, clock.at(t + 3));
     });
 
     assert_eq!(lines.len(), 1, "logged once: {lines:?}");
     assert!(lines[0].contains("message=node left the fleet"), "{lines:?}");
-    assert!(lines[0].contains("silent_ms=61000"), "{lines:?}");
+    assert!(lines[0].contains("reason=\"silent\""), "{lines:?}");
+    assert!(lines[0].contains(&format!("silent_ms={}", (t + 1) * 1000)), "{lines:?}");
 }
 
 #[test]
@@ -4034,7 +4247,7 @@ fn engine_logs_node_returned_when_heartbeat_follows_departure() {
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
-    engine.handle(Event::Tick, clock.at(62));
+    engine.handle(Event::Tick, clock.at(2 + timeout_s()));
 
     let lines = Logs::during(|| {
         engine.handle(heartbeat(NODE, 2), clock.at(421));
@@ -4149,7 +4362,7 @@ fn engine_logs_nothing_when_heartbeats_arrive_on_time() {
     engine.handle(delivered(id), clock.at(1));
 
     let lines = Logs::during(|| {
-        for (counter, at) in (2..).zip((31..=181).step_by(30)) {
+        for (counter, at) in (2..).zip((6..=181).step_by(5)) {
             engine.handle(heartbeat(NODE, counter), clock.at(at));
             engine.handle(Event::Tick, clock.at(at));
         }
@@ -4179,8 +4392,8 @@ fn engine_logs_nothing_when_link_outage_holds_heartbeats_past_timeout() {
         engine.handle(connected(), clock.at(131));
         engine.handle(heartbeat(NODE, 3), clock.at(131));
         for at in 132..=250 {
-            if at % 30 == 0 {
-                engine.handle(heartbeat(NODE, at / 30), clock.at(u64::from(at)));
+            if at % 5 == 0 {
+                engine.handle(heartbeat(NODE, at / 5), clock.at(u64::from(at)));
             }
             engine.handle(Event::Tick, clock.at(u64::from(at)));
         }
