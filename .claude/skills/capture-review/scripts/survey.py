@@ -8,7 +8,11 @@ The file is opened read-only (`mode=ro`), so a capture that is still being writt
 survey. It reads the tables and columns this build writes (`SCHEMA` in
 crates/wartui-core/src/store.rs), and nothing else.
 
-Usage: python3 -I survey.py CAPTURE.db [--log wartui.log] [--node 59:50]
+Nodes and slots print as the operator reads them: a node by its latest heartbeat's slot label
+(`N7`), or by its last two octets with no slot or no carrier, and a slot by its label. Each flag's
+SQL queries the raw rows, so it stays on bus names (`A1`) and MAC hex.
+
+Usage: python3 -I survey.py CAPTURE.db [--log wartui.log] [--node N7]
 """
 
 import argparse
@@ -36,6 +40,10 @@ TOPOLOGY_TIMEOUT_MS = 20000
 PER_BUS = 7
 MAX_SLOTS = 14
 
+# Mirrors NodeBoard::per_bus in crates/wartui-proto/src/bus/node_board.rs. Any other value of
+# capture.node_board has no labels.
+BOARD_PER_BUS = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}
+
 # Mirrors EngineConfig::status_interval in crates/wartui-core/src/engine/config.rs.
 STATUS_INTERVAL_MS = 5000
 
@@ -61,7 +69,7 @@ def flag(sev, area, text, sql=""):
 
 
 def short(mac):
-    """A MAC by its last two octets, as the fleet table and docs name boards."""
+    """A MAC by its last two octets, as the docs name bridges and nodes with no slot."""
     if mac is None:
         return "?"
     if isinstance(mac, (bytes, bytearray)) and len(mac) == 6:
@@ -78,6 +86,64 @@ def full(mac):
 def slot_name(k):
     """The bus name of the slot whose byte is `k`, as `heartbeat.slot` stores it."""
     return f"{'AB'[k // PER_BUS]}{k % PER_BUS + 1}"
+
+
+BOARD = None  # capture.node_board, or None while it is NULL.
+LATEST_SLOT = {}  # mac -> the bus name its latest heartbeat came from, with a carrier
+
+
+def label(slot):
+    """A bus name as the carrier's silk names it. Mirrors `NodeBoard::label`, so a slot the board
+    does not drive stays as stored, as does every slot with no carrier or an unknown board."""
+    per_bus = BOARD_PER_BUS.get(BOARD)
+    if per_bus is None or not re.fullmatch("[AB][1-7]", str(slot)):
+        return slot
+    bus, index = "AB".index(slot[0]), int(slot[1]) - 1
+    return f"N{bus * per_bus + index + 1}" if index < per_bus else slot
+
+
+def load_slots(db):
+    """Fill LATEST_SLOT. Heartbeat slots mean nothing to the operator with no carrier."""
+    if BOARD not in BOARD_PER_BUS:
+        return
+    rows = db.q("SELECT node_mac, slot, MAX(id) FROM heartbeat GROUP BY node_mac")
+    for mac, slot, _ in rows:
+        if re.fullmatch("[AB][1-7]", str(slot)):
+            LATEST_SLOT[mac] = slot
+
+
+def name(mac):
+    """What the operator calls a node: its slot's label, or its last two octets with no slot.
+    Nodes whose latest heartbeats name one slot each add their octets, as `wartui analyze` does.
+    """
+    slot = LATEST_SLOT.get(mac)
+    if slot is None:
+        return short(mac)
+    if sum(s == slot for s in LATEST_SLOT.values()) > 1:
+        return f"{label(slot)} {short(mac)}"
+    return label(slot)
+
+
+def named(mac):
+    """`name(mac)` tied to its address: `N7 (57:84)`."""
+    node = name(mac)
+    return node if short(mac) in node else f"{node} ({short(mac)})"
+
+
+def node_order(mac):
+    """Sorts as the carrier reads: by slot, then nodes with no slot by address. Bus names sort
+    as their labels do."""
+    slot = LATEST_SLOT.get(mac)
+    return (slot is None, slot or "", mac)
+
+
+def wanted(ctx, mac):
+    """Whether --node leaves this node's detail in: no --node, its octets or its slot's label."""
+    only = ctx["only"]
+    if not only or only == short(mac):
+        return True
+    slot = LATEST_SLOT.get(mac)
+    return slot is not None and only == label(slot)
 
 
 def utc(ms):
@@ -164,7 +230,7 @@ def since_boot_delta(cur, prev, rebooted):
 
 
 def provenance(db, ctx):
-    global START_MS
+    global START_MS, BOARD
     section("capture")
     cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "notes",
             "simulated")
@@ -187,10 +253,13 @@ def provenance(db, ctx):
         f"  bridge    {full(row.get('bridge_mac'))}  fw {row.get('bridge_fw')}"
     )
     board = row.get("node_board")
-    per_bus = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}.get(board)
+    BOARD = board
+    load_slots(db)
+    per_bus = BOARD_PER_BUS.get(board)
     if per_bus:
-        # Slots are stored by bus name; the operator read the silk.
-        print(f"  board     {board}  (slots below are bus names: A1 is N1, B1 is N{per_bus + 1})")
+        # The rows store bus names; the operator read the silk, and the survey prints it.
+        print(f"  board     {board}  (slots below are labels; SQL and rows hold bus names: "
+              f"A1 is N1, B1 is N{per_bus + 1})")
     else:
         print(f"  board     {board}")
     if board == "no carrier":
@@ -266,18 +335,18 @@ def nodes(db, ctx):
     section("nodes")
     rows = db.q("SELECT mac, first_seen, last_seen, capabilities FROM node ORDER BY mac")
     ctx["nodes"] = {r[0]: r for r in rows}
-    for mac, first, last, caps in rows:
-        if ctx["only"] and short(mac) != ctx["only"]:
+    for mac, first, last, caps in sorted(rows, key=lambda r: node_order(r[0])):
+        if not wanted(ctx, mac):
             continue
         print(
-            f"  {short(mac)}  {full(mac)}  {caps or 'no capabilities'}  "
+            f"  {named(mac)}  {full(mac)}  {caps or 'no capabilities'}  "
             f"seen {rel(first)} .. {rel(last)}"
         )
         if caps is None:
             flag(
                 "INFO",
                 "nodes",
-                f"{short(mac)} never reported capabilities: heard only by sighting, never "
+                f"{name(mac)} never reported capabilities: heard only by sighting, never "
                 "assignable",
                 f"SELECT * FROM node WHERE hex(mac)='{mac.hex().upper()}'",
             )
@@ -286,9 +355,8 @@ def nodes(db, ctx):
         flag(
             "INFO",
             "config",
-            f"ble_slot={ble_slot} (the bridge's Bluetooth slot) is set, but no assignment gave "
-            "a node the Bluetooth job, so no node heartbeated from that slot and none scanned "
-            "Bluetooth",
+            f"{label(ble_slot)} is the bridge's Bluetooth slot, but no assignment gave a node the "
+            "Bluetooth job, so no node heartbeated from that slot and none scanned Bluetooth",
             "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
         )
     if len(rows) > MAX_NODES:
@@ -312,7 +380,7 @@ def heartbeats(db, ctx):
     ctx["hb"] = per
     ble_nodes = ctx.get("ble_nodes", set())
     total_reversals = 0
-    for mac, hs in per.items():
+    for mac, hs in sorted(per.items(), key=lambda item: node_order(item[0])):
         reboots = replayed = 0
         wifi_ref = ble_ref = 0
         silences = []
@@ -359,11 +427,11 @@ def heartbeats(db, ctx):
                 held = epoch
             prev = r
         total_reversals += reversals
-        if ctx["only"] and short(mac) != ctx["only"]:
+        if not wanted(ctx, mac):
             continue  # walked anyway: its restarts feed the grouping and the adoption check
         job = "ble" if mac in ble_nodes else "wifi"
-        where = "  ".join(f"{s} {n}" for s, n in slots.most_common())
-        print(f"  {short(mac)} [{job}]  rows {len(hs)}  slot {where}  restarts {reboots}  "
+        where = "  ".join(f"{label(s)} {n}" for s, n in slots.most_common())
+        print(f"  {name(mac)} [{job}]  rows {len(hs)}  slot {where}  restarts {reboots}  "
               f"replayed {replayed}")
         if intervals:
             print(f"        interval ms  {spread(intervals)}")
@@ -389,16 +457,17 @@ def heartbeats(db, ctx):
                 fell = min(boot[:fifth]) - min(boot[-fifth:])
                 if fell > HEAP_FALL_BYTES:
                     flag("WARN", "node",
-                         f"{short(mac)} free heap fell {fell} bytes across its last boot "
+                         f"{name(mac)} free heap fell {fell} bytes across its last boot "
                          f"({min(boot[:fifth])} -> {min(boot[-fifth:])} at the low points): "
                          "a leak in the node firmware?",
                          f"SELECT id, rx_at, counter, heap_free FROM heartbeat WHERE {node_sql} "
                          "ORDER BY id")
         for at, a, b in moves[:5]:
-            print(f"        moved        {a} -> {b} at {rel(at)}")
+            print(f"        moved        {label(a)} -> {label(b)} at {rel(at)}")
         if moves:
             flag("INFO", "node",
-                 f"{short(mac)} heartbeated from {len(slots)} slots ({', '.join(slots)}), "
+                 f"{name(mac)} heartbeated from {len(slots)} slots "
+                 f"({', '.join(str(label(s)) for s in slots)}), "
                  f"moving {len(moves)} time(s), first near {rel(moves[0][0])}",
                  f"SELECT id, rx_at, slot FROM (SELECT *, LAG(slot) OVER (ORDER BY id) AS ps "
                  f"FROM heartbeat WHERE {node_sql}) WHERE slot != ps ORDER BY id")
@@ -412,14 +481,14 @@ def heartbeats(db, ctx):
                   + (f"; in capture: {', '.join(str(c) for c in during)}" if during else ""))
             if is_fault(before):
                 flag("INFO", "node",
-                     f"{short(mac)} last booted before the capture started, for {before}",
+                     f"{name(mac)} last booted before the capture started, for {before}",
                      f"SELECT id, rx_at, counter, reset_cause FROM heartbeat WHERE "
                      f"{node_sql} ORDER BY id LIMIT 1")
             faults = [c for c in during if is_fault(c)]
             if faults:
                 not_faults = ", ".join(f"'{c}'" for c in NOT_FAULTS)
                 flag("WARN", "node",
-                     f"{short(mac)} restarted {len(faults)} time(s) in the capture for a cause "
+                     f"{name(mac)} restarted {len(faults)} time(s) in the capture for a cause "
                      f"other than power-on or an external reset: {', '.join(faults)}",
                      f"SELECT id, rx_at, counter, reset_cause FROM (SELECT *, LAG(counter) "
                      f"OVER (ORDER BY id) AS pc FROM heartbeat WHERE {node_sql}) WHERE counter < pc "
@@ -430,7 +499,7 @@ def heartbeats(db, ctx):
             flag(
                 "WARN",
                 "node",
-                f"{short(mac)} went {len(silences)} time(s) without a heartbeat for longer than "
+                f"{name(mac)} went {len(silences)} time(s) without a heartbeat for longer than "
                 f"topology_timeout ({TOPOLOGY_TIMEOUT_MS} ms); "
                 f"longest {dur(max(b - a for a, b in silences))}",
                 f"SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) AS gap FROM heartbeat "
@@ -445,12 +514,12 @@ def heartbeats(db, ctx):
             groups.append([r])
     fleet = len(per)
     for g in groups:
-        macs = sorted({short(r[1]) for r in g})
+        macs = [name(m) for m in sorted({r[1] for r in g}, key=node_order)]
         at = g[0][0]
         silent = max(r[0] - r[4] for r in g)
-        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]}"
+        detail = ", ".join(f"{named(r[1])} counter {r[2]}->{r[3]}"
                            + (f" reset {r[5]}" if r[5] is not None else "") for r in g)
-        causes = sorted({f"{short(r[1])} {r[5]}" for r in g if r[5] is not None})
+        causes = sorted({f"{name(r[1])} {r[5]}" for r in g if r[5] is not None})
         print(f"  restart near {rel(at)}: {', '.join(macs)}  (longest silence {dur(silent)})"
               + (f"  reset {', '.join(causes)}" if causes else ""))
         who = (f"all {fleet} nodes restarted together" if len(macs) == fleet and fleet > 1
@@ -486,7 +555,7 @@ def assignments(db, ctx):
     ble = {r[0] for r in rows if r[4]}
     ctx["ble_nodes"] = ble
     if ble:
-        print(f"  bluetooth job given to {', '.join(short(m) for m in ble)}")
+        print(f"  bluetooth job given to {', '.join(name(m) for m in sorted(ble, key=node_order))}")
     if ctx.get("start") and ctx.get("end") and rows:
         hours = (ctx["end"] - ctx["start"]) / 3_600_000
         if hours > 0:
@@ -506,7 +575,7 @@ def assignments(db, ctx):
         chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
         assigned[r[0]] |= set(chans)
         print(
-            f"  {short(r[0])}  epoch {r[1]} (wire {r[2]})  {r[7]}  at {rel(r[5])}  "
+            f"  {name(r[0])}  epoch {r[1]} (wire {r[2]})  {r[7]}  at {rel(r[5])}  "
             f"{'BLE' if r[4] else ''}  {len(chans)} channels"
         )
     ctx["assigned"] = assigned
@@ -514,9 +583,9 @@ def assignments(db, ctx):
     last = {}
     for r in rows:
         last[r[0]] = r
-    for mac, r in sorted(last.items()):
+    for mac, r in sorted(last.items(), key=lambda item: node_order(item[0])):
         chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
-        print(f"    {short(mac)}  " + " ".join(str(c) for c in chans)
+        print(f"    {name(mac)}  " + " ".join(str(c) for c in chans)
               + ("  BLE" if r[4] else ""))
 
     # Adoption: a live heartbeat well after an acked assignment should carry that assignment's wire
@@ -546,7 +615,7 @@ def assignments(db, ctx):
                 first = first or h[2]
         if mismatched:
             flag("WARN", "admin",
-                 f"{short(mac)}: {mismatched} live heartbeats >15 s after an acked assignment carry an "
+                 f"{name(mac)}: {mismatched} live heartbeats >15 s after an acked assignment carry an "
                  f"epoch it was never sent since (first at {rel(first)}): acked but not adopted",
                  f"SELECT id, rx_at, epoch FROM heartbeat WHERE hex(node_mac)='{mac.hex().upper()}'")
 
@@ -560,14 +629,14 @@ def batch_gaps(db, ctx):
     per = defaultdict(list)
     for mac, rx, lost in rows:
         per[mac].append((rx, lost))
-    for mac, gaps in sorted(per.items()):
-        if ctx["only"] and short(mac) != ctx["only"]:
+    for mac, gaps in sorted(per.items(), key=lambda item: node_order(item[0])):
+        if not wanted(ctx, mac):
             continue
         total = sum(lost for _, lost in gaps)
         buckets = Counter((rx - (ctx.get("start") or 0)) // 300_000 for rx, _ in gaps)
         worst = buckets.most_common(3)
         print(
-            f"  {short(mac)}  gaps {len(gaps)}  lost {total}  largest {max(l for _, l in gaps)}  "
+            f"  {name(mac)}  gaps {len(gaps)}  lost {total}  largest {max(l for _, l in gaps)}  "
             f"busiest 5-min windows "
             + ", ".join(f"+{b * 5}m:{n}" for b, n in worst)
         )
@@ -792,8 +861,8 @@ def bridge_slots(db):
     rows = db.q("SELECT rx_at, uptime_ms, slots_present FROM bridge_status ORDER BY id")
     if not rows:
         return
-    first = [slot_name(k) for k in range(MAX_SLOTS) if rows[0][2] >> k & 1]
-    last = [slot_name(k) for k in range(MAX_SLOTS) if rows[-1][2] >> k & 1]
+    first = [label(slot_name(k)) for k in range(MAX_SLOTS) if rows[0][2] >> k & 1]
+    last = [label(slot_name(k)) for k in range(MAX_SLOTS) if rows[-1][2] >> k & 1]
     print(f"  slots  first {' '.join(first) or 'none'}  last {' '.join(last) or 'none'}")
     restarts = {i for i in range(1, len(rows)) if rows[i][1] < rows[i - 1][1]}
     restart_spells = set()  # row indices of restarts that some slot's absence began on
@@ -815,14 +884,14 @@ def bridge_slots(db):
         spells = [(i, ms) for i, ms in spells if i not in restarts]
         if not spells:
             continue
-        name = slot_name(k)
+        slot = label(slot_name(k))
         for i, ms in spells[:5]:
             span = f"for {dur(ms)}" if ms is not None else "to the end"
-            print(f"  slot {name} off the bus at {rel(rows[i][0])} {span}")
+            print(f"  slot {slot} off the bus at {rel(rows[i][0])} {span}")
         if len(spells) > 5:
-            print(f"  slot {name} off the bus {len(spells) - 5} more time(s)")
+            print(f"  slot {slot} off the bus {len(spells) - 5} more time(s)")
         flag("WARN", "bridge",
-             f"slot {name} dropped off the bus {len(spells)} time(s) mid-capture: its node lost "
+             f"slot {slot} dropped off the bus {len(spells)} time(s) mid-capture: its node lost "
              "power, crashed or was unplugged, or the host power-cycled it",
              f"SELECT id, rx_at, uptime_ms, slots_present FROM bridge_status "
              f"WHERE (slots_present >> {k}) & 1 = 0 ORDER BY id")
@@ -929,12 +998,12 @@ def observations(db, ctx):
     print("  by node: rows / distinct bssid / channels")
     per_node = db.q("SELECT node_mac, COUNT(*), COUNT(DISTINCT bssid), MIN(rx_at), MAX(rx_at) "
                     "FROM observation GROUP BY 1 ORDER BY 1")
-    for mac, n, distinct, lo, hi in per_node:
-        if ctx["only"] and short(mac) != ctx["only"]:
+    for mac, n, distinct, lo, hi in sorted(per_node, key=lambda r: node_order(r[0])):
+        if not wanted(ctx, mac):
             continue
         chans = [c for (c,) in db.q("SELECT DISTINCT channel FROM observation WHERE node_mac=? "
                                     "ORDER BY 1", (mac,))]
-        print(f"    {short(mac)}  {n}  {distinct}  {rel(lo)}..{rel(hi)}  ch {chans}")
+        print(f"    {name(mac)}  {n}  {distinct}  {rel(lo)}..{rel(hi)}  ch {chans}")
         assigned = ctx.get("assigned", {}).get(mac)
         if assigned:
             off5 = [c for c in chans if c > 14 and c not in assigned]
@@ -952,10 +1021,10 @@ def observations(db, ctx):
              f"(first heartbeat {rel(first_hb)})",
              "SELECT MIN(rx_at) - (SELECT started_at FROM capture) FROM observation")
     heartbeating = set(ctx.get("hb", {}))
-    for mac in heartbeating - {r[0] for r in per_node}:
+    for mac in sorted(heartbeating - {r[0] for r in per_node}, key=node_order):
         if mac not in ctx.get("ble_nodes", set()):
             flag("WARN", "sightings",
-                 f"{short(mac)} heartbeated but stored no observations")
+                 f"{name(mac)} heartbeated but stored no observations")
     pool_seen = {c for (c,) in db.q("SELECT DISTINCT channel FROM observation WHERE kind='wifi'")}
     assigned_all = set().union(*ctx.get("assigned", {}).values()) if ctx.get("assigned") else set()
     never = sorted(assigned_all - pool_seen)
@@ -974,7 +1043,7 @@ def observations(db, ctx):
         if beats > 3:
             hits.append((mac, rx, gap, beats))
     for mac, rx, gap, beats in hits[:8]:
-        print(f"  {short(mac)} stored no sighting for {dur(gap)} before {rel(rx)} while sending "
+        print(f"  {name(mac)} stored no sighting for {dur(gap)} before {rel(rx)} while sending "
               f"{beats} heartbeats")
     if hits:
         flag("WARN", "sightings",
@@ -1136,14 +1205,14 @@ def raw_frames(db, ctx):
         return
     by_slot = db.q("SELECT slot, kind, COUNT(*) FROM raw_frame GROUP BY 1, 2 ORDER BY 1, 2")
     for slot, kind, c in by_slot:
-        print(f"    {slot}  {UP_TYPES.get(kind, f'type {kind}')}  {c}")
+        print(f"    {label(slot)}  {UP_TYPES.get(kind, f'type {kind}')}  {c}")
     # Equal counts mean any heartbeat loss happened before the host read the record.
     raw_hb = dict(db.q("SELECT slot, COUNT(*) FROM raw_frame WHERE kind = 1 GROUP BY 1"))
     stored = Counter(h[5] for hs in ctx.get("hb", {}).values() for h in hs)
     if raw_hb:
         slots = sorted(set(raw_hb) | set(stored))
         print("  heartbeat records raw/stored per slot: " + "  ".join(
-            f"{s} {raw_hb.get(s, 0)}/{stored.get(s, 0)}" for s in slots))
+            f"{label(s)} {raw_hb.get(s, 0)}/{stored.get(s, 0)}" for s in slots))
 
 
 LOG_LINE = re.compile(
@@ -1244,7 +1313,7 @@ def log(path, ctx):
     if silent:
         flag("WARN", "log", f"the bridge said its radio stopped answering {silent} time(s)")
     moments = [(at, "bridge reboot") for at in ctx.get("bridge_reboots", [])]
-    moments += [(r[0], f"{short(r[1])} restart") for r in ctx.get("restarts", [])[:6]]
+    moments += [(r[0], f"{name(r[1])} restart") for r in ctx.get("restarts", [])[:6]]
     for at, what in moments:
         near = [e for e in events if e[0] and abs(e[0] - at) <= 60_000]
         print(f"  within 60 s of {what} at {rel(at)}: {len(near)} notable lines")
@@ -1256,7 +1325,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("db")
     ap.add_argument("--log", help="the --log-file from the same run")
-    ap.add_argument("--node", help="limit per-node detail to one node, by last two octets")
+    ap.add_argument("--node", help="limit per-node detail to one node, by slot label or last two "
+                                   "octets")
     args = ap.parse_args()
     db = Db(args.db)
     ctx = {"only": args.node.upper() if args.node else None}

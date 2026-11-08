@@ -4195,7 +4195,7 @@ impl tracing::Subscriber for Logs {
         let mut fields = Fields(String::new());
         event.record(&mut fields);
         // Lag lines are not about membership.
-        if fields.0.starts_with("message=node ") {
+        if fields.0.starts_with("message=node ") || fields.0.starts_with("message=host needs") {
             CAPTURED.with_borrow_mut(|lines| lines.as_mut().map(|lines| lines.push(fields.0)));
         }
     }
@@ -4250,6 +4250,7 @@ fn engine_logs_node_left_when_heartbeats_stop_for_topology_timeout() {
 
     assert_eq!(lines.len(), 1, "logged once: {lines:?}");
     assert!(lines[0].contains("message=node left the fleet"), "{lines:?}");
+    assert!(lines[0].contains(&format!("slot={}", slot_of(NODE))), "{lines:?}");
     assert!(lines[0].contains("reason=\"silent\""), "{lines:?}");
     assert!(lines[0].contains(&format!("silent_ms={}", (t + 1) * 1000)), "{lines:?}");
 }
@@ -4270,6 +4271,7 @@ fn engine_logs_node_returned_when_heartbeat_follows_departure() {
 
     assert_eq!(lines.len(), 1, "logged once: {lines:?}");
     assert!(lines[0].contains("message=node returned"), "{lines:?}");
+    assert!(lines[0].contains(&format!("slot={}", slot_of(NODE))), "{lines:?}");
     assert!(lines[0].contains("silent_ms=420000"), "{lines:?}");
 }
 
@@ -4286,7 +4288,63 @@ fn engine_logs_node_restarted_when_heartbeat_counter_decreases() {
 
     assert_eq!(lines.len(), 1, "logged once: {lines:?}");
     assert!(lines[0].contains("message=node restarted"), "{lines:?}");
+    assert!(lines[0].contains(&format!("slot={}", slot_of(NODE))), "{lines:?}");
     assert!(lines[0].contains("counter_before=175 counter_after=2"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_slot_label_when_node_restarts_on_a_carrier() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected_board(NODE, NodeBoard::Carrier14), clock.at(0));
+    let b1 = Slot::new(1, 0).expect("B1");
+    let from_b1 =
+        |counter| from_slot(b1, UpType::Heartbeat.as_u8(), &beat_msg(NODE, counter).encode(), 0);
+    engine.handle(from_b1(175), clock.at(1));
+
+    let lines = Logs::during(|| {
+        engine.handle(from_b1(2), clock.at(2));
+    });
+
+    assert!(lines[0].contains("message=node restarted"), "{lines:?}");
+    assert!(lines[0].contains("slot=N8"), "{lines:?}");
+}
+
+#[test]
+fn engine_omits_slot_from_node_left_when_another_node_took_its_slot() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let body = beat_msg(OTHER, 1).encode();
+    engine.handle(from_slot(slot_of(NODE), UpType::Heartbeat.as_u8(), &body, 0), clock.at(2));
+
+    let lines = Logs::during(|| {
+        engine.handle(Event::Tick, clock.at(3 + timeout_s()));
+    });
+
+    let mac = wartui_proto::mac::full(&NODE).to_string();
+    let left = lines.iter().find(|line| line.contains(&mac)).expect("NODE left");
+    assert!(left.contains("message=node left the fleet"), "{left}");
+    assert!(!left.contains("slot="), "{left}");
+}
+
+#[test]
+fn engine_logs_slot_when_heartbeat_names_another_version() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let lines = Logs::during(|| {
+        engine.handle(beat_at(NODE, 1, 0, outdated_capabilities(), 0), clock.at(1));
+        engine.handle(beat_at(OTHER, 1, 0, ahead_capabilities(), 0), clock.at(1));
+    });
+
+    let line = |message: &str| lines.iter().find(|line| line.contains(message)).expect(message);
+    assert!(line("message=node needs update").contains(&format!("slot={}", slot_of(NODE))));
+    assert!(
+        line("message=host needs update to drive this node")
+            .contains(&format!("slot={}", slot_of(OTHER)))
+    );
 }
 
 #[test]

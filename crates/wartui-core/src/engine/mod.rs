@@ -304,7 +304,7 @@ impl FleetEngine {
         if !settled {
             return;
         }
-        let gone: Vec<(Mac, Option<u64>, &str)> = self
+        let gone: Vec<(Mac, Option<SlotLabel>, Option<u64>, &str)> = self
             .nodes
             .values()
             .filter(|node| node.last_heartbeat.is_some() && !node.departed)
@@ -312,11 +312,14 @@ impl FleetEngine {
             .map(|node| {
                 let silent = node.last_heartbeat.map(|last| now.mono.duration_since(last));
                 let reason = if self.on_bus(node) { "silent" } else { "off bus" };
-                (node.mac, silent.map(|silent| silent.as_millis() as u64), reason)
+                let slot = node.slot.map(|slot| self.slot_label(slot));
+                (node.mac, slot, silent.map(|silent| silent.as_millis() as u64), reason)
             })
             .collect();
-        for (mac, silent_ms, reason) in gone {
-            tracing::info!(mac = %mac::full(&mac), reason, silent_ms, "node left the fleet");
+        for (mac, slot, silent_ms, reason) in gone {
+            // An empty `Option` omits the field: a node that lost its slot has none to name.
+            let slot = slot.map(tracing::field::display);
+            tracing::info!(mac = %mac::full(&mac), slot, reason, silent_ms, "node left the fleet");
             if let Some(node) = self.nodes.get_mut(&mac) {
                 node.departed = true;
             }

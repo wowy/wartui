@@ -4,6 +4,12 @@
 //! nothing, so the counts match what an export of the same selection would write. The second is
 //! the peak arrival rates and the third the losses, both from `wartui_core::analyze`, whose `//!`
 //! says how each figure is counted. Standard output, because nothing else is written there.
+//!
+//! Nodes go by slot label, as on the main screen, and by address tail with no slot. Two nodes whose
+//! last heartbeats name one slot each get their tail after the label, wherever they appear in the
+//! report.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -12,12 +18,13 @@ use wartui_core::analyze::{
 };
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
-use wartui_proto::mac;
+use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::mac::{self, Mac};
 
 use crate::export::{
     Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
 };
-use crate::text::{buffer_full, thousands};
+use crate::text::{buffer_full, node_name, thousands};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -31,14 +38,15 @@ pub fn run(args: Args) -> Result<()> {
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = args.selection.filter(&config);
     let summary = wigle_csv(&conn, &filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
-    let peak = peaks(&conn).context("reading how fast sightings arrived")?;
     let loss = losses(&conn).context("reading what the capture lost")?;
+    let peak = peaks(&conn, &loss.slots()).context("reading how fast sightings arrived")?;
+    let names = NodeNames::new(loss.board, &loss);
     print!(
         "{} rows to export\n{}{}{}",
         thousands(summary.rows),
         details(&summary),
-        peaks_text(&peak),
-        losses_text(&loss)
+        peaks_text(&peak, &names),
+        losses_text(&loss, &names)
     );
     note_unpositioned(&summary);
     note_unknown_kind(&summary);
@@ -47,8 +55,40 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// What the report calls its nodes.
+struct NodeNames {
+    board: NodeBoard,
+    /// Slots more than one node's latest heartbeat names.
+    shared: BTreeSet<Slot>,
+}
+
+impl NodeNames {
+    /// `loss` lists every node with a heartbeat, so every node with a slot.
+    fn new(board: NodeBoard, loss: &LossSummary) -> Self {
+        let mut seen = BTreeSet::new();
+        let shared =
+            loss.nodes.iter().filter_map(|node| node.slot).filter(|s| !seen.insert(*s)).collect();
+        Self { board, shared }
+    }
+
+    fn name(&self, slot: Option<Slot>, mac: &Mac) -> String {
+        let name = node_name(self.board, slot, mac);
+        if slot.is_some_and(|slot| self.shared.contains(&slot)) {
+            format!("{name} {}", mac::short(mac))
+        } else {
+            name
+        }
+    }
+}
+
+/// `names`, padded to the widest so the figures after them line up.
+fn name_column(names: Vec<String>) -> Vec<String> {
+    let width = names.iter().map(String::len).max().unwrap_or(0);
+    names.into_iter().map(|name| format!("{name:<width$}")).collect()
+}
+
 /// The peak arrival rates, in the layout of [`details`], or nothing when no sighting was stored.
-fn peaks_text(peak: &PeakSummary) -> String {
+fn peaks_text(peak: &PeakSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 
     if peak.sightings == 0 {
@@ -75,15 +115,16 @@ fn peaks_text(peak: &PeakSummary) -> String {
         }
     }
     let _ = writeln!(text, "  peak by node");
-    for node in &peak.nodes {
-        let _ = writeln!(text, "    {}  {}", mac::short(&node.mac), rate(&node.peak));
+    let column = name_column(peak.nodes.iter().map(|n| names.name(n.slot, &n.mac)).collect());
+    for (name, node) in column.iter().zip(&peak.nodes) {
+        let _ = writeln!(text, "    {name}  {}", rate(&node.peak));
     }
     text
 }
 
 /// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
 /// `lost on USB` is approximate to the bridge's queued frames.
-fn losses_text(loss: &LossSummary) -> String {
+fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 
     let mut text = String::new();
@@ -155,9 +196,9 @@ fn losses_text(loss: &LossSummary) -> String {
     }
 
     let _ = writeln!(text, "  loss by node");
-    for node in &loss.nodes {
-        let mut line =
-            format!("    {}  batches {}", mac::short(&node.mac), thousands(node.batches_lost));
+    let column = name_column(loss.nodes.iter().map(|n| names.name(n.slot, &n.mac)).collect());
+    for (name, node) in column.iter().zip(&loss.nodes) {
+        let mut line = format!("    {name}  batches {}", thousands(node.batches_lost));
         if node.heartbeats > 0 {
             let _ = write!(line, "  heartbeats {}", thousands(node.heartbeats));
         }
@@ -277,9 +318,53 @@ mod tests {
         BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary, QueueLoss,
         RadioLinkLoss,
     };
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::QueueId;
+    use wartui_proto::mac::Mac;
 
-    use super::{losses_text, peaks_text};
+    use super::{NodeNames, losses_text, peaks_text};
+
+    const NODE_1C: Mac = [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A];
+    const NODE_57: Mac = [0x02, 0, 0x5E, 0x10, 0x57, 0x84];
+    const NODE_90: Mac = [0x02, 0, 0x5E, 0x10, 0x90, 0x01];
+
+    /// Bus A's first three sockets, which are `N1` to `N3` on any carrier.
+    const fn a(index: u8) -> Option<Slot> {
+        Slot::new(0, index)
+    }
+
+    /// `B7`, which is `N14` on the fourteen-node carrier.
+    const B7: Option<Slot> = Slot::new(1, 6);
+
+    /// Names for a capture with no node on a slot, so every node goes by its tail.
+    fn tails() -> NodeNames {
+        NodeNames::new(NodeBoard::Carrier14, &LossSummary::default())
+    }
+
+    /// `losses_text` with the names of a capture with no node on a slot.
+    fn loss_text(loss: &LossSummary) -> String {
+        losses_text(loss, &tails())
+    }
+
+    /// `peaks_text` with the names of a capture with no node on a slot.
+    fn peak_text(peak: &PeakSummary) -> String {
+        peaks_text(peak, &tails())
+    }
+
+    /// A loss row with one batch lost.
+    fn lost(mac: Mac, slot: Option<Slot>) -> NodeLoss {
+        NodeLoss { mac, slot, batches_lost: 1, ..Default::default() }
+    }
+
+    /// A summary of `nodes` alone.
+    fn node_losses(nodes: Vec<NodeLoss>) -> LossSummary {
+        LossSummary { nodes, ..Default::default() }
+    }
+
+    /// The rows under `heading`.
+    fn rows<'a>(text: &'a str, heading: &str) -> Vec<&'a str> {
+        text.lines().skip_while(|line| *line != heading).skip(1).collect()
+    }
 
     /// Two nodes over an evening, behind a bridge that restarted once.
     fn evening() -> LossSummary {
@@ -297,14 +382,16 @@ mod tests {
             }),
             nodes: vec![
                 NodeLoss {
-                    mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A],
+                    mac: NODE_1C,
+                    slot: None,
                     batches_lost: 12,
                     heartbeats: 699,
                     wifi_refused: 0,
                     ble_refused: 1_203,
                 },
                 NodeLoss {
-                    mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84],
+                    mac: NODE_57,
+                    slot: None,
                     batches_lost: 200,
                     heartbeats: 2_757,
                     wifi_refused: 18_220,
@@ -312,6 +399,7 @@ mod tests {
                 },
             ],
             host: None,
+            ..Default::default()
         }
     }
 
@@ -344,6 +432,7 @@ mod tests {
                 battery_min_mv: Some(3_618),
                 ..Default::default()
             }),
+            ..Default::default()
         }
     }
 
@@ -356,8 +445,8 @@ mod tests {
             wifi: peak(1_790, 39_880),
             ble: peak(120, 2_310),
             nodes: vec![
-                NodePeak { mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], peak: peak(120, 2_310) },
-                NodePeak { mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84], peak: peak(1_790, 39_880) },
+                NodePeak { mac: NODE_1C, slot: None, peak: peak(120, 2_310) },
+                NodePeak { mac: NODE_57, slot: None, peak: peak(1_790, 39_880) },
             ],
             clock_reversals: 0,
         }
@@ -366,7 +455,7 @@ mod tests {
     #[test]
     fn analyze_report_prints_peak_lines_when_sightings_stored() {
         assert_eq!(
-            peaks_text(&rates()),
+            peak_text(&rates()),
             "  peak       1,842 sightings/s  41,210/min\n\
              \x20 peak wifi  1,790/s  39,880/min\n\
              \x20 peak ble   120/s  2,310/min\n\
@@ -378,32 +467,32 @@ mod tests {
 
     #[test]
     fn analyze_report_omits_peak_lines_when_no_sightings_stored() {
-        assert_eq!(peaks_text(&PeakSummary::default()), "");
+        assert_eq!(peak_text(&PeakSummary::default()), "");
     }
 
     #[test]
     fn analyze_report_omits_peak_ble_when_no_ble_sightings() {
-        let text = peaks_text(&PeakSummary { ble: Peak::default(), ..rates() });
+        let text = peak_text(&PeakSummary { ble: Peak::default(), ..rates() });
         assert!(!text.contains("peak ble"), "{text}");
         assert!(text.contains("  peak wifi  "), "{text}");
     }
 
     #[test]
     fn analyze_report_names_clock_reversals_when_wall_clock_steps_back() {
-        let text = peaks_text(&PeakSummary { clock_reversals: 1, ..rates() });
+        let text = peak_text(&PeakSummary { clock_reversals: 1, ..rates() });
         assert!(
             text.starts_with(
                 "  peak       1,842 sightings/s  41,210/min  wall clock reversed 1 time\n"
             ),
             "{text}"
         );
-        let text = peaks_text(&PeakSummary { clock_reversals: 2, ..rates() });
+        let text = peak_text(&PeakSummary { clock_reversals: 2, ..rates() });
         assert!(text.contains("41,210/min  wall clock reversed 2 times\n"), "{text}");
     }
 
     #[test]
     fn analyze_report_lists_node_lines_when_nodes_present() {
-        let text = losses_text(&evening());
+        let text = loss_text(&evening());
         assert!(
             text.contains("\n    1C:5A  batches 12  heartbeats 699  buffer full ble 1,203\n"),
             "{text}"
@@ -425,7 +514,7 @@ mod tests {
     fn analyze_report_omits_bridge_line_when_no_status_rows() {
         let mut loss = evening();
         loss.bridge = None;
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(!text.contains("bridge"), "{text}");
         assert!(text.starts_with("  batches "), "{text}");
     }
@@ -444,7 +533,7 @@ mod tests {
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
         });
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
     }
 
@@ -466,7 +555,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        first_line(&losses_text(&loss))
+        first_line(&loss_text(&loss))
     }
 
     /// The report's first line, the bridge's, with its newline.
@@ -491,7 +580,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            first_line(&losses_text(&loss)),
+            first_line(&loss_text(&loss)),
             "  bridge     1,000 frames received  10 dropped (1.0%)  host read 990  \
              42 oversize (not a node's)\n"
         );
@@ -558,7 +647,7 @@ mod tests {
     #[test]
     fn analyze_report_prints_queue_lines_when_bridge_reports_queues() {
         assert_eq!(
-            losses_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() })),
+            loss_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() })),
             "  bridge     1,000 frames received  0 dropped (0.0%)  host read 1,000\n\
              \x20 queue      host-bulk  peak 1,024/262,144 bytes  0 dropped\n\
              \x20 queue      node-down  peak 3,102/4,096 bytes  3 dropped\n\
@@ -576,7 +665,7 @@ mod tests {
             radio_seq_gap: 4,
             ..Default::default()
         };
-        let text = losses_text(&bridge_with_link(radio_link));
+        let text = loss_text(&bridge_with_link(radio_link));
         assert!(
             text.contains(
                 "  radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap\n"
@@ -587,17 +676,16 @@ mod tests {
 
     #[test]
     fn analyze_report_prints_radio_link_packets_alone_when_link_is_clean() {
-        let text =
-            losses_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() }));
+        let text = loss_text(&bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() }));
         assert!(text.contains("  radio link 9 packets\n"), "{text}");
     }
 
     #[test]
     fn analyze_report_prints_host_uart_errors_even_at_zero_when_none_occurred() {
         let mut loss = bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() });
-        assert!(losses_text(&loss).ends_with("  host link  0 host_uart_errors\n"));
+        assert!(loss_text(&loss).ends_with("  host link  0 host_uart_errors\n"));
         loss.bridge.as_mut().unwrap().host_uart_errors = 1_204;
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(text.ends_with("  host link  1,204 host_uart_errors\n"), "{text}");
     }
 
@@ -608,17 +696,17 @@ mod tests {
             node.wifi_refused = 0;
             node.ble_refused = 0;
         }
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(!text.contains("buffer full"), "{text}");
         assert!(text.contains("\n    1C:5A  batches 12  heartbeats 699\n"), "{text}");
 
-        let text = losses_text(&evening());
+        let text = loss_text(&evening());
         assert!(text.contains("  buffer full wifi 18,220  ble 1,203\n"), "{text}");
     }
 
     #[test]
     fn analyze_report_prints_host_and_health_lines_when_host_rows_present() {
-        let text = losses_text(&drive());
+        let text = loss_text(&drive());
         assert_eq!(
             text,
             "  bridge     31,821 frames received  0 dropped (0.0%)  host read 31,821\n\
@@ -637,7 +725,7 @@ mod tests {
         if let Some(host) = &mut loss.host {
             host.battery_min_mv = None;
         }
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(text.contains("temp max 71.2 °C\n"), "{text}");
         assert!(!text.contains("battery"), "{text}");
     }
@@ -646,7 +734,7 @@ mod tests {
     fn analyze_report_prints_store_dropped_alone_when_host_figures_are_zero() {
         let mut loss = drive();
         loss.host = Some(HostLoss::default());
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(text.contains("\n  host       0 store dropped\n"), "{text}");
         assert!(!text.contains("health "), "no health column was read: {text}");
     }
@@ -655,7 +743,7 @@ mod tests {
     fn analyze_report_prints_temperature_alone_when_host_is_not_a_pi() {
         let mut loss = drive();
         loss.host = Some(HostLoss { temp_max_mc: Some(48_000), ..Default::default() });
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(text.ends_with("\n  health     temp max 48.0 °C\n"), "{text}");
     }
 
@@ -665,7 +753,7 @@ mod tests {
         if let Some(host) = &mut loss.host {
             host.since_boot = Some(0b1110);
         }
-        let text = losses_text(&loss);
+        let text = loss_text(&loss);
         assert!(
             text.contains("  since boot: frequency capped, throttled, soft temperature limit  "),
             "{text}"
@@ -674,8 +762,68 @@ mod tests {
 
     #[test]
     fn analyze_report_omits_host_lines_when_no_host_rows() {
-        let text = losses_text(&evening());
+        let text = loss_text(&evening());
         assert!(!text.contains("  host       "), "{text}");
         assert!(!text.contains("health "), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_names_nodes_by_label_when_on_a_carrier() {
+        let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, a(1))]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        assert_eq!(
+            rows(&losses_text(&loss, &names), "  loss by node"),
+            ["    N1  batches 1", "    N2  batches 1"]
+        );
+    }
+
+    #[test]
+    fn analyze_report_names_node_by_tail_when_it_has_no_slot() {
+        let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, None)]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        assert_eq!(
+            rows(&losses_text(&loss, &names), "  loss by node"),
+            ["    N1     batches 1", "    1C:5A  batches 1"]
+        );
+    }
+
+    #[test]
+    fn analyze_report_keeps_columns_aligned_when_label_widths_differ() {
+        let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, B7)]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        assert_eq!(
+            rows(&losses_text(&loss, &names), "  loss by node"),
+            ["    N1   batches 1", "    N14  batches 1"]
+        );
+    }
+
+    #[test]
+    fn analyze_report_adds_tail_only_to_rows_sharing_a_slot_when_another_node_took_it() {
+        let loss = node_losses(vec![lost(NODE_1C, a(2)), lost(NODE_57, a(2)), lost(NODE_90, B7)]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        assert_eq!(
+            rows(&losses_text(&loss, &names), "  loss by node"),
+            ["    N3 1C:5A  batches 1", "    N3 57:84  batches 1", "    N14       batches 1"]
+        );
+    }
+
+    #[test]
+    fn analyze_report_adds_tail_in_peak_rows_when_slot_is_shared_with_a_node_without_sightings() {
+        // The other node has no peak row, and the two sections should still name this one alike.
+        let loss = node_losses(vec![lost(NODE_1C, a(2)), lost(NODE_57, a(2))]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let peak = PeakSummary {
+            sightings: 1,
+            nodes: vec![NodePeak {
+                mac: NODE_57,
+                slot: a(2),
+                peak: Peak { per_second: 1, per_minute: 1 },
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            rows(&peaks_text(&peak, &names), "  peak by node"),
+            ["    N3 57:84  1/s  1/min"]
+        );
     }
 }

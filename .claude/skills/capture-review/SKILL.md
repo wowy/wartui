@@ -26,7 +26,7 @@ next capture needs, or a reason to stop worrying about something.
 Run both, from the repo root:
 
 ```sh
-python3 -I .claude/skills/capture-review/scripts/survey.py <db> [--log <log>] [--node 57:84]
+python3 -I .claude/skills/capture-review/scripts/survey.py <db> [--log <log>] [--node N7]
 cargo run --release -q -p wartui -- analyze --db <db>
 ```
 
@@ -93,8 +93,9 @@ Drop these, they are settled policy:
 
 ## 4. Report
 
-Reply in chat with this structure. Keep sentences short and use the boards' last two octets
-(`57:84`) as the operator does.
+Reply in chat with this structure. Keep sentences short and name nodes by slot label (`N7`), as
+the operator does, the survey's `nodes` section tying each to its address. Use the last two octets
+(`57:84`) only for the bridge and a node with no slot.
 
 ```markdown
 ## Capture

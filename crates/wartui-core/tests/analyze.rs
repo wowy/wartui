@@ -1,5 +1,6 @@
 //! Loss and arrival-rate figures read back from a capture the store wrote.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -7,9 +8,11 @@ use wartui_core::analyze::{
     BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss, losses, peaks,
 };
 use wartui_core::position::Fix;
-use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record};
+use wartui_core::record::{
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record,
+};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::bus::{RecordKind, Slot};
+use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
@@ -32,6 +35,11 @@ fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
     store.close();
     let conn = open_readonly(&path).expect("reopening read-only");
     (dir, conn)
+}
+
+/// `peaks` where the figures are the point and no node's slot is.
+fn peak_figures(conn: &Connection) -> PeakSummary {
+    peaks(conn, &BTreeMap::new()).expect("reading peaks")
 }
 
 fn status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32) -> Record {
@@ -169,7 +177,7 @@ fn burst(node: Mac, kind: RecordKind, at_ms: i64, count: usize) -> Vec<Record> {
 fn total_peak(at_ms: &[i64]) -> Peak {
     let (_dir, conn) =
         capture(at_ms.iter().map(|&at| sighting(NODE, RecordKind::Wifi, at)).collect());
-    peaks(&conn).expect("reading peaks").total
+    peak_figures(&conn).total
 }
 
 #[test]
@@ -178,7 +186,7 @@ fn analyze_restarts_peak_windows_when_clock_steps_back() {
     records.extend(burst(NODE, RecordKind::Wifi, 5_000, 3));
     records.extend(burst(NODE, RecordKind::Wifi, 4_800, 3));
     let (_dir, conn) = capture(records);
-    let summary = peaks(&conn).expect("reading peaks");
+    let summary = peak_figures(&conn);
     // Sorted by `rx_at`, the step would merge into {6, 9}: a peak no link carried.
     assert_eq!(summary.total, Peak { per_second: 3, per_minute: 6 });
     assert_eq!(summary.clock_reversals, 1);
@@ -198,7 +206,7 @@ fn analyze_reports_burst_as_peak_when_sightings_arrive_together() {
     let mut records = burst(NODE, RecordKind::Wifi, 0, 5);
     records.extend(burst(NODE, RecordKind::Wifi, 10_000, 2));
     let (_dir, conn) = capture(records);
-    let summary = peaks(&conn).expect("reading peaks");
+    let summary = peak_figures(&conn);
     assert_eq!(summary.total, Peak { per_second: 5, per_minute: 7 });
     assert_eq!(summary.sightings, 7);
 }
@@ -208,14 +216,14 @@ fn analyze_joins_peak_burst_when_it_straddles_a_clock_second() {
     let mut records = burst(NODE, RecordKind::Wifi, 900, 3);
     records.extend(burst(NODE, RecordKind::Wifi, 1_100, 4));
     let (_dir, conn) = capture(records);
-    assert_eq!(peaks(&conn).expect("reading peaks").total.per_second, 7);
+    assert_eq!(peak_figures(&conn).total.per_second, 7);
 }
 
 #[test]
 fn analyze_reports_minute_peak_above_second_when_load_is_sustained() {
     let records = (0..=7).flat_map(|i| burst(NODE, RecordKind::Wifi, i * 10_000, 2)).collect();
     let (_dir, conn) = capture(records);
-    assert_eq!(peaks(&conn).expect("reading peaks").total, Peak { per_second: 2, per_minute: 12 });
+    assert_eq!(peak_figures(&conn).total, Peak { per_second: 2, per_minute: 12 });
 }
 
 #[test]
@@ -228,13 +236,13 @@ fn analyze_reports_peak_per_node_when_nodes_interleave() {
         sighting(NODE, RecordKind::Wifi, 0),
     ];
     let (_dir, conn) = capture(records);
-    let summary = peaks(&conn).expect("reading peaks");
+    let summary = peak_figures(&conn);
     assert_eq!(summary.total, Peak { per_second: 5, per_minute: 5 });
     assert_eq!(
         summary.nodes,
         vec![
-            NodePeak { mac: OTHER, peak: Peak { per_second: 2, per_minute: 2 } },
-            NodePeak { mac: NODE, peak: Peak { per_second: 3, per_minute: 3 } },
+            NodePeak { mac: OTHER, slot: None, peak: Peak { per_second: 2, per_minute: 2 } },
+            NodePeak { mac: NODE, slot: None, peak: Peak { per_second: 3, per_minute: 3 } },
         ]
     );
 }
@@ -244,7 +252,7 @@ fn analyze_reports_peak_per_kind_when_wifi_and_ble_arrive() {
     let mut records = burst(NODE, RecordKind::Wifi, 0, 3);
     records.extend(burst(NODE, RecordKind::Ble, 0, 2));
     let (_dir, conn) = capture(records);
-    let summary = peaks(&conn).expect("reading peaks");
+    let summary = peak_figures(&conn);
     assert_eq!(summary.wifi, Peak { per_second: 3, per_minute: 3 });
     assert_eq!(summary.ble, Peak { per_second: 2, per_minute: 2 });
     assert_eq!(summary.total, Peak { per_second: 5, per_minute: 5 });
@@ -261,7 +269,7 @@ fn analyze_counts_peak_rows_when_export_leaves_them_out() {
         })
         .collect();
     let (_dir, conn) = capture(records);
-    assert_eq!(peaks(&conn).expect("reading peaks").total.per_second, 2);
+    assert_eq!(peak_figures(&conn).total.per_second, 2);
 }
 
 #[test]
@@ -283,17 +291,17 @@ fn analyze_counts_peak_in_total_and_node_only_when_kind_is_unknown() {
     .expect("inserting the foreign row");
     drop(rw);
     let conn = open_readonly(&path).expect("reopening read-only");
-    let summary = peaks(&conn).expect("reading peaks");
+    let summary = peak_figures(&conn);
     assert_eq!(summary.total, Peak { per_second: 2, per_minute: 2 });
     assert_eq!(summary.wifi, Peak { per_second: 1, per_minute: 1 });
     assert_eq!(summary.ble, Peak::default());
-    assert_eq!(summary.nodes, vec![NodePeak { mac: NODE, peak: summary.total }]);
+    assert_eq!(summary.nodes, vec![NodePeak { mac: NODE, slot: None, peak: summary.total }]);
 }
 
 #[test]
 fn analyze_reports_no_peaks_when_capture_holds_no_sightings() {
     let (_dir, conn) = capture(vec![beat(NODE, 0, 1, 0, 0)]);
-    assert_eq!(peaks(&conn).expect("reading peaks"), PeakSummary::default());
+    assert_eq!(peak_figures(&conn), PeakSummary::default());
 }
 
 #[test]
@@ -594,7 +602,8 @@ fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
         beat(OTHER, 0, 1, 0, 0),
     ]);
     let loss = losses(&conn).unwrap();
-    // Sorted by address, and a node with batch gaps but no heartbeat is still listed.
+    // With no carrier no node has a slot, so sorted by address, and a node with batch gaps but no
+    // heartbeat is still listed.
     let summary: Vec<_> =
         loss.nodes.iter().map(|n| (n.mac, n.batches_lost, n.heartbeats)).collect();
     assert_eq!(summary, vec![(OTHER, 1, 1), (NODE, 7, 0)]);
@@ -804,4 +813,125 @@ fn analyze_reads_no_pi_figures_when_health_null() {
 fn analyze_omits_host_when_no_host_rows() {
     let (_dir, conn) = capture(steady(NODE, 0, 3));
     assert_eq!(losses(&conn).unwrap().host, None);
+}
+
+/// A bridge on `board`, which is what a capture learns its carrier from.
+fn bridge_on(board: NodeBoard) -> Record {
+    Record::Bridge(BridgeSeen {
+        mac: [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0],
+        fw_version: "0.1.0".to_owned(),
+        node_board: board,
+    })
+}
+
+/// A heartbeat from `slot`.
+fn beat_from(node: Mac, slot: Slot, at_ms: i64) -> Record {
+    let Record::Heartbeat(hb) = beat(node, at_ms, 1, 0, 0) else { unreachable!() };
+    Record::Heartbeat(Heartbeat { slot, ..hb })
+}
+
+const A3: Slot = Slot::new(0, 2).unwrap();
+const B1: Slot = Slot::new(1, 0).unwrap();
+const THIRD: Mac = [0x02, 0x00, 0x5E, 0x10, 0x90, 0x01];
+
+/// Each node's address and slot, in the order a summary lists them.
+type Listed = Vec<(Mac, Option<Slot>)>;
+
+/// What `losses` and then `peaks` list.
+fn listed(conn: &Connection) -> (Listed, Listed) {
+    let loss = losses(conn).expect("reading losses");
+    let peak = peaks(conn, &loss.slots()).expect("reading peaks");
+    (
+        loss.nodes.iter().map(|n| (n.mac, n.slot)).collect(),
+        peak.nodes.iter().map(|n| (n.mac, n.slot)).collect(),
+    )
+}
+
+#[test]
+fn analyze_lists_nodes_in_slot_order_when_on_a_carrier() {
+    // By address OTHER sorts first, so slot order is what puts NODE ahead of it.
+    let (_dir, conn) = capture(vec![
+        bridge_on(NodeBoard::Carrier14),
+        beat_from(OTHER, B1, 0),
+        beat_from(NODE, A3, 0),
+        sighting(OTHER, RecordKind::Wifi, 0),
+        sighting(NODE, RecordKind::Wifi, 0),
+    ]);
+    let expected = vec![(NODE, Some(A3)), (OTHER, Some(B1))];
+    assert_eq!(listed(&conn), (expected.clone(), expected));
+    assert_eq!(losses(&conn).unwrap().board, NodeBoard::Carrier14);
+}
+
+#[test]
+fn analyze_lists_slotless_nodes_after_slots_by_address_when_node_has_no_heartbeat() {
+    let (_dir, conn) = capture(vec![
+        bridge_on(NodeBoard::Carrier14),
+        beat_from(THIRD, B1, 0),
+        gap(NODE, 10, 1),
+        gap(OTHER, 10, 1),
+        sighting(NODE, RecordKind::Wifi, 0),
+        sighting(OTHER, RecordKind::Wifi, 0),
+        sighting(THIRD, RecordKind::Wifi, 0),
+    ]);
+    let expected = vec![(THIRD, Some(B1)), (OTHER, None), (NODE, None)];
+    assert_eq!(listed(&conn), (expected.clone(), expected));
+}
+
+#[test]
+fn analyze_gives_no_slots_when_capture_has_no_carrier() {
+    let (_dir, conn) = capture(vec![
+        bridge_on(NodeBoard::NoCarrier),
+        beat_from(NODE, A3, 0),
+        sighting(NODE, RecordKind::Wifi, 0),
+    ]);
+    let expected = vec![(NODE, None)];
+    assert_eq!(listed(&conn), (expected.clone(), expected));
+    assert_eq!(losses(&conn).unwrap().board, NodeBoard::NoCarrier);
+}
+
+#[test]
+fn analyze_gives_no_carrier_when_no_bridge_announced_itself() {
+    let (_dir, conn) = capture(vec![beat_from(NODE, A3, 0)]);
+    assert_eq!(losses(&conn).unwrap().board, NodeBoard::NoCarrier);
+    assert_eq!(losses(&conn).unwrap().nodes[0].slot, None);
+}
+
+#[test]
+fn analyze_lists_moved_node_once_under_latest_slot_when_node_moved() {
+    // `rx_at` runs backwards here: latest means the highest `id`.
+    let (_dir, conn) = capture(vec![
+        bridge_on(NodeBoard::Carrier14),
+        beat_from(NODE, A3, 5_000),
+        beat_from(NODE, B1, 0),
+        sighting(NODE, RecordKind::Wifi, 0),
+    ]);
+    let expected = vec![(NODE, Some(B1))];
+    assert_eq!(listed(&conn), (expected.clone(), expected));
+}
+
+#[test]
+fn analyze_lists_both_nodes_by_address_when_they_end_on_one_slot() {
+    let (_dir, conn) = capture(vec![
+        bridge_on(NodeBoard::Carrier14),
+        beat_from(NODE, A3, 0),
+        beat_from(OTHER, B1, 1_000),
+        beat_from(OTHER, A3, 2_000),
+    ]);
+    let (loss, _) = listed(&conn);
+    assert_eq!(loss, vec![(OTHER, Some(A3)), (NODE, Some(A3))]);
+}
+
+#[test]
+fn analyze_gives_no_slot_when_latest_heartbeat_slot_is_not_text() {
+    let (dir, conn) = capture(vec![
+        bridge_on(NodeBoard::Carrier14),
+        beat_from(NODE, A3, 0),
+        beat_from(NODE, B1, 1_000),
+    ]);
+    Connection::open(dir.path().join("wartui.db"))
+        .expect("opening to write")
+        .execute("UPDATE heartbeat SET slot = x'FF' WHERE id = (SELECT MAX(id) FROM heartbeat)", [])
+        .expect("writing a slot of the wrong type");
+    let loss = losses(&conn).expect("a bad slot does not fail the report");
+    assert_eq!(loss.nodes[0].slot, None, "not the older heartbeat's slot");
 }

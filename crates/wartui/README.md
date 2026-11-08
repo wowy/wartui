@@ -138,8 +138,8 @@ of its output, after the export summary:
   peak wifi  1,790/s  39,880/min
   peak ble   120/s  2,310/min
   peak by node
-    1C:5A  120/s  2,310/min
-    57:84  1,790/s  39,880/min
+    N3   120/s  2,310/min
+    N11  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   queue      host-bulk  peak 245,760/245,760 bytes  1,300 dropped
   queue      node-down  peak 3,102/4,160 bytes  0 dropped
@@ -150,15 +150,15 @@ of its output, after the export summary:
   batches    212 lost between node and host
   buffer full wifi 18,220  ble 1,203
   loss by node
-    1C:5A  batches 12  heartbeats 699  buffer full ble 1,203
-    57:84  batches 200  heartbeats 2,757  buffer full wifi 18,220
+    N3   batches 12  heartbeats 699  buffer full ble 1,203
+    N11  batches 200  heartbeats 2,757  buffer full wifi 18,220
 ```
 
 | Line           | What it counts                                                                  |
 |----------------|---------------------------------------------------------------------------------|
 | `peak`         | The most sightings in any one second and any one minute, across the fleet       |
 | `peak wifi`    | The same for Wi-Fi sightings alone; `peak ble` for BLE                          |
-| `peak by node` | The same for each node, by address                                              |
+| `peak by node` | The same for each node, by slot label; see below                                |
 | `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
 | `radio link`   | Packets on the P4–C6 link, and its link errors that are not zero                |
@@ -167,6 +167,12 @@ of its output, after the export summary:
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
+
+`peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
+order, so one that moved appears once. A node with no heartbeat, or any node in a capture with no
+carrier, goes by the last two octets of its address and sorts after the labels. Two nodes whose
+latest heartbeats name one slot, as when a board is replaced, each get their address after the
+label (`N3 57:84`).
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
 They are half-open: a sighting and one exactly a second earlier share no one-second window, so a
@@ -623,9 +629,10 @@ wartui power-cycle --slot N3 --bridge 44:C0
 
 It resolves one bridge as `wartui reset` does, and takes `--config PATH` as `status` does. `--slot`
 takes the carrier's silk names, `N1` to `N6`, `N10` or `N14`; another name is refused with the
-range. A bridge with no carrier is refused before anything is sent. A node with its own USB
-plugged in stays powered through a cycle. When the bridge takes the node supply to be lost, it
-switches every node off and powers them again one at a time
+range (`"N7" is not a slot on this carrier-6: name one of N1 to N6`). A bridge with no carrier is
+refused before anything is sent. A node with its own USB plugged in stays powered through a cycle.
+When the bridge takes the node supply to be lost, it switches every node off and powers them again
+one at a time
 ([`docs/node-bus.md`](../../docs/node-bus.md#on-the-carrier-board)). Otherwise nothing
 power-cycles a node on its own.
 
@@ -634,7 +641,6 @@ The bridge answers once the node is powered again, or says why not:
 - `N3 power-cycled`: done.
 - `this bridge has no carrier board, so it cannot switch node power`: the bridge found no
   wartui-carrier at boot.
-- `A4 is not a slot on this carrier-6`: the carrier has no socket there.
 - `N3 was not power-cycled: the carrier's I/O expander did not answer`: the bridge could not reach
   the switch. One that fails at boot is a `fault` in `wartui status` too.
 
@@ -1144,7 +1150,7 @@ The bridge is the `P4 bridge on a CH343` row, with the address the header shows 
 node is a row whose heartbeats `wartui sniff` attributes to its address. Either name works as
 `--bridge`, as does an address's last one to five octets (two hex digits each) when exactly one
 bridge answers with it. An address names only a bridge that answers, and a path
-is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several matches
+is opened as given. `--bridge 44:C0` is how a bridge is read off the header. Several matches
 are refused with a list, never guessed. Keep the address: a device node moves when the board
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 

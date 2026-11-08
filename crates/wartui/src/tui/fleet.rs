@@ -613,8 +613,6 @@ mod tests {
     #[test]
     fn fleet_table_shows_bluetooth_in_channel_column_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
-        // The stream pane names nodes by the same octets, on the same lines.
-        snapshot.tail = Vec::new();
         let mac = snapshot.nodes[0].state.mac;
 
         // Adopted: confirmed and desired agree on the Bluetooth assignment, and the
