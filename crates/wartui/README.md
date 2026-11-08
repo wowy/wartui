@@ -310,15 +310,15 @@ wdgwars = ""
 
 wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
 a malformed `[bridge] mac`, a `mac` or `serial` beside `remember = false`, or an `excluded-ssids`
-entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read only
-`[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop
-them.
+entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read only `[bridge]
+mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
 `run` writes `[bridge] mac` and `serial` when the bridge it remembers changes; see "Keyboard
-commands" and "When nothing arrives". `flash-bridge` writes both
-for a board it found and flashed; see "Flashing the bridge". When the file is missing, `run` creates
-it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its owner.
+commands" and "When nothing arrives". `flash-bridge` writes both for a board it found and flashed;
+see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`,
+except under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
@@ -335,8 +335,8 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `bluetooth`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing default file
-silently means the built-in defaults.
+`pool`, `bluetooth`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing
+default file silently means the built-in defaults.
 
 ### Benchmarking the store
 
@@ -1015,14 +1015,14 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 
 ## When nothing arrives
 
-**wartui finds the bridge by asking.** It opens each attached CH343 in turn, and never a node,
-and keeps the first that answers the link protocol. `run` saves that address to `wartui.toml` as
+**wartui finds the bridge by asking.** It opens each attached CH343 in turn, and never a node, and
+keeps the first that answers the link protocol. `run` saves that address to `wartui.toml` as
 `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only that port. A
 capture given `--bridge` saves the named board once it answers, since naming it for a capture is
 choosing it. `flash-bridge` saves the board it found and flashed. `status`, `sniff`, `reset`,
-`power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read it and save nothing, so questioning a board changes
-nothing later, and `flash-fleet` never reads it. An answering board is held for the run: unplug the
-bridge to reflash a node, and wartui waits rather than transmit into it.
+`power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read it and save nothing, so questioning a board
+changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
+unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
 
 Deleting the `mac` and `serial` lines is always safe, costs one slower start, and fixes wartui
 opening the wrong board. It also self-corrects: an answering board replaces it, and the remembered board is dropped
