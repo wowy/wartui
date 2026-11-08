@@ -34,7 +34,9 @@ On the XIAO ESP32-C5:
 
 ## Pin behavior
 
-- **SPI mode 0**, at 4 MHz, measured on the carrier.
+- **SPI mode 0**, at 4 MHz, measured on the carrier. A carrier-10's soaks counted no errors at the
+  P4 up to 26.67 MHz, and did at 40 MHz
+  ([the sweep](node-bus-findings.md#clock-sweep-on-the-carrier-10-2026-11-08)).
 - **No bus pin is a strapping pin** on either chip. The P4's are GPIO34–38 (ESP32-P4 datasheet
   v0.7). The C5's are GPIO2, 3, 7 and 25–28 (ESP32-C5 datasheet v1.5), which is why the node
   leaves D2 and D3 (GPIO25 and 7) unused. esp-hal's generated docs also flag the P4's GPIO32 and
