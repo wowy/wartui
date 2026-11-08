@@ -221,9 +221,16 @@ is here rather than only in a `//!`.
   node bus's frozen core and never moves: the host can update any node in the field over that core,
   so a fleet survives every other change.
   `store::SCHEMA_VERSION` moves with any change to a table, column or index, or to what a stored
-  value means. `store_keeps_schema_shape_when_schema_version_unchanged` catches a shape change
-  without a bump. It cannot see a change in meaning, so the author bumps by hand. **The store has
-  no migrations before 1.0 either.** `check_version` refuses any marker but its own — a lower one
+  value wartui reads back means. A scan-table change does not move it: `assignment.channels` holds
+  the indices that went out, read against the scan table of the build that wrote the row, and no
+  wartui code decodes the column against the scan table.
+  `.claude/skills/capture-review/scripts/survey.py` decodes it with its own mirror of
+  `SCAN_CHANNELS`, so it reads a capture written under another scan table in the mirror's terms.
+  `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
+  trigger and view, comments and whitespace aside, and fails on a difference without a bump. It
+  cannot see a change in meaning or a pragma, so the written rule alone enforces a bump for a
+  change in meaning. **The store has no migrations before 1.0 either.** `check_version` refuses
+  any marker but its own — a lower one
   as firmly as a higher one. A capture with another marker is somebody else's file, and the fix is
   a new `--db` path rather than a `migrate` arm. Bringing one forward would mean deciding what an
   older build meant, which is the compatibility this policy declines to claim: a stored

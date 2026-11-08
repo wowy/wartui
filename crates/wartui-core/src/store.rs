@@ -37,12 +37,15 @@ use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, Record};
 
 /// The schema version this build writes and reads, and the only thing that names a file's shape.
-/// Bump it for any change to a table, column or index, or to what a stored value means. A comment
-/// or whitespace change does not bump it. Neither does a new optional `capture.*` key in `kv`,
-/// because an absent key means unknown.
+/// Bump it for any change to a table, column or index, or to what a stored value wartui reads back
+/// means. A comment or whitespace change does not bump it. Neither does a new optional `capture.*`
+/// key in `kv`, because an absent key means unknown. Nor does a scan-table change:
+/// `assignment.channels` holds the indices that went out, read against the scan table of the build
+/// that wrote the row, and no wartui code decodes the column against the scan table.
 ///
-/// `store_keeps_schema_shape_when_schema_version_unchanged` catches a shape change without a bump.
-/// It cannot see a change in meaning, so the author bumps for that by hand.
+/// `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
+/// trigger and view, comments and whitespace aside, and fails on a difference without a bump. It
+/// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
 pub const SCHEMA_VERSION: i32 = 2;
@@ -110,8 +113,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- actually went out; they differ because the wire field is one byte wide.
 -- `channels` is the forty-two-bit SCAN_CHANNELS mask the assignment carried, stored as the
 -- integer it is: the indices are what the wire said, and which channels they name is
--- the scan table of the build that wrote the row. Nothing reads the column back, and
--- nothing rewrites it when the table changes -- a row records what went out.
+-- the scan table of the build that wrote the row. No wartui code decodes the column against the
+-- scan table, and nothing rewrites it when the table changes -- a row records what went out.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -289,8 +292,8 @@ pub enum StoreError {
     Create(#[source] std::io::Error),
     /// The database carries another schema version's marker.
     #[error(
-        "database schema is v{found}, but this build reads and writes only v{ours}, and there are \
-         no migrations before 1.0 — start a new file with a different --db path"
+        "capture is schema v{found}, and this build handles only v{ours}: read it with the wartui \
+         build that wrote it, or start a new capture at a different --db path to record"
     )]
     SchemaMismatch {
         /// What the file says.
@@ -298,6 +301,9 @@ pub enum StoreError {
         /// What this build writes.
         ours: i32,
     },
+    /// The file carries this build's marker and has no `capture` table.
+    #[error("this file is not a wartui capture: it has no capture table")]
+    NotACapture,
 }
 
 /// How the store should behave.
@@ -693,7 +699,7 @@ impl Drop for Store {
 /// an hour of data cannot stall ingest.
 ///
 /// # Errors
-/// [`StoreError`] if the file cannot be opened or is from a different wartui.
+/// [`StoreError`] if the file cannot be opened, carries another schema version, or is not a capture.
 pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -709,7 +715,8 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
 /// unwritable file read-only, so that is checked here.
 ///
 /// # Errors
-/// [`StoreError`] if the file cannot be opened or written, or is from a different wartui.
+/// [`StoreError`] if the file cannot be opened or written, carries another schema version, or is
+/// not a capture.
 pub fn open_readwrite(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -793,10 +800,22 @@ pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> 
 /// Refuse a database stamped with any marker but this build's. With no migration before 1.0, a
 /// lower marker is as foreign as a higher one. A file reading 0 has not had [`Store::create`]
 /// commit its schema yet.
+///
+/// A file with this build's marker must also have a `capture` table, or it is not a capture. The
+/// marker commits in the same transaction as the tables, so a running capture never fails this.
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match found {
-        0 | SCHEMA_VERSION => Ok(()),
+        0 => Ok(()),
+        SCHEMA_VERSION => {
+            let is_capture: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'capture')",
+                [],
+                |row| row.get(0),
+            )?;
+            if is_capture { Ok(()) } else { Err(StoreError::NotACapture) }
+        }
         found => Err(StoreError::SchemaMismatch { found, ours: SCHEMA_VERSION }),
     }
 }

@@ -86,7 +86,7 @@ get a `~` and "inferred from timing" (or "from counters").
 Drop these, they are settled policy:
 
 - Migrations or compatibility shims for older captures or firmware — nothing is compatible before
-  1.0, and the fix for another build's file is a new `--db`.
+  1.0, and the fix for another schema version's file is a new `--db`.
 - Safeguards for more than fourteen nodes (`plan::MAX_NODES`), one per node-bus slot.
 - `--lat/--lon` as a GPS fallback. It is test-only, and it marks a capture as test data.
 - Uploading. A review never runs `wartui upload` or touches the WDGWars endpoints.

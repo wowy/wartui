@@ -1,141 +1,156 @@
 SCHEMA_VERSION 2
 
-table assignment
-  id INTEGER notnull=0 pk=1
-  node_mac BLOB notnull=1 pk=0
-  counter INTEGER notnull=1 pk=0
-  wire_version INTEGER notnull=1 pk=0
-  channels INTEGER notnull=1 pk=0
-  ble INTEGER notnull=1 pk=0
-  created_at INTEGER notnull=1 pk=0
-  delivered_at INTEGER notnull=0 pk=0
-  outcome TEXT notnull=0 pk=0
-  latency_us INTEGER notnull=0 pk=0
+CREATE INDEX assign_node ON assignment(
+  node_mac,
+  created_at
+)
 
-table batch_gap
-  id INTEGER notnull=0 pk=1
-  node_mac BLOB notnull=1 pk=0
-  rx_at INTEGER notnull=1 pk=0
-  after_seq INTEGER notnull=1 pk=0
-  seq INTEGER notnull=1 pk=0
-  lost INTEGER notnull=1 pk=0
+CREATE TABLE assignment (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  counter INTEGER NOT NULL,
+  wire_version INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  ble INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  outcome TEXT,
+  latency_us INTEGER
+)
 
-table bridge_queue
-  status_id INTEGER notnull=1 pk=0
-  queue TEXT notnull=1 pk=0
-  capacity INTEGER notnull=1 pk=0
-  high_water INTEGER notnull=1 pk=0
-  dropped INTEGER notnull=1 pk=0
+CREATE TABLE batch_gap (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  after_seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  lost INTEGER NOT NULL
+)
 
-table bridge_status
-  id INTEGER notnull=0 pk=1
-  rx_at INTEGER notnull=1 pk=0
-  rx_count INTEGER notnull=1 pk=0
-  dropped_tx INTEGER notnull=1 pk=0
-  uptime_ms INTEGER notnull=1 pk=0
-  host_frames INTEGER notnull=1 pk=0
-  rx_oversize INTEGER notnull=1 pk=0
-  radio_link_packets INTEGER notnull=1 pk=0
-  radio_link_crc_fail INTEGER notnull=1 pk=0
-  radio_link_bad_magic INTEGER notnull=1 pk=0
-  radio_link_seq_gap INTEGER notnull=1 pk=0
-  radio_link_uart_errors INTEGER notnull=1 pk=0
-  radio_link_radio_crc_fail INTEGER notnull=1 pk=0
-  radio_link_radio_bad_magic INTEGER notnull=1 pk=0
-  radio_link_radio_seq_gap INTEGER notnull=1 pk=0
-  radio_link_radio_uart_errors INTEGER notnull=1 pk=0
-  host_uart_errors INTEGER notnull=1 pk=0
-  fan_duty INTEGER notnull=0 pk=0
-  fan_rpm INTEGER notnull=0 pk=0
-  slots_present INTEGER notnull=1 pk=0
+CREATE TABLE bridge_queue (
+  status_id INTEGER NOT NULL REFERENCES bridge_status(id),
+  queue TEXT NOT NULL,
+  capacity INTEGER NOT NULL,
+  high_water INTEGER NOT NULL,
+  dropped INTEGER NOT NULL
+)
 
-table capture
-  id INTEGER notnull=0 pk=1
-  started_at INTEGER notnull=1 pk=0
-  ended_at INTEGER notnull=0 pk=0
-  bridge_mac BLOB notnull=0 pk=0
-  bridge_fw TEXT notnull=0 pk=0
-  node_board TEXT notnull=0 pk=0
-  notes TEXT notnull=0 pk=0
-  simulated INTEGER notnull=1 pk=0
+CREATE TABLE bridge_status (
+  id INTEGER PRIMARY KEY,
+  rx_at INTEGER NOT NULL,
+  rx_count INTEGER NOT NULL,
+  dropped_tx INTEGER NOT NULL,
+  uptime_ms INTEGER NOT NULL,
+  host_frames INTEGER NOT NULL,
+  rx_oversize INTEGER NOT NULL,
+  radio_link_packets INTEGER NOT NULL,
+  radio_link_crc_fail INTEGER NOT NULL,
+  radio_link_bad_magic INTEGER NOT NULL,
+  radio_link_seq_gap INTEGER NOT NULL,
+  radio_link_uart_errors INTEGER NOT NULL,
+  radio_link_radio_crc_fail INTEGER NOT NULL,
+  radio_link_radio_bad_magic INTEGER NOT NULL,
+  radio_link_radio_seq_gap INTEGER NOT NULL,
+  radio_link_radio_uart_errors INTEGER NOT NULL,
+  host_uart_errors INTEGER NOT NULL,
+  fan_duty INTEGER,
+  fan_rpm INTEGER,
+  slots_present INTEGER NOT NULL
+)
 
-table heartbeat
-  id INTEGER notnull=0 pk=1
-  node_mac BLOB notnull=1 pk=0
-  rx_at INTEGER notnull=1 pk=0
-  counter INTEGER notnull=1 pk=0
-  epoch INTEGER notnull=1 pk=0
-  slot TEXT notnull=1 pk=0
-  wifi_refused INTEGER notnull=1 pk=0
-  ble_refused INTEGER notnull=1 pk=0
-  reset_cause TEXT notnull=1 pk=0
-  vdd_mv INTEGER notnull=0 pk=0
-  die_temp_c INTEGER notnull=0 pk=0
-  heap_free INTEGER notnull=1 pk=0
-  live INTEGER notnull=1 pk=0
+CREATE TABLE capture (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  bridge_mac BLOB,
+  bridge_fw TEXT,
+  node_board TEXT,
+  notes TEXT,
+  simulated INTEGER NOT NULL
+)
 
-table host_status
-  id INTEGER notnull=0 pk=1
-  at INTEGER notnull=1 pk=0
-  frames INTEGER notnull=1 pk=0
-  duplicate_batches INTEGER notnull=1 pk=0
-  garbled INTEGER notnull=1 pk=0
-  undecodable INTEGER notnull=1 pk=0
-  incompatible INTEGER notnull=1 pk=0
-  lag_peak_us INTEGER notnull=1 pk=0
-  store_written INTEGER notnull=1 pk=0
-  store_dropped INTEGER notnull=1 pk=0
-  store_queue_peak INTEGER notnull=1 pk=0
-  store_commit_peak_us INTEGER notnull=1 pk=0
-  throttled INTEGER notnull=0 pk=0
-  soc_temp_mc INTEGER notnull=0 pk=0
-  battery_mv INTEGER notnull=0 pk=0
-  battery_ma INTEGER notnull=0 pk=0
+CREATE TABLE heartbeat (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  counter INTEGER NOT NULL,
+  epoch INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  wifi_refused INTEGER NOT NULL,
+  ble_refused INTEGER NOT NULL,
+  reset_cause TEXT NOT NULL,
+  vdd_mv INTEGER,
+  die_temp_c INTEGER,
+  heap_free INTEGER NOT NULL,
+  live INTEGER NOT NULL
+)
 
-table kv
-  k TEXT notnull=0 pk=1
-  v TEXT notnull=1 pk=0
+CREATE TABLE host_status (
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  duplicate_batches INTEGER NOT NULL,
+  garbled INTEGER NOT NULL,
+  undecodable INTEGER NOT NULL,
+  incompatible INTEGER NOT NULL,
+  lag_peak_us INTEGER NOT NULL,
+  store_written INTEGER NOT NULL,
+  store_dropped INTEGER NOT NULL,
+  store_queue_peak INTEGER NOT NULL,
+  store_commit_peak_us INTEGER NOT NULL,
+  throttled INTEGER,
+  soc_temp_mc INTEGER,
+  battery_mv INTEGER,
+  battery_ma INTEGER
+)
 
-table node
-  mac BLOB notnull=0 pk=1
-  first_seen INTEGER notnull=1 pk=0
-  last_seen INTEGER notnull=1 pk=0
-  capabilities TEXT notnull=0 pk=0
+CREATE TABLE kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+)
 
-table observation
-  id INTEGER notnull=0 pk=1
-  node_mac BLOB notnull=1 pk=0
-  rx_at INTEGER notnull=1 pk=0
-  slot TEXT notnull=1 pk=0
-  bssid BLOB notnull=1 pk=0
-  ssid BLOB notnull=0 pk=0
-  security TEXT notnull=1 pk=0
-  channel INTEGER notnull=1 pk=0
-  rssi INTEGER notnull=1 pk=0
-  kind TEXT notnull=1 pk=0
-  rcoi BLOB notnull=0 pk=0
-  mfgr_id INTEGER notnull=0 pk=0
-  lat REAL notnull=0 pk=0
-  lon REAL notnull=0 pk=0
-  alt REAL notnull=0 pk=0
-  accuracy REAL notnull=0 pk=0
-  pos_source TEXT notnull=1 pk=0
-  pos_at INTEGER notnull=0 pk=0
-  raw_body BLOB notnull=0 pk=0
+CREATE TABLE node (
+  mac BLOB PRIMARY KEY,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  capabilities TEXT
+)
 
-table raw_frame
-  id INTEGER notnull=0 pk=1
-  rx_at INTEGER notnull=1 pk=0
-  slot TEXT notnull=1 pk=0
-  kind INTEGER notnull=1 pk=0
-  bytes BLOB notnull=1 pk=0
+CREATE TABLE observation (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  bssid BLOB NOT NULL,
+  ssid BLOB,
+  security TEXT NOT NULL,
+  channel INTEGER NOT NULL,
+  rssi INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  rcoi BLOB,
+  mfgr_id INTEGER,
+  lat REAL,
+  lon REAL,
+  alt REAL,
+  accuracy REAL,
+  pos_source TEXT NOT NULL,
+  pos_at INTEGER,
+  raw_body BLOB
+)
 
-table upload
-  id INTEGER notnull=0 pk=1
-  through_id INTEGER notnull=1 pk=0
-  uploaded_at INTEGER notnull=1 pk=0
-  job_id INTEGER notnull=1 pk=0
-  rows INTEGER notnull=1 pk=0
-  result TEXT notnull=0 pk=0
+CREATE TABLE raw_frame (
+  id INTEGER PRIMARY KEY,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  kind INTEGER NOT NULL,
+  bytes BLOB NOT NULL
+)
 
-index assign_node on assignment (node_mac, created_at)
+CREATE TABLE upload (
+  id INTEGER PRIMARY KEY,
+  through_id INTEGER NOT NULL,
+  uploaded_at INTEGER NOT NULL,
+  job_id INTEGER NOT NULL,
+  rows INTEGER NOT NULL,
+  result TEXT
+)
