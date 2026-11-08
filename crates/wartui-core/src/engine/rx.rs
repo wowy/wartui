@@ -187,7 +187,7 @@ impl FleetEngine {
             Some(last) if node.departed => {
                 node.departed = false;
                 let silent_ms = now.mono.duration_since(last).as_millis() as u64;
-                tracing::info!(mac = %mac::full(&src), silent_ms, "node returned");
+                tracing::info!(mac = %mac::full(&src), slot = %label, silent_ms, "node returned");
             }
             Some(_) => {}
         }
@@ -195,6 +195,7 @@ impl FleetEngine {
             by_reset!(
                 heartbeat.reset_cause,
                 mac = %mac::full(&src),
+                slot = %label,
                 counter_before = node.counter,
                 counter_after = heartbeat.counter,
                 reset = %heartbeat.reset_cause,
@@ -328,15 +329,23 @@ impl FleetEngine {
         self.see_node(src, now, Some(capabilities), batch);
         // Its slot is still its own: an update goes to it there.
         self.take_slot(rx.slot, src);
+        let label = self.slot_label(rx.slot);
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if node.capabilities.map(|caps| caps.version) != Some(capabilities.version) {
             let mac = mac::full(&src);
             let version = capabilities.version;
             if capabilities.version.compat_with_host().node_behind() {
-                tracing::warn!(%mac, %version, host = %NODE_VERSION, "node needs update");
+                tracing::warn!(
+                    %mac,
+                    slot = %label,
+                    %version,
+                    host = %NODE_VERSION,
+                    "node needs update"
+                );
             } else {
                 tracing::warn!(
                     %mac,
+                    slot = %label,
                     %version,
                     host = %NODE_VERSION,
                     "host needs update to drive this node"
