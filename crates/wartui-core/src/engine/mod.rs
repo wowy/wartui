@@ -18,8 +18,8 @@
 //!
 //! [`Command::AssignBle`] asks the bridge to give one slot's node the Bluetooth scan as its whole
 //! job. The bridge holds that slot as it holds the pool, and the engine gives the scan to whichever
-//! assignable node heartbeats from it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
-//! asks the bridge to hold a new pool, which its next `Status` brings back.
+//! assignable node heartbeats from it. [`Command::ClearRing`] empties dedup rings.
+//! [`Command::SetPool`] asks the bridge to hold a new pool, which its next `Status` brings back.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
 //! reaches the operator as [`Snapshot::power_answer`].
@@ -119,9 +119,9 @@ pub struct FleetEngine {
     /// The one node asked to scan Bluetooth, if any: the assignable node heartbeating from
     /// [`Self::ble_slot`], derived at the top of every [`Self::replan`].
     ///
-    /// Beside the plan, not in it: the slot is an operator's choice the bridge holds, while the plan
-    /// follows who is present. It reaches the planner as a [`Job::Bluetooth`] slot on every re-cut,
-    /// which deals its Wi-Fi share to the rest.
+    /// Beside the plan, not in it: the slot is an operator's choice the bridge holds, while the
+    /// plan follows who is present. It reaches the planner as a [`Job::Bluetooth`] slot on every
+    /// re-cut, which deals its Wi-Fi share to the rest.
     ble_node: Option<Mac>,
     /// The previous frame's bridge stamp and the host instant it was handled, to tell live reading
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
@@ -431,8 +431,9 @@ impl FleetEngine {
                     }
                 }
                 self.on_bridge_pool(*pool);
-                self.on_bridge_ble(*ble, now);
-                // A node off the bus leaves now, not on the next tick.
+                self.on_bridge_ble(*ble);
+                // A node off the bus leaves now, not on the next tick. The re-cut also moves the
+                // Bluetooth scan to the slot just reported.
                 self.follow_departures(now);
             }
             // Bridge diagnostics are the transport's to log. The engine reads only those that

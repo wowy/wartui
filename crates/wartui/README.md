@@ -786,8 +786,10 @@ boots into it, and reports it in every status, so it survives restarts of the ho
 the fleet. `wartui bluetooth` sets the same slot from the command line. Whichever node heartbeats
 from that slot holds the scan, so a node swapped into the socket takes it over. That node's
 `channels` reads `bluetooth`, since it is dealt no channels, or `bluetooth…` while the change waits
-for the node's next heartbeat. Taking the scan off shows as its new share, pending. `wartui status`
-prints a `bluetooth` line naming the slot, or `none`.
+for the node's next heartbeat. Taking the scan off shows as its new share, pending. The header
+shows `bt N3` while the bridge holds a slot, and `b` on that slot's row takes the scan off even
+when its node is not heartbeating. `wartui status` prints a `bluetooth` line naming the slot, or
+`none`.
 
 ```sh
 wartui bluetooth                # the slot the bridge holds

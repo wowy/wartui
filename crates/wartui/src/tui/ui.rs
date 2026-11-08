@@ -138,12 +138,14 @@ impl Ui {
     }
 
     /// Ask the bridge to move the Bluetooth scan onto the selected node's slot, or off the fleet
-    /// when that node holds it. The bridge keeps the slot across restarts of either end.
+    /// when that slot is the one the bridge holds. The bridge keeps the slot across restarts of
+    /// either end. Taking it off needs no assignable node: the bridge holds a slot, not a MAC, and
+    /// a silent or outdated node on it would otherwise leave the scan stuck there.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
         let name = node_name(snapshot.node_board(), node.state.slot, &target);
-        let holds = snapshot.ble_node == Some(target);
+        let holds = node.state.slot.is_some() && node.state.slot == snapshot.ble_slot;
         // Same rule as an assignment. The flag travels in the assignment, which answers
         // a heartbeat.
         if !holds && let Some(why) = why_not_assignable(node) {
@@ -461,9 +463,26 @@ mod tests {
         // is the only way back to no node scanning.
         let mut holding = busy();
         holding.ble_node = Some(node);
+        holding.ble_slot = slot;
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot: None });
         assert!(ui.notice(holding.now_ms).expect("a notice").contains("bluetooth off"));
+    }
+
+    #[test]
+    fn ui_takes_ble_off_when_b_pressed_on_held_slot_with_unassignable_node() {
+        // The bridge holds the slot whatever its node is doing, so a silent node on it
+        // must not leave the scan stuck there.
+        let mut snapshot = busy();
+        let mac = snapshot.nodes[0].state.mac;
+        snapshot.nodes[0] = stale_node(mac[5]);
+        snapshot.ble_slot = snapshot.nodes[0].state.slot;
+        snapshot.ble_node = None;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot: None });
+        assert!(ui.notice(snapshot.now_ms).expect("a notice").contains("bluetooth off"));
     }
 
     #[test]

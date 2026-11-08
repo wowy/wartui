@@ -1,5 +1,6 @@
 //! The settings the P4 keeps on flash: the lid fan's duty, the channel pool and the Bluetooth
-//! slot, in the first sector of its `nvs` partition. `wartui_proto::settings` has the records' layout.
+//! slot, in the first sector of its `nvs` partition. `wartui_proto::settings` has the records'
+//! layout.
 //!
 //! **The P4 is the settings' system of record.** It reads the sector once at boot, on every
 //! board, before the futures start ([`boot`]), and runs what it holds, or the defaults when

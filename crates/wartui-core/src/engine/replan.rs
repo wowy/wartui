@@ -57,20 +57,16 @@ impl FleetEngine {
         self.cut(&members);
     }
 
-    /// The Bluetooth slot a bridge's `Status` reports: when it differs from the one held, take it
-    /// and re-cut.
+    /// The Bluetooth slot a bridge's `Status` reports: take it. The caller's [`Self::replan`]
+    /// applies it, after it has also followed the nodes that `Status` shows off the bus.
     ///
     /// Nothing is sent here. Moving the scan changes what *two* nodes scan, so it is a re-cut, and
     /// only the planner re-cuts. [`Self::replan`] derives the scanning node from the slot, and each
     /// end takes its new assignment on its own heartbeat, share and flag under one epoch. So old
     /// and new holders can overlap for up to one heartbeat: "at most one node scans Bluetooth" is
     /// about what the host asks for.
-    pub(super) fn on_bridge_ble(&mut self, slot: Option<Slot>, now: Now) {
-        if self.ble_slot == slot {
-            return;
-        }
+    pub(super) fn on_bridge_ble(&mut self, slot: Option<Slot>) {
         self.ble_slot = slot;
-        self.replan(now);
     }
 
     /// Mark a node, or every assignable node, as owing a cleared dedup ring. A node never heard

@@ -162,8 +162,9 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
-is the reason it exists. No key or flag assigns channels to a node. `b`, or `wartui bluetooth`, only picks
-which node scans Bluetooth; the planner then shares that node's channels among the rest.
+is the reason it exists. No key or flag assigns channels to a node. `b`, or `wartui bluetooth`,
+only picks which node scans Bluetooth; the planner then shares that node's channels among the
+rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
