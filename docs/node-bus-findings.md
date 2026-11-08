@@ -676,6 +676,78 @@ node rebooting into its new image.
 
 What remains of a sector's time in a fleet update is mostly the bus sending its chunks.
 
+## Clock sweep on the carrier-10, 2026-11-08
+
+The clock was raised until errors appeared, to see how much margin 4 MHz leaves. The board is a Rev
+C carrier-10 in its case, with all ten nodes on 0.4.0. **26.67 MHz ran clean and 40 MHz did not.**
+`BUS_HZ` stays at 4 MHz.
+
+Each step was a P4 image from 27d32c4 with `BUS_HZ` changed and a log line added for each
+transfer's duration. Neither change was committed. The P4 divides 160 MHz, and every clock tried
+divides it evenly, so each has a 50% duty cycle. Each soak was a `wartui run` with all ten nodes
+sniffing and real traffic. An update followed each clean soak: `wartui ota --force --yes` to the
+same image, all ten nodes.
+
+| Clock | Shortest transfer | Soak | Transfers | Bus errors | Assignments delivered in | Rate per node | Ten-node update |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 MHz | not logged | 5 min | 16,809 | none | 6–22 ms | 40–43 KB/s, ba59d91 above | 37, 31 s, ba59d91 above |
+| 5 MHz | 1,693 µs | 5 min | 17,860 | none | 6–21 ms | 45–48 KB/s | 34 s |
+| 6.67 MHz | 1,276 µs | 5 min | 17,203 | none | 5–17 ms | 53–56 KB/s | 29 s |
+| 8 MHz | 1,067 µs | 5 min | 16,898 | none | 4–13 ms | 56–61 KB/s | 27 s |
+| 10 MHz | 858 µs | 5 min | 16,766 | none | 4–9 ms | 45–60 KB/s | 32 s |
+| 20 MHz | 440 µs | 5 min | 16,539 | none | 3–7 ms | 67–73 KB/s | 27 s |
+| 26.67 MHz | 335 µs | 5 + 10 min | 51,037 | none | 3–8 ms | 72–76 KB/s | 24 s |
+| 40 MHz, first soak | 232 µs | 5 min | 16,654 | N2 | 3–7 ms | not run | not run |
+| 40 MHz, second soak | 232 µs | 5 min | 17,046 | N1, N2 | 3–6 ms | not run | not run |
+
+- **The clocks are what they claim.** Each shortest transfer is its 8,352 bits at that clock, plus
+  about 23 µs. The 4 MHz row is the control after the sweep, on `main`'s image.
+- **Bus errors** means `magic`, `crc`, `ver`, `len`, `gap` or `retry` rising through a soak, or a
+  `gone` line. Every soak delivered all 19 assignments and every heartbeat, 12 per node per minute.
+- **The soaks carry data up.** 51,037 clean transfers at 26.67 MHz are 4.3 × 10⁸ bits, which bounds
+  the node-to-P4 bit error rate at ~7 × 10⁻⁹ (95%, inferred from the count). Most of those bits are
+  an idle transfer's zeros, so this is not a worst-case pattern.
+- **Updates carry data down, and only their outcome speaks for it.** All ten nodes confirmed in
+  every update, and each checks the image's digest. A corrupted flight is resent, and the P4
+  cannot count that: a node reports its own CRC errors only on its USB console, which wasn't
+  attached, and a flight sent in an IRQ pass counts under `pass`, not `carry`. So a rare P4-to-node
+  error would not show here. The rising rate says only that errors didn't cost much time.
+- **An update's `gone` lines were nodes rebooting.** All fell in the last seconds of a run.
+- **The 8 MHz update counted one CRC error, on N2,** in the report as the nodes rebooted. The same
+  slot counted one when a node supply dropped on 2026-11-06, so a reboot may explain it (not
+  tested). No soak below 40 MHz counted one.
+- **Two nodes on bus B set the 10 MHz update's time,** EF:54 and F7:30 at 45 KB/s, against 57–60 for
+  the others. Neither stood out at another clock, and the cause was not looked into.
+
+### What failed at 40 MHz
+
+Only bus A failed, and mostly N2. Over the 11 minutes that image ran, soaks and the time between
+them:
+
+| Slot | Good transfers | `magic` | `crc` | `gap` | `retry` |
+| --- | --- | --- | --- | --- | --- |
+| N1 | 3,943 | 2 | 0 | 2 | 2 |
+| N2 | 3,965 | 8 | 4 | 12 | 8 |
+| The other eight | 3,942–4,126 each | 0 | 0 | 0 | 0 |
+
+- **N2 failed in both soaks, and bus B had no error in either.** So 40 MHz is not a hard limit for
+  every slot, and it is inside the 60 MHz ESP-IDF rates the C5's SPI slave to.
+- **Each miss was a single transfer.** `magic` and `retry` match, so every retry was answered, and
+  no slot went `gone`. N2's errors, about 0.3% of its transfers, cost it no heartbeat in either soak.
+- **`stuck` rose too, on bus A only,** three times across the soaks. All three fell in the same 5 s
+  report as an N2 miss, so a miss may be what empties the pass (inferred from the timing).
+- **Whether this follows the slot or the node is open.** The nodes were not swapped, since they sit
+  in the case with their antennas. 00:40 was in N2 throughout.
+
+### Limits of this sweep
+
+- 80 MHz was not tried: the sweep stopped at the first failure, and it is past the C5's rating.
+  ESP-IDF v6.1's SPI slave page gives no MISO timing for the C5.
+- No scope was used. Everything above is what the two ends counted, so it shows where errors
+  appear and not what the signals look like.
+- It covers this one board, in its case. The 14-node carrier is untested, and a clean 26.67 MHz
+  here says nothing about it.
+
 ## The lid fan's duty and speed, 2026-11-07
 
 The P4 now drives the carrier's lid fan, a Noctua NF-A6x15 5V PWM, and reads its tach
@@ -712,4 +784,5 @@ This list replaces the dated ones above.
 - Two fixes that need conditions this bench can't easily create: retrying each expander
   transaction at boot, which needs an I2C glitch, and exempting only the node in a cycle now
   from the supply-loss count, which needs the supply to drop within about 1 s of a queued cycle.
+- Whether the 40 MHz errors on N1 and N2 follow the slot or the node, which needs nodes swapped.
 - The 14-node carrier.
