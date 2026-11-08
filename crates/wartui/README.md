@@ -640,7 +640,7 @@ The bridge answers once the node is powered again, or says why not:
 - `N3 power-cycled`: done.
 - `this bridge has no carrier board, so it cannot switch node power`: the bridge found no
   wartui-carrier at boot.
-- `A4 is not a slot on this carrier-6`: the carrier has no socket there.
+- `"N7" is not a slot on this carrier-6: name one of N1 to N6`: the carrier has no socket there.
 - `N3 was not power-cycled: the carrier's I/O expander did not answer`: the bridge could not reach
   the switch. One that fails at boot is a `fault` in `wartui status` too.
 
@@ -1150,7 +1150,7 @@ The bridge is the `P4 bridge on a CH343` row, with the address the header shows 
 node is a row whose heartbeats `wartui sniff` attributes to its address. Either name works as
 `--bridge`, as does an address's last one to five octets (two hex digits each) when exactly one
 bridge answers with it. An address names only a bridge that answers, and a path
-is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several matches
+is opened as given. `--bridge 44:C0` is how a bridge is read off the header. Several matches
 are refused with a list, never guessed. Keep the address: a device node moves when the board
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 
