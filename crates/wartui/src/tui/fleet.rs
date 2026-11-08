@@ -158,7 +158,7 @@ impl Severity {
 }
 
 /// The selected node's address, firmware and latest die reading, `—` for none, in the warning
-/// style when hot: `N7 C5 57:84  0.1.0;5g  41 °C`. `supply drop` follows, in the warning style,
+/// style when hot: `N7 C5 57:84  v0.1.0  41 °C`. `supply drop` follows, in the warning style,
 /// while `NodeState::supply_dropped` holds. The rail reading itself never shows: its per-chip
 /// offset makes the figure meaningless. The table has no width left for these, so they show for
 /// one node at a time, and this is the one place the main screen shows a node's address.
@@ -264,13 +264,14 @@ fn chip(node: &NodeView) -> &'static str {
     }
 }
 
-/// The node's firmware and flags, `0.1.0;5g`, with `here` (the version this host was
-/// built with) after an arrow when the node's is older: `0.1.2;5g ↑0.1.3`. `—` before a
-/// heartbeat.
+/// The node's firmware, `v0.1.0`, with `here` (the version this host was built with) after an
+/// arrow when the node's is older: `v0.1.2 ↑v0.1.3`. `—` before a heartbeat.
 fn version_label(node: &NodeView, here: Version) -> String {
     match node.state.capabilities {
-        Some(caps) if here.compat(&caps.version).node_behind() => format!("{caps} ↑{here}"),
-        Some(caps) => caps.to_string(),
+        Some(caps) if here.compat(&caps.version).node_behind() => {
+            format!("v{} ↑v{here}", caps.version)
+        }
+        Some(caps) => format!("v{}", caps.version),
         None => "—".to_owned(),
     }
 }
@@ -703,14 +704,14 @@ mod tests {
         let mut ui = Ui::default();
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(screen.contains(&format!("N7 C5 57:84  {NODE_VERSION};5g  41 °C")), "{screen}");
+        assert!(screen.contains(&format!("N7 C5 57:84  v{NODE_VERSION}  41 °C")), "{screen}");
 
         let (tx, _rx) = mpsc::channel(4);
         ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains(&format!("N8 C5 57:85  {NODE_VERSION};5g  —")),
+            screen.contains(&format!("N8 C5 57:85  v{NODE_VERSION}  —")),
             "no reading is a dash: {screen}"
         );
     }
@@ -902,9 +903,19 @@ mod tests {
         let mut behind = node(0x84, 0, true);
         let caps = Capabilities::here(Board::Esp32c5);
         behind.state.capabilities = Some(Capabilities { version: Version::new(0, 1, 2), ..caps });
-        assert_eq!(version_label(&behind, Version::new(0, 1, 3)), "0.1.2;5g ↑0.1.3");
-        assert_eq!(version_label(&behind, Version::new(0, 1, 2)), "0.1.2;5g", "current: no arrow");
+        assert_eq!(version_label(&behind, Version::new(0, 1, 3)), "v0.1.2 ↑v0.1.3");
+        assert_eq!(version_label(&behind, Version::new(0, 1, 2)), "v0.1.2", "current: no arrow");
         assert_eq!(version_label(&unannounced(0x84), Version::new(0, 1, 2)), "—");
+    }
+
+    #[test]
+    fn version_label_shows_version_alone_when_node_is_on_trial() {
+        let mut trial = node(0x84, 0, true);
+        let version = Version::new(0, 1, 2);
+        let caps = Capabilities::here(Board::Esp32c5);
+        trial.state.capabilities =
+            Some(Capabilities { version, trial: true, five_ghz: true, ..caps });
+        assert_eq!(version_label(&trial, version), format!("v{version}"));
     }
 
     #[test]
@@ -926,7 +937,7 @@ mod tests {
         assert!(why.contains("update the host"), "{why}");
         assert_eq!(
             version_label(&view, NODE_VERSION),
-            view.state.capabilities.unwrap().to_string()
+            format!("v{}", view.state.capabilities.unwrap().version)
         );
     }
 
@@ -939,7 +950,7 @@ mod tests {
         assert!(screen.contains("host behind"), "{screen}");
         assert!(!screen.contains("needs update"), "{screen}");
         // The health line: the node's version alone, no arrow toward this build's.
-        assert!(screen.contains(&format!("N7 C5 57:84  {caps}  ")), "{screen}");
+        assert!(screen.contains(&format!("N7 C5 57:84  v{}  ", caps.version)), "{screen}");
     }
 
     #[test]
@@ -950,6 +961,6 @@ mod tests {
         assert!(screen.contains("needs update"), "{screen}");
         assert!(row.contains("needs update"), "{screen}");
         let older = outdated(0x84).state.capabilities.expect("set").version;
-        assert!(screen.contains(&format!("{older};5g ↑{NODE_VERSION}")), "{screen}");
+        assert!(screen.contains(&format!("v{older} ↑v{NODE_VERSION}")), "{screen}");
     }
 }

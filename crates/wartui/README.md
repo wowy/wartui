@@ -595,7 +595,7 @@ The reboot and confirmation add a few seconds more. A node's first update after 
 into a blank slot, so its erases cost less ([`docs/ota-findings.md`](../../docs/ota-findings.md)).
 
 **Trial, confirmation and rollback.** A verified image is switched to at once, and the node
-reboots into it on trial: the fleet table shows `;trial` after its version. The first frame it
+reboots into it on trial: `ota`'s plan table shows `;trial` after its version. The first frame it
 hears from the host confirms it, and `ota` sends one, so `done` means the node heartbeated the new
 version with the trial over. A node that boots the new image three times without hearing the host
 goes back to the old one by itself. A node with no USB cable is never left without a working
@@ -948,13 +948,13 @@ The `channels` column shows where an assignment stands
 | cyan             | The Bluetooth node                                |
 
 The line under the table shows the selected node's last two address octets, its firmware and its
-latest die reading: `N1 C5 57:84  0.1.0;5g  41 °C`, with `—` for a node that has sent none or whose
+latest die reading: `N1 C5 57:84  v0.1.0  41 °C`, with `—` for a node that has sent none or whose
 read failed. `supply drop` follows it when the node's supply has fallen. It is the one place the
 main screen shows a node's address, which `flash-fleet --skip` and the OS's device names go by.
 
-The firmware is its version, then `;5g` for a radio that reaches 5 GHz. A node on an older version
-than this build's adds an arrow and this build's version: `0.1.2;5g ↑0.1.3`. A different patch is
-still driven; an older major or minor is `needs update` and a newer one `host behind`.
+The firmware is its version. A node on an older version than this build's adds an arrow and this
+build's version: `v0.1.2 ↑v0.1.3`. A different patch is still driven; an older major or minor is
+`needs update` and a newer one `host behind`.
 
 Either warning is yellow on that line, and turns an `alive` node's `state` yellow too; any other
 state keeps its own color:

@@ -83,8 +83,8 @@ CREATE TABLE IF NOT EXISTS capture (
   simulated INTEGER NOT NULL
 );
 
--- `capabilities` is the node's most recent heartbeat rendered the way the fleet
--- view shows it (`0.1.0;5g`). Null means only that nothing but an observation
+-- `capabilities` is the node's most recent heartbeat, as firmware version and
+-- flags (`0.1.0;5g`). Null means only that nothing but an observation
 -- has been heard yet; see `record::NodeSeen`.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
