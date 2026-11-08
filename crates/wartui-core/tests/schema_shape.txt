@@ -1,0 +1,141 @@
+SCHEMA_VERSION 2
+
+table assignment
+  id INTEGER notnull=0 pk=1
+  node_mac BLOB notnull=1 pk=0
+  counter INTEGER notnull=1 pk=0
+  wire_version INTEGER notnull=1 pk=0
+  channels INTEGER notnull=1 pk=0
+  ble INTEGER notnull=1 pk=0
+  created_at INTEGER notnull=1 pk=0
+  delivered_at INTEGER notnull=0 pk=0
+  outcome TEXT notnull=0 pk=0
+  latency_us INTEGER notnull=0 pk=0
+
+table batch_gap
+  id INTEGER notnull=0 pk=1
+  node_mac BLOB notnull=1 pk=0
+  rx_at INTEGER notnull=1 pk=0
+  after_seq INTEGER notnull=1 pk=0
+  seq INTEGER notnull=1 pk=0
+  lost INTEGER notnull=1 pk=0
+
+table bridge_queue
+  status_id INTEGER notnull=1 pk=0
+  queue TEXT notnull=1 pk=0
+  capacity INTEGER notnull=1 pk=0
+  high_water INTEGER notnull=1 pk=0
+  dropped INTEGER notnull=1 pk=0
+
+table bridge_status
+  id INTEGER notnull=0 pk=1
+  rx_at INTEGER notnull=1 pk=0
+  rx_count INTEGER notnull=1 pk=0
+  dropped_tx INTEGER notnull=1 pk=0
+  uptime_ms INTEGER notnull=1 pk=0
+  host_frames INTEGER notnull=1 pk=0
+  rx_oversize INTEGER notnull=1 pk=0
+  radio_link_packets INTEGER notnull=1 pk=0
+  radio_link_crc_fail INTEGER notnull=1 pk=0
+  radio_link_bad_magic INTEGER notnull=1 pk=0
+  radio_link_seq_gap INTEGER notnull=1 pk=0
+  radio_link_uart_errors INTEGER notnull=1 pk=0
+  radio_link_radio_crc_fail INTEGER notnull=1 pk=0
+  radio_link_radio_bad_magic INTEGER notnull=1 pk=0
+  radio_link_radio_seq_gap INTEGER notnull=1 pk=0
+  radio_link_radio_uart_errors INTEGER notnull=1 pk=0
+  host_uart_errors INTEGER notnull=1 pk=0
+  fan_duty INTEGER notnull=0 pk=0
+  fan_rpm INTEGER notnull=0 pk=0
+  slots_present INTEGER notnull=1 pk=0
+
+table capture
+  id INTEGER notnull=0 pk=1
+  started_at INTEGER notnull=1 pk=0
+  ended_at INTEGER notnull=0 pk=0
+  bridge_mac BLOB notnull=0 pk=0
+  bridge_fw TEXT notnull=0 pk=0
+  node_board TEXT notnull=0 pk=0
+  notes TEXT notnull=0 pk=0
+  simulated INTEGER notnull=1 pk=0
+
+table heartbeat
+  id INTEGER notnull=0 pk=1
+  node_mac BLOB notnull=1 pk=0
+  rx_at INTEGER notnull=1 pk=0
+  counter INTEGER notnull=1 pk=0
+  epoch INTEGER notnull=1 pk=0
+  slot TEXT notnull=1 pk=0
+  wifi_refused INTEGER notnull=1 pk=0
+  ble_refused INTEGER notnull=1 pk=0
+  reset_cause TEXT notnull=1 pk=0
+  vdd_mv INTEGER notnull=0 pk=0
+  die_temp_c INTEGER notnull=0 pk=0
+  heap_free INTEGER notnull=1 pk=0
+  live INTEGER notnull=1 pk=0
+
+table host_status
+  id INTEGER notnull=0 pk=1
+  at INTEGER notnull=1 pk=0
+  frames INTEGER notnull=1 pk=0
+  duplicate_batches INTEGER notnull=1 pk=0
+  garbled INTEGER notnull=1 pk=0
+  undecodable INTEGER notnull=1 pk=0
+  incompatible INTEGER notnull=1 pk=0
+  lag_peak_us INTEGER notnull=1 pk=0
+  store_written INTEGER notnull=1 pk=0
+  store_dropped INTEGER notnull=1 pk=0
+  store_queue_peak INTEGER notnull=1 pk=0
+  store_commit_peak_us INTEGER notnull=1 pk=0
+  throttled INTEGER notnull=0 pk=0
+  soc_temp_mc INTEGER notnull=0 pk=0
+  battery_mv INTEGER notnull=0 pk=0
+  battery_ma INTEGER notnull=0 pk=0
+
+table kv
+  k TEXT notnull=0 pk=1
+  v TEXT notnull=1 pk=0
+
+table node
+  mac BLOB notnull=0 pk=1
+  first_seen INTEGER notnull=1 pk=0
+  last_seen INTEGER notnull=1 pk=0
+  capabilities TEXT notnull=0 pk=0
+
+table observation
+  id INTEGER notnull=0 pk=1
+  node_mac BLOB notnull=1 pk=0
+  rx_at INTEGER notnull=1 pk=0
+  slot TEXT notnull=1 pk=0
+  bssid BLOB notnull=1 pk=0
+  ssid BLOB notnull=0 pk=0
+  security TEXT notnull=1 pk=0
+  channel INTEGER notnull=1 pk=0
+  rssi INTEGER notnull=1 pk=0
+  kind TEXT notnull=1 pk=0
+  rcoi BLOB notnull=0 pk=0
+  mfgr_id INTEGER notnull=0 pk=0
+  lat REAL notnull=0 pk=0
+  lon REAL notnull=0 pk=0
+  alt REAL notnull=0 pk=0
+  accuracy REAL notnull=0 pk=0
+  pos_source TEXT notnull=1 pk=0
+  pos_at INTEGER notnull=0 pk=0
+  raw_body BLOB notnull=0 pk=0
+
+table raw_frame
+  id INTEGER notnull=0 pk=1
+  rx_at INTEGER notnull=1 pk=0
+  slot TEXT notnull=1 pk=0
+  kind INTEGER notnull=1 pk=0
+  bytes BLOB notnull=1 pk=0
+
+table upload
+  id INTEGER notnull=0 pk=1
+  through_id INTEGER notnull=1 pk=0
+  uploaded_at INTEGER notnull=1 pk=0
+  job_id INTEGER notnull=1 pk=0
+  rows INTEGER notnull=1 pk=0
+  result TEXT notnull=0 pk=0
+
+index assign_node on assignment (node_mac, created_at)

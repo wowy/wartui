@@ -78,8 +78,8 @@ with noncryptographic FNV-1a. It excludes firmware and generated files. Neither 
 table proves which firmware a node ran: the table records only the host's interpretation.
 
 An absent metadata field means unknown, not a default, in an older compatible capture. There are no
-migrations before 1.0. A capture with another schema version or fingerprint is refused; start a new
-capture at a new `--db` path.
+migrations before 1.0. A capture with another schema version is refused; start a new capture at a
+new `--db` path.
 
 ### Exporting
 

@@ -1572,11 +1572,11 @@ fn wigle_csv_writes_identical_file_when_run_twice_on_one_connection() {
 
 #[test]
 fn store_refuses_database_when_schema_version_differs() {
-    // Reading another build's tables as this build's would export rows of the wrong
+    // Reading another shape's tables as this build's would export rows of the wrong
     // shape, or values that meant something else.
     //
-    // 1 is deliberately not in this list: it is the marker this build writes
-    for found in [99, 2] {
+    // 1 is the case that matters: captures stamped 1 span several shapes.
+    for found in [99, 1] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
         let other = Connection::open(&path).expect("creating");
@@ -1607,50 +1607,11 @@ fn create(path: &std::path::Path) {
 }
 
 #[test]
-fn store_reopens_database_when_fingerprint_matches() {
+fn store_reopens_database_when_schema_version_matches() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     create(&path);
     open_readonly(&path).expect("reopening a file this build wrote");
-}
-
-#[test]
-fn store_refuses_database_when_fingerprint_differs() {
-    // The marker stays at 1 while the schema changes shape, so the fingerprint is what
-    // tells this build's file from another's.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
-        .expect("overwriting the fingerprint");
-
-    let opened = open_readonly(&path);
-    assert!(
-        matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), ours })
-            if ours != 0xdead_beef),
-        "expected the other fingerprint to be refused, got {opened:?}"
-    );
-}
-
-#[test]
-fn store_refuses_database_when_fingerprint_missing() {
-    // A file from a build that stamped no fingerprint carries this build's marker over
-    // whatever shape that build's tables had.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("DELETE FROM kv WHERE k = 'schema_fingerprint'", [])
-        .expect("deleting the fingerprint");
-
-    let opened = open_readonly(&path);
-    assert!(
-        matches!(opened, Err(StoreError::SchemaDiffers { found: None, .. })),
-        "expected a file without a fingerprint to be refused, got {opened:?}"
-    );
 }
 
 #[test]
@@ -1684,6 +1645,72 @@ fn store_stamps_schema_version_when_creating_file() {
     let version: i32 =
         conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
     assert_eq!(version, SCHEMA_VERSION);
+}
+
+/// `SCHEMA_VERSION`, then each table's columns and each index's columns as the database reports
+/// them. SQLite's own objects are left out.
+fn schema_shape(conn: &Connection) -> String {
+    let objects = |kind: &str| -> Vec<(String, String)> {
+        conn.prepare(
+            "SELECT name, tbl_name FROM sqlite_master
+             WHERE type = ?1 AND substr(name, 1, 7) != 'sqlite_'
+             ORDER BY name",
+        )
+        .expect("preparing the object query")
+        .query_map([kind], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("listing objects")
+        .collect::<Result<_, _>>()
+        .expect("reading objects")
+    };
+
+    let mut shape = format!("SCHEMA_VERSION {SCHEMA_VERSION}\n");
+    for (table, _) in objects("table") {
+        shape.push_str(&format!("\ntable {table}\n"));
+        let columns: Vec<(String, String, i32, i32)> = conn
+            .prepare(r#"SELECT name, type, "notnull", pk FROM pragma_table_info(?1) ORDER BY cid"#)
+            .expect("preparing the column query")
+            .query_map([&table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .expect("listing columns")
+            .collect::<Result<_, _>>()
+            .expect("reading columns");
+        for (name, kind, not_null, primary_key) in columns {
+            shape.push_str(&format!("  {name} {kind} notnull={not_null} pk={primary_key}\n"));
+        }
+    }
+    shape.push('\n');
+    for (index, table) in objects("index") {
+        // An expression's column has no name.
+        let columns: Vec<Option<String>> = conn
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .expect("preparing the index query")
+            .query_map([&index], |row| row.get(0))
+            .expect("listing index columns")
+            .collect::<Result<_, _>>()
+            .expect("reading index columns");
+        let columns: Vec<&str> =
+            columns.iter().map(|c| c.as_deref().unwrap_or("<expression>")).collect();
+        shape.push_str(&format!("index {index} on {table} ({})\n", columns.join(", ")));
+    }
+    shape
+}
+
+#[test]
+fn store_keeps_schema_shape_when_schema_version_unchanged() {
+    // A bump relies on someone remembering it, so this catches the forgotten one. It reads the
+    // live database, so a comment or whitespace change in `SCHEMA` passes.
+    //
+    // It cannot see a change in what a stored value means, and someone can edit the file without
+    // bumping. The version line in the file's diff is what a reviewer checks.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+
+    let shape = schema_shape(&open_readonly(&path).expect("reopening"));
+    assert!(
+        shape == include_str!("schema_shape.txt"),
+        "the schema's shape differs from tests/schema_shape.txt: bump SCHEMA_VERSION for a shape \
+         change, then update the file to:\n{shape}"
+    );
 }
 
 #[test]
