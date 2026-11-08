@@ -299,12 +299,6 @@ pub struct CaptureSettings {
     pub preferred_ble: Option<Mac>,
     /// Node the host currently gives the Bluetooth job, if any.
     pub ble_node: Option<Mac>,
-    /// Heartbeat age that removes a node from the topology.
-    pub topology_timeout: Duration,
-    /// Bridge counter polling cadence.
-    pub status_interval: Duration,
-    /// Assignment outcome timeout.
-    pub admin_timeout: Duration,
 }
 
 /// Anything the engine or runtime wants written down.

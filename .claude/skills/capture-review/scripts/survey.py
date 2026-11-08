@@ -29,6 +29,21 @@ NOT_FAULTS = ("power_on", "external")
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
 
+# Mirrors EngineConfig::topology_timeout in crates/wartui-core/src/engine/config.rs.
+TOPOLOGY_TIMEOUT_MS = 60000
+
+# Mirrors EngineConfig::status_interval in crates/wartui-core/src/engine/config.rs.
+STATUS_INTERVAL_MS = 5000
+
+# Mirrors plan::SCAN_CHANNELS in crates/wartui-proto/src/plan/channels.rs.
+SCAN_CHANNELS = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48,
+    52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+]
+
 
 def is_fault(cause):
     return cause is not None and cause not in NOT_FAULTS
@@ -178,10 +193,8 @@ def provenance(db, ctx):
     kv = dict(db.q("SELECT k, v FROM kv"))
     ctx["kv"] = kv
     for k in sorted(kv):
-        if not k.startswith("capture.settings.") and k != "capture.scan_channels":
+        if not k.startswith("capture.settings."):
             print(f"  kv        {k} = {kv[k]}")
-    if "capture.scan_channels" in kv:
-        ctx["scan"] = [int(c) for c in kv["capture.scan_channels"].split(",") if c]
 
     settings = sorted(
         (k, v) for k, v in kv.items() if k.startswith("capture.settings.") and k.endswith(
@@ -209,8 +222,9 @@ def provenance(db, ctx):
                 ctx.setdefault("settings_changes", []).append((at, changed))
             prev = v
         ctx["settings_final"] = dict(p.split("=", 1) for p in v.split(";") if "=" in p)
-    # Thresholds read ctx["settings"]: the initial row overlaid with every later change, so a value
-    # changed mid-run is judged by what was in force at the end. The changes are listed above.
+    # Settings-driven thresholds (gps_max_age_ms) read ctx["settings"]: the initial row overlaid
+    # with every later change, so a value changed mid-run is judged by what was in force at the
+    # end. The changes are listed above. Fixed engine timings come from the module constants.
     # The pool is the bridge's: `none` until its first `Status`, then each change it reported.
     # A capture with no initial row starts from its first change.
     pools = [(None, ctx["settings"]["pool"])] if "pool" in ctx.get("settings", {}) else []
@@ -284,7 +298,6 @@ def heartbeats(db, ctx):
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
-    timeout = int(ctx.get("settings", {}).get("topology_timeout_ms", 60000))
     ble_nodes = ctx.get("ble_nodes", set())
     total_reversals = 0
     for mac, hs in per.items():
@@ -328,7 +341,7 @@ def heartbeats(db, ctx):
                     reversals += 1
                 elif prev[7] != 0:  # an interval after a replayed beat spans time no host read
                     intervals.append(dt)
-                if dt > timeout:
+                if dt > TOPOLOGY_TIMEOUT_MS:
                     silences.append((p_rx, rx))
             if live != 0:
                 held = epoch
@@ -406,7 +419,8 @@ def heartbeats(db, ctx):
                 "WARN",
                 "node",
                 f"{short(mac)} went {len(silences)} time(s) without a heartbeat for longer than "
-                f"topology_timeout ({timeout} ms); longest {dur(max(b - a for a, b in silences))}",
+                f"topology_timeout ({TOPOLOGY_TIMEOUT_MS} ms); "
+                f"longest {dur(max(b - a for a, b in silences))}",
                 f"SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) AS gap FROM heartbeat "
                 f"WHERE {node_sql} ORDER BY gap DESC LIMIT 10",
             )
@@ -475,26 +489,23 @@ def assignments(db, ctx):
         missing = sorted(set(range(counters[0], counters[-1] + 1)) - set(counters))
         if missing:
             print(f"  epochs with no row: {missing[:20]}{' ...' if len(missing) > 20 else ''}")
-    scan = ctx.get("scan")
     assigned = defaultdict(set)
     for r in rows:
-        if scan:
-            assigned[r[0]] |= {scan[i] for i in range(len(scan)) if r[3] >> i & 1}
+        chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
+        assigned[r[0]] |= set(chans)
         print(
             f"  {short(r[0])}  epoch {r[1]} (wire {r[2]})  {r[7]}  at {rel(r[5])}  "
-            f"{'BLE' if r[4] else ''}"
-            + (f"  {len([i for i in range(len(scan)) if r[3] >> i & 1])} channels" if scan else "")
+            f"{'BLE' if r[4] else ''}  {len(chans)} channels"
         )
     ctx["assigned"] = assigned
-    if scan:
-        print("  final share per node:")
-        last = {}
-        for r in rows:
-            last[r[0]] = r
-        for mac, r in sorted(last.items()):
-            chans = [scan[i] for i in range(len(scan)) if r[3] >> i & 1]
-            print(f"    {short(mac)}  " + " ".join(str(c) for c in chans)
-                  + ("  BLE" if r[4] else ""))
+    print("  final share per node:")
+    last = {}
+    for r in rows:
+        last[r[0]] = r
+    for mac, r in sorted(last.items()):
+        chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
+        print(f"    {short(mac)}  " + " ".join(str(c) for c in chans)
+              + ("  BLE" if r[4] else ""))
 
     # Adoption: a live heartbeat well after an acked assignment should carry that assignment's wire
     # epoch, or the epoch of any assignment sent since. An unacked or silent one may still have
@@ -598,14 +609,13 @@ def bridge(db, ctx):
              "SELECT id, rx_at, uptime_ms, rx_oversize FROM bridge_status ORDER BY id")
     if gaps:
         print(f"  reply interval ms  {spread(gaps)}")
-        interval = int(ctx.get("settings", {}).get("status_interval_ms", 5000))
-        long_gaps = [(rows[i][1], g) for i, g in enumerate(gaps) if g > 3 * interval]
+        long_gaps = [(rows[i][1], g) for i, g in enumerate(gaps) if g > 3 * STATUS_INTERVAL_MS]
         for at, g in long_gaps[:5]:
             print(f"  no reply for {dur(g)} after {rel(at)}")
         if long_gaps:
             flag("WARN", "bridge",
                  f"{len(long_gaps)} stretch(es) with no bridge status reply for over 3x the "
-                 f"{interval} ms poll; longest {dur(max(g for _, g in long_gaps))}",
+                 f"{STATUS_INTERVAL_MS} ms poll; longest {dur(max(g for _, g in long_gaps))}",
                  "SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) gap FROM bridge_status "
                  "ORDER BY gap DESC LIMIT 10")
     ctx["bridge_reboots"] = reboots
@@ -930,18 +940,16 @@ def observations(db, ctx):
         flag("WARN", "decode", f"{mcast} wifi observations whose bssid has the multicast bit set",
              "SELECT hex(bssid), COUNT(*) FROM observation WHERE kind='wifi' AND "
              "instr('13579BDF', substr(hex(bssid), 2, 1)) > 0 GROUP BY 1")
-    scan = ctx.get("scan")
-    if scan:
-        off = db.q(f"SELECT channel, COUNT(*) FROM observation WHERE kind='wifi' AND channel NOT IN "
-                   f"({','.join(map(str, scan))}) GROUP BY 1")
-        if off:
-            print("  channels outside the scan table: "
-                  + "  ".join(f"{c}:{n}" for c, n in off))
-            flag("WARN", "decode",
-                 f"{sum(n for _, n in off)} wifi observations on channels outside the scan table "
-                 f"{[c for c, _ in off]}",
-                 "SELECT channel, node_mac, COUNT(*) FROM observation WHERE channel NOT IN (...) "
-                 "GROUP BY 1, 2")
+    off = db.q(f"SELECT channel, COUNT(*) FROM observation WHERE kind='wifi' AND channel NOT IN "
+               f"({','.join(map(str, SCAN_CHANNELS))}) GROUP BY 1")
+    if off:
+        print("  channels outside the scan table: "
+              + "  ".join(f"{c}:{n}" for c, n in off))
+        flag("WARN", "decode",
+             f"{sum(n for _, n in off)} wifi observations on channels outside the scan table "
+             f"{[c for c, _ in off]}",
+             "SELECT channel, node_mac, COUNT(*) FROM observation WHERE channel NOT IN (...) "
+             "GROUP BY 1, 2")
 
     rev = db.one("SELECT COUNT(*) FROM (SELECT rx_at - LAG(rx_at) OVER (ORDER BY id) d "
                  "FROM observation) WHERE d < -2000")

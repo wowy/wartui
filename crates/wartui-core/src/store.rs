@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
-use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
+use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, Record};
@@ -470,8 +470,7 @@ pub struct CaptureInfo {
 
 /// Host identity and applied initial settings, supplied by the executable creating a capture.
 ///
-/// Missing values are unknown, never inferred from a shared package or firmware version. The
-/// scan table is recorded independently by the store; it describes the host, not a node build.
+/// Missing values are unknown, never inferred from a shared package or firmware version.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureProvenance {
     /// Executable's package version.
@@ -556,9 +555,7 @@ impl Store {
             "INSERT INTO capture (id, started_at, notes, simulated) VALUES (1, ?1, ?2, ?3)",
             params![started_at_ms, capture.notes, capture.simulated],
         )?;
-        let scan_channels = SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         for (key, value) in [
-            ("capture.scan_channels", Some(scan_channels)),
             ("capture.bus_version", Some(BUS_VERSION.to_string())),
             ("capture.core_version", Some(env!("CARGO_PKG_VERSION").to_owned())),
             ("capture.host_version", provenance.host_version.clone()),
@@ -982,8 +979,7 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
     };
     format!(
         "version=1;at_ms={at_ms};pool={};record_raw={};gps={};gps_max_age_ms={};\
-         remember_ble={};preferred_ble={};ble_node={};topology_timeout_ms={};\
-         status_interval_ms={};admin_timeout_ms={}",
+         remember_ble={};preferred_ble={};ble_node={}",
         pool_name(settings.pool),
         settings.record_raw,
         settings.gps,
@@ -991,9 +987,6 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         settings.remember_ble,
         mac(settings.preferred_ble),
         mac(settings.ble_node),
-        settings.topology_timeout.as_millis(),
-        settings.status_interval.as_millis(),
-        settings.admin_timeout.as_millis(),
     )
 }
 
