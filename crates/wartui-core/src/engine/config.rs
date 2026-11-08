@@ -3,7 +3,6 @@ use std::time::Duration;
 use indexmap::IndexSet;
 use wartui_proto::bus::{ACK_TIMEOUT_MS, SEND_TRIES};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::ChannelPool;
 
 #[cfg(doc)]
 use super::{Command, FleetEngine};
@@ -18,9 +17,6 @@ pub const SEND_TIMEOUT: Duration =
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// The channels the fleet partitions and the UI shows. The capture records the starting value,
-    /// and [`Command::SetPool`] changes it mid-run.
-    pub pool: ChannelPool,
     /// How long without a heartbeat before a node stops counting towards topology. Matches the
     /// firmware's 60 s node timeout.
     pub topology_timeout: Duration,
@@ -56,7 +52,6 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            pool: ChannelPool::All,
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
             tail_len: 200,

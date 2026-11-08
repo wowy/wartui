@@ -62,16 +62,17 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
         node_count: u8::try_from(NODES).expect("six fits"),
         speed: 60.0,
         ble_chance: 0.8,
+        pool: ChannelPool::Us,
         ..Default::default()
     })
     .start()
     .expect("starting the simulator");
 
     let started = now();
-    let info = CaptureInfo { pool: ChannelPool::Us, ..Default::default() };
+    let info = CaptureInfo::default();
     let store = Store::create(&StoreConfig::new(&path), &info, started.unix_ms)
         .expect("creating the store");
-    let config = EngineConfig { pool: ChannelPool::Us, ..Default::default() };
+    let config = EngineConfig::default();
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =

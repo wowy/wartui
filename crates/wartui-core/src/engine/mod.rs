@@ -8,14 +8,16 @@
 //! from. Sending it anything means allocating an epoch, answering its heartbeat, and counting the
 //! record delivered only when the bridge says the node acknowledged it. The engine
 //! partitions the channel pool across live, heartbeating nodes, re-cutting when membership or the
-//! pool changes. Only the planner's re-cut decides what a node scans.
+//! pool changes. Only the planner's re-cut decides what a node scans. The pool is the bridge's:
+//! the engine learns it from each `Status`, and cuts nothing before the first.
 //!
 //! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
-//! re-cuts the fleet against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi
-//! networks are never captured. [`Command::PowerCycle`] asks the bridge's carrier to switch one
-//! node off and on, and the answer reaches the operator as [`Snapshot::power_answer`].
+//! asks the bridge to hold a new pool, which its next `Status` brings back.
+//! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
+//! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
+//! reaches the operator as [`Snapshot::power_answer`].
 //! [`Command::SetFanDuty`] sets the carrier's lid fan, whose duty the bridge keeps.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
@@ -42,7 +44,7 @@ use wartui_proto::link::{
     NO_GPS_RECEIVER,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{Job, Plan};
+use wartui_proto::plan::{ChannelPool, Job, Plan};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
@@ -97,6 +99,9 @@ pub struct FleetEngine {
     /// The last epoch handed out. Starts at 0 each capture and is not persisted. A node may hold an
     /// epoch from an earlier run, so [`next_epoch`] skips the one its heartbeat reports.
     last_counter: u64,
+    /// The channel pool the bridge's last `Status` reported, kept across a disconnect. `None`
+    /// until the first, and nothing is cut until then.
+    pool: Option<ChannelPool>,
     /// The partition in force.
     plan: Option<Plan>,
     /// The members the plan was cut for, in slot order, each with its job. [`Self::replan`]
@@ -138,7 +143,7 @@ impl FleetEngine {
     #[must_use]
     pub fn capture_settings(&self) -> CaptureSettings {
         CaptureSettings {
-            pool: self.config.pool,
+            pool: self.pool,
             record_raw: self.config.record_raw,
             // The bridge's receiver is built for every run, so it counts only while a bridge is
             // connected.
@@ -175,6 +180,7 @@ impl FleetEngine {
             pending: BTreeMap::new(),
             next_send_id: 1,
             last_counter: 0,
+            pool: None,
             plan: None,
             plan_members: Vec::new(),
             ble_node: None,
@@ -380,6 +386,7 @@ impl FleetEngine {
                 radio_link,
                 host_uart_errors,
                 fan,
+                pool,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -406,6 +413,7 @@ impl FleetEngine {
                     host_uart_errors: *host_uart_errors,
                     fan: *fan,
                 }));
+                self.on_bridge_pool(*pool);
             }
             // Bridge diagnostics are the transport's to log. The engine reads only those that
             // say whether the bridge has a GPS receiver, for the view.

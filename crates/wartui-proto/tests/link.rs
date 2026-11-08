@@ -5,6 +5,7 @@
 //! below and leave the suite passing.
 
 use heapless::{String, Vec};
+use wartui_proto::ChannelPool;
 use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, RecordKind, Security,
     SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateChunk,
@@ -54,6 +55,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(sample_chunk_command()).expect("sample_commands has room");
     v.push(HostToBridge::SetFan { duty: FanDuty::new(40).expect("in range") })
         .expect("sample_commands has room");
+    v.push(HostToBridge::SetPool { pool: ChannelPool::Eu }).expect("sample_commands has room");
     v
 }
 
@@ -171,6 +173,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
+        pool: ChannelPool::Us,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -578,7 +581,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 10, "one of each");
+    assert_eq!(commands.len(), 11, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -644,6 +647,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
         fan: None,
+        pool: ChannelPool::Eu,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -721,6 +725,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         },
         host_uart_errors: 9,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
+        pool: ChannelPool::All,
     };
     assert_eq!(round_trip(&status), status);
 }
@@ -796,8 +801,9 @@ fn link_refuses_set_fan_when_duty_is_over_100() {
 }
 
 #[test]
-fn link_codec_pins_fan_bytes_at_end_of_status_when_bridge_reports_one() {
-    // `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
+fn link_codec_pins_fan_and_pool_bytes_at_end_of_status_when_bridge_reports_them() {
+    // `fan`: `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
+    // `pool`: postcard's variant index, last.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
         rx_count: 0,
@@ -808,17 +814,29 @@ fn link_codec_pins_fan_bytes_at_end_of_status_when_bridge_reports_one() {
         radio_link: RadioLinkStats::default(),
         host_uart_errors: 0,
         fan: None,
+        pool: ChannelPool::All,
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let none = frame_body(&out[..n]);
-    assert_eq!(none.last(), Some(&0));
-    if let BridgeToHost::Status { fan, .. } = &mut status {
+    assert_eq!(none[none.len() - 2..], [0, 2]);
+    if let BridgeToHost::Status { fan, pool, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
+        *pool = ChannelPool::Us;
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
     let some = frame_body(&out[..n]);
-    assert_eq!(some[..none.len() - 1], none[..none.len() - 1]);
-    assert_eq!(some[none.len() - 1..], [1, 40, 1, 0xAC, 0x02]);
+    assert_eq!(some[..none.len() - 2], none[..none.len() - 2]);
+    assert_eq!(some[none.len() - 2..], [1, 40, 1, 0xAC, 0x02, 0]);
+}
+
+#[test]
+fn link_codec_pins_set_pool_bytes_when_host_sets_a_pool() {
+    // Postcard's variant index, then the pool's.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    for (pool, byte) in [(ChannelPool::Us, 0), (ChannelPool::Eu, 1), (ChannelPool::All, 2)] {
+        let n = encode_host_frame(&HostToBridge::SetPool { pool }, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [10, byte], "{pool}");
+    }
 }
 
 #[test]

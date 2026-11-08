@@ -62,10 +62,10 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     .expect("starting the simulator");
 
     let started = now();
-    let info = CaptureInfo { pool: ChannelPool::All, ..Default::default() };
+    let info = CaptureInfo::default();
     let store =
         Store::create(&StoreConfig::new(path), &info, started.unix_ms).expect("creating the store");
-    let config = EngineConfig { pool: ChannelPool::All, ..Default::default() };
+    let config = EngineConfig::default();
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =
@@ -156,11 +156,11 @@ async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
     .expect("starting the simulator");
 
     let started = now();
-    let info = CaptureInfo { pool: ChannelPool::All, ..Default::default() };
+    let info = CaptureInfo::default();
     let store =
         Store::create(&StoreConfig::new(dir.path().join("outdated.db")), &info, started.unix_ms)
             .expect("creating the store");
-    let config = EngineConfig { pool: ChannelPool::All, ..Default::default() };
+    let config = EngineConfig::default();
     let engine = FleetEngine::new(config, started);
     let (snapshot_tx, snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));

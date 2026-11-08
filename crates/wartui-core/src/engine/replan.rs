@@ -22,30 +22,35 @@ pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
 
 impl FleetEngine {
     /// Take an operator's instruction. What changes for a node is sent on its next heartbeat, so
-    /// only a power-cycle and a fan duty, which are the bridge's to carry out, go out from here.
+    /// only a power-cycle, a fan duty and a pool, which are the bridge's to carry out or hold, go
+    /// out from here.
     pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::RememberBle { on } => self.on_remember_ble(on),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
-            Command::SetPool { pool } => self.on_set_pool(pool),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
             Command::SetFanDuty { duty } => {
                 batch.bulk.push(HostToBridge::SetFan { duty });
                 batch.bulk.push(HostToBridge::GetStatus);
             }
+            Command::SetPool { pool } => {
+                batch.bulk.push(HostToBridge::SetPool { pool });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
         }
     }
 
-    /// Change the pool and re-cut the current members against it. [`Self::replan`] would return
-    /// early, since membership is unchanged. With no members, the next membership change cuts
-    /// against the new pool.
-    fn on_set_pool(&mut self, pool: ChannelPool) {
-        if pool == self.config.pool {
+    /// The pool a bridge's `Status` reports: when it differs from the one held, take it and
+    /// re-cut the current members against it. [`Self::replan`] would return early, since
+    /// membership is unchanged. With no members, the next membership change cuts against the new
+    /// pool.
+    pub(super) fn on_bridge_pool(&mut self, pool: ChannelPool) {
+        if self.pool == Some(pool) {
             return;
         }
-        self.config.pool = pool;
+        self.pool = Some(pool);
         let members = self.plan_members.clone();
         self.cut(&members);
     }
@@ -125,7 +130,8 @@ impl FleetEngine {
     }
 
     /// Hold the fleet on a partition of the pool, re-cutting when the set of nodes changes.
-    /// [`Self::on_set_pool`] is the only other re-cut.
+    /// [`Self::on_bridge_pool`] is the only other re-cut. Membership is followed before the first
+    /// `Status` too, though [`Self::cut`] cuts nothing until it brings a pool.
     ///
     /// Members are the assignable nodes in MAC order, the planner's slot order, so a share depends
     /// on who is present, not on arrival order. An unchanged membership returns at once, keeping
@@ -168,12 +174,14 @@ impl FleetEngine {
         self.cut(&members);
     }
 
-    /// Cut the pool among `members` and deal each its share. Split out so [`Self::on_set_pool`] can
-    /// re-cut an unchanged membership.
+    /// Cut the pool among `members` and deal each its share. Split out so
+    /// [`Self::on_bridge_pool`] can re-cut an unchanged membership. Nothing while no bridge has
+    /// reported a pool.
     fn cut(&mut self, members: &[(Mac, Job)]) {
+        let Some(pool) = self.pool else { return };
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
         // `plan_for`, not `plan`: a Bluetooth slot is left out of the deal.
-        let Some(plan) = plan::plan_for(self.config.pool, &jobs) else {
+        let Some(plan) = plan::plan_for(pool, &jobs) else {
             // Nothing to cut for, or more than `plan_for` accepts. The fleet keeps what it has.
             self.plan = None;
             return;

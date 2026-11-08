@@ -64,7 +64,7 @@ const SAMPLE: Duration = Duration::from_secs(2);
 /// How long the fleet may take to hold its assignments before the run is abandoned.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The pool the benchmark fleet scans.
+/// The pool the benchmark fleet scans, which the simulated bridge holds.
 ///
 /// Named rather than taken from the default, so the workload does not move when
 /// the default does. The channel count still feeds it — `busy_networks` scales
@@ -232,6 +232,7 @@ pub async fn run(args: Args) -> Result<()> {
         seed: args.seed.unwrap_or(SimConfig::default().seed),
         sightings_per_address: Some(args.sightings_per_address.unwrap_or(SIGHTINGS_PER_ADDRESS))
             .filter(|&n| n > 0),
+        pool: POOL,
         ..SimConfig::default()
     };
 
@@ -269,7 +270,6 @@ pub async fn run(args: Args) -> Result<()> {
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
     let started = now();
     let info = CaptureInfo {
-        pool: POOL,
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
         simulated: true,
     };
@@ -277,7 +277,6 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("creating {}", args.db.display()))?;
     let engine = FleetEngine::new(
         EngineConfig {
-            pool: POOL,
             record_raw: args.record_raw,
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.

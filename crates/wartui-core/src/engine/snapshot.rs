@@ -103,8 +103,9 @@ pub struct Snapshot {
     pub link_up: bool,
     /// Why it went down, if it did.
     pub link_error: Option<String>,
-    /// The configured channel pool.
-    pub pool: ChannelPool,
+    /// The channel pool the bridge reports, which the planner deals. `None` before its first
+    /// `Status`.
+    pub pool: Option<ChannelPool>,
     /// The partition in force. `None` with nothing heartbeating, or more nodes alive than wartui
     /// supports.
     pub plan: Option<Plan>,
@@ -290,7 +291,7 @@ impl FleetEngine {
             bridge: self.bridge.clone(),
             link_up: self.link_up,
             link_error: self.link_error.clone(),
-            pool: self.config.pool,
+            pool: self.pool,
             plan: self.plan,
             ble_node: self.ble_node,
             preferred_ble: self.preferred_ble,

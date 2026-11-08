@@ -529,6 +529,21 @@ mod tests {
     use crate::store::{CaptureInfo, StoreConfig, open_readonly};
     use wartui_proto::plan::ChannelPool;
 
+    /// A bridge `Status` reporting `pool`, which is how the engine's pool changes.
+    fn pool_status(pool: ChannelPool) -> Event {
+        Event::Link(wartui_bridge::LinkEvent::Message(BridgeToHost::Status {
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 0,
+            rx_oversize: 0,
+            queues: wartui_proto::link::QueueStats::new(),
+            radio_link: wartui_proto::link::RadioLinkStats::default(),
+            host_uart_errors: 0,
+            fan: None,
+            pool,
+        }))
+    }
+
     #[test]
     fn runtime_records_settings_when_applied_values_change() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -542,15 +557,15 @@ mod tests {
         log.record(&store, engine.capture_settings(), clock);
         assert_eq!(log.next_sequence, 1, "unchanged settings are not per-tick records");
 
-        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), clock);
+        engine.handle(pool_status(ChannelPool::Us), clock);
         log.record(&store, engine.capture_settings(), clock);
-        // A repeated request is a no-op.
-        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), clock);
+        // The same pool again changes nothing.
+        engine.handle(pool_status(ChannelPool::Us), clock);
         log.record(&store, engine.capture_settings(), clock);
         assert_eq!(log.next_sequence, 2);
 
         let reversed = Now { unix_ms: 999, ..clock };
-        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Eu }), reversed);
+        engine.handle(pool_status(ChannelPool::Eu), reversed);
         log.record(&store, engine.capture_settings(), reversed);
         engine.handle(Event::Command(Command::RememberBle { on: false }), reversed);
         log.record(&store, engine.capture_settings(), reversed);
@@ -567,7 +582,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("rows");
         assert_eq!(values.len(), 4);
-        assert!(values[0].contains("pool=all;"));
+        // No bridge has reported a pool yet.
+        assert!(values[0].contains("pool=none;"));
         assert!(values[1].contains("at_ms=1000;pool=us;"));
         assert!(values[2].contains("at_ms=999;pool=eu;"));
         assert!(values[3].contains("remember_ble=false;"));

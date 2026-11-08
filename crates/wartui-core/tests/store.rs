@@ -107,7 +107,7 @@ fn open_at(path: &std::path::Path) -> Store {
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store")
 }
 
@@ -230,24 +230,38 @@ fn export_with(
 }
 
 #[test]
-fn store_records_pool_spelling_when_capture_created() {
+fn store_records_pool_spelling_when_settings_are_written() {
     // Lowercase, and deliberately not `ChannelPool`'s `Display`: captures on
     // disk carry these strings, so the two spellings are separate on purpose.
-    for (pool, spelling) in
-        [(ChannelPool::Us, "us"), (ChannelPool::Eu, "eu"), (ChannelPool::All, "all")]
-    {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("wartui.db");
-        let config = StoreConfig::new(&path);
-        let info = CaptureInfo { pool, notes: None, simulated: false };
-        Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
-
-        let conn = open_readonly(&path).expect("reopening read-only");
-        let stored: String = conn
-            .query_row("SELECT channel_pool FROM capture", [], |row| row.get(0))
-            .expect("the capture row");
-        assert_eq!(stored, spelling, "{pool:?}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let engine = FleetEngine::new(
+        EngineConfig::default(),
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let settings = engine.capture_settings();
+    let pools = [None, Some(ChannelPool::Us), Some(ChannelPool::Eu), Some(ChannelPool::All)];
+    let records = (0u64..)
+        .zip(pools)
+        .map(|(sequence, pool)| Record::CaptureSettings {
+            sequence,
+            at_ms: EPOCH_MS,
+            settings: wartui_core::record::CaptureSettings { pool, ..settings },
+        })
+        .collect();
+    let conn = write(&dir, records);
+    let mut stmt = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings query");
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("settings rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata strings");
+    // `none` before the bridge has reported a pool.
+    for (value, spelling) in values.iter().zip(["none", "us", "eu", "all"]) {
+        assert!(value.contains(&format!(";pool={spelling};")), "{value}");
     }
+    assert_eq!(values.len(), 4);
 }
 
 #[test]
@@ -255,7 +269,7 @@ fn store_records_simulated_flag_when_capture_created() {
     for simulated in [false, true] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
-        let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated };
+        let info = CaptureInfo { notes: None, simulated };
         Store::create(&StoreConfig::new(&path), &info, EPOCH_MS)
             .expect("creating the store")
             .close();
@@ -1064,7 +1078,7 @@ fn store_drops_without_blocking_when_queue_full() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let flood: Vec<Record> =
@@ -1104,7 +1118,7 @@ fn store_reports_batch_timings_on_close_when_asked() {
     config.batch_rows = 8;
     config.batch_interval = Duration::from_secs(3600);
     config.timings = true;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..20u8)
@@ -1148,7 +1162,7 @@ fn store_copies_and_truncates_wal_when_checkpoint_background() {
     // Any WAL at all is past the limit, so every pass that catches up is followed by a
     // truncation, and the last one, with the writer gone, always catches up.
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u8 {
@@ -1183,7 +1197,7 @@ fn store_counts_caught_up_passes_when_checkpoint_background() {
     config.batch_interval = Duration::from_secs(60);
     config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     assert_eq!(store.checkpoints_caught_up(), 0, "nothing has been committed yet");
@@ -1209,7 +1223,7 @@ fn store_counts_no_caught_up_passes_when_checkpoint_inline() {
     config.batch_rows = 10;
     config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..10u8)
@@ -1245,7 +1259,7 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
     let checkpointed = matches!(checkpoint, Checkpoint::Background { .. });
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u64 {
@@ -1292,7 +1306,7 @@ fn store_background_checkpoint_runs_owed_pass_when_fleet_quiet() {
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint =
         Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     // Two commits well inside one interval, then nothing.
@@ -1336,7 +1350,7 @@ fn store_reports_no_passes_on_close_when_checkpoint_inline() {
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
@@ -1383,7 +1397,7 @@ fn store_uses_page_size_when_creating_file() {
     config.page_size = Some(16_384);
     config.cache_kib = Some(32 * 1024);
     config.wal_autocheckpoint_pages = Some(4000);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
 
     let conn = open_readonly(&path).expect("reopening read-only");
@@ -1635,7 +1649,7 @@ fn store_refuses_create_when_file_exists() {
     create(&path);
     let before = std::fs::read(&path).expect("reading the capture");
 
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let created = Store::create(&StoreConfig::new(&path), &info, EPOCH_MS);
     assert!(
         matches!(&created, Err(StoreError::Exists(p)) if *p == path),

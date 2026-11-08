@@ -8,12 +8,14 @@
 //! It also transmits, and without being asked: the planner partitions the pool
 //! across the fleet and re-cuts it as the fleet or the pool changes. That is the only thing
 //! that decides what a node scans, and nothing on the command line or at the
-//! keyboard overrides it.
+//! keyboard overrides it. The pool is the bridge's, which reports it in each `Status`;
+//! the settings modal only asks the bridge to change it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::{capture, config, tui, upload};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
@@ -25,44 +27,6 @@ use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
-use wartui_proto::plan::ChannelPool;
-
-use crate::{capture, config, tui, upload};
-
-/// Which channels the fleet is meant to scan.
-///
-/// Spelled `us`, `eu` and `all` in `wartui.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PoolArg {
-    /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
-    Us,
-    /// ETSI-permitted unlicensed channels: 2.4 GHz 1–13 and 5 GHz 36–140.
-    Eu,
-    /// Every channel the node firmware knows about, matching stock behavior.
-    #[default]
-    All,
-}
-
-impl From<PoolArg> for ChannelPool {
-    fn from(arg: PoolArg) -> Self {
-        match arg {
-            PoolArg::Us => Self::Us,
-            PoolArg::Eu => Self::Eu,
-            PoolArg::All => Self::All,
-        }
-    }
-}
-
-impl From<ChannelPool> for PoolArg {
-    fn from(pool: ChannelPool) -> Self {
-        match pool {
-            ChannelPool::Us => Self::Us,
-            ChannelPool::Eu => Self::Eu,
-            ChannelPool::All => Self::All,
-        }
-    }
-}
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -132,11 +96,6 @@ pub struct Args {
     /// A note about this run, stored with the capture.
     #[arg(long)]
     notes: Option<String>,
-}
-
-/// Which channel pool the fleet starts on: the file beats the default.
-fn pool(file: Option<PoolArg>) -> ChannelPool {
-    file.unwrap_or_default().into()
 }
 
 /// Which receivers a run reads, from `--no-gps`, `--gps` and `--gps-baud`.
@@ -245,7 +204,6 @@ pub async fn run(args: Args) -> Result<()> {
         position = position.with_bridge_gps(gps.clone());
     }
 
-    let pool = pool(config.pool);
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
     let memory = BridgeMemory::holding(config.bridge.mac).on_port(config.bridge.serial.clone());
@@ -253,8 +211,7 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
 
     let started = now();
-    let info =
-        CaptureInfo { pool, notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
+    let info = CaptureInfo { notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
     let store_config = StoreConfig::new(&db);
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
@@ -270,7 +227,6 @@ pub async fn run(args: Args) -> Result<()> {
         upload,
     };
     let config = EngineConfig {
-        pool,
         record_raw: args.record_raw,
         position,
         remember_ble,
@@ -372,18 +328,7 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpsChoice, PoolArg, gps_choice, pool, test_data};
-    use wartui_proto::plan::ChannelPool;
-
-    #[test]
-    fn run_cmd_applies_file_pool_when_file_names_one() {
-        assert_eq!(pool(Some(PoolArg::Eu)), ChannelPool::Eu);
-    }
-
-    #[test]
-    fn run_cmd_applies_default_pool_when_file_names_none() {
-        assert_eq!(pool(None), ChannelPool::All);
-    }
+    use super::{GpsChoice, gps_choice, test_data};
 
     #[test]
     fn run_cmd_reads_only_bridge_receiver_when_gps_is_bridge() {

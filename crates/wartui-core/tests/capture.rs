@@ -69,7 +69,8 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     let settings: i64 = conn
         .query_row("SELECT COUNT(*) FROM kv WHERE k LIKE 'capture.settings.%'", [], |r| r.get(0))
         .expect("counting settings history");
-    assert_eq!(settings, 1, "runtime records initial settings, not every event or tick");
+    // The initial row has no pool, and the bridge's first `Status` brings one.
+    assert_eq!(settings, 2, "runtime records changes, not every event or tick");
 
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, &ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
@@ -105,11 +106,13 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_rememberi
     let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
         .expect("store");
     let engine = FleetEngine::new(EngineConfig::default(), started);
-    let (snapshot_tx, _snapshot_rx) =
+    let (snapshot_tx, mut snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    // The bridge's first `Status`, so the change below is told apart from it.
+    snapshot_rx.wait_for(|s| s.pool.is_some()).await.expect("the bridge reports a pool");
     command_tx
         .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
         .await
@@ -118,6 +121,11 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_rememberi
         .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
         .await
         .expect("same pool");
+    // The bridge's answer, so the pool and remembering change in separate rows.
+    snapshot_rx
+        .wait_for(|s| s.pool == Some(wartui_proto::plan::ChannelPool::Us))
+        .await
+        .expect("the bridge takes the pool");
     command_tx.send(Command::RememberBle { on: false }).await.expect("remember command");
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop_tx.send(()).expect("stop");
@@ -131,10 +139,11 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_rememberi
         .expect("rows")
         .collect::<Result<Vec<_>, _>>()
         .expect("settings strings");
-    assert_eq!(values.len(), 3, "initial settings and two changes, not the repeated request");
-    assert!(values[0].contains("pool=all;"));
-    assert!(values[1].contains("pool=us;") && values[1].contains("remember_ble=true;"));
-    assert!(values[2].contains("pool=us;") && values[2].contains("remember_ble=false;"));
+    assert_eq!(values.len(), 4, "initial settings and three changes, not the repeated request");
+    assert!(values[0].contains("pool=none;"), "before the bridge's first `Status`");
+    assert!(values[1].contains("pool=all;"));
+    assert!(values[2].contains("pool=us;") && values[2].contains("remember_ble=true;"));
+    assert!(values[3].contains("pool=us;") && values[3].contains("remember_ble=false;"));
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written

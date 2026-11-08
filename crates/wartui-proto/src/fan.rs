@@ -1,5 +1,5 @@
 //! The carrier's lid fan, a Noctua NF-A6x15 5V PWM: the duty the operator sets, the PWM wave the
-//! P4 drives for it, the tach reading, and the record the P4 keeps the duty in.
+//! P4 drives for it, and the tach reading.
 //!
 //! **The P4's PWM pin is inverted**: GPIO51 high holds the fan's PWM input low. So the fan's duty
 //! is the share of each period GPIO51 is low, and [`pwm`] says how long the pin stays high. A
@@ -19,7 +19,7 @@
 //! no reading spans two duties.
 //!
 //! **The P4 keeps the duty, not the host.** It boots into the stored one, or [`FanDuty::FULL`]
-//! with none, and holds it with no host present. [`store`] is the record's layout on flash.
+//! with none, and holds it with no host present. [`crate::settings`] has the record.
 
 use core::fmt;
 
@@ -174,71 +174,4 @@ pub struct FanStats {
     /// The speed over the last whole tach window, or `None` before the first since boot or since
     /// the duty last changed.
     pub rpm: Option<u16>,
-}
-
-/// The fan duty's record on the P4's flash: the first sector of its `nvs` partition.
-///
-/// **No ESP-IDF NVS reads that partition**, and neither a USB flash nor an update over the host
-/// link writes it, so the layout is this module's own.
-///
-/// **One 4-byte record a change, written at the first erased word**: [`MAGIC`], the duty, the
-/// duty inverted, then 0 ([`record`]). NOR flash programs only by clearing bits, so a change costs
-/// a word written and nothing erased, and the sector is erased once in [`RECORDS`] changes.
-/// Reading ([`read`]) walks the words up to the first erased one, and the last valid record wins;
-/// a word a power cut tore fails its check and is skipped. A power cut between the erase and the
-/// write that follows loses the setting, and the next boot runs at [`FanDuty::FULL`].
-pub mod store {
-    use super::FanDuty;
-    use crate::ota::SECTOR;
-
-    /// The first byte of a record.
-    pub const MAGIC: u8 = b'F';
-
-    /// Bytes in a record: one flash word.
-    pub const WORD: usize = 4;
-
-    /// Records a sector holds.
-    pub const RECORDS: usize = SECTOR / WORD;
-
-    /// Where the next record goes.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Next {
-        /// At this byte offset in the sector, which is erased there.
-        At(usize),
-        /// Nowhere: erase the sector, then write at 0.
-        Erase,
-    }
-
-    /// The record for `duty`.
-    #[must_use]
-    pub const fn record(duty: FanDuty) -> [u8; WORD] {
-        let pct = duty.get();
-        [MAGIC, pct, !pct, 0]
-    }
-
-    /// The duty `word` records, or `None` for an erased or torn word.
-    fn decode(word: &[u8; WORD]) -> Option<FanDuty> {
-        match *word {
-            [MAGIC, pct, check, 0] if check == !pct => FanDuty::new(pct),
-            _ => None,
-        }
-    }
-
-    /// The words up to the first erased one.
-    fn written(sector: &[u8; SECTOR]) -> impl Iterator<Item = &[u8; WORD]> {
-        sector.as_chunks::<WORD>().0.iter().take_while(|word| **word != [0xFF; WORD])
-    }
-
-    /// The duty the sector holds: its last valid record, or `None`.
-    #[must_use]
-    pub fn read(sector: &[u8; SECTOR]) -> Option<FanDuty> {
-        written(sector).filter_map(decode).last()
-    }
-
-    /// Where the next record goes: the first erased word, or [`Next::Erase`] when none is left.
-    #[must_use]
-    pub fn next(sector: &[u8; SECTOR]) -> Next {
-        let used = written(sector).count();
-        if used < RECORDS { Next::At(used * WORD) } else { Next::Erase }
-    }
 }

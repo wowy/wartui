@@ -285,8 +285,8 @@ pub struct AssignmentSent {
 /// Kept separately from assignments: the pool can change before any node is assignable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureSettings {
-    /// Pool the planner partitions.
-    pub pool: ChannelPool,
+    /// Pool the planner partitions, as the bridge reports it. `None` before its first `Status`.
+    pub pool: Option<ChannelPool>,
     /// Whether undecoded node records are retained.
     pub record_raw: bool,
     /// Whether the position chain has a GPS receiver.

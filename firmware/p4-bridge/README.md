@@ -57,11 +57,10 @@ it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with 
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
   power out of reach, every power-cycle answers `Failed`.
 
-- **The lid fan** runs at the duty stored in the first sector of the `nvs` partition, or 100 %
-  with none, from boot and with no host present. A host's `SetFan` changes it at once, and the P4
-  writes it only when it differs from the stored one. `Status` reports the duty and the tach's
-  speed (`src/fan.rs`). On the bench neither GPIO51 nor GPIO52 is configured and `SetFan` is
-  ignored.
+- **The lid fan** runs at the duty stored in the P4's settings (§ "Settings"), or 100 % with
+  none, from boot and with no host present. A host's `SetFan` changes it at once. `Status` reports
+  the duty and the tach's speed (`src/fan.rs`). On the bench neither GPIO51 nor GPIO52 is
+  configured and `SetFan` is ignored.
 
 Each announcement also carries a line naming the carrier and what it powered at boot:
 `carrier-10: 10 node slots; at boot 3 powered, 7 already on`.
@@ -95,8 +94,8 @@ CTS high, and the P4 waits rather than drops.
 The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is
 the port the bridge's link then runs on, so quit any `wartui` holding it first. The runner
 writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
-`otadata`, so the P4 boots the image just written. It leaves `nvs`, where the P4 keeps the lid
-fan's duty, as it was.
+`otadata`, so the P4 boots the image just written. It leaves `nvs`, where the P4 keeps its
+settings, as it was.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
 `cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
@@ -170,6 +169,13 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 
 A refused or silent update also sends one line naming why: `the radio refused the bundled image:
 …` or `the radio stopped answering its update`.
+
+## Settings
+
+The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty and the channel pool. It reads them once at boot and runs them with no host present,
+or 100 % and `All` with none stored. A host's `SetFan` or `SetPool` applies at once and is written
+only when the sector does not hold it. `Status` reports both (`src/settings.rs`).
 
 ## The host link
 

@@ -129,9 +129,11 @@ Driving a port high powers its node:
   GPIO51 is its PWM output at 25 kHz, inverted: GPIO51 high holds the fan's PWM input low, so the
   duty is the share of each period GPIO51 is low. While GPIO51 is undriven, as with the P4 in reset,
   the fan runs at full speed. GPIO52 is its tach input, two falling edges a revolution, pulled up
-  on the board. The P4 keeps the duty in the first sector of its `nvs` partition and boots into it;
-  the host sets it with `wartui fan` or settings (`crates/wartui/README.md` § "The lid fan"). The
-  bench configures neither pin.
+  on the board. The P4 keeps the duty in its settings sector, the first sector of its `nvs`
+  partition, as a record tagged `F`, and boots into it; the host sets it with `wartui fan` or
+  settings (`crates/wartui/README.md` § "The lid fan"). The bench configures neither pin. The same
+  sector holds the channel pool, tagged `P`, on every P4, carrier or not
+  (`crates/wartui-proto/src/settings.rs`).
 - **The silk names the sockets `N1` to `Nn`**, bus A first: `N1` to `Nk` is bus A, with *k* per
   bus, and bus B follows. So `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. The fleet
   view, `sniff`, `status` and `--slot` use the silk names. A capture stores the bus name, beside the

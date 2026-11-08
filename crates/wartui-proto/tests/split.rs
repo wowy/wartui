@@ -1,6 +1,7 @@
 //! The P4's pair state machine: radio up, `Ready` and `Status`.
 
 use heapless::Vec;
+use wartui_proto::ChannelPool;
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{
@@ -175,6 +176,7 @@ fn pair_status_sums_host_and_radio_drops() {
         rx_count: 40,
         rx_oversize: 2,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
+        pool: ChannelPool::Eu,
     };
     match pair.status(3_000, p4) {
         BridgeToHost::Status {
@@ -186,10 +188,12 @@ fn pair_status_sums_host_and_radio_drops() {
             radio_link,
             host_uart_errors,
             fan,
+            pool,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
             assert_eq!(host_uart_errors, 9);
             assert_eq!(fan.and_then(|fan| fan.rpm), Some(1830), "passed through");
+            assert_eq!(pool, ChannelPool::Eu, "passed through");
             // The host's 6 and the C6's ring toward the P4, 4; never the node queues' refusals.
             assert_eq!(dropped_tx, 10);
             assert_eq!(uptime_ms, 2_900);
@@ -354,6 +358,7 @@ fn p4_zero() -> P4Counters {
         rx_count: 0,
         rx_oversize: 0,
         fan: None,
+        pool: ChannelPool::All,
     }
 }
 

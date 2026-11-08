@@ -77,7 +77,6 @@ CREATE TABLE IF NOT EXISTS capture (
   -- What carries the bridge's nodes: `bench`, `carrier-6`, `carrier-10` or `carrier-14`.
   -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
   node_board TEXT,
-  channel_pool TEXT NOT NULL,
   notes TEXT,
   -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
   -- position). WDGWars and WiGLE ban both, so it is never uploaded.
@@ -463,9 +462,6 @@ pub struct BatchTiming {
 /// before any bridge announces itself, so that arrives later as a [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
 pub struct CaptureInfo {
-    /// The pool the run started on. The operator can change it mid-run, so each assignment row
-    /// records the channels actually sent.
-    pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
     /// Whether it holds test data: made with `--sim` or `--lat`/`--lon`.
@@ -557,9 +553,8 @@ impl Store {
             params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
         )?;
         tx.execute(
-            "INSERT INTO capture (id, started_at, channel_pool, notes, simulated) \
-             VALUES (1, ?1, ?2, ?3, ?4)",
-            params![started_at_ms, pool_name(capture.pool), capture.notes, capture.simulated],
+            "INSERT INTO capture (id, started_at, notes, simulated) VALUES (1, ?1, ?2, ?3)",
+            params![started_at_ms, capture.notes, capture.simulated],
         )?;
         let scan_channels = SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         for (key, value) in [
@@ -969,12 +964,13 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
 }
 
 /// The pool's name as stored, which is not its name on screen: `ChannelPool`'s `Display` says "US",
-/// and the `channel_pool` column says "us".
-const fn pool_name(pool: ChannelPool) -> &'static str {
+/// and a settings row says `pool=us`. `none` before the bridge has reported one.
+const fn pool_name(pool: Option<ChannelPool>) -> &'static str {
     match pool {
-        ChannelPool::Us => "us",
-        ChannelPool::Eu => "eu",
-        ChannelPool::All => "all",
+        Some(ChannelPool::Us) => "us",
+        Some(ChannelPool::Eu) => "eu",
+        Some(ChannelPool::All) => "all",
+        None => "none",
     }
 }
 

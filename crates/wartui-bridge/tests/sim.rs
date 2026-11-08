@@ -678,6 +678,28 @@ async fn sim_bridge_reports_fan_stopped_when_duty_is_below_15_percent() {
     }
 }
 
+/// The pool the next `Status` reports.
+async fn next_pool(link: &mut LinkHandle) -> ChannelPool {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { pool, .. }) =
+            link.recv().await.expect("running")
+        {
+            return pool;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_pool_set_when_host_sets_pool() {
+    let config = SimConfig { pool: ChannelPool::Eu, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    assert_eq!(next_pool(&mut link).await, ChannelPool::Eu, "seeded from the config");
+
+    link.send_bulk(HostToBridge::SetPool { pool: ChannelPool::Us }).expect("queued");
+    assert_eq!(next_pool(&mut link).await, ChannelPool::Us);
+}
+
 #[tokio::test(start_paused = true)]
 async fn sim_transport_produces_deterministic_sightings_when_seeded() {
     async fn first_sightings(seed: u64) -> Vec<Vec<u8>> {

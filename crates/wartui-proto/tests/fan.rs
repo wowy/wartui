@@ -1,25 +1,12 @@
-//! The lid fan: its duty, its PWM wave, the tach reading and the stored record.
+//! The lid fan: its duty, its PWM wave and the tach reading.
 
-use wartui_proto::fan::store::{self, MAGIC, Next, RECORDS, WORD};
 use wartui_proto::fan::{FanDuty, Pwm, TACH_MIN_GAP_US, TachFilter, pwm, rpm};
-use wartui_proto::ota::SECTOR;
 
 /// A period of 40 µs at a 10 MHz tick.
 const PERIOD: u16 = 400;
 
 fn duty(pct: u8) -> FanDuty {
     FanDuty::new(pct).expect("in range")
-}
-
-/// `sector` with the record for `pct` written as the P4 writes it, at the next erased word.
-fn write(sector: &mut [u8; SECTOR], pct: u8) {
-    let Next::At(at) = store::next(sector) else { panic!("the sector is full") };
-    let record = store::record(duty(pct));
-    for (old, new) in sector[at..at + WORD].iter().zip(&record) {
-        // NOR flash programs only by clearing bits: no write may set one.
-        assert_eq!(new & !old, 0, "the record sets a bit at {at}");
-    }
-    sector[at..at + WORD].copy_from_slice(&record);
 }
 
 #[test]
@@ -80,66 +67,4 @@ fn tach_filter_counts_once_when_edges_are_100_us_apart() {
     assert!(!filter.accept(10_100));
     assert!(!filter.accept(10_000 + TACH_MIN_GAP_US - 1));
     assert!(filter.accept(10_000 + TACH_MIN_GAP_US));
-}
-
-#[test]
-fn fan_store_reads_no_duty_when_sector_is_erased() {
-    let sector = [0xFF; SECTOR];
-    assert_eq!(store::read(&sector), None);
-    assert_eq!(store::next(&sector), Next::At(0));
-}
-
-#[test]
-fn fan_store_reads_last_record_when_several_are_written() {
-    let mut sector = [0xFF; SECTOR];
-    for pct in [40, 75, 0] {
-        write(&mut sector, pct);
-    }
-    assert_eq!(store::read(&sector), Some(duty(0)));
-    assert_eq!(store::next(&sector), Next::At(3 * WORD));
-}
-
-#[test]
-fn fan_store_skips_torn_word_when_it_sits_between_two_records() {
-    let mut sector = [0xFF; SECTOR];
-    write(&mut sector, 40);
-    // A write a power cut stopped part-way: some bits cleared, the check not yet.
-    sector[WORD..2 * WORD].copy_from_slice(&[MAGIC, 0x05, 0xFF, 0xFF]);
-    write(&mut sector, 60);
-    assert_eq!(store::read(&sector), Some(duty(60)));
-
-    // The torn word last: the record before it stands.
-    let mut sector = [0xFF; SECTOR];
-    write(&mut sector, 40);
-    sector[WORD..2 * WORD].copy_from_slice(&[MAGIC, 0x05, 0xFF, 0xFF]);
-    assert_eq!(store::read(&sector), Some(duty(40)));
-    assert_eq!(store::next(&sector), Next::At(2 * WORD));
-}
-
-#[test]
-fn fan_store_ignores_record_when_duty_is_101_or_check_byte_is_bad() {
-    let mut sector = [0xFF; SECTOR];
-    write(&mut sector, 30);
-    sector[WORD..2 * WORD].copy_from_slice(&[MAGIC, 101, !101, 0]);
-    sector[2 * WORD..3 * WORD].copy_from_slice(&[MAGIC, 50, !51, 0]);
-    assert_eq!(store::read(&sector), Some(duty(30)));
-}
-
-#[test]
-fn fan_store_asks_for_erase_when_sector_is_full() {
-    let mut sector = [0xFF; SECTOR];
-    for i in 0..RECORDS {
-        write(&mut sector, u8::try_from(i % 101).expect("in range"));
-    }
-    assert_eq!(store::next(&sector), Next::Erase);
-    assert_eq!(store::read(&sector), Some(duty(u8::try_from((RECORDS - 1) % 101).unwrap())));
-}
-
-#[test]
-fn fan_store_writes_at_first_erased_word_when_one_is_left() {
-    let mut sector = [0xFF; SECTOR];
-    for _ in 0..RECORDS - 1 {
-        write(&mut sector, 20);
-    }
-    assert_eq!(store::next(&sector), Next::At((RECORDS - 1) * WORD));
 }
