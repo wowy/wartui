@@ -1,9 +1,9 @@
 //! The carrier's lid fan, a Noctua NF-A6x15 5V PWM: its PWM on GPIO51, its tach on GPIO52, and
 //! the duty the P4 keeps on flash. `wartui_proto::fan` has the wave and the tach arithmetic.
 //!
-//! **Only on a carrier.** The bench has no fan header, so there [`run`] never configures GPIO51
-//! or GPIO52, the duty is never written, a `SetFan` is ignored and `Status.fan` is `None`. The
-//! sector is still read at boot there, for the pool.
+//! **Only on a carrier.** With no carrier read, [`run`] never configures GPIO51 or GPIO52, the
+//! duty is never written, a `SetFan` is ignored and `Status.fan` is `None`. The sector is still
+//! read at boot then, for the pool.
 //!
 //! **The P4 is the duty's system of record.** It boots into the duty stored in its settings
 //! sector (`src/settings.rs`), or 100 % when none is stored or the partition does not read, and
@@ -117,7 +117,7 @@ pub fn set(shared: &Shared, duty: FanDuty) {
     }
 }
 
-/// Drive the fan and read its tach forever, on a carrier; on the bench, wait forever and touch
+/// Drive the fan and read its tach forever, on a carrier; with no carrier, wait forever and touch
 /// neither pin.
 pub async fn run(pins: Pins, shared: &Shared) -> ! {
     let Some(fan) = shared.fan else { pending().await };

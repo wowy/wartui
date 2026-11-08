@@ -213,7 +213,7 @@ impl Ui {
             self.say(NOT_CONNECTED.to_owned(), snapshot);
             return;
         }
-        // Refused here, so a bench bridge is never sent a request it can only refuse.
+        // Refused here, so a bridge with no carrier is never sent a request it can only refuse.
         if !snapshot.node_board().is_carrier() {
             self.say(NO_CARRIER.to_owned(), snapshot);
             return;

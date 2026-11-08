@@ -42,7 +42,7 @@
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
 //! together. It reads the carrier's expander before it builds the node buses, since the board
-//! picks their CS pins and IRQ's polarity. Every wait is a DMA completion, a UART event, a GPIO
+//! picks their CS pins. Every wait is a DMA completion, a UART event, a GPIO
 //! level, a signal between the futures or a timer.
 //!
 //! `README.md` has the build command.
@@ -221,7 +221,7 @@ pub struct Shared {
     nodes: bus::Nodes,
     /// The carrier's node power, as the host reader and the carrier future see it.
     power: Power,
-    /// The carrier's lid fan, or `None` on the bench.
+    /// The carrier's lid fan, or `None` with no carrier.
     fan: Option<&'static fan::Fan>,
     /// The settings sector's image, read before each write (`src/settings.rs`).
     sector: RefCell<&'static mut [u8; SECTOR]>,
@@ -616,7 +616,7 @@ fn i2c0(
             let shared: &'static I2cBus = I2C0_BUS.init(Mutex::new(i2c.into_async()));
             (Ok(shared), carrier)
         }
-        Err(why) => (Err(why), Carrier::bench()),
+        Err(why) => (Err(why), Carrier::unread()),
     }
 }
 

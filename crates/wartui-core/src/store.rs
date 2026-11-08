@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS capture (
   ended_at INTEGER,
   bridge_mac BLOB,
   bridge_fw TEXT,
-  -- What carries the bridge's nodes: `bench`, `carrier-6`, `carrier-10` or `carrier-14`.
+  -- What carries the bridge's nodes: `no carrier`, `carrier-6`, `carrier-10` or `carrier-14`.
   -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
   node_board TEXT,
   notes TEXT,

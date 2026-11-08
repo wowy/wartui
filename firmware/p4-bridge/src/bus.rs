@@ -1,6 +1,6 @@
 //! The P4's end of the node bus: two SPI controllers, each with up to [`PER_BUS`] nodes behind its
-//! own CS (`docs/node-bus.md`). The board `main` read at boot sets how many each drives: six on
-//! the bench, and three, five or seven on a carrier.
+//! own CS (`docs/node-bus.md`). The board `main` read at boot sets how many each drives: three,
+//! five or seven on a carrier, and none without one.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the acknowledgment. The P4 checks
 //! framing only and reads no record. Each record a node sends goes to the host as a `FromNode`,
@@ -57,9 +57,8 @@
 //! Each slot has its own seq, so a node's gaps count only transfers meant for it. Log lines name a
 //! slot as the operator reads it, `N3` on a carrier ([`NodeBoard::label`]).
 //!
-//! **IRQ is active high on the bench**, where a node's D0 reaches the P4 directly: pulled down,
-//! so no node reads as no request. A carrier inverts it onto a shared line it pulls up, so there
-//! IRQ is active low and the P4 pulls it up too. A node drives D0 the same either way.
+//! **IRQ is active low.** The carrier inverts each node's D0 onto a shared line it pulls up, and
+//! the P4 pulls it up too, so a bus with no node asking reads high.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::Write;
@@ -86,7 +85,7 @@ use wartui_proto::link::{BridgeToHost, FromNodeBody, LogStr, QueueId, QueueStat,
 use crate::Shared;
 use crate::config::NODE_DOWN_BYTES;
 
-/// The bus clock, measured on the carrier. The bench's jumpers ran only at 1 MHz.
+/// The bus clock, measured on the carrier.
 pub const BUS_HZ: u32 = 4_000_000;
 /// Slots on one bus, as many as any board drives.
 pub const PER_BUS: usize = wartui_proto::bus::PER_BUS as usize;
@@ -253,9 +252,6 @@ pub fn build(
     let cs_a = a.cs.map(high);
     let cs_b = b.cs.map(high);
     let pulled_up = |pin| Input::new(pin, InputConfig::default().with_pull(Pull::Up));
-    let irq_active_high = !board.is_carrier();
-    let irq_pull = if irq_active_high { Pull::Down } else { Pull::Up };
-    let irq = |pin| Input::new(pin, InputConfig::default().with_pull(irq_pull));
     let config = Config::default().with_frequency(Rate::from_hz(BUS_HZ)).with_mode(Mode::_0);
 
     let miso_a = pulled_up(a.miso);
@@ -270,9 +266,8 @@ pub fn build(
         bus: 0,
         board,
         per_bus,
-        irq_active_high,
         cs: cs_a,
-        irq: irq(a.irq),
+        irq: pulled_up(a.irq),
         _miso: miso_a,
         wire: Some(Wire {
             spi: spi_a,
@@ -302,9 +297,8 @@ pub fn build(
         bus: 1,
         board,
         per_bus,
-        irq_active_high,
         cs: cs_b,
-        irq: irq(b.irq),
+        irq: pulled_up(b.irq),
         _miso: miso_b,
         wire: Some(Wire {
             spi: spi_b,
@@ -491,11 +485,9 @@ pub struct Controller {
     board: NodeBoard,
     /// Slots this bus drives, from slot 1.
     per_bus: usize,
-    /// Whether IRQ is asserted high: on the bench, not on a carrier.
-    irq_active_high: bool,
     /// One per driven slot, high.
     cs: [Option<Output<'static>>; PER_BUS],
-    /// Pulled to its inactive level.
+    /// Pulled up, and asserted low.
     irq: Input<'static>,
     /// Held so its pull stays: an empty slot then reads constant bytes, which fail the magic.
     _miso: Input<'static>,
@@ -519,7 +511,7 @@ pub struct Controller {
     irq_n: u32,
 }
 
-/// Run one bus forever. A bus that drives no slot, on a broken carrier, waits forever.
+/// Run one bus forever. A bus that drives no slot, with no carrier or a broken one, waits forever.
 pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
     if controller.per_bus == 0 {
         core::future::pending().await
@@ -533,7 +525,7 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
             Timer::at(end + SLOT_GAP).await;
         }
         let any_present = controller.slots.iter().any(|s| s.present);
-        let asserted = controller.irq.is_high() == controller.irq_active_high;
+        let asserted = controller.irq.is_low();
         let retry = controller.stuck_at.is_some_and(|at| Instant::now() >= at + STUCK_RETRY);
         if !asserted || retry {
             controller.unlatch();
@@ -593,8 +585,8 @@ pub async fn run(controller: &'static mut Controller, shared: &Shared) -> ! {
                 Timer::at(due.min(until)).await;
             } else if any_present {
                 // Asserted, or deasserted when stuck.
-                let high = controller.irq_active_high != controller.stuck_at.is_some();
-                let level = if high { Event::HighLevel } else { Event::LowLevel };
+                let level =
+                    if controller.stuck_at.is_some() { Event::HighLevel } else { Event::LowLevel };
                 let woke = select3(controller.irq.wait_for(level), Timer::at(due), queued.wait());
                 if let Either3::First(()) = woke.await {
                     continue;

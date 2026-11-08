@@ -393,7 +393,6 @@ fn label(board: NodeBoard, bus: u8, index: u8) -> String {
 
 #[test]
 fn node_board_labels_b1_by_silk_when_board_is_a_carrier() {
-    assert_eq!(label(NodeBoard::Bench, 1, 0), "B1");
     assert_eq!(label(NodeBoard::Carrier6, 1, 0), "N4");
     assert_eq!(label(NodeBoard::Carrier10, 1, 0), "N6");
     assert_eq!(label(NodeBoard::Carrier14, 1, 0), "N8");
@@ -401,7 +400,6 @@ fn node_board_labels_b1_by_silk_when_board_is_a_carrier() {
 
 #[test]
 fn node_board_labels_last_slot_when_board_drives_it() {
-    assert_eq!(label(NodeBoard::Bench, 1, 5), "B6");
     assert_eq!(label(NodeBoard::Carrier6, 1, 2), "N6");
     assert_eq!(label(NodeBoard::Carrier10, 1, 4), "N10");
     assert_eq!(label(NodeBoard::Carrier14, 1, 6), "N14");
@@ -412,7 +410,20 @@ fn node_board_labels_last_slot_when_board_drives_it() {
 fn node_board_keeps_bus_name_when_slot_is_not_driven() {
     assert_eq!(label(NodeBoard::Carrier6, 0, 3), "A4");
     assert_eq!(label(NodeBoard::Carrier10, 1, 6), "B7");
-    assert_eq!(label(NodeBoard::Bench, 0, 6), "A7");
+}
+
+#[test]
+fn node_board_keeps_bus_name_when_there_is_no_carrier() {
+    assert_eq!(label(NodeBoard::NoCarrier, 0, 0), "A1");
+    assert_eq!(label(NodeBoard::NoCarrier, 1, 6), "B7");
+}
+
+#[test]
+fn node_board_drives_no_slot_when_there_is_no_carrier() {
+    assert_eq!(NodeBoard::NoCarrier.per_bus(), 0);
+    assert_eq!(NodeBoard::NoCarrier.slot_count(), 0);
+    assert_eq!(NodeBoard::NoCarrier.slots().next(), None);
+    assert!(!NodeBoard::NoCarrier.is_carrier());
 }
 
 #[test]
@@ -428,7 +439,7 @@ fn node_board_lists_driven_slots_bus_a_first_when_asked() {
             assert_eq!(labels, silk, "{board}");
         }
     }
-    assert_eq!(NodeBoard::Bench.slots().last(), Slot::new(1, 5));
+    assert_eq!(NodeBoard::Carrier14.slots().last(), Slot::new(1, 6));
 }
 
 #[test]
@@ -445,7 +456,7 @@ fn node_board_parses_every_label_it_gives_when_round_tripped() {
 #[test]
 fn node_board_refuses_label_when_board_does_not_take_it() {
     let refused = [
-        (NodeBoard::Bench, ["A7", "B7", "N1", "A0", "", "C1"].as_slice()),
+        (NodeBoard::NoCarrier, ["A1", "B1", "B7", "N1", "n1", "A0", "", "C1"].as_slice()),
         (NodeBoard::Carrier6, ["N0", "N7", "A1", "B1", "N", "N01", "N+1", "N1x", "1"].as_slice()),
         (NodeBoard::Carrier10, ["N11", "N256", "A1"].as_slice()),
         (NodeBoard::Carrier14, ["N15", "B7", "NN1", " N1"].as_slice()),
@@ -460,7 +471,7 @@ fn node_board_refuses_label_when_board_does_not_take_it() {
 #[test]
 fn node_board_names_board_when_displayed() {
     let names: Vec<&str> = NodeBoard::ALL.iter().map(|b| b.name()).collect();
-    assert_eq!(names, ["bench", "carrier-6", "carrier-10", "carrier-14"]);
+    assert_eq!(names, ["no carrier", "carrier-6", "carrier-10", "carrier-14"]);
     assert_eq!(NodeBoard::Carrier10.to_string(), "carrier-10");
 }
 

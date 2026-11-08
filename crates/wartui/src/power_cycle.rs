@@ -3,9 +3,9 @@
 //! The carrier's I/O expander switches each node's power, so a hung node comes back without
 //! anyone reaching for it. The bridge is resolved to one board as `wartui reset` resolves it
 //! (`reset::board_to_reset`), since a sweep asks whichever bridge answers first. Its `Ready`
-//! names the board, which decides what `--slot` takes: the silk names, `N1` to `Nn`. A bench
-//! bridge, which switches no power, and a name the board does not take are refused before
-//! anything is sent.
+//! names the board, which decides what `--slot` takes: the silk names, `N1` to `Nn`. A bridge
+//! with no carrier, which switches no power, and a name the board does not take are refused
+//! before anything is sent.
 //!
 //! A node with its own USB plugged in stays powered through a cycle, since USB feeds it past
 //! the carrier's switch.
@@ -66,8 +66,8 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// The slot `name` means on `board`, or why it is refused: a bench bridge switches no power, and
-/// a carrier takes only the names it drives.
+/// The slot `name` means on `board`, or why it is refused: a bridge with no carrier switches no
+/// power, and a carrier takes only the names it drives.
 fn slot_for(board: NodeBoard, name: &str) -> Result<Slot, String> {
     if !board.is_carrier() {
         return Err(NO_CARRIER.to_owned());
@@ -121,8 +121,8 @@ mod tests {
     }
 
     #[test]
-    fn power_cycle_cmd_refuses_before_sending_when_bridge_is_on_the_bench() {
-        let refused = slot_for(NodeBoard::Bench, "A1").expect_err("no carrier");
+    fn power_cycle_cmd_refuses_before_sending_when_bridge_has_no_carrier() {
+        let refused = slot_for(NodeBoard::NoCarrier, "A1").expect_err("no carrier");
         assert!(refused.contains("no carrier board"), "{refused}");
     }
 }

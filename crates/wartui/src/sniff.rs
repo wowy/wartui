@@ -135,7 +135,7 @@ struct Counts {
     /// decoded message of any kind, or the transport saying why the link is down. An
     /// undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
-    /// What carries the nodes, from the bridge's announcement, which names each slot. The bench
+    /// What carries the nodes, from the bridge's announcement, which names each slot. No carrier
     /// until one arrives.
     board: Option<NodeBoard>,
     total: u64,
@@ -251,7 +251,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         }
         // Answers `power-cycle`, which `sniff` never sends.
         BridgeToHost::PowerCycled { slot, outcome } => {
-            let board = counts.board.unwrap_or(NodeBoard::Bench);
+            let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
             println!("# {}", wartui_core::engine::power_cycled_text(board, *slot, *outcome));
         }
     }
@@ -260,7 +260,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
 /// The start of each line about a record: the bridge's stamp, and the slot as the operator
 /// reads it on the board the bridge announced.
 fn head(rx_us: u32, slot: Slot, counts: &Counts) -> String {
-    let board = counts.board.unwrap_or(NodeBoard::Bench);
+    let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
     format!("{rx_us:>10}us  {}", board.label(slot))
 }
 

@@ -53,7 +53,7 @@ assignment, dedup what they see, and heartbeat every 5 seconds once assigned.
 ### On real hardware
 
 The bridge is a Waveshare ESP32-P4-WIFI6. Each node is a XIAO ESP32-C5, seated on the
-wartui-carrier (6, 10 or 14 slots) or wired straight to the P4's header
+wartui-carrier (6, 10 or 14 slots), which wires it to the P4
 ([`docs/node-bus.md`](docs/node-bus.md) has the pins).
 
 Install the binary:
@@ -185,7 +185,7 @@ Wi-Fi, and its `channels` column reads `bluetooth`.
 ## Limits
 
 - **Maximum fourteen nodes** (`plan::MAX_NODES`), seven slots on each of the two node buses. The
-  P4 drives seven per bus on the 14-node carrier, and six per bus wired straight to it
+  P4 drives seven per bus on the 14-node carrier, and none without a carrier
   ([`docs/node-bus.md`](docs/node-bus.md)).
 - **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
   and the footer says so.

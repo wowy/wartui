@@ -147,7 +147,7 @@ pub(super) fn busy() -> Snapshot {
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
             uptime_ms: 1_000,
-            node_board: NodeBoard::Bench,
+            node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
         }),

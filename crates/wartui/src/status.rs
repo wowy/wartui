@@ -151,6 +151,9 @@ fn slots_text(board: NodeBoard, present: u32) -> String {
 
 /// What carries the bridge's nodes, and the slots it drives.
 fn board_line(board: NodeBoard) -> String {
+    if !board.is_carrier() {
+        return format!("{board}, so no node is driven");
+    }
     format!("{board}, {} node slots, {}", board.slot_count(), crate::text::slot_range(board))
 }
 
@@ -308,8 +311,13 @@ mod tests {
 
     #[test]
     fn status_prints_board_and_its_slots_when_bridge_announces() {
-        assert_eq!(board_line(NodeBoard::Bench), "bench, 12 node slots, A1 to A6 or B1 to B6");
+        assert_eq!(board_line(NodeBoard::Carrier6), "carrier-6, 6 node slots, N1 to N6");
         assert_eq!(board_line(NodeBoard::Carrier10), "carrier-10, 10 node slots, N1 to N10");
+    }
+
+    #[test]
+    fn status_prints_no_node_driven_when_bridge_has_no_carrier() {
+        assert_eq!(board_line(NodeBoard::NoCarrier), "no carrier, so no node is driven");
     }
 
     #[test]
@@ -430,13 +438,13 @@ mod tests {
     fn status_prints_present_slots_by_board_label_when_bridge_reports_them() {
         // A1, A2 and B1: bytes 0, 1 and 7.
         let present = 1 << 0 | 1 << 1 | 1 << 7;
-        assert_eq!(slots_text(NodeBoard::Bench, present), "A1 A2 B1");
+        assert_eq!(slots_text(NodeBoard::Carrier6, present), "N1 N2 N4");
         assert_eq!(slots_text(NodeBoard::Carrier14, present), "N1 N2 N8");
     }
 
     #[test]
     fn status_prints_none_when_no_slot_is_present() {
-        assert_eq!(slots_text(NodeBoard::Bench, 0), "none");
+        assert_eq!(slots_text(NodeBoard::NoCarrier, 0), "none");
     }
 
     #[test]

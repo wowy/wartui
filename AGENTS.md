@@ -255,8 +255,8 @@ is here rather than only in a `//!`.
   few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
   has confirmed is a share that may be nobody's.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
-  per bus on the 14-node carrier, and six on the bench (`bus::NodeBoard`). A node is known by its
-  MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
+  per bus on the 14-node carrier, and none without a carrier (`bus::NodeBoard`). A node is known
+  by its MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
   (`bus::Slot`, `A1` to `B7`). The operator reads a slot through its board's label, `N1` up on a
   carrier, and the store keeps the bus name.
 - **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has

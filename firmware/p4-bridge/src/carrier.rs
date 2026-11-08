@@ -1,11 +1,11 @@
 //! The wartui-carrier: which one the P4 sits on, and its nodes' power, through the carrier's
 //! I/O expander at 0x20 on I2C0 (`docs/node-bus.md` § "On the carrier board").
 //!
-//! **The board is read before the node buses are built**, because it picks the CS pins and
-//! IRQ's polarity. [`detect`] runs blocking on the bus `main` brought up for the GPS. No answer
-//! at the expander's address is the bench. Otherwise `wartui_proto::carrier` decides from the
-//! registers, and [`detect`] does the I2C around it, each transaction bounded by
-//! [`TRANSACTION_TIMEOUT_MS`]:
+//! **The board is read before the node buses are built**, because it picks the CS pins they
+//! drive. [`detect`] runs blocking on the bus `main` brought up for the GPS. No answer at the
+//! expander's address is no carrier: an `Error`, and no slot driven. Otherwise
+//! `wartui_proto::carrier` decides from the registers, and [`detect`] does the I2C around it,
+//! each transaction bounded by [`TRANSACTION_TIMEOUT_MS`]:
 //!
 //! - **warm**, a P4 reset under running nodes: nodes on stay on, and any with its output low is
 //!   powered;
@@ -14,17 +14,17 @@
 //! - **broken**, inputs naming no carrier: an `Error`, nothing powered and no slot driven.
 //!
 //! An expander that answers and then fails is an `Error` too, and leaves power control lost:
-//! every power-cycle answers `Failed`. The board is then the one the registers named, or, when
-//! none had, the fourteen with no slot driven, which broken also reports. A fault goes with
-//! every announcement, as the GPS fault does, and so does a `Log` line naming a carrier that
-//! came up and what it powered at boot.
+//! a power-cycle answers `Failed`. The board is then the one the registers named, or, when none
+//! had, no carrier, which broken also reports, and there a power-cycle answers `NoCarrier`. A
+//! fault goes with every announcement, as the GPS fault does, and so does a `Log` line naming a
+//! carrier that came up and what it powered at boot.
 //!
 //! **[`run`] powers the nodes one at a time, 100 ms apart**, in slot order A1, B1, A2, B2,
 //! so their inrush never adds up. Then it serves power-cycle requests forever, one at a time:
 //! output low, [`POWER_OFF`], output high, and `PowerCycled` once the node is powered again.
 //! Requests wait in a bitmask in [`Power`], so a request for a slot already waiting or cycling
 //! joins that cycle and is answered once. The host reader answers at once what needs no
-//! expander: `NoCarrier` on the bench, `NotDriven` for a slot the board does not drive, and
+//! expander: `NoCarrier` with no carrier, `NotDriven` for a slot the board does not drive, and
 //! `Failed` once control is lost.
 //!
 //! **After a lost node supply, [`run`] staggers the nodes again.** The P4 stays up on its own
@@ -93,11 +93,14 @@ pub const TRANSACTION_TIMEOUT_MS: u64 = 10;
 /// Tries at switching a node back on before a cycle gives up and answers `Failed`.
 const ON_TRIES: u8 = 3;
 /// Tries at each expander transaction at boot, so one glitch neither hides a carrier nor loses
-/// its power control. A bench board NACKs each of its first reads at once, so they cost it little.
+/// its power control. With no carrier, each of the first reads is NACKed at once, so they cost
+/// little.
 const DETECT_TRIES: u8 = 3;
 
 /// The fault when the expander answered and then failed at boot.
 const LOST: &str = "the carrier's I/O expander stopped answering, so node power is out of reach";
+/// The fault when nothing answers at the expander's address.
+const NONE: &str = "no wartui-carrier answered at 0x20, so no node is driven";
 /// The fault when the expander's inputs name no carrier.
 const BROKEN: &str =
     "the carrier's I/O expander reads as no known carrier, so no node is powered or driven";
@@ -109,8 +112,6 @@ const UNPOWERED: &str = "the carrier's I/O expander did not answer, so a node ma
 pub struct Carrier {
     /// What `Ready` reports.
     board: NodeBoard,
-    /// Slots per bus the node buses drive.
-    per_bus: u8,
     /// The output registers as last read or written.
     output: u16,
     /// Node ports to power, staggered.
@@ -122,25 +123,30 @@ pub struct Carrier {
 }
 
 impl Carrier {
-    /// No carrier: the bench, or a bus that refused its configuration.
-    pub const fn bench() -> Self {
-        let board = NodeBoard::Bench;
-        Self { board, per_bus: board.per_bus(), output: 0, pending: 0, control: false, fault: None }
+    /// No carrier: nothing answered at the expander's address.
+    const fn none() -> Self {
+        let board = NodeBoard::NoCarrier;
+        Self { board, output: 0, pending: 0, control: false, fault: Some(NONE) }
+    }
+
+    /// No carrier, on a bus that refused its configuration. The GPS fault says why.
+    pub const fn unread() -> Self {
+        Self { fault: None, ..Self::none() }
     }
 
     /// A carrier that came up, with `output` in its registers and `pending` still to power.
     const fn up(board: NodeBoard, output: u16, pending: u16) -> Self {
-        Self { board, per_bus: board.per_bus(), output, pending, control: true, fault: None }
+        Self { board, output, pending, control: true, fault: None }
     }
 
     /// A carrier whose power is out of reach, driving `board`'s slots, or none when the
     /// registers named no carrier.
     const fn lost(board: Option<NodeBoard>, fault: &'static str) -> Self {
-        let (board, per_bus) = match board {
-            Some(board) => (board, board.per_bus()),
-            None => (NodeBoard::Carrier14, 0),
+        let board = match board {
+            Some(board) => board,
+            None => NodeBoard::NoCarrier,
         };
-        Self { board, per_bus, output: 0, pending: 0, control: false, fault: Some(fault) }
+        Self { board, output: 0, pending: 0, control: false, fault: Some(fault) }
     }
 
     /// The board, as `Ready` reports it.
@@ -150,7 +156,7 @@ impl Carrier {
 
     /// Slots per bus the node buses drive.
     pub const fn per_bus(&self) -> u8 {
-        self.per_bus
+        self.board.per_bus()
     }
 }
 
@@ -164,7 +170,7 @@ pub fn detect(i2c: &mut I2c<'_, Blocking>) -> Carrier {
         esp_hal::time::Duration::from_millis(TRANSACTION_TIMEOUT_MS),
     ));
     if i2c.apply_config(&bounded).is_err() {
-        return Carrier::bench();
+        return Carrier::none();
     }
     let found = read_expander(i2c);
     // The shared bus's users bound their own transactions.
@@ -172,9 +178,9 @@ pub fn detect(i2c: &mut I2c<'_, Blocking>) -> Carrier {
     found
 }
 
-/// The first read decides the bench from a carrier.
+/// The first read decides whether a carrier is there.
 fn read_expander(i2c: &mut I2c<'_, Blocking>) -> Carrier {
-    let Ok(config) = tried(|| read16(i2c, REG_CONFIG)) else { return Carrier::bench() };
+    let Ok(config) = tried(|| read16(i2c, REG_CONFIG)) else { return Carrier::none() };
     let warm = warm_board(config);
     let Ok(output) = tried(|| read16(i2c, REG_OUTPUT)) else { return Carrier::lost(warm, LOST) };
     if let Some(board) = warm {
@@ -315,7 +321,7 @@ fn answer(shared: &Shared, slot: Slot, outcome: PowerOutcome) {
     shared.push_host(&BridgeToHost::PowerCycled { slot, outcome });
 }
 
-/// What the carrier has to tell a host: its fault, or the line naming it. Nothing on the bench.
+/// What the carrier has to tell a host: its fault, or the line naming it.
 pub fn say(shared: &Shared) {
     let power = &shared.power;
     if let Some(fault) = power.fault.get() {
@@ -346,7 +352,7 @@ fn stagger(board: NodeBoard) -> impl Iterator<Item = Slot> + Clone {
 }
 
 /// Power the nodes [`detect`] left to power, then serve power-cycle requests forever, and
-/// recover a lost supply between them. Waits forever on the bench, or with power out of reach.
+/// recover a lost supply between them. Waits forever with no carrier, or with power out of reach.
 pub async fn run(carrier: Carrier, i2c: Option<&'static I2cBus>, shared: &Shared) -> ! {
     let Some(i2c) = i2c.filter(|_| carrier.control) else { pending().await };
     let board = carrier.board;

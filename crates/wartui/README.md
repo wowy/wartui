@@ -624,7 +624,7 @@ wartui power-cycle --slot N3 --bridge 44:C0
 
 It resolves one bridge as `wartui reset` does, and takes `--config PATH` as `status` does. `--slot`
 takes the carrier's silk names, `N1` to `N6`, `N10` or `N14`; another name is refused with the
-range. A bench bridge, with no carrier, is refused before anything is sent. A node with its own USB
+range. A bridge with no carrier is refused before anything is sent. A node with its own USB
 plugged in stays powered through a cycle. When the bridge takes the node supply to be lost, it
 switches every node off and powers them again one at a time
 ([`docs/node-bus.md`](../../docs/node-bus.md#on-the-carrier-board)). Otherwise nothing
@@ -633,8 +633,8 @@ power-cycles a node on its own.
 The bridge answers once the node is powered again, or says why not:
 
 - `N3 power-cycled`: done.
-- `this bridge has no carrier board, so it cannot switch node power`: its nodes are wired straight
-  to it.
+- `this bridge has no carrier board, so it cannot switch node power`: the bridge found no
+  wartui-carrier at boot.
 - `A4 is not a slot on this carrier-6`: the carrier has no socket there.
 - `N3 was not power-cycled: the carrier's I/O expander did not answer`: the bridge could not reach
   the switch. One that fails at boot is a `fault` in `wartui status` too.
@@ -653,8 +653,8 @@ wartui fan 40               # set 40 %, wait 2 s, then print the duty and the sp
 wartui fan 40 --bridge 44:C0
 ```
 
-It resolves one bridge and takes `--config PATH` as `power-cycle` does. A bench bridge, with no
-carrier, has no fan and is refused. The bridge writes a duty only when it differs from the one it
+It resolves one bridge and takes `--config PATH` as `power-cycle` does. A bridge with no carrier
+has no fan and is refused. The bridge writes a duty only when it differs from the one it
 stored. One it could not save holds until its next reboot, and `wartui fan` prints the bridge's
 `fault` line saying so. Setting the same duty again retries the save.
 
@@ -708,7 +708,7 @@ alone. `r` and `R` make a node forget every address it has reported, on its next
 running; see "Uploading to WDGWars".
 
 `p` asks before it power-cycles the selected node, and works on a node that has stopped
-heartbeating, as long as it has a slot. A bench bridge, with no carrier, refuses it, and so does a
+heartbeating, as long as it has a slot. A bridge with no carrier refuses it, and so does a
 bridge that is not connected, even with the confirm already open. The bridge's answer replaces the
 key help for a few seconds; see "Power-cycling a node".
 
@@ -896,9 +896,9 @@ nothing and says how many networks it left out.
 
 Rows name nodes by chip and last two address octets: `C5 57:84`. The chip comes from the board its
 heartbeats announce, so a node not yet heartbeating shows `—`, and a board this build has no name
-for shows `??`. `slot` is the node-bus slot its latest heartbeat came from: `A1` to `B6` on the
-bench, and the carrier's silk name, `N1` up, on a carrier. `B1` is `N4` on the 6, `N6` on the 10 and
-`N8` on the 14. A capture stores the bus name either way.
+for shows `??`. `slot` is the node-bus slot its latest heartbeat came from, by the carrier's silk
+name, `N1` up. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. A capture stores the bus
+name.
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -1048,15 +1048,15 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   overflows on the P4's UART from the host. Each is host bytes lost or corrupted, as while the P4
   writes its own flash during `flash-bridge`; the update rewinds over them. Outside an update it
   should stay 0.
-- **`board  …`**: what carries the nodes, `bench` or `carrier-6`, `carrier-10` or `carrier-14`,
-  and the slot names it takes.
+- **`board  …`**: what carries the nodes, `carrier-6`, `carrier-10` or `carrier-14`, and the slot
+  names it takes, or `no carrier, so no node is driven`.
 - **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
 - **`pool  …`**: the channel pool the bridge holds, which `run` deals; see "Channel pools".
-- **`slots  …`**: the slots the bridge hears a node in, by the board's names (`A1 A2 B1`, or
-  `N1 N2 N8` on a carrier), or `none`.
+- **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
+  or `none`.
 
 `wartui reset` takes about thirty seconds to fail on a node named by path. The board it is for
 answers nothing, so it transmits before anything has identified itself. A node that is not reading
