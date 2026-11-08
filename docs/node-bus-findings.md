@@ -811,9 +811,10 @@ the image already in the P4's cache.
   boot of 12 ms. cb73e56 at 4 MHz had 16–18 ms, and 22 ms on bus A and 76 ms on bus B at boot. That
   is an older build, so not all of the fall is the clock's.
 - **One node alone took 19 s at 86 KB/s,** against 22 s at 65 KB/s at 4 MHz (ba59d91).
-- **The sweep's CRC error did not recur.** `crc` stayed 0 on every slot through these three updates
-  and the two below, read again in a 45 s capture after each round. N2's errors at 40 MHz are
-  unchanged as a question, and the sweep's single one at 8 MHz stays unexplained.
+- **The sweep's CRC error did not recur here.** `crc` stayed 0 on every slot through these three
+  updates and the control's two, read again in a 45 s capture after each round. One came later, on
+  N10, in the [console rounds](#what-the-nodes-counted-with-consoles-attached). N2's errors at 40 MHz
+  are unchanged as a question.
 - **A node's flush left it deaf about as long as at 4 MHz,** at most 247 ms while sending. No node
   went `gone` while chunks were sent.
 - **This counts nothing toward a node,** as in the sweep: no node's USB console was attached. All
@@ -857,6 +858,48 @@ The `stuck` and rate rows add the two ten-node updates above to the 8 MHz column
   reports. No soak below 40 MHz counted one, and every update confirmed, so no cost shows. The cause
   was not looked into.
 
+### What the nodes counted, with consoles attached
+
+Four nodes had their USB consoles read, with nothing written to them: `04:E4` (N1), `00:40` (N2),
+`0D:20` (N5) and `1A:50` (N10), still in their sockets. The control's round ran once more at each
+clock, 4 MHz (75dbfcf) and then 8 MHz (10c5f19). Each node column sums the four nodes over every boot
+in the round, at each boot's last counter line, so up to 10 s before a reboot goes uncounted. Each
+count starts at that node's boot, so the first boot includes time before the round.
+
+| | 4 MHz | 8 MHz |
+| --- | --- | --- |
+| Transfers at the four nodes | 23,700 | 13,833 |
+| `crc` at the nodes | 0 | 0 |
+| `magic` at the nodes | 25 | 30 |
+| `gaps` at the nodes | 174 | 473 |
+| `early` at the nodes | 2 | 16 |
+| Out of order, repeats, resent, undelivered, arm failed | 0 | 0 |
+| `gap` at the P4, ten slots | 167 | 481 |
+| `magic` at the P4, ten slots | 2,295 | 5,385 |
+| `crc` at the P4, ten slots | 0 | 1, on N10 |
+| `stuck` rise per update, bus A | 3, 2 | 2, 4 |
+| `stuck` rise per update, bus B | 2, 5 | 4, 4 |
+| Confirmed | 10 of 10, twice | 10 of 10, twice |
+| Rate per node | 33–45, 28–45 KB/s | 43–62, 39–62 KB/s |
+| Whole run | 37, 40 s | 33, 32 s |
+
+- **No transfer reached these four nodes with a bad CRC, at either clock.** At 8 MHz each node took
+  at least about 3,300 good transfers, which bounds its P4-to-node bit error rate at ~1 × 10⁻⁷ (95%,
+  inferred from the count). This covers updates and short captures, not a soak.
+- **The gaps cost these nodes nothing that shows.** Each node's window took every flight in order, none
+  twice, and nothing was resent or undelivered.
+- **Both ends see about three times the gaps at 8 MHz.** The cause is still open. The nodes' `magic`
+  does not account for the P4's `gap`: N1 counted 10 against the P4's 62. The two boots after the
+  updates, in the capture, counted at most 2 `gaps`, 1 `magic` and no `early`.
+- **N10's CRC error fell in the report that spans its reboot,** 18:19:17 to 18:19:22 UTC, with
+  `rebooting into the new image` on its console at 18:19:21.3. A node that resets mid-transfer would
+  pass the magic and fail the CRC, but that is not shown. The sweep's error on N2 fell at the reboots
+  too. That makes two in seven ten-node updates at 8 MHz, against none in five at 4 MHz, which is too
+  few to tell the clock from chance.
+- **The consoles changed the runs.** Rates spread wider at both clocks, on nodes with no console too:
+  `7E:3C` was slowest at 8 MHz, at 39 KB/s. The cause was not looked into, so these rates and times do
+  not stand for a fleet with its USB unplugged.
+
 ## Still open
 
 This list replaces the dated ones above.
@@ -866,6 +909,8 @@ This list replaces the dated ones above.
   transaction at boot, which needs an I2C glitch, and exempting only the node in a cycle now
   from the supply-loss count, which needs the supply to drop within about 1 s of a queued cycle.
 - Whether the 40 MHz errors on N1 and N2 follow the slot or the node, which needs nodes swapped.
-- How many P4-to-node errors each clock causes, which needs a node's USB console attached.
+- P4-to-node errors at clocks other than 4 and 8 MHz, and in a soak, which need a node's USB console
+  attached.
 - Why seq gaps during an update peak near 8 MHz.
+- Whether the P4's CRC errors at reboots come from a node resetting mid-transfer.
 - The 14-node carrier.
