@@ -601,7 +601,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 }
 
 /// Bring up I2C0 for the GPS receiver and a carrier's expander, read the expander blocking, then
-/// share the bus. A bus that refuses its configuration is the GPS fault, and no carrier.
+/// share the bus. A bus that refuses its configuration is the GPS fault, and no carrier read.
 ///
 /// Out of line, so the drivers it moves are on this frame rather than `main`'s.
 #[inline(never)]

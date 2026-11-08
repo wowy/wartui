@@ -55,7 +55,8 @@ host. No answer at 0x20 is no carrier: an error in every announcement, and no sl
 - **A node powered over its own USB** keeps the P4 from seeing a lost node supply; unplug it, or
   power the carrier first.
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
-  power out of reach, a power-cycle answers `Failed`, or `NoCarrier` when no carrier was named.
+  power out of reach, a power-cycle answers `Failed`. When the registers named no board, the
+  bridge reports the fourteen-node carrier and drives no slot, and the fan still runs.
 
 - **The lid fan** runs at the duty stored in the P4's settings (§ "Settings"), or 100 % with
   none, from boot and with no host present. A host's `SetFan` changes it at once. `Status` reports

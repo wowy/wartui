@@ -15,9 +15,9 @@
 //!
 //! An expander that answers and then fails is an `Error` too, and leaves power control lost:
 //! a power-cycle answers `Failed`. The board is then the one the registers named, or, when none
-//! had, no carrier, which broken also reports, and there a power-cycle answers `NoCarrier`. A
-//! fault goes with every announcement, as the GPS fault does, and so does a `Log` line naming a
-//! carrier that came up and what it powered at boot.
+//! had, the fourteen with no slot driven, which broken also reports: a carrier is there, so its
+//! fan runs. A fault goes with every announcement, as the GPS fault does, and so does a `Log`
+//! line naming a carrier that came up and what it powered at boot.
 //!
 //! **[`run`] powers the nodes one at a time, 100 ms apart**, in slot order A1, B1, A2, B2,
 //! so their inrush never adds up. Then it serves power-cycle requests forever, one at a time:
@@ -101,6 +101,9 @@ const DETECT_TRIES: u8 = 3;
 const LOST: &str = "the carrier's I/O expander stopped answering, so node power is out of reach";
 /// The fault when nothing answers at the expander's address.
 const NONE: &str = "no wartui-carrier answered at 0x20, so no node is driven";
+/// The fault when I2C0 refused its configuration, so the expander was never asked.
+const UNREAD: &str =
+    "I2C0 refused its configuration, so the carrier was not read and no node is driven";
 /// The fault when the expander's inputs name no carrier.
 const BROKEN: &str =
     "the carrier's I/O expander reads as no known carrier, so no node is powered or driven";
@@ -112,6 +115,9 @@ const UNPOWERED: &str = "the carrier's I/O expander did not answer, so a node ma
 pub struct Carrier {
     /// What `Ready` reports.
     board: NodeBoard,
+    /// Slots per bus the node buses drive: the board's, or none when its power is out of reach
+    /// and the registers named no board.
+    per_bus: u8,
     /// The output registers as last read or written.
     output: u16,
     /// Node ports to power, staggered.
@@ -126,27 +132,27 @@ impl Carrier {
     /// No carrier: nothing answered at the expander's address.
     const fn none() -> Self {
         let board = NodeBoard::NoCarrier;
-        Self { board, output: 0, pending: 0, control: false, fault: Some(NONE) }
+        Self { board, per_bus: 0, output: 0, pending: 0, control: false, fault: Some(NONE) }
     }
 
-    /// No carrier, on a bus that refused its configuration. The GPS fault says why.
+    /// No carrier read, on a bus that refused its configuration.
     pub const fn unread() -> Self {
-        Self { fault: None, ..Self::none() }
+        Self { fault: Some(UNREAD), ..Self::none() }
     }
 
     /// A carrier that came up, with `output` in its registers and `pending` still to power.
     const fn up(board: NodeBoard, output: u16, pending: u16) -> Self {
-        Self { board, output, pending, control: true, fault: None }
+        Self { board, per_bus: board.per_bus(), output, pending, control: true, fault: None }
     }
 
-    /// A carrier whose power is out of reach, driving `board`'s slots, or none when the
-    /// registers named no carrier.
+    /// A carrier whose power is out of reach, driving `board`'s slots, or, when the registers
+    /// named no board, reported as the fourteen and driving none.
     const fn lost(board: Option<NodeBoard>, fault: &'static str) -> Self {
-        let board = match board {
-            Some(board) => board,
-            None => NodeBoard::NoCarrier,
+        let (board, per_bus) = match board {
+            Some(board) => (board, board.per_bus()),
+            None => (NodeBoard::Carrier14, 0),
         };
-        Self { board, output: 0, pending: 0, control: false, fault: Some(fault) }
+        Self { board, per_bus, output: 0, pending: 0, control: false, fault: Some(fault) }
     }
 
     /// The board, as `Ready` reports it.
@@ -156,7 +162,7 @@ impl Carrier {
 
     /// Slots per bus the node buses drive.
     pub const fn per_bus(&self) -> u8 {
-        self.board.per_bus()
+        self.per_bus
     }
 }
 
@@ -170,7 +176,7 @@ pub fn detect(i2c: &mut I2c<'_, Blocking>) -> Carrier {
         esp_hal::time::Duration::from_millis(TRANSACTION_TIMEOUT_MS),
     ));
     if i2c.apply_config(&bounded).is_err() {
-        return Carrier::none();
+        return Carrier::unread();
     }
     let found = read_expander(i2c);
     // The shared bus's users bound their own transactions.
