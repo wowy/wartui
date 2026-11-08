@@ -6,9 +6,7 @@ use wartui_proto::mac::Mac;
 
 use super::Settings;
 use super::fleet::{LOST_SLOT, why_not_assignable};
-use super::settings::{
-    ConfigModal, ModalAction, apply, apply_excluded, save_ble_node, save_bridge,
-};
+use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_bridge};
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
@@ -139,10 +137,8 @@ impl Ui {
         }
     }
 
-    /// Move the Bluetooth scan onto the selected node, or off it.
-    ///
-    /// While the engine remembers the Bluetooth node, the choice is also saved to
-    /// `wartui.toml`, so a restart gives the scan back to the same node.
+    /// Ask the bridge to move the Bluetooth scan onto the selected node's slot, or off the fleet
+    /// when that node holds it. The bridge keeps the slot across restarts of either end.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
@@ -154,18 +150,13 @@ impl Ui {
             self.say(format!("{name} {why}"), snapshot);
             return;
         }
-        let assigned = if holds { None } else { Some(target) };
-        let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
+        // An assignable node has a slot, so `None` here only ever means "off".
+        let slot = if holds { None } else { node.state.slot };
+        let said = match commands.try_send(Command::AssignBle { slot }) {
             Ok(()) if holds => format!("{name}: bluetooth off on its next heartbeat"),
             Ok(()) => format!("{name}: bluetooth on its next heartbeat"),
-            Err(_) => {
-                self.say(ENGINE_BUSY.to_owned(), snapshot);
-                return;
-            }
+            Err(_) => ENGINE_BUSY.to_owned(),
         };
-        if snapshot.remember_ble {
-            said.push_str(&save_ble_node(&mut self.settings, assigned));
-        }
         self.say(said, snapshot);
     }
 
@@ -458,10 +449,11 @@ mod tests {
     fn ui_toggles_ble_assignment_when_b_key_is_pressed() {
         let snapshot = busy();
         let node = snapshot.nodes[0].state.mac;
+        let slot = snapshot.nodes[0].state.slot;
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot });
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.starts_with("N7: bluetooth on"), "named by its slot: {notice}");
 
@@ -470,7 +462,7 @@ mod tests {
         let mut holding = busy();
         holding.ble_node = Some(node);
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot: None });
         assert!(ui.notice(holding.now_ms).expect("a notice").contains("bluetooth off"));
     }
 
@@ -689,75 +681,20 @@ mod tests {
     }
 
     #[test]
-    fn ui_saves_preferred_node_when_b_pressed_with_remember_on() {
+    fn ui_writes_nothing_to_config_when_b_pressed() {
+        // The bridge holds the Bluetooth slot, so `b` leaves `wartui.toml` alone.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        // An excluded SSID already in the file. `b` saves around it, not over it.
-        let saved = config::Config {
-            excluded_ssids: vec!["HomeNet".to_owned()],
-            ..config::Config::default()
-        };
-        config::save(&target, &saved).unwrap();
         let snapshot = busy();
-        let node = snapshot.nodes[0].state.mac;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui =
-            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
-
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-
-        assert_eq!(rx.try_recv().unwrap(), Command::AssignBle { mac: Some(node) });
-        let file = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(file.bluetooth.node, Some(node));
-        assert_eq!(file.excluded_ssids, ["HomeNet"], "the list already saved stays as it is");
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("remembered in"), "{notice}");
-
-        // Taking it off forgets it in the file too.
-        let mut holding = busy();
-        holding.ble_node = Some(node);
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
-        let file = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(file.bluetooth.node, None);
-        assert_eq!(file.excluded_ssids, ["HomeNet"]);
-        let notice = ui.notice(holding.now_ms).expect("a notice");
-        assert!(notice.contains("forgotten in"), "{notice}");
-    }
-
-    #[test]
-    fn ui_does_not_save_when_b_pressed_with_remember_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        let snapshot = Snapshot { remember_ble: false, ..busy() };
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 
-        assert!(rx.try_recv().is_ok(), "the scan still moves");
+        let slot = snapshot.nodes[0].state.slot;
+        assert_eq!(rx.try_recv().unwrap(), Command::AssignBle { slot });
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(!notice.contains("save"), "{notice}");
-    }
-
-    #[test]
-    fn ui_keeps_key_in_file_when_b_pressed() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        let saved = config::Config {
-            api_keys: config::ApiKeys { wdgwars: "kept-key".to_owned() },
-            ..config::Config::default()
-        };
-        config::save(&target, &saved).unwrap();
-        let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
-
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-
-        let file = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(file.bluetooth.node, Some(snapshot.nodes[0].state.mac), "b saved");
-        assert_eq!(file.api_keys.wdgwars, "kept-key");
+        assert_eq!(notice, "N7: bluetooth on its next heartbeat");
     }
 }

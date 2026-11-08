@@ -1,4 +1,4 @@
-use wartui_proto::bus::wire_epoch;
+use wartui_proto::bus::{Slot, wire_epoch};
 use wartui_proto::link::HostToBridge;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{self, ChannelPool, Job, Plan};
@@ -22,12 +22,14 @@ pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
 
 impl FleetEngine {
     /// Take an operator's instruction. What changes for a node is sent on its next heartbeat, so
-    /// only a power-cycle, a fan duty and a pool, which are the bridge's to carry out or hold, go
-    /// out from here.
+    /// only a power-cycle, a fan duty, a pool and a Bluetooth slot, which are the bridge's to carry
+    /// out or hold, go out from here.
     pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
-            Command::AssignBle { mac } => self.on_assign_ble(mac),
-            Command::RememberBle { on } => self.on_remember_ble(on),
+            Command::AssignBle { slot } => {
+                batch.bulk.push(HostToBridge::SetBle { slot });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
@@ -55,35 +57,20 @@ impl FleetEngine {
         self.cut(&members);
     }
 
-    /// Move the Bluetooth scan, or take it off the fleet.
+    /// The Bluetooth slot a bridge's `Status` reports: when it differs from the one held, take it
+    /// and re-cut.
     ///
     /// Nothing is sent here. Moving the scan changes what *two* nodes scan, so it is a re-cut, and
-    /// only the planner re-cuts. [`Self::replan`] reads this on every heartbeat and tick, and each
-    /// end takes its new assignment on its own heartbeat, share and flag under one epoch.
-    ///
-    /// While remembering is on, the preferred node follows the target, `None` included, so a
-    /// withdrawn scan stays withdrawn. It is set before the no-op check, so naming the current
-    /// holder still records it.
-    fn on_assign_ble(&mut self, target: Option<Mac>) {
-        if self.remember_ble {
-            self.preferred_ble = target;
-        }
-        if self.ble_node == target {
+    /// only the planner re-cuts. [`Self::replan`] derives the scanning node from the slot, and each
+    /// end takes its new assignment on its own heartbeat, share and flag under one epoch. So old
+    /// and new holders can overlap for up to one heartbeat: "at most one node scans Bluetooth" is
+    /// about what the host asks for.
+    pub(super) fn on_bridge_ble(&mut self, slot: Option<Slot>, now: Now) {
+        if self.ble_slot == slot {
             return;
         }
-
-        // Each end changes on its own heartbeat, so old and new holders can overlap for up to one
-        // heartbeat. "At most one node scans Bluetooth" is about what the host asks for.
-        self.ble_node = target;
-    }
-
-    /// Turn remembering the preferred Bluetooth node on or off, leaving the scan where it is.
-    fn on_remember_ble(&mut self, on: bool) {
-        if on == self.remember_ble {
-            return;
-        }
-        self.remember_ble = on;
-        self.preferred_ble = if on { self.ble_node } else { None };
+        self.ble_slot = slot;
+        self.replan(now);
     }
 
     /// Mark a node, or every assignable node, as owing a cleared dedup ring. A node never heard
@@ -137,14 +124,12 @@ impl FleetEngine {
     /// on who is present, not on arrival order. An unchanged membership returns at once, keeping
     /// this cheap enough for every tick and off a heartbeat's critical path.
     pub(super) fn replan(&mut self, now: Now) {
-        // The preferred node retakes the scan when nobody holds it and it is drivable: at startup,
-        // and after aging out.
-        if self.ble_node.is_none()
-            && let Some(mac) = self.preferred_ble
-            && self.nodes.get(&mac).is_some_and(|node| self.is_assignable(node, now))
-        {
-            self.ble_node = Some(mac);
-        }
+        // The scan is the slot's: whichever assignable node heartbeats from it holds the scan, so
+        // a node swapped into the slot takes it, and one that leaves or turns undrivable drops it.
+        self.ble_node = self
+            .ble_slot
+            .and_then(|slot| self.slots.get(&slot).copied())
+            .filter(|mac| self.nodes.get(mac).is_some_and(|node| self.is_assignable(node, now)));
         // Read once, so a node's channels and Bluetooth flag cannot disagree.
         let scanner = self.ble_node;
         let members: Vec<(Mac, Job)> = self

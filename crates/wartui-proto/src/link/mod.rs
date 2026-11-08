@@ -262,6 +262,14 @@ pub enum HostToBridge {
         /// The pool to run and store.
         pool: ChannelPool,
     },
+    /// Give the Bluetooth scan to the node in `slot`, or to no node, and store it so the P4 boots
+    /// into it ([`crate::settings`]). No answer: the next [`BridgeToHost::Status`] shows the slot
+    /// in force, and a failed save answers [`BridgeToHost::Error`]. Every P4 takes it, carrier or
+    /// not.
+    SetBle {
+        /// The slot whose node scans Bluetooth, or `None` for no node.
+        slot: Option<Slot>,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -324,6 +332,9 @@ pub enum BridgeToHost {
         fan: Option<FanStats>,
         /// The channel pool the bridge holds, which the host's planner deals.
         pool: ChannelPool,
+        /// The slot whose node scans Bluetooth, or `None` for no node. The bridge holds it; the
+        /// host's planner gives the scan to the node heartbeating from it.
+        ble: Option<Slot>,
         /// Bit n is set while the P4 counts the slot whose [`Slot`] byte is n present. A slot is
         /// present after one good transfer, and absent after five in a row fail the magic, once
         /// a second has passed since the last good one (`firmware/p4-bridge/src/bus.rs`). A u32,

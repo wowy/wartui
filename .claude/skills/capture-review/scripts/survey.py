@@ -281,17 +281,16 @@ def nodes(db, ctx):
                 "assignable",
                 f"SELECT * FROM node WHERE hex(mac)='{mac.hex().upper()}'",
             )
-    pref = ctx.get("settings", {}).get("preferred_ble")
-    if pref and pref != "none":
-        present = any(full(m) == pref.upper() for m in ctx["nodes"])
-        if not present and not ctx.get("ble_nodes"):
-            flag(
-                "INFO",
-                "config",
-                f"preferred_ble={pref} (the remembered Bluetooth node) never appeared, and no "
-                "assignment gave another node the Bluetooth job, so no node scanned Bluetooth",
-                "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
-            )
+    ble_slot = ctx.get("settings", {}).get("ble_slot")
+    if ble_slot and ble_slot != "none" and not ctx.get("ble_nodes"):
+        flag(
+            "INFO",
+            "config",
+            f"ble_slot={ble_slot} (the bridge's Bluetooth slot) is set, but no assignment gave "
+            "a node the Bluetooth job, so no node heartbeated from that slot and none scanned "
+            "Bluetooth",
+            "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
+        )
     if len(rows) > MAX_NODES:
         print(f"  {len(rows)} nodes: more than a bridge's {MAX_NODES} slots, so some came and went")
 

@@ -215,8 +215,6 @@ pub async fn run(args: Args) -> Result<()> {
     let store_config = StoreConfig::new(&db);
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
-    let remember_ble = config.bluetooth.remember.unwrap_or(true);
-    let preferred_ble = config.bluetooth.node;
     let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
     let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
     let settings = tui::Settings {
@@ -229,8 +227,6 @@ pub async fn run(args: Args) -> Result<()> {
     let config = EngineConfig {
         record_raw: args.record_raw,
         position,
-        remember_ble,
-        preferred_ble,
         excluded_ssids,
         gps_rate_hz,
         ..Default::default()

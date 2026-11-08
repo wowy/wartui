@@ -56,6 +56,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::SetFan { duty: FanDuty::new(40).expect("in range") })
         .expect("sample_commands has room");
     v.push(HostToBridge::SetPool { pool: ChannelPool::Eu }).expect("sample_commands has room");
+    v.push(HostToBridge::SetBle { slot: Slot::new(0, 2) }).expect("sample_commands has room");
     v
 }
 
@@ -174,6 +175,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         host_uart_errors: 0,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Us,
+        ble: Slot::new(1, 0),
         present: 0b11_1111,
     })
     .expect("sample_events has room");
@@ -582,7 +584,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 11, "one of each");
+    assert_eq!(commands.len(), 12, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -649,6 +651,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::Eu,
+        ble: None,
         present: 0,
     };
     let mut out = [0u8; MAX_FRAME];
@@ -728,6 +731,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         host_uart_errors: 9,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
         pool: ChannelPool::All,
+        ble: None,
         present: u32::MAX,
     };
     assert_eq!(round_trip(&status), status);
@@ -804,9 +808,10 @@ fn link_refuses_set_fan_when_duty_is_over_100() {
 }
 
 #[test]
-fn link_codec_pins_fan_pool_and_present_bytes_at_end_of_status_when_bridge_reports_them() {
+fn link_codec_pins_fan_pool_ble_and_present_bytes_at_end_of_status_when_bridge_reports_them() {
     // `fan`: `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
-    // `pool`: postcard's variant index. `present`: a varint, last.
+    // `pool`: postcard's variant index. `ble`: an option's tag, then the slot's byte.
+    // `present`: a varint, last.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
         rx_count: 0,
@@ -818,21 +823,23 @@ fn link_codec_pins_fan_pool_and_present_bytes_at_end_of_status_when_bridge_repor
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        ble: None,
         present: 0,
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let none = frame_body(&out[..n]);
-    assert_eq!(none[none.len() - 3..], [0, 2, 0]);
-    if let BridgeToHost::Status { fan, pool, present, .. } = &mut status {
+    assert_eq!(none[none.len() - 4..], [0, 2, 0, 0]);
+    if let BridgeToHost::Status { fan, pool, ble, present, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
         *pool = ChannelPool::Us;
+        *ble = Slot::new(1, 2);
         // A1, A3 and B3: bits 0, 2 and 9, 0x205.
         *present = 1 << 0 | 1 << 2 | 1 << 9;
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
     let some = frame_body(&out[..n]);
-    assert_eq!(some[..none.len() - 3], none[..none.len() - 3]);
-    assert_eq!(some[none.len() - 3..], [1, 40, 1, 0xAC, 0x02, 0, 0x85, 0x04]);
+    assert_eq!(some[..none.len() - 4], none[..none.len() - 4]);
+    assert_eq!(some[none.len() - 4..], [1, 40, 1, 0xAC, 0x02, 0, 1, 9, 0x85, 0x04]);
     assert_eq!(round_trip(&status), status);
 }
 
@@ -844,6 +851,17 @@ fn link_codec_pins_set_pool_bytes_when_host_sets_a_pool() {
         let n = encode_host_frame(&HostToBridge::SetPool { pool }, &mut out).expect("encodes");
         assert_eq!(frame_body(&out[..n]), [10, byte], "{pool}");
     }
+}
+
+#[test]
+fn link_codec_pins_set_ble_bytes_when_host_sets_a_slot() {
+    // Postcard's variant index, then the option's tag and the slot's byte.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let b3 = HostToBridge::SetBle { slot: Slot::new(1, 2) };
+    let n = encode_host_frame(&b3, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [11, 1, 9]);
+    let n = encode_host_frame(&HostToBridge::SetBle { slot: None }, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [11, 0]);
 }
 
 #[test]

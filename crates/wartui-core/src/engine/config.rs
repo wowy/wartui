@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use indexmap::IndexSet;
 use wartui_proto::bus::{ACK_TIMEOUT_MS, SEND_TRIES};
-use wartui_proto::mac::Mac;
 
 #[cfg(doc)]
 use super::{Command, FleetEngine};
@@ -33,11 +32,6 @@ pub struct EngineConfig {
     /// `Undelivered` itself once its tries run out, so the default, [`SEND_TIMEOUT`], waits past
     /// that.
     pub admin_timeout: Duration,
-    /// Whether [`Command::AssignBle`] records its target as the preferred Bluetooth node.
-    pub remember_ble: bool,
-    /// The node given the Bluetooth scan whenever it is assignable and no node holds
-    /// the scan. Ignored when [`Self::remember_ble`] is off.
-    pub preferred_ble: Option<Mac>,
     /// SSIDs never captured. A Wi-Fi sighting whose SSID equals an entry byte-for-byte is dropped
     /// before anything counts or records it. A Bluetooth name is not an SSID, so BLE is never
     /// dropped. [`Command::SetExcludedSsids`] replaces the list mid-run. A set for the lookup
@@ -58,8 +52,6 @@ impl Default for EngineConfig {
             record_raw: false,
             position: PositionChain::empty(),
             admin_timeout: SEND_TIMEOUT,
-            remember_ble: true,
-            preferred_ble: None,
             excluded_ssids: IndexSet::new(),
             gps_rate_hz: ubx::DEFAULT_RATE_HZ,
         }

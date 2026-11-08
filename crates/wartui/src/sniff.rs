@@ -417,6 +417,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            ble: None,
             present: 0,
         };
         assert!(heard(LinkEvent::Message(status)));

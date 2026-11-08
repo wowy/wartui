@@ -16,9 +16,9 @@
 //! The heartbeat timeout is the backstop for a node that still answers the bus but has stopped
 //! heartbeating: its bus re-arm runs in an interrupt, so a hung main loop still answers.
 //!
-//! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
-//! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
-//! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
+//! [`Command::AssignBle`] asks the bridge to give one slot's node the Bluetooth scan as its whole
+//! job. The bridge holds that slot as it holds the pool, and the engine gives the scan to whichever
+//! assignable node heartbeats from it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
 //! asks the bridge to hold a new pool, which its next `Status` brings back.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
@@ -113,17 +113,16 @@ pub struct FleetEngine {
     /// re-partitions when the live membership differs, job included: a node that took the
     /// Bluetooth scan holds a share of the wrong shape.
     plan_members: Vec<(Mac, Job)>,
-    /// The one node asked to scan Bluetooth, if any.
+    /// The slot whose node scans Bluetooth, as the bridge's last `Status` reported it, kept across
+    /// a disconnect like [`Self::pool`]. `None` for no node, and until the first `Status`.
+    ble_slot: Option<Slot>,
+    /// The one node asked to scan Bluetooth, if any: the assignable node heartbeating from
+    /// [`Self::ble_slot`], derived at the top of every [`Self::replan`].
     ///
-    /// Beside the plan, not in it: it is an operator's choice (now, or carried from
-    /// [`Self::preferred_ble`]), while the plan follows who is present. It reaches the planner as a
-    /// [`Job::Bluetooth`] slot on every re-cut, which deals its Wi-Fi share to the rest.
+    /// Beside the plan, not in it: the slot is an operator's choice the bridge holds, while the plan
+    /// follows who is present. It reaches the planner as a [`Job::Bluetooth`] slot on every re-cut,
+    /// which deals its Wi-Fi share to the rest.
     ble_node: Option<Mac>,
-    /// Whether [`Command::AssignBle`] records its target in [`Self::preferred_ble`].
-    remember_ble: bool,
-    /// The operator's last Bluetooth choice. [`Self::replan`] gives this node the scan whenever it
-    /// is assignable and none holds it. `None` while [`Self::remember_ble`] is off.
-    preferred_ble: Option<Mac>,
     /// The previous frame's bridge stamp and the host instant it was handled, to tell live reading
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
@@ -155,8 +154,7 @@ impl FleetEngine {
             gps: self.config.position.gps().is_some()
                 || (self.bridge_connected() && self.config.position.bridge_gps().is_some()),
             gps_max_age: self.config.position.max_age(),
-            remember_ble: self.remember_ble,
-            preferred_ble: self.preferred_ble,
+            ble_slot: self.ble_slot,
             ble_node: self.ble_node,
         }
     }
@@ -185,9 +183,8 @@ impl FleetEngine {
             pool: None,
             plan: None,
             plan_members: Vec::new(),
+            ble_slot: None,
             ble_node: None,
-            remember_ble: config.remember_ble,
-            preferred_ble: config.preferred_ble.filter(|_| config.remember_ble),
             last_arrival: None,
             // Caught up, as on `Connected`.
             backlog_lag_us: 0,
@@ -277,21 +274,11 @@ impl FleetEngine {
         }
     }
 
-    /// Act on the nodes that have left the fleet: release the Bluetooth scan from one that held it,
-    /// log each once, and re-cut the plan without them. A node leaves on a tick, past the heartbeat
-    /// timeout, or on a `Status` that shows its slot absent, and both call this.
+    /// Act on the nodes that have left the fleet: log each once, and re-cut the plan without them.
+    /// The re-cut also takes the Bluetooth scan from one that held it, since it is no longer
+    /// assignable. A node leaves on a tick, past the heartbeat timeout, or on a `Status` that shows
+    /// its slot absent, and both call this.
     fn follow_departures(&mut self, now: Now) {
-        // A gone node is not scanning for us. `last_heartbeat` guards a node known only from a
-        // sighting: it has had no chance to answer yet.
-        let ble_gone = self.ble_node.is_some_and(|mac| {
-            self.nodes
-                .get(&mac)
-                .is_some_and(|node| node.last_heartbeat.is_some() && !self.is_alive(node, now))
-        });
-        // This only changes what the snapshot claims. The re-cut below withdraws the scan, since a
-        // gone node is not a member. If it returns as the preferred node, `replan` hands the scan
-        // back.
-        let _ = self.ble_node.take_if(|_| ble_gone);
         self.note_departures(now);
         self.replan(now);
     }
@@ -407,6 +394,7 @@ impl FleetEngine {
                 host_uart_errors,
                 fan,
                 pool,
+                ble,
                 present,
             } => {
                 // Below the baseline means the bridge restarted from zero.
@@ -443,6 +431,7 @@ impl FleetEngine {
                     }
                 }
                 self.on_bridge_pool(*pool);
+                self.on_bridge_ble(*ble, now);
                 // A node off the bus leaves now, not on the next tick.
                 self.follow_departures(now);
             }

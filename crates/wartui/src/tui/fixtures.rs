@@ -157,8 +157,7 @@ pub(super) fn busy() -> Snapshot {
         pool: Some(ChannelPool::All),
         plan: None,
         ble_node: None,
-        preferred_ble: None,
-        remember_ble: true,
+        ble_slot: None,
         nodes: vec![
             assigned(0x84),
             unannounced(0x85),

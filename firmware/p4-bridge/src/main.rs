@@ -32,8 +32,8 @@
 //!   flash, which a host's `SetFan` changes, and reads its tach for `Status`.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
-//! change there.
+//! duty, the channel pool and the Bluetooth slot, which `Status` reports. A host's `SetFan`,
+//! `SetPool` or `SetBle` stores its change there.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -92,7 +92,7 @@ use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
 use wartui_proto::ChannelPool;
-use wartui_proto::bus::PER_BUS;
+use wartui_proto::bus::{PER_BUS, Slot};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
@@ -227,6 +227,9 @@ pub struct Shared {
     sector: RefCell<&'static mut [u8; SECTOR]>,
     /// The channel pool in force, which `Status` reports and a host's `SetPool` changes.
     pool: Cell<ChannelPool>,
+    /// The slot whose node scans Bluetooth, or `None` for no node, which `Status` reports and a
+    /// host's `SetBle` changes.
+    ble: Cell<Option<Slot>>,
 }
 
 impl Shared {
@@ -275,6 +278,8 @@ impl Shared {
             fan,
             sector: RefCell::new(sector),
             pool: Cell::new(stored.pool.unwrap_or_default()),
+            // No record is no node, as a record of none is.
+            ble: Cell::new(stored.ble.flatten()),
         }
     }
 
@@ -431,6 +436,7 @@ impl Shared {
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
             pool: self.pool.get(),
+            ble: self.ble.get(),
             present: self.nodes.present(),
         };
         let status = self.pair.borrow().status(now_ms(), counters);

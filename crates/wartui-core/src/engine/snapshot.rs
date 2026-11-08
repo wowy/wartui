@@ -116,10 +116,9 @@ pub struct Snapshot {
     pub plan: Option<Plan>,
     /// Which node is scanning Bluetooth, if any.
     pub ble_node: Option<Mac>,
-    /// The node the scan returns to whenever it is assignable and none holds it.
-    pub preferred_ble: Option<Mac>,
-    /// Whether giving a node the scan records it as [`Self::preferred_ble`].
-    pub remember_ble: bool,
+    /// The slot whose node scans Bluetooth, as the bridge reports it. `None` for no node, and
+    /// before its first `Status`.
+    pub ble_slot: Option<Slot>,
     /// Every node, ordered by slot as the carrier lays them out, then the slotless ones by MAC, so
     /// the table holds still.
     pub nodes: Vec<NodeView>,
@@ -302,8 +301,7 @@ impl FleetEngine {
             pool: self.pool,
             plan: self.plan,
             ble_node: self.ble_node,
-            preferred_ble: self.preferred_ble,
-            remember_ble: self.remember_ble,
+            ble_slot: self.ble_slot,
             nodes,
             alive,
             assignable,

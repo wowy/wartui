@@ -131,8 +131,8 @@ Driving a port high powers its node:
   on the board. The P4 keeps the duty in its settings sector, the first sector of its `nvs`
   partition, as a record tagged `F`, and boots into it; the host sets it with `wartui fan` or
   settings (`crates/wartui/README.md` § "The lid fan"). With no carrier, the P4 configures neither
-  pin. The same sector holds the channel pool, tagged `P`, on every P4, carrier or not
-  (`crates/wartui-proto/src/settings.rs`).
+  pin. The same sector holds the channel pool, tagged `P`, and the Bluetooth slot, tagged `B`, on
+  every P4, carrier or not (`crates/wartui-proto/src/settings.rs`).
 - **The silk names the sockets `N1` to `Nn`**, bus A first: `N1` to `Nk` is bus A, with *k* per
   bus, and bus B follows. So `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. The fleet
   view, `sniff`, `status` and `--slot` use the silk names. A capture stores the bus name, beside the

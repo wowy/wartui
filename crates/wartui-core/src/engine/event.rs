@@ -46,29 +46,22 @@ pub enum Event {
 /// keypresses against heartbeats, testably.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Give one node the Bluetooth scan as its whole job, or take the scan off the fleet.
+    /// Ask the bridge to give the node in one slot the Bluetooth scan as its whole job, or to take
+    /// the scan off the fleet.
     ///
     /// At most one node, and by default none. The two radios share one 2.4 GHz antenna, and a scan
     /// holds it through the window a node listens in. That cost a stock node every assignment sent
     /// to it (`docs/phase-0-findings.md`). A node sniffing no Wi-Fi has nothing to hold the antenna
     /// against, so Bluetooth costs the fleet a whole sniffer and buys back-to-back scans.
     ///
-    /// Nothing is sent now. The planner's next re-cut deals that node's channels to the rest.
-    /// Moving the scan costs two assignments, since the old holder gets a share back. While remembering
-    /// is on, the target also becomes the preferred node, `None` included, so a withdrawn scan
-    /// stays withdrawn.
+    /// The scan belongs to a slot, and the bridge holds it beside the pool, across its reboots.
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetPool`] is. The engine
+    /// changes nothing here: the planner gives the scan to the node heartbeating from the slot the
+    /// bridge's `Status` reports, and the re-cut deals that node's channels to the rest. Moving the
+    /// scan costs two assignments, since the old holder gets a share back.
     AssignBle {
-        /// Which node, or `None` to stop scanning BLE anywhere.
-        mac: Option<Mac>,
-    },
-
-    /// Turn remembering the preferred Bluetooth node on or off.
-    ///
-    /// Off forgets the preferred node but leaves the scan where it is. On from off adopts the
-    /// current holder. Setting the current value is a no-op.
-    RememberBle {
-        /// Whether to remember.
-        on: bool,
+        /// Which slot's node, or `None` to stop scanning BLE anywhere.
+        slot: Option<Slot>,
     },
 
     /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that

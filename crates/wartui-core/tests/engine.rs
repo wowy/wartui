@@ -101,8 +101,27 @@ fn slots_status(pool: ChannelPool, present: u32) -> Event {
         host_uart_errors: 0,
         fan: None,
         pool,
+        ble: BRIDGE_BLE.get(),
         present,
     }))
+}
+
+thread_local! {
+    /// The Bluetooth slot the calling test's bridge holds, which every `Status` above reports.
+    static BRIDGE_BLE: std::cell::Cell<Option<Slot>> = const { std::cell::Cell::new(None) };
+}
+
+/// The bridge taking `slot` as the Bluetooth slot, and reporting it with the pool the engine
+/// holds, as a `SetBle` and the `GetStatus` behind it are answered.
+fn bridge_ble(engine: &mut FleetEngine, slot: Option<Slot>, now: Now) -> ActionBatch {
+    BRIDGE_BLE.set(slot);
+    let pool = engine.snapshot(now, StoreStats::default()).pool.unwrap_or_default();
+    engine.handle(pool_status(pool), now)
+}
+
+/// [`bridge_ble`] with `mac`'s slot, or none.
+fn give_ble(engine: &mut FleetEngine, mac: Option<Mac>, now: Now) {
+    let _ = bridge_ble(engine, mac.map(slot_of), now);
 }
 
 /// Every slot but `mac`'s present.
@@ -1464,21 +1483,21 @@ fn engine_withdraws_ble_at_once_when_scanner_reports_another_minor() {
         let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
         deliver_all(&mut engine, &batch, clock.at(1));
     }
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(0)), clock.at(2));
 
     // Well inside the topology timeout: the scan does not wait for the node to age out.
     engine.handle(beat_at(peer(0), 2, 0, outdated_capabilities(), 0), clock.at(3));
 
     assert_eq!(
         ble_state(&engine, clock.at(3)),
-        (None, Some(peer(0)), true),
-        "withdrawn, and still the preferred node"
+        (None, Some(slot_of(peer(0)))),
+        "withdrawn, and the slot still the bridge's"
     );
     let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
     let other = snapshot.nodes.iter().find(|n| n.state.mac == peer(1)).expect("the other node");
     assert!(other.state.desired.is_some_and(|a| !a.ble), "nobody else is handed the scan");
 
-    // Updated, it takes the scan back as a returning preferred node does.
+    // Updated, it takes the scan back: its slot still holds it.
     let batch = engine.handle(heartbeat(peer(0), 3), clock.at(4));
     assert_eq!(ble_state(&engine, clock.at(4)).0, Some(peer(0)));
     assert!(admins(&batch).iter().any(|admin| admin.scan_ble()));
@@ -1956,6 +1975,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            ble: None,
             present: ALL_PRESENT,
         }))
     };
@@ -2010,6 +2030,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan,
             pool: ChannelPool::All,
+            ble: None,
             present: ALL_PRESENT,
         }))
     };
@@ -2086,6 +2107,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            ble: None,
             present: ALL_PRESENT,
         })),
         clock.at(4),
@@ -2317,37 +2339,28 @@ fn engine_leaves_slot_out_of_plan_when_it_sends_only_sightings() {
 }
 
 #[test]
-fn engine_holds_ble_for_named_node_when_it_has_not_heartbeated() {
-    // Nothing is ever removed from the node table, so an absent MAC has never been
-    // heard rather than having gone away. Reading absence as departure took the
-    // scan back before the node's first heartbeat could arrive.
+fn engine_holds_ble_slot_when_its_node_has_not_heartbeated() {
+    // The slot is the bridge's, so it waits for a node however long that takes; the scan goes
+    // to nobody meanwhile.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    give_ble(&mut engine, Some(NODE), clock.at(1));
     for tick in 2..12 {
         engine.handle(Event::Tick, clock.at(tick));
     }
-    assert_eq!(
-        engine.snapshot(clock.at(12), StoreStats::default()).ble_node,
-        Some(NODE),
-        "ten ticks with no word from the node change nothing"
-    );
+    assert_eq!(ble_state(&engine, clock.at(12)), (None, Some(slot_of(NODE))));
 
     // A batch from its slot is not arrival either: no heartbeat has named the
     // slot yet, which across a restart can last a whole sweep.
     engine.handle(observation(NODE, "aa:bb:cc:dd:ee:ff", -50), clock.at(12));
     engine.handle(Event::Tick, clock.at(12));
-    assert_eq!(
-        engine.snapshot(clock.at(12), StoreStats::default()).ble_node,
-        Some(NODE),
-        "a slot that has only sent sightings has not gone quiet — it has not spoken yet"
-    );
+    assert_eq!(ble_state(&engine, clock.at(12)), (None, Some(slot_of(NODE))));
 
     // And when it does turn up, the flag is on the first assignment the planner
     // sends it: nothing else had to be asked for.
     let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(13)));
     assert_eq!(dst, NODE);
-    assert!(admin.scan_ble(), "the scan asked for before it arrived is the scan it is given");
+    assert!(admin.scan_ble(), "the slot's scan is the scan it is given");
 }
 
 #[test]
@@ -2917,7 +2930,7 @@ fn engine_recuts_both_ends_when_ble_scan_moves() {
     assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, None);
 
     let whole_pool = ChannelPool::default().channels();
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    give_ble(&mut engine, Some(peer(0)), clock.at(3));
     // Bluetooth is the whole job, so the scan does not ride on the share — it takes
     // its place. One epoch carries both.
     let (id, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
@@ -2936,7 +2949,7 @@ fn engine_recuts_both_ends_when_ble_scan_moves() {
     engine.handle(delivered(id), clock.at(5));
 
     // Moving it is two assignments: the node giving it up has a share coming back to it.
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(6));
+    give_ble(&mut engine, Some(peer(1)), clock.at(6));
     let (_, _, gave_up) = sent_admin(&engine.handle(heartbeat(peer(0), 4), clock.at(7)));
     assert!(!gave_up.scan_ble());
     assert_eq!(gave_up.channels, whole_pool, "and takes the whole pool with it");
@@ -2974,13 +2987,13 @@ fn engine_sends_empty_channels_only_with_ble_flag_when_ble_moves_in_three_node_f
         check(&batch, &mut seen_empty);
         deliver_all(&mut engine, &batch, clock.at(1));
     }
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(1)), clock.at(2));
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 2), clock.at(3));
         check(&batch, &mut seen_empty);
         deliver_all(&mut engine, &batch, clock.at(3));
     }
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(2)) }), clock.at(4));
+    give_ble(&mut engine, Some(peer(2)), clock.at(4));
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 3), clock.at(5));
         check(&batch, &mut seen_empty);
@@ -3006,7 +3019,7 @@ fn engine_reports_whole_pool_unreachable_when_lone_node_scans_ble() {
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
 
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    give_ble(&mut engine, Some(peer(0)), clock.at(3));
     let (id, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
     assert!(admin.scan_ble() && admin.channels.is_empty());
     engine.handle(delivered(id), clock.at(4));
@@ -3047,13 +3060,13 @@ fn engine_returns_scanner_to_wifi_when_scan_taken_off() {
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(2)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(2)), clock.at(2));
     settle_fleet(&mut engine, &clock, 3, 2);
     let scanner = engine.nodes().find(|node| node.mac == peer(2)).expect("here");
     let held = scanner.confirmed.expect("it took the scan");
     assert!(held.ble && held.channels.is_empty(), "it really holds the scan: {held:?}");
 
-    engine.handle(Event::Command(Command::AssignBle { mac: None }), clock.at(20));
+    give_ble(&mut engine, None, clock.at(20));
     settle_fleet(&mut engine, &clock, 3, 20);
 
     assert_eq!(engine.snapshot(clock.at(40), StoreStats::default()).ble_node, None);
@@ -3076,9 +3089,9 @@ fn engine_keeps_one_ble_scanner_when_scan_moves() {
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(2)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(2)), clock.at(2));
     settle_fleet(&mut engine, &clock, 3, 2);
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(20));
+    give_ble(&mut engine, Some(peer(0)), clock.at(20));
     settle_fleet(&mut engine, &clock, 3, 20);
 
     let scanning: Vec<Mac> = engine
@@ -3095,7 +3108,7 @@ fn engine_drops_ble_node_when_it_ages_out() {
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
     engine.handle(heartbeat(peer(1), 1), clock.at(1));
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(0)), clock.at(2));
     assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, Some(peer(0)));
 
     // It ages out with the node, or the view would claim Bluetooth coverage
@@ -3275,7 +3288,7 @@ fn engine_releases_bluetooth_scan_when_status_shows_its_node_slot_absent() {
     let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(heartbeat(OTHER, 1), clock.at(1));
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    give_ble(&mut engine, Some(NODE), clock.at(1));
     engine.handle(Event::Tick, clock.at(1));
     assert_eq!(engine.snapshot(clock.at(1), StoreStats::default()).ble_node, Some(NODE));
 
@@ -3838,127 +3851,119 @@ fn engine_reissues_when_desired_epoch_matches_held() {
     assert_ne!(admin.epoch, collide_epoch, "reissued under a fresh epoch");
 }
 
-/// The engine's Bluetooth state as the view sees it: holder, preferred node, remember flag.
-fn ble_state(engine: &FleetEngine, now: Now) -> (Option<Mac>, Option<Mac>, bool) {
+/// The engine's Bluetooth state as the view sees it: the holder, then the bridge's slot.
+fn ble_state(engine: &FleetEngine, now: Now) -> (Option<Mac>, Option<Slot>) {
     let snapshot = engine.snapshot(now, StoreStats::default());
-    (snapshot.ble_node, snapshot.preferred_ble, snapshot.remember_ble)
+    (snapshot.ble_node, snapshot.ble_slot)
 }
 
 #[test]
-fn engine_gives_ble_to_preferred_node_when_it_first_heartbeats() {
-    // Remembered from the file: no command is sent this run.
+fn engine_sends_set_ble_then_status_poll_when_assign_ble_commanded() {
     let clock = Clock::new();
-    let config = EngineConfig { preferred_ble: Some(peer(0)), ..EngineConfig::default() };
-    let mut engine = engine(config, &clock);
-    caught_up(&mut engine, &clock);
-    assert_eq!(ble_state(&engine, clock.at(0)).0, None, "nothing holds it before it is heard");
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    let a1 = Some(slot_of(peer(0)));
 
-    let batch = engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    let batch = engine.handle(Event::Command(Command::AssignBle { slot: a1 }), clock.at(2));
 
-    assert_eq!(ble_state(&engine, clock.at(1)).0, Some(peer(0)));
-    let (_, dst, admin) = sent_admin(&batch);
-    assert_eq!(dst, peer(0));
-    assert!(admin.scan_ble(), "its first assignment carries the scan");
+    assert_eq!(batch.bulk, vec![HostToBridge::SetBle { slot: a1 }, HostToBridge::GetStatus]);
+    assert!(batch.urgent.is_empty());
+    assert_eq!(ble_state(&engine, clock.at(2)), (None, None), "nothing moves before the bridge");
 }
 
 #[test]
-fn engine_gives_ble_back_to_preferred_node_when_it_returns() {
+fn engine_gives_ble_to_node_in_slot_when_status_reports_ble_slot() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    for n in 0..2 {
+        let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
+        deliver_all(&mut engine, &batch, clock.at(1));
+    }
+
+    give_ble(&mut engine, Some(peer(1)), clock.at(2));
+
+    assert_eq!(ble_state(&engine, clock.at(2)), (Some(peer(1)), Some(slot_of(peer(1)))));
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(1), 2), clock.at(3)));
+    assert_eq!(dst, peer(1));
+    assert!(admin.scan_ble() && admin.channels.is_empty(), "told on its own heartbeat");
+}
+
+#[test]
+fn engine_gives_ble_to_new_node_when_it_heartbeats_from_ble_slot() {
+    // The scan is the slot's: a node swapped into the socket takes it from the one that left.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
     engine.handle(heartbeat(peer(1), 1), clock.at(1));
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(0)), clock.at(2));
+    assert_eq!(ble_state(&engine, clock.at(2)).0, Some(peer(0)));
 
-    engine.handle(heartbeat(peer(1), 2), clock.at(70));
-    engine.handle(Event::Tick, clock.at(70));
-    assert_eq!(ble_state(&engine, clock.at(70)).0, None, "the scan ages out with the node");
+    let newcomer: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x99];
+    let msg = beat_msg(newcomer, 1);
+    let batch = engine.handle(
+        from_slot(slot_of(peer(0)), UpType::Heartbeat.as_u8(), &msg.encode(), 0),
+        clock.at(3),
+    );
 
-    let batch = engine.handle(heartbeat(peer(0), 2), clock.at(71));
-
-    assert_eq!(ble_state(&engine, clock.at(71)).0, Some(peer(0)));
-    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()), "it is told on its own heartbeat");
+    assert_eq!(ble_state(&engine, clock.at(3)), (Some(newcomer), Some(slot_of(peer(0)))));
+    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()), "its first assignment scans");
 }
 
 #[test]
-fn engine_remembers_target_when_assign_ble_commanded() {
+fn engine_drops_ble_when_status_reports_no_slot() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    give_ble(&mut engine, Some(peer(0)), clock.at(2));
+
+    give_ble(&mut engine, None, clock.at(3));
+
+    assert_eq!(ble_state(&engine, clock.at(3)), (None, None));
+    let back = engine.nodes().find(|node| node.mac == peer(0)).expect("here");
+    let held = back.desired.expect("dealt a share again");
+    assert!(!held.ble && !held.channels.is_empty(), "it sniffs Wi-Fi again: {held:?}");
+}
+
+#[test]
+fn engine_keeps_ble_slot_when_link_drops() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
-
-    assert_eq!(ble_state(&engine, clock.at(1)), (Some(peer(0)), Some(peer(0)), true));
-}
-
-#[test]
-fn engine_forgets_preferred_ble_when_scan_taken_off() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    give_ble(&mut engine, Some(peer(0)), clock.at(2));
 
-    engine.handle(Event::Command(Command::AssignBle { mac: None }), clock.at(3));
-    // Still assignable, so a preferred node left behind would take the scan straight back.
-    engine.handle(heartbeat(peer(0), 2), clock.at(4));
-    engine.handle(Event::Tick, clock.at(4));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(3),
+    );
+    assert_eq!(ble_state(&engine, clock.at(3)).1, Some(slot_of(peer(0))), "kept, as the pool is");
 
-    assert_eq!(ble_state(&engine, clock.at(4)), (None, None, true));
+    engine.handle(connected(), clock.at(4));
+    let batch = engine.handle(heartbeat(peer(0), 1), clock.at(5));
+    assert_eq!(ble_state(&engine, clock.at(5)).0, Some(peer(0)));
+    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()), "before the next `Status`");
 }
 
 #[test]
-fn engine_keeps_scan_but_forgets_preferred_when_remember_off() {
+fn engine_scans_nothing_when_ble_slot_is_empty() {
+    // A slot no node heartbeats from holds the scan for nobody: every node sniffs, and between
+    // them they take the whole pool.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    let empty = Slot::from_u8(u8::try_from(MAX_SLOTS - 1).expect("fits")).expect("a slot");
 
-    engine.handle(Event::Command(Command::RememberBle { on: false }), clock.at(3));
+    let _ = bridge_ble(&mut engine, Some(empty), clock.at(2));
 
-    assert_eq!(ble_state(&engine, clock.at(3)), (Some(peer(0)), None, false));
-}
-
-#[test]
-fn engine_ignores_assign_ble_for_preference_when_remember_off() {
-    let clock = Clock::new();
-    let config = EngineConfig { remember_ble: false, ..EngineConfig::default() };
-    let mut engine = engine(config, &clock);
-
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
-
-    assert_eq!(ble_state(&engine, clock.at(1)), (Some(peer(0)), None, false));
-}
-
-#[test]
-fn engine_adopts_current_scanner_when_remember_on() {
-    let clock = Clock::new();
-    let config = EngineConfig { remember_ble: false, ..EngineConfig::default() };
-    let mut engine = engine(config, &clock);
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
-
-    engine.handle(Event::Command(Command::RememberBle { on: true }), clock.at(2));
-
-    assert_eq!(ble_state(&engine, clock.at(2)), (Some(peer(0)), Some(peer(0)), true));
-
-    // Already on: a node remembered from the file and not yet heard from survives.
-    let config = EngineConfig { preferred_ble: Some(peer(1)), ..EngineConfig::default() };
-    let mut from_file = self::engine(config, &clock);
-    from_file.handle(Event::Command(Command::RememberBle { on: true }), clock.at(1));
-    assert_eq!(ble_state(&from_file, clock.at(1)), (None, Some(peer(1)), true));
-}
-
-#[test]
-fn engine_ignores_configured_preferred_ble_when_remember_off() {
-    let clock = Clock::new();
-    let config = EngineConfig {
-        remember_ble: false,
-        preferred_ble: Some(peer(0)),
-        ..EngineConfig::default()
-    };
-    let mut engine = engine(config, &clock);
-
-    engine.handle(heartbeat(peer(0), 1), clock.at(1));
-    engine.handle(Event::Tick, clock.at(1));
-
-    assert_eq!(ble_state(&engine, clock.at(1)), (None, None, false));
+    assert_eq!(ble_state(&engine, clock.at(2)), (None, Some(empty)));
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    let plan = snapshot.plan.expect("a plan");
+    assert!(plan.unreachable().is_empty(), "the whole pool is dealt");
+    let held: Vec<_> = engine.nodes().filter_map(|node| node.desired).collect();
+    assert_eq!(held.len(), 2);
+    assert!(held.iter().all(|share| !share.ble && !share.channels.is_empty()));
 }
 
 // ---------------------------------------------------------------------------
@@ -4133,7 +4138,7 @@ fn engine_moves_node_into_pool_when_pool_narrowed() {
 fn engine_keeps_ble_node_unchanged_when_pool_changes() {
     let clock = Clock::new();
     let mut engine = settled_pair(&clock);
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    give_ble(&mut engine, Some(peer(0)), clock.at(3));
     let (id, _, scan) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
     assert!(scan.scan_ble());
     engine.handle(delivered(id), clock.at(4));

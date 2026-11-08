@@ -291,16 +291,16 @@ pub async fn run(args: Args) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    // Naming a node before it has been heard is allowed, and this one is the only
+    // Naming a slot before its node has been heard is allowed, and this node is the only
     // source of addresses that never dedup.
     //
     // Not on a fleet of one, which the flags allow: Bluetooth is a whole node's job,
     // so the only node would sniff nothing and the run would measure a stream of
     // advertisers instead of the sweep its profile describes.
     let ble_node = (nodes > 1).then(|| SimTransport::node_mac(0));
-    if let Some(mac) = ble_node {
+    if ble_node.is_some() {
         command_tx
-            .send(Command::AssignBle { mac: Some(mac) })
+            .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
             .await
             .context("the capture stopped before it began")?;
     }
