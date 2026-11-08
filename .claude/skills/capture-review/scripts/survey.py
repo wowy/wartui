@@ -355,9 +355,8 @@ def nodes(db, ctx):
         flag(
             "INFO",
             "config",
-            f"{label(ble_slot)} (ble_slot={ble_slot}, the bridge's Bluetooth slot) is set, but no "
-            "assignment gave a node the Bluetooth job, so no node heartbeated from that slot and "
-            "none scanned Bluetooth",
+            f"{label(ble_slot)} is the bridge's Bluetooth slot, but no assignment gave a node the "
+            "Bluetooth job, so no node heartbeated from that slot and none scanned Bluetooth",
             "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
         )
     if len(rows) > MAX_NODES:
