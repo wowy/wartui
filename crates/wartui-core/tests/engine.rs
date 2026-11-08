@@ -1409,6 +1409,29 @@ fn engine_remaps_slot_when_heartbeat_names_another_node() {
 }
 
 #[test]
+fn engine_orders_snapshot_by_slot_when_mac_order_disagrees() {
+    // The table follows the carrier: slots in bus order, then the nodes left without one.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let lowest: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x80];
+    let (a1, a3, b1) =
+        (Slot::new(0, 0).expect("A1"), Slot::new(0, 2).expect("A3"), Slot::new(1, 0).expect("B1"));
+    let beat_from = |slot: Slot, mac: Mac| {
+        from_slot(slot, UpType::Heartbeat.as_u8(), &beat_msg(mac, 1).encode(), 0)
+    };
+    engine.handle(beat_from(a3, NODE), clock.at(1));
+    engine.handle(beat_from(a1, OTHER), clock.at(1));
+    engine.handle(beat_from(b1, lowest), clock.at(1));
+    // Displaced from its slot, the lowest MAC keeps its row with no slot.
+    engine.handle(beat_from(b1, THIRD), clock.at(2));
+
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    let order: Vec<(Option<Slot>, Mac)> =
+        snapshot.nodes.iter().map(|n| (n.state.slot, n.state.mac)).collect();
+    assert_eq!(order, [(Some(a1), OTHER), (Some(a3), NODE), (Some(b1), THIRD), (None, lowest)]);
+}
+
+#[test]
 fn engine_leaves_node_out_of_plan_when_another_node_takes_its_slot() {
     let clock = Clock::new();
     let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
@@ -1914,20 +1937,6 @@ fn engine_records_raw_frame_only_when_record_raw() {
         }],
         "the record as it arrived, with the slot and type it came under"
     );
-}
-
-#[test]
-fn engine_snapshot_orders_nodes_by_mac_when_heard_out_of_order() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-
-    engine.handle(heartbeat(OTHER, 1), clock.at(1));
-    engine.handle(heartbeat(NODE, 1), clock.at(2));
-
-    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
-    let macs: Vec<Mac> = snapshot.nodes.iter().map(|n| n.state.mac).collect();
-    assert_eq!(macs, vec![NODE, OTHER]);
-    assert_eq!(snapshot.alive, 2);
 }
 
 #[test]

@@ -72,12 +72,7 @@ fn slot_for(board: NodeBoard, name: &str) -> Result<Slot, String> {
     if !board.is_carrier() {
         return Err(NO_CARRIER.to_owned());
     }
-    board.parse_label(name).ok_or_else(|| {
-        format!(
-            "{name:?} is not a slot on this {board}: name one of {}",
-            crate::text::slot_range(board)
-        )
-    })
+    crate::text::slot_named(board, name)
 }
 
 /// Wait for the answer about `slot`, printing each fault the bridge reports meanwhile.

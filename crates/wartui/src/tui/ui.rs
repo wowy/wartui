@@ -2,7 +2,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
-use wartui_proto::mac::{self, Mac};
+use wartui_proto::mac::Mac;
 
 use super::Settings;
 use super::fleet::{LOST_SLOT, why_not_assignable};
@@ -12,6 +12,7 @@ use super::settings::{
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
+use crate::text::node_name;
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -44,8 +45,8 @@ pub(super) struct Ui {
     /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
     /// the next change rather than repeating every frame.
     bridge_tried: Option<(Option<Mac>, Option<String>)>,
-    /// The node `p` asks to power-cycle, by slot and address, while its confirm is open.
-    power_confirm: Option<(Slot, Mac)>,
+    /// The slot `p` asks to power-cycle, while its confirm is open.
+    power_confirm: Option<Slot>,
     /// The last power-cycle answer shown, so each is shown once.
     power_shown: Option<u64>,
 }
@@ -145,19 +146,18 @@ impl Ui {
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
+        let name = node_name(snapshot.node_board(), node.state.slot, &target);
         let holds = snapshot.ble_node == Some(target);
         // Same rule as an assignment. The flag travels in the assignment, which answers
         // a heartbeat.
         if !holds && let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac::full(&target)), snapshot);
+            self.say(format!("{name} {why}"), snapshot);
             return;
         }
         let assigned = if holds { None } else { Some(target) };
         let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
-            Ok(()) if holds => {
-                format!("{}: bluetooth off on its next heartbeat", mac::full(&target))
-            }
-            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac::full(&target)),
+            Ok(()) if holds => format!("{name}: bluetooth off on its next heartbeat"),
+            Ok(()) => format!("{name}: bluetooth on its next heartbeat"),
             Err(_) => {
                 self.say(ENGINE_BUSY.to_owned(), snapshot);
                 return;
@@ -173,16 +173,15 @@ impl Ui {
     fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
+        let name = node_name(snapshot.node_board(), node.state.slot, &target);
         // Same refusal as `toggle_ble`. The clear answers a heartbeat, and goes to the
         // slot that heartbeat came from.
         if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac::full(&target)), snapshot);
+            self.say(format!("{name} {why}"), snapshot);
             return;
         }
         let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
-            Ok(()) => {
-                format!("{}: clearing its dedup ring on its next heartbeat", mac::full(&target))
-            }
+            Ok(()) => format!("{name}: clearing its dedup ring on its next heartbeat"),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
@@ -209,6 +208,7 @@ impl Ui {
     fn ask_power_cycle(&mut self, snapshot: &Snapshot) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
+        let name = node_name(snapshot.node_board(), node.state.slot, &target);
         if !snapshot.link_up {
             self.say(NOT_CONNECTED.to_owned(), snapshot);
             return;
@@ -224,11 +224,11 @@ impl Ui {
             } else {
                 LOST_SLOT
             };
-            self.say(format!("{} {why}", mac::full(&target)), snapshot);
+            self.say(format!("{name} {why}"), snapshot);
             return;
         };
         self.notice = None;
-        self.power_confirm = Some((slot, target));
+        self.power_confirm = Some(slot);
     }
 
     /// Whether the power-cycle confirm is open, and so takes every key.
@@ -243,7 +243,7 @@ impl Ui {
         snapshot: &Snapshot,
         commands: &mpsc::Sender<Command>,
     ) {
-        let Some((slot, target)) = self.power_confirm.take() else { return };
+        let Some(slot) = self.power_confirm.take() else { return };
         let name = snapshot.node_board().label(slot);
         if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
             self.say(format!("{name} not power-cycled"), snapshot);
@@ -255,7 +255,7 @@ impl Ui {
             return;
         }
         let said = match commands.try_send(Command::PowerCycle { slot }) {
-            Ok(()) => format!("power-cycling {name} ({})", mac::full(&target)),
+            Ok(()) => format!("power-cycling {name}"),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
@@ -263,10 +263,10 @@ impl Ui {
 
     /// The power-cycle confirm's lines, while it is open.
     pub(super) fn power_confirm_lines(&self, snapshot: &Snapshot) -> Option<Vec<String>> {
-        let (slot, target) = self.power_confirm?;
+        let slot = self.power_confirm?;
         let name = snapshot.node_board().label(slot);
         Some(vec![
-            format!("power-cycle {name} ({})?", mac::full(&target)),
+            format!("power-cycle {name}?"),
             "Its node goes off for a second, then boots again.".to_owned(),
             String::new(),
             "y power-cycle · any other key cancels".to_owned(),
@@ -462,6 +462,8 @@ mod tests {
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.starts_with("N7: bluetooth on"), "named by its slot: {notice}");
 
         // Pressed on the node holding the scan, it takes the scan off the fleet. This
         // is the only way back to no node scanning.
@@ -481,7 +483,9 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: Some(node) });
         assert!(
-            ui.notice(snapshot.now_ms).expect("a notice").contains("clearing its dedup ring"),
+            ui.notice(snapshot.now_ms)
+                .expect("a notice")
+                .starts_with("N7: clearing its dedup ring"),
             "got {:?}",
             ui.notice(snapshot.now_ms)
         );
@@ -503,13 +507,13 @@ mod tests {
         assert!(ui.power_confirming());
         assert!(rx.try_recv().is_err(), "nothing before the answer");
         let lines = ui.power_confirm_lines(&snapshot).expect("the confirm");
-        assert!(lines[0].starts_with("power-cycle N7 (02:00:5E:10:57:84)?"), "{lines:?}");
+        assert_eq!(lines[0], "power-cycle N7?", "{lines:?}");
 
         ui.on_power_key(press('y'), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::PowerCycle { slot });
         assert!(!ui.power_confirming());
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.starts_with("power-cycling N7"), "{notice}");
+        assert_eq!(notice, "power-cycling N7");
     }
 
     #[test]

@@ -512,14 +512,14 @@ meanwhile, so stop `run` first.
 
 ```sh
 wartui ota                                    # every node heard
-wartui ota --node A1:B0 --node 57:84          # just these two
+wartui ota --node N3 --node N7                # just these two
 wartui ota --image wartui-node-app-esp32c5.bin --yes
 ```
 
 | Flag                 | Default          | What it is                                                     |
 |----------------------|------------------|----------------------------------------------------------------|
 | `--bridge PATH\|MAC` | detected         | The bridge, by path, address or `00:08`                        |
-| `--node MAC`         | every node heard | A node to update, by address or the end of one; repeatable     |
+| `--node SLOT`        | every node heard | A node to update, by the name the fleet table shows (`N3`)     |
 | `--image BIN`        | —                | Send this app-only image, to the nodes of the board it is for  |
 | `--firmware-dir DIR` | the checkout's   | Build the image from the node firmware here                    |
 | `--listen SECS`      | `6`              | How long to gather heartbeats before choosing                  |
@@ -540,13 +540,17 @@ is sent. Each board gets its own image, from the first source that applies:
 - The release this binary was built for: `wartui-node-app-esp32c5.bin`, checked against its
   `SHA256SUMS` and kept under `images/<tag>/` like `flash-fleet`'s.
 
-**The table comes first.** Each node heard, or each one `--node` names, gets a line:
+**The table comes first.** Each node heard, or each one `--node` names, gets a line, by its slot:
 
 ```
 node     board      version   image     action
-A1:B0    esp32c5    0.1.0     0.1.1     update
-57:84    esp32c5    0.1.1     0.1.1     skip: already 0.1.1
+N3       esp32c5    0.1.0     0.1.1     update
+N7       esp32c5    0.1.1     0.1.1     skip: already 0.1.1
 ```
+
+A `--node` slot no node heartbeated from during the listen is refused, and so is any `--node` on a
+bridge with no carrier board, whose slots have no names. The progress lines name nodes the same
+way.
 
 | Action                            | Why                                                                       |
 |-----------------------------------|---------------------------------------------------------------------------|
@@ -894,11 +898,12 @@ nothing and says how many networks it left out.
 
 ## Reading the fleet table
 
-Rows name nodes by chip and last two address octets: `C5 57:84`. The chip comes from the board its
-heartbeats announce, so a node not yet heartbeating shows `—`, and a board this build has no name
-for shows `??`. `slot` is the node-bus slot its latest heartbeat came from, by the carrier's silk
-name, `N1` up. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. A capture stores the bus
-name.
+Rows name nodes by slot and chip: `N1 C5`. The slot is the node-bus slot its latest heartbeat came
+from, by the carrier's silk name, `N1` up. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14,
+and with no carrier a slot keeps its bus name. A capture stores the bus name. Rows run in slot
+order, and a node with no slot (`—`) comes last. The chip comes from the board its heartbeats
+announce, so a node not yet heartbeating shows `—`, and a board this build has no name for shows
+`??`.
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -922,8 +927,10 @@ The `channels` column shows where an assignment stands
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
 
-The line under the table shows the selected node's firmware and its latest supply and die readings:
-`C5 57:84  0.1.0;5g  3.30 V  41 °C`, with `—` for a node that has sent none or whose read failed.
+The line under the table shows the selected node's last two address octets, its firmware and its
+latest supply and die readings: `N1 C5 57:84  0.1.0;5g  3.30 V  41 °C`, with `—` for a node that
+has sent none or whose read failed. It is the one place the main screen shows a node's address,
+which `flash-fleet --skip` and the OS's device names go by.
 
 The firmware is its version, then `;5g` for a radio that reaches 5 GHz. A node on an older version
 than this build's adds an arrow and this build's version: `0.1.2;5g ↑0.1.3`. A different patch is
@@ -992,10 +999,11 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 - **`fan stopped at 40%: unplugged or stalled`**: the bridge read no tach pulse over a whole second
   at 20 % or more, where the fan always turns. Check the fan header. Below 20 % nothing is raised,
   since the fan may stop there by design.
-- **`4F:08 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
-  fault, and the line stays for the run. `brownout` means check that node's supply; `software`,
-  `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on
-  or a reset over USB is not shown.
+- **`N3 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
+  fault, and the line stays for the run. A node with no slot is named by its last two address
+  octets. `brownout` means check that node's supply; `software`, `watchdog` or `lockup` is the
+  firmware; `unknown` is a cause this build cannot name. A power-on or a reset over USB is not
+  shown.
 
 ## When nothing arrives
 

@@ -223,7 +223,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("C5 57:84"), "the fleet table");
+        assert!(rendered.contains(" N7 C5 "), "the fleet table");
         assert!(rendered.contains("AA:BB:CC:DD:EE"), "and the observation stream");
         assert!(rendered.contains("4 of 5 alive"));
         assert!(rendered.contains("no heartbeat"), "the one node nothing can be sent to yet");

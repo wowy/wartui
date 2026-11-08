@@ -1402,7 +1402,7 @@ mod tests {
         assert!(!rendered.contains("tx power"), "{rendered}");
         assert!(rendered.contains("remember bridge"), "{rendered}");
         // The view behind it is still live, not blanked out.
-        assert!(rendered.contains("C5 57:84"), "{rendered}");
+        assert!(rendered.contains(" N7 C5 "), "{rendered}");
     }
 
     /// Open the modal and walk down to the `wdgwars` row.
