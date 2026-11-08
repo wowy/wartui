@@ -5,7 +5,7 @@ A terminal-based fleet controller for ESP32-C5 wardriving nodes.
 Wartui runs on Linux and macOS, with the goal being good performance on something as low-powered as
 a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.com/ZitaoTech/HackberryPi5)).
 Using an NVMe drive is preferred, but not a requirement. If you're running into poor performance on a microSD card,
-please open an [issue](https://github.com/yourusername/wartui/issues).
+please open an [issue](https://github.com/wowy/wartui/issues).
 
 The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
@@ -52,11 +52,26 @@ assignment, dedup what they see, and heartbeat every 5 seconds once assigned.
 
 ### On real hardware
 
+The bridge is a Waveshare ESP32-P4-WIFI6. Each node is a XIAO ESP32-C5, seated on the
+wartui-carrier (6, 10 or 14 slots), which wires it to the P4
+([`docs/node-bus.md`](docs/node-bus.md) has the pins).
+
 Install the binary:
 
 ```sh
 cargo install --path crates/wartui
 ```
+
+Flash each board by wire once:
+
+1. The bridge's C6, through its header H4:
+   [`firmware/p4-radio`](firmware/p4-radio/README.md#first-flash).
+2. The P4, through its Type-C: [`firmware/p4-bridge`](firmware/p4-bridge/README.md#first-flash).
+3. Every node plugged in over USB, with `wartui flash-fleet`
+   ([§ "Flashing the fleet"](crates/wartui/README.md#flashing-the-fleet)).
+
+After that, the bridge's one cable carries every update: `wartui flash-bridge` updates the bridge,
+its C6 included, and `wartui ota` the nodes.
 
 With a bridge plugged in, start a capture and export it. `run` is the default subcommand, so it can
 be omitted.
@@ -90,8 +105,8 @@ wartui ota        # update node firmware through the bridge
 | [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
-| `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
-| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: UARTs to the board's CH343 and its C6, no protocol knowledge          |
+| `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                 |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses and the C6 link, forwarding records unread          |
 | [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4 and its updates, and no radio                                        |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
@@ -105,8 +120,8 @@ The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firm
 in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4-WIFI6:
 the P4 talks to the host and drives the node buses, and its on-board C6 runs no radio.
 
-Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Both
-depend on `crates/wartui-proto`, which keeps the two ends of the wire consistent. The library crates
+Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Each
+depends on `crates/wartui-proto`, which keeps the ends of every wire consistent. The library crates
 have no README; their `//!` module docs hold the detail.
 
 ## Keyboard commands
@@ -157,11 +172,9 @@ An assignment answers the node's next heartbeat. Heartbeats come every 5 seconds
 assigned, so a new assignment can take up to that long to land. Until then, the node's `channels`
 column reads `1: 1…`.
 
-Set the pool from settings (`c`) or with `wartui pool`. The bridge keeps it across its reboots:
-
-- `all` (default): every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz
-- `us`: 2.4 GHz 1–11 and 5 GHz 36–165
-- `eu`: 2.4 GHz 1–13 and 5 GHz 36–140
+Set the pool from settings (`c`) or with `wartui pool`. The bridge keeps it across its reboots.
+The default, `all`, is every channel a node can tune; `us` and `eu` are what the FCC and ETSI
+permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
 Wi-Fi, and its `channels` column reads `bluetooth`.
@@ -172,7 +185,7 @@ Wi-Fi, and its `channels` column reads `bluetooth`.
 ## Limits
 
 - **Maximum fourteen nodes** (`plan::MAX_NODES`), seven slots on each of the two node buses. The
-  P4 drives seven per bus on the 14-node carrier, and six wired straight to it
+  P4 drives seven per bus on the 14-node carrier, and none without a carrier
   ([`docs/node-bus.md`](docs/node-bus.md)).
 - **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
   and the footer says so.
@@ -192,12 +205,12 @@ cargo fmt --check
 cargo test -p wartui-core --test engine                     # one test binary
 cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
-cd firmware/node      && cargo clippy --release
-cd firmware/p4-radio  && cargo clippy --release
-cd firmware/p4-bridge && cargo clippy --release
+(cd firmware/node      && cargo clippy --release)
+(cd firmware/p4-radio  && cargo clippy --release)
+(cd firmware/p4-bridge && cargo clippy --release)
 ```
 
-`wartui-proto` is `no_std` so both firmwares can use it. That's also why the node's beacon parser,
+`wartui-proto` is `no_std` so every firmware can use it. That's also why the node's beacon parser,
 dedup ring, and HCI packets live there: `cargo test` covers them, and a fix needs no reflash.
 `crates/wartui-proto/tests/wire.rs` pins the wire format byte-for-byte against hand-written
 vectors, since there is no second implementation to check against.

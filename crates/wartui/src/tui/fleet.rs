@@ -412,15 +412,16 @@ mod tests {
         let b1 = node(0x85, 0, true);
         assert_eq!(b1.state.slot, Slot::new(1, 0));
         let carrier = Snapshot { nodes: vec![b1.clone()], ..on_board(NodeBoard::Carrier14) };
-        let bench = Snapshot { nodes: vec![b1], ..on_board(NodeBoard::Bench) };
+        let bare = Snapshot { nodes: vec![b1], ..on_board(NodeBoard::NoCarrier) };
 
         let row = |snapshot: &Snapshot| {
             rendered(snapshot).lines().find(|line| line.contains("57:85")).map(str::to_owned)
         };
         let on_carrier = row(&carrier).expect("the node's row");
         assert!(on_carrier.contains(" N8 "), "{on_carrier}");
-        let on_bench = row(&bench).expect("the node's row");
-        assert!(on_bench.contains(" B1 "), "{on_bench}");
+        // With no carrier the slot keeps its bus name.
+        let no_carrier = row(&bare).expect("the node's row");
+        assert!(no_carrier.contains(" B1 "), "{no_carrier}");
     }
 
     #[test]

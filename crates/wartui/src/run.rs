@@ -51,8 +51,8 @@ pub struct Args {
     )]
     sim: Option<u8>,
 
-    /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM.db` in the
-    /// working directory, named for the minute this run started, by default.
+    /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the
+    /// working directory, named for the second this run started, by default.
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 

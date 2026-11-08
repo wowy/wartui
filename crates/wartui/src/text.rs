@@ -1,6 +1,6 @@
 //! Number and label text shared by the subcommands' reports and the TUI.
 
-use wartui_proto::bus::{BUSES, NodeBoard, Slot};
+use wartui_proto::bus::NodeBoard;
 
 /// `n` with a comma between each group of three digits.
 pub(crate) fn thousands(n: u64) -> String {
@@ -26,17 +26,11 @@ pub(crate) fn buffer_full(wifi: u64, ble: u64) -> Option<String> {
     (!figures.is_empty()).then(|| format!("buffer full {}", figures.join("  ")))
 }
 
-/// The slot names `board` takes, as a range: `N1 to N10` on a carrier, `A1 to A6 or B1 to B6`
-/// on the bench.
+/// The slot names `board` takes, as a range: `N1 to N10` on a carrier, `none` with no carrier.
 pub(crate) fn slot_range(board: NodeBoard) -> String {
-    let name = |bus, index| {
-        Slot::new(bus, index).map_or_else(String::new, |slot| board.label(slot).to_string())
-    };
-    let last = board.per_bus() - 1;
-    if board.is_carrier() {
-        format!("{} to {}", name(0, 0), name(BUSES - 1, last))
-    } else {
-        format!("{} to {} or {} to {}", name(0, 0), name(0, last), name(1, 0), name(1, last))
+    match (board.slots().next(), board.slots().last()) {
+        (Some(first), Some(last)) => format!("{} to {}", board.label(first), board.label(last)),
+        _ => "none".to_owned(),
     }
 }
 
@@ -47,10 +41,14 @@ mod tests {
     use super::{slot_range, thousands};
 
     #[test]
-    fn slot_range_names_first_and_last_slot_when_board_is_known() {
-        assert_eq!(slot_range(NodeBoard::Bench), "A1 to A6 or B1 to B6");
+    fn slot_range_names_first_and_last_slot_when_board_is_a_carrier() {
         assert_eq!(slot_range(NodeBoard::Carrier6), "N1 to N6");
         assert_eq!(slot_range(NodeBoard::Carrier14), "N1 to N14");
+    }
+
+    #[test]
+    fn slot_range_names_none_when_there_is_no_carrier() {
+        assert_eq!(slot_range(NodeBoard::NoCarrier), "none");
     }
 
     #[test]

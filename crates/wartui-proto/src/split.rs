@@ -193,7 +193,7 @@ impl Pair {
             boot_ms,
             bundled,
             own_image: None,
-            node_board: NodeBoard::Bench,
+            node_board: NodeBoard::NoCarrier,
             attempted: false,
             progress: 0,
             installed_at: None,

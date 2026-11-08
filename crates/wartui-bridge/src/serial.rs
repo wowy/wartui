@@ -1468,7 +1468,7 @@ mod tests {
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
             uptime_ms: 0,
-            node_board: NodeBoard::Bench,
+            node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
         }
@@ -1537,7 +1537,7 @@ mod tests {
                 reset_cause,
                 last_phase: LoopPhase::Unknown,
                 uptime_ms,
-                node_board: NodeBoard::Bench,
+                node_board: NodeBoard::NoCarrier,
                 radio: None,
                 image: None,
             },

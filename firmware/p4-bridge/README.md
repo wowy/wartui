@@ -33,14 +33,14 @@ writes one, the update chunks it builds from its node image cache, below.
 
 ## Boards
 
-This firmware runs on the Waveshare ESP32-P4-WIFI6, with its nodes wired straight to it (the
-bench) or on the wartui-carrier.
+This firmware runs on the Waveshare ESP32-P4-WIFI6, with its nodes on the wartui-carrier. A P4
+without a carrier drives no node.
 
 ## On the carrier
 
 At boot, before it builds the node buses, the P4 reads the carrier's I/O expander at 0x20 on I2C0
-(`src/carrier.rs`). The carrier it finds picks the CS pins and IRQ's polarity, and `Ready` reports
-it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with no carrier.
+(`src/carrier.rs`). The carrier it finds picks the CS pins it drives, and `Ready` reports it to the
+host. No answer at 0x20 is no carrier: an error in every announcement, and no slot driven.
 
 - **A cold boot** powers every node, one every 100 ms.
 - **A reset of the P4** leaves running nodes running, and powers only a node that is off.
@@ -55,11 +55,12 @@ it to the host. No answer at 0x20 is the bench, and the P4 runs as it does with 
 - **A node powered over its own USB** keeps the P4 from seeing a lost node supply; unplug it, or
   power the carrier first.
 - **An expander that fails, or reads as no carrier,** is an error in every announcement. With
-  power out of reach, every power-cycle answers `Failed`.
+  power out of reach, a power-cycle answers `Failed`. When the registers named no board, the
+  bridge reports the fourteen-node carrier and drives no slot, and the fan still runs.
 
 - **The lid fan** runs at the duty stored in the P4's settings (§ "Settings"), or 100 % with
   none, from boot and with no host present. A host's `SetFan` changes it at once. `Status` reports
-  the duty and the tach's speed (`src/fan.rs`). On the bench neither GPIO51 nor GPIO52 is
+  the duty and the tach's speed (`src/fan.rs`). With no carrier neither GPIO51 nor GPIO52 is
   configured and `SetFan` is ignored.
 
 Each announcement also carries a line naming the carrier and what it powered at boot:
@@ -201,6 +202,10 @@ garbage: a reset under a held connection costs a few undecodable frames, and the
 The serial number is the CH343's own, so `wartui ports` asks each CH343 which bridge it is.
 `wartui flash-bridge` updates the bridge over this link and `wartui flash-fleet` skips every
 CH343. The MX1.25 high-speed port `P1` is unused.
+
+**The board's Type-A port always drives 5 V**, since it is wired as a host port. A cable from it to
+a PC must leave VBUS unconnected, or it back-feeds the PC whenever the Type-C is also connected
+([`docs/p4-spi-link-findings.md`](../../docs/p4-spi-link-findings.md)).
 
 ## GPS
 

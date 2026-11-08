@@ -50,12 +50,9 @@ pub const fn port(slot: Slot) -> u16 {
     if slot.bus() == 0 { 1 << (15 - i) } else { 1 << i }
 }
 
-/// The node ports `board` wires: none on the bench.
+/// The node ports `board` wires: none with no carrier, which drives no slot.
 #[must_use]
 pub fn ports(board: NodeBoard) -> u16 {
-    if !board.is_carrier() {
-        return 0;
-    }
     board.slots().fold(0, |bits, slot| bits | port(slot))
 }
 

@@ -2,13 +2,13 @@
 
 The node bus is SPI between the P4 bridge and its nodes, and the nodes' only link. The P4 is the
 controller on two buses, A and B, and each node has its own CS line, called a slot: `A1` to `A7`
-and `B1` to `B7`. Wired straight to the P4, each bus takes six nodes. The wartui-carrier takes
-three, five or seven per bus, and names its sockets by the silk, `N1` to `Nn`
-([On the carrier board](#on-the-carrier-board)).
+and `B1` to `B7`. The nodes sit on the wartui-carrier, which takes three, five or seven per bus
+and names its sockets by the silk, `N1` to `Nn` ([On the carrier board](#on-the-carrier-board)).
+A P4 without a carrier drives no node.
 
 ## Pins
 
-On the ESP32-P4-WIFI6:
+The carrier wires them to the ESP32-P4-WIFI6:
 
 | Signal | Bus A (SPI2) | Bus B (SPI3) |
 | --- | --- | --- |
@@ -34,8 +34,7 @@ On the XIAO ESP32-C5:
 
 ## Pin behavior
 
-- **SPI mode 0**, at 4 MHz, measured on the carrier. Wired straight on the bench, the bus ran
-  only at 1 MHz.
+- **SPI mode 0**, at 4 MHz, measured on the carrier.
 - **No bus pin is a strapping pin** on either chip. The P4's are GPIO34–38 (ESP32-P4 datasheet
   v0.7). The C5's are GPIO2, 3, 7 and 25–28 (ESP32-C5 datasheet v1.5), which is why the node
   leaves D2 and D3 (GPIO25 and 7) unused. esp-hal's generated docs also flag the P4's GPIO32 and
@@ -44,11 +43,9 @@ On the XIAO ESP32-C5:
   high from boot, and leaves the rest unconfigured. The node pulls its CS up, so it reads idle with
   no P4 attached.
 - **MISO is pulled up on the P4**, so an empty slot reads constant bytes and fails the magic.
-- **IRQ is one line per bus.** A node drives D0 push-pull, high to ask for a transfer.
-  - On the carrier board, each node's D0 drives its own driver, which pulls the bus's shared line
-    low. So the line is active low, and no two D0 pins are ever wired together.
-  - Wired straight to the P4, one node has the IRQ line to itself. It is active high, and the P4
-    pulls it down.
+- **IRQ is one line per bus, shared and active low.** A node drives D0 push-pull, high to ask for
+  a transfer. On the carrier, each node's D0 drives its own driver, which pulls the bus's shared
+  line low, so no two D0 pins are ever wired together. The P4 pulls the line up.
 
 Every transfer is a fixed 1,044 bytes each way. The framing, the acknowledgment, and the handshake
 that re-arms the node between transfers, are in the `//!` of
@@ -97,7 +94,7 @@ Driving a port high powers its node:
 
 - **The P4 reads the carrier from the expander at boot.** Each node enable is pulled down on the
   board, so with every port an input, a wired socket's port reads low and a spare one high. No
-  answer at 0x20 is the bench, wired straight to the P4.
+  answer at 0x20 is no carrier: the P4 reports an error and drives no slot.
 - **A cold boot powers every node, one every 100 ms**, in slot order A1, B1, A2, B2. The P4 makes
   every port an input, which turns every node off, writes the outputs low, makes only the node ports
   outputs, then raises them in turn. At power-up every port is an input, so every node starts off.
@@ -131,8 +128,8 @@ Driving a port high powers its node:
   the fan runs at full speed. GPIO52 is its tach input, two falling edges a revolution, pulled up
   on the board. The P4 keeps the duty in its settings sector, the first sector of its `nvs`
   partition, as a record tagged `F`, and boots into it; the host sets it with `wartui fan` or
-  settings (`crates/wartui/README.md` § "The lid fan"). The bench configures neither pin. The same
-  sector holds the channel pool, tagged `P`, on every P4, carrier or not
+  settings (`crates/wartui/README.md` § "The lid fan"). With no carrier, the P4 configures neither
+  pin. The same sector holds the channel pool, tagged `P`, on every P4, carrier or not
   (`crates/wartui-proto/src/settings.rs`).
 - **The silk names the sockets `N1` to `Nn`**, bus A first: `N1` to `Nk` is bus A, with *k* per
   bus, and bus B follows. So `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. The fleet

@@ -778,7 +778,7 @@ mod tests {
                 reset_cause: ResetCause::PowerOn,
                 last_phase,
                 uptime_ms: 0,
-                node_board: wartui_proto::bus::NodeBoard::Bench,
+                node_board: wartui_proto::bus::NodeBoard::NoCarrier,
                 radio: None,
                 image: None,
             })

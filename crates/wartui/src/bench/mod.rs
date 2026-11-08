@@ -194,8 +194,8 @@ pub struct Args {
     #[arg(long, value_name = "MIB", default_value_t = 64, conflicts_with = "inline_checkpoint")]
     truncate_wal_mib: u64,
 
-    /// Leave checkpoints to SQLite, inside whichever commit fills the WAL, as the store
-    /// did before it had a checkpoint thread. For comparison.
+    /// Leave checkpoints to SQLite, inside whichever commit fills the WAL, rather than to
+    /// the store's checkpoint thread. For comparison.
     #[arg(long)]
     inline_checkpoint: bool,
 

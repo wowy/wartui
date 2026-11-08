@@ -126,7 +126,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         reset_cause: ResetCause::Watchdog,
         last_phase: LoopPhase::Command,
         uptime_ms: 8_675_309,
-        node_board: NodeBoard::Bench,
+        node_board: NodeBoard::NoCarrier,
         radio: None,
         image: None,
     })
@@ -867,7 +867,7 @@ fn link_codec_pins_node_board_ahead_of_radio_and_image_when_ready_is_encoded() {
     // two `None` tags.
     let mut out = [0u8; MAX_FRAME];
     for (board, code) in [
-        (NodeBoard::Bench, 0),
+        (NodeBoard::NoCarrier, 0),
         (NodeBoard::Carrier6, 1),
         (NodeBoard::Carrier10, 2),
         (NodeBoard::Carrier14, 3),

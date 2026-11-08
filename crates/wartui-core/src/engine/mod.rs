@@ -353,7 +353,7 @@ impl FleetEngine {
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
-    /// What carries the nodes, as the bridge last announced it: the bench before any has.
+    /// What carries the nodes, as the bridge last announced it: no carrier before any has.
     #[must_use]
     pub fn node_board(&self) -> NodeBoard {
         snapshot::announced_board(self.bridge.as_ref())

@@ -108,7 +108,7 @@ own.
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
-  and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
+  and cannot tell a real bridge (`serial`) from the fake fleet (`sim`). It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
@@ -255,8 +255,8 @@ is here rather than only in a `//!`.
   few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
   has confirmed is a share that may be nobody's.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
-  per bus on the 14-node carrier, and six on the bench (`bus::NodeBoard`). A node is known by its
-  MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
+  per bus on the 14-node carrier, and none without a carrier (`bus::NodeBoard`). A node is known
+  by its MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
   (`bus::Slot`, `A1` to `B7`). The operator reads a slot through its board's label, `N1` up on a
   carrier, and the store keeps the bus name.
 - **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has
@@ -345,13 +345,13 @@ edit stops; follow the pointer before changing the rule.
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
-  `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
+  `ASSIGN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
   `b`, or carried forward from the node `b` last chose, which `wartui.toml` remembers. The node
   holding it is dealt no channels and is counted in `Plan::node_count` anyway, because that reports
   the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
   is sent only with the flag beside it; without it, a node told to scan nothing parks
-  while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
-  → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `admin_for`;
+  while the host believes it is sweeping, and `Plan::assign_for` refuses to build that frame.
+  → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `assign_for`;
   `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
   `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`

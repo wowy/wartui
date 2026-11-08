@@ -56,10 +56,6 @@ It also names the flash mode, frequency and size (DIO, 40 MHz, 4 MB), as the P4'
 when it saves the bundled image. They sit in the header the digest covers, so a C6 flashed by
 wire from the same tree carries the bundled digest and is not reflashed.
 
-**The high-speed USB port always drives 5 V.** A cable from it to a PC must leave VBUS
-unconnected, or it back-feeds the PC whenever the Type-C is also connected; see
-[`firmware/p4-bridge`](../p4-bridge/README.md#usb).
-
 ## Queue sizes
 
 The C6 has one queue. Its size is read at build time from an environment variable, so a bench

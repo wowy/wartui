@@ -188,13 +188,13 @@ pub fn power_cycled_text(board: NodeBoard, slot: Slot, outcome: PowerOutcome) ->
     }
 }
 
-/// What carries the nodes, as `bridge` announced it: the bench before any bridge has.
+/// What carries the nodes, as `bridge` announced it: no carrier before any bridge has.
 pub(super) fn announced_board(bridge: Option<&BridgeInfo>) -> NodeBoard {
-    bridge.map_or(NodeBoard::Bench, |bridge| bridge.node_board)
+    bridge.map_or(NodeBoard::NoCarrier, |bridge| bridge.node_board)
 }
 
 impl Snapshot {
-    /// What carries the nodes, as the bridge last announced it: the bench before any has.
+    /// What carries the nodes, as the bridge last announced it: no carrier before any has.
     #[must_use]
     pub fn node_board(&self) -> NodeBoard {
         announced_board(self.bridge.as_ref())
@@ -372,7 +372,7 @@ mod tests {
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
             uptime_ms: 1_000,
-            node_board: NodeBoard::Bench,
+            node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
         };

@@ -332,7 +332,7 @@ fn connected() -> Event {
 
 /// A connect from a bridge at `mac`, for the tests about a bridge swap.
 fn connected_with_mac(mac: Mac) -> Event {
-    connected_board(mac, NodeBoard::Bench)
+    connected_board(mac, NodeBoard::NoCarrier)
 }
 
 /// A connect from a bridge whose nodes `board` carries.

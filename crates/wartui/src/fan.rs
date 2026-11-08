@@ -2,8 +2,8 @@
 //!
 //! The bridge keeps the duty on its own flash and boots into it, so it holds across the bridge's
 //! reboots and with no host attached. `wartui.toml` holds no copy. The bridge is resolved to one
-//! board as `wartui power-cycle` resolves it. A bench bridge has no fan, and is refused before
-//! anything is sent.
+//! board as `wartui power-cycle` resolves it. A bridge with no carrier has no fan, and is refused
+//! before anything is sent.
 //!
 //! With a duty, the bridge applies it at once and the command waits two of its tach windows, so
 //! the speed it prints is read at the new duty.
@@ -25,7 +25,7 @@ const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 /// at it.
 const SETTLE: Duration = Duration::from_millis(2 * TACH_WINDOW_MS as u64);
 
-/// What a bench bridge answers.
+/// What a bridge with no carrier answers.
 const NO_FAN: &str = "this bridge has no carrier board, so it has no fan";
 
 #[derive(ClapArgs)]
@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn fan_cmd_refuses_before_sending_when_bridge_is_on_the_bench() {
-        assert_eq!(has_fan(NodeBoard::Bench), Err(NO_FAN));
+    fn fan_cmd_refuses_before_sending_when_bridge_has_no_carrier() {
+        assert_eq!(has_fan(NodeBoard::NoCarrier), Err(NO_FAN));
     }
 }

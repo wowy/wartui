@@ -21,7 +21,7 @@ fn carrier_maps_ports_to_slots_when_read_as_one_value() {
     assert_eq!(ports(NodeBoard::Carrier6), 0b1110_0000_0000_0111);
     assert_eq!(ports(NodeBoard::Carrier10), 0b1111_1000_0001_1111);
     assert_eq!(ports(NodeBoard::Carrier14), 0b1111_1110_0111_1111);
-    assert_eq!(ports(NodeBoard::Bench), 0);
+    assert_eq!(ports(NodeBoard::NoCarrier), 0);
 }
 
 #[test]
