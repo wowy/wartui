@@ -935,3 +935,78 @@ fn analyze_gives_no_slot_when_latest_heartbeat_slot_is_not_text() {
     let loss = losses(&conn).expect("a bad slot does not fail the report");
     assert_eq!(loss.nodes[0].slot, None, "not the older heartbeat's slot");
 }
+
+/// A node's capture holding one heartbeat per reading, then whether it reports a supply drop.
+fn supply_drop_over(readings: &[Option<u16>]) -> bool {
+    let records = readings.iter().zip(1..).map(|(&vdd_mv, n)| reading(NODE, n, vdd_mv)).collect();
+    let (_dir, conn) = capture(records);
+    losses(&conn).expect("the report").nodes[0].supply_drop
+}
+
+/// A heartbeat carrying a rail reading, its counter and arrival following `n`.
+fn reading(node: Mac, n: u32, vdd_mv: Option<u16>) -> Record {
+    let Record::Heartbeat(hb) = beat(node, i64::from(n) * 5_000, n, 0, 0) else { unreachable!() };
+    Record::Heartbeat(Heartbeat { vdd_mv, ..hb })
+}
+
+#[test]
+fn analyze_reports_no_supply_drop_when_low_reading_stays_put() {
+    assert!(!supply_drop_over(&[Some(2920), Some(2920), Some(2920)]));
+}
+
+#[test]
+fn analyze_reports_no_supply_drop_when_fall_is_just_under_threshold() {
+    assert!(!supply_drop_over(&[Some(3304), Some(3160)]));
+}
+
+#[test]
+fn analyze_reports_supply_drop_when_reading_falls() {
+    assert!(supply_drop_over(&[Some(3304), Some(3148)]));
+}
+
+#[test]
+fn analyze_reports_supply_drop_when_reading_later_recovers() {
+    assert!(supply_drop_over(&[Some(3304), Some(3148), Some(3304)]));
+}
+
+#[test]
+fn analyze_reports_no_supply_drop_when_every_reading_is_null() {
+    assert!(!supply_drop_over(&[None, None]));
+}
+
+#[test]
+fn analyze_takes_first_reading_as_baseline_when_earlier_rows_are_null() {
+    assert!(!supply_drop_over(&[None, Some(3148), Some(3148)]));
+}
+
+#[test]
+fn analyze_keeps_supply_baselines_apart_when_arrivals_are_interleaved() {
+    // Each node holds steady, and the two differ by more than a drop.
+    let (_dir, conn) = capture(vec![
+        reading(NODE, 1, Some(3304)),
+        reading(OTHER, 2, Some(2980)),
+        reading(NODE, 3, Some(3304)),
+        reading(OTHER, 4, Some(2980)),
+    ]);
+    let loss = losses(&conn).expect("the report");
+    assert_eq!(loss.nodes.len(), 2);
+    assert!(loss.nodes.iter().all(|n| !n.supply_drop), "{:?}", loss.nodes);
+}
+
+#[test]
+fn analyze_treats_wrong_type_as_no_reading_when_vdd_is_not_an_integer() {
+    let (dir, conn) = capture(vec![
+        reading(NODE, 1, Some(3304)),
+        reading(NODE, 2, Some(3304)),
+        reading(NODE, 3, Some(3148)),
+    ]);
+    Connection::open(dir.path().join("wartui.db"))
+        .expect("opening to write")
+        .execute(
+            "UPDATE heartbeat SET vdd_mv = x'FF' WHERE id = (SELECT MIN(id) FROM heartbeat)",
+            [],
+        )
+        .expect("writing a reading of the wrong type");
+    let loss = losses(&conn).expect("a bad reading does not fail the report");
+    assert!(loss.nodes[0].supply_drop, "the baseline is the next good reading");
+}

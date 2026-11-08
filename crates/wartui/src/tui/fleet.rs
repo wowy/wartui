@@ -49,9 +49,9 @@ pub(super) fn draw_fleet(
         .iter()
         .map(|node| {
             let (state, mut severity) = node_state(node);
-            // A reading out of range warns only on an otherwise healthy node; any state
+            // A supply drop or a hot die warns only on an otherwise healthy node; any state
             // of its own says more.
-            if severity == Severity::Ok && (node.state.low_vdd() || node.state.hot()) {
+            if severity == Severity::Ok && (node.state.supply_dropped() || node.state.hot()) {
                 severity = Severity::Warning;
             }
             let style = severity.style();
@@ -140,7 +140,7 @@ enum Severity {
     Ok,
     /// Worth knowing, needing nothing: `rebooted xN`.
     Notice,
-    /// Out of the plan for now, or a reading out of range.
+    /// Out of the plan for now, a supply drop or a hot die.
     Warning,
     /// Something to fix.
     Fault,
@@ -157,26 +157,28 @@ impl Severity {
     }
 }
 
-/// The selected node's address, firmware and latest supply and die readings, `—` for none,
-/// each out-of-range reading in the warning style: `N7 C5 57:84  0.1.0;5g  3.30 V  41 °C`.
-/// The table has no width left for them, so they show for one node at a time, and this is the
-/// one place the main screen shows a node's address.
+/// The selected node's address, firmware and latest die reading, `—` for none, in the warning
+/// style when hot: `N7 C5 57:84  0.1.0;5g  41 °C`. `supply drop` follows, in the warning style,
+/// while `NodeState::supply_dropped` holds. The rail reading itself never shows: its per-chip
+/// offset makes the figure meaningless. The table has no width left for these, so they show for
+/// one node at a time, and this is the one place the main screen shows a node's address.
 fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
     let state = &node.state;
-    let vdd = state.vdd.to_string();
     let temp = state.die_temp.to_string();
-    let warn = |bad: bool| if bad { Severity::Warning.style() } else { Style::new() };
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw(format!(
             "{} {}  {}  ",
             node_label(board, node).trim_start(),
             mac::short(&state.mac),
             version_label(node, NODE_VERSION)
         )),
-        Span::styled(vdd, warn(state.low_vdd())),
-        Span::raw("  "),
-        Span::styled(temp, warn(state.hot())),
-    ])
+        Span::styled(temp, if state.hot() { Severity::Warning.style() } else { Style::new() }),
+    ];
+    if state.supply_dropped() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("supply drop", Severity::Warning.style()));
+    }
+    Line::from(spans)
 }
 
 /// The channels column's width, which caps how much of the list fits.
@@ -691,6 +693,7 @@ mod tests {
     #[test]
     fn fleet_health_line_shows_selected_node_readings_when_cursor_moves() {
         let mut reading = node(0x84, 0, true);
+        reading.state.vdd_baseline = Vdd::from_mv(3304);
         reading.state.vdd = Vdd::from_mv(3304);
         reading.state.die_temp = DieTemp::from_c(41);
         let silent = node(0x85, 0, true);
@@ -700,26 +703,58 @@ mod tests {
         let mut ui = Ui::default();
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(
-            screen.contains(&format!("N7 C5 57:84  {NODE_VERSION};5g  3.30 V  41 °C")),
-            "{screen}"
-        );
+        assert!(screen.contains(&format!("N7 C5 57:84  {NODE_VERSION};5g  41 °C")), "{screen}");
 
         let (tx, _rx) = mpsc::channel(4);
         ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains(&format!("N8 C5 57:85  {NODE_VERSION};5g  —  —")),
+            screen.contains(&format!("N8 C5 57:85  {NODE_VERSION};5g  —")),
             "no reading is a dash: {screen}"
         );
     }
 
     #[test]
-    fn fleet_table_warns_on_state_when_vdd_is_low() {
+    fn fleet_health_line_shows_no_voltage_when_node_has_a_reading() {
+        let mut steady = node(0x84, 0, true);
+        steady.state.vdd_baseline = Vdd::from_mv(3304);
+        steady.state.vdd = Vdd::from_mv(3304);
+        let line = health_line(NodeBoard::Carrier14, &steady).to_string();
+        assert!(!line.contains(" V"), "{line}");
+        assert!(!line.contains("3.30"), "{line}");
+        assert!(!line.contains("supply drop"), "{line}");
+    }
+
+    #[test]
+    fn fleet_health_line_warns_of_supply_drop_when_reading_falls() {
+        let mut dropped = node(0x84, 0, true);
+        dropped.state.vdd_baseline = Vdd::from_mv(3304);
+        dropped.state.vdd = Vdd::from_mv(3148);
+        let line = health_line(NodeBoard::Carrier14, &dropped);
+        assert!(line.to_string().ends_with("  supply drop"), "{line}");
+        assert!(!line.to_string().contains(" V"), "{line}");
+        let warning = line.spans.last().expect("the warning");
+        assert_eq!(
+            (warning.content.as_ref(), warning.style.fg),
+            ("supply drop", Some(Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn fleet_table_warns_on_state_when_supply_drops() {
+        let mut dropped = node(0x84, 0, true);
+        dropped.state.vdd_baseline = Vdd::from_mv(3304);
+        dropped.state.vdd = Vdd::from_mv(3148);
+        assert_eq!(state_fg(dropped, "alive"), Some(Color::Yellow));
+    }
+
+    #[test]
+    fn fleet_table_keeps_state_style_when_reading_is_low_and_steady() {
         let mut low = node(0x84, 0, true);
-        low.state.vdd = Vdd::from_mv(2996);
-        assert_eq!(state_fg(low, "alive"), Some(Color::Yellow));
+        low.state.vdd_baseline = Vdd::from_mv(2920);
+        low.state.vdd = Vdd::from_mv(2920);
+        assert_eq!(state_fg(low, "alive"), Some(Color::Green));
     }
 
     #[test]
@@ -732,16 +767,19 @@ mod tests {
     #[test]
     fn fleet_table_keeps_state_style_when_readings_are_in_range() {
         let mut normal = node(0x84, 0, true);
-        normal.state.vdd = Vdd::from_mv(3000);
+        // One step short of a drop.
+        normal.state.vdd_baseline = Vdd::from_mv(3304);
+        normal.state.vdd = Vdd::from_mv(3160);
         normal.state.die_temp = DieTemp::from_c(69);
         assert_eq!(state_fg(normal, "alive"), Some(Color::Green));
     }
 
     #[test]
-    fn fleet_table_keeps_notice_style_when_rebooted_node_has_low_vdd() {
-        // The reboot is the more useful news; the health line still shows the reading.
+    fn fleet_table_keeps_notice_style_when_rebooted_node_has_supply_drop() {
+        // The reboot is the more useful news; the health line still shows the drop.
         let mut rebooted = node(0x84, 1, true);
-        rebooted.state.vdd = Vdd::from_mv(2996);
+        rebooted.state.vdd_baseline = Vdd::from_mv(3304);
+        rebooted.state.vdd = Vdd::from_mv(3148);
         assert_eq!(state_fg(rebooted, "rebooted x1"), Some(Color::Cyan));
     }
 

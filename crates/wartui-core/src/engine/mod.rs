@@ -60,6 +60,7 @@ pub use snapshot::{
 };
 
 pub(crate) use lag::BEHIND_US;
+pub(crate) use node::supply_dropped_from;
 pub(crate) use rx::advance_since_boot;
 
 use crate::distinct::Distinct;

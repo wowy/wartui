@@ -57,6 +57,10 @@
 //! `heartbeat.slot` means something to the operator only through `capture.node_board`, so with no
 //! carrier, or none known, no node has a slot. [`losses`] reads the slots with the heartbeats, and
 //! [`peaks`] takes them from it.
+//!
+//! A node's rail reading has a per-chip offset, so `supply_drop` applies the engine's rule against
+//! that node's first reading in the capture. The live warning follows the latest reading. This one
+//! stays set once tripped, because the report summarizes the whole capture.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -65,7 +69,7 @@ use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
-use crate::engine::{BEHIND_US, advance_since_boot};
+use crate::engine::{BEHIND_US, advance_since_boot, supply_dropped_from};
 use crate::store::parse_kind;
 
 /// What a capture lost.
@@ -247,6 +251,9 @@ pub struct NodeLoss {
     pub wifi_refused: u64,
     /// Advertisers the node's pending buffer refused.
     pub ble_refused: u64,
+    /// A rail reading fell far enough below the node's first in the capture to count as a drop,
+    /// even if it later recovered.
+    pub supply_drop: bool,
 }
 
 /// How fast sightings arrived.
@@ -599,12 +606,13 @@ fn heartbeats(
     nodes: &mut BTreeMap<Mac, NodeLoss>,
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT node_mac, counter, wifi_refused, ble_refused, slot
+        "SELECT node_mac, counter, wifi_refused, ble_refused, slot, vdd_mv
          FROM heartbeat
          ORDER BY node_mac, id",
     )?;
     let mut rows = stmt.query([])?;
     let mut prev: Option<Beat> = None;
+    let mut vdd_baseline: Option<u16> = None;
     while let Some(row) = rows.next()? {
         let beat = Beat {
             mac: row.get(0)?,
@@ -612,6 +620,10 @@ fn heartbeats(
             wifi: count(row.get(2)?),
             ble: count(row.get(3)?),
         };
+        // Rows are grouped by node, so a new address starts a new baseline.
+        if prev.as_ref().map(|prev| prev.mac) != Some(beat.mac) {
+            vdd_baseline = None;
+        }
         let node = nodes
             .entry(beat.mac)
             .or_insert_with(|| NodeLoss { mac: beat.mac, ..Default::default() });
@@ -620,6 +632,11 @@ fn heartbeats(
         // cannot read, which is left out rather than failing the report.
         node.slot =
             row.get_ref(4)?.as_str().ok().and_then(Slot::parse).filter(|_| board.is_carrier());
+        // A reading this build cannot read is no reading, likewise.
+        if let Some(mv) = row.get_ref(5)?.as_i64().ok().and_then(|mv| u16::try_from(mv).ok()) {
+            let baseline = *vdd_baseline.get_or_insert(mv);
+            node.supply_drop |= supply_dropped_from(baseline, mv);
+        }
         // A node's first heartbeat is a baseline only.
         if let Some(prev) = prev.as_ref().filter(|prev| prev.mac == beat.mac) {
             let rebooted = beat.counter.wrapping_sub(prev.counter) >= 0x8000_0000;
