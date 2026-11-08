@@ -51,8 +51,10 @@ binary on a pty and prints the screen as text, `--keys jb` presses keys first, a
 points it at the boards attached rather than the simulator. `README.md` § "Suggested tools" says
 when to reach for it over the `TestBackend` tests in `crates/wartui/src/tui/`.
 
-Refer to boards by their last two octets; `wartui ports` names each attached board by its
-address, and `crates/wartui/README.md` § "Telling the boards apart" says why that works.
+Refer to nodes by their slot label (`N7`), which is printed on the carrier. Use the last two
+octets only for bridges, USB-attached boards and nodes with no slot; `wartui ports` names each
+attached board by its address, and `crates/wartui/README.md` § "Telling the boards apart" says why
+that works.
 
 **Never upload to WDGWars without asking the user directly first, every time.** That covers
 `wartui upload`, with or without `--yes`, and any request to its upload endpoints, such as curl.
