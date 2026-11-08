@@ -116,15 +116,22 @@ fn store_records_bus_version_when_capture_created() {
     let dir = tempfile::tempdir().expect("temp dir");
     store(&dir).close();
     let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
+    let version: String = conn
+        .query_row("SELECT v FROM kv WHERE k = 'capture.bus_version'", [], |r| r.get(0))
+        .expect("bus version provenance");
+    assert_eq!(version, BUS_VERSION.to_string());
+}
+
+#[test]
+fn store_omits_scan_table_when_capture_created() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    store(&dir).close();
+    let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
     // The scan table is a code constant, so it says nothing about a capture.
     let scan: i64 = conn
         .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
         .expect("scan table count");
     assert_eq!(scan, 0);
-    let version: String = conn
-        .query_row("SELECT v FROM kv WHERE k = 'capture.bus_version'", [], |r| r.get(0))
-        .expect("bus version provenance");
-    assert_eq!(version, BUS_VERSION.to_string());
 }
 
 #[test]

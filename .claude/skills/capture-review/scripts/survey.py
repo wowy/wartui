@@ -222,8 +222,9 @@ def provenance(db, ctx):
                 ctx.setdefault("settings_changes", []).append((at, changed))
             prev = v
         ctx["settings_final"] = dict(p.split("=", 1) for p in v.split(";") if "=" in p)
-    # Thresholds read ctx["settings"]: the initial row overlaid with every later change, so a value
-    # changed mid-run is judged by what was in force at the end. The changes are listed above.
+    # Settings-driven thresholds (gps_max_age_ms) read ctx["settings"]: the initial row overlaid
+    # with every later change, so a value changed mid-run is judged by what was in force at the
+    # end. The changes are listed above. Fixed engine timings come from the module constants.
     # The pool is the bridge's: `none` until its first `Status`, then each change it reported.
     # A capture with no initial row starts from its first change.
     pools = [(None, ctx["settings"]["pool"])] if "pool" in ctx.get("settings", {}) else []
@@ -297,7 +298,6 @@ def heartbeats(db, ctx):
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
-    timeout = TOPOLOGY_TIMEOUT_MS
     ble_nodes = ctx.get("ble_nodes", set())
     total_reversals = 0
     for mac, hs in per.items():
@@ -341,7 +341,7 @@ def heartbeats(db, ctx):
                     reversals += 1
                 elif prev[7] != 0:  # an interval after a replayed beat spans time no host read
                     intervals.append(dt)
-                if dt > timeout:
+                if dt > TOPOLOGY_TIMEOUT_MS:
                     silences.append((p_rx, rx))
             if live != 0:
                 held = epoch
@@ -419,7 +419,8 @@ def heartbeats(db, ctx):
                 "WARN",
                 "node",
                 f"{short(mac)} went {len(silences)} time(s) without a heartbeat for longer than "
-                f"topology_timeout ({timeout} ms); longest {dur(max(b - a for a, b in silences))}",
+                f"topology_timeout ({TOPOLOGY_TIMEOUT_MS} ms); "
+                f"longest {dur(max(b - a for a, b in silences))}",
                 f"SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) AS gap FROM heartbeat "
                 f"WHERE {node_sql} ORDER BY gap DESC LIMIT 10",
             )
@@ -608,14 +609,13 @@ def bridge(db, ctx):
              "SELECT id, rx_at, uptime_ms, rx_oversize FROM bridge_status ORDER BY id")
     if gaps:
         print(f"  reply interval ms  {spread(gaps)}")
-        interval = STATUS_INTERVAL_MS
-        long_gaps = [(rows[i][1], g) for i, g in enumerate(gaps) if g > 3 * interval]
+        long_gaps = [(rows[i][1], g) for i, g in enumerate(gaps) if g > 3 * STATUS_INTERVAL_MS]
         for at, g in long_gaps[:5]:
             print(f"  no reply for {dur(g)} after {rel(at)}")
         if long_gaps:
             flag("WARN", "bridge",
                  f"{len(long_gaps)} stretch(es) with no bridge status reply for over 3x the "
-                 f"{interval} ms poll; longest {dur(max(g for _, g in long_gaps))}",
+                 f"{STATUS_INTERVAL_MS} ms poll; longest {dur(max(g for _, g in long_gaps))}",
                  "SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) gap FROM bridge_status "
                  "ORDER BY gap DESC LIMIT 10")
     ctx["bridge_reboots"] = reboots
