@@ -1,53 +1,69 @@
-//! The host's half of an over-the-air update: a state machine that takes one node from its
-//! running image to a new one, confirmed. [`wartui_proto::ota::Receiver`] is the node's half.
+//! The host's half of a node's update: a state machine that takes one node from its running
+//! image to a new one, confirmed. [`wartui_proto::ota::Receiver`] is the node's half.
 //!
 //! Like [`crate::engine`], it reads no clock and does no I/O. Time arrives as [`Now`], and
 //! what it wants sent comes back as [`HostToBridge`] commands for a driver
-//! (`runtime::drive_ota`) to queue.
+//! (`runtime::drive_fleet`) to queue. Several sessions share one link, each giving its records
+//! ids no other uses ([`Ids`]) and reading only its own node's records.
 //!
-//! **The first `begin` rides a heartbeat.** Outside update mode a node hears frames only in the
-//! admin window its heartbeat opens: 100 ms every 5 s when assigned, about a second when parked.
-//! So [`OtaBeginMsg`] goes out on each heartbeat from the node until a status for this session
-//! answers it. An accepted `begin` puts the node in update mode, where it listens continuously,
-//! and everything after it goes out as soon as it is due. A refused `begin` from a host that is
-//! not yet the node's core is not answered at all, which is why [`BEGIN_TIMEOUT`] is the only
-//! way that phase fails.
+//! **The `begin` follows the node's heartbeats**, which name the node-bus slot the node sits in.
+//! [`UpdateBegin`] goes out on each heartbeat from the node until a status for this session
+//! answers it. A session that knows the slot its node was last heard in
+//! ([`OtaSession::with_slot`]) sends its first `begin` there at once rather than waiting out a
+//! heartbeat; undelivered, it waits for the next heartbeat, which names where the node is now. An
+//! accepted `begin` puts the node in update mode, where it services the bus continuously, and
+//! everything after it goes out as soon as it is due.
 //!
-//! **One chunk is in flight at a time**, the next sent only on the previous one's
-//! [`SendStatus`]. The bridge queues its `SendResult`s in an 8-deep priority ring that evicts
-//! its oldest; a burst of chunks would overrun it, and a lost result leaves the host unable to
-//! tell an acked chunk from a dropped one. At ~3.6 ms a frame the pace is the flash's anyway
-//! (`docs/espnow-v2-findings.md`).
+//! **Chunks go by reference.** The image is uploaded once into the P4's cache, and each chunk is
+//! a [`HostToBridge::ToNodeChunk`] naming the image by its tag, an offset and a length, from
+//! which the P4 builds the record. So the host link carries an image once however many nodes
+//! take it. The upload runs beside the `begin`s, and no chunk goes before
+//! [`OtaEvent::Cached`] says the P4 has checked the image's digest: a chunk from an image not yet
+//! cached is refused, and one from a corrupt copy would fail every node at once. A chunk answered
+//! `NoImage` after that means the P4 lost the image since, by rebooting or by its host gate
+//! closing, and every other session's chunks meet the same answer. So it fails the session
+//! ([`Failure::CacheLost`]) rather than counting as a send to retry, and the driver ends the fleet.
 //!
-//! **Flow control is the node's `next_offset`, not the MAC ack.** An ack says the radio took
-//! the frame, not that the node read it: its receive queue is ten deep and drains only between
-//! flash writes. The node reports a status on each 4 KB sector it writes, so after the chunk
-//! that completes a sector the host waits for one. Any status moves the host to the offset it
-//! names, back or forward, except one below the highest offset the node has reported since its
-//! `begin`: that one was overtaken by a newer status, and acting on it would resend what the node
-//! already holds. With no status within [`STATUS_TIMEOUT`], the host resends from the
-//! last offset the node reported: a node that has those bytes answers the duplicate with its
-//! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
-//! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
-//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] unacked
-//! sends in a row: a node rebooting has its radio off, and acks nothing for a second or so.
-//! Each returns to the `begin`, which an identical one resumes where the node's progress
-//! stands: from 0 after a reboot, which loses the receiver's state and the node's core.
-//! [`MAX_RESTARTS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
-//! up after the node accepted it sends [`OtaAbortMsg`] once, so the node leaves update mode at
-//! once rather than after its 30 s of silence.
+//! **[`CHUNKS_IN_FLIGHT`] chunks are out at once**, a sector's worth, so the P4 has the next
+//! queued while two are on the bus. Each `Delivered` or `Undelivered` sends what the sector then
+//! allows, and the P4's queue for a slot holds four. A chunk that starts a sector goes only once
+//! the node has reported the sectors before it written, so nothing is in flight while the node
+//! flushes one. An undelivered chunk sends from its offset again.
 //!
-//! **Success, rollback and silence are told apart by the heartbeat's frozen prefix**: version
-//! and trial flag, which every minor reads. A node switches slots the moment it reports
+//! **Flow control is the node's `next_offset`, not the bus's ack.** Delivery says the node took the
+//! transfer, not that its receiver took the chunk: a resent chunk arrives twice, and one past an
+//! undelivered chunk arrives at the wrong offset. The node reports a status on each 4 KB sector it
+//! writes, so after the chunk that completes a sector the host waits for one. A status moves the
+//! host forward, never back. On the node bus, delivery is in order: the P4's queue for a slot is
+//! FIFO, and the node takes its flights strictly in order: one whose inbox is full leaves the
+//! transfer unacknowledged, and every later one too, so the P4 resends from it rather than losing
+//! it. So only an undelivered chunk or the timeout says a chunk was lost. A status naming an offset
+//! behind what was sent is the node's answer to a duplicate, written before the chunks after it
+//! arrived, and going back on it would resend chunks the node holds, each drawing another such
+//! status. The commit's answer is the exception: one naming bytes still missing streams from there.
+//! With no status within [`STATUS_TIMEOUT`] of nothing left to send, the host resends from the last
+//! offset the node reported: a node that has those bytes answers the duplicate with its status, and
+//! one that lacks them takes them. One rule recovers lost chunks and lost statuses alike. `Idle`
+//! means the node dropped the session (30 s of silence, or a reboot), and so does
+//! [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] undelivered sends
+//! with no progress reported between them: a node rebooting acknowledges nothing for a second or
+//! so. Each returns to the `begin`, which an identical one resumes where the node's progress
+//! stands: from 0 after a reboot, which loses the receiver's state. [`MAX_RESTARTS`] and
+//! [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives up after the node accepted
+//! it sends [`UpdateAbort`] once, so the node leaves update mode at once rather than after its 30 s
+//! of silence.
+//!
+//! **Success, rollback and silence are told apart by the heartbeat's prefix**: version and trial
+//! flag, which every minor reads. A node switches slots the moment it reports
 //! `Verified`, so its next boot heartbeats the new version with `trial` set. That heartbeat is
 //! success even when the `Verified` itself was lost. The new image is confirmed by the first
-//! host frame it decodes; [`OtaConfirmMsg`] goes out on each heartbeat still showing `trial`,
+//! record from the bridge it decodes; [`UpdateConfirm`] goes out on each heartbeat still showing `trial`,
 //! and one with the new version and no `trial` is done.
 //!
 //! The prefix carries no boot counter, and a node on another minor has no layout this host
 //! reads beyond it, so "not rebooted yet" is told from "rolled back" by time. The old image
 //! heartbeats for a moment after `Verified`: the switch and reboot take milliseconds, but
-//! heartbeats already in the bridge's backlog arrive after it. So an old-version heartbeat
+//! heartbeats already queued at the bridge arrive after it. So an old-version heartbeat
 //! counts as failure only [`REBOOT_GRACE`] after `Verified`, by which time the node has either
 //! booted the new image or is still on the old one: a switch that failed, or a new image that
 //! rolled back. Once a trial heartbeat has been heard, a reboot is proven, and an old-version
@@ -55,52 +71,53 @@
 //!
 //! **A heartbeat is the new image only once this session has sent its commit**, since nothing
 //! installs before one. That check comes first in every phase, `Begin` included: a `Verified`
-//! that is lost, then resent commits unacked while the node reboots, return the session to its
+//! that is lost, then resent commits undelivered while the node reboots, return the session to its
 //! `begin`, and the new image's first heartbeat must be confirmed, never answered with a
 //! `begin`. The node would take that `begin` and stream the image again into the slot holding
 //! the old one, destroying the copy a rollback returns to.
 //!
 //! After the commit, the image's version with `trial` set is the new image on trial: the old
-//! image cannot be on trial, because the node confirms a trial image on the first update frame
+//! image cannot be on trial, because the node confirms a trial image on the first update record
 //! it decodes. Without `trial`, the version says it is the new image, confirmed, when it differs
 //! from the old one. An image of the version the node already runs (`--force`) leaves the
-//! version unable to tell, so done then needs an acked [`OtaConfirmMsg`], and a heartbeat of that
-//! version without `trial` gets another confirm until one is acked. A rollback in that case is
-//! indistinguishable from a confirmed image once the old image acks a confirm, which is the cost
-//! of reinstalling one version.
+//! version unable to tell, so done then needs a delivered [`UpdateConfirm`], and a heartbeat of
+//! that version without `trial` gets another confirm until one is delivered. A rollback in that
+//! case is indistinguishable from a confirmed image once the old image takes a confirm, which is
+//! the cost of reinstalling one version.
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wartui_proto::air::{
-    Capabilities, OTA_CHUNK, OTA_CHUNK_MSG_MAX, OtaAbortMsg, OtaBeginMsg, OtaChunkMsg,
-    OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg, Version,
+use wartui_proto::bus::{
+    Capabilities, DownType, Heartbeat, Slot, UPDATE_CHUNK, UpType, UpdateAbort, UpdateBegin,
+    UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus, Version,
 };
-use wartui_proto::link::{HostToBridge, SendPayload, SendStatus};
+use wartui_proto::link::{HostToBridge, ToNodeBody, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::SECTOR;
 
-use crate::engine::Now;
+use crate::engine::{Now, SEND_TIMEOUT};
 
 /// How long to wait for the status a sector's last chunk is owed, or for a commit's answer,
-/// before resending. A sector write takes tens of milliseconds, so this is several of them.
+/// before resending. It outlasts a node's slowest flush, a 64 KB block erase and the sector write
+/// behind it, whose timings are in `wartui_proto::ota`'s "Erase is lazy".
 pub const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Status timeouts in a row, about 10 s, after which the node is taken to have dropped the
 /// session and the update returns to its `begin`.
 pub const MAX_STATUS_TIMEOUTS: u32 = 20;
 
-/// How long a sent frame waits for its `SendResult` before it is treated as unacked. The
-/// bridge answers in milliseconds; a result evicted from its ring never comes.
-pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Unacked chunks or commits in a row before the node is taken to have rebooted or wandered off,
-/// and the update returns to its `begin`.
+/// Undelivered chunks or commits, with no progress reported between them, before the node is taken
+/// to have rebooted or wandered off, and the update returns to its `begin`.
 pub const MAX_SEND_FAILURES: u32 = 10;
 
-/// How long the `begin` is retried on heartbeats before the node is given up on: six admin
-/// windows of an assigned node, thirty of a parked one.
+/// Chunks a session has out at once, awaiting their delivery answers: a sector. The P4's queue
+/// for a slot holds four full chunks, and keeps two of them on the bus at once.
+pub const CHUNKS_IN_FLIGHT: usize = 4;
+
+/// How long the `begin` is retried on heartbeats before the node is given up on: six heartbeats
+/// of an assigned node, thirty of an unassigned one.
 pub const BEGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How many times an update may start over from its `begin` after losing the node, before
@@ -184,6 +201,8 @@ pub enum Failure {
     Cancelled,
     /// The link to the bridge closed.
     LinkClosed,
+    /// The P4 answered a chunk `NoImage`: its cache lost the image it had checked.
+    CacheLost,
 }
 
 impl fmt::Display for Failure {
@@ -214,6 +233,7 @@ impl fmt::Display for Failure {
             Self::UnknownState(byte) => write!(f, "the node answered with unknown state {byte}"),
             Self::Cancelled => f.write_str("cancelled"),
             Self::LinkClosed => f.write_str("the link to the bridge closed"),
+            Self::CacheLost => f.write_str("the bridge lost the node image"),
         }
     }
 }
@@ -230,22 +250,32 @@ pub enum Outcome {
 /// What [`OtaSession::handle`] reacts to.
 #[derive(Debug, Clone, Copy)]
 pub enum OtaEvent<'a> {
-    /// The bridge's answer to a frame the session sent.
-    SendResult {
-        /// The id the session gave the frame.
+    /// The bridge's answer to a record the session sent.
+    Delivery {
+        /// The id the session gave the record.
         id: u16,
-        /// What the radio said.
-        status: SendStatus,
+        /// `Delivered`, rather than `Undelivered`.
+        delivered: bool,
     },
-    /// A frame the bridge heard. Only the session's own node is read.
-    Rx {
-        /// Who sent it.
-        src: Mac,
-        /// The frame.
-        payload: &'a [u8],
+    /// A record a node sent. Only the session's own node is read.
+    FromNode {
+        /// The slot it came from.
+        slot: Slot,
+        /// Its type, a `bus::UpType` byte.
+        kind: u8,
+        /// Its body.
+        body: &'a [u8],
     },
     /// Time passing, for timeouts. A few times a second is enough.
     Tick,
+    /// The P4's cache holds the image, checked, so chunks may go.
+    Cached,
+    /// The P4 answered the record the session gave `id` `NoImage`: its cache no longer holds the
+    /// image.
+    NoImage {
+        /// The id the session gave the record.
+        id: u16,
+    },
 }
 
 /// Where an update stands, for showing.
@@ -269,10 +299,47 @@ pub struct OtaImage {
     /// The firmware version the image carries.
     pub version: Version,
     /// The board it was built for.
-    pub board: wartui_proto::air::Board,
+    pub board: wartui_proto::bus::Board,
 }
 
-/// A frame awaiting its `SendResult`.
+/// The ids a session gives its records: `next`, then every `step` after it, wrapping.
+///
+/// Sessions sharing a link step past each other's ids, so a delivery answer matches only the
+/// session that sent it: session `index` of `count` takes [`Ids::of`]. The ids wrap within the
+/// largest multiple of `step` a `u16` holds, so each stays `next` modulo `step`, and skip 0, which
+/// the engine never sends either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ids {
+    /// The id the next record takes.
+    pub next: u16,
+    /// What each record adds to it.
+    pub step: u16,
+}
+
+impl Ids {
+    /// The ids of session `index` of `count` sharing a link: `index + 1`, stepping by `count`.
+    #[must_use]
+    pub fn of(index: usize, count: usize) -> Self {
+        // A link carries at most a bus's fourteen nodes.
+        #[allow(clippy::cast_possible_truncation)]
+        Self { next: index as u16 + 1, step: count.max(1) as u16 }
+    }
+
+    fn take(&mut self) -> u16 {
+        let id = self.next;
+        let step = u32::from(self.step.max(1));
+        let span = (u32::from(u16::MAX) + 1) / step * step;
+        let next = match (u32::from(self.next) + step) % span {
+            0 => step,
+            next => next,
+        };
+        // Below `span`, which is at most 65,536, so it fits.
+        self.next = u16::try_from(next).unwrap_or(self.step);
+        id
+    }
+}
+
+/// A record awaiting its answer.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
     id: u16,
@@ -293,27 +360,34 @@ enum Sent {
 #[derive(Debug)]
 pub struct OtaSession {
     node: Mac,
-    bytes: Arc<[u8]>,
-    begin: OtaBeginMsg,
+    /// The slot the node's latest heartbeat came from, which everything is sent to.
+    slot: Option<Slot>,
+    /// The image's [`image_tag`], which names it in the P4's cache.
+    tag: u32,
+    begin: UpdateBegin,
     /// The version the node ran when the update started.
     from: Version,
     phase: Phase,
     phase_since: Instant,
-    next_id: u16,
-    pending: Option<Pending>,
+    ids: Ids,
+    /// Records awaiting their answers: up to [`CHUNKS_IN_FLIGHT`] chunks, and the last of any
+    /// other kind.
+    pending: Vec<Pending>,
     /// The next offset to send.
     next: u32,
-    /// The last `next_offset` the node reported.
-    reported: u32,
     /// The highest `next_offset` the node has reported since its `begin`; a status below it is
     /// stale.
-    high: u32,
+    reported: u32,
     /// Whether the node has accepted this session, so a failure owes it an abort.
     accepted: bool,
     /// Whether a failure has an abort to send.
     abort_owed: bool,
     /// Whether this session has sent its commit, before which no heartbeat is the new image.
     committed: bool,
+    /// Whether the P4's cache holds the image, before which no chunk goes.
+    cached: bool,
+    /// Whether a `begin` goes to `slot` on the next tick, before any heartbeat.
+    begin_due: bool,
     /// When the status the host is waiting on is overdue.
     wait_status: Option<Instant>,
     send_failures: u32,
@@ -327,23 +401,24 @@ impl OtaSession {
     /// An update of `node`, running `from`, to `image`.
     ///
     /// `session` names it on the wire; the caller picks one a restarted host is unlikely to
-    /// repeat. `first_id` is the first `SendEspNow` id it uses, so a driver running several
-    /// in turn keeps late results of one from matching another ([`Self::next_id`]).
+    /// repeat. `ids` are the ids it gives its records, which no other session on the link
+    /// shares. Its chunks wait for [`OtaEvent::Cached`].
     #[must_use]
     pub fn new(
         node: Mac,
         from: Version,
         image: &OtaImage,
         session: u8,
-        first_id: u16,
+        ids: Ids,
         now: Now,
     ) -> Self {
         // An image is at most an app slot, under 2 MB.
         let len = u32::try_from(image.bytes.len()).unwrap_or(u32::MAX);
         Self {
             node,
-            bytes: Arc::clone(&image.bytes),
-            begin: OtaBeginMsg {
+            slot: None,
+            tag: image_tag(&image.sha256),
+            begin: UpdateBegin {
                 session,
                 len,
                 sha256: image.sha256,
@@ -353,14 +428,15 @@ impl OtaSession {
             from,
             phase: Phase::Begin,
             phase_since: now.mono,
-            next_id: first_id,
-            pending: None,
+            ids,
+            pending: Vec::new(),
             next: 0,
             reported: 0,
-            high: 0,
             accepted: false,
             abort_owed: false,
             committed: false,
+            cached: false,
+            begin_due: false,
             wait_status: None,
             send_failures: 0,
             status_timeouts: 0,
@@ -370,17 +446,26 @@ impl OtaSession {
         }
     }
 
-    /// Confirm a node already running `version` on trial, as an update ends: an
-    /// [`OtaConfirmMsg`] on each heartbeat until one without `trial` follows an acked confirm.
+    /// The node was last heard in `slot`, so the first `begin` goes there on the next
+    /// [`OtaEvent::Tick`] rather than on the node's next heartbeat.
     #[must_use]
-    pub fn confirm_trial(node: Mac, version: Version, first_id: u16, now: Now) -> Self {
+    pub const fn with_slot(mut self, slot: Slot) -> Self {
+        self.slot = Some(slot);
+        self.begin_due = true;
+        self
+    }
+
+    /// Confirm a node already running `version` on trial, as an update ends: an
+    /// [`UpdateConfirm`] on each heartbeat until one without `trial` follows a delivered confirm.
+    #[must_use]
+    pub fn confirm_trial(node: Mac, version: Version, ids: Ids, now: Now) -> Self {
         let image = OtaImage {
             bytes: Arc::from(Vec::new()),
             sha256: [0; 32],
             version,
-            board: wartui_proto::air::Board::Unknown(0),
+            board: wartui_proto::bus::Board::Unknown(0),
         };
-        let mut session = Self::new(node, version, &image, 0, first_id, now);
+        let mut session = Self::new(node, version, &image, 0, ids, now);
         session.committed = true;
         session.phase = Phase::AwaitConfirm;
         session
@@ -394,23 +479,43 @@ impl OtaSession {
         }
         let now = now.mono;
         match event {
-            OtaEvent::SendResult { id, status } => self.on_send_result(now, id, status, &mut out),
-            OtaEvent::Rx { src, payload } if src == self.node => {
-                if let Ok(caps) = Capabilities::decode_prefix(payload) {
-                    self.on_heartbeat(now, caps, &mut out);
-                } else if let Ok(status) = OtaStatusMsg::decode(payload)
-                    && status.session == self.begin.session
-                {
-                    self.on_status(now, status, &mut out);
+            OtaEvent::Delivery { id, delivered } => {
+                self.on_delivery(now, id, delivered, &mut out);
+            }
+            OtaEvent::FromNode { slot, kind, body } => match UpType::from_u8(kind) {
+                // A heartbeat of any layout opens with the prefix and the MAC.
+                Some(UpType::Heartbeat) => {
+                    if let Ok((caps, mac)) = Heartbeat::identity(body)
+                        && mac == self.node
+                    {
+                        self.slot = Some(slot);
+                        self.on_heartbeat(now, caps, &mut out);
+                    }
+                }
+                Some(UpType::UpdateStatus) if self.slot == Some(slot) => {
+                    if let Ok(status) = UpdateStatus::decode(body)
+                        && status.session == self.begin.session
+                    {
+                        self.on_status(now, status, &mut out);
+                    }
+                }
+                _ => {}
+            },
+            OtaEvent::Tick => self.on_tick(now, &mut out),
+            OtaEvent::Cached => {
+                self.cached = true;
+                self.send_next(now, &mut out);
+            }
+            OtaEvent::NoImage { id } => {
+                if self.pending.iter().any(|p| p.id == id && matches!(p.frame, Sent::Chunk(_))) {
+                    self.fail(now, Failure::CacheLost);
                 }
             }
-            OtaEvent::Rx { .. } => {}
-            OtaEvent::Tick => self.on_tick(now, &mut out),
         }
         if self.abort_owed {
             self.abort_owed = false;
-            let abort = OtaAbortMsg { session: self.begin.session }.encode();
-            self.send(now, Sent::Abort, &abort, &mut out);
+            let abort = UpdateAbort { session: self.begin.session }.encode();
+            self.send(now, Sent::Abort, DownType::UpdateAbort, &abort, &mut out);
         }
         out
     }
@@ -422,8 +527,8 @@ impl OtaSession {
             return out;
         }
         if matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing) {
-            let abort = OtaAbortMsg { session: self.begin.session }.encode();
-            self.send(now.mono, Sent::Abort, &abort, &mut out);
+            let abort = UpdateAbort { session: self.begin.session }.encode();
+            self.send(now.mono, Sent::Abort, DownType::UpdateAbort, &abort, &mut out);
         }
         self.fail(now.mono, Failure::Cancelled);
         out
@@ -451,12 +556,6 @@ impl OtaSession {
         self.node
     }
 
-    /// The first `SendEspNow` id this session has not used.
-    #[must_use]
-    pub const fn next_id(&self) -> u16 {
-        self.next_id
-    }
-
     /// What a heartbeat says of the new image: `Some(true)` for it on trial, `Some(false)` for it
     /// confirmed, `None` for anything else. The module docs give the rule.
     fn new_image(&self, caps: Capabilities) -> Option<bool> {
@@ -482,10 +581,7 @@ impl OtaSession {
             // Confirmed: by our confirm, or in `Committing` and `AwaitReboot` by the commits
             // resent after a lost `Verified`, which the new image heard.
             (Some(false), _) => self.finish(now, Outcome::Done(new)),
-            (None, Phase::Begin) => {
-                let begin = self.begin.encode();
-                self.send(now, Sent::Begin, &begin, out);
-            }
+            (None, Phase::Begin) => self.send_begin(now, out),
             (None, Phase::Streaming | Phase::Committing) => {}
             (None, Phase::AwaitReboot) => {
                 if now.duration_since(self.phase_since) >= REBOOT_GRACE {
@@ -493,7 +589,7 @@ impl OtaSession {
                 }
             }
             // The image's version without `trial`, from a node whose old image carries it too,
-            // with no confirm acked: the confirm's ack was lost, so it goes again.
+            // with no confirm delivered: the confirm's delivery was lost, so it goes again.
             (None, Phase::AwaitConfirm) if caps.version == new && !caps.trial => {
                 self.send_confirm(now, out);
             }
@@ -501,57 +597,60 @@ impl OtaSession {
         }
     }
 
-    fn on_status(&mut self, now: Instant, status: OtaStatusMsg, out: &mut Vec<HostToBridge>) {
+    fn on_status(&mut self, now: Instant, status: UpdateStatus, out: &mut Vec<HostToBridge>) {
         let len = self.begin.len;
-        if matches!(status.state, OtaState::Receiving | OtaState::Verified) {
+        if matches!(status.state, UpdateState::Receiving | UpdateState::Verified) {
             self.accepted = true;
         }
         match (self.phase, status.state) {
-            (Phase::AwaitReboot, OtaState::FlashError) => self.fail(now, Failure::SwitchFailed),
+            (Phase::AwaitReboot, UpdateState::FlashError) => self.fail(now, Failure::SwitchFailed),
             (Phase::AwaitReboot | Phase::AwaitConfirm | Phase::Done | Phase::Failed, _) => {}
-            (Phase::Begin, OtaState::Idle) => {}
-            (Phase::Begin, OtaState::FlashError) => self.fail(now, Failure::Refused),
-            (_, OtaState::WrongBoard) => self.fail(now, Failure::WrongBoard),
-            (_, OtaState::TooLarge) => self.fail(now, Failure::TooLarge),
-            (_, OtaState::FlashError) => self.fail(now, Failure::FlashError),
-            (_, OtaState::HashMismatch) => self.fail(now, Failure::HashMismatch),
-            (_, OtaState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
-            (_, OtaState::Verified) => self.enter(now, Phase::AwaitReboot),
-            (Phase::Streaming | Phase::Committing, OtaState::Idle) => self.restart(now),
-            (Phase::Begin, OtaState::Receiving) => {
-                // A `begin` answers from where the node stands, which a reboot sets back to 0.
-                self.high = 0;
+            (Phase::Begin, UpdateState::Idle) => {}
+            (Phase::Begin, UpdateState::FlashError) => self.fail(now, Failure::Refused),
+            (_, UpdateState::WrongBoard) => self.fail(now, Failure::WrongBoard),
+            (_, UpdateState::TooLarge) => self.fail(now, Failure::TooLarge),
+            (_, UpdateState::FlashError) => self.fail(now, Failure::FlashError),
+            (_, UpdateState::HashMismatch) => self.fail(now, Failure::HashMismatch),
+            (_, UpdateState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
+            (_, UpdateState::Verified) => self.enter(now, Phase::AwaitReboot),
+            (Phase::Streaming | Phase::Committing, UpdateState::Idle) => self.restart(now),
+            // A `begin` answers from where the node stands, which a reboot sets back to 0.
+            (Phase::Begin, UpdateState::Receiving) => {
                 self.stream_from(now, status.next_offset, out);
             }
             // Overtaken by a newer status.
-            (Phase::Streaming | Phase::Committing, OtaState::Receiving)
-                if status.next_offset < self.high => {}
+            (Phase::Streaming | Phase::Committing, UpdateState::Receiving)
+                if status.next_offset < self.reported => {}
             // The last sector's own status, overtaken by the commit.
-            (Phase::Committing, OtaState::Receiving) if status.next_offset >= len => {}
-            (Phase::Committing, OtaState::Receiving) => {
+            (Phase::Committing, UpdateState::Receiving) if status.next_offset >= len => {}
+            (Phase::Committing, UpdateState::Receiving) => {
                 self.stream_from(now, status.next_offset, out);
             }
-            (Phase::Streaming, OtaState::Receiving) => {
-                self.reported = status.next_offset.min(len);
-                self.high = self.reported;
-                self.next = self.reported;
-                self.wait_status = None;
-                self.status_timeouts = 0;
-                self.send_next(now, out);
+            (Phase::Streaming, UpdateState::Receiving) => {
+                self.on_progress(now, status.next_offset.min(len), out);
             }
         }
     }
 
-    fn on_send_result(
-        &mut self,
-        now: Instant,
-        id: u16,
-        status: SendStatus,
-        out: &mut Vec<HostToBridge>,
-    ) {
-        let Some(pending) = self.pending.filter(|p| p.id == id) else { return };
-        self.pending = None;
-        if status == SendStatus::AckOk {
+    /// The node holds everything before `offset`, by a status no older than the last. Sending
+    /// moves forward to it, never back: the module docs give the rule.
+    fn on_progress(&mut self, now: Instant, offset: u32, out: &mut Vec<HostToBridge>) {
+        // No further than the last: the answer to a duplicate.
+        if offset <= self.reported {
+            return;
+        }
+        self.send_failures = 0;
+        self.reported = offset;
+        self.wait_status = None;
+        self.status_timeouts = 0;
+        self.next = self.next.max(offset);
+        self.send_next(now, out);
+    }
+
+    fn on_delivery(&mut self, now: Instant, id: u16, delivered: bool, out: &mut Vec<HostToBridge>) {
+        let Some(at) = self.pending.iter().position(|p| p.id == id) else { return };
+        let pending = self.pending.remove(at);
+        if delivered {
             self.on_acked(now, pending.frame, out);
         } else {
             self.on_unacked(now, pending.frame, out);
@@ -560,19 +659,8 @@ impl OtaSession {
 
     fn on_acked(&mut self, now: Instant, frame: Sent, out: &mut Vec<HostToBridge>) {
         match frame {
-            Sent::Chunk(offset) if self.phase == Phase::Streaming => {
-                self.send_failures = 0;
-                // A status may have moved the host while the chunk was in flight; then it is
-                // the status's offset that counts.
-                if offset == self.next {
-                    let end = offset + self.chunk_len(offset);
-                    self.next = end;
-                    if end.is_multiple_of(SECTOR as u32) && end < self.begin.len {
-                        self.wait_status = Some(now + STATUS_TIMEOUT);
-                    }
-                }
-                self.send_next(now, out);
-            }
+            // Delivery is not progress: a chunk delivered past a lost one is dropped by the node.
+            Sent::Chunk(_) if self.phase == Phase::Streaming => self.send_next(now, out),
             Sent::Commit => self.send_failures = 0,
             Sent::Confirm => self.confirm_acked = true,
             Sent::Begin | Sent::Chunk(_) | Sent::Abort => {}
@@ -581,8 +669,12 @@ impl OtaSession {
 
     fn on_unacked(&mut self, now: Instant, frame: Sent, out: &mut Vec<HostToBridge>) {
         match frame {
-            Sent::Chunk(_) if self.phase == Phase::Streaming => {
+            Sent::Chunk(offset) if self.phase == Phase::Streaming => {
                 if self.note_send_failure(now) {
+                    // Unless a status has since said the node holds it.
+                    if offset >= self.reported && offset < self.next {
+                        self.next = offset;
+                    }
                     self.send_next(now, out);
                 }
             }
@@ -596,7 +688,7 @@ impl OtaSession {
         }
     }
 
-    /// Count an unacked send, returning to the `begin` past [`MAX_SEND_FAILURES`]. Whether to
+    /// Count an undelivered send, returning to the `begin` past [`MAX_SEND_FAILURES`]. Whether to
     /// retry.
     fn note_send_failure(&mut self, now: Instant) -> bool {
         self.send_failures += 1;
@@ -608,15 +700,16 @@ impl OtaSession {
     }
 
     fn on_tick(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        if let Some(pending) = self.pending
-            && now.duration_since(pending.sent) >= SEND_TIMEOUT
+        while let Some(at) =
+            self.pending.iter().position(|p| now.duration_since(p.sent) >= SEND_TIMEOUT)
         {
-            self.pending = None;
+            let pending = self.pending.remove(at);
             self.on_unacked(now, pending.frame, out);
         }
         let elapsed = now.duration_since(self.phase_since);
         match self.phase {
             Phase::Begin if elapsed >= BEGIN_TIMEOUT => self.fail(now, Failure::NoAnswer),
+            Phase::Begin if self.begin_due => self.send_begin(now, out),
             Phase::Streaming | Phase::Committing => {
                 if !self.wait_status.is_some_and(|deadline| now >= deadline) {
                     return;
@@ -628,6 +721,7 @@ impl OtaSession {
                 } else if self.phase == Phase::Committing {
                     self.send_commit(now, out);
                 } else {
+                    // The silence outlasted anything in flight.
                     self.next = self.reported;
                     self.send_next(now, out);
                 }
@@ -644,59 +738,92 @@ impl OtaSession {
     fn stream_from(&mut self, now: Instant, offset: u32, out: &mut Vec<HostToBridge>) {
         self.enter(now, Phase::Streaming);
         self.reported = offset.min(self.begin.len);
-        self.high = self.reported;
         self.next = self.reported;
         self.send_next(now, out);
     }
 
-    /// Send the chunk at `next`, or the commit after the last one, unless a chunk is in flight
-    /// or a sector's status is awaited.
+    /// Send chunks from `next` until [`CHUNKS_IN_FLIGHT`] are out or the next starts a sector
+    /// the node has not reached, or the commit once the last chunk is delivered. With nothing out
+    /// and nothing to send, a status is awaited, for [`STATUS_TIMEOUT`]. Nothing goes, and nothing
+    /// is awaited, until the image is cached.
     fn send_next(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        if self.phase != Phase::Streaming || self.wait_status.is_some() {
+        if self.phase != Phase::Streaming || !self.cached {
             return;
         }
-        if self.pending.is_some_and(|p| matches!(p.frame, Sent::Chunk(_))) {
-            return;
+        while self.chunks_out() < CHUNKS_IN_FLIGHT {
+            let offset = self.next;
+            if offset >= self.begin.len {
+                if self.chunks_out() == 0 {
+                    self.enter(now, Phase::Committing);
+                    self.send_commit(now, out);
+                }
+                return;
+            }
+            if offset.is_multiple_of(SECTOR as u32) && self.reported < offset {
+                break;
+            }
+            let Some(slot) = self.slot else { return };
+            let len = self.chunk_len(offset);
+            let id = self.ids.take();
+            self.pending.push(Pending { id, sent: now, frame: Sent::Chunk(offset) });
+            // `chunk_len` is at most `UPDATE_CHUNK`, 1024.
+            #[allow(clippy::cast_possible_truncation)]
+            let len16 = len as u16;
+            let (image, session) = (self.tag, self.begin.session);
+            out.push(HostToBridge::ToNodeChunk { slot, id, image, session, offset, len: len16 });
+            self.next = offset + len;
         }
-        if self.next >= self.begin.len {
-            self.enter(now, Phase::Committing);
-            self.send_commit(now, out);
-            return;
+        if self.chunks_out() == 0 && self.wait_status.is_none() {
+            self.wait_status = Some(now + STATUS_TIMEOUT);
         }
-        let offset = self.next;
-        let start = offset as usize;
-        let data = &self.bytes[start..start + self.chunk_len(offset) as usize];
-        let msg = OtaChunkMsg { session: self.begin.session, offset, data };
-        let mut buf = [0u8; OTA_CHUNK_MSG_MAX];
-        let Some(n) = msg.encode_into(&mut buf) else { return };
-        self.send(now, Sent::Chunk(offset), &buf[..n], out);
+    }
+
+    fn chunks_out(&self) -> usize {
+        self.pending.iter().filter(|p| matches!(p.frame, Sent::Chunk(_))).count()
+    }
+
+    fn send_begin(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
+        self.begin_due = false;
+        let begin = self.begin.encode();
+        self.send(now, Sent::Begin, DownType::UpdateBegin, &begin, out);
     }
 
     fn send_commit(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        let commit = OtaCommitMsg { session: self.begin.session }.encode();
+        let commit = UpdateCommit { session: self.begin.session }.encode();
         self.committed = true;
-        self.send(now, Sent::Commit, &commit, out);
+        self.send(now, Sent::Commit, DownType::UpdateCommit, &commit, out);
         self.wait_status = Some(now + STATUS_TIMEOUT);
     }
 
     fn send_confirm(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
-        self.send(now, Sent::Confirm, &OtaConfirmMsg.encode(), out);
+        self.send(now, Sent::Confirm, DownType::UpdateConfirm, &UpdateConfirm.encode(), out);
     }
 
-    fn send(&mut self, now: Instant, frame: Sent, bytes: &[u8], out: &mut Vec<HostToBridge>) {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.pending = Some(Pending { id, sent: now, frame });
-        // Every update frame fits ESP-NOW v2's payload (`air::ota`'s assertions).
-        let payload = SendPayload::from_slice(bytes).unwrap_or_default();
-        out.push(HostToBridge::SendEspNow { id, dst: self.node, ensure_peer: true, payload });
+    /// Send one record other than a chunk to the node's slot, which takes the place of the last
+    /// such record awaiting its answer. Nothing goes before a heartbeat or [`Self::with_slot`]
+    /// has named the slot.
+    fn send(
+        &mut self,
+        now: Instant,
+        frame: Sent,
+        kind: DownType,
+        bytes: &[u8],
+        out: &mut Vec<HostToBridge>,
+    ) {
+        let Some(slot) = self.slot else { return };
+        let id = self.ids.take();
+        self.pending.retain(|p| matches!(p.frame, Sent::Chunk(_)));
+        self.pending.push(Pending { id, sent: now, frame });
+        // Every update body fits `MAX_NODE_DOWN` (`bus::update`'s assertions).
+        let body = ToNodeBody::from_slice(bytes).unwrap_or_default();
+        out.push(HostToBridge::ToNode { slot, id, kind: kind.as_u8(), body });
     }
 
-    /// Bytes in the chunk at `offset`: [`OTA_CHUNK`], or what is left of the image.
+    /// Bytes in the chunk at `offset`: [`UPDATE_CHUNK`], or what is left of the image.
     fn chunk_len(&self, offset: u32) -> u32 {
-        // `OTA_CHUNK` is 1024.
+        // `UPDATE_CHUNK` is 1024.
         #[allow(clippy::cast_possible_truncation)]
-        let full = OTA_CHUNK as u32;
+        let full = UPDATE_CHUNK as u32;
         full.min(self.begin.len - offset)
     }
 
@@ -713,7 +840,7 @@ impl OtaSession {
     fn enter(&mut self, now: Instant, phase: Phase) {
         self.phase = phase;
         self.phase_since = now;
-        self.pending = None;
+        self.pending.clear();
         self.wait_status = None;
         self.send_failures = 0;
         self.status_timeouts = 0;
@@ -732,5 +859,26 @@ impl OtaSession {
             && failure != Failure::Cancelled
             && matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing);
         self.finish(now, Outcome::Failed(failure));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_stay_in_their_own_class_when_they_wrap() {
+        for count in [3, 10] {
+            for index in 0..count {
+                let mut ids = Ids::of(index, count);
+                let class = (index + 1) % count;
+                // Past three wraps of the `u16`.
+                for _ in 0..3 * (usize::from(u16::MAX) / count + 1) {
+                    let id = ids.take();
+                    assert_ne!(id, 0, "session {index} of {count}");
+                    assert_eq!(usize::from(id) % count, class, "session {index} of {count}");
+                }
+            }
+        }
     }
 }

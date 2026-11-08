@@ -52,7 +52,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert_eq!(snapshot.nodes.len(), 3, "every simulated node should have been seen");
     assert!(snapshot.counters.observations > 0, "and should have reported something");
     assert_eq!(snapshot.counters.undecodable, 0, "the decoder agrees with the simulator");
-    assert_eq!(snapshot.counters.undecodable, 0);
+    assert_eq!(snapshot.counters.unknown_slot, 0, "every node heartbeats before it reports");
     assert_eq!(snapshot.store.dropped, 0, "nothing should be dropped at this rate");
 
     let conn = open_readonly(&path).expect("reopening the capture");
@@ -69,7 +69,8 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     let settings: i64 = conn
         .query_row("SELECT COUNT(*) FROM kv WHERE k LIKE 'capture.settings.%'", [], |r| r.get(0))
         .expect("counting settings history");
-    assert_eq!(settings, 1, "runtime records initial settings, not every event or tick");
+    // The initial row has no pool, and the bridge's first `Status` brings one.
+    assert_eq!(settings, 2, "runtime records changes, not every event or tick");
 
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, &ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
@@ -95,7 +96,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_records_settings_history_when_operator_changes_power_and_pool() {
+async fn drive_records_settings_history_when_operator_changes_pool_and_remembering() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("settings.db");
     let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
@@ -105,17 +106,27 @@ async fn drive_records_settings_history_when_operator_changes_power_and_pool() {
     let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
         .expect("store");
     let engine = FleetEngine::new(EngineConfig::default(), started);
-    let (snapshot_tx, _snapshot_rx) =
+    let (snapshot_tx, mut snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    command_tx.send(Command::SetTxPower { nodes: 40, bridge: 60 }).await.expect("power command");
-    command_tx.send(Command::SetTxPower { nodes: 40, bridge: 60 }).await.expect("same power");
+    // The bridge's first `Status`, so the change below is told apart from it.
+    snapshot_rx.wait_for(|s| s.pool.is_some()).await.expect("the bridge reports a pool");
     command_tx
         .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
         .await
         .expect("pool command");
+    command_tx
+        .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
+        .await
+        .expect("same pool");
+    // The bridge's answer, so the pool and remembering change in separate rows.
+    snapshot_rx
+        .wait_for(|s| s.pool == Some(wartui_proto::plan::ChannelPool::Us))
+        .await
+        .expect("the bridge takes the pool");
+    command_tx.send(Command::RememberBle { on: false }).await.expect("remember command");
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop_tx.send(()).expect("stop");
     assert_eq!(capture.await.expect("capture").dropped, 0);
@@ -128,10 +139,11 @@ async fn drive_records_settings_history_when_operator_changes_power_and_pool() {
         .expect("rows")
         .collect::<Result<Vec<_>, _>>()
         .expect("settings strings");
-    assert_eq!(values.len(), 3, "initial settings and two changes, not the repeated request");
-    assert!(values[0].contains("nodes_tx_power_quarter_dbm=8;"));
-    assert!(values[1].contains("nodes_tx_power_quarter_dbm=40;bridge_tx_power_quarter_dbm=60;"));
-    assert!(values[2].contains("pool=us;"));
+    assert_eq!(values.len(), 4, "initial settings and three changes, not the repeated request");
+    assert!(values[0].contains("pool=none;"), "before the bridge's first `Status`");
+    assert!(values[1].contains("pool=all;"));
+    assert!(values[2].contains("pool=us;") && values[2].contains("remember_ble=true;"));
+    assert!(values[3].contains("pool=us;") && values[3].contains("remember_ble=false;"));
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written
@@ -251,13 +263,13 @@ async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
     assert_eq!(rows, 4, "one at the start, one every 5 s and one at shutdown");
     let last: (i64, i64, i64) = conn
         .query_row(
-            "SELECT frames, duplicate_batches, admin_windows_missed
+            "SELECT frames, duplicate_batches, incompatible
              FROM host_status ORDER BY id DESC LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .expect("the last host row");
-    let expected = (counters.frames, counters.duplicate_batches, counters.admin_windows_missed);
+    let expected = (counters.frames, counters.duplicate_batches, counters.incompatible);
     assert_eq!(last, (expected.0 as i64, expected.1 as i64, expected.2 as i64));
     assert!(counters.frames > 0, "the fleet was heard");
 

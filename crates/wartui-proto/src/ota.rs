@@ -1,25 +1,29 @@
-//! The node's half of an over-the-air update: a state machine that takes the update
-//! frames ([`crate::air::OtaBeginMsg`] and the rest) and writes the image into the spare
-//! app slot through a [`SectorSink`].
+//! The node's half of an update: a state machine that takes the update messages
+//! ([`crate::bus::UpdateBegin`] and the rest) and writes the image into the spare app slot
+//! through a [`SectorSink`].
 //!
 //! It decides nothing about versions and touches neither `otadata` nor the reset. A
 //! downgrade is the host's call, and switching slots is the firmware's once
 //! [`Receiver::is_verified`] says the image is whole.
 //!
-//! **Flow control rides on `next_offset`, not on MAC acks.** An ack proves the frame reached
-//! the radio, not that the node read it. The node's receive queue is 10 deep and a flash
-//! write holds the loop that drains it, so acked chunks are dropped while a sector is
-//! written. Every [`OtaStatusMsg`] names the next offset the node wants. The node reports
-//! one on each sector flush, every four chunks, which gives the host a window to pace
-//! itself by. It reports one on each duplicate or gap too, so the host goes back to the
-//! first byte the node lacks rather than guessing which chunks fell out of the queue.
+//! **Flow control rides on `next_offset`, not on the transport's acks.** An ack proves a
+//! chunk reached the node, not that the receiver took it: a resent chunk arrives twice, and a
+//! chunk after a lost one arrives out of order. Every [`UpdateStatus`] names the next offset
+//! the node wants. The node reports one on each sector flush, every four chunks, which gives
+//! the host a window to pace itself by. It reports one on each duplicate or gap too, so the
+//! host goes back to the first byte the node lacks rather than guessing.
 //!
-//! **Erase is lazy**, one sector immediately before that sector's write. Erasing the whole
-//! slot at `begin` would stall the node for seconds while the host waits on a status, and
-//! erases sectors a shorter image never reaches.
+//! **Erase is lazy**, immediately before the first write it clears. Erasing the whole slot at
+//! `begin` would stall the node for seconds while the host waits on a status, and erases
+//! sectors a shorter image never reaches. A node takes nothing over its bus while its flash
+//! erases, so its sink erases a [`BLOCK`] at a time ([`SectorSink::erase_unit`]). On the
+//! carrier's nodes, each sector's erase and write leaves a node unreachable on the bus for about
+//! 43 ms (inferred from the P4's counters in a ten-node update), and one block erase for about
+//! 150–170 ms (inferred from update timings; the longest seen in a ten-node update was 243 ms).
+//! A unit's erase may run past the image's end, never past the slot's last whole sector.
 //!
 //! **A `begin` identical to a session receiving or verified changes nothing.** The host
-//! re-sends [`OtaBeginMsg`] when the status answering the first is lost, and restarting
+//! re-sends [`UpdateBegin`] when the status answering the first is lost, and restarting
 //! would throw away chunks the node already holds. After a hash mismatch or a flash error
 //! there is nothing to keep, so an identical `begin` starts afresh. A host that restarts
 //! and reuses its session byte is then never stuck behind a failure.
@@ -42,13 +46,16 @@ pub mod trial;
 
 use sha2::{Digest, Sha256};
 
-use crate::air::{
-    Board, OTA_CHUNK, OtaAbortMsg, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg,
-    Version,
+use crate::bus::{
+    Board, UPDATE_CHUNK, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState,
+    UpdateStatus, Version,
 };
 
-/// Bytes in one flash sector: the unit erased, and the unit [`Receiver`] buffers.
+/// Bytes in one flash sector: the default erase unit, and the unit [`Receiver`] buffers.
 pub const SECTOR: usize = 4096;
+
+/// Bytes in one flash block: the node's [`SectorSink::erase_unit`].
+pub const BLOCK: usize = 65536;
 
 /// Unconfirmed boots of a new image before it is rolled back, on a node or either half of a P4
 /// bridge.
@@ -59,7 +66,8 @@ pub const SECTOR: usize = 4096;
 /// node, the P4's reset of its C6 (`crate::split`), and the P4's own trial watchdog.
 pub const TRIAL_BOOTS: u32 = 3;
 
-const _: () = assert!(SECTOR.is_multiple_of(OTA_CHUNK));
+const _: () = assert!(SECTOR.is_multiple_of(UPDATE_CHUNK));
+const _: () = assert!(BLOCK.is_multiple_of(SECTOR));
 
 /// The flash slot an image is written into.
 pub trait SectorSink {
@@ -67,11 +75,15 @@ pub trait SectorSink {
     type Error;
     /// Bytes the target slot holds.
     fn capacity(&self) -> u32;
-    /// Erase the [`SECTOR`]-byte sector starting at `offset`, a multiple of [`SECTOR`].
+    /// Bytes the receiver erases at a time, a nonzero multiple of [`SECTOR`].
+    fn erase_unit(&self) -> u32 {
+        SECTOR as u32
+    }
+    /// Erase `[offset, offset + len)`. Both are multiples of [`SECTOR`].
     ///
     /// # Errors
     /// Whatever the flash reports.
-    fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error>;
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), Self::Error>;
     /// Write `data` at `offset`. `offset` and `data.len()` are multiples of 4.
     ///
     /// # Errors
@@ -89,19 +101,19 @@ enum Phase {
 }
 
 impl Phase {
-    const fn state(self) -> OtaState {
+    const fn state(self) -> UpdateState {
         match self {
-            Self::Receiving => OtaState::Receiving,
-            Self::Verified => OtaState::Verified,
-            Self::HashMismatch => OtaState::HashMismatch,
-            Self::FlashError => OtaState::FlashError,
+            Self::Receiving => UpdateState::Receiving,
+            Self::Verified => UpdateState::Verified,
+            Self::HashMismatch => UpdateState::HashMismatch,
+            Self::FlashError => UpdateState::FlashError,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 struct Session {
-    begin: OtaBeginMsg,
+    begin: UpdateBegin,
     next_offset: u32,
     phase: Phase,
     hasher: Sha256,
@@ -127,17 +139,16 @@ impl Receiver {
 
     /// Open a session, or answer for the one already open.
     ///
-    /// Refused with [`OtaState::WrongBoard`] or [`OtaState::TooLarge`] (an empty image too,
+    /// Refused with [`UpdateState::WrongBoard`] or [`UpdateState::TooLarge`] (an empty image too,
     /// or one past the slot's last whole sector), leaving any current session as it is. A
     /// `begin` identical to a session receiving or verified returns its status and keeps its
     /// progress. Any other starts afresh.
-    pub fn begin<S: SectorSink>(&mut self, msg: &OtaBeginMsg, sink: &S) -> OtaStatusMsg {
+    pub fn begin<S: SectorSink>(&mut self, msg: &UpdateBegin, sink: &S) -> UpdateStatus {
         if msg.board != self.board {
-            return refused(msg.session, OtaState::WrongBoard);
+            return refused(msg.session, UpdateState::WrongBoard);
         }
-        let whole_sectors = sink.capacity() / SECTOR as u32 * SECTOR as u32;
-        if msg.len == 0 || msg.len > whole_sectors {
-            return refused(msg.session, OtaState::TooLarge);
+        if msg.len == 0 || msg.len > whole_sectors(sink) {
+            return refused(msg.session, UpdateState::TooLarge);
         }
         if let Some(session) = &self.session
             && session.begin == *msg
@@ -156,15 +167,15 @@ impl Receiver {
 
     /// Take a chunk.
     ///
-    /// Accepted only at `next_offset`, and only as a full [`OTA_CHUNK`] or as the image's
+    /// Accepted only at `next_offset`, and only as a full [`UPDATE_CHUNK`] or as the image's
     /// last bytes. Reports a status when a sector is written, and when the chunk is not
     /// accepted: a duplicate, a gap, a chunk of the wrong length, or one for a session this
-    /// receiver does not hold ([`OtaState::Idle`]).
+    /// receiver does not hold ([`UpdateState::Idle`]).
     pub fn chunk<S: SectorSink>(
         &mut self,
-        msg: &OtaChunkMsg<'_>,
+        msg: &UpdateChunk<'_>,
         sink: &mut S,
-    ) -> Option<OtaStatusMsg> {
+    ) -> Option<UpdateStatus> {
         let Some(session) = self.session.as_mut().filter(|s| s.begin.session == msg.session) else {
             return Some(idle(msg.session));
         };
@@ -172,14 +183,14 @@ impl Receiver {
             return Some(self.status());
         }
         let remaining = session.begin.len - session.next_offset;
-        let want = OTA_CHUNK.min(remaining as usize);
+        let want = UPDATE_CHUNK.min(remaining as usize);
         if msg.data.len() != want {
             return Some(self.status());
         }
         let at = session.next_offset as usize % SECTOR;
         self.buf[at..at + want].copy_from_slice(msg.data);
         session.hasher.update(msg.data);
-        // `want` is at most `OTA_CHUNK`.
+        // `want` is at most `UPDATE_CHUNK`.
         #[allow(clippy::cast_possible_truncation)]
         {
             session.next_offset += want as u32;
@@ -196,11 +207,11 @@ impl Receiver {
 
     /// Check the image.
     ///
-    /// With bytes still missing, reports [`OtaState::Receiving`] and the first of them.
-    /// Otherwise writes the last partial sector and reports [`OtaState::Verified`] or
-    /// [`OtaState::HashMismatch`]. Once the session is past receiving, reports where it
+    /// With bytes still missing, reports [`UpdateState::Receiving`] and the first of them.
+    /// Otherwise writes the last partial sector and reports [`UpdateState::Verified`] or
+    /// [`UpdateState::HashMismatch`]. Once the session is past receiving, reports where it
     /// ended.
-    pub fn commit<S: SectorSink>(&mut self, msg: &OtaCommitMsg, sink: &mut S) -> OtaStatusMsg {
+    pub fn commit<S: SectorSink>(&mut self, msg: &UpdateCommit, sink: &mut S) -> UpdateStatus {
         let Some(session) = self.session.as_mut().filter(|s| s.begin.session == msg.session) else {
             return idle(msg.session);
         };
@@ -221,8 +232,8 @@ impl Receiver {
         self.status()
     }
 
-    /// Drop the session if `msg` names it, and report [`OtaState::Idle`].
-    pub fn abort(&mut self, msg: &OtaAbortMsg) -> OtaStatusMsg {
+    /// Drop the session if `msg` names it, and report [`UpdateState::Idle`].
+    pub fn abort(&mut self, msg: &UpdateAbort) -> UpdateStatus {
         if self.session.as_ref().is_some_and(|s| s.begin.session == msg.session) {
             self.session = None;
         }
@@ -234,11 +245,11 @@ impl Receiver {
         self.session = None;
     }
 
-    /// Where the current session stands, or [`OtaState::Idle`] for session 0 with none.
+    /// Where the current session stands, or [`UpdateState::Idle`] for session 0 with none.
     #[must_use]
-    pub fn status(&self) -> OtaStatusMsg {
+    pub fn status(&self) -> UpdateStatus {
         match &self.session {
-            Some(session) => OtaStatusMsg {
+            Some(session) => UpdateStatus {
                 session: session.begin.session,
                 state: session.phase.state(),
                 next_offset: session.next_offset,
@@ -278,16 +289,27 @@ impl Receiver {
     }
 }
 
-const fn idle(session: u8) -> OtaStatusMsg {
-    OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }
+const fn idle(session: u8) -> UpdateStatus {
+    UpdateStatus { session, state: UpdateState::Idle, next_offset: 0 }
 }
 
-const fn refused(session: u8, state: OtaState) -> OtaStatusMsg {
-    OtaStatusMsg { session, state, next_offset: 0 }
+const fn refused(session: u8, state: UpdateState) -> UpdateStatus {
+    UpdateStatus { session, state, next_offset: 0 }
 }
 
-/// Erase the sector at `start` and write the first `fill` bytes of `buf` into it, padded
-/// with 0xFF to a multiple of 4. The padding is what erased flash holds anyway.
+/// Bytes from the slot's start to the end of its last whole sector: as far as an image or an
+/// erase reaches.
+fn whole_sectors<S: SectorSink>(sink: &S) -> u32 {
+    sink.capacity() / SECTOR as u32 * SECTOR as u32
+}
+
+/// Write the first `fill` bytes of `buf` into the sector at `start`, padded with 0xFF to a
+/// multiple of 4. The padding is what erased flash holds anyway.
+///
+/// A sector that starts an erase unit erases first, up to the next unit boundary or the slot's
+/// last whole sector, whichever comes first. A session flushes each sector once, in order, so
+/// this erases every unit it writes exactly once: a new session starts at offset 0, and one kept
+/// by an identical `begin` resumes after the sectors it already flushed.
 fn flush<S: SectorSink>(
     sink: &mut S,
     start: u32,
@@ -296,6 +318,10 @@ fn flush<S: SectorSink>(
 ) -> Result<(), S::Error> {
     let padded = fill.next_multiple_of(4);
     buf[fill..padded].fill(0xFF);
-    sink.erase_sector(start)?;
+    let unit = sink.erase_unit();
+    if start.is_multiple_of(unit) {
+        let end = start.saturating_add(unit).min(whole_sectors(sink));
+        sink.erase(start, end - start)?;
+    }
     sink.write(start, &buf[..padded])
 }

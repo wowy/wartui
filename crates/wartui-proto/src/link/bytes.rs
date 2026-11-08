@@ -66,7 +66,7 @@ mod tests {
 
     use crate::link::MAX_NODE_PAYLOAD;
 
-    /// The largest payload under test: a node's, which a `BridgeToHost::Rx` carries.
+    /// The largest payload under test: a node's, which a `BridgeToHost::FromNode` carries.
     const N: usize = MAX_NODE_PAYLOAD;
 
     /// A payload through this module.

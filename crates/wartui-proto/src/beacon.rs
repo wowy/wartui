@@ -13,13 +13,13 @@
 //! An access point hides its name in either of two ways: an SSID element of length zero,
 //! or the element at the name's real length with every byte zero. Only the first looks
 //! hidden. The second is a well-formed SSID made of NULs, and survives everything
-//! downstream: `air` is byte-transparent, the store keeps what arrived, and NUL is valid
+//! downstream: `bus` is byte-transparent, the store keeps what arrived, and NUL is valid
 //! UTF-8. [`visible_ssid`] strips it here, once, so `ssid_len == 0` means hidden
 //! everywhere.
 
 use core::fmt;
 
-use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
+use crate::bus::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
 use crate::plan::{Band, ChannelInfo, channel_info};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.

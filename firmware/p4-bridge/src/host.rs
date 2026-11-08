@@ -20,16 +20,20 @@
 //!
 //! **Host→P4 bytes are lost while the P4 erases or writes its own flash.** Interrupts stay off
 //! for about 40 ms, the armed buffer lasts about 10 ms, and then the FIFO overflows. The link
-//! needs no flow control for it: the only flash work a host causes is an update of the P4's own
-//! image, and `wartui_proto::radio_link::update::Sender` waits for each sector's status and
-//! rewinds on `next_offset` and on silence. `Status.host_uart_errors` counts the reads that saw
-//! one or more line errors or overflows, not the errors themselves.
+//! needs no flow control for it. An update of the P4's own image is the flash work a host causes,
+//! and `wartui_proto::radio_link::update::Sender` waits for each sector's status and rewinds on
+//! `next_offset` and on silence. A `SetFan` or `SetPool` for a value the sector does not hold
+//! writes one word, and one in 1024 erases a sector first, which can lose the host's next frames
+//! (`src/settings.rs`).
+//! `Status.host_uart_errors` counts the reads that saw one or more line errors or overflows, not
+//! the errors themselves.
 //!
 //! **The gate opens on any host frame that decodes and closes after [`HOST_SILENCE`] without
 //! one.** The P4 cannot see the CH343's DTR, so a frame is the only sign that someone reads.
 //! Opening clears both host queues, so a host never reads a backlog from before it attached,
 //! and announces this life. While the gate is closed nothing queues (`Shared::push_host`), and
-//! closing drops any update session (`update::host_gone`). The engine polls every 5 s, so three
+//! closing drops any update session and the cached node image (`update::host_gone`,
+//! `cache::host_gone`). The engine polls every 5 s, so three
 //! polls go missing before the gate closes on a running host.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
@@ -49,11 +53,9 @@ use wartui_firmware::phase::mark;
 use wartui_firmware::reboot;
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LoopPhase, MAX_HOST_FRAME, SendStatus,
-    decode_frame,
+    FrameAccumulator, HOST_BAUD, HostToBridge, LoopPhase, MAX_HOST_FRAME, decode_frame,
 };
 use wartui_proto::radio_link::Down;
-use wartui_proto::split::Route;
 
 use crate::Shared;
 
@@ -137,15 +139,15 @@ async fn read_host(
     }
 }
 
-/// Decode one host frame, open the gate, and send the command where the pair says.
+/// Decode one host frame, open the gate, and carry out the command: on the P4, by queueing
+/// a record for a node, or by passing a power-cycle to the carrier.
 ///
-/// Out of line: a decoded command is 1.5 KB, and a refusal carries a frame. The command is
-/// decoded straight into the `Down` that relays it, so it is never copied.
+/// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
 fn take_frame(frame: &mut [u8], shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
-    let Some(down @ Down::Command(cmd)) = &decoded else { return };
+    let Some(cmd) = &decoded else { return };
     let opened = open(shared);
     let confirmed = crate::update::note_host_frame(shared);
     // An `Identify` announces below, and the announcement carries the confirm's line. Any other
@@ -157,12 +159,24 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
             shared.flush_update_lines();
         }
     }
-    let route = shared.pair.borrow().route(cmd);
-    match route {
-        Route::Local => local(cmd, shared),
-        Route::Forward => forward(down, shared),
-        Route::Refuse(Some(answer)) => shared.push_host(&answer),
-        Route::Refuse(None) => {}
+    mark(LoopPhase::Command);
+    // Listed rather than caught, so a new command is a compile error until it is placed.
+    match cmd {
+        HostToBridge::Identify => shared.announce(),
+        HostToBridge::GetStatus => shared.status_asked.signal(()),
+        HostToBridge::Reset => reboot(),
+        HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
+        HostToBridge::Update(op) => crate::update::take(op, shared),
+        HostToBridge::ToNode { slot, id, kind, body } => {
+            crate::bus::to_node(shared, *slot, *id, *kind, body);
+        }
+        HostToBridge::PowerCycle { slot } => crate::carrier::request(shared, *slot),
+        HostToBridge::CacheImage(op) => crate::cache::take(op, shared),
+        HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
+            crate::cache::to_node_chunk(shared, *slot, *id, *image, *session, *offset, *len);
+        }
+        HostToBridge::SetFan { duty } => crate::fan::set(shared, *duty),
+        HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
     }
 }
 
@@ -181,32 +195,8 @@ fn open(shared: &Shared) -> bool {
 }
 
 #[inline(never)]
-fn decode(frame: &mut [u8]) -> Option<Down> {
-    decode_frame::<HostToBridge>(frame).ok().map(Down::Command)
-}
-
-/// Carry out a command the P4 answers itself.
-fn local(cmd: &HostToBridge, shared: &Shared) {
-    mark(LoopPhase::Command);
-    match cmd {
-        HostToBridge::Identify => shared.announce(),
-        HostToBridge::GetStatus => shared.status_asked.signal(()),
-        HostToBridge::Reset => reboot(),
-        HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
-        HostToBridge::Update(op) => crate::update::take(op, shared),
-        // `Pair::route` sends nothing else here.
-        _ => {}
-    }
-}
-
-/// Queue a command for the C6. A send that finds the queue full is answered `Rejected`,
-/// since nothing else would ever answer it.
-fn forward(down: &Down, shared: &Shared) {
-    if !shared.push_down(down)
-        && let Down::Command(HostToBridge::SendEspNow { id, .. }) = *down
-    {
-        shared.push_host(&BridgeToHost::SendResult { id, status: SendStatus::Rejected, tx_us: 0 });
-    }
+fn decode(frame: &mut [u8]) -> Option<HostToBridge> {
+    decode_frame::<HostToBridge>(frame).ok()
 }
 
 /// Write queued frames to the host forever, a chunk at a time.
@@ -248,6 +238,7 @@ async fn close_on_silence(shared: &Shared) -> ! {
         }
         presence.present.set(false);
         crate::update::host_gone(shared);
+        crate::cache::host_gone(shared);
     }
 }
 

@@ -10,15 +10,21 @@
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
 //! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
-//! link between a P4 bridge and the C6 that runs its radio, and [`split`] holds the P4's
-//! decisions about that C6.
+//! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
+//! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes,
+//! and holds the messages a node and the P4 exchange over it. [`carrier`] reads the carrier
+//! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
+//! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
+//! the P4 keeps its settings in.
 
 #![no_std]
 
-pub mod air;
 pub mod beacon;
+pub mod bus;
+pub mod carrier;
 pub mod config;
 pub mod dedup;
+pub mod fan;
 pub mod frame_ring;
 pub mod hci;
 pub mod host_queue;
@@ -31,19 +37,19 @@ pub mod pending;
 pub mod plan;
 pub mod radio_link;
 pub mod reset;
+pub mod settings;
 pub mod split;
-pub mod tx_power;
 
 /// Re-exported so consumers can build link payloads without depending on
 /// `heapless` themselves, and can never end up on a mismatched version.
 pub use heapless;
 
-pub use air::{
-    AdminMsg, DecodeError, Frame, HeartbeatMsg, MsgType, SightingBatch, SightingBatchWriter,
-    SightingMsg,
-};
 pub use beacon::{Sighting, parse_mgmt};
+pub use bus::{
+    Assign, DecodeError, DownMsg, Heartbeat, SightingBatch, SightingBatchWriter, SightingMsg, Slot,
+    UpMsg,
+};
 pub use dedup::MacRing;
 pub use hci::AdvReport;
-pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
+pub use link::{BridgeToHost, HostToBridge, LinkError, Undelivered};
 pub use plan::{ChannelPool, SCAN_CHANNELS};

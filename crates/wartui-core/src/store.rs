@@ -33,14 +33,14 @@ use std::time::{Duration, Instant};
 
 pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
-use wartui_proto::air::{RecordKind, WIRE_VERSION};
-use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
+use wartui_proto::bus::{BUS_VERSION, RecordKind};
+use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, Record};
 
 /// The schema version this build writes and reads: 1 until wartui 1.0, as
-/// [`wartui_proto::air::WIRE_VERSION`] is. It is the lever for the first capture that must be read
+/// [`wartui_proto::link::LINK_PROTO_VERSION`] is. It is the lever for the first capture that must be read
 /// in an earlier build's terms, and none is before 1.0. Meanwhile [`SCHEMA_FINGERPRINT`] tells
 /// builds apart (see the module docs).
 pub const SCHEMA_VERSION: i32 = 1;
@@ -73,9 +73,10 @@ CREATE TABLE IF NOT EXISTS capture (
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   bridge_mac BLOB,
-  bridge_chip TEXT,
   bridge_fw TEXT,
-  channel_pool TEXT NOT NULL,
+  -- What carries the bridge's nodes: `no carrier`, `carrier-6`, `carrier-10` or `carrier-14`.
+  -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
+  node_board TEXT,
   notes TEXT,
   -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
   -- position). WDGWars and WiGLE ban both, so it is never uploaded.
@@ -92,21 +93,17 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
+-- `slot` is the node-bus slot the heartbeat came from, by its bus name (`A1` to `B7`) on
+-- every board. `capture.node_board` maps it to the carrier's silk name.
 -- `wifi_refused` and `ble_refused` are the node's since-boot refusal counts as
--- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
--- the node's since-boot heartbeat count, raw, and wraps at 2^16. `unsent` is the
--- heartbeats its radio could not send since boot, this one excluded, raw, and
--- wraps at 2^8. `dwell` is the scan channel number the node dwelt on just
--- before this heartbeat, 0 when none did (parked, Bluetooth, or a refused hop).
--- `prev_dwell` is the `dwell` its previous heartbeat carried, arrived or not, so
--- a single missed beat gets its channel from the next row. `tx_power` is the
--- radio's maximum transmit power in quarter-dBm as the node read it just before
--- this heartbeat, 0 when the read failed. `reset_cause` is why the node is
+-- the heartbeat carried them: raw, so a reboot shows as the value falling.
+-- `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
--- the node's read failed. An assignment
--- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
+-- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
+-- across a capture is a leak in the node firmware. An assignment
+-- sent in answer to a heartbeat is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
@@ -114,26 +111,22 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   rx_at INTEGER NOT NULL,
   counter INTEGER NOT NULL,
   epoch INTEGER NOT NULL,
-  rssi INTEGER,
+  slot TEXT NOT NULL,
   wifi_refused INTEGER NOT NULL,
   ble_refused INTEGER NOT NULL,
-  beat INTEGER NOT NULL,
-  unsent INTEGER NOT NULL,
-  dwell INTEGER NOT NULL,
-  prev_dwell INTEGER NOT NULL,
-  tx_power INTEGER NOT NULL,
   reset_cause TEXT NOT NULL,
   vdd_mv INTEGER,
   die_temp_c INTEGER,
+  heap_free INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
 
--- One row per transmitted assignment, written when its outcome is known, so
+-- One row per assignment sent, written when its outcome is known, so
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the engine's monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
+-- `channels` is the forty-two-bit SCAN_CHANNELS mask the assignment carried, stored as the
 -- integer it is: the indices are what the wire said, and which channels they name is
 -- the scan table of the build that wrote the row. Nothing reads the column back, and
 -- nothing rewrites it when the table changes -- a row records what went out.
@@ -158,7 +151,7 @@ CREATE TABLE IF NOT EXISTS observation (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
-  link_rssi INTEGER,
+  slot TEXT NOT NULL,
   bssid BLOB NOT NULL,
   ssid BLOB,
   security TEXT NOT NULL,
@@ -180,43 +173,47 @@ CREATE TABLE IF NOT EXISTS observation (
 -- One row per bridge status reply, which the host polls for every few seconds.
 -- `rx_count`, `dropped_tx`, `uptime_ms` and `rx_oversize` are the bridge's since-boot
 -- counts as the reply carried them: raw, as `heartbeat` keeps its drop counts, so a
--- bridge reboot shows as the values falling. `rx_count` is the frames the bridge
--- accepted to forward; `rx_oversize` is those it dropped for being longer than any
--- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is
--- how many frames of ours this host had read off the link when the reply arrived, taken with
--- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
--- difference less the `host_frames` difference is frames lost on the host link plus the bridge's
--- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
--- The `radio_link_*` columns are the P4 split bridge's UART link counters since boot, named as
--- `RadioLinkStats` names them, and NULL for a bridge without that link. `host_uart_errors` counts
+-- bridge reboot shows as the values falling. `rx_count` is the node records the bridge
+-- forwarded; `rx_oversize` is those it dropped for being longer than any node sends, which
+-- are not in `rx_count`. `host_frames` is how many node records this host had read off the
+-- link when the reply arrived, taken with `rx_count` so the two pair closely but not exactly:
+-- between two rows, the `rx_count` difference less the `host_frames` difference is records
+-- lost on the host link plus the bridge's `dropped_tx`, give or take the records queued behind
+-- the reply, which overtakes them.
+-- The `radio_link_*` columns are the P4–C6 UART link's counters since boot, named as
+-- `RadioLinkStats` names them. `host_uart_errors` counts
 -- the P4's host-link reads since boot that saw one or more line errors or overflows on the UART
 -- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
--- flash.
+-- flash. `fan_duty` is the carrier's lid fan duty in force, in percent, and `fan_rpm` its speed
+-- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
+-- the bridge's first window since boot. `slots_present` is the slots the bridge counted holding a
+-- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7).
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
-  peer_count INTEGER NOT NULL,
   rx_count INTEGER NOT NULL,
   dropped_tx INTEGER NOT NULL,
   uptime_ms INTEGER NOT NULL,
   host_frames INTEGER NOT NULL,
   rx_oversize INTEGER NOT NULL,
-  radio_link_packets INTEGER,
-  radio_link_crc_fail INTEGER,
-  radio_link_bad_magic INTEGER,
-  radio_link_seq_gap INTEGER,
-  radio_link_uart_errors INTEGER,
-  radio_link_radio_crc_fail INTEGER,
-  radio_link_radio_bad_magic INTEGER,
-  radio_link_radio_seq_gap INTEGER,
-  radio_link_radio_uart_errors INTEGER,
-  host_uart_errors INTEGER NOT NULL
+  radio_link_packets INTEGER NOT NULL,
+  radio_link_crc_fail INTEGER NOT NULL,
+  radio_link_bad_magic INTEGER NOT NULL,
+  radio_link_seq_gap INTEGER NOT NULL,
+  radio_link_uart_errors INTEGER NOT NULL,
+  radio_link_radio_crc_fail INTEGER NOT NULL,
+  radio_link_radio_bad_magic INTEGER NOT NULL,
+  radio_link_radio_seq_gap INTEGER NOT NULL,
+  radio_link_radio_uart_errors INTEGER NOT NULL,
+  host_uart_errors INTEGER NOT NULL,
+  fan_duty INTEGER,
+  fan_rpm INTEGER,
+  slots_present INTEGER NOT NULL
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
 -- `high_water` is the most the queue has held since the bridge booted, `dropped` what it
--- has evicted or refused. `queue` names it as `wartui status` does, and the name settles
--- whether the counts are bytes or entries.
+-- has evicted or refused. `queue` names it as `wartui status` does. Every count is bytes.
 CREATE TABLE IF NOT EXISTS bridge_queue (
   status_id INTEGER NOT NULL REFERENCES bridge_status(id),
   queue TEXT NOT NULL,
@@ -226,12 +223,11 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
--- its own so it carries on while the bridge is gone. `frames` through
--- `admin_windows_missed` and `store_written`/`store_dropped` are counts since the
--- capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
--- largest since the previous row. `throttled` is the Raspberry Pi firmware's
--- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
--- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
+-- its own so it carries on while the bridge is gone. `frames` through `incompatible`
+-- and `store_written`/`store_dropped` are counts since the capture began. `lag_peak_us`,
+-- `store_queue_peak` and `store_commit_peak_us` are the largest since the previous row.
+-- `throttled` is the Raspberry Pi firmware's `get_throttled` word, NULL off a Pi; `soc_temp_mc` is
+-- thermal zone 0 in milli-degrees Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
 -- voltage and current as its driver reports them, NULL on a host without one.
 CREATE TABLE IF NOT EXISTS host_status (
   id INTEGER PRIMARY KEY,
@@ -241,7 +237,6 @@ CREATE TABLE IF NOT EXISTS host_status (
   garbled INTEGER NOT NULL,
   undecodable INTEGER NOT NULL,
   incompatible INTEGER NOT NULL,
-  admin_windows_missed INTEGER NOT NULL,
   lag_peak_us INTEGER NOT NULL,
   store_written INTEGER NOT NULL,
   store_dropped INTEGER NOT NULL,
@@ -266,12 +261,13 @@ CREATE TABLE IF NOT EXISTS batch_gap (
   lost INTEGER NOT NULL
 );
 
+-- One row per node record, kept only with `--record-raw`: the slot it came from, its type
+-- byte (`bus::UpType`) and its body verbatim.
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
-  src BLOB NOT NULL,
-  dst BLOB,
-  rssi INTEGER,
+  slot TEXT NOT NULL,
+  kind INTEGER NOT NULL,
   bytes BLOB NOT NULL
 );
 
@@ -468,9 +464,6 @@ pub struct BatchTiming {
 /// before any bridge announces itself, so that arrives later as a [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
 pub struct CaptureInfo {
-    /// The pool the run started on. The operator can change it mid-run, so each assignment row
-    /// records the channels actually sent.
-    pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
     /// Whether it holds test data: made with `--sim` or `--lat`/`--lon`.
@@ -479,8 +472,7 @@ pub struct CaptureInfo {
 
 /// Host identity and applied initial settings, supplied by the executable creating a capture.
 ///
-/// Missing values are unknown, never inferred from a shared package or firmware version. The
-/// scan table is recorded independently by the store; it describes the host, not a node build.
+/// Missing values are unknown, never inferred from a shared package or firmware version.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureProvenance {
     /// Executable's package version.
@@ -562,14 +554,11 @@ impl Store {
             params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
         )?;
         tx.execute(
-            "INSERT INTO capture (id, started_at, channel_pool, notes, simulated) \
-             VALUES (1, ?1, ?2, ?3, ?4)",
-            params![started_at_ms, pool_name(capture.pool), capture.notes, capture.simulated],
+            "INSERT INTO capture (id, started_at, notes, simulated) VALUES (1, ?1, ?2, ?3)",
+            params![started_at_ms, capture.notes, capture.simulated],
         )?;
-        let scan_channels = SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
         for (key, value) in [
-            ("capture.scan_channels", Some(scan_channels)),
-            ("capture.wire_version", Some(WIRE_VERSION.to_string())),
+            ("capture.bus_version", Some(BUS_VERSION.to_string())),
             ("capture.core_version", Some(env!("CARGO_PKG_VERSION").to_owned())),
             ("capture.host_version", provenance.host_version.clone()),
             ("capture.host_build", provenance.host_build.clone()),
@@ -974,12 +963,13 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
 }
 
 /// The pool's name as stored, which is not its name on screen: `ChannelPool`'s `Display` says "US",
-/// and the `channel_pool` column says "us".
-const fn pool_name(pool: ChannelPool) -> &'static str {
+/// and a settings row says `pool=us`. `none` before the bridge has reported one.
+const fn pool_name(pool: Option<ChannelPool>) -> &'static str {
     match pool {
-        ChannelPool::Us => "us",
-        ChannelPool::Eu => "eu",
-        ChannelPool::All => "all",
+        Some(ChannelPool::Us) => "us",
+        Some(ChannelPool::Eu) => "eu",
+        Some(ChannelPool::All) => "all",
+        None => "none",
     }
 }
 
@@ -990,22 +980,15 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
     };
     format!(
-        "version=1;at_ms={at_ms};pool={};nodes_tx_power_quarter_dbm={};\
-         bridge_tx_power_quarter_dbm={};record_raw={};gps={};gps_max_age_ms={};\
-         remember_ble={};preferred_ble={};ble_node={};topology_timeout_ms={};\
-         status_interval_ms={};admin_timeout_ms={}",
+        "version=1;at_ms={at_ms};pool={};record_raw={};gps={};gps_max_age_ms={};\
+         remember_ble={};preferred_ble={};ble_node={}",
         pool_name(settings.pool),
-        settings.tx_power,
-        settings.bridge_tx_power,
         settings.record_raw,
         settings.gps,
         settings.gps_max_age.as_millis(),
         settings.remember_ble,
         mac(settings.preferred_ble),
         mac(settings.ble_node),
-        settings.topology_timeout.as_millis(),
-        settings.status_interval.as_millis(),
-        settings.admin_timeout.as_millis(),
     )
 }
 
@@ -1149,35 +1132,29 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::Heartbeat(hb) => {
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
-                       (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
-                        beat, unsent, dwell, prev_dwell, tx_power, reset_cause, vdd_mv,
-                        die_temp_c, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                             ?16)",
+                       (node_mac, rx_at, counter, epoch, slot, wifi_refused, ble_refused,
+                        reset_cause, vdd_mv, die_temp_c, heap_free, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
                     hb.rx_at_ms,
                     hb.counter,
                     hb.epoch,
-                    hb.link_rssi,
+                    hb.slot.to_string(),
                     hb.wifi_refused,
                     hb.ble_refused,
-                    hb.beat,
-                    hb.unsent,
-                    hb.dwell,
-                    hb.prev_dwell,
-                    hb.tx_power,
                     hb.reset_cause.as_str(),
                     hb.vdd_mv,
                     hb.die_temp_c,
+                    hb.heap_free,
                     hb.live
                 ])?;
             }
             Record::Observation(obs) => {
                 tx.prepare_cached(
                     "INSERT INTO observation
-                       (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+                       (node_mac, rx_at, slot, bssid, ssid, security, channel, rssi,
                         kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
                         raw_body)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
@@ -1185,7 +1162,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 .execute(params![
                     &obs.node_mac[..],
                     obs.rx_at_ms,
-                    obs.link_rssi,
+                    obs.slot.to_string(),
                     &obs.bssid[..],
                     obs.ssid,
                     obs.security,
@@ -1207,13 +1184,13 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 // Which dongle produced this capture. Written when the bridge announces itself,
                 // always after the capture row exists, and again if it re-announces.
                 tx.prepare_cached(
-                    "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3
+                    "UPDATE capture SET bridge_mac = ?1, bridge_fw = ?2, node_board = ?3
                      WHERE id = 1",
                 )?
                 .execute(params![
                     &bridge.mac[..],
-                    bridge.chip.as_str(),
-                    bridge.fw_version.as_str()
+                    bridge.fw_version.as_str(),
+                    bridge.node_board.name()
                 ])?;
             }
             Record::Assignment(a) => {
@@ -1241,31 +1218,34 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 let radio_link = status.radio_link;
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames,
+                       (rx_at, rx_count, dropped_tx, uptime_ms, host_frames,
                         rx_oversize, radio_link_packets, radio_link_crc_fail,
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
-                        radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                        radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors,
+                        fan_duty, fan_rpm, slots_present)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
-                    status.peer_count,
                     status.rx_count,
                     status.dropped_tx,
                     status.uptime_ms,
                     column(status.host_frames),
                     status.rx_oversize,
-                    radio_link.map(|s| s.packets),
-                    radio_link.map(|s| s.crc_fail),
-                    radio_link.map(|s| s.bad_magic),
-                    radio_link.map(|s| s.seq_gap),
-                    radio_link.map(|s| s.uart_errors),
-                    radio_link.map(|s| s.radio_crc_fail),
-                    radio_link.map(|s| s.radio_bad_magic),
-                    radio_link.map(|s| s.radio_seq_gap),
-                    radio_link.map(|s| s.radio_uart_errors),
+                    radio_link.packets,
+                    radio_link.crc_fail,
+                    radio_link.bad_magic,
+                    radio_link.seq_gap,
+                    radio_link.uart_errors,
+                    radio_link.radio_crc_fail,
+                    radio_link.radio_bad_magic,
+                    radio_link.radio_seq_gap,
+                    radio_link.radio_uart_errors,
                     status.host_uart_errors,
+                    status.fan.map(|fan| fan.duty.get()),
+                    status.fan.and_then(|fan| fan.rpm),
+                    status.slots_present,
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1286,10 +1266,9 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO host_status
                        (at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                        admin_windows_missed, lag_peak_us, store_written, store_dropped,
-                        store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
-                        battery_mv, battery_ma)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        lag_peak_us, store_written, store_dropped, store_queue_peak,
+                        store_commit_peak_us, throttled, soc_temp_mc, battery_mv, battery_ma)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 )?
                 .execute(params![
                     host.at_ms,
@@ -1298,7 +1277,6 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     column(host.garbled),
                     column(host.undecodable),
                     column(host.incompatible),
-                    column(host.admin_windows_missed),
                     column(host.lag_peak_us),
                     column(host.store_written),
                     column(host.store_dropped),
@@ -1325,15 +1303,13 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(
-                    "INSERT INTO raw_frame (rx_at, src, dst, rssi, bytes)
-                     VALUES (?1,?2,?3,?4,?5)",
+                    "INSERT INTO raw_frame (rx_at, slot, kind, bytes) VALUES (?1,?2,?3,?4)",
                 )?
                 .execute(params![
                     raw.rx_at_ms,
-                    &raw.src[..],
-                    &raw.dst[..],
-                    raw.rssi,
-                    raw.bytes,
+                    raw.slot.to_string(),
+                    raw.kind,
+                    raw.bytes
                 ])?;
             }
         }
@@ -1351,15 +1327,16 @@ mod tests {
     fn status(rx_at_ms: i64) -> Record {
         Record::BridgeStatus(BridgeStatusSeen {
             rx_at_ms,
-            peer_count: 0,
             rx_count: 0,
             dropped_tx: 0,
             uptime_ms: 0,
             host_frames: 0,
             rx_oversize: 0,
             queues: Default::default(),
-            radio_link: None,
+            radio_link: Default::default(),
             host_uart_errors: 0,
+            fan: None,
+            slots_present: 0,
         })
     }
 

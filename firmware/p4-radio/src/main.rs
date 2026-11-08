@@ -1,15 +1,13 @@
-//! The radio half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
+//! The C6 half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
 //!
-//! The P4 owns the USB link to the host. This chip owns the radio: it parks on the fleet's
-//! control channel, queues every wartui frame it hears for the P4, and carries out the
-//! radio commands the P4 relays. It never talks USB. The two talk over the board's SDIO
-//! traces, on UART1 with hardware flow control, through UHCI's DMA (`src/link.rs`).
+//! The P4 owns the USB link to the host and the node buses. This chip holds the UART link to
+//! the P4 for a Bluetooth host link to come: it answers the P4's status poll, sends its lines,
+//! and takes its own updates. It never talks USB. The two talk over the board's SDIO traces, on
+//! UART1 with hardware flow control, through UHCI's DMA (`src/link.rs`).
 //!
-//! The ESP-NOW half is [`wartui_firmware::radio`], kept apart from this chip's link. Updates
-//! arrive from the P4 over the link and boot on trial, through
-//! [`wartui_firmware::ota`], the flash code a node uses. Three futures share one task: the
-//! radio's jobs, `hear_loop` draining the receive queue, and the link. Each waits on an
-//! interrupt, a signal or a timer rather than polling.
+//! Updates arrive from the P4 over the link and boot on trial, through
+//! [`wartui_firmware::ota`], the flash code a node uses. The link's futures share one task, and
+//! each waits on an interrupt, a signal or a timer rather than polling.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -26,7 +24,6 @@ mod link;
 
 use core::cell::RefCell;
 
-use embassy_futures::join::join3;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
@@ -38,24 +35,20 @@ use esp_hal::uart::{
     BaudrateTolerance, Config as UartConfig, CtsConfig, HwFlowControl, RtsConfig,
     RxConfig as UartRxConfig, Uart,
 };
-use esp_radio::esp_now::{EspNowReceiver, ReceivedData};
-use esp_radio::wifi::{ControllerConfig, Interface, WifiController};
 use static_cell::ConstStaticCell;
 use wartui_firmware::ota::Ota;
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::radio::{self, Dones, Heard, Jobs, Payloads};
 use wartui_firmware::{phase, reboot, reset_cause};
-use wartui_proto::air::Board;
+use wartui_proto::bus::Board;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
 use wartui_proto::ota::Receiver;
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, FIFO_FULL_THRESHOLD, Held, PacketReader, RTS_THRESHOLD, RX_BUF_LEN, Up,
+    BAUD_RATE, BODY_MAX, FIFO_FULL_THRESHOLD, Held, PacketReader, RTS_THRESHOLD, RX_BUF_LEN,
     WIRE_MAX,
 };
 
-use crate::config::{RADIO_JOBS, SEND_JOBS};
-use crate::link::{Bus, Link, Radio, Shared, UpPriority, UpQueue, Updates, link_loop};
+use crate::link::{Bus, Link, Shared, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -80,19 +73,14 @@ macro_rules! dma_buf {
 }
 
 /// Resets rather than hanging. The P4 sees the new life in the next hello and announces a
-/// fresh `Ready`, so the host re-adds peers and transmit power.
+/// fresh `Ready`.
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     reboot()
 }
 
-/// Received frames waiting for the P4. Built at compile time, so the ring is never on the
-/// stack.
+/// Records waiting for the P4. Built at compile time, so the ring is never on the stack.
 static UP_QUEUE: ConstStaticCell<UpQueue> = ConstStaticCell::new(UpQueue::new(FrameRing::new()));
-
-/// Every other record waiting for the P4, sent ahead of the received frames.
-static UP_PRIORITY: ConstStaticCell<UpPriority> =
-    ConstStaticCell::new(UpPriority::new(FrameRing::new()));
 
 /// The record that did not fit the last packet.
 static HELD: ConstStaticCell<Held> = ConstStaticCell::new(Held::new());
@@ -102,15 +90,6 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 
 /// Where the writer builds a packet's body.
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
-
-/// The radio jobs [`radio::run_jobs`] works through, in arrival order.
-static JOBS: ConstStaticCell<Jobs<RADIO_JOBS>> = ConstStaticCell::new(Jobs::new());
-
-/// The payloads of the sends among the jobs; each is a full ESP-NOW v2 payload.
-static PAYLOADS: ConstStaticCell<Payloads<SEND_JOBS>> = ConstStaticCell::new(Payloads::new());
-
-/// What became of each job, waiting for the link.
-static DONES: ConstStaticCell<Dones<RADIO_JOBS>> = ConstStaticCell::new(Dones::new());
 
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32c6));
@@ -126,8 +105,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     mark(LoopPhase::Boot);
     phase::claim();
 
-    // Before the radio, so an image that has run out of trial boots is rolled back before
-    // it does anything else. What it says waits for the link.
+    // Before anything else, so an image that has run out of trial boots is rolled back before
+    // it does anything. What it says waits for the link.
     let (mut ota, table_fault) = Ota::new(peripherals.FLASH);
     let booted = ota.boot();
     if booted.reboot {
@@ -136,24 +115,13 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // Zeros name no image, so the P4 still sends its own.
     let image = ota.booted_digest().unwrap_or([0; 32]);
 
-    // The radio blobs allocate; nothing in wartui's own code does.
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 36 * 1024);
-
-    // The scheduler has to be running before the radio comes up.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // `US` rather than `esp-radio`'s default, as every wartui firmware passes;
-    // `firmware/node/src/main.rs` has why.
-    let mut controller = WifiController::new(
-        peripherals.WIFI,
-        ControllerConfig::default().with_country_info(*b"US"),
-    )
-    .expect("Wi-Fi controller");
-    let (manager, mut sender, mut receiver) = controller.esp_now().split();
-    let setup = radio::setup(&mut controller, &manager);
-    let mac = Interface::station().mac_address();
+    // The factory MAC, which is also the Wi-Fi station's: the address the host knows the
+    // bridge by.
+    let mut mac = [0; 6];
+    mac.copy_from_slice(esp_hal::efuse::base_mac_address().as_bytes());
 
     // SDIO D2 and D3 are unused; both ends leave them as inputs.
     let _d2 = Input::new(peripherals.GPIO22, InputConfig::default());
@@ -191,16 +159,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         body: BODY.take(),
     };
 
-    let shared = Shared::new(UP_QUEUE.take(), UP_PRIORITY.take());
+    let shared = Shared::new(UP_QUEUE.take());
     // Queued behind the hello exchange, for the P4 to relay once the link is up.
-    for said in setup.said {
-        shared.say(said);
-    }
     if let Some(err) = table_fault {
-        shared
-            .line(None, format_args!("could not read the partition table: {err}; updates refused"));
+        shared.error(format_args!("could not read the partition table: {err}; updates refused"));
     } else if let Some(lacks) = ota.lacks() {
-        shared.line(None, format_args!("{lacks}; updates refused"));
+        shared.error(format_args!("{lacks}; updates refused"));
     }
     for note in &booted.notes {
         shared.note(note);
@@ -208,48 +172,6 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let updates =
         Updates { ota, receiver: RECEIVER.take(), trial: booted.trial, image, status: None };
     let link = RefCell::new(Link::new(boot, mac, cause, last_phase, HELD.take(), updates));
-    let jobs = JOBS.take();
-    let payloads = PAYLOADS.take();
-    let dones = DONES.take();
-    let radio = Radio { manager: &manager, jobs, payloads };
 
-    // Joined rather than spawned: all three borrow the ESP-NOW handles `main` owns, and
-    // none ends.
-    match join3(
-        radio::run_jobs(
-            &mut controller,
-            &manager,
-            &mut sender,
-            setup.tx_power,
-            jobs,
-            payloads,
-            dones,
-        ),
-        hear_loop(&mut receiver, &shared, boot),
-        link_loop(bus, &link, &shared, radio, dones),
-    )
-    .await {}
-}
-
-/// Queue every wartui frame the radio hears for the P4.
-async fn hear_loop(receiver: &mut EspNowReceiver, shared: &Shared, boot: Instant) -> ! {
-    loop {
-        let received = receiver.receive_async().await;
-        hear(&received, shared, boot);
-    }
-}
-
-/// Queue one received frame, if it is ours.
-///
-/// Out of line because it builds a 1048-byte message. `radio::hear` has what is ours;
-/// somebody else's frame is neither queued nor counted.
-#[inline(never)]
-fn hear(received: &ReceivedData, shared: &Shared, boot: Instant) {
-    // On this chip's clock, wrapping after roughly 71 minutes, as `tx_us` is.
-    let rx_us = boot.elapsed().as_micros() as u32;
-    match radio::hear(received, rx_us, |rx| shared.push(&Up::Message(rx.clone()))) {
-        Heard::Forwarded => shared.note_rx(),
-        Heard::Oversize => shared.note_oversize(),
-        Heard::Foreign => {}
-    }
+    link_loop(bus, &link, &shared).await
 }

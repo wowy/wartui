@@ -11,11 +11,12 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Board, Capabilities, NODE_VERSION, RecordKind, Version, wire_epoch};
-use wartui_proto::link::{Chip, LoopPhase};
+use wartui_proto::bus::{
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
+};
+use wartui_proto::link::LoopPhase;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use super::draw;
 use super::ui::Ui;
@@ -33,15 +34,14 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.reboots = reboots;
     state.heartbeats = 12;
     state.observations = 340;
-    state.link_rssi = Some(-41);
+    state.slot = Slot::from_u8(last % MAX_SLOTS as u8);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));
-    NodeView { state, alive: true, assignable }
+    NodeView { state, alive: true, on_bus: true, assignable }
 }
 
-/// Heard only through sightings. Normal for a few seconds after boot: a node reports
-/// what it found on a channel before it returns to the control channel to heartbeat.
+/// Known only by sightings filed under its slot: no heartbeat yet.
 pub(super) fn unannounced(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
     view.state.capabilities = None;
@@ -82,11 +82,10 @@ pub(super) fn stale_node(last: u8) -> NodeView {
     view
 }
 
-/// Heartbeating, but with no slot in the bridge's peer table.
-pub(super) fn refused(last: u8) -> NodeView {
+/// Heartbeating, but its slot's latest heartbeat named another node.
+pub(super) fn unslotted(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
-    view.state.peer_refused = true;
-    view.state.last_outcome = Some(AdminOutcome::Refused);
+    view.state.slot = None;
     view
 }
 
@@ -100,12 +99,8 @@ pub(super) fn adopt(state: &mut NodeState) {
 /// Given channels, acked, and adopted: fully settled.
 pub(super) fn assigned(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    let assignment = Assignment {
-        channels: ChannelSet::from_run(IndexRun::new(0, 0)),
-        ble: false,
-        tx_power: 8,
-        counter: 9,
-    };
+    let assignment =
+        Assignment { channels: ChannelSet::from_run(IndexRun::new(0, 0)), ble: false, counter: 9 };
     view.state.confirmed = Some(assignment);
     view.state.desired = Some(assignment);
     view.state.last_outcome = Some(AdminOutcome::Acked);
@@ -121,8 +116,7 @@ pub(super) fn acked_not_adopted(last: u8) -> NodeView {
     view
 }
 
-/// Sent an assignment that its radio never acked. In practice BLE held the antenna
-/// through the admin window.
+/// Sent an assignment the bridge could not deliver.
 pub(super) fn unacked(last: u8) -> NodeView {
     let mut view = pending(last);
     view.state.last_outcome = Some(AdminOutcome::Unacked);
@@ -137,7 +131,6 @@ pub(super) fn pending(last: u8) -> NodeView {
     view.state.desired = Some(Assignment {
         channels: ChannelSet::from_run(IndexRun::new(14, 38)),
         ble: false,
-        tx_power: 8,
         counter: 10,
     });
     view.state.dirty = true;
@@ -149,22 +142,19 @@ pub(super) fn pending(last: u8) -> NodeView {
 pub(super) fn busy() -> Snapshot {
     Snapshot {
         bridge: Some(BridgeInfo {
-            chip: Chip::Esp32P4,
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
             fw_version: "0.1.0".to_owned(),
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
-            heap_free: 65_536,
             uptime_ms: 1_000,
-            gps: false,
+            node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
         }),
         link_up: true,
         link_error: None,
-        // Defaults, like `tx_power` and `bridge_tx_power` below, so an unrelated test
-        // cannot trip the pool row's save rule.
-        pool: ChannelPool::All,
+        // What a bridge with none stored reports.
+        pool: Some(ChannelPool::All),
         plan: None,
         ble_node: None,
         preferred_ble: None,
@@ -201,12 +191,11 @@ pub(super) fn busy() -> Snapshot {
             undecodable: 1,
             incompatible: 2,
             garbled: 5,
-            admin_windows_missed: 6,
             admin_sent: 3,
             admin_acked: 2,
             admin_failed: 1,
             admin_unadopted: 0,
-            peer_table_full: 0,
+            unknown_slot: 0,
             replans: 0,
             batches_lost: 0,
             duplicate_batches: 0,
@@ -215,11 +204,11 @@ pub(super) fn busy() -> Snapshot {
         },
         store: StoreStats { written: 800, dropped: 7 },
         bridge_status: Some(BridgeStatus {
-            peer_count: 0,
             rx_count: 900,
             dropped_tx: 1300,
             dropped_since_attach: 0,
             uptime_ms: 60_000,
+            fan: None,
         }),
         started_at_ms: EPOCH_MS,
         now_ms: EPOCH_MS + 60_000,
@@ -232,10 +221,18 @@ pub(super) fn busy() -> Snapshot {
             at_ms: None,
         },
         gps: None,
-        tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
-        bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         excluded_ssids: Vec::new(),
+        power_answer: None,
     }
+}
+
+/// [`busy`] behind a bridge on `board`.
+pub(super) fn on_board(board: NodeBoard) -> Snapshot {
+    let mut snapshot = busy();
+    if let Some(bridge) = snapshot.bridge.as_mut() {
+        bridge.node_board = board;
+    }
+    snapshot
 }
 
 /// No bridge, no nodes, no position.

@@ -12,7 +12,7 @@
 //! `HCI_LE_Set_Scan_Parameters` in §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11
 //! and the LE Advertising Report in §7.7.65.2.
 
-use crate::air::{RecordKind, Security, SightingMsg};
+use crate::bus::{RecordKind, Security, SightingMsg};
 
 /// Largest HCI packet, so a read buffer can never be short.
 ///

@@ -31,13 +31,13 @@ use esp_hal::peripherals::{FLASH, RTC_TIMER};
 use esp_hal::rtc_cntl::{Rtc, RwdtStage};
 use esp_hal::time::Duration;
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::ota::{Fault, Note, Ota};
+use wartui_firmware::ota::{Fault, Note, Ota, SettingsSector};
 use wartui_firmware::reboot;
-use wartui_proto::air::{Board, OtaState, OtaStatusMsg};
+use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogLevel, LogStr, UPDATE_STATUS_MAX,
-    UpdateStatus,
+    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, UPDATE_STATUS_MAX,
+    UpdateStatusBytes,
 };
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
@@ -55,7 +55,15 @@ pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
 
 /// Lines for the host held until the next announcement, since nothing reaches the host
 /// before its `Ready`: what the boot found, and the confirm.
-pub type Lines = Vec<(Option<LogLevel>, LogStr), 8>;
+pub type Lines = Vec<Line, 8>;
+
+/// One held line, sent as the host message it names.
+pub enum Line {
+    /// A `Log`.
+    Log(LogStr),
+    /// An `Error`.
+    Error(LogStr),
+}
 
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32p4));
@@ -119,8 +127,13 @@ impl Updates {
         }
         let mut lines = Lines::new();
         for note in notes {
-            let level = if matches!(note, Note::Failed(..)) { None } else { Some(LogLevel::Info) };
-            let _ = lines.push((level, text(format_args!("{note}"))));
+            let message = text(format_args!("{note}"));
+            let line = if matches!(note, Note::Failed(..)) {
+                Line::Error(message)
+            } else {
+                Line::Log(message)
+            };
+            let _ = lines.push(line);
         }
         let fault = match table_fault {
             Some(err) => Some(text(format_args!(
@@ -129,6 +142,11 @@ impl Updates {
             None => ota.lacks().map(|lacks| text(format_args!("{lacks}; updates refused"))),
         };
         Self { ota, receiver: RECEIVER.take(), trial, confirm_failed: false, rtc, lines, fault }
+    }
+
+    /// The sector the settings are stored in (`src/settings.rs`), through the flash this owns.
+    pub fn settings(&mut self) -> Option<SettingsSector<'_>> {
+        self.ota.settings()
     }
 
     /// End this image's trial, if it is on one, and disarm the watchdog. A failure leaves it
@@ -142,11 +160,11 @@ impl Updates {
             Ok(()) => {
                 self.trial = false;
                 self.rtc.rwdt.disable();
-                (Some(LogLevel::Info), text(format_args!("{IMAGE_CONFIRMED}")))
+                Line::Log(text(format_args!("{IMAGE_CONFIRMED}")))
             }
             Err(err) => {
                 self.confirm_failed = true;
-                (None, text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}")))
+                Line::Error(text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}")))
             }
         };
         let _ = self.lines.push(line);
@@ -156,7 +174,7 @@ impl Updates {
     ///
     /// A `Begin` is refused while this image is on trial, and on a table without a `trial`
     /// sector or a second app slot, as the C6 refuses one ([`receive`]).
-    fn take(&mut self, op: Op<'_>) -> Option<OtaStatusMsg> {
+    fn take(&mut self, op: Op<'_>) -> Option<UpdateStatus> {
         let received = receive(&mut *self.receiver, op, self.ota.slot().as_mut(), self.trial);
         match received {
             Received::Status(status) => status,
@@ -166,7 +184,7 @@ impl Updates {
 
     /// Switch to the verified image and reboot into it. Returns only when the session is not
     /// verified, or the switch failed, with the status to send.
-    fn install(&mut self, session: u8) -> Option<OtaStatusMsg> {
+    fn install(&mut self, session: u8) -> Option<UpdateStatus> {
         let receiver = &mut *self.receiver;
         if !receiver.is_verified() || receiver.status().session != session {
             return Some(receiver.status());
@@ -176,11 +194,10 @@ impl Updates {
             // the rest.
             Ok(_) => reboot(),
             Err(err) => {
-                let _ = self
-                    .lines
-                    .push((None, text(format_args!("could not switch to the new image: {err}"))));
+                let message = text(format_args!("could not switch to the new image: {err}"));
+                let _ = self.lines.push(Line::Error(message));
                 receiver.reset();
-                Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
+                Some(UpdateStatus { session, state: UpdateState::FlashError, next_offset: 0 })
             }
         }
     }
@@ -207,7 +224,7 @@ pub fn note_host_frame(shared: &Shared) -> bool {
 #[inline(never)]
 pub fn take(bytes: &[u8], shared: &Shared) {
     let Some(op) = Op::decode(bytes) else {
-        shared.push_line(None, text(format_args!("an update op did not decode")));
+        shared.push_error("an update op did not decode");
         return;
     };
     let status = shared.updates.borrow_mut().take(op);
@@ -225,18 +242,21 @@ pub fn take(bytes: &[u8], shared: &Shared) {
 
 /// Send the host `status`. Out of line, as each message is, so the two never share a frame.
 #[inline(never)]
-fn answer(status: OtaStatusMsg, shared: &Shared) {
+fn answer(status: UpdateStatus, shared: &Shared) {
     let mut buf = [0u8; UPDATE_STATUS_MAX];
     let len = Op::Status(status).encode(&mut buf);
-    let status = UpdateStatus::from_slice(&buf[..len]).unwrap_or_default();
+    let status = UpdateStatusBytes::from_slice(&buf[..len]).unwrap_or_default();
     shared.push_host(&BridgeToHost::Update(status));
 }
 
 /// Send the host the lines held for it.
 #[inline(never)]
 pub fn say_lines(shared: &Shared) {
-    for (level, message) in take_lines(shared) {
-        shared.push_line(level, message);
+    for line in take_lines(shared) {
+        match line {
+            Line::Log(message) => shared.push_log(&message),
+            Line::Error(message) => shared.push_error(&message),
+        }
     }
 }
 

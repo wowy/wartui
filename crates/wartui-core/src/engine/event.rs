@@ -2,6 +2,8 @@ use std::time::Instant;
 
 use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
+use wartui_proto::bus::Slot;
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
@@ -24,7 +26,7 @@ pub struct Now {
 }
 
 /// Something the engine must react to.
-// `Link` carries an inline ESP-NOW payload. Boxing it would allocate per frame to shrink a value
+// `Link` carries an inline node record. Boxing it would allocate per frame to shrink a value
 // that lives inside one `handle` call.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -52,7 +54,7 @@ pub enum Command {
     /// against, so Bluetooth costs the fleet a whole sniffer and buys back-to-back scans.
     ///
     /// Nothing is sent now. The planner's next re-cut deals that node's channels to the rest.
-    /// Moving the scan costs two frames, since the old holder gets a share back. While remembering
+    /// Moving the scan costs two assignments, since the old holder gets a share back. While remembering
     /// is on, the target also becomes the preferred node, `None` included, so a withdrawn scan
     /// stays withdrawn.
     AssignBle {
@@ -69,40 +71,49 @@ pub enum Command {
         on: bool,
     },
 
-    /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
-    ///
-    /// Both are clamped as [`FleetEngine::new`] clamps them. The bridge's power goes out at once
-    /// (`FleetEngine::update_bridge_tx_power`), the nodes' in re-sent assignments
-    /// (`FleetEngine::update_nodes_tx_power`). Setting the current values is a no-op.
-    SetTxPower {
-        /// Wi-Fi transmit power for the nodes.
-        nodes: i8,
-        /// Wi-Fi transmit power for the bridge.
-        bridge: i8,
-    },
-
-    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out in that
-    /// node's next admin window, like an assignment.
+    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that
+    /// node's next heartbeat, like an assignment.
     ClearRing {
         /// Which node, or `None` for every node [`FleetEngine::is_assignable`] when this arrives.
         mac: Option<Mac>,
     },
 
-    /// Change the channel pool the fleet partitions.
+    /// Ask the bridge to hold the channel pool `pool`, and keep it across its reboots.
     ///
-    /// The planner re-cuts the fleet, and each node takes its new share in its next admin window
-    /// under a fresh epoch. A node whose share changes empties its own dedup ring. Setting the
-    /// current pool is a no-op.
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The engine
+    /// changes nothing here: the planner deals the pool the bridge's `Status` reports, so the
+    /// fleet re-cuts once that `Status` shows the change.
     SetPool {
-        /// The pool to partition from now on.
+        /// The pool for the bridge to hold.
         pool: ChannelPool,
     },
 
     /// Replace the SSIDs never captured ([`EngineConfig::excluded_ssids`]). Takes effect from the
-    /// next sighting; nothing goes out on the air.
+    /// next sighting; nothing goes to the nodes.
     SetExcludedSsids {
         /// Each SSID's bytes, matched exactly, in the operator's order.
         ssids: IndexSet<Vec<u8>>,
+    },
+
+    /// Ask the bridge's carrier board to switch the node in `slot` off and on.
+    ///
+    /// Sent at once, and answered by the bridge whatever it carries; the answer reaches the
+    /// operator as [`Snapshot::power_answer`](super::Snapshot::power_answer). Nothing in the
+    /// plan changes: the node reboots, and its heartbeats say so.
+    PowerCycle {
+        /// Which node, by the slot its heartbeat came from.
+        slot: Slot,
+    },
+
+    /// Ask the bridge to run the carrier's lid fan at `duty`, and keep it across its reboots.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, so
+    /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the duty in force without
+    /// waiting for the next poll. The bridge stores it, not the host. A bridge with no carrier
+    /// ignores it.
+    SetFanDuty {
+        /// The duty to run.
+        duty: FanDuty,
     },
 }
 
@@ -113,9 +124,8 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands sent ahead of `bulk`. Assignments and dedup-ring clears race a node's 100 ms admin
-    /// window straight after a heartbeat. Peer removals come here because `bulk` can drop them
-    /// (`FleetEngine::evict_stale_peers`).
+    /// Commands sent ahead of `bulk`: assignments and dedup-ring clears, which answer a
+    /// heartbeat.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 

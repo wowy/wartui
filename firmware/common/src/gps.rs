@@ -4,6 +4,10 @@
 //! buffers and how it runs [`run`], so this module holds only what the receiver and the host
 //! need from it.
 //!
+//! **The bus is shared.** [`Bus`] borrows the I2C driver behind a mutex and locks it for each
+//! transaction, so other devices on the bus, such as the P4 carrier's I/O expander, take turns
+//! with the receiver. Nothing holds the lock across an await on anything but the bus.
+//!
 //! **The bridge does not parse what the receiver says.** It reads the receiver's byte stream
 //! and forwards it as [`BridgeToHost::Gps`](wartui_proto::link::BridgeToHost::Gps), and
 //! writes the bytes a [`HostToBridge::GpsWrite`](wartui_proto::link::HostToBridge::GpsWrite)
@@ -49,6 +53,7 @@
 
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_sync::zerocopy_channel::{Receiver, Sender};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::gpio::interconnect::{PeripheralInput, PeripheralOutput};
@@ -56,7 +61,7 @@ use esp_hal::i2c::master::{Config, I2c, Instance};
 use esp_hal::time::Rate;
 use esp_hal::{Async, Blocking};
 use portable_atomic::{AtomicBool, Ordering};
-use wartui_proto::link::{GpsBytes, GpsWriteBytes};
+use wartui_proto::link::{GPS_BUS_REFUSED, GpsBytes, GpsWriteBytes};
 
 /// The receiver's I2C address, u-blox's default.
 const ADDRESS: u8 = 0x42;
@@ -141,22 +146,26 @@ pub fn write<M: RawMutex>(writes: &mut Sender<'_, M, GpsWriteBytes>, bytes: &Gps
     }
 }
 
-/// Bring up the receiver's bus at 400 kHz, blocking. The caller turns it async where the
-/// driver's interrupt handler is to be bound, then wraps it in a [`Bus`].
+/// The receiver's bus configuration: 400 kHz, with no software timeout, since [`Bus`] bounds
+/// each transaction itself.
+#[must_use]
+pub fn bus_config() -> Config {
+    Config::default().with_frequency(Rate::from_khz(400))
+}
+
+/// Bring up the receiver's bus with [`bus_config`], blocking. The caller turns it async where
+/// the driver's interrupt handler is to be bound, puts it behind a mutex, and wraps that in a
+/// [`Bus`].
 ///
 /// # Errors
 ///
-/// When the peripheral refuses the configuration, a message for the host.
+/// When the peripheral refuses the configuration, [`GPS_BUS_REFUSED`] for the host.
 pub fn bus<'d>(
     i2c: impl Instance + 'd,
     sda: impl PeripheralInput<'d> + PeripheralOutput<'d>,
     scl: impl PeripheralInput<'d> + PeripheralOutput<'d>,
 ) -> Result<I2c<'d, Blocking>, &'static str> {
-    let config = Config::default().with_frequency(Rate::from_khz(400));
-    Ok(I2c::new(i2c, config)
-        .map_err(|_| "the GPS port's I2C bus refused its configuration")?
-        .with_sda(sda)
-        .with_scl(scl))
+    Ok(I2c::new(i2c, bus_config()).map_err(|_| GPS_BUS_REFUSED)?.with_sda(sda).with_scl(scl))
 }
 
 /// The firmware's end of [`run`].
@@ -201,8 +210,8 @@ enum Polled {
 ///
 /// A plain future rather than a task, because an embassy task cannot be generic: a
 /// firmware spawns a task that awaits it, or joins it with its own loop.
-pub async fn run<M: RawMutex>(
-    mut bus: Bus,
+pub async fn run<M: RawMutex, L: RawMutex + 'static>(
+    mut bus: Bus<L>,
     mut batches: Sender<'_, M, GpsBytes>,
     mut writes: Receiver<'_, M, GpsWriteBytes>,
 ) -> ! {
@@ -239,14 +248,14 @@ pub async fn run<M: RawMutex>(
     }
 }
 
-/// The receiver's bus, async.
-pub struct Bus {
-    i2c: I2c<'static, Async>,
+/// The receiver's bus, async, shared with whatever else is on it.
+pub struct Bus<L: RawMutex + 'static> {
+    i2c: &'static Mutex<L, I2c<'static, Async>>,
 }
 
-impl Bus {
-    /// Wrap a bus [`bus`] brought up and the caller turned async.
-    pub const fn new(i2c: I2c<'static, Async>) -> Self {
+impl<L: RawMutex + 'static> Bus<L> {
+    /// Wrap a bus [`bus`] brought up and the caller turned async and put behind a mutex.
+    pub const fn new(i2c: &'static Mutex<L, I2c<'static, Async>>) -> Self {
         Self { i2c }
     }
 
@@ -278,19 +287,23 @@ impl Bus {
     }
 
     /// Read register `reg` into `buf`, saying whether the receiver answered in time.
+    ///
+    /// The timeout starts once the lock is held, so a transaction another device's turn
+    /// delays still gets its whole bound.
     async fn read(&mut self, reg: u8, buf: &mut [u8]) -> bool {
         let reg = [reg];
-        let read = self.i2c.write_read_async(ADDRESS, &reg, buf);
+        let mut i2c = self.i2c.lock().await;
+        let read = i2c.write_read_async(ADDRESS, &reg, buf);
         matches!(with_timeout(timeout(), read).await, Ok(Ok(())))
     }
 
     /// Write bytes to the receiver verbatim, saying whether it took them in time.
     async fn write(&mut self, bytes: &[u8]) -> bool {
-        bytes.is_empty()
-            || matches!(
-                with_timeout(timeout(), self.i2c.write_async(ADDRESS, bytes)).await,
-                Ok(Ok(()))
-            )
+        if bytes.is_empty() {
+            return true;
+        }
+        let mut i2c = self.i2c.lock().await;
+        matches!(with_timeout(timeout(), i2c.write_async(ADDRESS, bytes)).await, Ok(Ok(())))
     }
 }
 

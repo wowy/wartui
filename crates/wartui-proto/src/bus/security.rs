@@ -8,7 +8,7 @@ use core::fmt;
 /// one, and make decoding a string comparison.
 ///
 /// A discriminant this build does not know is carried as [`Security::Unknown`] rather
-/// than failing the frame. A sighting must not be lost to a security mode this build
+/// than failing the batch. A sighting must not be lost to a security mode this build
 /// has no name for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]

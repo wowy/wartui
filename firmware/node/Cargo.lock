@@ -1633,7 +1633,6 @@ dependencies = [
  "embedded-storage",
  "esp-bootloader-esp-idf",
  "esp-hal",
- "esp-radio",
  "esp-storage",
  "portable-atomic",
  "static_cell",
@@ -1642,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "wartui-node-fw"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "esp-alloc",
  "esp-bootloader-esp-idf",
@@ -1651,7 +1650,6 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-sync",
- "esp-wifi-sys-esp32c5",
  "static_cell",
  "wartui-firmware",
  "wartui-proto",

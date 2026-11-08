@@ -389,14 +389,15 @@ mod tests {
     fn flash_bridge_remembers_flashed_board_when_file_holds_other_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "pool = \"eu\"\n[bridge]\nmac = \"3C:DC:75:84:A1:B0\"\n").unwrap();
+        let text = "excluded-ssids = [\"HomeNet\"]\n[bridge]\nmac = \"3C:DC:75:84:A1:B0\"\n";
+        std::fs::write(&path, text).unwrap();
 
         remember_flashed(&path, BRIDGE_MAC, Some("5CF7153520".to_owned())).unwrap();
 
         let saved = config::load(Some(&path)).unwrap();
         assert_eq!(saved.bridge.mac, Some(BRIDGE_MAC), "the new bridge replaces the old");
         assert_eq!(saved.bridge.serial.as_deref(), Some("5CF7153520"), "with its port");
-        assert_eq!(saved.pool, Some(crate::run::PoolArg::Eu), "the rest is kept");
+        assert_eq!(saved.excluded_ssids, ["HomeNet"], "the rest is kept");
     }
 
     #[test]

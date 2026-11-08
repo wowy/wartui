@@ -1,33 +1,29 @@
 //! What a node says it is, in every heartbeat it sends.
 //!
-//! A version, a board and two feature bits, since the magic is what separates one of
-//! ours from anything else. The rule that matters: a node from a later build announcing
+//! A version, a board and two feature bits. The rule that matters: a node from a later build announcing
 //! something this host has never heard of is still a node.
 
-use wartui_proto::air::{
-    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, HeartbeatMsg, NODE_VERSION, Vdd,
+use wartui_proto::bus::{
+    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, Heartbeat, NODE_VERSION, Vdd,
     Version,
 };
 use wartui_proto::reset::ResetCause;
 
 fn round_trip(caps: Capabilities) -> Capabilities {
-    let frame = HeartbeatMsg {
+    let body = Heartbeat {
+        capabilities: caps,
+        mac: [0x02, 0, 0, 0, 0, 1],
         counter: 0,
         epoch: 0,
-        capabilities: caps,
         wifi_refused: 0,
         ble_refused: 0,
-        beat: 1,
-        unsent: 0,
-        dwell: 0,
-        prev_dwell: 0,
-        tx_power: 8,
         reset_cause: ResetCause::PowerOn,
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
+        heap_free: 0,
     }
     .encode();
-    HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities
+    Heartbeat::decode(&body).expect("we just encoded it").capabilities
 }
 
 #[test]
@@ -40,6 +36,7 @@ fn capabilities_survives_heartbeat_round_trip_when_encoded_and_decoded() {
     assert_eq!(round_trip(trial), trial);
 }
 
+/// `CAP_FLAG_5G` and `CAP_FLAG_TRIAL` are the bus's frozen core. They must never change.
 #[test]
 fn capabilities_maps_feature_bits_when_converting_to_flags() {
     // Written out rather than derived, because these are wire values: the node
@@ -63,13 +60,16 @@ fn capabilities_preserves_known_flags_when_parsing_unknown_feature_bits() {
     assert!(!bare.five_ghz && !bare.trial);
 }
 
+/// The `Board` codes are the bus's frozen core. They must never change.
 #[test]
 fn board_maps_bytes_when_converting_to_and_from_wire() {
     // Wire values, frozen with the prefix that carries them.
     assert_eq!(Board::Esp32c5.as_u8(), 1);
     assert_eq!(Board::Esp32c6.as_u8(), 2);
-    assert_eq!(Board::Esp32p4.as_u8(), 4);
-    assert_eq!(Board::from_u8(4), Board::Esp32p4);
+    assert_eq!(Board::Esp32p4.as_u8(), 3);
+    assert_eq!(Board::from_u8(1), Board::Esp32c5);
+    assert_eq!(Board::from_u8(2), Board::Esp32c6);
+    assert_eq!(Board::from_u8(3), Board::Esp32p4);
     for byte in 0..=u8::MAX {
         assert_eq!(Board::from_u8(byte).as_u8(), byte);
     }
@@ -83,10 +83,13 @@ fn board_decodes_unknown_when_byte_unassigned() {
 }
 
 #[test]
-fn board_decodes_unknown_when_byte_is_three() {
-    // Assigned to no board, and a heartbeat carrying it is still a node.
-    assert_eq!(Board::from_u8(3), Board::Unknown(3));
-    assert_eq!(Board::Unknown(3).as_u8(), 3);
+fn board_decodes_unknown_when_byte_is_zero_or_four() {
+    // 0 is never sent, and 4 is past the last board. A heartbeat carrying either is still a
+    // node.
+    for byte in [0, 4] {
+        assert_eq!(Board::from_u8(byte), Board::Unknown(byte));
+        assert_eq!(Board::Unknown(byte).as_u8(), byte);
+    }
 }
 
 #[test]

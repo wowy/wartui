@@ -5,9 +5,9 @@
 //! link, and change whenever the work needs. [`LINK_REVISION`] names the encoding, and the
 //! hello carries it so a P4 never bridges with a C6 that encodes them differently.
 //!
-//! The P4 relays the host link's own messages whole, so the C6 runs the link's command
-//! handling and nothing is translated in between. The only additions are
-//! the C6's own status, which the P4 folds into what it reports to the host.
+//! Today they carry only what the pair needs: the P4's poll for the C6's counters, the
+//! counters, and the C6's lines for the host. The C6 holds the link for a future host link
+//! over Bluetooth.
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
 //! payload's end. A record never spans packets: the largest message fits one, so the
@@ -17,60 +17,43 @@
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
 
-use crate::link::{BridgeToHost, HostToBridge, QueueStat};
+use crate::link::{LogStr, QueueStat};
 
 /// The revision of the [`Up`] and [`Down`] encoding, which [`Hello`](super::Hello)
 /// carries.
 ///
-/// Not frozen. Bump it whenever this module's types or the link enums they carry change
-/// shape; `radio_link_revision_golden_bytes` in `tests/radio_link.rs` fails until the bump.
-pub const LINK_REVISION: u16 = 4;
+/// Not frozen. Held at 1 until 1.0, as [`crate::link::LINK_PROTO_VERSION`] is: both firmwares
+/// are flashed from one tree. `radio_link_revision_golden_bytes` in `tests/radio_link.rs` pins
+/// the encoding, and is re-pinned when these types change shape.
+pub const LINK_REVISION: u16 = 1;
 
 /// P4 to C6.
-// Unboxed for the reason `HostToBridge` gives.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Down {
-    /// A host command, relayed whole.
-    Command(HostToBridge),
     /// Ask for an [`Up::RadioStatus`].
     GetRadioStatus,
 }
 
 /// C6 to P4.
-// Unboxed for the reason `HostToBridge` gives.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Up {
-    /// A message for the host, relayed whole.
-    Message(BridgeToHost),
     /// Reply to [`Down::GetRadioStatus`].
     RadioStatus(RadioStatus),
-}
-
-impl Up {
-    /// Whether this record must survive a backlog of received frames: everything but a
-    /// received frame, so a send result, a line or the C6's status is never evicted behind
-    /// the traffic.
-    #[must_use]
-    pub const fn is_priority(&self) -> bool {
-        !matches!(self, Up::Message(BridgeToHost::Rx { .. }))
-    }
+    /// A line for the host's log.
+    Log {
+        /// The text.
+        message: LogStr,
+    },
+    /// A fault for the host.
+    Error {
+        /// The text.
+        message: LogStr,
+    },
 }
 
 /// The C6's counters, which the P4 reports beside its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RadioStatus {
-    /// Registered peers.
-    pub peer_count: u8,
-    /// Frames received and accepted to forward since boot.
-    pub rx_count: u32,
-    /// Received frames longer than [`crate::link::MAX_NODE_PAYLOAD`], dropped since boot.
-    pub rx_oversize: u32,
-    /// Bytes free in the C6's heap.
-    pub heap_free: u32,
-    /// Milliseconds since the C6's life started.
-    pub uptime_ms: u32,
     /// The C6's bounded queues.
     pub queues: Vec<QueueStat, 4>,
     /// Packets from the P4 that failed their CRC.

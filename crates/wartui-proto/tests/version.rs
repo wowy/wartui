@@ -1,6 +1,6 @@
 //! The node firmware's version, and the rule tying the wire to the manifest.
 
-use wartui_proto::air::{Compat, NODE_VERSION, Version};
+use wartui_proto::bus::{Compat, NODE_VERSION, Version};
 
 /// `version` under `[package]` in `firmware/node/Cargo.toml`.
 fn manifest_version() -> String {

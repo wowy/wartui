@@ -1,37 +1,11 @@
 //! What a capture lost on the way in, and how fast it arrived, read back from the tables the
 //! store already writes.
 //!
-//! Heartbeat loss comes from sequences. Every heartbeat carries `beat`, the node's since-boot count of
-//! heartbeats sent, so a gap between consecutive beats is heartbeats lost. A repeated beat, a radio
-//! retransmit or a replay, is neither received nor lost.
-//!
-//! Rows are walked in arrival order (`id`, since the store has one writer), not by `rx_at`, which
-//! the wall clock can step back. Forward modulo deltas below half-range in `beat` (u16) and
-//! `counter` (u32 sweeps, not heartbeats) include wraps; a delta at least half-range indicates a
-//! restart. This assumes fewer than 32,768 beats and 2^31 sweeps between observations. A restart
-//! whose counters both look forward cannot be detected. `beat` restarts at 1, so the first
-//! heartbeat after a detected restart contributes `beat - 1` missed beats since boot.
-//!
-//! Each counted gap keeps the two observed arrival timestamps and row IDs. These bracket missing
-//! beats, not their exact transmission times. A restart-associated interval is uncertain: the
-//! boot time and any loss before that boot are unknown. Clock reversals remain visible, never
-//! sorted away. Windows and lifetime totals use the same `beat_gap` result in the same walk.
-//!
-//! A gap counts only after a heartbeat that arrived live. One replayed from the bridge's backlog
-//! can be minutes older than the next, and the heartbeats between were sent while no host read. The
-//! bridge's `dropped` covers those, before the capture's baseline. The few lost at the
-//! replay-to-live handoff go uncounted.
-//!
-//! Each counted gap splits into unsent and lost on the air. Every heartbeat carries `unsent`, the
-//! node's since-boot count of heartbeats its radio could not send. It excludes the heartbeat
-//! carrying it, which cannot know its own outcome. So the current count less the previous one is
-//! the failed sends among the previous beat and the missed beats between. The previous beat
-//! arrived, so it did not fail, and the difference never exceeds `missed` from honest rows. The cap
-//! at `missed` only guards against a corrupt or repeated row. A byte is enough. The failed sends in
-//! a gap cannot outnumber the beats sent in it, so the wrapping difference is exact for any gap
-//! under 256 beats. A gap of 256 or more beats, or more than 255 failed sends before a restart,
-//! undercounts. That u8 wraps often, so the walk takes the wrapping difference and decides restarts
-//! from `counter` and `beat`, never from `unsent` falling, as `advance_since_boot` would.
+//! Heartbeats are counted per node, in arrival order (`id`, since the store has one writer), not
+//! by `rx_at`, which the wall clock can step back. A heartbeat carries no sequence of its own, so
+//! a lost one is not counted: the node bus does not resend a heartbeat, and a newer one replaces
+//! one the bridge has not yet clocked. A restart is `counter` (u32 sweeps) falling by half its
+//! range or more, which assumes fewer than 2^31 sweeps between two rows.
 //!
 //! Refusals are reported beside the losses, not as one. A full pending buffer turns a sighting away
 //! once per dwell or scan, and the address is usually reported on a later one. The count is
@@ -45,8 +19,8 @@
 //! off by up to the ring's 24 frames at each end, and saturates at 0 when a baseline taken
 //! mid-backlog shows the host reading more than the bridge passed on.
 //!
-//! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and on the P4
-//! split bridge its radio link's counters. A queue's `peak` is the largest `high_water` any row
+//! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and its radio
+//! link's counters. A queue's `peak` is the largest `high_water` any row
 //! carried. That figure is since the bridge booted, so the peak can predate the capture. Its drops
 //! and the radio link counters are since-boot counts, rebased like the bridge's own: a restart
 //! between two rows is the reply's uptime falling at any row between them. That uptime is the C6's.
@@ -67,9 +41,8 @@
 //!
 //! Every since-boot count is rebased by the engine's `advance_since_boot`, and the first row is a
 //! baseline only (per node, for heartbeats): what was dropped before the capture is not the
-//! capture's. Analyze infers restarts from `counter` and `beat`. Live, the engine's
-//! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
-//! misses.
+//! capture's. Analyze infers restarts from `counter`. Live, the engine also reads a heartbeat's
+//! epoch falling back to 0, so the two can disagree after a restart the counter misses.
 //!
 //! Arrival rate is [`peaks`]: the most sightings in any one second and any one minute. Windows
 //! slide rather than fall on clock boundaries, since a burst astride a second is one burst to the
@@ -81,11 +54,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use rusqlite::{Connection, Row};
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::RecordKind;
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
-use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
+use crate::engine::{BEHIND_US, advance_since_boot};
 use crate::store::parse_kind;
 
 /// What a capture lost.
@@ -102,7 +75,7 @@ pub struct LossSummary {
 /// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
-    /// Frames the bridge received over the air.
+    /// Records the bridge received from its nodes.
     pub received: u64,
     /// Frames the bridge dropped on their way to the host: its queues' drops when rows carry them,
     /// else `dropped_tx`'s rise. The module documentation says why.
@@ -120,8 +93,8 @@ pub struct BridgeLoss {
     pub oversize: u64,
     /// The bridge's queues, in the order it first reported them; empty when it reports none.
     pub queues: Vec<QueueLoss>,
-    /// The radio link's errors, or `None` when no reply carried them, as off the P4 split bridge.
-    pub radio_link: Option<RadioLinkLoss>,
+    /// The P4–C6 UART link's counters.
+    pub radio_link: RadioLinkLoss,
     /// The P4's host-link reads that saw one or more line errors or overflows: host bytes lost
     /// or corrupted on the way in.
     pub host_uart_errors: u64,
@@ -130,7 +103,7 @@ pub struct BridgeLoss {
 /// How full one of the bridge's queues got, and what it dropped during the capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueLoss {
-    /// Which queue; [`QueueId::unit`] says whether the figures are bytes or entries.
+    /// Which queue. Every figure is bytes.
     pub queue: QueueId,
     /// Its size, as the last reply gave it.
     pub capacity: u64,
@@ -165,44 +138,20 @@ pub struct RadioLinkLoss {
 }
 
 impl RadioLinkLoss {
-    /// A status row's counters, or `None` when it carries none.
-    fn read(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
-        let get = |name: &str| row.get::<_, Option<i64>>(name).map(|v| v.map(count));
-        let (
-            Some(packets),
-            Some(crc_fail),
-            Some(bad_magic),
-            Some(seq_gap),
-            Some(uart_errors),
-            Some(radio_crc_fail),
-            Some(radio_bad_magic),
-            Some(radio_seq_gap),
-            Some(radio_uart_errors),
-        ) = (
-            get("radio_link_packets")?,
-            get("radio_link_crc_fail")?,
-            get("radio_link_bad_magic")?,
-            get("radio_link_seq_gap")?,
-            get("radio_link_uart_errors")?,
-            get("radio_link_radio_crc_fail")?,
-            get("radio_link_radio_bad_magic")?,
-            get("radio_link_radio_seq_gap")?,
-            get("radio_link_radio_uart_errors")?,
-        )
-        else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            packets,
-            crc_fail,
-            bad_magic,
-            seq_gap,
-            uart_errors,
-            radio_crc_fail,
-            radio_bad_magic,
-            radio_seq_gap,
-            radio_uart_errors,
-        }))
+    /// A status row's counters.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let get = |name: &str| row.get::<_, i64>(name).map(count);
+        Ok(Self {
+            packets: get("radio_link_packets")?,
+            crc_fail: get("radio_link_crc_fail")?,
+            bad_magic: get("radio_link_bad_magic")?,
+            seq_gap: get("radio_link_seq_gap")?,
+            uart_errors: get("radio_link_uart_errors")?,
+            radio_crc_fail: get("radio_link_radio_crc_fail")?,
+            radio_bad_magic: get("radio_link_radio_bad_magic")?,
+            radio_seq_gap: get("radio_link_radio_seq_gap")?,
+            radio_uart_errors: get("radio_link_radio_uart_errors")?,
+        })
     }
 
     /// Adds what each counter advanced from `before` to `now`. `restarted` is the C6's uptime
@@ -225,7 +174,7 @@ impl RadioLinkLoss {
 /// What the host did with the frames it read, and how it held up, first `host_status` row to last.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostLoss {
-    /// Sighting batches dropped as radio retransmits.
+    /// Sighting batches dropped as node-bus resends.
     pub duplicates: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
@@ -233,13 +182,11 @@ pub struct HostLoss {
     pub undecodable: u64,
     /// Frames from a build speaking another wire version or layout.
     pub incompatible: u64,
-    /// Assignments held back because the heartbeat that would have carried them was stale.
-    pub admin_windows_missed: u64,
     /// Rows the store dropped.
     pub store_dropped: u64,
-    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the air.
+    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the bridge.
     pub lag_over_100ms: u64,
-    /// The furthest behind the air the host fell, in microseconds.
+    /// The furthest behind the bridge the host fell, in microseconds.
     pub lag_peak_us: u64,
     /// The slowest batch the store wrote, in microseconds.
     pub commit_peak_us: u64,
@@ -267,38 +214,12 @@ pub struct NodeLoss {
     pub mac: Mac,
     /// Sighting batches lost between the node and the host. Exact, from `batch_gap`.
     pub batches_lost: u64,
-    /// Distinct heartbeats the capture holds. A duplicate counts once.
+    /// Heartbeats the capture holds.
     pub heartbeats: u64,
-    /// Heartbeats lost between the node and the host: gaps in `beat` after a live heartbeat.
-    pub heartbeats_missed: u64,
-    /// Of `heartbeats_missed`, those the node's radio could not send. The rest were lost on the
-    /// air or past the bridge.
-    pub heartbeats_unsent: u64,
-    /// Counted gaps in arrival order. Their missed counts sum to `heartbeats_missed`.
-    pub heartbeat_windows: Vec<HeartbeatWindow>,
     /// Access points the node's pending buffer refused. Most are reported on a later dwell.
     pub wifi_refused: u64,
     /// Advertisers the node's pending buffer refused.
     pub ble_refused: u64,
-}
-
-/// Observed arrivals bracketing a counted heartbeat gap, not exact transmission times.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeartbeatWindow {
-    /// Previous heartbeat row ID, which preserves arrival order even if the clock reverses.
-    pub start_id: i64,
-    /// Current heartbeat row ID.
-    pub end_id: i64,
-    /// Previous heartbeat's UTC arrival time, in unix milliseconds.
-    pub start_rx_at_ms: i64,
-    /// Current heartbeat's UTC arrival time; it can be earlier than `start_rx_at_ms`.
-    pub end_rx_at_ms: i64,
-    /// Missing beats, from the same sequence accounting as the lifetime total.
-    pub missed: u64,
-    /// Of `missed`, the beats the node's radio could not send.
-    pub unsent: u64,
-    /// A detected restart makes the interval uncertain: only missing beats since boot count.
-    pub restarted: bool,
 }
 
 /// How fast sightings arrived.
@@ -462,8 +383,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
     // The previous status row's host UART errors, a P4 count that runs on through a C6 restart.
     let mut prev_host_uart: Option<u64> = None;
-    // The radio link counters of the last status row that carried them, and the restarts seen by
-    // then.
+    // The previous status row's radio link counters, and the restarts seen by then.
     let mut prev_radio_link: Option<(RadioLinkLoss, u64)> = None;
     // Beside each queue, its previous row's drops and the restarts seen by then.
     let mut prev_queue: Vec<(u64, u64)> = Vec::new();
@@ -494,13 +414,11 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             loss.host_uart_errors += advance_since_boot(host_uart, prev_host_uart, false);
             prev_host_uart = Some(host_uart);
 
-            if let Some(now) = RadioLinkLoss::read(row)? {
-                let sums = loss.radio_link.get_or_insert_default();
-                if let Some((before, life)) = &prev_radio_link {
-                    sums.advance(&now, before, *life != loss.reboots);
-                }
-                prev_radio_link = Some((now, loss.reboots));
+            let now = RadioLinkLoss::read(row)?;
+            if let Some((before, life)) = &prev_radio_link {
+                loss.radio_link.advance(&now, before, *life != loss.reboots);
             }
+            prev_radio_link = Some((now, loss.reboots));
         }
 
         let Some(name) = row.get::<_, Option<String>>("queue")? else { continue };
@@ -541,7 +459,6 @@ struct HostRow {
     garbled: u64,
     undecodable: u64,
     incompatible: u64,
-    admin_windows_missed: u64,
     store_dropped: u64,
     lag_peak_us: u64,
     commit_peak_us: u64,
@@ -559,23 +476,21 @@ impl HostRow {
             garbled: count(row.get(1)?),
             undecodable: count(row.get(2)?),
             incompatible: count(row.get(3)?),
-            admin_windows_missed: count(row.get(4)?),
-            store_dropped: count(row.get(5)?),
-            lag_peak_us: count(row.get(6)?),
-            commit_peak_us: count(row.get(7)?),
-            queue_peak: count(row.get(8)?),
-            throttled: row.get(9)?,
-            soc_temp_mc: row.get(10)?,
-            battery_mv: row.get(11)?,
+            store_dropped: count(row.get(4)?),
+            lag_peak_us: count(row.get(5)?),
+            commit_peak_us: count(row.get(6)?),
+            queue_peak: count(row.get(7)?),
+            throttled: row.get(8)?,
+            soc_temp_mc: row.get(9)?,
+            battery_mv: row.get(10)?,
         })
     }
 }
 
 fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     let mut stmt = conn.prepare(
-        "SELECT duplicate_batches, garbled, undecodable, incompatible, admin_windows_missed,
-                store_dropped, lag_peak_us, store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc,
-                battery_mv
+        "SELECT duplicate_batches, garbled, undecodable, incompatible, store_dropped, lag_peak_us,
+                store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc, battery_mv
          FROM host_status
          ORDER BY id",
     )?;
@@ -591,7 +506,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 
         let loss = loss.get_or_insert_default();
         let lag = row.lag_peak_us;
-        loss.lag_over_100ms += u64::from(lag >= BEHIND_THE_AIR_US);
+        loss.lag_over_100ms += u64::from(lag >= BEHIND_US);
         loss.lag_peak_us = loss.lag_peak_us.max(lag);
         loss.commit_peak_us = loss.commit_peak_us.max(row.commit_peak_us);
         loss.queue_peak = loss.queue_peak.max(row.queue_peak);
@@ -614,7 +529,6 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     loss.garbled = delta(|r| r.garbled);
     loss.undecodable = delta(|r| r.undecodable);
     loss.incompatible = delta(|r| r.incompatible);
-    loss.admin_windows_missed = delta(|r| r.admin_windows_missed);
     loss.store_dropped = delta(|r| r.store_dropped);
     loss.since_boot = last_throttled.map(|word| (word >> 16) & 0xF);
     Ok(Some(loss))
@@ -624,18 +538,13 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 struct Beat {
     mac: Mac,
     counter: u32,
-    beat: u16,
-    unsent: u8,
     wifi: u64,
     ble: u64,
-    live: bool,
-    id: i64,
-    rx_at_ms: i64,
 }
 
 fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT node_mac, counter, beat, wifi_refused, ble_refused, live, id, rx_at, unsent
+        "SELECT node_mac, counter, wifi_refused, ble_refused
          FROM heartbeat
          ORDER BY node_mac, id",
     )?;
@@ -645,65 +554,22 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
         let beat = Beat {
             mac: row.get(0)?,
             counter: row.get(1)?,
-            beat: row.get(2)?,
-            wifi: count(row.get(3)?),
-            ble: count(row.get(4)?),
-            live: row.get(5)?,
-            id: row.get(6)?,
-            rx_at_ms: row.get(7)?,
-            unsent: row.get(8)?,
+            wifi: count(row.get(2)?),
+            ble: count(row.get(3)?),
         };
         let node = nodes
             .entry(beat.mac)
             .or_insert_with(|| NodeLoss { mac: beat.mac, ..Default::default() });
-        match &prev {
-            Some(prev) if prev.mac == beat.mac => {
-                let rebooted = beat.counter.wrapping_sub(prev.counter) >= 0x8000_0000
-                    || beat.beat.wrapping_sub(prev.beat) >= 0x8000;
-                node.wifi_refused += advance_since_boot(beat.wifi, Some(prev.wifi), rebooted);
-                node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
-                let (heard, missed) = beat_gap(prev.beat, beat.beat, rebooted);
-                node.heartbeats += heard;
-                // A gap after a replayed heartbeat spans time no host was reading.
-                if prev.live && missed > 0 {
-                    // Not `advance_since_boot`: a u8 wraps often, and its falling is not a restart.
-                    let unsent_since = u64::from(if rebooted {
-                        beat.unsent
-                    } else {
-                        beat.unsent.wrapping_sub(prev.unsent)
-                    });
-                    let unsent = unsent_since.min(missed);
-                    node.heartbeats_missed += missed;
-                    node.heartbeats_unsent += unsent;
-                    node.heartbeat_windows.push(HeartbeatWindow {
-                        start_id: prev.id,
-                        end_id: beat.id,
-                        start_rx_at_ms: prev.rx_at_ms,
-                        end_rx_at_ms: beat.rx_at_ms,
-                        missed,
-                        unsent,
-                        restarted: rebooted,
-                    });
-                }
-            }
-            // A node's first heartbeat is a baseline only.
-            _ => node.heartbeats += 1,
+        node.heartbeats += 1;
+        // A node's first heartbeat is a baseline only.
+        if let Some(prev) = prev.as_ref().filter(|prev| prev.mac == beat.mac) {
+            let rebooted = beat.counter.wrapping_sub(prev.counter) >= 0x8000_0000;
+            node.wifi_refused += advance_since_boot(beat.wifi, Some(prev.wifi), rebooted);
+            node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
         }
         prev = Some(beat);
     }
     Ok(())
-}
-
-/// What one heartbeat adds after `prev`: heartbeats heard, then missed. After a restart, every
-/// earlier beat since boot was lost. A repeat adds nothing.
-fn beat_gap(prev: u16, beat: u16, rebooted: bool) -> (u64, u64) {
-    if rebooted {
-        return (1, u64::from(beat.saturating_sub(1)));
-    }
-    match beat.wrapping_sub(prev) {
-        0 => (0, 0),
-        d => (1, u64::from(d - 1)),
-    }
 }
 
 fn batches(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {

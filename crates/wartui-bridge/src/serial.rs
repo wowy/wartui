@@ -3,7 +3,7 @@
 //! Deliberately built on blocking [`serialport`] reads and writes on dedicated
 //! threads rather than an async serial crate. A tty file descriptor is a poor
 //! fit for kqueue/epoll readiness, and the extra hop costs latency exactly
-//! where it is scarce — a node holds its admin window open for only 100 ms.
+//! where it counts — an assignment answers a heartbeat.
 //! Two threads and a pair of channels are simpler and more predictable.
 
 use std::io::{ErrorKind, Read, Write};
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, MAX_FRAME, MAX_HOST_FRAME, decode_frame, encode_host_frame,
+    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
+    decode_frame, encode_host_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -762,7 +762,7 @@ async fn connect(
     // Unbounded, and deliberately so. The biased select below arbitrates when a
     // command is taken rather than when it reaches the wire, so a burst of bulk
     // commands drains into this queue and an assignment behind them inherits the
-    // latency — 28-35 ms against a node's 100 ms admin window, and that is the
+    // latency — 28-35 ms behind the heartbeat it answers, and that is the
     // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
     // Two bounded channels and a condvar in `write_loop` is the fix if that ever
     // changes, and `assignment.latency_us` is where it would show.
@@ -938,23 +938,12 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
     TransportError::Open { port: path.to_owned(), source: error.clone() }.to_string()
 }
 
-/// Puts a line the bridge sent in the log, at its own level; an `Error` has none and reads as a
-/// warning. Here rather than in the engine, which does no I/O and drops these frames.
+/// Puts a line the bridge sent in the log: a `Log` at info, an `Error` as a warning. Here rather
+/// than in the engine, which does no I/O and drops these frames.
 fn log_bridge_line(msg: &BridgeToHost) {
     match msg {
         BridgeToHost::Error { message } => tracing::warn!("bridge: {message}"),
-        BridgeToHost::Log { level: LogLevel::Debug, message } => {
-            tracing::debug!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Info, message } => {
-            tracing::info!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Warn, message } => {
-            tracing::warn!("bridge: {message}");
-        }
-        BridgeToHost::Log { level: LogLevel::Error, message } => {
-            tracing::error!("bridge: {message}");
-        }
+        BridgeToHost::Log { message } => tracing::info!("bridge: {message}"),
         _ => {}
     }
 }
@@ -1006,28 +995,15 @@ fn read_frames<R: Read>(
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
             let event = match decode_frame::<BridgeToHost>(frame) {
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version, .. })
-                    if proto_version != LINK_PROTO_VERSION =>
-                {
-                    let _ = (chip, mac, fw_version);
-                    return LinkError::VersionMismatch {
-                        ours: LINK_PROTO_VERSION,
-                        theirs: proto_version,
-                    }
-                    .to_string();
-                }
                 Ok(BridgeToHost::Ready {
-                    chip,
                     mac,
                     fw_version,
                     reset_cause,
                     last_phase,
-                    heap_free,
                     uptime_ms,
-                    gps,
+                    node_board,
                     radio,
                     image,
-                    ..
                 }) => {
                     state.announced.store(true, Ordering::Relaxed);
                     // Read by the sweep, which stops here and holds this board for
@@ -1049,8 +1025,7 @@ fn read_frames<R: Read>(
                     // under a held connection — a C6 that restarted, or a P4 that
                     // rebooted and was asked again by the next host frame, while the
                     // CH343 stayed on the bus — and that has to be reported, or the
-                    // engine keeps the dead life's `BridgeInfo` and goes on believing
-                    // in a peer table the restart emptied. A second answer's uptime
+                    // engine keeps the dead life's `BridgeInfo`. A second answer's uptime
                     // keeps pace with the host's clock since the last `Ready`; a new
                     // life's falls below the last `Ready`'s, or well behind that pace even
                     // when above it, as when a C6 restarts seconds after a P4 reboot.
@@ -1066,26 +1041,22 @@ fn read_frames<R: Read>(
                     // Without it, a log of a link that dropped and came back ends
                     // at "opening the bridge" — as does one that never did.
                     tracing::info!(
-                        chip = ?chip,
                         mac = %mac::full(&mac),
                         fw = %fw_version.as_str(),
                         reset = ?reset_cause,
                         phase = ?last_phase,
-                        heap_free,
                         uptime_ms,
-                        gps,
+                        board = %node_board,
                         radio = ?radio,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
-                        chip,
                         mac,
                         fw_version: fw_version.as_str().to_owned(),
                         reset_cause,
                         last_phase,
-                        heap_free,
                         uptime_ms,
-                        gps,
+                        node_board,
                         radio,
                         image,
                     })
@@ -1095,7 +1066,7 @@ fn read_frames<R: Read>(
                     // `Identify`, and clears its queue when a host arrives. So whatever
                     // decodes before this connection's first `Ready` was written before
                     // the connection, out of the CH343's or the tty's buffer, and is
-                    // stale: a heartbeat seconds old reads as a host behind the air. A
+                    // stale: a heartbeat seconds old reads as a host behind the bridge. A
                     // rebooted bridge's `Ready` on a connection already announced changes
                     // nothing here.
                     if last_ready.is_none() {
@@ -1278,9 +1249,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
+    use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::{
-        BridgeToHost, Chip, EspNowPayload, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
-        MAX_HOST_FRAME, ShortStr, encode_frame, encode_host_frame,
+        BridgeToHost, FromNodeBody, HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, ShortStr,
+        encode_frame, encode_host_frame,
     };
     use wartui_proto::reset::ResetCause;
 
@@ -1484,22 +1456,19 @@ mod tests {
         buf[..len].to_vec()
     }
 
-    fn rx(rssi: i8) -> BridgeToHost {
-        let payload = EspNowPayload::from_slice(b"WTUI").unwrap();
-        BridgeToHost::Rx { src: [1; 6], dst: [2; 6], rssi, rx_us: 0, payload }
+    fn rx(rx_us: u32) -> BridgeToHost {
+        let body = FromNodeBody::from_slice(b"body").unwrap();
+        BridgeToHost::FromNode { slot: Slot::new(0, 0).unwrap(), rx_us, kind: 1, body }
     }
 
     fn ready() -> BridgeToHost {
         BridgeToHost::Ready {
-            chip: Chip::Esp32P4,
             mac: [1, 2, 3, 4, 5, 6],
             fw_version: ShortStr::new(),
-            proto_version: LINK_PROTO_VERSION,
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
-            heap_free: 0,
             uptime_ms: 0,
-            gps: false,
+            node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
         }
@@ -1507,9 +1476,9 @@ mod tests {
 
     #[test]
     fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
-        let mut bytes = frame(&rx(-10));
+        let mut bytes = frame(&rx(10));
         bytes.extend(frame(&ready()));
-        bytes.extend(frame(&rx(-20)));
+        bytes.extend(frame(&rx(20)));
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
@@ -1518,7 +1487,7 @@ mod tests {
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
         assert!(matches!(
             received.try_recv(),
-            Ok(LinkEvent::Message(BridgeToHost::Rx { rssi: -20, .. }))
+            Ok(LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. }))
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
@@ -1544,8 +1513,8 @@ mod tests {
     fn serial_link_stays_unannounced_when_only_frames_before_ready_arrive() {
         // Stale frames prove nothing about this connection, so `connect` still runs out of
         // patience and the next connection asks again.
-        let mut bytes = frame(&rx(-10));
-        bytes.extend(frame(&rx(-20)));
+        let mut bytes = frame(&rx(10));
+        bytes.extend(frame(&rx(20)));
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
@@ -1562,21 +1531,16 @@ mod tests {
         // The CH343 stays on the bus, so the reboot arrives on the same connection: the
         // bootloader's log at the wrong rate, then a `Ready` whose uptime fell.
         let up = |uptime_ms| match ready() {
-            BridgeToHost::Ready { chip, mac, fw_version, proto_version, reset_cause, .. } => {
-                BridgeToHost::Ready {
-                    chip,
-                    mac,
-                    fw_version,
-                    proto_version,
-                    reset_cause,
-                    last_phase: LoopPhase::Unknown,
-                    heap_free: 0,
-                    uptime_ms,
-                    gps: false,
-                    radio: None,
-                    image: None,
-                }
-            }
+            BridgeToHost::Ready { mac, fw_version, reset_cause, .. } => BridgeToHost::Ready {
+                mac,
+                fw_version,
+                reset_cause,
+                last_phase: LoopPhase::Unknown,
+                uptime_ms,
+                node_board: NodeBoard::NoCarrier,
+                radio: None,
+                image: None,
+            },
             _ => unreachable!(),
         };
         let mut bytes = frame(&up(50_000));
@@ -1646,7 +1610,7 @@ mod tests {
         // sent frames before the answer.
         let mut reply = b"ESP-ROM:esp32p4-eco2-20240710\r\nrst:0x1".to_vec();
         reply.extend([0x00, 0xFF, 0x13, 0x00]);
-        reply.extend(frame(&rx(-40)));
+        reply.extend(frame(&rx(40)));
         reply.extend(frame(&ready()));
         let mut port = FakePort::answering(reply);
         assert_eq!(identify(&mut port, WAIT, WAIT), Some([1, 2, 3, 4, 5, 6]));
@@ -1707,7 +1671,7 @@ mod tests {
 
     #[test]
     fn serial_probe_returns_none_when_nothing_answers() {
-        let mut port = FakePort::answering(frame(&rx(-40)));
+        let mut port = FakePort::answering(frame(&rx(40)));
         assert_eq!(identify(&mut port, WAIT, WAIT), None);
     }
 }

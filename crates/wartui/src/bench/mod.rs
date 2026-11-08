@@ -51,20 +51,20 @@ use wartui_core::store::{
 };
 use wartui_proto::dedup::DEDUP_RING;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
 use self::timeline::{Mark, Slice, Timeline};
 
 /// How often each node's progress is checked during the measured window.
 ///
-/// Longer than the slowest sweep a fleet of one to twenty nodes has, so a node doing its
+/// Longer than the slowest sweep a fleet of one to [`MAX_NODES`] nodes has, so a node doing its
 /// job always reports something inside one.
 const SAMPLE: Duration = Duration::from_secs(2);
 
 /// How long the fleet may take to hold its assignments before the run is abandoned.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The pool the benchmark fleet scans.
+/// The pool the benchmark fleet scans, which the simulated bridge holds.
 ///
 /// Named rather than taken from the default, so the workload does not move when
 /// the default does. The channel count still feeds it — `busy_networks` scales
@@ -86,8 +86,8 @@ pub enum Profile {
     /// Ten nodes in real time, one of them scanning Bluetooth: a busy street, sustained.
     #[default]
     Drive,
-    /// The fleet maximum of twenty nodes in real time, one on Bluetooth, to find where
-    /// the store stops keeping up and starts dropping.
+    /// The fleet maximum in real time, one on Bluetooth, to find where the store stops
+    /// keeping up and starts dropping.
     Burst,
 }
 
@@ -97,7 +97,7 @@ impl Profile {
     const fn load(self) -> (u8, f64, f64) {
         match self {
             Self::Drive => (10, 1.0, 1.0),
-            Self::Burst => (20, 1.0, 1.0),
+            Self::Burst => (MAX_NODES as u8, 1.0, 1.0),
         }
     }
 
@@ -194,8 +194,8 @@ pub struct Args {
     #[arg(long, value_name = "MIB", default_value_t = 64, conflicts_with = "inline_checkpoint")]
     truncate_wal_mib: u64,
 
-    /// Leave checkpoints to SQLite, inside whichever commit fills the WAL, as the store
-    /// did before it had a checkpoint thread. For comparison.
+    /// Leave checkpoints to SQLite, inside whichever commit fills the WAL, rather than to
+    /// the store's checkpoint thread. For comparison.
     #[arg(long)]
     inline_checkpoint: bool,
 
@@ -215,6 +215,9 @@ pub async fn run(args: Args) -> Result<()> {
     if nodes == 0 {
         bail!("--nodes must be at least 1");
     }
+    if usize::from(nodes) > MAX_NODES {
+        bail!("--nodes must be at most {MAX_NODES}, one per node-bus slot");
+    }
     if args.interval < SAMPLE.as_secs() {
         bail!("--interval must be at least {}s, the sampling period", SAMPLE.as_secs());
     }
@@ -229,6 +232,7 @@ pub async fn run(args: Args) -> Result<()> {
         seed: args.seed.unwrap_or(SimConfig::default().seed),
         sightings_per_address: Some(args.sightings_per_address.unwrap_or(SIGHTINGS_PER_ADDRESS))
             .filter(|&n| n > 0),
+        pool: POOL,
         ..SimConfig::default()
     };
 
@@ -266,7 +270,6 @@ pub async fn run(args: Args) -> Result<()> {
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
     let started = now();
     let info = CaptureInfo {
-        pool: POOL,
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
         simulated: true,
     };
@@ -274,7 +277,6 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("creating {}", args.db.display()))?;
     let engine = FleetEngine::new(
         EngineConfig {
-            pool: POOL,
             record_raw: args.record_raw,
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.
@@ -926,9 +928,9 @@ mod tests {
     use std::time::Duration;
 
     use wartui_proto::dedup::DEDUP_RING;
-    use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
+    use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
-    use super::{Report, Value, busy_networks, percentile, table};
+    use super::{MAX_NODES, Report, Value, busy_networks, percentile, table};
 
     fn slice(t_s: u64, rows_per_s: f64, device_writes: Option<u64>) -> Report {
         let mut row = Report::default();

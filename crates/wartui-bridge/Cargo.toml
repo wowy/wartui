@@ -1,6 +1,6 @@
 [package]
 name = "wartui-bridge"
-description = "Host-side link to the ESP-NOW bridge, plus a node simulator."
+description = "Host-side link to the P4 bridge, plus a node simulator."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,4 +17,5 @@ tracing = "0.1.44"
 wartui-proto = { path = "../wartui-proto" }
 
 [dev-dependencies]
+sha2 = "0.11.1"
 tokio = { version = "1.53.1", features = ["test-util", "macros", "rt-multi-thread"] }

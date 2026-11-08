@@ -1,17 +1,17 @@
 //! The P4 bridge's view of its C6: whether the radio is up, what `Ready` says to the host,
-//! where each host command goes, and what `Status` reports.
+//! and what `Status` reports.
 //!
 //! The firmware consults [`Pair`] for these decisions so they are testable on the host.
 //!
-//! - **`Ready.mac` is the C6's**, because that is the address nodes see as the bridge and the
-//!   host finds the bridge by. The P4 therefore waits [`RADIO_WAIT_MS`] for the C6's first hello
+//! - **`Ready.mac` is the C6's**, because that is the address the host finds the bridge by
+//!   (`[bridge]` in `wartui.toml`, `wartui ports`). The P4 therefore waits [`RADIO_WAIT_MS`] for the C6's first hello
 //!   before it announces anything. Only if the C6 never answers does it announce its own MAC,
 //!   with a fault.
 //! - **`Ready.uptime_ms` is the C6's uptime now.** The host detects a bridge restart by
 //!   that value going backwards (`is_a_new_life` in `crates/wartui-bridge/src/serial.rs`).
-//!   A C6 restart under a running P4 loses the peer table and transmit power, so it must
-//!   look like a bridge restart; a hello arriving after the link was up is
-//!   [`PairEvent::NewLife`], and the firmware answers with a fresh `Ready`.
+//!   Since that uptime is the C6's, a C6 restart under a running P4 must read as a bridge
+//!   restart too; a hello arriving after the link was up is [`PairEvent::NewLife`], and the
+//!   firmware answers with a fresh `Ready`.
 //! - **The C6 repeats its hello** until it hears the P4's, so [`Pair`] tells a new life from a
 //!   repeat by the packet seq; see [`Pair::on_hello`]. A restarted C6 boots through the same
 //!   code to the same first hello, often within a millisecond of the last life's uptime, so
@@ -19,10 +19,10 @@
 //! - **`Ready.reset_cause` is the C6's after a C6 restart**, since that restart is the
 //!   bridge restart the host sees. The P4's own boot reports the P4's cause.
 //! - **A link revision mismatch does not bridge.** The hello is frozen, so the P4 can
-//!   always read it and say so, but radio commands are refused.
+//!   always read it and say so, but sends it no records.
 //! - **The P4 carries the C6's image, and the C6 runs it.** A hello whose image digest
 //!   differs from the bundled one is [`RadioState::Updating`]: the P4 sends the bundle over
-//!   the link (`crate::radio_link::update`) and refuses radio commands meanwhile. The C6 reboots
+//!   the link (`crate::radio_link::update`) and sends it no records meanwhile. The C6 reboots
 //!   into the new image, and its next hello is a new life. One attempt per P4 life, so an
 //!   image that will not take cannot loop: a C6 still on another build afterwards is
 //!   [`RadioState::Stale`], bridged with a fault when its revision matches.
@@ -30,8 +30,6 @@
 //!   [`PairEvent::ResetRadio`], up to [`TRIAL_BOOTS`] times. A trial image that hangs gets no
 //!   watchdog, and each power cycle counts a trial boot, so the C6 rolls back to the image it
 //!   ran before (`firmware/common/src/ota.rs`).
-//! - **A C6 whose hello carries no digest is not updated**: it cannot take the image, so it needs
-//!   one wired flash.
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
 //!   updates over the host link (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
@@ -44,13 +42,16 @@
 
 use core::fmt::Write;
 
+use crate::bus::NodeBoard;
+use crate::fan::FanStats;
 use crate::link::{
-    BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueStat, QueueStats,
-    RADIO_UPDATING, RadioInfo, RadioLinkStats, SendStatus, ShortStr,
+    BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING, RadioInfo,
+    RadioLinkStats, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
+use crate::plan::ChannelPool;
 use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use crate::reset::ResetCause;
 
@@ -86,7 +87,7 @@ pub enum RadioState {
     /// The C6 runs another image after this P4 life's update, and speaks this P4's revision:
     /// bridged, with a fault.
     Stale(Hello),
-    /// The C6 answered speaking another revision, or with no image digest.
+    /// The C6 answered speaking another revision, and no update brought it to this one.
     Mismatch(Hello),
     /// No hello arrived in time.
     Absent,
@@ -105,18 +106,31 @@ pub enum PairEvent {
     RadioSilent,
 }
 
-/// Where a host command goes.
-// `Refuse` carries a whole frame, but boxing needs an allocator, which this crate avoids.
-// A route is built, matched and dropped at once.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Route {
-    /// The P4 handles it.
-    Local,
-    /// Send it down to the C6.
-    Forward,
-    /// Do not forward it; send the host this answer, if any.
-    Refuse(Option<BridgeToHost>),
+/// The P4's own counters, which [`Pair::status`] reports beside the C6's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct P4Counters {
+    /// The host queue's two rings.
+    pub host: [QueueStat; 2],
+    /// The queue toward the C6.
+    pub down: QueueStat,
+    /// The queues toward the nodes.
+    pub node_down: QueueStat,
+    /// The P4–C6 link's counters as the P4 kept them.
+    pub radio_link: RadioLinkStats,
+    /// What the host queue dropped.
+    pub host_dropped: u32,
+    /// Line errors on the host UART.
+    pub host_uart_errors: u32,
+    /// Node records forwarded to the host.
+    pub rx_count: u32,
+    /// Node records too long to forward.
+    pub rx_oversize: u32,
+    /// The carrier's lid fan, or `None` with no carrier.
+    pub fan: Option<FanStats>,
+    /// The channel pool in force.
+    pub pool: ChannelPool,
+    /// The slots that hold a node, bit n for [`crate::bus::Slot`] byte n.
+    pub present: u32,
 }
 
 /// The P4's pair state.
@@ -139,6 +153,8 @@ pub struct Pair {
     bundled: [u8; DIGEST_LEN],
     /// The digest of the P4's own booted image, for `Ready`.
     own_image: Option<[u8; DIGEST_LEN]>,
+    /// What carries the nodes, for `Ready`.
+    node_board: NodeBoard,
     /// This P4 life has tried to update the C6.
     attempted: bool,
     /// How much of the image the C6 holds, in percent.
@@ -177,6 +193,7 @@ impl Pair {
             boot_ms,
             bundled,
             own_image: None,
+            node_board: NodeBoard::NoCarrier,
             attempted: false,
             progress: 0,
             installed_at: None,
@@ -191,6 +208,13 @@ impl Pair {
     #[must_use]
     pub fn with_own_image(mut self, image: Option<[u8; DIGEST_LEN]>) -> Self {
         self.own_image = image;
+        self
+    }
+
+    /// The board the P4 read at boot, for `Ready`.
+    #[must_use]
+    pub fn with_node_board(mut self, board: NodeBoard) -> Self {
+        self.node_board = board;
         self
     }
 
@@ -238,15 +262,17 @@ impl Pair {
     /// The state a new life's hello puts the pair in.
     fn judge(&mut self, hello: Hello) -> RadioState {
         let revision = hello.link_rev == LINK_REVISION;
-        match hello.image {
-            Some(image) if image == self.bundled && revision => RadioState::Up(hello),
-            Some(image) if image != self.bundled && !self.attempted => {
-                self.attempted = true;
-                self.progress = 0;
-                RadioState::Updating(hello)
-            }
-            Some(image) if image != self.bundled && revision => RadioState::Stale(hello),
-            Some(_) | None => RadioState::Mismatch(hello),
+        let bundled = hello.image == self.bundled;
+        if bundled && revision {
+            RadioState::Up(hello)
+        } else if !bundled && !self.attempted {
+            self.attempted = true;
+            self.progress = 0;
+            RadioState::Updating(hello)
+        } else if !bundled && revision {
+            RadioState::Stale(hello)
+        } else {
+            RadioState::Mismatch(hello)
         }
     }
 
@@ -362,8 +388,7 @@ impl Pair {
         &self.state
     }
 
-    /// Whether radio commands and records flow: the C6 is up, or stale with a matching
-    /// revision.
+    /// Whether records flow to and from the C6: it is up, or stale with a matching revision.
     pub fn bridges(&self) -> bool {
         matches!(self.state, RadioState::Up(_) | RadioState::Stale(_))
     }
@@ -418,18 +443,13 @@ impl Pair {
             _ => (self.own_cause, self.own_phase),
         };
         Some(BridgeToHost::Ready {
-            chip: Chip::Esp32P4,
             mac,
             fw_version: self.own_fw.clone(),
-            proto_version: LINK_PROTO_VERSION,
             reset_cause,
             last_phase,
-            heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
-            // The P4 always reads its GPS receiver.
-            gps: true,
+            node_board: self.node_board,
             radio: hello.map(|hello| RadioInfo {
-                chip: hello.chip,
                 mac: hello.mac,
                 fw_version: hello.fw_version.clone(),
                 reset_cause: hello.reset_cause,
@@ -448,12 +468,6 @@ impl Pair {
                 let _ = write!(
                     text,
                     "the radio has stopped answering; wartui reset restarts the bridge"
-                );
-            }
-            RadioState::Mismatch(hello) if hello.image.is_none() => {
-                let _ = write!(
-                    text,
-                    "radio predates bundled updates; flash it through the header once"
                 );
             }
             RadioState::Mismatch(hello) => {
@@ -480,52 +494,26 @@ impl Pair {
         Some(text)
     }
 
-    /// Where `cmd` goes.
-    pub fn route(&self, cmd: &HostToBridge) -> Route {
-        match cmd {
-            HostToBridge::Identify
-            | HostToBridge::GetStatus
-            | HostToBridge::Reset
-            | HostToBridge::GpsWrite { .. }
-            | HostToBridge::Update(_) => Route::Local,
-            // Listed rather than caught, so a new command is a compile error until it is
-            // placed.
-            HostToBridge::SendEspNow { .. }
-            | HostToBridge::AddPeer { .. }
-            | HostToBridge::RemovePeer { .. }
-            | HostToBridge::SetTxPower { .. }
-                if self.bridges() =>
-            {
-                Route::Forward
-            }
-            HostToBridge::SendEspNow { id, .. } => Route::Refuse(Some(BridgeToHost::SendResult {
-                id: *id,
-                status: SendStatus::Rejected,
-                tx_us: 0,
-            })),
-            HostToBridge::AddPeer { .. }
-            | HostToBridge::RemovePeer { .. }
-            | HostToBridge::SetTxPower { .. } => Route::Refuse(None),
-        }
-    }
-
     /// The C6 reported its counters.
     pub fn note_radio_status(&mut self, status: RadioStatus) {
         self.status = Some(status);
     }
 
-    /// The `Status` to answer a poll with. `host` and `down` are the P4's own queues;
-    /// `host_dropped` is what its host queue dropped, and `host_uart_errors` the line errors on
-    /// its host UART.
-    pub fn status(
-        &self,
-        now_ms: u64,
-        host: [QueueStat; 2],
-        down: QueueStat,
-        mut radio_link: RadioLinkStats,
-        host_dropped: u32,
-        host_uart_errors: u32,
-    ) -> BridgeToHost {
+    /// The `Status` to answer a poll with: `p4`'s counters with the C6's.
+    pub fn status(&self, now_ms: u64, p4: P4Counters) -> BridgeToHost {
+        let P4Counters {
+            host,
+            down,
+            node_down,
+            mut radio_link,
+            host_dropped,
+            host_uart_errors,
+            rx_count,
+            rx_oversize,
+            fan,
+            pool,
+            present,
+        } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
         if let Some(status) = &self.status {
@@ -540,21 +528,23 @@ impl Pair {
             radio_link.radio_seq_gap = status.seq_gap;
             radio_link.radio_uart_errors = status.uart_errors;
         }
-        // The C6's queues leave room for these: 4 + 3 fits in 8.
+        // The C6's queues leave room for these: 4 + 4 fits in 8.
         let _ = queues.push(down);
+        let _ = queues.push(node_down);
         for stat in host {
             let _ = queues.push(stat);
         }
-        let counters = self.status.as_ref();
         BridgeToHost::Status {
-            peer_count: counters.map_or(0, |status| status.peer_count),
-            rx_count: counters.map_or(0, |status| status.rx_count),
+            rx_count,
             dropped_tx: host_dropped.saturating_add(radio_up_drops),
             uptime_ms: self.uptime_ms(now_ms),
-            rx_oversize: counters.map_or(0, |status| status.rx_oversize),
+            rx_oversize,
             queues,
-            radio_link: Some(radio_link),
+            radio_link,
             host_uart_errors,
+            fan,
+            pool,
+            present,
         }
     }
 }

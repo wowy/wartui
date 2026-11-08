@@ -1,5 +1,5 @@
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
-//! as refused sightings and missed admin windows, sit outside it, so a clean run looks
+//! as refused sightings and duplicate batches, sit outside it, so a clean run looks
 //! clean.
 
 use ratatui::Frame;
@@ -10,6 +10,7 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -59,15 +60,6 @@ pub(super) fn draw_footer(
         }
         if c.duplicate_batches > 0 {
             spans.push(Span::raw(format!("  dup {}", thousands(c.duplicate_batches))));
-        }
-        // Missed windows sit with the totals, not the faults: connecting to a bridge
-        // that has been buffering produces them normally. It shows before the first
-        // assignment too, where it explains why nothing has been assigned yet.
-        if c.admin_windows_missed > 0 {
-            spans.push(Span::raw(format!(
-                "  {} held for a live window",
-                thousands(c.admin_windows_missed)
-            )));
         }
         lines.push(Line::from(spans));
     }
@@ -121,19 +113,17 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
             thousands(c.admin_unadopted)
         ));
     }
-    if c.peer_table_full > 0 {
-        faults.push("peer table full".to_owned());
-    }
     // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
-    // so nothing sniffs at all.
+    // so nothing sniffs at all. A plan is cut only from a pool, so both are here.
     if let Some(plan) = snapshot.plan
+        && let Some(pool) = snapshot.pool
         && !plan.unreachable().is_empty()
     {
         faults.push(format!(
             "every node in this fleet is scanning Bluetooth, so none of the {} channels of the \
              {} pool is being swept",
             thousands(u64::from(plan.unreachable().len())),
-            snapshot.pool
+            pool
         ));
     }
     if let Some(gps) = &snapshot.gps {
@@ -170,7 +160,7 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     // is the only place it shows.
     if c.incompatible > 0 {
         faults
-            .push(format!("{} frames from an older firmware — reflash", thousands(c.incompatible)));
+            .push(format!("{} frames from an older firmware — update", thousands(c.incompatible)));
     }
     // Only this capture's loss. The bridge's own count runs from its boot, mostly
     // frames dropped before anyone was listening.
@@ -180,13 +170,21 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults
             .push(format!("bridge dropped {}", thousands(u64::from(status.dropped_since_attach))));
     }
-    // A restart under a running capture is a fault even when nothing fails now: the
-    // peer table came back empty and the data has a gap. A power-on is how a capture
-    // starts, so it is not one.
+    // A restart under a running capture is a fault even when nothing fails now: the data
+    // has a gap. A power-on is how a capture starts, so it is not one.
     if let Some(bridge) = &snapshot.bridge
         && let Some(reason) = restart_fault(bridge)
     {
         faults.push(reason);
+    }
+    // No tach pulses at a duty the fan turns at: unplugged or stalled. Below that, the fan may
+    // stop by design, so nothing is raised there. With the link down the reading is stale.
+    if snapshot.link_up
+        && let Some(fan) = snapshot.bridge_status.and_then(|status| status.fan)
+        && fan.duty >= FanDuty::TURNS_FROM
+        && fan.rpm == Some(0)
+    {
+        faults.push(format!("fan stopped at {}: unplugged or stalled", fan.duty));
     }
     // Each node's own faults come after the bridge's: a bridge fault touches every node,
     // and these touch one. The operator sees neither in the car any other way, since the
@@ -194,17 +192,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     for view in &snapshot.nodes {
         let node = &view.state;
         let name = mac::short(&node.mac);
-        if let Some(mismatch) = node.power_mismatch {
-            faults.push(if mismatch.reported == 0 {
-                format!("{name} cannot read its transmit power")
-            } else {
-                format!(
-                    "{name} at {} dBm, assigned {} dBm",
-                    dbm(mismatch.reported),
-                    dbm(mismatch.assigned)
-                )
-            });
-        }
         if let Some(cause) = node.fault_restart {
             let times = if node.fault_restarts > 1 {
                 format!(" (×{})", node.fault_restarts)
@@ -215,20 +202,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
     }
     faults
-}
-
-/// A quarter-dBm power in dBm: whole when it divides by four, else to the quarter.
-fn dbm(quarter_dbm: i8) -> String {
-    let q = i16::from(quarter_dbm);
-    let sign = if q < 0 { "-" } else { "" };
-    let (whole, quarters) = (q.abs() / 4, q.abs() % 4);
-    let frac = match quarters {
-        1 => ".25",
-        2 => ".5",
-        3 => ".75",
-        _ => "",
-    };
-    format!("{sign}{whole}{frac}")
 }
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
@@ -324,12 +297,12 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
+    use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::plan::{ChannelPool, Job, plan_for};
 
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
-    use wartui_core::engine::PowerMismatch;
 
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {
@@ -484,12 +457,11 @@ mod tests {
 
     #[test]
     fn view_suppresses_gps_fault_line_when_no_receiver_was_found() {
-        // The search runs by default, and most captures have no receiver. Saying so
-        // every time would show a fault where there is none.
+        // A missing receiver is not a fault: the header names it, and the footer adds nothing.
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
-        // The key help names `g gps` on every screen.
-        assert!(!drawn.replace("g gps", "").contains("gps"), "{drawn}");
+        assert!(!drawn.contains("gps unreadable"), "{drawn}");
+        assert!(!drawn.contains("gps:"), "{drawn}");
         // A static position still keeps the unpositioned warning off screen.
         assert!(!drawn.contains("pos none"), "{drawn}");
     }
@@ -642,33 +614,6 @@ mod tests {
         with_restart(ResetCause::PowerOn)
     }
 
-    /// `quiet()` with node `57:84` reporting `reported` against an assignment of `assigned`.
-    fn with_mismatch(reported: i8, assigned: i8) -> Snapshot {
-        let mut snapshot = quiet();
-        snapshot.nodes[0].state.power_mismatch =
-            Some(PowerMismatch { epoch: 3, reported, assigned });
-        snapshot
-    }
-
-    #[test]
-    fn footer_reports_node_power_when_it_differs_from_assignment() {
-        let screen = rendered(&with_mismatch(8, 24));
-        assert!(screen.contains("57:84 at 2 dBm, assigned 6 dBm"), "{screen}");
-    }
-
-    #[test]
-    fn footer_reports_unreadable_power_when_node_reports_zero() {
-        let lines = faults(&with_mismatch(0, 24));
-        assert_eq!(lines, ["57:84 cannot read its transmit power"]);
-    }
-
-    #[test]
-    fn footer_prints_quarter_dbm_when_power_not_whole() {
-        let lines = faults(&with_mismatch(9, 26));
-        assert_eq!(lines, ["57:84 at 2.25 dBm, assigned 6.5 dBm"]);
-        assert_eq!(dbm(31), "7.75");
-    }
-
     #[test]
     fn footer_reports_node_restart_when_cause_is_fault() {
         let mut snapshot = quiet();
@@ -686,9 +631,46 @@ mod tests {
     fn footer_reports_no_node_fault_when_fleet_clean() {
         assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
         let screen = rendered(&quiet());
-        assert!(!screen.contains("transmit power"), "{screen}");
-        assert!(!screen.contains("dBm, assigned"), "{screen}");
         assert!(!screen.contains("restarted:"), "{screen}");
+    }
+
+    /// [`quiet`] with the bridge reporting the fan at `pct` and `rpm`.
+    fn with_fan(pct: u8, rpm: Option<u16>) -> Snapshot {
+        let mut snapshot = quiet();
+        let duty = FanDuty::new(pct).expect("in range");
+        if let Some(status) = &mut snapshot.bridge_status {
+            status.fan = Some(FanStats { duty, rpm });
+        }
+        snapshot
+    }
+
+    #[test]
+    fn footer_reports_fan_stopped_when_duty_is_set_and_tach_reads_zero() {
+        assert_eq!(faults(&with_fan(40, Some(0))), ["fan stopped at 40%: unplugged or stalled"]);
+        assert_eq!(faults(&with_fan(20, Some(0))), ["fan stopped at 20%: unplugged or stalled"]);
+    }
+
+    #[test]
+    fn footer_reports_no_fan_fault_when_fan_turns_or_is_unread_or_below_turning_duty() {
+        // Turning; not read yet since the bridge booted; and duties the fan may stop at.
+        for snapshot in [
+            with_fan(40, Some(1830)),
+            with_fan(40, None),
+            with_fan(0, Some(0)),
+            with_fan(10, Some(0)),
+            with_fan(19, Some(0)),
+        ] {
+            assert!(faults(&snapshot).is_empty(), "{:?}", faults(&snapshot));
+        }
+        // No carrier.
+        assert!(faults(&quiet()).is_empty());
+    }
+
+    #[test]
+    fn footer_reports_no_fan_fault_when_link_is_down() {
+        let mut snapshot = with_fan(40, Some(0));
+        snapshot.link_up = false;
+        assert!(faults(&snapshot).is_empty(), "{:?}", faults(&snapshot));
     }
 
     #[test]

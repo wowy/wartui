@@ -8,12 +8,14 @@
 //! It also transmits, and without being asked: the planner partitions the pool
 //! across the fleet and re-cuts it as the fleet or the pool changes. That is the only thing
 //! that decides what a node scans, and nothing on the command line or at the
-//! keyboard overrides it.
+//! keyboard overrides it. The pool is the bridge's, which reports it in each `Status`;
+//! the settings modal only asks the bridge to change it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::{capture, config, tui, upload};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
@@ -25,45 +27,6 @@ use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
-use wartui_proto::plan::ChannelPool;
-use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
-
-use crate::{capture, config, tui, upload};
-
-/// Which channels the fleet is meant to scan.
-///
-/// Spelled `us`, `eu` and `all` in `wartui.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PoolArg {
-    /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
-    Us,
-    /// ETSI-permitted unlicensed channels: 2.4 GHz 1–13 and 5 GHz 36–140.
-    Eu,
-    /// Every channel the node firmware knows about, matching stock behavior.
-    #[default]
-    All,
-}
-
-impl From<PoolArg> for ChannelPool {
-    fn from(arg: PoolArg) -> Self {
-        match arg {
-            PoolArg::Us => Self::Us,
-            PoolArg::Eu => Self::Eu,
-            PoolArg::All => Self::All,
-        }
-    }
-}
-
-impl From<ChannelPool> for PoolArg {
-    fn from(pool: ChannelPool) -> Self {
-        match pool {
-            ChannelPool::Us => Self::Us,
-            ChannelPool::Eu => Self::Eu,
-            ChannelPool::All => Self::All,
-        }
-    }
-}
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -79,11 +42,17 @@ pub struct Args {
     pub(crate) config: Option<PathBuf>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
-    #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
+    #[arg(
+        long,
+        value_name = "NODES",
+        num_args = 0..=1,
+        default_missing_value = "3",
+        value_parser = crate::sim_nodes()
+    )]
     sim: Option<u8>,
 
-    /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM.db` in the
-    /// working directory, named for the minute this run started, by default.
+    /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the
+    /// working directory, named for the second this run started, by default.
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
@@ -127,30 +96,6 @@ pub struct Args {
     /// A note about this run, stored with the capture.
     #[arg(long)]
     notes: Option<String>,
-}
-
-/// The fleet's two transmit powers in ESP-IDF quarter-dBm units: `(nodes, bridge)`.
-///
-/// Whole dBm in, 2 to 20, which maps exactly onto the 8 to 80 quarter-dBm the host
-/// permits; the wire carries quarter-dBm, so the conversion happens once here rather
-/// than on either side of it. Nodes and bridge are completely independent, each
-/// resolved on its own: the file beats the default.
-///
-/// ```text
-/// nodes  = file.fleet  ∨ default
-/// bridge = file.bridge ∨ default
-/// ```
-fn tx_powers(file: &config::TxPower) -> (i8, i8) {
-    let quarter = |dbm: i8| dbm * 4;
-    let nodes = file.fleet.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    let bridge = file.bridge.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    (nodes, bridge)
-}
-
-/// Which channel pool the fleet starts on: the file beats the default, as
-/// [`tx_powers`] resolves the transmit powers.
-fn pool(file: Option<PoolArg>) -> ChannelPool {
-    file.unwrap_or_default().into()
 }
 
 /// Which receivers a run reads, from `--no-gps`, `--gps` and `--gps-baud`.
@@ -259,7 +204,6 @@ pub async fn run(args: Args) -> Result<()> {
         position = position.with_bridge_gps(gps.clone());
     }
 
-    let pool = pool(config.pool);
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
     let memory = BridgeMemory::holding(config.bridge.mac).on_port(config.bridge.serial.clone());
@@ -267,11 +211,9 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
 
     let started = now();
-    let info =
-        CaptureInfo { pool, notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
+    let info = CaptureInfo { notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
     let store_config = StoreConfig::new(&db);
 
-    let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
@@ -285,11 +227,8 @@ pub async fn run(args: Args) -> Result<()> {
         upload,
     };
     let config = EngineConfig {
-        pool,
         record_raw: args.record_raw,
         position,
-        tx_power,
-        bridge_tx_power,
         remember_ble,
         preferred_ble,
         excluded_ssids,
@@ -389,48 +328,7 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpsChoice, PoolArg, gps_choice, pool, test_data, tx_powers};
-    use crate::config::TxPower;
-    use wartui_proto::plan::ChannelPool;
-    use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
-
-    #[test]
-    fn run_cmd_applies_default_tx_power_when_file_names_none() {
-        assert_eq!(
-            tx_powers(&TxPower::default()),
-            (DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM)
-        );
-    }
-
-    #[test]
-    fn run_cmd_leaves_bridge_at_default_tx_power_when_file_names_only_fleet() {
-        // Nodes and bridge are independent: a fleet power alone never touches
-        // the bridge, which stays at the default.
-        let file = TxPower { fleet: Some(10), bridge: None };
-        assert_eq!(tx_powers(&file), (40, DEFAULT_TX_POWER_QUARTER_DBM));
-    }
-
-    #[test]
-    fn run_cmd_leaves_nodes_at_default_tx_power_when_file_names_only_bridge() {
-        let file = TxPower { fleet: None, bridge: Some(17) };
-        assert_eq!(tx_powers(&file), (DEFAULT_TX_POWER_QUARTER_DBM, 68));
-    }
-
-    #[test]
-    fn run_cmd_applies_both_file_tx_powers_when_file_names_both() {
-        let file = TxPower { fleet: Some(10), bridge: Some(17) };
-        assert_eq!(tx_powers(&file), (40, 68));
-    }
-
-    #[test]
-    fn run_cmd_applies_file_pool_when_file_names_one() {
-        assert_eq!(pool(Some(PoolArg::Eu)), ChannelPool::Eu);
-    }
-
-    #[test]
-    fn run_cmd_applies_default_pool_when_file_names_none() {
-        assert_eq!(pool(None), ChannelPool::All);
-    }
+    use super::{GpsChoice, gps_choice, test_data};
 
     #[test]
     fn run_cmd_reads_only_bridge_receiver_when_gps_is_bridge() {

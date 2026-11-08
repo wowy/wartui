@@ -1,9 +1,8 @@
 use std::time::Instant;
 
-use wartui_proto::air::{AdminMsg, ClearMsg, wire_epoch};
-use wartui_proto::link::{HostToBridge, SendPayload, SendStatus};
+use wartui_proto::bus::{Assign, Clear, DownType, Slot, wire_epoch};
+use wartui_proto::link::{HostToBridge, ToNodeBody, Undelivered};
 use wartui_proto::mac::Mac;
-use wartui_proto::node;
 
 use super::{ActionBatch, Assignment, FleetEngine, Now};
 use crate::record::{AdminOutcome, AssignmentSent, Record};
@@ -16,7 +15,7 @@ pub(super) enum Pending {
 }
 
 impl Pending {
-    /// When this was put on the air, whichever variant it is.
+    /// When this was sent, whichever variant it is.
     fn sent_mono(&self) -> Instant {
         match self {
             Self::Admin(pending) => pending.sent_mono,
@@ -32,42 +31,41 @@ pub(super) struct PendingAdmin {
     assignment: Assignment,
     sent_mono: Instant,
     sent_ms: i64,
-    /// The bridge's stamp on the heartbeat that opened the window, so latency is measured on the
-    /// bridge's clock alone, free of host scheduling noise.
-    heartbeat_rx_us: Option<u32>,
 }
 
 impl FleetEngine {
-    /// Put a dirty node's assignment on the air. Called only straight off a heartbeat, the one
-    /// moment the node listens on the control channel.
+    /// Send a dirty node its assignment. Called only straight off a heartbeat, so it goes to the
+    /// slot that heartbeat came from.
+    ///
+    /// A heartbeat read behind the bridge sends nothing.
+    ///
+    /// One assignment per node is in flight at a time: while one is unanswered and inside
+    /// [`EngineConfig::admin_timeout`](super::EngineConfig::admin_timeout), a heartbeat sends
+    /// nothing and counts nothing.
     pub(super) fn send_admin(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
-        let id = self.next_send_id();
-
-        // Read before borrowing the node, acted on after. Only windows that owed something count,
-        // or they would bury the ones that did.
-        let live = self.air_is_live();
+        // A heartbeat read behind names the slot the node was in then, which may be another
+        // node's now, and its epoch is history `deal` cannot skip. The next live heartbeat sends.
+        if !self.reading_live() {
+            return;
+        }
+        if self.in_flight(now, |p| matches!(p, Pending::Admin(a) if a.mac == mac)) {
+            return;
+        }
 
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         if !node.dirty {
             return;
         }
         let Some(assignment) = node.desired else { return };
-        if !live {
-            self.counters.admin_windows_missed += 1;
-            return;
-        }
+        let Some(slot) = node.slot else { return };
         node.admin_attempts += 1;
-        let heartbeat_rx_us = node.last_heartbeat_rx_us;
 
-        let msg = AdminMsg {
+        let id = self.next_send_id();
+        let msg = Assign {
             epoch: wire_epoch(assignment.counter),
-            flags: AdminMsg::flags_for(assignment.ble),
+            flags: Assign::flags_for(assignment.ble),
             channels: assignment.channels,
-            tx_power: assignment.tx_power,
         };
-        // Fifteen bytes into a 1470-byte buffer, so this cannot fail.
-        let payload = SendPayload::from_slice(&msg.encode()).unwrap_or_default();
-
         self.pending.insert(
             id,
             Pending::Admin(PendingAdmin {
@@ -75,40 +73,40 @@ impl FleetEngine {
                 assignment,
                 sent_mono: now.mono,
                 sent_ms: now.unix_ms,
-                heartbeat_rx_us,
             }),
         );
         self.counters.admin_sent += 1;
-        if let Some(node) = self.nodes.get_mut(&mac) {
-            node.peered = true;
-        }
-        batch.urgent.push(HostToBridge::SendEspNow {
-            id,
-            dst: mac,
-            // Add if absent. Removing it here would race the transmit callback, so
-            // `evict_stale_peers` does it once the node is gone.
-            ensure_peer: true,
-            payload,
-        });
+        batch.urgent.push(to_node(slot, id, DownType::Assign, &msg.encode()));
     }
 
-    /// Put a clear on the air for a node that owes one. Called only off a heartbeat, as
-    /// [`Self::send_admin`] is.
+    /// Send a clear to a node that owes one. Called only off a heartbeat, as
+    /// [`Self::send_admin`] is. One clear per node is in flight at a time: while one is
+    /// unanswered and inside the admin timeout, a heartbeat sends none.
     pub(super) fn send_dedup_ring_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
-        let live = self.air_is_live();
+        // A heartbeat read behind names the slot the node was in then, which may be another
+        // node's now. The next live heartbeat sends.
+        if !self.reading_live() {
+            return;
+        }
+        if self.in_flight(now, |p| matches!(p, Pending::Clear { mac: m, .. } if *m == mac)) {
+            return;
+        }
         let Some(node) = self.nodes.get(&mac) else { return };
-        if !node.clear_dedup_ring || !live {
+        let Some(slot) = node.slot else { return };
+        if !node.clear_dedup_ring {
             return;
         }
 
         let id = self.next_send_id();
         self.pending.insert(id, Pending::Clear { mac, sent_mono: now.mono });
-        // Six bytes into a 1470-byte buffer, so this cannot fail.
-        let payload = SendPayload::from_slice(&ClearMsg.encode()).unwrap_or_default();
-        if let Some(node) = self.nodes.get_mut(&mac) {
-            node.peered = true;
-        }
-        batch.urgent.push(HostToBridge::SendEspNow { id, dst: mac, ensure_peer: true, payload });
+        batch.urgent.push(to_node(slot, id, DownType::Clear, &Clear.encode()));
+    }
+
+    /// Whether a pending send that `which` picks is in flight at `now`: unanswered, and not past
+    /// [`EngineConfig::admin_timeout`](super::EngineConfig::admin_timeout).
+    fn in_flight(&self, now: Now, which: impl Fn(&Pending) -> bool) -> bool {
+        let timeout = self.config.admin_timeout;
+        self.pending.values().any(|p| which(p) && now.mono.duration_since(p.sent_mono()) < timeout)
     }
 
     fn next_send_id(&mut self) -> u16 {
@@ -117,24 +115,12 @@ impl FleetEngine {
         id
     }
 
-    /// Handle a full peer table, for assignments and clears alike. It stays full until a stale peer
-    /// is evicted or the bridge announces itself, and both clear the refusal.
-    fn mark_peer_table_full(&mut self, mac: Mac) {
-        self.counters.peer_table_full += 1;
-        if let Some(node) = self.nodes.get_mut(&mac) {
-            // The node leaves the plan, so the next re-cut spreads the pool over reachable nodes.
-            node.peer_refused = true;
-            // The bridge refused the slot, so there is none to evict.
-            node.peered = false;
-        }
-    }
-
-    /// The bridge said what became of an assignment or a clear.
+    /// The bridge delivered, or could not deliver, an assignment or a clear. `undelivered` is
+    /// why not, or `None` for a delivery.
     pub(super) fn on_send_result(
         &mut self,
         id: u16,
-        status: SendStatus,
-        tx_us: u32,
+        undelivered: Option<Undelivered>,
         now: Now,
         batch: &mut ActionBatch,
     ) {
@@ -142,76 +128,24 @@ impl FleetEngine {
         let Some(pending) = self.pending.remove(&id) else { return };
         match pending {
             Pending::Admin(pending) => {
-                self.on_admin_send_result(pending, status, tx_us, now, batch)
+                let outcome =
+                    if undelivered.is_none() { AdminOutcome::Acked } else { AdminOutcome::Unacked };
+                // How long the bus took to deliver it, on this host's clock: from the heartbeat
+                // that sent it to the bridge's answer.
+                let latency_us = (outcome == AdminOutcome::Acked).then(|| {
+                    u32::try_from(now.mono.duration_since(pending.sent_mono).as_micros())
+                        .unwrap_or(u32::MAX)
+                });
+                self.resolve(&pending, outcome, latency_us, now, batch);
             }
-            Pending::Clear { mac, .. } => self.on_clear_send_result(mac, status),
-        }
-    }
-
-    /// The bridge said what became of an assignment.
-    fn on_admin_send_result(
-        &mut self,
-        pending: PendingAdmin,
-        status: SendStatus,
-        tx_us: u32,
-        now: Now,
-        batch: &mut ActionBatch,
-    ) {
-        let outcome = match status {
-            SendStatus::AckOk => AdminOutcome::Acked,
-            SendStatus::AckFail => AdminOutcome::Unacked,
-            // Broadcast is never acked, and assignments are always unicast, so it means a bad
-            // address.
-            SendStatus::Broadcast
-            | SendStatus::NoPeer
-            | SendStatus::PeerTableFull
-            | SendStatus::Rejected => AdminOutcome::Refused,
-        };
-
-        // A full peer table is terminal: give up on what was wanted, and let the view say why.
-        if matches!(status, SendStatus::PeerTableFull) {
-            self.mark_peer_table_full(pending.mac);
-            if let Some(node) = self.nodes.get_mut(&pending.mac) {
-                node.dirty = false;
-                node.desired = None;
-            }
-        }
-
-        // Both stamps are the bridge's microsecond clock, which wraps about every 71 minutes.
-        // Wrapping subtraction is correct across it.
-        //
-        // The column means how long the assignment took to land inside a heartbeat's window. A
-        // larger figure is not that, so it is not recorded as one. It comes from a heartbeat
-        // replayed out of a backlog: honest arithmetic that says nothing about how fast the bridge
-        // answered. `None` is the truthful answer, and the outcome is recorded either way.
-        let latency_us = pending
-            .heartbeat_rx_us
-            .map(|rx_us| tx_us.wrapping_sub(rx_us))
-            .filter(|us| *us <= node::ADMIN_WAIT_MS * 1_000);
-
-        self.resolve(&pending, outcome, latency_us, now, batch);
-    }
-
-    /// The bridge said what became of a clear. Clears write no store record and touch no `admin_*`
-    /// counter.
-    fn on_clear_send_result(&mut self, mac: Mac, status: SendStatus) {
-        match status {
-            SendStatus::AckOk => {
-                if let Some(node) = self.nodes.get_mut(&mac) {
+            Pending::Clear { mac, .. } => {
+                // Undelivered leaves the flag set for the next heartbeat to retry.
+                if undelivered.is_none()
+                    && let Some(node) = self.nodes.get_mut(&mac)
+                {
                     node.clear_dedup_ring = false;
                 }
             }
-            SendStatus::PeerTableFull => {
-                self.mark_peer_table_full(mac);
-                if let Some(node) = self.nodes.get_mut(&mac) {
-                    node.clear_dedup_ring = false;
-                }
-            }
-            // Anything else leaves the flag set for the next heartbeat to retry.
-            SendStatus::AckFail
-            | SendStatus::Broadcast
-            | SendStatus::NoPeer
-            | SendStatus::Rejected => {}
         }
     }
 
@@ -256,8 +190,8 @@ impl FleetEngine {
             if acked {
                 node.last_outcome = Some(outcome);
                 node.last_latency_us = latency_us;
-                // Cleared on the MAC-layer ack, not on enqueue, and only if the node still wants
-                // what was sent. Otherwise it is already dirty again under a newer epoch.
+                // Cleared on delivery, not on enqueue, and only if the node still wants what was
+                // sent. Otherwise it is already dirty again under a newer epoch.
                 if node.desired.is_some_and(|d| d.counter == pending.assignment.counter) {
                     node.confirmed = Some(pending.assignment);
                     node.dirty = false;
@@ -281,4 +215,11 @@ impl FleetEngine {
             latency_us,
         }));
     }
+}
+
+/// A record for the node in `slot`.
+fn to_node(slot: Slot, id: u16, kind: DownType, body: &[u8]) -> HostToBridge {
+    // An assignment and a clear are a few bytes against a 1029-byte body.
+    let body = ToNodeBody::from_slice(body).unwrap_or_default();
+    HostToBridge::ToNode { slot, id, kind: kind.as_u8(), body }
 }

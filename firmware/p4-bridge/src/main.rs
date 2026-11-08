@@ -2,7 +2,8 @@
 //!
 //! The P4 talks to the host over UART0, which the board's CH343 carries to the Type-C, with
 //! wartui's link protocol, through UHCI's DMA. It talks to the board's ESP32-C6 over UART1 with
-//! hardware flow control, on the FIFO. The C6 runs the radio (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! hardware flow control, on the FIFO; the C6 holds that link for a future Bluetooth host link
+//! (`firmware/p4-radio`). The host sees one bridge, reporting both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
@@ -16,10 +17,23 @@
 //!   host's poll;
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
-//!   (`src/update.rs`);
+//!   (`src/update.rs`), queues the host's records for its nodes, and fills the node image cache
+//!   in PSRAM that their update chunks are built from (`src/cache.rs`);
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
-//!   never addresses.
+//!   never addresses;
+//! - **the carrier** (`src/carrier.rs`) powers a carrier board's nodes one at a time at boot,
+//!   then power-cycles one whenever the host asks, and staggers them again after a lost node
+//!   supply, through the I/O expander that shares I2C0 with the GPS. Each locks the bus per
+//!   transaction;
+//! - **the node buses** (`src/bus.rs`), one future per SPI controller, carry each node's records
+//!   to and from the host, and report link counters to it as log lines;
+//! - **the fan** (`src/fan.rs`), on a carrier only, drives the lid fan's PWM at the duty stored on
+//!   flash, which a host's `SetFan` changes, and reads its tach for `Status`.
+//!
+//! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
+//! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
+//! change there.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -27,8 +41,9 @@
 //! (`src/update.rs`).
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
-//! together. Every wait is a DMA completion, a UART event, a signal between the futures or a
-//! timer.
+//! together. It reads the carrier's expander before it builds the node buses, since the board
+//! picks their CS pins. Every wait is a DMA completion, a UART event, a GPIO
+//! level, a signal between the futures or a timer.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -40,47 +55,61 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod cache;
+mod carrier;
 mod config;
+mod fan;
 mod gps;
 mod host;
 mod link;
 mod radio;
+mod settings;
 mod update;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::join4;
+use embassy_futures::join::{join, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::zerocopy_channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
+use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
-use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::gpio::{AnyPin, Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::i2c::master::I2c;
+use esp_hal::peripherals::{GPIO7, GPIO8, I2C0};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, Uhci};
 use esp_hal::uart::{
     BaudrateTolerance, Config as UartConfig, CtsConfig, HwFlowControl, RtsConfig,
     RxConfig as UartRxConfig, Uart,
 };
-use static_cell::ConstStaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::{phase, reboot, reset_cause};
+use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
+use wartui_proto::ChannelPool;
+use wartui_proto::bus::PER_BUS;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, HOST_BAUD, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat,
-    RadioLinkStats, ShortStr, encode_frame,
+    BridgeToHost, HOST_BAUD, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
+    ShortStr, encode_frame,
 };
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
+use wartui_proto::ota::SECTOR;
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
     WIRE_MAX, encode_down,
 };
-use wartui_proto::split::{Pair, PairEvent};
+use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
+use crate::cache::Cache;
+use crate::carrier::{Carrier, Power};
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
 use crate::host::Presence;
 use crate::link::{Bus, Link, run_link};
@@ -109,6 +138,15 @@ static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX
 /// Where the writer encodes the packet for the wire.
 static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
 
+/// What the futures share. Static, to keep it out of `main`'s future, which `.clippy.toml`'s
+/// stack threshold bounds.
+static SHARED: StaticCell<Shared> = StaticCell::new();
+
+/// I2C0, shared by the GPS reader and the carrier's expander. Both lock it per transaction, and
+/// every future is in one task, so the lock needs no more than [`NoopRawMutex`].
+pub type I2cBus = Mutex<NoopRawMutex, I2c<'static, Async>>;
+static I2C0_BUS: StaticCell<I2cBus> = StaticCell::new();
+
 /// A DMA buffer of `$len` bytes, with its descriptors, in static internal RAM. Each use has
 /// its own statics.
 macro_rules! dma_buf {
@@ -127,6 +165,9 @@ macro_rules! dma_buf {
         buf
     }};
 }
+
+// After `dma_buf!`, which it uses.
+mod bus;
 
 /// Resets rather than hanging. The reset takes the C6 with it, and the host sees a new
 /// life in the next `Ready`.
@@ -174,6 +215,18 @@ pub struct Shared {
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
     updates: RefCell<&'static mut Updates>,
+    /// The node image the host uploaded, which update chunks are built from.
+    cache: RefCell<Cache>,
+    /// The node buses' slots, as the host reader and both buses see them.
+    nodes: bus::Nodes,
+    /// The carrier's node power, as the host reader and the carrier future see it.
+    power: Power,
+    /// The carrier's lid fan, or `None` with no carrier.
+    fan: Option<&'static fan::Fan>,
+    /// The settings sector's image, read before each write (`src/settings.rs`).
+    sector: RefCell<&'static mut [u8; SECTOR]>,
+    /// The channel pool in force, which `Status` reports and a host's `SetPool` changes.
+    pool: Cell<ChannelPool>,
 }
 
 impl Shared {
@@ -182,9 +235,15 @@ impl Shared {
         host: &'static mut HostFrames,
         down: &'static mut DownQueue,
         updates: &'static mut Updates,
+        cache: Cache,
+        carrier: &Carrier,
     ) -> Self {
+        // The stored settings, read before any future runs.
+        let (sector, stored) = settings::boot(updates);
+        let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
         Self {
-            pair: RefCell::new(pair),
+            // Here rather than in `main`, whose frame another `Pair` would grow.
+            pair: RefCell::new(pair.with_node_board(carrier.board())),
             host: RefCell::new(host),
             pushed: Signal::new(),
             down: RefCell::new(down),
@@ -210,6 +269,12 @@ impl Shared {
             gps_fault: Cell::new(None),
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
+            cache: RefCell::new(cache),
+            nodes: bus::Nodes::new(carrier.per_bus()),
+            power: Power::new(carrier),
+            fan,
+            sector: RefCell::new(sector),
+            pool: Cell::new(stored.pool.unwrap_or_default()),
         }
     }
 
@@ -224,8 +289,8 @@ impl Shared {
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
     /// Dropped, and not counted, while no host is present. A backlog held for an absent host
-    /// arrives late when one attaches, carries its current position onto old sightings and
-    /// reads as missed admin windows. Faults worth keeping are repeated by
+    /// arrives late when one attaches, and the host stamps its current position onto the old
+    /// sightings in it. Faults worth keeping are repeated by
     /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
@@ -243,11 +308,10 @@ impl Shared {
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.
     ///
-    /// Refused rather than evicting the oldest: an evicted command is lost with nothing to
-    /// say so, and an evicted send would never be answered.
+    /// Refused rather than evicting the oldest: an evicted record is lost with nothing to say
+    /// so.
     #[inline(never)]
     fn push_down(&self, down: &Down) -> bool {
-        // The largest `Down` is a relayed 1470-byte ESP-NOW send.
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
@@ -265,7 +329,8 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, and what the P4's own image has to say.
+    /// GPS fault if there is one, what the carrier and the node image cache have to say, and what
+    /// the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -278,6 +343,8 @@ impl Shared {
         if let Some(why) = self.gps_fault.get() {
             self.push_error(why);
         }
+        carrier::say(self);
+        cache::say(self);
         self.flush_update_lines();
     }
 
@@ -290,16 +357,7 @@ impl Shared {
         }
         update::say_lines(self);
         if let Some(message) = update::fault(self) {
-            self.push_line(None, message);
-        }
-    }
-
-    /// A line for the host: an `Error` without a level, else a `Log`.
-    #[inline(never)]
-    fn push_line(&self, level: Option<LogLevel>, message: LogStr) {
-        match level {
-            Some(level) => self.push_host(&BridgeToHost::Log { level, message }),
-            None => self.push_host(&BridgeToHost::Error { message }),
+            self.push_error(&message);
         }
     }
 
@@ -329,9 +387,9 @@ impl Shared {
     }
 
     #[inline(never)]
-    fn push_log(&self, level: LogLevel, message: &str) {
+    fn push_log(&self, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
-        self.push_host(&BridgeToHost::Log { level, message });
+        self.push_host(&BridgeToHost::Log { message });
     }
 
     /// Queue a batch from the GPS receiver, copied out of its slot here rather than in the
@@ -361,11 +419,21 @@ impl Shared {
                 dropped: ring.dropped().saturating_add(self.down_refused.get()),
             }
         };
-        let host_dropped = host[0].dropped.saturating_add(host[1].dropped);
-        let radio_link = self.radio_link.get();
-        let uart_errors = self.host_uart_errors.get();
-        let status =
-            self.pair.borrow().status(now_ms(), host, down, radio_link, host_dropped, uart_errors);
+        let (rx_count, rx_oversize) = self.nodes.rx_counts();
+        let counters = P4Counters {
+            host,
+            down,
+            node_down: self.nodes.stat(),
+            radio_link: self.radio_link.get(),
+            host_dropped: host[0].dropped.saturating_add(host[1].dropped),
+            host_uart_errors: self.host_uart_errors.get(),
+            rx_count,
+            rx_oversize,
+            fan: self.fan.map(fan::Fan::stats),
+            pool: self.pool.get(),
+            present: self.nodes.present(),
+        };
+        let status = self.pair.borrow().status(now_ms(), counters);
         self.push_host(&status);
     }
 }
@@ -386,6 +454,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+    // The PSRAM, for the node image cache (`src/cache.rs`), mapped before the buses start.
+    let cache = Cache::new(peripherals.PSRAM);
     let boot = Instant::now();
 
     let mut own_mac = [0; 6];
@@ -448,21 +518,106 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         tx_buf: dma_buf!(DmaTxBuf, HOST_CHUNK),
     };
 
+    let (i2c, carrier) = i2c0(peripherals.I2C0, peripherals.GPIO7, peripherals.GPIO8);
+
+    // The node buses (`docs/node-bus.md`), slot 1 first. Only the 14-node carrier wires slot 7,
+    // so only it takes GPIO25 and GPIO24 from the USB-Serial-JTAG. The board's slots get their
+    // pins, and the rest stay unconfigured.
+    let mut cs_a: [Option<AnyPin<'static>>; PER_BUS as usize] = [
+        Some(peripherals.GPIO26.into()),
+        Some(peripherals.GPIO27.into()),
+        Some(peripherals.GPIO32.into()),
+        Some(peripherals.GPIO33.into()),
+        Some(peripherals.GPIO46.into()),
+        Some(peripherals.GPIO47.into()),
+        None,
+    ];
+    let mut cs_b: [Option<AnyPin<'static>>; PER_BUS as usize] = [
+        Some(peripherals.GPIO50.into()),
+        Some(peripherals.GPIO49.into()),
+        Some(peripherals.GPIO5.into()),
+        Some(peripherals.GPIO4.into()),
+        Some(peripherals.GPIO3.into()),
+        Some(peripherals.GPIO2.into()),
+        None,
+    ];
+    let per_bus = usize::from(carrier.per_bus());
+    if per_bus == usize::from(PER_BUS) {
+        cs_a[6] = Some(peripherals.GPIO25.into());
+        cs_b[6] = Some(peripherals.GPIO24.into());
+    }
+    for cs in cs_a[per_bus..].iter_mut().chain(&mut cs_b[per_bus..]) {
+        *cs = None;
+    }
+    let pins_a = bus::Pins {
+        sck: peripherals.GPIO20.into(),
+        mosi: peripherals.GPIO21.into(),
+        miso: peripherals.GPIO22.into(),
+        irq: peripherals.GPIO23.into(),
+        cs: cs_a,
+    };
+    let pins_b = bus::Pins {
+        sck: peripherals.GPIO31.into(),
+        mosi: peripherals.GPIO30.into(),
+        miso: peripherals.GPIO29.into(),
+        irq: peripherals.GPIO28.into(),
+        cs: cs_b,
+    };
+    let (bus_a, bus_b) = bus::build(
+        carrier.board(),
+        carrier.per_bus(),
+        (peripherals.SPI2, peripherals.DMA_AXI_CH0, pins_a),
+        (peripherals.SPI3, peripherals.DMA_AXI_CH1, pins_b),
+    );
+
+    let fan_pins =
+        fan::Pins { rmt: peripherals.RMT, pwm: peripherals.GPIO51, tach: peripherals.GPIO52 };
+
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
-    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates);
-    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take()));
-    let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };
+    let shared = SHARED.init_with(|| {
+        Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier)
+    });
+    let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
+    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
-    match join4(
-        run_link(bus, &link, &shared),
-        radio_clock(&shared, c6_en),
-        host::run(host_bus, &shared),
-        gps::run(pins, &shared),
+    match join(
+        join4(
+            run_link(bus, &link, shared),
+            radio_clock(shared, c6_en),
+            host::run(host_bus, shared),
+            gps::run(i2c, shared),
+        ),
+        join4(
+            carrier::run(carrier, i2c.ok(), shared),
+            bus::run(bus_a, shared),
+            bus::run(bus_b, shared),
+            fan::run(fan_pins, shared),
+        ),
     )
     .await {}
+}
+
+/// Bring up I2C0 for the GPS receiver and a carrier's expander, read the expander blocking, then
+/// share the bus. A bus that refuses its configuration is the GPS fault, and no carrier read.
+///
+/// Out of line, so the drivers it moves are on this frame rather than `main`'s.
+#[inline(never)]
+fn i2c0(
+    i2c: I2C0<'static>,
+    sda: GPIO7<'static>,
+    scl: GPIO8<'static>,
+) -> (Result<&'static I2cBus, &'static str>, Carrier) {
+    match gps_bus::bus(i2c, sda, scl) {
+        Ok(mut i2c) => {
+            let carrier = carrier::detect(&mut i2c);
+            let shared: &'static I2cBus = I2C0_BUS.init(Mutex::new(i2c.into_async()));
+            (Ok(shared), carrier)
+        }
+        Err(why) => (Err(why), Carrier::unread()),
+    }
 }
 
 /// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6

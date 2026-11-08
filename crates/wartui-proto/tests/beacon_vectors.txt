@@ -6,8 +6,8 @@
 #   tools/beacons/extract.py /tmp/beacons.pcap >> \
 #       crates/wartui-proto/tests/beacon_vectors.txt
 #
-# Format: <name> <length> <hex>, matching golden_vectors.txt. Lines starting
-# with # are ignored, so a capture can be appended unedited.
+# Format: <name> <length> <hex>. Lines starting with # are ignored, so a
+# capture can be appended unedited.
 #
 # The assembled frames in tests/beacon.rs check the classification ladder
 # against a reading of the auth-mode rules. These check it against the air,

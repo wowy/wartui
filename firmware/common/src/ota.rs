@@ -49,6 +49,12 @@
 //! it after, which is correct whether or not the firmware has started core 1. The C5 and C6
 //! have one core.
 //!
+//! **The P4's settings live here too** ([`SettingsSector`]), the lid fan's duty and the channel
+//! pool, in the first sector of the `nvs` partition, since this module owns the flash. No
+//! ESP-IDF NVS reads that partition, so its layout is `wartui_proto::settings`'s own. A USB flash
+//! erases only `otadata`, and an update writes only an app slot, `otadata` and `trial`, so the
+//! settings survive both.
+//!
 //! **Nothing here logs.** Each step returns what happened, as [`Note`]s or a [`Fault`], and
 //! the caller says it its own way and reboots where a step says to: a node prints to its USB
 //! port, and the C6 sends lines up the link.
@@ -171,6 +177,8 @@ struct Layout {
     target: Option<AppSlot>,
     /// Absolute offset of the `trial` sector.
     trial: Option<u32>,
+    /// Absolute offset of the `nvs` partition's first sector.
+    settings: Option<u32>,
 }
 
 /// The slot an image is written into, as the receiver sees it.
@@ -187,13 +195,60 @@ impl SectorSink for Slot<'_> {
         self.size
     }
 
-    fn erase_sector(&mut self, offset: u32) -> Result<(), Self::Error> {
+    /// The node's only: it takes nothing over its bus while flash is erased, and one block erase
+    /// costs it far less of that than sixteen sector erases. The C6 and the P4 serve links while
+    /// they update, which a block erase would stall longer than a sector erase does, and their
+    /// update speed does not matter.
+    #[cfg(feature = "esp32c5")]
+    fn erase_unit(&self) -> u32 {
+        wartui_proto::ota::BLOCK as u32
+    }
+
+    /// One `NorFlash::erase`, which erases a block-aligned 64 KB in one ROM call and anything
+    /// else sector by sector.
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), Self::Error> {
         let at = self.base + offset;
-        NorFlash::erase(self.flash, at, at + SECTOR_U32)
+        NorFlash::erase(self.flash, at, at + len)
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), Self::Error> {
         NorFlash::write(self.flash, self.base + offset, data)
+    }
+}
+
+/// The first sector of the `nvs` partition, where the P4 keeps its settings.
+pub struct SettingsSector<'a> {
+    flash: &'a mut FlashStorage<'static>,
+    base: u32,
+}
+
+impl SettingsSector<'_> {
+    /// Read the whole sector into `buf`.
+    ///
+    /// # Errors
+    /// The read failed.
+    pub fn read(&mut self, buf: &mut [u8; SECTOR]) -> Result<(), Fault> {
+        ReadNorFlash::read(self.flash, self.base, buf)?;
+        Ok(())
+    }
+
+    /// Erase the sector.
+    ///
+    /// # Errors
+    /// The erase failed.
+    pub fn erase(&mut self) -> Result<(), Fault> {
+        NorFlash::erase(self.flash, self.base, self.base + SECTOR_U32)?;
+        Ok(())
+    }
+
+    /// Write `words`, whole words, at `offset`, a word-aligned offset in the sector that is erased
+    /// there.
+    ///
+    /// # Errors
+    /// The write failed.
+    pub fn write(&mut self, offset: u32, words: &[u8]) -> Result<(), Fault> {
+        NorFlash::write(self.flash, self.base + offset, words)?;
+        Ok(())
     }
 }
 
@@ -262,6 +317,13 @@ impl Ota {
         let target = self.layout.target?;
         self.layout.trial?;
         Some(Slot { flash: &mut self.flash, base: target.base, size: target.size })
+    }
+
+    /// The `nvs` partition's first sector, or `None` when the table has no `nvs` partition of
+    /// one sector or more, or did not read.
+    pub fn settings(&mut self) -> Option<SettingsSector<'_>> {
+        let base = self.layout.settings?;
+        Some(SettingsSector { flash: &mut self.flash, base })
     }
 
     /// The digest appended to the booted image, which names the build
@@ -450,7 +512,7 @@ fn note(notes: &mut Notes, item: Note) {
     let _ = notes.push(item);
 }
 
-/// Find the booted slot, the other app slot and the `trial` sector.
+/// Find the booted slot, the other app slot, the `trial` sector and the settings sector.
 fn locate(
     flash: &mut FlashStorage<'static>,
     table: &mut [u8; PARTITION_TABLE_MAX_LEN],
@@ -474,5 +536,12 @@ fn locate(
         .find_partition(PartitionType::Data(DataPartitionSubType::Undefined))?
         .filter(|entry| entry.len() >= SECTOR_U32)
         .map(|entry| entry.offset());
-    Ok(Layout { booted: booted_slot, target, trial })
+    // A lookup that fails is no settings sector, so the settings never cost an update.
+    let settings = pt
+        .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+        .ok()
+        .flatten()
+        .filter(|entry| entry.label_as_str() == "nvs" && entry.len() >= SECTOR_U32)
+        .map(|entry| entry.offset());
+    Ok(Layout { booted: booted_slot, target, trial, settings })
 }

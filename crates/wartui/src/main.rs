@@ -1,8 +1,8 @@
 //! wartui's command line.
 //!
 //! `run` is the tool; `flash-fleet` and `flash-bridge` put the firmware on the boards it
-//! drives, and `ota` updates the nodes' firmware over the air. Everything else checks one link
-//! in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
+//! drives, and `ota` updates the nodes' firmware through the bridge. Everything else checks one
+//! link in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
 //! § "When nothing arrives" has which to reach for.
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
@@ -17,7 +17,7 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
-use wartui_proto::link::LoopPhase;
+use wartui_proto::link::{BridgeToHost, LoopPhase};
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -26,8 +26,11 @@ mod bench;
 mod capture;
 mod config;
 mod export;
+mod fan;
 mod flash;
 mod ota;
+mod pool;
+mod power_cycle;
 mod reset;
 mod run;
 mod sniff;
@@ -73,13 +76,19 @@ enum Command {
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),
+    /// Switch one node off and on through the carrier board.
+    PowerCycle(power_cycle::Args),
+    /// Read or set the carrier's lid fan duty, which the bridge keeps across its reboots.
+    Fan(fan::Args),
+    /// Read or set the channel pool, which the bridge keeps across its reboots.
+    Pool(pool::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
     FlashFleet(flash::fleet::Args),
     /// Update the P4 bridge's firmware over its link.
     FlashBridge(flash::bridge::Args),
-    /// Update nodes' firmware over the air, through the bridge.
+    /// Update nodes' firmware through the bridge.
     Ota(ota::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
@@ -94,9 +103,9 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`
-        // and `ota` read a broken one as no bridge remembered, and `ports` and `flash-fleet`
-        // never read it.
+        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
+        // `power-cycle`, `fan`, `pool` and `ota` read a broken one as no bridge remembered, and
+        // `ports` and `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -105,6 +114,9 @@ async fn main() -> Result<()> {
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
+        Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
+        Some(Command::Fan(args)) => fan::run(args).await,
+        Some(Command::Pool(args)) => pool::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -243,6 +255,11 @@ fn memory(explicit: Option<&Path>) -> BridgeMemory {
     BridgeMemory::holding(bridge.mac).on_port(bridge.serial)
 }
 
+/// `--sim`'s node count: at most one node per node-bus slot, as on a real bridge.
+fn sim_nodes() -> clap::builder::RangedI64ValueParser<u8> {
+    clap::value_parser!(u8).range(0..=wartui_proto::plan::MAX_NODES as i64)
+}
+
 /// Open whichever transport the arguments called for.
 fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
@@ -258,6 +275,43 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
     .context("opening the link")
 }
 
+/// Open the one bridge `named` resolves to, as `wartui reset` resolves it
+/// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
+/// `Ready`. `fan`, `pool` and `power-cycle` connect through this.
+async fn connect_one(
+    named: Option<&str>,
+    config: Option<&Path>,
+) -> Result<(LinkHandle, BridgeInfo)> {
+    let remembered = crate::config::remembered_bridge(config);
+    let port =
+        reset::board_to_reset(named, &remembered, serial::discover_bridges, |found| async move {
+            serial::probe_all(&found).await
+        })
+        .await?;
+    let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
+    let mut link = open(Some(&port), None, memory)?;
+    match tokio::time::timeout(CONNECT_NOTICE_AFTER, status::wait_for_ready(&mut link)).await {
+        Ok(ready) => Ok((link, ready?)),
+        Err(_) => anyhow::bail!("{}", no_bridge_notice(named)),
+    }
+}
+
+/// Wait `wait`, printing each fault the bridge reports meanwhile, such as a setting not saved.
+async fn settle(link: &mut LinkHandle, wait: Duration) -> Result<()> {
+    let until = tokio::time::Instant::now() + wait;
+    loop {
+        match tokio::time::timeout_at(until, link.recv()).await {
+            Err(_) => return Ok(()),
+            Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
+                println!("fault      {message}");
+            }
+            Ok(Some(LinkEvent::Disconnected { reason })) => anyhow::bail!("{reason}"),
+            Ok(Some(_)) => {}
+            Ok(None) => anyhow::bail!("the link closed"),
+        }
+    }
+}
+
 /// How a `--bridge` value was meant. Parsing it cannot fail: what is not an address
 /// is a path, and whether that path exists is the transport's question.
 fn spec(bridge: &str) -> BridgeSpec {
@@ -270,12 +324,9 @@ fn spec(bridge: &str) -> BridgeSpec {
 /// the kind of thing that should not be silent.
 fn describe(event: &LinkEvent) -> Option<String> {
     match event {
-        LinkEvent::Connected(info) => Some(format!(
-            "bridge {} on {:?}, firmware {}",
-            mac::full(&info.mac),
-            info.chip,
-            info.fw_version
-        )),
+        LinkEvent::Connected(info) => {
+            Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
+        }
         LinkEvent::Disconnected { reason } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
@@ -479,7 +530,7 @@ mod tests {
         BridgeInfo, BridgeSpec, Command, last_reset_line, no_boards_notice, parse, silence_notice,
         spec,
     };
-    use wartui_proto::link::{Chip, LoopPhase};
+    use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
 
     /// A P4 bridge's CH343 as the OS lists it.
@@ -524,14 +575,9 @@ mod tests {
 
     #[test]
     fn cli_parser_rejects_removed_flags_when_given_before_or_after_subcommand() {
-        // Power and pool come from `wartui.toml` or the settings modal; the store
+        // The bridge holds the pool, set with `wartui pool` or the settings modal; the store
         // commits at its built-in interval.
-        for flag in [
-            ["--pool", "eu"],
-            ["--node-tx-power", "10"],
-            ["--bridge-tx-power", "10"],
-            ["--commit-interval", "500"],
-        ] {
+        for flag in [["--pool", "eu"], ["--commit-interval", "500"]] {
             for args in [
                 ["wartui", flag[0], flag[1]].as_slice(),
                 ["wartui", "run", flag[0], flag[1]].as_slice(),
@@ -539,6 +585,18 @@ mod tests {
                 assert!(parse(args).is_err(), "{args:?} should be refused");
             }
         }
+    }
+
+    #[test]
+    fn cli_parser_rejects_sim_node_count_when_over_max_nodes() {
+        let max = wartui_proto::plan::MAX_NODES.to_string();
+        let over = (wartui_proto::plan::MAX_NODES + 1).to_string();
+        for command in [None, Some("run"), Some("sniff"), Some("status"), Some("ota")] {
+            let args: Vec<&str> =
+                ["wartui"].into_iter().chain(command).chain(["--sim", &over]).collect();
+            assert!(parse(args.as_slice()).is_err(), "{args:?} should be refused");
+        }
+        assert!(parse(["wartui", "--sim", max.as_str()]).is_ok());
     }
 
     #[test]
@@ -569,6 +627,27 @@ mod tests {
             assert!(parse(["wartui", command, "--config", "w.toml"]).is_ok(), "{command}");
         }
         assert!(parse(["wartui", "flash-bridge", "--config", "w.toml"]).is_ok());
+    }
+
+    #[test]
+    fn cli_parser_accepts_power_cycle_when_given_slot_bridge_and_config() {
+        let args = ["wartui", "power-cycle", "--slot", "N3", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::PowerCycle(_))));
+        // Which node is the whole question, so there is no default.
+        assert!(parse(["wartui", "power-cycle"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_fan_when_given_duty_bridge_and_config_or_nothing() {
+        let args = ["wartui", "fan", "40", "--bridge", "44:C0", "--config", "w"];
+        assert!(matches!(parse(args).unwrap().command, Some(Command::Fan(_))));
+        assert!(matches!(parse(["wartui", "fan"]).unwrap().command, Some(Command::Fan(_))));
+    }
+
+    #[test]
+    fn cli_parser_rejects_fan_duty_when_over_100() {
+        assert!(parse(["wartui", "fan", "101"]).is_err());
+        assert!(parse(["wartui", "fan", "100"]).is_ok());
     }
 
     #[test]
@@ -694,14 +773,12 @@ mod tests {
     fn last_reset_line_says_what_ran_last_when_phase_is_only_a_hint() {
         let line = |last_phase| {
             last_reset_line(&BridgeInfo {
-                chip: Chip::Esp32P4,
                 mac: [0; 6],
                 fw_version: String::new(),
                 reset_cause: ResetCause::PowerOn,
                 last_phase,
-                heap_free: 0,
                 uptime_ms: 0,
-                gps: false,
+                node_board: wartui_proto::bus::NodeBoard::NoCarrier,
                 radio: None,
                 image: None,
             })

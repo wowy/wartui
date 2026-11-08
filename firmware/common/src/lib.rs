@@ -7,11 +7,9 @@
 //! `esp-hal` features at once.
 //!
 //! Each firmware names its chip feature here, so one build selects one chip. Only the
-//! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`radio`] is the
-//! ESP-NOW half of a bridge, behind the `radio` feature, so a firmware whose chip has a
-//! radio and bridges it carries the one copy; the P4 has no radio and cannot select it.
-//! [`gps`] reads a u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any
-//! of the three chips. [`ota`] is updates on flash, which every firmware takes.
+//! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`gps`] reads a
+//! u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any of the three chips.
+//! [`ota`] is updates on flash, which every firmware takes.
 #![no_std]
 
 #[cfg(feature = "gps")]
@@ -19,8 +17,6 @@ pub mod gps;
 pub mod health;
 pub mod ota;
 pub mod phase;
-#[cfg(feature = "radio")]
-pub mod radio;
 
 use esp_hal::rtc_cntl::SocResetReason;
 use wartui_proto::reset::ResetCause;
@@ -36,8 +32,6 @@ const _: () = assert!(
         <= 1,
     "select exactly one chip: esp32c5, esp32c6 and esp32p4 are mutually exclusive"
 );
-#[cfg(all(feature = "radio", feature = "esp32p4"))]
-compile_error!("the ESP32-P4 has no radio; build `radio` with esp32c5 or esp32c6");
 
 /// Flatten the chip's reset reason into the handful of stories worth telling.
 ///

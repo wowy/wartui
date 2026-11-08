@@ -246,14 +246,15 @@ fn done_line(job: u64, result: &Map<String, Value>) -> String {
     format!("upload: job {job} {}", counts.join("  "))
 }
 
-/// The upload's confirm, centered like settings and sized to its text.
-pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, lines: &[String]) {
+/// A confirm titled `title`, centered like settings and sized to its text: the upload's, and
+/// the power-cycle's.
+pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, title: &str, lines: &[String]) {
     let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
     let width = u16::try_from(widest + 4).unwrap_or(u16::MAX);
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let area = centered_rect(width, height, frame.area());
     frame.render_widget(Clear, area);
-    let block = Block::bordered().title(" upload to WDGWars ");
+    let block = Block::bordered().title(title);
     let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     let lines: Vec<Line<'_>> = lines.iter().map(|line| Line::from(line.as_str())).collect();

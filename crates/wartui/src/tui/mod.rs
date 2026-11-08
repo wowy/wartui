@@ -90,6 +90,7 @@ async fn view(
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
         ui.poll_upload(&current);
+        ui.poll_power(&current);
         ui.poll_bridge();
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
@@ -102,6 +103,10 @@ async fn view(
                 // The upload's confirm opens over everything, settings included, so
                 // it answers first.
                 Some(Input::Key(key)) if ui.upload().confirming() => ui.on_confirm_key(key, &current),
+                // Opened only from the fleet view, so nothing else is open under it.
+                Some(Input::Key(key)) if ui.power_confirming() => {
+                    ui.on_power_key(key, &current, commands);
+                }
                 // Ahead of `quits()`, so `q` closes the modal rather than the view.
                 Some(Input::Key(key)) if ui.gps_open() => ui.on_gps_key(key),
                 // An open modal gets the key ahead of `quits()`, so `esc` and `q`
@@ -164,8 +169,11 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     if ui.gps_open() {
         draw_gps_modal(frame, snapshot);
     }
+    if let Some(lines) = ui.power_confirm_lines(snapshot) {
+        draw_confirm_modal(frame, " power-cycle ", &lines);
+    }
     if let Some(lines) = ui.upload().confirm_lines() {
-        draw_confirm_modal(frame, &lines);
+        draw_confirm_modal(frame, " upload to WDGWars ", &lines);
     }
 }
 

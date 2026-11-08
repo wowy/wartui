@@ -1,4 +1,4 @@
-use super::{DecodeError, MsgType, OFFSET_BODY, Security, header, write_header};
+use super::{DecodeError, Security};
 use crate::link::MAX_NODE_PAYLOAD;
 
 /// Longest SSID 802.11 allows, and so the most a record carries.
@@ -20,11 +20,10 @@ pub const SIGHTING_RECORD_MIN: usize = 12;
 /// buffer [`SightingMsg::encode_record_into`] can always finish in.
 pub const SIGHTING_RECORD_MAX: usize = SIGHTING_RECORD_MIN + SSID_MAX + EXT_MAX;
 
-/// Length of a [`SightingBatch`] header: magic, version, type, `seq` and `count`.
-pub const SIGHTING_BATCH_HEADER: usize = OFFSET_BODY + 3;
+/// Length of a [`SightingBatch`] header: `seq` and `count`.
+pub const SIGHTING_BATCH_HEADER: usize = 3;
 
-/// The most a [`SightingBatch`] may be on the wire: the longest frame a node sends, so a
-/// full batch fills exactly one frame.
+/// The most a [`SightingBatch`] body may be: the longest body a node sends.
 pub const SIGHTING_BATCH_MAX: usize = 1024;
 
 const _: () = assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
@@ -34,7 +33,7 @@ const _: () = assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
 ///
 /// [`SightingBatchWriter`] packs to a byte budget, not to this count. Records vary from
 /// [`SIGHTING_RECORD_MIN`] to [`SIGHTING_RECORD_MAX`], so a count cap would either
-/// overflow the frame or waste it.
+/// overflow the batch or waste it.
 pub const SIGHTINGS_PER_BATCH_MAX: usize =
     (SIGHTING_BATCH_MAX - SIGHTING_BATCH_HEADER) / SIGHTING_RECORD_MIN;
 
@@ -70,9 +69,8 @@ impl TryFrom<u8> for RecordKind {
 
 /// One record of a [`SightingBatch`]: one sighting of an access point or advertiser.
 ///
-/// Twelve bytes plus the SSID and the trailer, with no padding, because every byte is
-/// paid on the control channel every node shares. A record has no header of its own;
-/// [`SightingBatch`] carries one for the whole frame.
+/// Twelve bytes plus the SSID and the trailer, with no padding. A record has no header of its
+/// own; [`SightingBatch`] carries one for the whole batch.
 ///
 /// The SSID is length-prefixed, so a comma or any other byte inside it arrives intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,8 +112,7 @@ impl<'a> SightingMsg<'a> {
     /// trailer from it and returning how many bytes it took.
     ///
     /// `buf` may hold more records after this one. [`SightingBatch::decode`] walks them,
-    /// using the returned length to find the next. The batch header has already
-    /// answered for magic and version.
+    /// using the returned length to find the next.
     ///
     /// # Errors
     /// See [`DecodeError`].
@@ -188,24 +185,23 @@ impl<'a> SightingMsg<'a> {
     }
 }
 
-/// Node → host: sightings from one dwell or Bluetooth scan, unicast to the bridge.
+/// Node → P4: sightings from one dwell or Bluetooth scan.
 ///
 /// A dwell or scan sends as many batches as its sightings fill, and none outlives it. The
-/// [`crate::air`] docs say why.
+/// [`crate::bus`] docs say why.
 ///
-/// `"WTUI" | ver | 0x02 | seq:u16le | count:u8 | records…`, each record a
-/// [`SightingMsg`].
+/// `seq:u16le | count:u8 | records…`, each record a [`SightingMsg`].
 ///
-/// [`Self::decode`] validates the whole frame before anything is read out of it.
+/// [`Self::decode`] validates the whole body before anything is read out of it.
 /// `count` is at least 1 and accounts for every byte, and every record is within
 /// [`SIGHTING_RECORD_MIN`]/[`SIGHTING_RECORD_MAX`]. A fault anywhere rejects the whole
-/// frame, the same "never half-decoded" rule every frame here follows. [`Self::iter`] is
+/// batch, the same "never half-decoded" rule every message here follows. [`Self::iter`] is
 /// infallible because of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SightingBatch<'a> {
-    /// Counts up once per batch the bridge's radio acknowledged, wrapping and
-    /// restarting at boot. A batch that went unacknowledged keeps its `seq`. A gap
-    /// between two arrivals is batches lost after the bridge's radio took them.
+    /// Counts up once per batch the P4 acknowledged on the bus, wrapping and restarting at
+    /// boot. A batch that went unacknowledged keeps its `seq`. A gap between two arrivals is
+    /// batches lost after the P4 took them.
     pub seq: u16,
     /// How many records follow. Always at least 1: a node with nothing to report sends
     /// no batch.
@@ -215,23 +211,19 @@ pub struct SightingBatch<'a> {
 }
 
 impl<'a> SightingBatch<'a> {
-    /// Decode from a received frame, validating every record before returning.
+    /// Decode a body, validating every record before returning.
     ///
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &'a [u8]) -> Result<Self, DecodeError> {
-        match header(buf)? {
-            MsgType::SightingBatch => {}
-            other => return Err(DecodeError::UnknownType(other.as_u8())),
-        }
         if buf.len() < SIGHTING_BATCH_HEADER {
             return Err(DecodeError::TooShort { need: SIGHTING_BATCH_HEADER, got: buf.len() });
         }
-        let seq = u16::from_le_bytes([buf[OFFSET_BODY], buf[OFFSET_BODY + 1]]);
-        let count = buf[OFFSET_BODY + 2];
+        let seq = u16::from_le_bytes([buf[0], buf[1]]);
+        let count = buf[2];
         let records = &buf[SIGHTING_BATCH_HEADER..];
         // An empty batch is the same fault as one claiming records it does not
-        // carry: a frame this layout cannot produce.
+        // carry: a body this layout cannot produce.
         if count == 0 {
             return Err(DecodeError::TooShort {
                 need: SIGHTING_BATCH_HEADER + SIGHTING_RECORD_MIN,
@@ -243,7 +235,7 @@ impl<'a> SightingBatch<'a> {
             let (_, len) = SightingMsg::decode_record(&records[consumed..])?;
             consumed += len;
         }
-        // Bytes past the last record are the batch form of a fixed-length frame
+        // Bytes past the last record are the batch form of a fixed-length body
         // that outgrew its layout. Reading them as records would go past what
         // `count` promised.
         if consumed != records.len() {
@@ -275,12 +267,12 @@ impl<'a> SightingBatch<'a> {
     }
 }
 
-/// Packs [`SightingMsg`] records into one [`SightingBatch`] frame, up to
+/// Packs [`SightingMsg`] records into one [`SightingBatch`] body, up to
 /// [`SIGHTING_BATCH_MAX`] bytes.
 ///
 /// [`Self::push`] writes nothing when a record does not fit. The caller then sends what is
 /// packed and starts a new batch with the record that did not fit. Whatever is packed
-/// goes out when the dwell or Bluetooth scan ends; the [`crate::air`] docs say why
+/// goes out when the dwell or Bluetooth scan ends; the [`crate::bus`] docs say why
 /// nothing is held past it.
 #[derive(Debug, Clone)]
 pub struct SightingBatchWriter {
@@ -307,14 +299,14 @@ impl SightingBatchWriter {
             return false;
         };
         self.len += written;
-        self.buf[OFFSET_BODY + 2] += 1;
+        self.buf[2] += 1;
         true
     }
 
     /// How many records have been packed in.
     #[must_use]
     pub fn len(&self) -> usize {
-        usize::from(self.buf[OFFSET_BODY + 2])
+        usize::from(self.buf[2])
     }
 
     /// Whether nothing has been packed in yet.
@@ -323,7 +315,7 @@ impl SightingBatchWriter {
         self.len() == 0
     }
 
-    /// The frame as it stands, ready to send.
+    /// The body as it stands, ready to send.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
@@ -331,9 +323,8 @@ impl SightingBatchWriter {
 
     /// Empty the writer and start a new batch carrying `seq`.
     pub fn reset(&mut self, seq: u16) {
-        write_header(&mut self.buf, MsgType::SightingBatch);
-        self.buf[OFFSET_BODY..OFFSET_BODY + 2].copy_from_slice(&seq.to_le_bytes());
-        self.buf[OFFSET_BODY + 2] = 0;
+        self.buf[..2].copy_from_slice(&seq.to_le_bytes());
+        self.buf[2] = 0;
         self.len = SIGHTING_BATCH_HEADER;
     }
 }

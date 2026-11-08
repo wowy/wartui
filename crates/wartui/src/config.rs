@@ -33,8 +33,6 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wartui_proto::mac::{self, Mac};
 
-use crate::run::PoolArg;
-
 /// Everything `wartui.toml` can hold. Add a field and a table to grow it; every
 /// struct denies unknown fields, so a typo in the file is caught rather than
 /// silently ignored. `save` omits a table with nothing set, except `[api-keys]`,
@@ -42,17 +40,10 @@ use crate::run::PoolArg;
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
-    /// The root `pool` key. An unknown spelling is a serde error, named with
-    /// the file the same way an out-of-range tx-power is. `None` means the
-    /// file said nothing, and `run::pool` falls back on the default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pool: Option<PoolArg>,
     /// The root `excluded-ssids` key: Wi-Fi networks never captured, matched
     /// byte-for-byte. Declared before the tables, since TOML root keys must come first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_ssids: Vec<String>,
-    #[serde(default, skip_serializing_if = "TxPower::is_empty")]
-    pub tx_power: TxPower,
     #[serde(default, skip_serializing_if = "Bluetooth::is_empty")]
     pub bluetooth: Bluetooth,
     #[serde(default, skip_serializing_if = "Bridge::is_empty")]
@@ -61,24 +52,6 @@ pub struct Config {
     pub gps: Gps,
     #[serde(default)]
     pub api_keys: ApiKeys,
-}
-
-/// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
-/// independent and falling back to the default on its own.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct TxPower {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fleet: Option<i8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bridge: Option<i8>,
-}
-
-impl TxPower {
-    /// Whether neither key is set, so `save` writes no `[tx-power]` table at all.
-    fn is_empty(&self) -> bool {
-        self.fleet.is_none() && self.bridge.is_none()
-    }
 }
 
 /// The `[bluetooth]` table: whether giving a node the scan (`b`) remembers it, and the
@@ -185,11 +158,6 @@ fn read_mac<'de, D: Deserializer<'de>>(
     })
 }
 
-/// Valid whole dBm transmit power values, on the command line or in the file. 20 dBm
-/// is the ceiling because whether anything above it works correctly is unverified,
-/// per `AGENTS.md`'s tx-power invariant.
-pub const TX_POWER_DBM: RangeInclusive<i8> = 2..=20;
-
 /// Valid `[gps] bridge-rate-hz` values: the rates the receiver configuration takes.
 pub const GPS_RATE_HZ: RangeInclusive<u8> = wartui_core::ubx::RATE_HZ;
 
@@ -200,8 +168,6 @@ pub fn excluded_ssid_bytes(ssids: &[String]) -> impl Iterator<Item = Vec<u8>> + 
 
 impl Config {
     fn validate(&self) -> Result<()> {
-        check_power("tx-power.fleet", self.tx_power.fleet)?;
-        check_power("tx-power.bridge", self.tx_power.bridge)?;
         if let Some(rate) = self.gps.bridge_rate_hz
             && !GPS_RATE_HZ.contains(&rate)
         {
@@ -262,15 +228,6 @@ pub fn check_excluded_ssid(ssid: &str, listed: &[String]) -> std::result::Result
     } else {
         Ok(())
     }
-}
-
-fn check_power(key: &str, value: Option<i8>) -> Result<()> {
-    if let Some(value) = value
-        && !TX_POWER_DBM.contains(&value)
-    {
-        bail!("{key} = {value} is outside {} to {} dBm", TX_POWER_DBM.start(), TX_POWER_DBM.end());
-    }
-    Ok(())
 }
 
 /// Load and validate `wartui.toml`.
@@ -516,10 +473,9 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeys, Bluetooth, Bridge, Config, Gps, TxPower, create_if_missing, default_path_in,
+        ApiKeys, Bluetooth, Bridge, Config, Gps, create_if_missing, default_path_in,
         excluded_ssid_bytes, load, load_from, path, remembered_bridge_from, save,
     };
-    use crate::run::PoolArg;
     use std::ffi::OsStr;
 
     #[test]
@@ -558,8 +514,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("wartui.toml");
         let config = load_from(None, || Some(missing)).unwrap();
-        assert!(config.tx_power.fleet.is_none());
-        assert!(config.tx_power.bridge.is_none());
+        assert!(config.gps.bridge_rate_hz.is_none());
     }
 
     #[test]
@@ -567,7 +522,7 @@ mod tests {
         // No `$HOME`, so `default_path()` returns `None` and there is nowhere to
         // look — the same as a missing file, but with the lookup itself absent.
         let config = load_from(None, || None).unwrap();
-        assert!(config.tx_power.fleet.is_none());
+        assert!(config.excluded_ssids.is_empty());
     }
 
     #[test]
@@ -579,40 +534,14 @@ mod tests {
     }
 
     #[test]
-    fn config_loader_reads_tx_power_table() {
+    fn config_loader_rejects_pool_key_and_names_file() {
+        // The bridge holds the pool, so the file has no key for it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 10\nbridge = 15\n").unwrap();
-        let config = load(Some(&path)).unwrap();
-        assert_eq!(config.tx_power.fleet, Some(10));
-        assert_eq!(config.tx_power.bridge, Some(15));
-    }
-
-    #[test]
-    fn config_loader_reads_pool_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "pool = \"eu\"\n").unwrap();
-        let config = load(Some(&path)).unwrap();
-        assert_eq!(config.pool, Some(PoolArg::Eu));
-    }
-
-    #[test]
-    fn config_loader_returns_none_pool_when_key_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 10\n").unwrap();
-        let config = load(Some(&path)).unwrap();
-        assert_eq!(config.pool, None);
-    }
-
-    #[test]
-    fn config_loader_rejects_unknown_pool_and_names_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "pool = \"jp\"\n").unwrap();
-        let error = load(Some(&path)).unwrap_err();
-        assert!(error.to_string().contains("wartui.toml"), "{error}");
+        std::fs::write(&path, "pool = \"us\"\n").unwrap();
+        let chain = format!("{:#}", load(Some(&path)).unwrap_err());
+        assert!(chain.contains("wartui.toml"), "{chain}");
+        assert!(chain.contains("pool"), "{chain}");
     }
 
     #[test]
@@ -621,14 +550,14 @@ mod tests {
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "").unwrap();
         let config: Config = load(Some(&path)).unwrap();
-        assert!(config.tx_power.fleet.is_none());
+        assert!(config.excluded_ssids.is_empty());
     }
 
     #[test]
     fn config_loader_rejects_unknown_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 10\ntypo = 1\n").unwrap();
+        std::fs::write(&path, "[bluetooth]\nremember = true\ntypo = 1\n").unwrap();
         assert!(load(Some(&path)).is_err());
     }
 
@@ -638,26 +567,6 @@ mod tests {
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[not-a-real-table]\nx = 1\n").unwrap();
         assert!(load(Some(&path)).is_err());
-    }
-
-    #[test]
-    fn config_loader_rejects_fleet_power_above_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 25\n").unwrap();
-        let error = load(Some(&path)).unwrap_err();
-        let chain = format!("{error:#}");
-        assert!(chain.contains("tx-power.fleet"), "{chain}");
-    }
-
-    #[test]
-    fn config_loader_rejects_bridge_power_below_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nbridge = 1\n").unwrap();
-        let error = load(Some(&path)).unwrap_err();
-        let chain = format!("{error:#}");
-        assert!(chain.contains("tx-power.bridge"), "{chain}");
     }
 
     #[test]
@@ -700,7 +609,7 @@ mod tests {
     fn config_save_writes_gps_table_that_reloads_when_rate_is_set() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
         assert_eq!(load(Some(&target)).unwrap().gps.bridge_rate_hz, Some(2));
     }
 
@@ -708,7 +617,7 @@ mod tests {
     fn config_loader_names_file_in_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 25\n").unwrap();
+        std::fs::write(&path, "[gps]\nbridge-rate-hz = 9\n").unwrap();
         let error = load(Some(&path)).unwrap_err();
         assert!(error.to_string().contains("wartui.toml"), "{error}");
     }
@@ -752,11 +661,9 @@ mod tests {
     }
 
     /// A `Config` holding every key the settings modal saves.
-    fn full(pool: PoolArg, fleet: i8, bridge: i8) -> Config {
+    fn full() -> Config {
         Config {
-            pool: Some(pool),
             excluded_ssids: vec!["HomeNet".to_owned(), "Pixel 9".to_owned()],
-            tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
             bridge: Bridge {
                 remember: Some(true),
@@ -768,15 +675,13 @@ mod tests {
         }
     }
 
-    /// A `Config` with only the fleet's tx power set.
-    fn fleet_only(fleet: i8) -> Config {
+    /// A `Config` with only the bridge's GPS rate set.
+    fn rate_only(rate: u8) -> Config {
         Config {
-            pool: None,
             excluded_ssids: Vec::new(),
-            tx_power: TxPower { fleet: Some(fleet), bridge: None },
             bluetooth: Bluetooth::default(),
             bridge: Bridge::default(),
-            gps: Gps::default(),
+            gps: Gps { bridge_rate_hz: Some(rate) },
             api_keys: ApiKeys::default(),
         }
     }
@@ -786,11 +691,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("nested/deeper/wartui.toml");
 
-        save(&target, &full(PoolArg::Us, 10, 15)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, Some(15));
+        assert_eq!(saved.gps.bridge_rate_hz, Some(2));
     }
 
     #[test]
@@ -798,14 +702,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &full(PoolArg::Eu, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.pool, Some(PoolArg::Eu));
-        assert_eq!(saved.tx_power.fleet, Some(8));
-        assert_eq!(saved.tx_power.bridge, Some(12));
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("pool = \"eu\""), "the spelling the file reads back: {text}");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(2));
+        assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
+        assert_eq!(saved.api_keys.wdgwars, "abc123def456");
     }
 
     #[test]
@@ -813,7 +715,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
         assert_eq!(saved.bluetooth.remember, Some(true));
@@ -830,7 +732,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
         assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
@@ -840,7 +742,7 @@ mod tests {
 
     #[test]
     fn config_excluded_ssid_bytes_yields_each_entry_as_bytes_when_list_is_set() {
-        let config = full(PoolArg::Us, 8, 12);
+        let config = full();
         let bytes: Vec<Vec<u8>> = excluded_ssid_bytes(&config.excluded_ssids).collect();
         assert_eq!(bytes, [b"HomeNet".to_vec(), b"Pixel 9".to_vec()]);
     }
@@ -850,7 +752,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &fleet_only(10)).unwrap();
+        save(&target, &rate_only(3)).unwrap();
 
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(!text.contains("excluded-ssids"), "{text}");
@@ -883,23 +785,11 @@ mod tests {
     }
 
     #[test]
-    fn config_save_omits_tx_power_table_when_neither_power_is_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-
-        let config = Config { pool: Some(PoolArg::All), ..Config::default() };
-        save(&target, &config).unwrap();
-
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(!text.contains("tx-power"), "{text}");
-    }
-
-    #[test]
     fn config_save_omits_bridge_table_when_remember_is_unset() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &fleet_only(10)).unwrap();
+        save(&target, &rate_only(3)).unwrap();
 
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(!text.contains("[bridge]"), "{text}");
@@ -944,7 +834,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
         assert_eq!(saved.bridge.remember, Some(true));
@@ -1046,10 +936,10 @@ mod tests {
     fn config_save_refuses_out_of_range_value_and_leaves_file_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let original = "[tx-power]\nfleet = 6\n";
+        let original = "[gps]\nbridge-rate-hz = 1\n";
         std::fs::write(&target, original).unwrap();
 
-        let result = save(&target, &fleet_only(99));
+        let result = save(&target, &rate_only(9));
 
         assert!(result.is_err());
         let text = std::fs::read_to_string(&target).unwrap();
@@ -1060,15 +950,18 @@ mod tests {
     fn config_save_replaces_everything_when_file_holds_other_values() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "# notes\npool = \"us\"\n[tx-power]\nfleet = 6\nbridge = 9\n")
-            .unwrap();
+        std::fs::write(
+            &target,
+            "# notes\nexcluded-ssids = [\"HomeNet\"]\n[bluetooth]\nremember = false\n",
+        )
+        .unwrap();
 
-        save(&target, &fleet_only(10)).unwrap();
+        save(&target, &rate_only(3)).unwrap();
 
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.pool, None, "the file holds only what was saved");
-        assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, None);
+        assert!(saved.excluded_ssids.is_empty(), "the file holds only what was saved");
+        assert_eq!(saved.bluetooth.remember, None);
+        assert_eq!(saved.gps.bridge_rate_hz, Some(3));
     }
 
     #[test]
@@ -1077,10 +970,10 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         std::fs::write(&target, "this is [not toml\n").unwrap();
 
-        save(&target, &full(PoolArg::Us, 4, 5)).unwrap();
+        save(&target, &full()).unwrap();
 
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.pool, Some(PoolArg::Us));
+        assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
     }
 
     #[test]
@@ -1089,14 +982,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.toml");
         let link = dir.path().join("wartui.toml");
-        std::fs::write(&real, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::write(&real, "[gps]\nbridge-rate-hz = 1\n").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        save(&link, &fleet_only(10)).unwrap();
+        save(&link, &rate_only(3)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         let saved = load(Some(&real)).unwrap();
-        assert_eq!(saved.tx_power.fleet, Some(10), "the file it pointed to got the change");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(3), "the file it pointed to got the change");
     }
 
     #[test]
@@ -1107,12 +1000,12 @@ mod tests {
         let link = dir.path().join("wartui.toml");
         std::os::unix::fs::symlink(&target, &link).unwrap(); // target does not exist yet
 
-        save(&link, &fleet_only(10)).unwrap();
+        save(&link, &rate_only(3)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         assert_eq!(std::fs::read_link(&link).unwrap(), target, "still points at the same place");
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.tx_power.fleet, Some(10), "the link's target got created");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(3), "the link's target got created");
     }
 
     #[test]
@@ -1127,22 +1020,22 @@ mod tests {
         std::os::unix::fs::symlink("real.toml", &middle).unwrap();
         std::os::unix::fs::symlink(&middle, &link).unwrap();
 
-        save(&link, &fleet_only(7)).unwrap();
+        save(&link, &rate_only(4)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(std::fs::symlink_metadata(&middle).unwrap().file_type().is_symlink());
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.tx_power.fleet, Some(7), "the chain's final target got created");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(4), "the chain's final target got created");
     }
 
     #[test]
     fn config_save_leaves_file_untouched_when_it_already_holds_the_same_text() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        save(&target, &full(PoolArg::Us, 10, 12)).unwrap();
+        save(&target, &full()).unwrap();
         let before = std::fs::metadata(&target).unwrap().modified().unwrap();
 
-        save(&target, &full(PoolArg::Us, 10, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let after = std::fs::metadata(&target).unwrap().modified().unwrap();
         assert_eq!(before, after, "identical text is never rewritten");
@@ -1155,10 +1048,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::write(&target, "[gps]\nbridge-rate-hz = 1\n").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        save(&target, &fleet_only(10)).unwrap();
+        save(&target, &rate_only(3)).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the mode survives the rewrite");
@@ -1187,7 +1080,7 @@ mod tests {
     fn config_loader_returns_empty_api_key_when_table_absent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[tx-power]\nfleet = 10\n").unwrap();
+        std::fs::write(&path, "[gps]\nbridge-rate-hz = 2\n").unwrap();
         assert_eq!(load(Some(&path)).unwrap().api_keys.wdgwars, "");
     }
 
@@ -1204,7 +1097,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         assert_eq!(load(Some(&target)).unwrap().api_keys.wdgwars, "abc123def456");
     }
@@ -1232,15 +1125,15 @@ mod tests {
 
         let config = load(Some(&target)).unwrap();
         assert_eq!(config.api_keys.wdgwars, "");
-        assert_eq!(config.pool, None);
-        assert!(config.tx_power.fleet.is_none());
+        assert!(config.excluded_ssids.is_empty());
+        assert!(config.gps.bridge_rate_hz.is_none());
     }
 
     #[test]
     fn config_create_if_missing_leaves_file_untouched_when_present() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let original = "# mine\n[tx-power]\nfleet = 6\n";
+        let original = "# mine\n[gps]\nbridge-rate-hz = 1\n";
         std::fs::write(&target, original).unwrap();
 
         assert!(!create_if_missing(&target).unwrap());
@@ -1269,10 +1162,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::write(&target, "[gps]\nbridge-rate-hz = 1\n").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a key is readable only by its owner");
@@ -1285,10 +1178,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the skipped write still tightens the mode");
@@ -1301,10 +1194,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::write(&target, "[gps]\nbridge-rate-hz = 1\n").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&target, &fleet_only(10)).unwrap();
+        save(&target, &rate_only(3)).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644, "no key, nothing to hide");
@@ -1321,7 +1214,7 @@ mod tests {
         std::fs::write(&stale, "junk from an earlier save").unwrap();
         std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        save(&target, &full()).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the stale file's mode is not inherited");

@@ -16,13 +16,14 @@ use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus,
-    NodeSeen, Observation, Record,
+    NodeSeen, Observation, RawFrame, Record,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
-use wartui_proto::air::RecordKind;
+use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType, wire_epoch};
+use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -31,6 +32,8 @@ use wartui_proto::reset::ResetCause;
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
 const EPOCH_MS: i64 = 1_777_642_477_000;
+/// The node-bus slot `NODE` sits in, `A2`.
+const SLOT: Slot = Slot::new(0, 1).unwrap();
 
 fn fixed(lat: f64, lon: f64) -> Fix {
     Fix {
@@ -62,7 +65,7 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
     Record::Observation(Observation {
         node_mac: node,
         rx_at_ms: at_ms,
-        link_rssi: Some(-41),
+        slot: SLOT,
         bssid,
         ssid: b"example".to_vec(),
         security: "[WPA2_PSK]".to_owned(),
@@ -104,25 +107,31 @@ fn open_at(path: &std::path::Path) -> Store {
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store")
 }
 
 #[test]
-fn store_records_scan_table_when_capture_created() {
+fn store_records_bus_version_when_capture_created() {
     let dir = tempfile::tempdir().expect("temp dir");
     store(&dir).close();
     let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
-    let channels: String = conn
-        .query_row("SELECT v FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
-        .expect("ordered scan table provenance");
-    let expected =
-        wartui_proto::plan::SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
-    assert_eq!(channels, expected);
     let version: String = conn
-        .query_row("SELECT v FROM kv WHERE k = 'capture.wire_version'", [], |r| r.get(0))
-        .expect("wire version provenance");
-    assert_eq!(version, wartui_proto::air::WIRE_VERSION.to_string());
+        .query_row("SELECT v FROM kv WHERE k = 'capture.bus_version'", [], |r| r.get(0))
+        .expect("bus version provenance");
+    assert_eq!(version, BUS_VERSION.to_string());
+}
+
+#[test]
+fn store_omits_scan_table_when_capture_created() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    store(&dir).close();
+    let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
+    // The scan table is a code constant, so it says nothing about a capture.
+    let scan: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
+        .expect("scan table count");
+    assert_eq!(scan, 0);
 }
 
 #[test]
@@ -130,7 +139,7 @@ fn store_records_initial_provenance_when_capture_created() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("provenance.db");
     let engine = FleetEngine::new(
-        EngineConfig { tx_power: 127, bridge_tx_power: -1, record_raw: true, ..Default::default() },
+        EngineConfig { record_raw: true, ..Default::default() },
         Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
     );
     let provenance = CaptureProvenance {
@@ -157,10 +166,8 @@ fn store_records_initial_provenance_when_capture_created() {
     assert_eq!(get("capture.release_tag"), "v-test");
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
-    assert!(settings.contains("nodes_tx_power_quarter_dbm=80;"), "{settings}");
-    assert!(settings.contains("bridge_tx_power_quarter_dbm=8;"), "{settings}");
     assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
-    assert!(settings.contains("preferred_ble=none;ble_node=none;"), "{settings}");
+    assert!(settings.ends_with(";preferred_ble=none;ble_node=none"), "{settings}");
     assert_eq!(store.close().dropped, 0);
 }
 
@@ -179,7 +186,7 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
             sequence: sequence as u64,
             at_ms,
             settings: wartui_core::record::CaptureSettings {
-                tx_power: 8 + sequence as i8,
+                gps_max_age: std::time::Duration::from_secs(5 + sequence as u64),
                 ..settings
             },
         })
@@ -196,7 +203,9 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
     assert_eq!(rows.len(), 3);
     for (i, (key, value)) in rows.iter().enumerate() {
         assert_eq!(key, &format!("capture.settings.{i:020}"));
-        assert!(value.contains(&format!("nodes_tx_power_quarter_dbm={};", 8 + i)), "{value}");
+        assert!(value.contains(&format!("gps_max_age_ms={};", 5_000 + i * 1000)), "{value}");
+        // Fixed engine timings are no operator's choice, so a settings row leaves them out.
+        assert!(!value.contains("timeout") && !value.contains("status_interval"), "{value}");
     }
     assert!(rows[2].1.contains(&format!("at_ms={};", EPOCH_MS - 1)));
     let unknown: i64 = conn
@@ -229,24 +238,38 @@ fn export_with(
 }
 
 #[test]
-fn store_records_pool_spelling_when_capture_created() {
+fn store_records_pool_spelling_when_settings_are_written() {
     // Lowercase, and deliberately not `ChannelPool`'s `Display`: captures on
     // disk carry these strings, so the two spellings are separate on purpose.
-    for (pool, spelling) in
-        [(ChannelPool::Us, "us"), (ChannelPool::Eu, "eu"), (ChannelPool::All, "all")]
-    {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("wartui.db");
-        let config = StoreConfig::new(&path);
-        let info = CaptureInfo { pool, notes: None, simulated: false };
-        Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
-
-        let conn = open_readonly(&path).expect("reopening read-only");
-        let stored: String = conn
-            .query_row("SELECT channel_pool FROM capture", [], |row| row.get(0))
-            .expect("the capture row");
-        assert_eq!(stored, spelling, "{pool:?}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let engine = FleetEngine::new(
+        EngineConfig::default(),
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let settings = engine.capture_settings();
+    let pools = [None, Some(ChannelPool::Us), Some(ChannelPool::Eu), Some(ChannelPool::All)];
+    let records = (0u64..)
+        .zip(pools)
+        .map(|(sequence, pool)| Record::CaptureSettings {
+            sequence,
+            at_ms: EPOCH_MS,
+            settings: wartui_core::record::CaptureSettings { pool, ..settings },
+        })
+        .collect();
+    let conn = write(&dir, records);
+    let mut stmt = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings query");
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("settings rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata strings");
+    // `none` before the bridge has reported a pool.
+    for (value, spelling) in values.iter().zip(["none", "us", "eu", "all"]) {
+        assert!(value.contains(&format!(";pool={spelling};")), "{value}");
     }
+    assert_eq!(values.len(), 4);
 }
 
 #[test]
@@ -254,13 +277,31 @@ fn store_records_simulated_flag_when_capture_created() {
     for simulated in [false, true] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
-        let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated };
+        let info = CaptureInfo { notes: None, simulated };
         Store::create(&StoreConfig::new(&path), &info, EPOCH_MS)
             .expect("creating the store")
             .close();
 
         let conn = open_readonly(&path).expect("reopening read-only");
         assert_eq!(is_simulated(&conn).expect("the capture row"), simulated);
+    }
+}
+
+/// A heartbeat from `NODE` in `SLOT` with every field set; tests override what they read.
+fn heartbeat() -> Heartbeat {
+    Heartbeat {
+        node_mac: NODE,
+        rx_at_ms: EPOCH_MS,
+        counter: 174,
+        epoch: 5,
+        slot: SLOT,
+        wifi_refused: 12,
+        ble_refused: 3,
+        reset_cause: ResetCause::PowerOn,
+        vdd_mv: Some(3304),
+        die_temp_c: Some(41),
+        heap_free: 40_000,
+        live: true,
     }
 }
 
@@ -276,24 +317,7 @@ fn store_round_trips_record_when_each_type_written() {
                 last_seen_ms: EPOCH_MS,
                 capabilities: Some("0.1.0;5g".to_owned()),
             }),
-            Record::Heartbeat(Heartbeat {
-                node_mac: NODE,
-                rx_at_ms: EPOCH_MS,
-                counter: 174,
-                epoch: 5,
-                link_rssi: Some(-41),
-                wifi_refused: 12,
-                ble_refused: 3,
-                beat: 61,
-                unsent: 4,
-                dwell: 0,
-                prev_dwell: 0,
-                tx_power: 8,
-                reset_cause: ResetCause::PowerOn,
-                vdd_mv: None,
-                die_temp_c: None,
-                live: false,
-            }),
+            Record::Heartbeat(Heartbeat { live: false, ..heartbeat() }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
         ],
     );
@@ -304,20 +328,14 @@ fn store_round_trips_record_when_each_type_written() {
     assert_eq!((nodes, beats, obs), (1, 1, 1));
 
     let epoch: i64 = conn.query_row("SELECT epoch FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(epoch, 5, "the epoch the frame said the node held");
+    assert_eq!(epoch, 5, "the epoch the heartbeat said the node held");
 
     let refused: (i64, i64) = conn
         .query_row("SELECT wifi_refused, ble_refused FROM heartbeat", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();
-    assert_eq!(refused, (12, 3), "the since-boot counts as the frame carried them");
-
-    let beat: i64 = conn.query_row("SELECT beat FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
-
-    let unsent: i64 = conn.query_row("SELECT unsent FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(unsent, 4, "the since-boot failed-send count as the frame carried it");
+    assert_eq!(refused, (12, 3), "the since-boot counts as the heartbeat carried them");
 
     let live: bool = conn.query_row("SELECT live FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert!(!live, "replayed from the bridge's backlog");
@@ -329,6 +347,13 @@ fn store_round_trips_record_when_each_type_written() {
         .unwrap();
     assert_eq!(mac, NODE.to_vec(), "MACs are stored as six raw bytes, never as text");
     assert_eq!(source, "static");
+
+    let slots: (String, String) = conn
+        .query_row("SELECT heartbeat.slot, observation.slot FROM heartbeat, observation", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(slots, ("A2".to_owned(), "A2".to_owned()), "slots are stored by their text form");
 }
 
 /// Asserts that the one row in `table` has no NULL column and that no column declares a default.
@@ -367,115 +392,33 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
     // The record sets every field, so any column the insert omits shows up as NULL or as a
     // default.
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 11,
-            prev_dwell: 1,
-            tx_power: 8,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv: Some(3304),
-            die_temp_c: Some(41),
-            live: true,
-        })],
-    );
+    let conn = write(&dir, vec![Record::Heartbeat(heartbeat())]);
     assert_insert_names_every_column(&conn, "heartbeat");
 }
 
 #[test]
-fn store_writes_dwell_when_heartbeat_recorded() {
+fn store_writes_slot_and_reset_cause_when_heartbeat_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
+    let slot = Slot::new(1, 6).unwrap();
     let conn = write(
         &dir,
         vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 8,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv: None,
-            die_temp_c: None,
-            live: true,
-        })],
-    );
-    let dwell: (i64, i64) = conn
-        .query_row("SELECT dwell, prev_dwell FROM heartbeat", [], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap();
-    assert_eq!(dwell, (149, 36), "the channel numbers as the frame carried them");
-}
-
-#[test]
-fn store_writes_tx_power_and_reset_cause_when_heartbeat_recorded() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 24,
+            slot,
             reset_cause: ResetCause::Brownout,
-            vdd_mv: None,
-            die_temp_c: None,
-            live: true,
+            ..heartbeat()
         })],
     );
-    let row: (i64, String) = conn
-        .query_row("SELECT tx_power, reset_cause FROM heartbeat", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let row: (String, String) = conn
+        .query_row("SELECT slot, reset_cause FROM heartbeat", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
-    assert_eq!(row, (24, "brownout".to_owned()), "quarter-dBm as sent, the cause by name");
+    assert_eq!(row, ("B7".to_owned(), "brownout".to_owned()), "the slot and the cause by name");
 }
 
 #[test]
 fn store_writes_health_readings_when_heartbeat_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let beat = |vdd_mv, die_temp_c| {
-        Record::Heartbeat(Heartbeat {
-            node_mac: NODE,
-            rx_at_ms: EPOCH_MS,
-            counter: 174,
-            epoch: 5,
-            link_rssi: Some(-41),
-            wifi_refused: 12,
-            ble_refused: 3,
-            beat: 61,
-            unsent: 4,
-            dwell: 149,
-            prev_dwell: 36,
-            tx_power: 24,
-            reset_cause: ResetCause::PowerOn,
-            vdd_mv,
-            die_temp_c,
-            live: true,
-        })
-    };
+    let beat =
+        |vdd_mv, die_temp_c| Record::Heartbeat(Heartbeat { vdd_mv, die_temp_c, ..heartbeat() });
     let conn = write(&dir, vec![beat(Some(3304), Some(41)), beat(None, None)]);
     let rows: Vec<(Option<i64>, Option<i64>)> = conn
         .prepare("SELECT vdd_mv, die_temp_c FROM heartbeat ORDER BY id")
@@ -486,6 +429,15 @@ fn store_writes_health_readings_when_heartbeat_recorded() {
         .unwrap();
     // A failed read is NULL rather than a sentinel a query would average in.
     assert_eq!(rows, vec![(Some(3304), Some(41)), (None, None)]);
+}
+
+#[test]
+fn store_writes_heap_free_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![Record::Heartbeat(Heartbeat { heap_free: 37_120, ..heartbeat() })]);
+    let heap_free: i64 =
+        conn.query_row("SELECT heap_free FROM heartbeat", [], |r| r.get(0)).unwrap();
+    assert_eq!(heap_free, 37_120);
 }
 
 #[test]
@@ -505,11 +457,41 @@ fn store_writes_every_node_column_when_node_recorded() {
     assert_insert_names_every_column(&conn, "node");
 }
 
+#[test]
+fn store_writes_every_raw_frame_column_when_raw_frame_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Raw(RawFrame {
+            rx_at_ms: EPOCH_MS,
+            slot: SLOT,
+            kind: UpType::Sightings.as_u8(),
+            bytes: vec![1, 2, 3],
+        })],
+    );
+    assert_insert_names_every_column(&conn, "raw_frame");
+    let row: (String, u8, Vec<u8>) = conn
+        .query_row("SELECT slot, kind, bytes FROM raw_frame", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(row, ("A2".to_owned(), UpType::Sightings.as_u8(), vec![1, 2, 3]));
+}
+
 /// A status reply carrying `queues` and `radio_link`, the rest of it fixed.
-fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Record {
+fn bridge_status(queues: &[QueueStat], radio_link: RadioLinkStats) -> Record {
+    let fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) });
+    bridge_status_with_fan(queues, radio_link, fan)
+}
+
+/// [`bridge_status`] with `fan` in place of its fan.
+fn bridge_status_with_fan(
+    queues: &[QueueStat],
+    radio_link: RadioLinkStats,
+    fan: Option<FanStats>,
+) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + 5_000,
-        peer_count: 3,
         rx_count: 4_000_000_000,
         dropped_tx: 1305,
         uptime_ms: 3_240_000,
@@ -518,6 +500,9 @@ fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Re
         queues: queues.iter().copied().collect(),
         radio_link,
         host_uart_errors: 4_000_000_003,
+        fan,
+        // A1, A3 and B3, and the top bit, so the column holds the whole u32.
+        slots_present: 0x8000_0205,
     })
 }
 
@@ -540,24 +525,24 @@ const QUEUES: [QueueStat; 2] = [
         high_water: 4_000_000_002,
         dropped: 9,
     },
-    QueueStat { queue: QueueId::RadioJobs, capacity: 32, high_water: 20, dropped: 0 },
+    QueueStat { queue: QueueId::NodeDown, capacity: 32, high_water: 20, dropped: 0 },
 ];
 
 #[test]
 fn store_round_trips_every_column_when_bridge_status_written() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&QUEUES, Some(RADIO_LINK))]);
+    let conn = write(&dir, vec![bridge_status(&QUEUES, RADIO_LINK)]);
     assert_insert_names_every_column(&conn, "bridge_status");
 
-    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
+            "SELECT rx_at, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
              FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .unwrap();
-    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
+    assert_eq!(row, (EPOCH_MS + 5_000, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
 
     let radio_link: Vec<i64> = conn
         .query_row(
@@ -574,12 +559,43 @@ fn store_round_trips_every_column_when_bridge_status_written() {
     let host_uart: i64 =
         conn.query_row("SELECT host_uart_errors FROM bridge_status", [], |r| r.get(0)).unwrap();
     assert_eq!(host_uart, 4_000_000_003);
+    let fan: (Option<i64>, Option<i64>) = conn
+        .query_row("SELECT fan_duty, fan_rpm FROM bridge_status", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(fan, (Some(40), Some(1830)));
+    let present: i64 =
+        conn.query_row("SELECT slots_present FROM bridge_status", [], |r| r.get(0)).unwrap();
+    assert_eq!(present, 0x8000_0205);
+}
+
+#[test]
+fn store_writes_null_fan_columns_when_bridge_has_no_carrier_or_no_reading_yet() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let unread = Some(FanStats { duty: FanDuty::FULL, rpm: None });
+    let conn = write(
+        &dir,
+        vec![
+            bridge_status_with_fan(&[], RADIO_LINK, None),
+            bridge_status_with_fan(&[], RADIO_LINK, unread),
+        ],
+    );
+    let rows: Vec<(Option<i64>, Option<i64>)> = conn
+        .prepare("SELECT fan_duty, fan_rpm FROM bridge_status ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, [(None, None), (Some(100), None)]);
 }
 
 #[test]
 fn store_writes_queue_rows_when_bridge_status_carries_queues() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&[], None), bridge_status(&QUEUES, None)]);
+    let conn =
+        write(&dir, vec![bridge_status(&[], RADIO_LINK), bridge_status(&QUEUES, RADIO_LINK)]);
 
     let parent: i64 =
         conn.query_row("SELECT MAX(id) FROM bridge_status", [], |r| r.get(0)).unwrap();
@@ -598,32 +614,9 @@ fn store_writes_queue_rows_when_bridge_status_carries_queues() {
         rows,
         [
             (parent, "host-bulk".to_owned(), 262_144, 4_000_000_002, 9),
-            (parent, "radio-jobs".to_owned(), 32, 20, 0),
+            (parent, "node-down".to_owned(), 32, 20, 0),
         ]
     );
-}
-
-#[test]
-fn store_leaves_radio_link_columns_null_when_bridge_has_no_radio_link() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(&dir, vec![bridge_status(&[], None)]);
-
-    let nulls: i64 = conn
-        .query_row(
-            "SELECT (radio_link_packets IS NULL) + (radio_link_crc_fail IS NULL)
-                  + (radio_link_bad_magic IS NULL)
-                  + (radio_link_seq_gap IS NULL) + (radio_link_uart_errors IS NULL)
-                  + (radio_link_radio_crc_fail IS NULL) + (radio_link_radio_bad_magic IS NULL)
-                  + (radio_link_radio_seq_gap IS NULL) + (radio_link_radio_uart_errors IS NULL)
-             FROM bridge_status",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(nulls, 9);
-    let queues: i64 =
-        conn.query_row("SELECT COUNT(*) FROM bridge_queue", [], |r| r.get(0)).unwrap();
-    assert_eq!(queues, 0);
 }
 
 fn host_status(
@@ -639,7 +632,6 @@ fn host_status(
         garbled: 3,
         undecodable: 4,
         incompatible: 5,
-        admin_windows_missed: 8,
         lag_peak_us: 9,
         store_written: 10,
         store_dropped: 11,
@@ -666,9 +658,8 @@ fn store_round_trips_every_column_when_host_status_written() {
     let mut stmt = conn
         .prepare(
             "SELECT at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                    admin_windows_missed, lag_peak_us, store_written, store_dropped,
-                    store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
-                    battery_mv, battery_ma
+                    lag_peak_us, store_written, store_dropped, store_queue_peak,
+                    store_commit_peak_us, throttled, soc_temp_mc, battery_mv, battery_ma
              FROM host_status ORDER BY id",
         )
         .unwrap();
@@ -682,16 +673,15 @@ fn store_round_trips_every_column_when_host_status_written() {
                 garbled: count(3)?,
                 undecodable: count(4)?,
                 incompatible: count(5)?,
-                admin_windows_missed: count(6)?,
-                lag_peak_us: count(7)?,
-                store_written: count(8)?,
-                store_dropped: count(9)?,
-                store_queue_peak: count(10)?,
-                store_commit_peak_us: count(11)?,
-                throttled: r.get(12)?,
-                soc_temp_mc: r.get(13)?,
-                battery_mv: r.get(14)?,
-                battery_ma: r.get(15)?,
+                lag_peak_us: count(6)?,
+                store_written: count(7)?,
+                store_dropped: count(8)?,
+                store_queue_peak: count(9)?,
+                store_commit_peak_us: count(10)?,
+                throttled: r.get(11)?,
+                soc_temp_mc: r.get(12)?,
+                battery_mv: r.get(13)?,
+                battery_ma: r.get(14)?,
             })
         })
         .unwrap()
@@ -1101,7 +1091,7 @@ fn store_drops_without_blocking_when_queue_full() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let flood: Vec<Record> =
@@ -1141,7 +1131,7 @@ fn store_reports_batch_timings_on_close_when_asked() {
     config.batch_rows = 8;
     config.batch_interval = Duration::from_secs(3600);
     config.timings = true;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..20u8)
@@ -1185,7 +1175,7 @@ fn store_copies_and_truncates_wal_when_checkpoint_background() {
     // Any WAL at all is past the limit, so every pass that catches up is followed by a
     // truncation, and the last one, with the writer gone, always catches up.
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u8 {
@@ -1220,7 +1210,7 @@ fn store_counts_caught_up_passes_when_checkpoint_background() {
     config.batch_interval = Duration::from_secs(60);
     config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     assert_eq!(store.checkpoints_caught_up(), 0, "nothing has been committed yet");
@@ -1246,7 +1236,7 @@ fn store_counts_no_caught_up_passes_when_checkpoint_inline() {
     config.batch_rows = 10;
     config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..10u8)
@@ -1282,7 +1272,7 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
     let checkpointed = matches!(checkpoint, Checkpoint::Background { .. });
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u64 {
@@ -1329,7 +1319,7 @@ fn store_background_checkpoint_runs_owed_pass_when_fleet_quiet() {
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint =
         Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     // Two commits well inside one interval, then nothing.
@@ -1373,7 +1363,7 @@ fn store_reports_no_passes_on_close_when_checkpoint_inline() {
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
@@ -1420,7 +1410,7 @@ fn store_uses_page_size_when_creating_file() {
     config.page_size = Some(16_384);
     config.cache_kib = Some(32 * 1024);
     config.wal_autocheckpoint_pages = Some(4000);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
 
     let conn = open_readonly(&path).expect("reopening read-only");
@@ -1672,7 +1662,7 @@ fn store_refuses_create_when_file_exists() {
     create(&path);
     let before = std::fs::read(&path).expect("reading the capture");
 
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let created = Store::create(&StoreConfig::new(&path), &info, EPOCH_MS);
     assert!(
         matches!(&created, Err(StoreError::Exists(p)) if *p == path),
@@ -1704,18 +1694,19 @@ fn store_records_bridge_when_bridge_announces() {
         &dir,
         vec![Record::Bridge(BridgeSeen {
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
-            chip: "Esp32C6".to_owned(),
             fw_version: "0.1.0".to_owned(),
+            node_board: NodeBoard::Carrier10,
         })],
     );
 
-    let (mac, chip, fw): (Vec<u8>, String, String) = conn
-        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM capture", [], |r| {
+    let (mac, fw, board): (Vec<u8>, String, String) = conn
+        .query_row("SELECT bridge_mac, bridge_fw, node_board FROM capture", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .expect("the capture row");
     assert_eq!(mac, vec![0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
-    assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
+    assert_eq!(fw, "0.1.0");
+    assert_eq!(board, "carrier-10");
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,7 +1717,7 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
     Record::Assignment(AssignmentSent {
         node_mac: NODE,
         counter,
-        wire_version: wartui_proto::air::wire_epoch(counter),
+        wire_version: wire_epoch(counter),
         channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),
         ble: false,
         created_at_ms: EPOCH_MS,
@@ -1917,10 +1908,10 @@ fn wigle_csv_skips_sighting_when_kind_is_neither_wifi_nor_ble() {
     // No build writes this kind, so only an edited file holds one.
     let rw = Connection::open(dir.path().join("wartui.db")).expect("opening for writing");
     rw.execute(
-        "INSERT INTO observation (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+        "INSERT INTO observation (node_mac, rx_at, slot, bssid, ssid, security, channel, rssi,
                                   kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
                                   raw_body)
-         SELECT node_mac, rx_at + 500, link_rssi, X'DDDDDDDDDDDD', ssid, security, channel, rssi,
+         SELECT node_mac, rx_at + 500, slot, X'DDDDDDDDDDDD', ssid, security, channel, rssi,
                 'zigbee', rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at, raw_body
          FROM observation WHERE bssid = X'AAAAAAAAAAAA'",
         [],
@@ -2123,7 +2114,7 @@ fn wigle_csv_ignores_uploads_when_after_uploads_off() {
 
 #[test]
 fn wigle_csv_includes_row_when_stored_after_upload_at_cutoff_time() {
-    // One frame's sightings share an rx_at, and the store can commit them in two batches.
+    // One batch's sightings share an rx_at, and the store can commit them in two batches.
     // An upload that read between the commits covered only the first, so the second still
     // goes on the next upload.
     let dir = tempfile::tempdir().expect("temp dir");

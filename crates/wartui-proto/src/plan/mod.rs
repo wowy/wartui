@@ -1,7 +1,7 @@
 //! Channel pools and the assignment planner.
 //!
 //! A *pool* is described in runs, because that is the shape regulation gives it: every
-//! pool is two runs with a gap between. An *assignment* is not. [`crate::air::AdminMsg`]
+//! pool is two runs with a gap between. An *assignment* is not. [`crate::bus::Assign`]
 //! carries a forty-two-bit [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node
 //! can hold any subset. A run boundary is nothing the planner steers around.
 //!
@@ -12,7 +12,7 @@
 //! A fleet is a slice of [`Job`]s rather than of radios, because the node scanning
 //! Bluetooth is dealt nothing. It is still a slot, counted in [`Plan::node_count`].
 
-use crate::air::AdminMsg;
+use crate::bus::{ASSIGN_FLAG_BLE, Assign, MAX_SLOTS};
 
 mod channels;
 
@@ -22,11 +22,9 @@ pub use channels::{
     channel_info, is_five_ghz,
 };
 
-/// The largest fleet wartui supports.
-///
-/// Twenty, the peers an ESP-NOW radio can hold. A node the host cannot address is not
-/// one it can drive.
-pub const MAX_NODES: usize = 20;
+/// The largest fleet wartui supports: the bridge's node-bus slots. A node in no slot is not
+/// one the host can drive.
+pub const MAX_NODES: usize = MAX_SLOTS;
 
 /// What the planner is dealing to, one per fleet slot.
 ///
@@ -76,7 +74,7 @@ impl Plan {
     ///
     /// - `Some` non-empty: its share of the pool.
     /// - `Some` empty: it is the node scanning Bluetooth. The empty set, sent with
-    ///   [`crate::air::ADMIN_FLAG_BLE`], says so on the wire.
+    ///   [`ASSIGN_FLAG_BLE`], says so on the wire.
     /// - `None`: nothing for this node. The index is outside the fleet, or it is a
     ///   [`Job::Bluetooth`] slot after the first. A [`Job::Wifi`] slot is never `None`:
     ///   every pool holds at least [`MAX_NODES`] channels.
@@ -114,16 +112,16 @@ impl Plan {
     /// from the one it holds. `flags` is the caller's too: *which* node scans Bluetooth
     /// is the operator's decision.
     ///
-    /// `None` when there is nothing to say. Also `None` for the one frame that must never
-    /// exist: an empty [`ChannelSet`] without [`crate::air::ADMIN_FLAG_BLE`]. A node sent
+    /// `None` when there is nothing to say. Also `None` for the one assignment that must never
+    /// exist: an empty [`ChannelSet`] without [`ASSIGN_FLAG_BLE`]. A node sent
     /// one parks while the host believes it is sweeping.
     #[must_use]
-    pub fn admin_for(&self, index: u8, epoch: u8, flags: u8, tx_power: i8) -> Option<AdminMsg> {
+    pub fn assign_for(&self, index: u8, epoch: u8, flags: u8) -> Option<Assign> {
         let channels = self.channels_for(index)?;
-        if channels.is_empty() && flags & crate::air::ADMIN_FLAG_BLE == 0 {
+        if channels.is_empty() && flags & ASSIGN_FLAG_BLE == 0 {
             return None;
         }
-        Some(AdminMsg { epoch, flags, channels, tx_power })
+        Some(Assign { epoch, flags, channels })
     }
 }
 

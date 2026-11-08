@@ -1,9 +1,8 @@
 //! wartui's wardriving node firmware.
 //!
 //! A node listens on one channel at a time, reports every access point it has not
-//! reported lately, and takes its share of the channel pool from whatever is
-//! acting as the mesh's core — for this fleet, a laptop running `wartui` behind a
-//! USB bridge.
+//! reported lately, and takes its share of the channel pool from the host: a laptop
+//! running `wartui` behind the P4 bridge, whose node bus is this node's only link to it.
 //!
 //! A rewrite rather than a port: the web interface, SD card, display, buttons,
 //! fuel gauge, GPS, geofencing, uploads and dock mode did not come across, because
@@ -11,14 +10,12 @@
 //! only way to find out.
 //!
 //! `README.md` § "What it does differently" is the longer account of its design. In
-//! short: it *listens* rather than scanning, so it never transmits on a DFS channel and
-//! holds `sniffer()` and `esp_now()` together for the life of the program; it returns
-//! to the control channel after every dwell rather than once a sweep; an unassigned
-//! node parks rather than sweeping the whole table; the node given the Bluetooth scan
-//! sniffs nothing and holds the control channel always; and every heartbeat says what
-//! this build can do. Its wire format is wartui's own in both directions —
-//! [`wartui_proto::air`]. It takes a new image over the air, and boots it on trial
-//! until it hears the host — [`ota`].
+//! short: it *listens* rather than scanning, and sends no Wi-Fi at all; everything it says
+//! goes over the node bus ([`bus`]), so it hops from dwell to dwell with no channel to
+//! return to; an unassigned node idles rather than sweeping the whole table; the node
+//! given the Bluetooth scan sniffs nothing; and every heartbeat says what this build can
+//! do. Its messages are wartui's own in both directions — [`wartui_proto::bus`]. It takes
+//! a new image over the bus, and boots it on trial until it hears the host — [`ota`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -32,24 +29,24 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Io, Level, Output, OutputConfig, Pull};
+use esp_hal::spi::Mode;
+use esp_hal::spi::slave::Spi;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::health;
 use wartui_firmware::{reboot, reset_cause};
-use wartui_proto::air::{
-    AdminMsg, Board, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
-    OtaState, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
+use wartui_proto::bus::{
+    Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg, Heartbeat, PAYLOAD_MAX,
+    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType, UpdateState, UpdateStatus,
+    Vdd, records,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB};
-use wartui_proto::link::BROADCAST;
-use wartui_proto::mac;
-use wartui_proto::node::{
-    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS, SweepCursor,
-};
+use wartui_proto::mac::{self, Mac};
+use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS, SweepCursor};
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -92,10 +89,11 @@ macro_rules! note {
     };
 }
 
+mod bus;
 mod ota;
 
-/// Granularity of the listening loops. Fine enough that a 100 ms window is not
-/// meaningfully shortened, coarse enough not to spin the core.
+/// Granularity of the loops that wait on the bus: fine against the P4's millisecond gap
+/// between transfers, coarse enough not to spin the core.
 const POLL_MS: u64 = 2;
 
 /// Resets rather than hanging, for the same reason the bridge does: a node that
@@ -132,53 +130,35 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// it, so it needs no lock — unlike the dedup ring, which lives in [`sniff::SEEN`]
 /// instead because the receive callback has to reach it from another task.
 struct Node {
+    /// This node's station MAC, the address the host knows it by.
+    mac: Mac,
     /// The epoch of the assignment held. Zero means none has ever arrived, which
-    /// the core never puts on the wire. Sent back in every heartbeat, so the
-    /// host can tell adoption from a MAC-layer ack.
+    /// the host never puts on the wire. Sent back in every heartbeat, so the
+    /// host can tell adoption from a bus ack.
     version: u8,
     /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
     channels: ChannelSet,
-    /// Whether the core asked this node to scan Bluetooth as well.
+    /// Whether the host asked this node to scan Bluetooth.
     ble: bool,
     /// Where the sweep has got to in those indices.
     cursor: SweepCursor,
     /// Monotonic from boot, counting completed sweeps (a Bluetooth node's
-    /// completed scans, a parked node's idle beats). Its going backwards is how
+    /// completed scans, an idle node's beats). Its going backwards is how
     /// the host notices a node has restarted and forgotten its assignment.
     counter: u32,
-    /// Heartbeats this node has tried to send since boot. Wraps. Each heartbeat carries
-    /// the count including itself, so the host reads a gap as heartbeats lost between here
-    /// and there.
-    beats: u16,
-    /// Heartbeats the radio could not send since boot. Wraps at 256. Each heartbeat
-    /// carries the count before its own send, since it cannot know its own outcome.
-    unsent: u8,
-    /// The scan channel number this node last dwelt on, or 0 when its last step before a
-    /// heartbeat was not a dwell: parked, the Bluetooth scan, or a hop the radio refused.
-    /// Each heartbeat carries it, so loss that depends on the channel before the beat can
-    /// be read per channel.
-    last_dwell: u8,
-    /// The `last_dwell` the previous heartbeat carried, sent or not. Each heartbeat
-    /// carries it too, so a single lost beat gets its channel from the next one.
-    beat_dwell: u8,
-    /// When this node next sends a heartbeat and holds the admin window open.
-    /// `None` while parked: an unassigned node heartbeats every
-    /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
-    /// time an assignment is adopted while parked, not only the first, so a
-    /// stale deadline from before this node last parked never fires early.
+    /// When an assigned node next sends a heartbeat. An unassigned node heartbeats
+    /// every [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
+    /// time an assignment is adopted while idle, not only the first, so a stale
+    /// deadline from before this node last went idle never fires early. `None`, on a
+    /// node assigned some other way, is due at once.
     next_beat: Option<Instant>,
     reported: u32,
-    /// This sighting batch's sequence number, advanced only once the core
-    /// acknowledges a batch, as `counter` is only once [`heartbeat`] is on the
-    /// air. A host-visible gap in it is loss after the bridge's radio
-    /// took the frame (its receive queue or USB path), never loss on the air:
-    /// an unacknowledged batch reuses `seq` rather than advancing past it.
+    /// This sighting batch's sequence number, advanced only once the P4
+    /// acknowledges a batch. A host-visible gap in it is loss after the P4 took
+    /// the batch (its queue or USB path), never loss on the bus: an
+    /// unacknowledged batch reuses `seq` rather than advancing past it.
     seq: u16,
-    /// The MAC address sightings unicast to, learned from the source of the last
-    /// admin or clear frame this node received, whether or not it changed the
-    /// assignment. `None` from boot until the first one arrives.
-    core: Option<[u8; 6]>,
-    /// Sighting batches this node sent that the core never acknowledged.
+    /// Sighting batches this node sent that the P4 never acknowledged.
     unacked: u32,
     /// Why this boot happened, read once in `main`. Every heartbeat carries it.
     reset_cause: ResetCause,
@@ -193,19 +173,15 @@ impl Node {
     #[allow(clippy::large_stack_frames)]
     const fn new() -> Self {
         Self {
+            mac: [0; 6],
             version: 0,
             channels: ChannelSet::empty(),
             ble: false,
             cursor: SweepCursor::new(),
             counter: 1,
-            beats: 0,
-            unsent: 0,
-            last_dwell: 0,
-            beat_dwell: 0,
             next_beat: None,
             reported: 0,
             seq: 0,
-            core: None,
             unacked: 0,
             // `main` replaces it before the first heartbeat.
             reset_cause: ResetCause::Unknown,
@@ -216,8 +192,8 @@ impl Node {
     /// Whether the node has anything to do, given whether it has a scan to run.
     ///
     /// Channels, or the Bluetooth scan. An empty mask with the flag clear counts as
-    /// nothing rather than as an error: no frame means "scan nothing", so this needs a
-    /// confused host, and parking is the same answer as never having been told anything.
+    /// nothing rather than as an error: no assignment means "scan nothing", so this needs a
+    /// confused host, and idling is the same answer as never having been told anything.
     const fn assigned(&self, scanning: bool) -> bool {
         self.version != 0 && (!self.channels.is_empty() || self.bluetooth_only(scanning))
     }
@@ -227,9 +203,8 @@ impl Node {
     /// `scanning` is whether the controller started. The host cannot see that —
     /// every node can scan, so capabilities carry no Bluetooth bit — so this node
     /// does not depend on the host never asking: a flag that reaches one with no
-    /// controller leaves it parked and reporting nothing, honest and diagnosable
-    /// from the adoption line, rather than holding the control channel for a scan
-    /// that cannot happen.
+    /// controller leaves it idle and reporting nothing, honest and diagnosable
+    /// from the adoption line.
     const fn bluetooth_only(&self, scanning: bool) -> bool {
         scanning && self.ble && self.channels.is_empty()
     }
@@ -241,24 +216,24 @@ impl Node {
     /// acknowledged and silently discarded.
     ///
     /// Nothing is rejected: `ChannelSet` drops bits above [`NUM_SCAN_CHANNELS`]
-    /// rather than refusing the frame, because the radio has already
-    /// MAC-acknowledged it and a node that quietly declined would leave the two
-    /// sides disagreeing with nothing to say so.
+    /// rather than refusing the record, because the bus has already acknowledged
+    /// it and a node that quietly declined would leave the two sides disagreeing
+    /// with nothing to say so.
     ///
     /// Forgets every reported address first when the new share changes what this
     /// node scans or its Bluetooth flag: entries built under the old share describe
     /// a neighborhood this node no longer listens to. A first assignment after
     /// boot finds the ring already empty, so that case costs nothing.
-    fn adopt(&mut self, admin: &AdminMsg) -> bool {
-        if admin.epoch == self.version {
+    fn adopt(&mut self, assign: &Assign) -> bool {
+        if assign.epoch == self.version {
             return false;
         }
-        if admin.channels != self.channels || admin.scan_ble() != self.ble {
+        if assign.channels != self.channels || assign.scan_ble() != self.ble {
             self.forget_reported("new share");
         }
-        self.version = admin.epoch;
-        self.channels = admin.channels;
-        self.ble = admin.scan_ble();
+        self.version = assign.epoch;
+        self.channels = assign.channels;
+        self.ble = assign.scan_ble();
         self.cursor = SweepCursor::new();
         true
     }
@@ -296,7 +271,7 @@ const BOARD: Board = Board::Esp32c5;
 /// What this node is, as every heartbeat says it: `NODE_VERSION`, the board and its flags.
 ///
 /// Bluetooth is not a capability at all: every node can scan it, and the scan is the
-/// core's decision, off at every boot.
+/// host's decision, off at every boot.
 const CAPABILITIES: Capabilities = Capabilities::here(BOARD);
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
@@ -322,18 +297,15 @@ fn main() -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // The controller is configured before `sniffer()` and `esp_now()` hand out their
-    // handles, so the first frame either sees or sends is under the band and power set
-    // here. The handles do not borrow the controller: each holds a reference that keeps
-    // Wi-Fi running, and both are held for the rest of the program, as is the controller,
-    // which sets the power each assignment carries (`drain_admin`). `README.md`
-    // § "What it does differently" has why this node sniffs rather than scans.
+    // The controller is configured before `sniffer()` hands out its handle, so the first
+    // frame it sees is under the band set here. The handle does not borrow the controller:
+    // it holds a reference that keeps Wi-Fi running, and both are held for the rest of the
+    // program. The controller sets the channel (`radio::park`). `README.md` § "What it does
+    // differently" has why this node sniffs rather than scans.
     //
     // `US` rather than `esp-radio`'s default, China under `WIFI_COUNTRY_POLICY_MANUAL`,
     // which refuses 5 GHz 100-144 outright and so silently costs a C5 those channels on
-    // every sweep. The bridge's C6 only ever sits on `CONTROL_CHANNEL` and would never
-    // notice, but it passes `US` too: two halves of one fleet disagreeing about what is
-    // legal is a trap.
+    // every sweep.
     let mut controller = WifiController::new(
         peripherals.WIFI,
         ControllerConfig::default().with_country_info(*b"US"),
@@ -346,28 +318,26 @@ fn main() -> ! {
         Err(err) => note!("could not enable dual band: {:?}", err),
     }
 
-    // The standalone fallback is 2 dBm. A host replaces it through the first
-    // assignment it sends; `DEFAULT_TX_POWER_QUARTER_DBM` documents the default.
-    match controller.set_max_tx_power(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM) {
+    // The node sends no Wi-Fi frames of its own. The cap holds anything the MAC answers in
+    // hardware, such as an ack to a frame addressed to this station, at 2 dBm, the lowest power
+    // `set_max_tx_power` accepts, in ESP-IDF's quarter-dBm units.
+    const MIN_TX_POWER_QUARTER_DBM: i8 = 8;
+    match controller.set_max_tx_power(MIN_TX_POWER_QUARTER_DBM) {
         Ok(()) => {}
         Err(err) => note!("could not cap transmit power: {:?}", err),
     }
 
     let mut sniffer = controller.sniffer();
     sniffer.set_receive_cb(sniff::on_frame);
-    let (manager, mut sender, receiver) = controller.esp_now().split();
-    if !radio::set_peer_rate(&manager, &BROADCAST) {
-        note!("could not set the ESP-NOW rate; broadcasting at 1 Mbps");
-    }
 
     // Brought up before the loop rather than on demand: initializing a radio
-    // between a dwell and an admin window is the kind of surprise to avoid.
+    // between two dwells is the kind of surprise to avoid.
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
         Some(scanner) => Some(SCANNER.init(scanner)),
         None => {
             // The host cannot see this: capabilities carry no Bluetooth bit, so a
             // controller that would not start is a fact only this node's own
-            // console knows. It sniffs Wi-Fi as normal, and parks if handed the
+            // console knows. It sniffs Wi-Fi as normal, and idles if handed the
             // scan anyway.
             note!("bluetooth controller would not start; sniffing Wi-Fi only");
             None
@@ -375,57 +345,50 @@ fn main() -> ! {
     };
     let scanning = scanner.is_some();
 
+    // The node bus, on the XIAO's D7-D10 and D0 (`docs/node-bus.md`). Pulled up, so CS reads
+    // idle with no P4 attached. One pin, two readers: the SPI driver takes it as CS, and
+    // `bus` re-arms on its rising edge.
+    let cs = Input::new(peripherals.GPIO12, InputConfig::default().with_pull(Pull::Up));
+    let spi = Spi::new(peripherals.SPI2, Mode::_0)
+        .with_sck(peripherals.GPIO8)
+        .with_mosi(peripherals.GPIO10)
+        .with_miso(peripherals.GPIO9)
+        .with_cs(cs.peripheral_input())
+        .with_dma(peripherals.DMA_CH0);
+    let irq = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    let mut io = Io::new(peripherals.IO_MUX);
+    bus::start(spi, cs, irq, &mut io);
+
     let node = NODE.take();
     node.reset_cause = cause;
     node.trial = trial;
-    let mac = esp_radio::wifi::Interface::station().mac_address();
-    note!(
-        "wartui node {} v{}, control channel {}",
-        mac::full(&mac),
-        env!("CARGO_PKG_VERSION"),
-        CONTROL_CHANNEL
-    );
+    node.mac = esp_radio::wifi::Interface::station().mac_address();
+    note!("wartui node {} v{}", mac::full(&node.mac), env!("CARGO_PKG_VERSION"));
 
     loop {
+        drain(node, &mut ota);
         if ota.updating() {
-            // Update mode: parked on the control channel, sniffing nothing and scanning no
-            // Bluetooth, draining every frame. It heartbeats every second whatever the
-            // assignment, so the host sees it alive, and keeps that assignment to return to.
-            if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                node.last_dwell = 0;
-                heartbeat(&manager, &mut sender, node);
-            } else {
-                note!("radio would not park on channel {}", CONTROL_CHANNEL);
-            }
-            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            // Update mode: sniffing nothing and scanning no Bluetooth, servicing the bus
+            // throughout. It heartbeats every second whatever the assignment, so the host
+            // sees it alive, and keeps that assignment to return to.
+            heartbeat(node);
+            listen(node, &mut ota, scanning, IDLE_BEAT_MS);
             ota.expire();
             continue;
         }
 
         if !node.assigned(scanning) {
-            // Parked: reachable the whole time, collecting nothing. Heartbeat
-            // first and listen afterwards, because the host only ever transmits
-            // an assignment in answer to one — so this is how long joining a
-            // fleet takes, and there is nothing to be gained by waiting first.
-            // One idle beat is this node's whole cycle, so the counter the
-            // heartbeat carries advances here too.
-            //
-            // Only heartbeat if the radio got there, for the reason the sweep
-            // gives below. The listen runs either way: it is what keeps this
-            // loop from spinning.
-            if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                node.last_dwell = 0;
-                heartbeat(&manager, &mut sender, node);
-                node.counter = node.counter.wrapping_add(1).max(1);
-            } else {
-                note!("radio would not park on channel {}", CONTROL_CHANNEL);
-            }
-            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
-            // An assignment adopted mid-listen, or moving from parked to
-            // assigned generally: this node has just heartbeated and held a
-            // window, so its next one is a whole interval out from here
-            // rather than immediate — set every time, since a stale deadline
-            // from before this node last parked would otherwise fire early.
+            // Idle: servicing the bus the whole time, collecting nothing. Heartbeat first
+            // and listen afterwards, because the host sends an assignment in answer to
+            // one, so this is how long joining a fleet takes. One idle beat is this node's
+            // whole cycle, so the counter the heartbeat carries advances here too.
+            heartbeat(node);
+            node.counter = node.counter.wrapping_add(1).max(1);
+            listen(node, &mut ota, scanning, IDLE_BEAT_MS);
+            // An assignment adopted mid-listen: this node has just heartbeated, so its
+            // next one is a whole interval out from here rather than immediate. Set every
+            // time, since a stale deadline from before this node last went idle would
+            // otherwise fire early.
             if node.assigned(scanning) {
                 node.next_beat =
                     Some(Instant::now() + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS)));
@@ -434,57 +397,23 @@ fn main() -> ! {
         }
 
         if node.bluetooth_only(scanning) {
-            // Bluetooth is this node's whole job, so it sniffs nothing and never
-            // leaves the control channel: it is the one node an assignment can
-            // always reach, and the only thing the Bluetooth controller takes the
-            // shared 2.4 GHz antenna from is this node's own heartbeat.
+            // Bluetooth is this node's whole job, so it sniffs nothing and the Bluetooth
+            // controller has the shared 2.4 GHz antenna to itself.
             //
             // One scan is this node's whole sweep, so the counter advances every
             // time regardless of whether a heartbeat goes out on this pass.
-            if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                // Always `Some` here: `scanning` is what put this node in this arm,
-                // and it is that scanner being there.
-                if let Some(scanner) = scanner.as_deref_mut() {
-                    report_ble(&mut sender, node, scanner);
-                }
-                node.counter = node.counter.wrapping_add(1).max(1);
-                if let Some(deadline) = node.next_beat
-                    && Instant::now() >= deadline
-                {
-                    // Drain first: this node never leaves the control channel, so
-                    // an admin frame that landed after the last listen was acked
-                    // and queued, and this heartbeat must report its epoch.
-                    drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
-                    node.last_dwell = 0;
-                    heartbeat(&manager, &mut sender, node);
-                    listen(
-                        &mut controller,
-                        &manager,
-                        &mut sender,
-                        &receiver,
-                        node,
-                        &mut ota,
-                        ADMIN_WAIT_MS,
-                    );
-                    node.next_beat = Some(next_beat_after(deadline));
-                }
-            } else {
-                note!("radio would not park on channel {}", CONTROL_CHANNEL);
-                // What keeps this loop from spinning when the radio refuses:
-                // nothing else here sleeps unconditionally the way the idle
-                // branch's `listen` does.
-                listen(
-                    &mut controller,
-                    &manager,
-                    &mut sender,
-                    &receiver,
-                    node,
-                    &mut ota,
-                    ADMIN_WAIT_MS,
-                );
+            //
+            // Always `Some` here: `scanning` is what put this node in this arm, and it is
+            // that scanner being there.
+            if let Some(scanner) = scanner.as_deref_mut() {
+                report_ble(node, scanner);
             }
-            // Straight into the next scan either way: a beat not yet due costs
-            // this node nothing but the next check.
+            node.counter = node.counter.wrapping_add(1).max(1);
+            // Drain first, so a heartbeat due now reports an epoch adopted since the scan.
+            drain(node, &mut ota);
+            beat_if_due(node);
+            // Straight into the next scan: a beat not yet due costs this node nothing but
+            // the check.
             continue;
         }
 
@@ -494,57 +423,42 @@ fn main() -> ! {
         // arrived, so collecting then would file this channel's name on whatever
         // it is still tuned to.
         let Some(channel) = node.channel() else {
-            // An assignment adopted while parked, whose sweep has not begun: step
-            // onto its lowest channel rather than whichever index the cursor held
-            // when the frame arrived, which may no longer be assigned.
+            // An assignment adopted while idle, whose sweep has not begun: step onto
+            // its lowest channel rather than whichever index the cursor held when the
+            // record arrived, which may no longer be assigned.
             node.advance();
             continue;
         };
-        if radio::park(&manager, &sniffer, channel, true) {
-            node.last_dwell = channel;
+        if radio::park(&mut controller, &sniffer, channel) {
             sniff::arm(channel);
             CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(CHANNEL_DWELL_MS)));
             sniff::disarm();
+            radio::quiet(&sniffer);
+            report(node, channel);
         } else {
-            node.last_dwell = 0;
             note!("radio refused channel {}", channel);
-        }
-
-        // Back where the fleet can be heard, for as long as it takes to say what
-        // was on that channel. A refusal here costs the observations rather than
-        // misdirecting them.
-        let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
-        if on_control {
-            report(&mut sender, node, channel);
-            drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
-        } else {
-            note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
 
         // `advance` runs either way, so a radio that refused one hop does not leave
         // the node dwelling there forever, and the counter it bumps on a completed
         // sweep counts every one of them, whether or not a heartbeat goes out on
-        // this pass. Only the heartbeat itself needs the control channel: sent
-        // from a dwell channel it would not be heard.
+        // this pass. Drained first, so a heartbeat due now reports an epoch adopted
+        // since the last pass.
+        drain(node, &mut ota);
         if node.advance() {
             node.counter = node.counter.wrapping_add(1).max(1);
         }
-        if on_control
-            && let Some(deadline) = node.next_beat
-            && Instant::now() >= deadline
-        {
-            heartbeat(&manager, &mut sender, node);
-            listen(
-                &mut controller,
-                &manager,
-                &mut sender,
-                &receiver,
-                node,
-                &mut ota,
-                ADMIN_WAIT_MS,
-            );
-            node.next_beat = Some(next_beat_after(deadline));
-        }
+        beat_if_due(node);
+    }
+}
+
+/// Send a heartbeat if an assigned node's deadline has passed, and set the next one.
+fn beat_if_due(node: &mut Node) {
+    let now = Instant::now();
+    let deadline = node.next_beat.unwrap_or(now);
+    if now >= deadline {
+        heartbeat(node);
+        node.next_beat = Some(next_beat_after(deadline));
     }
 }
 
@@ -560,47 +474,32 @@ fn next_beat_after(deadline: Instant) -> Instant {
     if next <= now { now + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS)) } else { next }
 }
 
-/// Broadcast one heartbeat, which is also the whole of this node's liveness.
+/// Send one heartbeat over the bus, which is also the whole of this node's liveness.
 ///
-/// Sent only from the control channel, at most once every [`ASSIGNED_BEAT_MS`]
-/// for an assigned node. The counter it carries tracks completed sweeps on its
-/// own timer, so it advances whether or not this call goes out; the host treats
-/// sixty seconds of silence as a node that has left the fleet. `node.version` is
-/// the epoch this node holds, which is how the host tells adoption from a
-/// MAC-layer ack. Every attempt advances `node.beats`, so a gap the host sees in
-/// it covers both a send the radio could not make and a frame lost on the air. `node.unsent`
-/// counts the failed sends, and is what tells the two apart. `node.beat_dwell` takes
-/// this beat's dwell on every attempt too, so the next beat names it whether or not this
-/// one arrives. The transmit power is read from the radio on every beat rather than
-/// remembered from adoption, so the beat reports what a refused `set_max_tx_power` kept (the
-/// boot default, or an earlier assignment's power) or what something reset it to since.
-/// The rail voltage and die temperature are read beside it, on the control channel where
-/// every heartbeat goes out, so the voltage read's PBUS excursion never lands in a dwell.
-fn heartbeat(manager: &EspNowManager, sender: &mut EspNowSender, node: &mut Node) {
+/// At most once every [`ASSIGNED_BEAT_MS`] for an assigned node. The counter it carries
+/// tracks completed sweeps on its own timer, so it advances whether or not a beat reaches
+/// the host; the host treats sixty seconds of silence as a node that has left the fleet.
+/// `node.version` is the epoch this node holds, which is how the host tells adoption from a
+/// bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
+/// (`bus::send`). The rail voltage, die temperature and free heap are read between dwells, so
+/// the voltage read's PBUS excursion never lands in one.
+fn heartbeat(node: &Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
-    // would be lost to a dropped frame or stale after a reflash, and they are
-    // five bytes of twenty-nine.
-    let beat = node.beats.wrapping_add(1);
-    let msg = HeartbeatMsg {
+    // would be lost to a dropped beat or stale after a reflash, and they are
+    // five bytes of twenty-seven.
+    let msg = Heartbeat {
+        capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
+        mac: node.mac,
         counter: node.counter,
         epoch: node.version,
-        capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
         wifi_refused: sniff::refused(),
         ble_refused: ble::refused(),
-        beat,
-        unsent: node.unsent,
-        dwell: node.last_dwell,
-        prev_dwell: node.beat_dwell,
-        tx_power: radio::tx_power(manager),
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
         die_temp: die_temp(health::die_temp_c()),
+        heap_free: esp_alloc::HEAP.free() as u32,
     };
-    node.beats = beat;
-    node.beat_dwell = node.last_dwell;
-    if !radio::broadcast(sender, &msg.encode()) {
-        node.unsent = node.unsent.wrapping_add(1);
-    }
+    bus::send(UpType::Heartbeat, &msg.encode());
 }
 
 /// Encode a die reading, sending a failed one as no reading.
@@ -609,24 +508,22 @@ fn die_temp(c: i16) -> DieTemp {
     if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) }
 }
 
-/// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts
-/// to `node.core` as `SIGHTING_BATCH_MAX` (1024 bytes) allows, and sends what it holds
-/// at the end rather than carrying anything into the next one — the host
+/// Packs every sighting one dwell or Bluetooth scan produces into as few batches as
+/// `SIGHTING_BATCH_MAX` (1024 bytes) allows, delivers each over the bus, and sends what
+/// it holds at the end rather than carrying anything into the next one — the host
 /// stamps a sighting's position on arrival, so held sightings would carry the
 /// wrong one.
 ///
-/// `members` mirrors what `writer` currently holds, so an acknowledged unicast's
-/// success can be turned into a dedup-ring entry per record without re-decoding the
-/// frame just sent.
+/// `members` mirrors what `writer` currently holds, so an acknowledged batch can be
+/// turned into a dedup-ring entry per record without re-decoding the batch just sent.
 ///
-/// `failed` latches once a batch in this report goes unacknowledged, or `node.core`
-/// is `None`: every batch after it in the same report is discarded rather than
-/// packed and retried. With no bridge in range nothing a node sends is ever
-/// acknowledged, so without the latch every dwell would end in a full string of
-/// retried, still-unacknowledged batches. One failed frame is the bound instead;
-/// nothing discarded enters `SEEN`, so it stays due, and the next report's first
-/// batch is the probe that finds out whether a core has come back — recovery needs
-/// no extra logic.
+/// `failed` latches once a batch in this report goes unacknowledged: every batch after
+/// it in the same report is discarded rather than packed and retried. With no P4
+/// clocking this node nothing it sends is ever acknowledged, so without the latch every
+/// dwell would end in a string of batches, each waiting out its timeouts. One failed
+/// batch is the bound instead; nothing discarded enters `SEEN`, so it stays due, and the
+/// next report's first batch is the probe that finds out whether the P4 has come back —
+/// recovery needs no extra logic.
 struct Outgoing {
     writer: SightingBatchWriter,
     members: [([u8; 6], Option<i8>); SIGHTINGS_PER_BATCH_MAX],
@@ -654,7 +551,6 @@ impl Outgoing {
     /// entered in `SEEN`, so it is due again next time it is heard.
     fn offer(
         &mut self,
-        sender: &mut EspNowSender,
         node: &mut Node,
         msg: &SightingMsg<'_>,
         addr: [u8; 6],
@@ -668,9 +564,9 @@ impl Outgoing {
             self.remember(addr, rssi);
             return 0;
         }
-        let flushed = self.flush(sender, node, now);
+        let flushed = self.flush(node, now);
         // A flush that just failed leaves nothing to pack this sighting behind: taking
-        // it would hand the final flush a second frame for an absent core.
+        // it would hand the final flush a second batch for an absent P4.
         if self.failed {
             return flushed;
         }
@@ -690,27 +586,23 @@ impl Outgoing {
         }
     }
 
-    /// Unicast what is packed, if anything, to `node.core`, returning how many
-    /// records it held. `SEEN` is only updated once the radio confirms the ack:
-    /// recorded only once the core has it, so a batch nobody acknowledged stays
-    /// due to be offered again next time its addresses are heard.
-    fn flush(&mut self, sender: &mut EspNowSender, node: &mut Node, now: u32) -> u32 {
+    /// Deliver what is packed, if anything, returning how many records it held. `SEEN`
+    /// is only updated once the P4 acknowledges the batch, so a batch nobody
+    /// acknowledged stays due to be offered again next time its addresses are heard.
+    fn flush(&mut self, node: &mut Node, now: u32) -> u32 {
         if self.writer.is_empty() {
             return 0;
         }
-        let sent = match node.core {
-            Some(core) if radio::unicast(sender, &core, self.writer.as_bytes()) => {
-                for &(addr, rssi) in &self.members[..self.len] {
-                    sniff::SEEN.with(|seen| seen.record(addr, rssi, now));
-                }
-                node.seq = node.seq.wrapping_add(1);
-                u32::try_from(self.len).unwrap_or(u32::MAX)
+        let sent = if bus::deliver(UpType::Sightings, self.writer.as_bytes()) {
+            for &(addr, rssi) in &self.members[..self.len] {
+                sniff::SEEN.with(|seen| seen.record(addr, rssi, now));
             }
-            _ => {
-                node.unacked = node.unacked.wrapping_add(1);
-                self.failed = true;
-                0
-            }
+            node.seq = node.seq.wrapping_add(1);
+            u32::try_from(self.len).unwrap_or(u32::MAX)
+        } else {
+            node.unacked = node.unacked.wrapping_add(1);
+            self.failed = true;
+            0
         };
         self.writer.reset(node.seq);
         self.len = 0;
@@ -719,22 +611,22 @@ impl Outgoing {
 }
 
 /// Report everything heard on `channel` that has not been reported lately.
-fn report(sender: &mut EspNowSender, node: &mut Node, channel: u8) {
+fn report(node: &mut Node, channel: u8) {
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
     let mut sent = 0u32;
     while let Some(sighting) = sniff::take() {
         let rssi = Some(sighting.rssi);
-        // Taken and released per sighting, never across the transmit inside
+        // Taken and released per sighting, never across the delivery inside
         // `offer` — the callback's own rule for `sniff::SEEN`, kept here too.
         if !sniff::SEEN
             .with(|seen| seen.is_due(&sighting.bssid, rssi, DEDUP_RSSI_GAIN_WIFI_DB, now))
         {
             continue;
         }
-        sent += outgoing.offer(sender, node, &sighting.as_msg(), sighting.bssid, rssi, now);
+        sent += outgoing.offer(node, &sighting.as_msg(), sighting.bssid, rssi, now);
     }
-    sent += outgoing.flush(sender, node, now);
+    sent += outgoing.flush(node, now);
     if sent > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(sent);
         note!(
@@ -750,27 +642,24 @@ fn report(sender: &mut EspNowSender, node: &mut Node, channel: u8) {
 
 /// Listen for advertisers and report the new ones.
 ///
-/// Called once per scan on the node whose whole job this is, ahead of whichever
-/// heartbeat follows it, so the Bluetooth controller is off again well ahead of
-/// the window that heartbeat opens. The node sniffs no Wi-Fi, so the scan
-/// competes with nothing but that heartbeat for the antenna.
-fn report_ble(sender: &mut EspNowSender, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
+/// Called once per scan on the node whose whole job this is. The node sniffs no
+/// Wi-Fi, so the scan competes with nothing for the antenna.
+fn report_ble(node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let heard = scanner.sweep();
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
     let mut lines = 0u32;
     // One report at a time out of the buffer, so the lock is never held across a
-    // transmit — the same shape the Wi-Fi sightings are drained in.
+    // delivery — the same shape the Wi-Fi sightings are drained in.
     while let Some(report) = ble::take() {
         let rssi = report.has_rssi().then_some(report.rssi);
         if !sniff::SEEN.with(|seen| seen.is_due(&report.address, rssi, DEDUP_RSSI_GAIN_BLE_DB, now))
         {
             continue;
         }
-        lines +=
-            report.with_msg(|msg| outgoing.offer(sender, node, &msg, report.address, rssi, now));
+        lines += report.with_msg(|msg| outgoing.offer(node, &msg, report.address, rssi, now));
     }
-    lines += outgoing.flush(sender, node, now);
+    lines += outgoing.flush(node, now);
     if heard > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(lines);
         note!(
@@ -783,115 +672,73 @@ fn report_ble(sender: &mut EspNowSender, node: &mut Node, scanner: &mut ble::Sca
     }
 }
 
-/// Hold the control channel for `ms`, acting on anything that arrives.
+/// Service the bus for `ms`, acting on whatever the P4 sends.
 ///
-/// This is the admin window. The radio acknowledges a unicast assignment in
-/// hardware either way, but adopting one needs the frame, read only here.
-///
-/// Returns early when update mode starts or ends, so the main loop changes mode at once.
-fn listen(
-    controller: &mut WifiController<'_>,
-    manager: &EspNowManager,
-    sender: &mut EspNowSender,
-    receiver: &EspNowReceiver,
-    node: &mut Node,
-    ota: &mut ota::Ota,
-    ms: u32,
-) {
+/// Returns early when update mode starts or ends, or the node gains or loses an
+/// assignment, so the main loop changes mode at once.
+fn listen(node: &mut Node, ota: &mut ota::Ota, scanning: bool, ms: u32) {
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
     let updating = ota.updating();
+    let assigned = node.assigned(scanning);
     loop {
-        drain_admin(controller, manager, sender, receiver, node, ota);
-        if Instant::now() >= until || ota.updating() != updating {
+        drain(node, ota);
+        if Instant::now() >= until
+            || ota.updating() != updating
+            || node.assigned(scanning) != assigned
+        {
             return;
         }
         CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS));
     }
 }
 
-/// Take whatever the radio has queued: adopt any assignment, and hand update frames to
-/// `ota`.
+/// Service the bus and act on every record the P4 has sent: adopt an assignment, forget
+/// what was reported, and hand update records to `ota`.
 ///
-/// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
-/// update frame: decoding one is hearing the host over the air, which is the whole test.
-fn drain_admin(
-    controller: &mut WifiController<'_>,
-    manager: &EspNowManager,
-    sender: &mut EspNowSender,
-    receiver: &EspNowReceiver,
-    node: &mut Node,
-    ota: &mut ota::Ota,
-) {
-    while let Some(received) = receiver.receive() {
-        let src = received.info.src_address;
-        let admin = match Frame::decode(received.data()) {
-            Ok(Frame::Admin(admin)) => {
-                note_core(manager, node, src);
-                confirm(node, ota);
-                admin
-            }
-            Ok(Frame::Clear(_)) => {
-                note_core(manager, node, src);
-                confirm(node, ota);
-                node.forget_reported("host asked");
-                continue;
-            }
-            Ok(Frame::OtaConfirm(_)) => {
-                confirm(node, ota);
-                continue;
-            }
-            Ok(Frame::OtaBegin(msg)) => {
-                update(manager, sender, node, ota, src, &ota::Update::Begin(msg));
-                continue;
-            }
-            Ok(Frame::OtaChunk(msg)) => {
-                update(manager, sender, node, ota, src, &ota::Update::Chunk(msg));
-                continue;
-            }
-            Ok(Frame::OtaCommit(msg)) => {
-                update(manager, sender, node, ota, src, &ota::Update::Commit(msg));
-                continue;
-            }
-            Ok(Frame::OtaAbort(msg)) => {
-                update(manager, sender, node, ota, src, &ota::Update::Abort(msg));
-                continue;
-            }
-            // A host whose frame is not the shape this build reads — a different
-            // wire version, or a different length under the same one. Said out
-            // loud rather than dropped with everything else: it is the whole
-            // diagnosis for a node that is talked to and never answers.
-            Err(DecodeError::BadVersion(version)) => {
-                note!("ignoring a frame at wire version {}; reflash this node", version);
-                continue;
-            }
-            Err(DecodeError::BadLength { need, got }) => {
-                note!(
-                    "ignoring a {} byte frame, this build reads {}; reflash this node",
+/// Any record from the P4 this node decodes confirms an image on trial — assign, clear,
+/// update confirm or an update record: decoding one is hearing the host over the bus,
+/// which is the whole test.
+fn drain(node: &mut Node, ota: &mut ota::Ota) {
+    bus::service();
+    let mut payload = [0u8; PAYLOAD_MAX];
+    while let Some(len) = bus::take(&mut payload) {
+        for record in records(&payload[..len]) {
+            match DownMsg::decode(record.kind, record.body) {
+                Ok(DownMsg::Assign(assign)) => {
+                    confirm(node, ota);
+                    if node.adopt(&assign) {
+                        note!(
+                            "assigned v{}: {} channels ({}), ble {}",
+                            node.version,
+                            node.channels.len(),
+                            Channels(node.channels),
+                            if node.ble { "on" } else { "off" }
+                        );
+                    }
+                }
+                Ok(DownMsg::Clear(_)) => {
+                    confirm(node, ota);
+                    node.forget_reported("host asked");
+                }
+                Ok(DownMsg::UpdateConfirm(_)) => confirm(node, ota),
+                Ok(DownMsg::UpdateBegin(msg)) => update(node, ota, &ota::Update::Begin(msg)),
+                Ok(DownMsg::UpdateChunk(msg)) => update(node, ota, &ota::Update::Chunk(msg)),
+                Ok(DownMsg::UpdateCommit(msg)) => update(node, ota, &ota::Update::Commit(msg)),
+                Ok(DownMsg::UpdateAbort(msg)) => update(node, ota, &ota::Update::Abort(msg)),
+                // A host whose record is not the shape this build reads: a type it does
+                // not know, or a different length. Said out loud rather than dropped: it
+                // is the whole diagnosis for a node that is talked to and never answers.
+                Err(DecodeError::BadLength { need, got }) => note!(
+                    "ignoring a {} byte type {} record, this build reads {}; update this node",
                     got,
+                    record.kind,
                     need
-                );
-                continue;
+                ),
+                Err(DecodeError::UnknownType(kind)) => {
+                    note!("ignoring a record of unknown type {}; update this node", kind);
+                }
+                Err(err) => note!("ignoring a type {} record: {}", record.kind, err),
             }
-            // Everything else on this channel: our own broadcasts coming back, the
-            // rest of the fleet's, and whatever else is nearby — a vendor fleet's
-            // frames fail the magic and land here, which is the point.
-            _ => continue,
-        };
-        if node.adopt(&admin) {
-            if controller.set_max_tx_power(admin.tx_power).is_err() {
-                note!(
-                    "could not set transmit power to {} quarter-dBm; retaining the previous power",
-                    admin.tx_power
-                );
-            }
-            note!(
-                "assigned v{}: {} channels ({}), ble {}, power {} quarter-dBm",
-                node.version,
-                node.channels.len(),
-                Channels(node.channels),
-                if node.ble { "on" } else { "off" },
-                admin.tx_power
-            );
         }
     }
 }
@@ -904,66 +751,27 @@ fn confirm(node: &mut Node, ota: &mut ota::Ota) {
     }
 }
 
-/// Act on an update frame from `src`, confirming a trial image first.
+/// Act on an update record, confirming a trial image first.
 ///
 /// Confirming first matters: an update accepted while this image is on trial would write
 /// over the only slot known to work, so `ota` refuses a `begin` until the trial is over.
 ///
-/// The core moves to `src` only for a frame of the session the receiver accepted. A
-/// refusal is answered only when `src` is the core already: a stray `begin` from another
-/// host must not re-point sightings, and answering it would need a peer slot for it.
-///
-/// A `Verified` status is followed by the switch to the new image and a reboot. Its send is
-/// best effort: the host also learns of the update from the reboot. A switch that fails
-/// sends one `FlashError` instead.
-fn update(
-    manager: &EspNowManager,
-    sender: &mut EspNowSender,
-    node: &mut Node,
-    ota: &mut ota::Ota,
-    src: [u8; 6],
-    frame: &ota::Update<'_>,
-) {
+/// A `Verified` status is followed by the switch to the new image and a reboot. The
+/// host also learns of the update from the reboot. A switch that fails sends one
+/// `FlashError` instead.
+fn update(node: &mut Node, ota: &mut ota::Ota, record: &ota::Update<'_>) {
     confirm(node, ota);
-    let answer = ota.on_update(frame, node.trial);
-    if answer.accepted {
-        note_core(manager, node, src);
-    }
-    let Some(status) = answer.status else { return };
-    if node.core != Some(src) {
-        return;
-    }
-    if !radio::unicast(sender, &src, &status.encode()) {
-        note!("update status {:?} unacknowledged", status.state);
-    }
-    if status.state == OtaState::Verified {
-        let failed = ota.install();
-        if !radio::unicast(sender, &src, &failed.encode()) {
-            note!("update status {:?} unacknowledged", failed.state);
-        }
+    let Some(status) = ota.on_update(record, node.trial) else { return };
+    send_status(&status);
+    if status.state == UpdateState::Verified {
+        send_status(&ota.install());
     }
 }
 
-/// Point sighting batches at `src`, if that is not the core already held.
-///
-/// Runs on every admin or clear frame, and on an update frame of the session the update
-/// receiver accepted. For an admin frame it runs before [`Node::adopt`]'s epoch check, not
-/// only on ones that change the assignment: a bridge that swapped and re-sent the same
-/// epoch still has to move the core, or every sighting after it unicasts into
-/// silence forever. Registration failure is left as a note — the old peer, and the
-/// old `node.core`, are still there to unicast to.
-fn note_core(manager: &EspNowManager, node: &mut Node, src: [u8; 6]) {
-    if node.core == Some(src) {
-        return;
-    }
-    match radio::set_core_peer(manager, node.core, src) {
-        Ok(()) => {
-            node.core = Some(src);
-            note!("core is now {}", mac::full(&src));
-        }
-        Err(_) => {
-            note!("could not register {} as the core peer; keeping the old one", mac::full(&src))
-        }
+/// Deliver an update status to the P4, noting one it never acknowledged.
+fn send_status(status: &UpdateStatus) {
+    if !bus::deliver(UpType::UpdateStatus, &status.encode()) {
+        note!("update status {:?} unacknowledged", status.state);
     }
 }
 

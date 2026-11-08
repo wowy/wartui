@@ -7,8 +7,9 @@
 
 use std::time::Duration;
 
-use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
+use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
+use wartui_proto::fan::FanStats;
 use wartui_proto::link::{QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -63,32 +64,23 @@ pub struct Heartbeat {
     pub rx_at_ms: i64,
     /// The node's own counter, monotonic from its boot.
     pub counter: u32,
-    /// The assignment epoch the node says it holds, 0 for none, as the frame carried it, replay
-    /// included.
+    /// The assignment epoch the node says it holds, 0 for none, as the heartbeat carried it,
+    /// replay included.
     pub epoch: u8,
-    /// How strongly the bridge heard it.
-    pub link_rssi: Option<i8>,
+    /// The node-bus slot it came from.
+    pub slot: Slot,
     /// Access points the node's full pending buffer turned away since boot, once per dwell each.
     pub wifi_refused: u16,
     /// Advertisers the node's full pending buffer turned away since boot, once per scan each.
     pub ble_refused: u16,
-    /// Heartbeats the node has sent since its boot, this one included. Wraps.
-    pub beat: u16,
-    /// Heartbeats the node's radio could not send since its boot, this one excluded. Wraps.
-    pub unsent: u8,
-    /// The scan channel the node dwelt on just before this heartbeat, 0 for none.
-    pub dwell: u8,
-    /// The `dwell` the node's previous heartbeat carried, arrived or not; 0 after boot.
-    pub prev_dwell: u8,
-    /// The node radio's maximum transmit power in quarter-dBm as it read it just before this
-    /// heartbeat, 0 when the read failed.
-    pub tx_power: i8,
     /// Why the node is running this boot; the same on every heartbeat of a boot.
     pub reset_cause: ResetCause,
     /// The node chip's 3.3 V rail in millivolts, `None` when the read failed.
     pub vdd_mv: Option<u16>,
     /// The node's die temperature in whole degrees Celsius, `None` when the read failed.
     pub die_temp_c: Option<i16>,
+    /// Bytes free in the node's heap.
+    pub heap_free: u32,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }
@@ -99,27 +91,28 @@ pub struct Heartbeat {
 pub struct BridgeStatusSeen {
     /// Unix milliseconds of receipt.
     pub rx_at_ms: i64,
-    /// How many peers its ESP-NOW table holds.
-    pub peer_count: u8,
-    /// Frames it has received and accepted to forward since its boot.
+    /// Node records it has forwarded since its boot.
     pub rx_count: u32,
     /// Frames its outbound ring dropped on the way to the host since its boot.
     pub dropped_tx: u32,
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
-    /// Frames of ours this host had read off the link when the reply arrived (`Counters::frames`). Between
-    /// two rows, the `rx_count` difference less this one's is link loss plus `dropped_tx`, give or
-    /// take frames still queued in the bridge, which the reply overtakes.
+    /// Node records this host had read off the link when the reply arrived (`Counters::frames`).
+    /// Between two rows, the `rx_count` difference less this one's is link loss plus `dropped_tx`,
+    /// give or take records still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
-    /// Frames too long to be a node's that it dropped since its boot. Not in `rx_count`.
+    /// Node records too long to forward that it dropped since its boot. Not in `rx_count`.
     pub rx_oversize: u32,
-    /// Its queues' capacity, high-water mark and drops since its boot; empty when it reports
-    /// none.
+    /// Its queues' capacity, high-water mark and drops since its boot.
     pub queues: QueueStats,
-    /// Its radio link's counters since its boot; `None` off the P4 split bridge.
-    pub radio_link: Option<RadioLinkStats>,
+    /// Its radio link's counters since its boot.
+    pub radio_link: RadioLinkStats,
     /// Line errors on the P4's host UART since its boot: bytes from this host lost or corrupted.
     pub host_uart_errors: u32,
+    /// Its lid fan: the duty in force and the last tach reading. `None` with no carrier.
+    pub fan: Option<FanStats>,
+    /// The slots it counted present, bit n for `Slot` byte n.
+    pub slots_present: u32,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.
@@ -131,9 +124,9 @@ pub struct BridgeStatusSeen {
 pub struct HostStatus {
     /// Unix milliseconds of the sample.
     pub at_ms: i64,
-    /// `Counters::frames`: ESP-NOW frames read off the link.
+    /// `Counters::frames`: node records read off the link.
     pub frames: u64,
-    /// `Counters::duplicate_batches`: radio retransmits dropped rather than stored.
+    /// `Counters::duplicate_batches`: copies of a batch dropped rather than stored.
     pub duplicate_batches: u64,
     /// `Counters::garbled`: USB frames that failed their checksum.
     pub garbled: u64,
@@ -141,9 +134,7 @@ pub struct HostStatus {
     pub undecodable: u64,
     /// `Counters::incompatible`.
     pub incompatible: u64,
-    /// `Counters::admin_windows_missed`.
-    pub admin_windows_missed: u64,
-    /// The furthest behind the air this host fell since the previous row, in microseconds. Only
+    /// The furthest behind the bridge this host fell since the previous row, in microseconds. Only
     /// lags measured from arriving frames count, not the assumption made on connecting.
     pub lag_peak_us: u64,
     /// Rows the store has written.
@@ -186,9 +177,8 @@ pub struct Observation {
     pub node_mac: Mac,
     /// Unix milliseconds of receipt by the bridge.
     pub rx_at_ms: i64,
-    /// How strongly the bridge heard the reporting node, not the network, to spot nodes at the
-    /// mesh's edge.
-    pub link_rssi: Option<i8>,
+    /// The node-bus slot the batch came from.
+    pub slot: Slot,
     /// The observed BSSID, six raw bytes.
     pub bssid: [u8; 6],
     /// Raw SSID bytes. An SSID is whatever the access point beaconed, so UTF-8 here would lose the
@@ -212,22 +202,20 @@ pub struct Observation {
     pub fix: Fix,
     /// This record's own bytes, without the batch header, which a re-parse does not need. A couple
     /// of dozen bytes a row, and the reason a decoder fix can reach history, not only what arrives
-    /// later. `--record-raw` keeps whole frames as [`RawFrame`]s.
+    /// later. `--record-raw` keeps whole records as [`RawFrame`]s.
     pub raw_body: Vec<u8>,
 }
 
-/// A frame exactly as it arrived, kept only when `--record-raw` is on.
+/// A node record exactly as it arrived, kept only when `--record-raw` is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawFrame {
     /// Unix milliseconds of receipt.
     pub rx_at_ms: i64,
-    /// Transmitter.
-    pub src: Mac,
-    /// Destination, usually broadcast.
-    pub dst: Mac,
-    /// Link signal strength.
-    pub rssi: Option<i8>,
-    /// The undecoded payload.
+    /// The node-bus slot it came from.
+    pub slot: Slot,
+    /// Its record type, a `bus::UpType` byte.
+    pub kind: u8,
+    /// The undecoded body.
     pub bytes: Vec<u8>,
 }
 
@@ -236,26 +224,25 @@ pub struct RawFrame {
 /// gets a capture row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeSeen {
-    /// The bridge's own MAC, which nodes see as the core's address.
+    /// The bridge's MAC: its C6's, which names the bridge.
     pub mac: Mac,
-    /// Which chip it is.
-    pub chip: String,
     /// Its firmware version.
     pub fw_version: String,
+    /// What carries its nodes, which maps the stored bus slots to the silk names.
+    pub node_board: NodeBoard,
 }
 
-/// What became of one assignment this host put on the air. Every attempt gets a row, so "the fleet
-/// keeps drifting off its channels" becomes a query.
+/// What became of one assignment this host sent. Every attempt gets a row, so "the fleet keeps
+/// drifting off its channels" becomes a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
-    /// The node's radio acknowledged the frame at the MAC layer.
+    /// The bridge delivered it: the node acknowledged the transfer that carried it.
     Acked,
-    /// It went out and nothing came back. Usually BLE coexistence on the node.
+    /// The bridge could not deliver it: no node in the slot, a full queue, or no ack after every
+    /// try.
     Unacked,
-    /// The bridge could not transmit it at all.
-    Refused,
-    /// No answer from the bridge inside the timeout, so unknown. Unlike `Unacked`, where the radio
-    /// did report.
+    /// No answer from the bridge inside the timeout, so unknown. Unlike `Unacked`, where the
+    /// bridge did report.
     Silent,
 }
 
@@ -266,51 +253,43 @@ impl AdminOutcome {
         match self {
             Self::Acked => "acked",
             Self::Unacked => "unacked",
-            Self::Refused => "refused",
             Self::Silent => "silent",
         }
     }
 }
 
-/// One assignment this host transmitted, and what came of it.
+/// One assignment this host sent, and what came of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssignmentSent {
     /// Which node it was addressed to.
     pub node_mac: Mac,
     /// The engine's epoch counter it was allocated from: monotonic within a capture, not persisted.
     pub counter: u64,
-    /// The byte that went on the wire, `air::wire_epoch(counter)`.
+    /// The byte that went on the wire, `bus::wire_epoch(counter)`.
     pub wire_version: u8,
     /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
     pub channels: ChannelSet,
     /// Whether it was also told to scan Bluetooth.
     pub ble: bool,
-    /// Unix milliseconds the frame was handed to the link.
+    /// Unix milliseconds the assignment was handed to the link.
     pub created_at_ms: i64,
     /// Unix milliseconds the outcome arrived, if one did.
     pub delivered_at_ms: Option<i64>,
-    /// What the radio said.
+    /// What the bridge said.
     pub outcome: AdminOutcome,
-    /// Bridge-measured microseconds from the heartbeat that opened the node's window to the
-    /// transmit callback, both ends stamped by the bridge. `None` with no heartbeat stamp, or a
-    /// difference longer than the window, meaning that heartbeat opened none. The outcome is
-    /// recorded either way.
+    /// Microseconds from sending it to the bridge's `Delivered`, on this host's clock. `None`
+    /// when it was not delivered.
     pub latency_us: Option<u32>,
 }
 
 /// Host settings that affect capture interpretation, not proof that a radio adopted them.
 ///
-/// Kept separately from assignments: power and pool can change before any node is assignable,
-/// and the bridge's configured power never rides a node assignment.
+/// Kept separately from assignments: the pool can change before any node is assignable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureSettings {
-    /// Pool the planner partitions.
-    pub pool: ChannelPool,
-    /// Normalized desired node power, in quarter-dBm.
-    pub tx_power: i8,
-    /// Normalized desired bridge power, in quarter-dBm.
-    pub bridge_tx_power: i8,
-    /// Whether undecoded frames are retained.
+    /// Pool the planner partitions, as the bridge reports it. `None` before its first `Status`.
+    pub pool: Option<ChannelPool>,
+    /// Whether undecoded node records are retained.
     pub record_raw: bool,
     /// Whether the position chain has a GPS receiver.
     pub gps: bool,
@@ -322,12 +301,6 @@ pub struct CaptureSettings {
     pub preferred_ble: Option<Mac>,
     /// Node the host currently gives the Bluetooth job, if any.
     pub ble_node: Option<Mac>,
-    /// Heartbeat age that removes a node from the topology.
-    pub topology_timeout: Duration,
-    /// Bridge counter polling cadence.
-    pub status_interval: Duration,
-    /// Assignment outcome timeout.
-    pub admin_timeout: Duration,
 }
 
 /// Anything the engine or runtime wants written down.
@@ -343,9 +316,9 @@ pub enum Record {
     Heartbeat(Heartbeat),
     /// Append an observation.
     Observation(Observation),
-    /// Append an undecoded frame.
+    /// Append an undecoded node record.
     Raw(RawFrame),
-    /// Append an assignment this host transmitted.
+    /// Append an assignment this host sent.
     Assignment(AssignmentSent),
     /// Append a bridge status reply.
     BridgeStatus(BridgeStatusSeen),

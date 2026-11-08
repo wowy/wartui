@@ -39,7 +39,7 @@
 //! Its progress arrives as error lines, printed until the C6's new life, or until [`QUIET`]
 //! passes without one.
 //!
-//! **A P4 that cannot take an update names the fix.** One whose firmware predates link updates
+//! **A P4 that cannot take an update names the fix.** One running firmware from another tree
 //! announces a `Ready` this build cannot decode, and one on espflash's default partition table
 //! refuses the `Begin`. Both need one last wired flash. A P4 that sends nothing at all is more
 //! likely held by another program, or still starting, so that advice is kept for a `Ready` that
@@ -54,10 +54,9 @@ use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, SerialTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
-use wartui_proto::air::OtaState;
+use wartui_proto::bus::UpdateState;
 use wartui_proto::link::{
-    BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED,
-    RADIO_UPDATING, UpdateOp,
+    BridgeToHost, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, RADIO_UPDATING, UpdateOp,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
@@ -158,7 +157,6 @@ pub(super) async fn run(args: &Args, board: &PortCandidate, expected: Mac) -> Re
             bail!("{}", no_ready_text(&label, &board.path, &why, garbled))
         }
     };
-    ensure!(info.chip == LinkChip::Esp32P4, "{label} answered as {:?}, not a P4", info.chip);
     ensure!(info.mac == expected, "{label} answered with another address");
     if info.image == Some(digest) {
         println!("{label:<6} already runs this image");
@@ -213,13 +211,13 @@ async fn wait_for_ready(link: &mut LinkHandle, garbled: &mut bool) -> Result<Bri
 }
 
 /// Why no `Ready` arrived from `board` on `path`, and what to do. Frames that did not decode
-/// are a `Ready` from firmware that predates link updates; silence is a held port or a bridge
+/// are a `Ready` from firmware built from another tree; silence is a held port or a bridge
 /// still starting.
 fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
     if garbled {
         format!(
-            "{board} on {path} answered in a form this build cannot read ({why}): its firmware \
-             predates link updates. Flash it once by hand, per {FIRST_FLASH}"
+            "{board} on {path} answered in a form this build cannot read ({why}): it runs \
+             firmware from another tree. Flash it once by hand, per {FIRST_FLASH}"
         )
     } else {
         format!(
@@ -532,19 +530,19 @@ fn judge(
 fn failure_text(failure: Failure, image_known: bool) -> String {
     match failure {
         Failure::Silent if !image_known => format!(
-            "the bridge did not answer the update: its firmware predates link updates. Flash it \
-             once by hand, per {FIRST_FLASH}"
+            "the bridge did not answer the update, and its image carries no digest: it runs \
+             firmware from another tree. Flash it once by hand, per {FIRST_FLASH}"
         ),
         Failure::Silent => "the bridge stopped answering the update".to_owned(),
-        Failure::Refused(OtaState::FlashError) => format!(
+        Failure::Refused(UpdateState::FlashError) => format!(
             "the bridge refused the update: it has no second app slot or trial sector, or is \
              still on trial. A board on espflash's default partition table needs one flash by \
              hand with the bridge's own, per {FIRST_FLASH}"
         ),
-        Failure::Refused(OtaState::HashMismatch) => {
+        Failure::Refused(UpdateState::HashMismatch) => {
             "the bridge received the image damaged; run flash-bridge again".to_owned()
         }
-        Failure::Refused(OtaState::TooLarge) => {
+        Failure::Refused(UpdateState::TooLarge) => {
             "the image is larger than the bridge's update slot".to_owned()
         }
         Failure::Refused(state) => format!("the bridge refused the update: {state:?}"),
@@ -603,7 +601,7 @@ impl ProgressLine {
     fn line(&mut self, message: &BridgeToHost) {
         match message {
             BridgeToHost::Error { message } => self.say(&format!("fault  {message}")),
-            BridgeToHost::Log { level, message } => self.say(&format!("{level:?}  {message}")),
+            BridgeToHost::Log { message } => self.say(&format!("Info  {message}")),
             _ => {}
         }
     }
@@ -613,7 +611,7 @@ impl ProgressLine {
 mod tests {
     use std::path::Path;
 
-    use wartui_proto::link::{LogLevel, LogStr};
+    use wartui_proto::link::LogStr;
 
     use super::super::normalize;
     use super::super::testing::{C6_HEADER, P4_APP_HEADER};
@@ -752,22 +750,22 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_names_wired_flash_when_bridge_predates_link_updates() {
+    fn flash_p4_names_wired_flash_when_bridge_reports_no_digest() {
         let text = failure_text(Failure::Silent, false);
-        assert!(text.contains("predates") && text.contains(FIRST_FLASH), "{text}");
-        assert!(!failure_text(Failure::Silent, true).contains("predates"));
+        assert!(text.contains("another tree") && text.contains(FIRST_FLASH), "{text}");
+        assert!(!failure_text(Failure::Silent, true).contains("another tree"));
     }
 
     #[test]
     fn flash_p4_names_wired_flash_when_bridge_has_no_update_slot() {
-        let text = failure_text(Failure::Refused(OtaState::FlashError), true);
+        let text = failure_text(Failure::Refused(UpdateState::FlashError), true);
         assert!(text.contains("partition table") && text.contains(FIRST_FLASH), "{text}");
     }
 
     #[test]
     fn flash_p4_says_run_again_when_switch_to_image_fails() {
         // A refusal after `Install`: the image arrived whole, so the table is not at fault.
-        let text = failure_text(Failure::SwitchFailed(OtaState::FlashError), true);
+        let text = failure_text(Failure::SwitchFailed(UpdateState::FlashError), true);
         assert!(text.contains("switching") && text.contains("run flash-bridge again"), "{text}");
         assert!(!text.contains("partition table") && !text.contains(FIRST_FLASH), "{text}");
     }
@@ -775,14 +773,14 @@ mod tests {
     #[test]
     fn flash_p4_names_wired_flash_when_ready_arrived_garbled() {
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", true);
-        assert!(text.contains("predates") && text.contains(FIRST_FLASH), "{text}");
+        assert!(text.contains("another tree") && text.contains(FIRST_FLASH), "{text}");
     }
 
     #[test]
     fn flash_p4_names_held_port_when_nothing_arrived() {
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", false);
         assert!(text.contains("wartui run") && text.contains("still starting"), "{text}");
-        assert!(!text.contains("predates") && !text.contains(FIRST_FLASH), "{text}");
+        assert!(!text.contains("another tree") && !text.contains(FIRST_FLASH), "{text}");
     }
 
     #[test]
@@ -800,7 +798,7 @@ mod tests {
     }
 
     fn log(text: &str) -> BridgeToHost {
-        BridgeToHost::Log { level: LogLevel::Info, message: LogStr::try_from(text).unwrap() }
+        BridgeToHost::Log { message: LogStr::try_from(text).unwrap() }
     }
 
     fn error(text: &str) -> BridgeToHost {

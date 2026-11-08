@@ -26,11 +26,16 @@ pub const HOST_CHUNK: usize = 4096;
 pub const fn is_priority(msg: &BridgeToHost) -> bool {
     match msg {
         BridgeToHost::Ready { .. }
-        | BridgeToHost::SendResult { .. }
+        | BridgeToHost::Delivered { .. }
+        | BridgeToHost::Undelivered { .. }
         | BridgeToHost::Status { .. }
         | BridgeToHost::Error { .. }
-        | BridgeToHost::Update(_) => true,
-        BridgeToHost::Rx { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => false,
+        | BridgeToHost::Update(_)
+        | BridgeToHost::CacheImage(_)
+        | BridgeToHost::PowerCycled { .. } => true,
+        BridgeToHost::FromNode { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => {
+            false
+        }
     }
 }
 

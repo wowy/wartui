@@ -67,8 +67,8 @@ fn host_queue_reports_bytes_and_drops_per_ring() {
 
 #[test]
 fn host_queue_classifies_message_when_deciding_priority() {
-    use wartui_proto::{BridgeToHost, host_queue::is_priority, link::LogLevel};
-    let log = BridgeToHost::Log { level: LogLevel::Info, message: Default::default() };
+    use wartui_proto::{BridgeToHost, host_queue::is_priority};
+    let log = BridgeToHost::Log { message: Default::default() };
     assert!(!is_priority(&log));
     let err = BridgeToHost::Error { message: Default::default() };
     assert!(is_priority(&err));

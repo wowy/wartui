@@ -1,4 +1,4 @@
-//! The host side of the link to the ESP-NOW bridge.
+//! The host side of the link to the P4 bridge.
 //!
 //! Everything above this crate talks to a [`LinkHandle`] and never learns
 //! whether the frames came from a real dongle or from [`sim`]. That is what
@@ -17,7 +17,8 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, RadioInfo};
+use wartui_proto::bus::NodeBoard;
+use wartui_proto::link::{BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -30,19 +31,17 @@ pub const EVENT_CAPACITY: usize = 4096;
 
 /// Depth of the urgent command queue, which carries channel assignments.
 ///
-/// Small, because anything queued here is racing a node's 100 ms admin window
-/// and a deep backlog would be stale by the time it went out.
+/// Small, because an assignment is answered by the next heartbeat and a deep backlog would
+/// be stale by the time it went out.
 pub const URGENT_CAPACITY: usize = 64;
 
-/// Depth of the bulk command queue: status polls, peer setup, resets.
+/// Depth of the bulk command queue: status polls, update records, resets.
 pub const BULK_CAPACITY: usize = 512;
 
 /// What the bridge announced about itself when it came up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeInfo {
-    /// Which chip the firmware is running on.
-    pub chip: Chip,
-    /// The bridge's MAC, which nodes see as the core's address.
+    /// The bridge's MAC: its C6's, which names the bridge.
     pub mac: Mac,
     /// Bridge firmware version.
     pub fw_version: String,
@@ -52,30 +51,25 @@ pub struct BridgeInfo {
     pub reset_cause: ResetCause,
     /// Where the previous life stopped, when the reset preserved it.
     pub last_phase: LoopPhase,
-    /// Bytes free in the radio blobs' heap at the moment it announced.
-    pub heap_free: u32,
     /// How long the bridge had been up when it announced itself.
     ///
     /// Small means this connection is talking to a bridge that has just restarted;
     /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
-    /// Whether this bridge was built with a GPS port.
-    ///
-    /// A board fact: it says the bridge forwards a receiver's bytes, not that a receiver
-    /// answered.
-    pub gps: bool,
+    /// What carries the nodes, which names their slots for the operator.
+    pub node_board: NodeBoard,
     /// The C6 behind the P4, as it described itself. Its reset cause is the only record of
     /// a radio crash under a running bridge. `None` until it answers.
     pub radio: Option<RadioInfo>,
-    /// The digest appended to the booted image, from a bridge that takes updates over the
-    /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.
-    /// `None` from a bridge that does not.
+    /// The digest appended to the P4's booted image. `wartui flash-bridge` reads it to tell an
+    /// installed image from a rollback. `None` when the P4 cannot read one: its partition
+    /// table did not read, or the image carries no appended digest.
     pub image: Option<[u8; DIGEST_LEN]>,
 }
 
 /// Something that happened on the link.
 // `Message` is much larger than the other variants because it carries an
-// inline ESP-NOW payload. Boxing it would mean an allocation for every frame
+// inline node record. Boxing it would mean an allocation for every frame
 // received, and buys nothing: tokio's channels allocate blocks as messages
 // arrive rather than reserving the full capacity up front, so an idle queue
 // costs nothing either way.
@@ -190,7 +184,7 @@ impl LinkHandle {
         self.events.recv().await
     }
 
-    /// Queue a command that is racing a node's admin window.
+    /// Queue a command that answers a node's heartbeat.
     ///
     /// Never blocks: a full queue means the bridge is behind, and the engine
     /// must keep running rather than wait on it.
@@ -238,8 +232,8 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
 /// Receives commands, always preferring urgent ones.
 ///
 /// Without this bias a burst of status polls can queue ahead of a channel
-/// assignment and push it past the node's 100 ms admin window, costing a whole
-/// sweep. It is the concrete mechanism protecting that deadline.
+/// assignment and hold it back from the heartbeat it answers. It is the
+/// concrete mechanism keeping assignments prompt.
 #[derive(Debug)]
 pub(crate) struct CommandRx {
     urgent: mpsc::Receiver<HostToBridge>,
@@ -265,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn link_handle_prioritizes_urgent_commands_when_bulk_commands_are_backlogged() {
         // Without this bias a burst of status polls can queue ahead of a channel
-        // assignment and push it past the node's 100 ms admin window.
+        // assignment and hold it back from the heartbeat it answers.
         let (handle, mut plumbing) = link_pair();
         for _ in 0..32 {
             handle.send_bulk(HostToBridge::GetStatus).expect("queued");
