@@ -141,12 +141,12 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
     }
 }
 
-/// The slots `present` names, as `board` labels them, or `none`.
 /// The slot whose node scans Bluetooth, by its board's name, or `none`.
-fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
+pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
     ble.map_or_else(|| "none".to_owned(), |slot| board.label(slot).to_string())
 }
 
+/// The slots `present` names, as `board` labels them, or `none`.
 fn slots_text(board: NodeBoard, present: u32) -> String {
     let labels: Vec<String> = (0..MAX_SLOTS as u8)
         .filter_map(Slot::from_u8)

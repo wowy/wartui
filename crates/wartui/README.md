@@ -21,6 +21,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `power-cycle`  | Switch one node off and on through the carrier board; see "Power-cycling a node"    |
 | `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
 | `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
+| `bluetooth`    | Read or set the slot whose node scans Bluetooth; see "Bluetooth"                    |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -309,7 +310,7 @@ wdgwars = ""
 
 wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
 a malformed `[bridge] mac`, a `mac` or `serial` beside `remember = false`, or an `excluded-ssids`
-entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool` and `ota` read only
+entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read only
 `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop
 them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
@@ -334,7 +335,7 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing default file
+`pool`, `bluetooth`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing default file
 silently means the built-in defaults.
 
 ### Benchmarking the store
@@ -782,10 +783,22 @@ transfer on every try and the node acknowledged none, or the bridge never answer
 belongs to a slot, and the bridge holds it: it keeps the slot in its own flash beside the pool,
 boots into it, and reports it in every status, so it survives restarts of the host and the bridge.
 `b` on a node asks the bridge to move the scan to its slot; `b` on the node holding it takes it off
-the fleet. Whichever node heartbeats from that slot holds the scan, so a node swapped into the
-socket takes it over. That node's `channels` reads `bluetooth`, since it is dealt no channels, or
-`bluetooth…` while the change waits for the node's next heartbeat. Taking the scan off shows as its
-new share, pending. `wartui status` prints a `bluetooth` line naming the slot, or `none`.
+the fleet. `wartui bluetooth` sets the same slot from the command line. Whichever node heartbeats
+from that slot holds the scan, so a node swapped into the socket takes it over. That node's
+`channels` reads `bluetooth`, since it is dealt no channels, or `bluetooth…` while the change waits
+for the node's next heartbeat. Taking the scan off shows as its new share, pending. `wartui status`
+prints a `bluetooth` line naming the slot, or `none`.
+
+```sh
+wartui bluetooth                # the slot the bridge holds
+wartui bluetooth N3             # give the scan to N3, then print the slot the bridge reports
+wartui bluetooth none           # take the scan off the fleet
+wartui bluetooth N3 --bridge 44:C0
+```
+
+It resolves one bridge and takes `--config PATH` as `pool` does. A slot is named as the fleet table
+names it, either case, and a bridge with no carrier takes only `none`. A slot the bridge could not
+save prints its `fault` line, and the command fails when the slot read back is not the one sent.
 
 **It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A Bluetooth
 controller left free takes it whenever the node is otherwise idle
@@ -1007,7 +1020,7 @@ and keeps the first that answers the link protocol. `run` saves that address to 
 `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only that port. A
 capture given `--bridge` saves the named board once it answers, since naming it for a capture is
 choosing it. `flash-bridge` saves the board it found and flashed. `status`, `sniff`, `reset`,
-`power-cycle`, `fan`, `pool` and `ota` read it and save nothing, so questioning a board changes
+`power-cycle`, `fan`, `pool`, `bluetooth` and `ota` read it and save nothing, so questioning a board changes
 nothing later, and `flash-fleet` never reads it. An answering board is held for the run: unplug the
 bridge to reflash a node, and wartui waits rather than transmit into it.
 

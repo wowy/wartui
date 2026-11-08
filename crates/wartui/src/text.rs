@@ -43,6 +43,19 @@ pub(crate) fn slot_named(board: NodeBoard, name: &str) -> Result<Slot, String> {
     })
 }
 
+/// The slot `name` means on a carrier `board`, or why it is refused: `no_carrier` for a bridge
+/// with no carrier, and otherwise the names the board does take.
+pub(crate) fn carrier_slot_named(
+    board: NodeBoard,
+    name: &str,
+    no_carrier: &str,
+) -> Result<Slot, String> {
+    if !board.is_carrier() {
+        return Err(no_carrier.to_owned());
+    }
+    slot_named(board, name)
+}
+
 /// What the operator calls a node: its slot's label, which is on the carrier for them to see, or
 /// the tail of its address for a node with no slot, which has nothing else to go by.
 pub(crate) fn node_name(board: NodeBoard, slot: Option<Slot>, mac: &Mac) -> String {
