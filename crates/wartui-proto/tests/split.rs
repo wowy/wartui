@@ -177,6 +177,7 @@ fn pair_status_sums_host_and_radio_drops() {
         rx_oversize: 2,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Eu,
+        present: 0b101,
     };
     match pair.status(3_000, p4) {
         BridgeToHost::Status {
@@ -189,8 +190,10 @@ fn pair_status_sums_host_and_radio_drops() {
             host_uart_errors,
             fan,
             pool,
+            present,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
+            assert_eq!(present, 0b101, "passed through");
             assert_eq!(host_uart_errors, 9);
             assert_eq!(fan.and_then(|fan| fan.rpm), Some(1830), "passed through");
             assert_eq!(pool, ChannelPool::Eu, "passed through");
@@ -359,6 +362,7 @@ fn p4_zero() -> P4Counters {
         rx_oversize: 0,
         fan: None,
         pool: ChannelPool::All,
+        present: 0,
     }
 }
 

@@ -18,7 +18,7 @@ pub const SEND_TIMEOUT: Duration =
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// How long without a heartbeat before a node stops counting towards topology. A fixed host
-    /// constant that no config key or flag sets: 60 s is twelve of a node's 5 s heartbeats.
+    /// constant that no config key or flag sets: 15 s is three of a node's 5 s heartbeats.
     pub topology_timeout: Duration,
     /// How often to ask the bridge for its counters.
     pub status_interval: Duration,
@@ -52,7 +52,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            topology_timeout: Duration::from_secs(60),
+            topology_timeout: Duration::from_secs(15),
             status_interval: Duration::from_secs(5),
             tail_len: 200,
             record_raw: false,

@@ -431,6 +431,7 @@ impl Shared {
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
             pool: self.pool.get(),
+            present: self.nodes.present(),
         };
         let status = self.pair.borrow().status(now_ms(), counters);
         self.push_host(&status);

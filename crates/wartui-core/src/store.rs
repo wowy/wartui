@@ -186,7 +186,8 @@ CREATE TABLE IF NOT EXISTS observation (
 -- the host's frames arrive over: host bytes lost or corrupted, as while the P4 writes its own
 -- flash. `fan_duty` is the carrier's lid fan duty in force, in percent, and `fan_rpm` its speed
 -- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
--- the bridge's first window since boot.
+-- the bridge's first window since boot. `slots_present` is the slots the bridge counted holding a
+-- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7).
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -206,7 +207,8 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   radio_link_radio_uart_errors INTEGER NOT NULL,
   host_uart_errors INTEGER NOT NULL,
   fan_duty INTEGER,
-  fan_rpm INTEGER
+  fan_rpm INTEGER,
+  slots_present INTEGER NOT NULL
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
@@ -1221,8 +1223,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
                         radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors,
-                        fan_duty, fan_rpm)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                        fan_duty, fan_rpm, slots_present)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1243,6 +1245,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.host_uart_errors,
                     status.fan.map(|fan| fan.duty.get()),
                     status.fan.and_then(|fan| fan.rpm),
+                    status.slots_present,
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1333,6 +1336,7 @@ mod tests {
             radio_link: Default::default(),
             host_uart_errors: 0,
             fan: None,
+            slots_present: 0,
         })
     }
 

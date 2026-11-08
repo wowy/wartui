@@ -174,6 +174,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         host_uart_errors: 0,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Us,
+        present: 0b11_1111,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -648,6 +649,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::Eu,
+        present: 0,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -726,6 +728,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         host_uart_errors: 9,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
         pool: ChannelPool::All,
+        present: u32::MAX,
     };
     assert_eq!(round_trip(&status), status);
 }
@@ -801,9 +804,9 @@ fn link_refuses_set_fan_when_duty_is_over_100() {
 }
 
 #[test]
-fn link_codec_pins_fan_and_pool_bytes_at_end_of_status_when_bridge_reports_them() {
+fn link_codec_pins_fan_pool_and_present_bytes_at_end_of_status_when_bridge_reports_them() {
     // `fan`: `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
-    // `pool`: postcard's variant index, last.
+    // `pool`: postcard's variant index. `present`: a varint, last.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
         rx_count: 0,
@@ -815,18 +818,22 @@ fn link_codec_pins_fan_and_pool_bytes_at_end_of_status_when_bridge_reports_them(
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        present: 0,
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let none = frame_body(&out[..n]);
-    assert_eq!(none[none.len() - 2..], [0, 2]);
-    if let BridgeToHost::Status { fan, pool, .. } = &mut status {
+    assert_eq!(none[none.len() - 3..], [0, 2, 0]);
+    if let BridgeToHost::Status { fan, pool, present, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
         *pool = ChannelPool::Us;
+        // A1, A3 and B3: bits 0, 2 and 9, 0x205.
+        *present = 1 << 0 | 1 << 2 | 1 << 9;
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
     let some = frame_body(&out[..n]);
-    assert_eq!(some[..none.len() - 2], none[..none.len() - 2]);
-    assert_eq!(some[none.len() - 2..], [1, 40, 1, 0xAC, 0x02, 0]);
+    assert_eq!(some[..none.len() - 3], none[..none.len() - 3]);
+    assert_eq!(some[none.len() - 3..], [1, 40, 1, 0xAC, 0x02, 0, 0x85, 0x04]);
+    assert_eq!(round_trip(&status), status);
 }
 
 #[test]

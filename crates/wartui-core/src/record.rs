@@ -111,6 +111,8 @@ pub struct BridgeStatusSeen {
     pub host_uart_errors: u32,
     /// Its lid fan: the duty in force and the last tach reading. `None` with no carrier.
     pub fan: Option<FanStats>,
+    /// The slots it counted present, bit n for `Slot` byte n.
+    pub slots_present: u32,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

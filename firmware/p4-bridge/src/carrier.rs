@@ -294,11 +294,13 @@ pub fn request(shared: &Shared, slot: Slot) {
 
 /// Note that the slots in `present` hold a node, a mask by slot byte, and have [`run`] recover
 /// them when every node dropped at once. Nothing without power control.
-pub fn presence(shared: &Shared, present: u16) {
+pub fn presence(shared: &Shared, present: u32) {
     let power = &shared.power;
     if !power.control {
         return;
     }
+    // The expander's masks are 16 bits, and a carrier's slot bytes all fit in them.
+    let present = present as u16;
     let mut watch = power.watch.get();
     if let Some(lost) = watch.note(present, power.cycling.get(), now_ms()) {
         power.lost.set(power.lost.get() | lost);
@@ -516,7 +518,7 @@ async fn try_scout(i2c: &I2cBus, shared: &Shared, off: u16, slot: Slot) -> Scout
     let bit = request_bit(slot);
     let wait = async {
         loop {
-            if shared.nodes.present() & bit != 0 {
+            if shared.nodes.present() & u32::from(bit) != 0 {
                 return Scouted::Answered;
             }
             if power.requests.get() != 0 {

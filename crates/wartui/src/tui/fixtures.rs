@@ -38,7 +38,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));
-    NodeView { state, alive: true, assignable }
+    NodeView { state, alive: true, on_bus: true, assignable }
 }
 
 /// Known only by sightings filed under its slot: no heartbeat yet.

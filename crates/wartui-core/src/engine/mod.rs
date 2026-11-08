@@ -11,6 +11,11 @@
 //! pool changes. Only the planner's re-cut decides what a node scans. The pool is the bridge's:
 //! the engine learns it from each `Status`, and cuts nothing before the first.
 //!
+//! A node leaves the plan on the first `Status` that shows its slot absent from the bus
+//! ([`FleetEngine::on_bus`]), within about a poll of losing power. The heartbeat timeout is the
+//! backstop for a node that still answers the bus but has stopped heartbeating: its bus re-arm
+//! runs in an interrupt, so a hung main loop still answers.
+//!
 //! [`Command::AssignBle`] gives one node the Bluetooth scan as its whole job.
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`]
@@ -136,6 +141,10 @@ pub struct FleetEngine {
     behind_peak_us: u64,
     /// The bridge's last answer to a power-cycle.
     power_answer: Option<PowerAnswer>,
+    /// The slots the latest `Status` showed present, bit n for [`Slot`] byte n, and when it
+    /// arrived. `None` until the first `Status` of a connection: a bridge met again may have
+    /// restarted, so heartbeats alone decide until it reports.
+    slots_present: Option<(u32, Instant)>,
 }
 
 impl FleetEngine {
@@ -190,6 +199,7 @@ impl FleetEngine {
             behind_since: None,
             behind_peak_us: 0,
             power_answer: None,
+            slots_present: None,
             config,
         }
     }
@@ -213,6 +223,7 @@ impl FleetEngine {
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
+                self.slots_present = None;
                 // Start caught up. Every record from here on was produced after this connection
                 // began: the bridge queues nothing for an absent host and clears its queue when one
                 // connects, and the transport drops what was already past that queue, which
@@ -229,6 +240,7 @@ impl FleetEngine {
                 self.bridge_lacks_gps = false;
                 self.link_up_since = None;
                 self.link_error = Some(reason);
+                self.slots_present = None;
                 self.reset_arrivals();
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
@@ -283,11 +295,12 @@ impl FleetEngine {
         }
     }
 
-    /// Log every node that has gone past the topology timeout, once.
+    /// Log every node that has left the fleet, once, with why: off the bus, or silent past the
+    /// topology timeout.
     ///
     /// Such a node is out of the plan already. Waits until the link has been up a whole timeout:
     /// an outage silences every node at once, and until heartbeats flow again after a reconnect,
-    /// a live node looks a minute silent.
+    /// a live node looks a whole timeout silent.
     fn note_departures(&mut self, now: Now) {
         let settled = self
             .link_up_since
@@ -295,18 +308,19 @@ impl FleetEngine {
         if !settled {
             return;
         }
-        let gone: Vec<(Mac, Option<u64>)> = self
+        let gone: Vec<(Mac, Option<u64>, &str)> = self
             .nodes
             .values()
             .filter(|node| node.last_heartbeat.is_some() && !node.departed)
             .filter(|node| !self.is_alive(node, now))
             .map(|node| {
                 let silent = node.last_heartbeat.map(|last| now.mono.duration_since(last));
-                (node.mac, silent.map(|silent| silent.as_millis() as u64))
+                let reason = if self.on_bus(node) { "silent" } else { "off bus" };
+                (node.mac, silent.map(|silent| silent.as_millis() as u64), reason)
             })
             .collect();
-        for (mac, silent_ms) in gone {
-            tracing::info!(mac = %mac::full(&mac), silent_ms, "node left the fleet");
+        for (mac, silent_ms, reason) in gone {
+            tracing::info!(mac = %mac::full(&mac), reason, silent_ms, "node left the fleet");
             if let Some(node) = self.nodes.get_mut(&mac) {
                 node.departed = true;
             }
@@ -384,6 +398,7 @@ impl FleetEngine {
                 host_uart_errors,
                 fan,
                 pool,
+                present,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -409,8 +424,12 @@ impl FleetEngine {
                     radio_link: *radio_link,
                     host_uart_errors: *host_uart_errors,
                     fan: *fan,
+                    slots_present: *present,
                 }));
+                self.slots_present = Some((*present, now.mono));
                 self.on_bridge_pool(*pool);
+                // A node off the bus leaves the plan now, not on the next tick.
+                self.replan(now);
             }
             // Bridge diagnostics are the transport's to log. The engine reads only those that
             // say whether the bridge has a GPS receiver, for the view.
@@ -434,11 +453,27 @@ impl FleetEngine {
         }
     }
 
-    /// Whether a node has heartbeated recently enough to hold an assignment.
+    /// Whether a node has heartbeated recently enough to hold an assignment, and is on the bus.
     #[must_use]
     pub fn is_alive(&self, node: &NodeState, now: Now) -> bool {
         node.last_heartbeat
             .is_some_and(|last| now.mono.duration_since(last) < self.config.topology_timeout)
+            && self.on_bus(node)
+    }
+
+    /// Whether a node's slot is on the bus, as far as the bridge has said. False only when the
+    /// latest `Status` shows the node's slot absent and the node has not heartbeated since.
+    ///
+    /// A heartbeat after that `Status` means the node is back. A `Status` is a priority frame and
+    /// overtakes bulk node frames, so a heartbeat read after it is almost always newer. A
+    /// heartbeat queued behind bulk can still arrive after a `Status` that already shows its slot
+    /// absent: the node rejoins until the next `Status`, at the cost of one extra re-cut.
+    #[must_use]
+    pub fn on_bus(&self, node: &NodeState) -> bool {
+        let (Some((present, at)), Some(slot)) = (self.slots_present, node.slot) else {
+            return true;
+        };
+        present & 1 << slot.as_u8() != 0 || node.last_heartbeat.is_some_and(|last| last > at)
     }
 
     /// Whether a node can be given channels.
