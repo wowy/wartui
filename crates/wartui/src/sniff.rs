@@ -181,7 +181,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             if info.node_board.is_carrier() {
                 println!("#   nodes on {}", info.node_board);
             } else {
-                println!("#   {}, so no node is driven", info.node_board);
+                println!("#   {}", info.node_board);
             }
             counts.board = Some(info.node_board);
         }

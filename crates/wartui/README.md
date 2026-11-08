@@ -1049,7 +1049,7 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   writes its own flash during `flash-bridge`; the update rewinds over them. Outside an update it
   should stay 0.
 - **`board  …`**: what carries the nodes, `carrier-6`, `carrier-10` or `carrier-14`, and the slot
-  names it takes, or `no carrier, so no node is driven`.
+  names it takes, or `no carrier`, beside the fault saying no node is driven.
 - **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the

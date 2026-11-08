@@ -193,6 +193,10 @@ def provenance(db, ctx):
         print(f"  board     {board}  (slots below are bus names: A1 is N1, B1 is N{per_bus + 1})")
     else:
         print(f"  board     {board}")
+    if board == "no carrier":
+        flag("WARN", "capture",
+             "node_board='no carrier': the P4 found no wartui-carrier at boot and drove no node",
+             "SELECT node_board FROM capture")
     print(f"  simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")

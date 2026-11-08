@@ -108,9 +108,6 @@ impl NodeBoard {
     /// take: on a carrier only the `N` names it drives, and with no carrier none.
     #[must_use]
     pub fn parse_label(self, text: &str) -> Option<Slot> {
-        if !self.is_carrier() {
-            return None;
-        }
         let digits = text.strip_prefix(['N', 'n'])?;
         // `u8::from_str` takes a sign and leading zeros, which no silk name has.
         if digits.is_empty()
@@ -167,7 +164,7 @@ pub struct SlotLabel {
 impl fmt::Display for SlotLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { board, slot } = *self;
-        if board.is_carrier() && board.drives(slot) {
+        if board.drives(slot) {
             write!(f, "N{}", slot.bus() * board.per_bus() + slot.index() + 1)
         } else {
             write!(f, "{slot}")
