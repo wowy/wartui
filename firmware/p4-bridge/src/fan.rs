@@ -1,18 +1,14 @@
 //! The carrier's lid fan, a Noctua NF-A6x15 5V PWM: its PWM on GPIO51, its tach on GPIO52, and
-//! the duty the P4 keeps on flash. `wartui_proto::fan` has the wave, the tach arithmetic and the
-//! record's layout.
+//! the duty the P4 keeps on flash. `wartui_proto::fan` has the wave and the tach arithmetic.
 //!
 //! **Only on a carrier.** The bench has no fan header, so there [`run`] never configures GPIO51
-//! or GPIO52, the stored duty is never read or written, a `SetFan` is ignored and `Status.fan` is
-//! `None`.
+//! or GPIO52, the duty is never written, a `SetFan` is ignored and `Status.fan` is `None`. The
+//! sector is still read at boot there, for the pool.
 //!
-//! **The P4 is the duty's system of record.** It boots into the duty stored in the first sector
-//! of its `nvs` partition, or 100 % when none is stored or the partition does not read, before
-//! the futures start, and holds it with no host present. A `SetFan` ([`set`]) applies at once and
-//! is written only when it differs from the stored duty, so a repeat costs a sector read and no
-//! flash write. Each write parks core 1, as every P4 flash write does (`wartui_firmware::ota`),
-//! and one change in 1024 erases the sector first. A write that fails leaves the duty applied
-//! until reboot and says so to the host, and the same `SetFan` again retries it.
+//! **The P4 is the duty's system of record.** It boots into the duty stored in its settings
+//! sector (`src/settings.rs`), or 100 % when none is stored or the partition does not read, and
+//! holds it with no host present. A `SetFan` ([`set`]) applies at once and is stored as every
+//! setting is.
 //!
 //! **GPIO51 is inverted**: high holds the fan's PWM input low. The RMT drives it, since this
 //! esp-hal has no LEDC driver for the P4. Its counter runs at [`RMT_HZ`], so one 40 µs period at
@@ -28,8 +24,8 @@
 //! **No reading spans a duty change.** A change discards the window in progress, and the speed
 //! reads `None` until a window that began after it ends, so a reading is one duty's.
 
-use core::cell::{Cell, RefCell};
-use core::fmt::{self, Write};
+use core::cell::Cell;
+use core::fmt::Write;
 use core::future::pending;
 
 use embassy_futures::join::join;
@@ -45,15 +41,12 @@ use esp_hal::rmt::{
     TxChannelCreator,
 };
 use esp_hal::time::Rate;
-use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::ota::Fault;
-use wartui_proto::fan::store::{self, Next};
+use static_cell::StaticCell;
 use wartui_proto::fan::{FanDuty, FanStats, PWM_HZ, Pwm, TACH_WINDOW_MS, TachFilter, pwm, rpm};
 use wartui_proto::link::LogStr;
-use wartui_proto::ota::SECTOR;
+use wartui_proto::settings::Setting;
 
 use crate::Shared;
-use crate::update::Updates;
 
 /// The RMT counter's clock: 80 MHz divided by 8.
 const RMT_HZ: u32 = 10_000_000;
@@ -61,9 +54,6 @@ const RMT_HZ: u32 = 10_000_000;
 /// Ticks in one PWM period: 400 for 40 µs.
 #[allow(clippy::cast_possible_truncation)]
 const PERIOD_TICKS: u16 = (RMT_HZ / PWM_HZ) as u16;
-
-/// The sector's image, read before each write. Static, to keep 4 KB off the stack.
-static SECTOR_IMAGE: ConstStaticCell<[u8; SECTOR]> = ConstStaticCell::new([0; SECTOR]);
 
 /// Static, to keep it out of `main`'s future.
 static FAN: StaticCell<Fan> = StaticCell::new();
@@ -85,30 +75,21 @@ pub struct Fan {
     generation: Cell<u32>,
     /// Raised when `duty` changes, so [`run`] applies it.
     changed: Signal<NoopRawMutex, ()>,
-    sector: RefCell<&'static mut [u8; SECTOR]>,
 }
 
 impl Fan {
-    /// The fan at the stored duty, or 100 % when none reads. Called once, on a carrier, before
-    /// the futures start.
-    ///
-    /// Out of line, as `update::boot` is.
+    /// The fan at the `stored` duty, or 100 % with none. Called once, on a carrier, before the
+    /// futures start.
     ///
     /// # Panics
-    /// If called twice: the fan and its sector image are statics taken once.
+    /// If called twice: the fan is a static taken once.
     #[inline(never)]
-    pub fn boot(updates: &mut Updates) -> &'static Self {
-        let sector = SECTOR_IMAGE.take();
-        let stored = updates
-            .settings()
-            .and_then(|mut settings| settings.read(sector).ok())
-            .and_then(|()| store::read(sector));
+    pub fn boot(stored: Option<FanDuty>) -> &'static Self {
         FAN.init_with(|| Self {
             duty: Cell::new(stored.unwrap_or(FanDuty::FULL)),
             rpm: Cell::new(None),
             generation: Cell::new(0),
             changed: Signal::new(),
-            sector: RefCell::new(sector),
         })
     }
 
@@ -129,57 +110,11 @@ pub fn set(shared: &Shared, duty: FanDuty) {
         fan.generation.set(fan.generation.get().wrapping_add(1));
         fan.changed.signal(());
     }
-    if let Err(why) = save(shared, fan, duty) {
+    if let Err(why) = crate::settings::save(shared, Setting::Fan(duty)) {
         let mut message = LogStr::new();
         let _ = write!(message, "fan duty {duty} not saved, so it holds until reboot: {why}");
         shared.push_error(&message);
     }
-}
-
-/// Why a duty was not saved.
-enum Unsaved {
-    /// The table has no `nvs` partition.
-    NoPartition,
-    /// Reading, erasing or writing the sector.
-    Flash(Fault),
-}
-
-impl fmt::Display for Unsaved {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoPartition => f.write_str("no nvs partition"),
-            Self::Flash(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl From<Fault> for Unsaved {
-    fn from(err: Fault) -> Self {
-        Self::Flash(err)
-    }
-}
-
-/// Write `duty` at the sector's next erased word, erasing it first when it is full, unless the
-/// sector already holds `duty`.
-fn save(shared: &Shared, fan: &Fan, duty: FanDuty) -> Result<(), Unsaved> {
-    let mut updates = shared.updates.borrow_mut();
-    let mut settings = updates.settings().ok_or(Unsaved::NoPartition)?;
-    let mut image = fan.sector.borrow_mut();
-    settings.read(&mut image)?;
-    if store::read(&image) == Some(duty) {
-        return Ok(());
-    }
-    let at = match store::next(&image) {
-        Next::At(at) => at,
-        Next::Erase => {
-            settings.erase()?;
-            0
-        }
-    };
-    // `at` is inside one sector.
-    #[allow(clippy::cast_possible_truncation)]
-    settings.write(at as u32, &store::record(duty))?;
-    Ok(())
 }
 
 /// Drive the fan and read its tach forever, on a carrier; on the bench, wait forever and touch

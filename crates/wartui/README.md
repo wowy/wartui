@@ -20,6 +20,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `power-cycle`  | Switch one node off and on through the carrier board; see "Power-cycling a node"    |
 | `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
+| `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -47,8 +48,8 @@ slot moves its assignment with it on its next heartbeat.
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The channel pool and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is
-global; see "When nothing arrives".
+The bridge GPS rate has no flag; see "Config file". The channel pool has a command, `wartui pool`,
+and a settings row; see "The channel pool". `--log-file PATH` is global; see "When nothing arrives".
 
 ### Capture metadata
 
@@ -66,7 +67,8 @@ The capture records the host build and its settings in SQLite metadata:
 | `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
 
 Settings include the channel pool, raw recording, positioning configuration and Bluetooth
-preference. They describe desired host settings, not a radio's acknowledgment or adoption.
+preference. The pool is the one the bridge reports, `none` before its first status; the rest are
+desired host settings. None of them says a node adopted anything.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
@@ -282,7 +284,6 @@ site queues nothing; one the site already queued is recorded in the capture.
 `wartui.toml` holds settings an operator wants to stop typing every run:
 
 ```toml
-pool = "us"
 excluded-ssids = ["HomeNet", "Pixel 9"]
 
 [bluetooth]
@@ -303,7 +304,6 @@ wdgwars = ""
 
 | Key                    | Default | What it is                                                                     |
 |------------------------|---------|--------------------------------------------------------------------------------|
-| `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"                    |
 | `excluded-ssids`       | `[]`    | Wi-Fi networks never captured, matched exactly; see below                      |
 | `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"                      |
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
@@ -314,11 +314,11 @@ wdgwars = ""
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
-an unknown `pool`, a malformed `node` or `mac`, any of them or `serial` beside its table's
-`remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
-refused too, naming the file and key. `status`, `sniff`, `reset`, `power-cycle`, `fan` and `ota`
-read only `[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it
-cannot stop them.
+a malformed `node` or `mac`, any of them or `serial` beside its table's `remember = false`, or an
+`excluded-ssids` entry that is empty, over 32 bytes, or listed twice is refused too, naming the file
+and key. `status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool` and `ota` read only
+`[bridge] mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop
+them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save,
 `b` writes the Bluetooth node, and `run` writes `[bridge] mac` and `serial` when the bridge it
@@ -660,10 +660,32 @@ stored. One it could not save holds until its next reboot, and `wartui fan` prin
 `fault` line saying so. Setting the same duty again retries the save.
 
 In `run`, settings' `fan` row shows the duty the bridge last reported and steps it by 5 %. `Enter`
-sends it only when the row moved; `no fan` means no status has reported one. While the link is up,
-the header shows the fan after the bridge, as `fan 40% 1830 rpm`, or `fan 40%` with no reading: in
-the bridge's first second, and for a second or two after a duty change, since no reading spans
-two duties. `wartui status` prints a `fan` line too.
+sends it only when the row moved; `no fan` means the bridge reported none, and `no bridge` that the
+link is down. While the link is up, the header shows the fan after the bridge, as
+`fan 40% 1830 rpm`, or `fan 40%` with no reading: in the bridge's first second, and for a second or
+two after a duty change, since no reading spans two duties. `wartui status` prints a `fan` line too.
+
+### The channel pool
+
+The bridge keeps the channel pool in its own flash and boots into it, so the pool holds across its
+reboots and with no host attached; `wartui.toml` holds none. Every bridge holds one, carrier or
+not, and one with nothing stored holds `all`. "Channel pools" has what each pool covers.
+
+```sh
+wartui pool                 # the pool the bridge holds
+wartui pool eu              # set EU, then print the pool the bridge reports
+wartui pool us --bridge 44:C0
+```
+
+It resolves one bridge and takes `--config PATH` as `fan` does. The bridge writes a pool only when
+it differs from the one it stored. One it could not save holds until its next reboot, and
+`wartui pool` prints the bridge's `fault` line saying so. Setting the same pool again retries the
+save.
+
+In `run`, settings' `pool` row shows the pool the bridge last reported. `Enter` sends it only when
+the row moved; `no bridge` means the link is down or no status has reported a pool yet, so there is
+nothing to send it to. The header shows the
+pool once the bridge has reported one, and `wartui status` prints a `pool` line too.
 
 ## Keyboard commands
 
@@ -699,7 +721,7 @@ key help for a few seconds; see "Power-cycling a node".
 | `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
 | Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
-| `Enter`             | Apply every row; save them to `wartui.toml`, the fan to the bridge  |
+| `Enter`             | Apply every row; pool and fan to the bridge, rest to `wartui.toml`  |
 | `Esc` / `q`         | Close without changing anything                                     |
 | `ctrl-c`            | Quit                                                                |
 
@@ -715,9 +737,9 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-The rows are the pool (`all → eu → us`), the `fan` (0 to 100 %, by 5; see "The lid fan"),
-`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
-`wdgwars` API key. `excluded ssids` shows how many are
+The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5;
+see "The lid fan"), `remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`),
+`excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are
 listed, or `none`, and opens a page that lists them. While an SSID is being typed there, every
 letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already listed,
 and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the remembered
@@ -725,19 +747,20 @@ bridge but none of the rows, and returns to the rows; edits to the rows stay pen
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
-the engine and writes every row shown but the fan to `pool`, `excluded-ssids`, `[bluetooth]`,
-`[bridge]`, and `[api-keys]`, whatever was there, and settings closes. The fan goes to the bridge,
-which keeps it. If the engine is not accepting commands,
-nothing is sent or written, and settings stays open with its edits. A moved pool re-cuts the fleet.
-Each node takes its new share on its next heartbeat, emptying its dedup ring when its share
-changes.
+the engine and writes every row shown but the pool and the fan to `excluded-ssids`, `[bluetooth]`,
+`[bridge]`, and `[api-keys]`, whatever was there, and settings closes. The pool and the fan go to
+the bridge, which keeps them, and only when their rows moved; neither is written to `wartui.toml`.
+If the engine is not accepting commands, nothing is sent or written, and settings stays open with
+its edits. A pool the bridge takes re-cuts the fleet once the status asked for behind it reports
+the pool. Each node takes its new share on its next heartbeat, emptying its dedup ring when its
+share changes.
 
 ## How channels are assigned
 
 **The planner cuts the pool, and nothing else does.** It deals the pool across every heartbeating,
 sniffing node. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"), or the
-pool changes in settings. The header shows its inputs: `auto — 4 of 5` is four heartbeating nodes of
-five seen.
+bridge reports another pool (§ "Channel pools"). The header shows its inputs: `auto — 4 of 5` is
+four heartbeating nodes of five seen.
 
 **A changed share waits for the node's next heartbeat.** An assignment answers a heartbeat, through
 the node-bus slot that heartbeat came from, and an assigned node heartbeats every 5 s, so an
@@ -777,9 +800,11 @@ sweeps no Wi-Fi at all, and the fault box says so.
 
 ## Channel pools
 
-`pool = "all"` is the default: everything a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
-UNII-4 (169, 173, 177). A node only parks and reads beacons, so a pool sets where it listens, never
-what it emits: the choice is coverage, not legality.
+The bridge holds the pool: it keeps it in its own flash, boots into it, and reports it in every
+status. `run`'s planner deals what the bridge reports, and cuts nothing before the first status
+arrives. A bridge with nothing stored holds `all`, the default: everything a node can tune, 2.4 GHz
+1–13 and all of 5 GHz including UNII-4 (169, 173, 177). A node only parks and reads beacons, so a
+pool sets where it listens, never what it emits: the choice is coverage, not legality.
 
 | Pool  | 2.4 GHz | 5 GHz  | Channels |
 |-------|---------|--------|----------|
@@ -790,6 +815,8 @@ what it emits: the choice is coverage, not legality.
 `us` is what the FCC permits: no 12, 13, or UNII-4. `eu` is what ETSI permits: 5 GHz stops at 140,
 because 144's twenty megahertz cross the 5725 MHz edge and 149 up is another band. Channel 14 is in
 no pool; `esp-radio` cannot reach it.
+
+Set it from settings (`c`) or with `wartui pool`; see "The channel pool".
 
 An assignment's forty-two-bit mask can name any subset. The planner deals round-robin, pool index
 _k_ to node _k mod n_, so every node carries both bands. A block split would put one node on all of
@@ -1028,6 +1055,7 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
+- **`pool  …`**: the channel pool the bridge holds, which `run` deals; see "Channel pools".
 
 `wartui reset` takes about thirty seconds to fail on a node named by path. The board it is for
 answers nothing, so it transmits before anything has identified itself. A node that is not reading

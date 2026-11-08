@@ -14,7 +14,8 @@
 //! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes,
 //! and holds the messages a node and the P4 exchange over it. [`carrier`] reads the carrier
 //! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
-//! carrier's lid fan: its duty, its PWM wave and tach reading, and the record the P4 stores.
+//! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
+//! the P4 keeps its settings in.
 
 #![no_std]
 
@@ -36,6 +37,7 @@ pub mod pending;
 pub mod plan;
 pub mod radio_link;
 pub mod reset;
+pub mod settings;
 pub mod split;
 
 /// Re-exported so consumers can build link payloads without depending on

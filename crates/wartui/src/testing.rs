@@ -10,7 +10,6 @@ use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig};
 use wartui_proto::bus::{RecordKind, Slot};
-use wartui_proto::plan::ChannelPool;
 
 use crate::upload::{Prepare, Prepared};
 
@@ -56,7 +55,7 @@ pub(crate) fn capture_simulated(
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated };
+    let info = CaptureInfo { notes: None, simulated };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();

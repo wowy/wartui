@@ -153,8 +153,8 @@ pub(super) fn busy() -> Snapshot {
         }),
         link_up: true,
         link_error: None,
-        // The default, so an unrelated test cannot trip the pool row's save rule.
-        pool: ChannelPool::All,
+        // What a bridge with none stored reports.
+        pool: Some(ChannelPool::All),
         plan: None,
         ble_node: None,
         preferred_ble: None,

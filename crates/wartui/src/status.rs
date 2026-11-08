@@ -12,7 +12,8 @@
 //! `oversize` counts node records the bridge dropped for being longer than any node of
 //! this build sends: a node on another build.
 //!
-//! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed.
+//! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed. `pool` is
+//! the channel pool the bridge holds, which `run`'s planner deals.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -90,6 +91,7 @@ pub async fn run(args: Args) -> Result<()> {
         radio_link,
         host_uart_errors,
         fan,
+        pool,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -100,6 +102,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
+    println!("pool       {pool}");
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
@@ -396,6 +399,7 @@ mod tests {
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
             fan: None,
+            pool: wartui_proto::plan::ChannelPool::All,
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

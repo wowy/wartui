@@ -311,7 +311,7 @@ const _: () = assert!(
 ///
 /// A pool cannot make a node quiet; only the node firmware can. [`crate::beacon`] says
 /// why an active scan does not belong on DFS channels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
     ///
@@ -372,8 +372,8 @@ impl ChannelPool {
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
 ///
 /// A label, not an identifier. `wartui-core`'s `pool_name` keeps its own lowercase
-/// spelling for the `capture.channel_pool` column, which has stored rows behind it and
-/// must not follow this.
+/// spelling for the capture's settings rows, which has stored rows behind it and must not
+/// follow this.
 impl core::fmt::Display for ChannelPool {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {

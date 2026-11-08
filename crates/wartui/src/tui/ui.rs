@@ -401,7 +401,6 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
 
     use super::*;
-    use crate::run::PoolArg;
     use crate::tui::fixtures::*;
 
     #[test]
@@ -689,8 +688,11 @@ mod tests {
     fn ui_saves_preferred_node_when_b_pressed_with_remember_on() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        // A pool already in the file. `b` saves around it, not over it.
-        let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
+        // An excluded SSID already in the file. `b` saves around it, not over it.
+        let saved = config::Config {
+            excluded_ssids: vec!["HomeNet".to_owned()],
+            ..config::Config::default()
+        };
         config::save(&target, &saved).unwrap();
         let snapshot = busy();
         let node = snapshot.nodes[0].state.mac;
@@ -703,7 +705,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Command::AssignBle { mac: Some(node) });
         let file = config::load(Some(&target)).expect("a valid file");
         assert_eq!(file.bluetooth.node, Some(node));
-        assert_eq!(file.pool, Some(PoolArg::Us), "the pool already saved stays as it is");
+        assert_eq!(file.excluded_ssids, ["HomeNet"], "the list already saved stays as it is");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("remembered in"), "{notice}");
 
@@ -713,7 +715,7 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
         let file = config::load(Some(&target)).expect("a valid file");
         assert_eq!(file.bluetooth.node, None);
-        assert_eq!(file.pool, Some(PoolArg::Us));
+        assert_eq!(file.excluded_ssids, ["HomeNet"]);
         let notice = ui.notice(holding.now_ms).expect("a notice");
         assert!(notice.contains("forgotten in"), "{notice}");
     }

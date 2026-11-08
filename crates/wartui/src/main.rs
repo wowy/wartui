@@ -17,7 +17,7 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
-use wartui_proto::link::LoopPhase;
+use wartui_proto::link::{BridgeToHost, LoopPhase};
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -29,6 +29,7 @@ mod export;
 mod fan;
 mod flash;
 mod ota;
+mod pool;
 mod power_cycle;
 mod reset;
 mod run;
@@ -79,6 +80,8 @@ enum Command {
     PowerCycle(power_cycle::Args),
     /// Read or set the carrier's lid fan duty, which the bridge keeps across its reboots.
     Fan(fan::Args),
+    /// Read or set the channel pool, which the bridge keeps across its reboots.
+    Pool(pool::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -101,8 +104,8 @@ async fn main() -> Result<()> {
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
-        // `power-cycle`, `fan` and `ota` read a broken one as no bridge remembered, and `ports` and
-        // `flash-fleet` never read it.
+        // `power-cycle`, `fan`, `pool` and `ota` read a broken one as no bridge remembered, and
+        // `ports` and `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
         Some(Command::Fan(args)) => fan::run(args).await,
+        Some(Command::Pool(args)) => pool::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -273,7 +277,7 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
 
 /// Open the one bridge `named` resolves to, as `wartui reset` resolves it
 /// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
-/// `Ready`. `fan` and `power-cycle` connect through this.
+/// `Ready`. `fan`, `pool` and `power-cycle` connect through this.
 async fn connect_one(
     named: Option<&str>,
     config: Option<&Path>,
@@ -289,6 +293,22 @@ async fn connect_one(
     match tokio::time::timeout(CONNECT_NOTICE_AFTER, status::wait_for_ready(&mut link)).await {
         Ok(ready) => Ok((link, ready?)),
         Err(_) => anyhow::bail!("{}", no_bridge_notice(named)),
+    }
+}
+
+/// Wait `wait`, printing each fault the bridge reports meanwhile, such as a setting not saved.
+async fn settle(link: &mut LinkHandle, wait: Duration) -> Result<()> {
+    let until = tokio::time::Instant::now() + wait;
+    loop {
+        match tokio::time::timeout_at(until, link.recv()).await {
+            Err(_) => return Ok(()),
+            Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
+                println!("fault      {message}");
+            }
+            Ok(Some(LinkEvent::Disconnected { reason })) => anyhow::bail!("{reason}"),
+            Ok(Some(_)) => {}
+            Ok(None) => anyhow::bail!("the link closed"),
+        }
     }
 }
 
@@ -555,8 +575,8 @@ mod tests {
 
     #[test]
     fn cli_parser_rejects_removed_flags_when_given_before_or_after_subcommand() {
-        // The pool comes from `wartui.toml` or the settings modal; the store commits at
-        // its built-in interval.
+        // The bridge holds the pool, set with `wartui pool` or the settings modal; the store
+        // commits at its built-in interval.
         for flag in [["--pool", "eu"], ["--commit-interval", "500"]] {
             for args in [
                 ["wartui", flag[0], flag[1]].as_slice(),

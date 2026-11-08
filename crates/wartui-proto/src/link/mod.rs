@@ -28,6 +28,7 @@ use crate::bus::{NodeBoard, Slot};
 use crate::fan::{FanDuty, FanStats};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
+use crate::plan::ChannelPool;
 use crate::radio_link::update::OP_MAX;
 use crate::reset::ResetCause;
 use heapless::{String, Vec};
@@ -253,6 +254,14 @@ pub enum HostToBridge {
         /// The duty to run and store.
         duty: FanDuty,
     },
+    /// Run the channel pool `pool`, and store it so the P4 boots into it
+    /// ([`crate::settings`]). No answer: the next [`BridgeToHost::Status`] shows the pool in
+    /// force, and a failed save answers [`BridgeToHost::Error`]. Every P4 takes it, carrier or
+    /// not.
+    SetPool {
+        /// The pool to run and store.
+        pool: ChannelPool,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -313,6 +322,8 @@ pub enum BridgeToHost {
         host_uart_errors: u32,
         /// The carrier's lid fan, or `None` with no carrier.
         fan: Option<FanStats>,
+        /// The channel pool the bridge holds, which the host's planner deals.
+        pool: ChannelPool,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.

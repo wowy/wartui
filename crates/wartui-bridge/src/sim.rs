@@ -33,8 +33,9 @@
 //! verifies, and from the next `Begin` on, a chunk command is answered `NoImage`.
 //!
 //! Its board is a carrier, so it has a lid fan: a `SetFan` sets the duty `Status` reports, with a
-//! speed made up from it. It has no flash, so the duty lasts the simulator's life and starts at
-//! full.
+//! speed made up from it. A `SetPool` sets the pool `Status` reports, which starts at
+//! [`SimConfig::pool`]. It has no flash, and connects once and never reboots, so both last the
+//! simulator's life, and the duty starts at full.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -56,7 +57,7 @@ use wartui_proto::link::{
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::ota::{Receiver, SectorSink};
-use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
 
@@ -121,6 +122,9 @@ pub struct SimConfig {
     /// that reboots or whose host gate closes does. `None` by default. A test knob, for the
     /// host's answer to a lost cache.
     pub drop_cache_after: Option<u32>,
+    /// The channel pool the bridge holds when the simulator starts, which `Status` reports until
+    /// a `SetPool` changes it. [`ChannelPool::All`] by default, as a P4 with none stored.
+    pub pool: ChannelPool,
 }
 
 impl Default for SimConfig {
@@ -139,6 +143,7 @@ impl Default for SimConfig {
             mute_verified_node: None,
             no_image_answers: None,
             drop_cache_after: None,
+            pool: ChannelPool::All,
         }
     }
 }
@@ -280,7 +285,16 @@ impl SimTransport {
         let events = plumbing.events.clone();
         let no_image = self.config.no_image_answers.clone();
         let drop_cache = self.config.drop_cache_after;
-        tokio::spawn(run_bridge(plumbing, routes, started, attached_tx, no_image, drop_cache));
+        let pool = self.config.pool;
+        tokio::spawn(run_bridge(
+            plumbing,
+            routes,
+            started,
+            attached_tx,
+            no_image,
+            drop_cache,
+            pool,
+        ));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
                 node,
@@ -314,6 +328,7 @@ async fn run_bridge(
     attached: tokio::sync::watch::Sender<bool>,
     no_image: Option<Arc<AtomicU32>>,
     mut drop_cache_after: Option<u32>,
+    mut pool: ChannelPool,
 ) {
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
@@ -372,6 +387,7 @@ async fn run_bridge(
                 radio_link: RadioLinkStats::default(),
                 host_uart_errors: 0,
                 fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
+                pool,
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
@@ -394,7 +410,11 @@ async fn run_bridge(
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
-            // Answered by the next `Status`, as the P4's is.
+            // Both answered by the next `Status`, as the P4's are.
+            HostToBridge::SetPool { pool: wanted } => {
+                pool = wanted;
+                None
+            }
             HostToBridge::SetFan { duty } => {
                 fan_duty = duty;
                 None

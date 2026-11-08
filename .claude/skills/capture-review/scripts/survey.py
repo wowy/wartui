@@ -142,8 +142,8 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS
     section("capture")
-    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board",
-            "channel_pool", "notes", "simulated")
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "notes",
+            "simulated")
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
     end = row.get("ended_at")
@@ -169,7 +169,7 @@ def provenance(db, ctx):
         print(f"  board     {board}  (slots below are bus names: A1 is N1, B1 is N{per_bus + 1})")
     else:
         print(f"  board     {board}")
-    print(f"  pool      {row.get('channel_pool')}   simulated {row.get('simulated')}")
+    print(f"  simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")
     if row.get("simulated"):
@@ -211,6 +211,13 @@ def provenance(db, ctx):
         ctx["settings_final"] = dict(p.split("=", 1) for p in v.split(";") if "=" in p)
     # Thresholds read ctx["settings"]: the initial row overlaid with every later change, so a value
     # changed mid-run is judged by what was in force at the end. The changes are listed above.
+    # The pool is the bridge's: `none` until its first `Status`, then each change it reported.
+    # A capture with no initial row starts from its first change.
+    pools = [(None, ctx["settings"]["pool"])] if "pool" in ctx.get("settings", {}) else []
+    pools += [(at, ch["pool"][1]) for at, ch in ctx.get("settings_changes", []) if "pool" in ch]
+    if pools:
+        later = "".join(f" -> {new} at {rel(at)}" for at, new in pools[1:])
+        print(f"  pool      {pools[0][1]}{later}")
     if "settings_final" in ctx:
         ctx["settings"] = {**ctx.get("settings", {}), **ctx["settings_final"]}
     raw_values = {c[1] for _, ch in ctx.get("settings_changes", []) for k, c in ch.items()

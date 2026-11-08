@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::fan::{FanDuty, TACH_WINDOW_MS};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
@@ -57,7 +56,7 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(duty) = duty {
         link.send_bulk(HostToBridge::SetFan { duty }).context("queueing the fan duty")?;
         println!("setting the fan to {duty} on bridge {}", mac::full(&info.mac));
-        settle(&mut link, SETTLE).await?;
+        super::settle(&mut link, SETTLE).await?;
     }
 
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
@@ -79,22 +78,6 @@ pub async fn run(args: Args) -> Result<()> {
 /// Whether `board` has a fan, or why not: only a carrier has the header.
 fn has_fan(board: NodeBoard) -> Result<(), &'static str> {
     if board.is_carrier() { Ok(()) } else { Err(NO_FAN) }
-}
-
-/// Wait `wait`, printing each fault the bridge reports meanwhile, such as a duty not saved.
-async fn settle(link: &mut LinkHandle, wait: Duration) -> Result<()> {
-    let until = tokio::time::Instant::now() + wait;
-    loop {
-        match tokio::time::timeout_at(until, link.recv()).await {
-            Err(_) => return Ok(()),
-            Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
-                println!("fault      {message}");
-            }
-            Ok(Some(LinkEvent::Disconnected { reason })) => bail!("{reason}"),
-            Ok(Some(_)) => {}
-            Ok(None) => bail!("the link closed"),
-        }
-    }
 }
 
 #[cfg(test)]

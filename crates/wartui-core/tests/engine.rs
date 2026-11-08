@@ -64,16 +64,34 @@ impl Clock {
     }
 }
 
+/// An engine whose bridge has reported the default pool, as a run's first `Status` does.
 fn engine(config: EngineConfig, clock: &Clock) -> FleetEngine {
-    FleetEngine::new(config, clock.at(0))
+    engine_on(ChannelPool::default(), config, clock)
 }
 
-/// A config on the US pool, for the tests whose channel counts are its.
+/// An engine whose bridge has reported `pool`.
 ///
 /// The default pool is `All`; a test that asserts the shape of a pool names the
 /// one it means, so its arithmetic does not move when the default does.
-fn us_config() -> EngineConfig {
-    EngineConfig { pool: ChannelPool::Us, ..Default::default() }
+fn engine_on(pool: ChannelPool, config: EngineConfig, clock: &Clock) -> FleetEngine {
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    engine.handle(pool_status(pool), clock.at(0));
+    engine
+}
+
+/// A `Status` with every counter zero, reporting `pool`: where the planner learns its pool.
+fn pool_status(pool: ChannelPool) -> Event {
+    Event::Link(LinkEvent::Message(BridgeToHost::Status {
+        rx_count: 0,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: QueueStats::new(),
+        radio_link: RadioLinkStats::default(),
+        host_uart_errors: 0,
+        fan: None,
+        pool,
+    }))
 }
 
 thread_local! {
@@ -1377,7 +1395,7 @@ fn engine_remaps_slot_when_heartbeat_names_another_node() {
 #[test]
 fn engine_leaves_node_out_of_plan_when_another_node_takes_its_slot() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let slot = slot_of(NODE);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1912,6 +1930,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
             fan: None,
+            pool: ChannelPool::All,
         }))
     };
 
@@ -1964,6 +1983,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             radio_link,
             host_uart_errors: 0,
             fan,
+            pool: ChannelPool::All,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2036,6 +2056,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             radio_link: RadioLinkStats::default(),
             host_uart_errors: 0,
             fan: None,
+            pool: ChannelPool::All,
         })),
         clock.at(4),
     );
@@ -2216,7 +2237,7 @@ fn engine_addresses_assignment_to_slot_when_heartbeat_arrives_from_it() {
     let (_, to, kind, body) = &sent[0];
     assert_eq!((*to, *kind), (slot, DownType::Assign.as_u8()));
     let assign = Assign::decode(body).expect("a valid assignment");
-    assert_eq!(assign.channels, EngineConfig::default().pool.channels());
+    assert_eq!(assign.channels, ChannelPool::default().channels());
     assert_eq!(engine.nodes().next().expect("the node").slot, Some(slot));
 }
 
@@ -2240,7 +2261,7 @@ fn engine_leaves_slot_out_of_plan_when_it_sends_only_sightings() {
     // nodes plus a slot no heartbeat has named must partition the pool two ways, not
     // three. Three would leave a third of it assigned to a node nothing confirmed.
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(heartbeat(OTHER, 1), clock.at(1));
     engine.handle(observation(THIRD, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
@@ -2302,7 +2323,7 @@ fn engine_holds_ble_for_named_node_when_it_has_not_heartbeated() {
 #[test]
 fn engine_confirms_assignment_when_bridge_delivers_it() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     let (id, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
@@ -2406,8 +2427,8 @@ fn engine_records_silent_when_bridge_never_answers() {
 #[test]
 fn engine_keeps_ack_when_older_attempt_times_out() {
     let clock = Clock::new();
-    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..us_config() };
-    let mut engine = engine(config, &clock);
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let mut engine = engine_on(ChannelPool::Us, config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
 
     // The first attempt's answer is lost on the way back — a garbled USB frame.
@@ -2722,7 +2743,7 @@ fn wanted(engine: &FleetEngine) -> Vec<ChannelSet> {
 #[test]
 fn engine_partitions_whole_pool_when_nodes_join() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
@@ -2749,7 +2770,7 @@ fn engine_repartitions_when_membership_changes() {
     // assignment there is: no command reaches this, and no configuration turns
     // it off.
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
@@ -2801,7 +2822,7 @@ fn engine_reissues_every_share_when_node_joins() {
 #[test]
 fn engine_redeals_share_when_node_falls_silent() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
     engine.handle(heartbeat(peer(1), 1), clock.at(2));
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
@@ -2823,7 +2844,7 @@ fn engine_redeals_share_when_node_falls_silent() {
 #[test]
 fn engine_gives_whole_pool_once_when_fleet_is_one_node() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
 
     // Nothing here rotates: one contiguous range cannot say the US pool's two runs,
@@ -2865,7 +2886,7 @@ fn engine_recuts_both_ends_when_ble_scan_moves() {
     assert!(engine.nodes().all(|node| !node.confirmed.expect("planned").ble));
     assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, None);
 
-    let whole_pool = EngineConfig::default().pool.channels();
+    let whole_pool = ChannelPool::default().channels();
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
     // Bluetooth is the whole job, so the scan does not ride on the share — it takes
     // its place. One epoch carries both.
@@ -2965,7 +2986,7 @@ fn engine_reports_whole_pool_unreachable_when_lone_node_scans_ble() {
     assert_eq!(plan.node_count(), 1, "and the scanner is still its slot");
     assert_eq!(
         plan.unreachable(),
-        EngineConfig::default().pool.channels(),
+        ChannelPool::default().channels(),
         "every channel of the pool went into no share"
     );
 }
@@ -2992,8 +3013,7 @@ fn engine_returns_scanner_to_wifi_when_scan_taken_off() {
     // node the host does not think is the holder, and `b` would report a withdrawal that
     // never happened.
     let clock = Clock::new();
-    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
-    let mut engine = engine(config, &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
@@ -3022,8 +3042,7 @@ fn engine_returns_scanner_to_wifi_when_scan_taken_off() {
 fn engine_keeps_one_ble_scanner_when_scan_moves() {
     // The scan moved rather than withdrawn, so one node gives it up as another takes it.
     let clock = Clock::new();
-    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
-    let mut engine = engine(config, &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
@@ -3092,7 +3111,7 @@ fn engine_sends_nothing_when_plan_settled() {
 #[test]
 fn engine_reissues_under_new_epoch_when_rebooted_node_rejoins() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     engine.handle(delivered(first), clock.at(1));
@@ -3134,7 +3153,7 @@ fn departed(engine: &FleetEngine, mac: Mac) -> bool {
 #[test]
 fn engine_marks_node_departed_when_silent_past_topology_timeout() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3152,7 +3171,7 @@ fn engine_marks_node_departed_when_silent_past_topology_timeout() {
 #[test]
 fn engine_marks_node_departed_when_silent_since_reconnect() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3167,7 +3186,7 @@ fn engine_marks_node_departed_when_silent_since_reconnect() {
 #[test]
 fn engine_keeps_node_undeparted_when_link_down() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3354,7 +3373,7 @@ fn engine_reads_live_when_link_reconnects_after_falling_behind() {
 #[test]
 fn engine_reissues_nothing_when_same_bridge_reconnects() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3723,11 +3742,65 @@ fn engine_ignores_configured_preferred_ble_when_remember_off() {
 }
 
 // ---------------------------------------------------------------------------
-// Command::SetPool: the operator changing what the fleet partitions, mid-run.
+// The pool: the bridge's `Status` sets what the fleet partitions, and `Command::SetPool`
+// asks the bridge to change it.
 // ---------------------------------------------------------------------------
 
 fn set_pool(pool: ChannelPool) -> Event {
     Event::Command(Command::SetPool { pool })
+}
+
+#[test]
+fn engine_cuts_no_plan_when_no_status_has_arrived() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    caught_up(&mut engine, &clock);
+    for counter in 1..=3 {
+        let batch = engine.handle(heartbeat(NODE, counter), clock.at(counter.into()));
+        assert!(admins(&batch).is_empty(), "no pool, so nothing to deal");
+    }
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    assert_eq!((snapshot.pool, snapshot.plan), (None, None));
+    assert_eq!(counters(&engine).replans, 0);
+
+    engine.handle(pool_status(ChannelPool::Us), clock.at(4));
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 4), clock.at(5)));
+    assert_eq!(dst, NODE);
+    assert_eq!(admin.channels, ChannelPool::Us.channels(), "the pool the bridge reported");
+}
+
+#[test]
+fn engine_keeps_pool_when_link_drops() {
+    let clock = Clock::new();
+    let mut engine = engine_on(ChannelPool::Eu, EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(1));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(2),
+    );
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!(snapshot.pool, Some(ChannelPool::Eu));
+}
+
+#[test]
+fn engine_sends_set_pool_then_status_poll_when_operator_sets_pool() {
+    let clock = Clock::new();
+    let mut engine = settled_pair(&clock);
+
+    let batch = engine.handle(set_pool(ChannelPool::Us), clock.at(3));
+
+    // The bridge takes the pool before it answers the poll, so the `Status` carries it.
+    assert_eq!(
+        batch.bulk,
+        [HostToBridge::SetPool { pool: ChannelPool::Us }, HostToBridge::GetStatus]
+    );
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    assert_eq!(
+        engine.snapshot(clock.at(3), StoreStats::default()).pool,
+        Some(ChannelPool::default()),
+        "the pool is the bridge's until its `Status` says otherwise"
+    );
+    assert!(engine.nodes().all(|node| !node.dirty), "nothing re-cut");
 }
 
 /// Two nodes on the default pool, each holding its acknowledged share of it.
@@ -3750,13 +3823,13 @@ fn settled_pair(clock: &Clock) -> FleetEngine {
 }
 
 #[test]
-fn engine_recuts_fleet_when_pool_changes() {
+fn engine_recuts_fleet_when_status_reports_new_pool() {
     let clock = Clock::new();
     let mut engine = settled_pair(&clock);
     let replans_before = counters(&engine).replans;
 
-    let command = engine.handle(set_pool(ChannelPool::Us), clock.at(3));
-    assert!(command.urgent.is_empty(), "nothing sent until each node's own heartbeat");
+    let batch = engine.handle(pool_status(ChannelPool::Us), clock.at(3));
+    assert!(batch.urgent.is_empty(), "nothing sent until each node's own heartbeat");
 
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
     for node in engine.nodes() {
@@ -3766,7 +3839,7 @@ fn engine_recuts_fleet_when_pool_changes() {
         assert_ne!(desired.counter, confirmed.counter, "under a fresh epoch");
     }
     assert_eq!(counters(&engine).replans, replans_before + 1);
-    assert_eq!(engine.snapshot(clock.at(3), StoreStats::default()).pool, ChannelPool::Us);
+    assert_eq!(engine.snapshot(clock.at(3), StoreStats::default()).pool, Some(ChannelPool::Us));
 
     let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
     assert_eq!(dst, peer(0));
@@ -3774,16 +3847,16 @@ fn engine_recuts_fleet_when_pool_changes() {
 }
 
 #[test]
-fn engine_ignores_set_pool_when_pool_unchanged() {
+fn engine_keeps_plan_when_status_reports_same_pool() {
     let clock = Clock::new();
     let mut engine = settled_pair(&clock);
     let replans_before = counters(&engine).replans;
     let counters_before: Vec<u64> =
         engine.nodes().map(|node| node.confirmed.expect("acked").counter).collect();
 
-    let batch = engine.handle(set_pool(EngineConfig::default().pool), clock.at(3));
+    let batch = engine.handle(pool_status(ChannelPool::default()), clock.at(3));
 
-    assert!(batch.is_empty());
+    assert!(batch.urgent.is_empty() && batch.bulk.is_empty());
     assert!(engine.nodes().all(|node| !node.dirty), "nothing wanted a fresh epoch");
     let counters_after: Vec<u64> =
         engine.nodes().map(|node| node.confirmed.expect("acked").counter).collect();
@@ -3792,14 +3865,14 @@ fn engine_ignores_set_pool_when_pool_unchanged() {
 }
 
 #[test]
-fn engine_cuts_new_pool_when_first_node_heartbeats_after_set_pool() {
+fn engine_cuts_new_pool_when_first_node_heartbeats_after_status_changes_it() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
 
-    engine.handle(set_pool(ChannelPool::Us), clock.at(1));
+    engine.handle(pool_status(ChannelPool::Us), clock.at(1));
     let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
-    assert_eq!(snapshot.pool, ChannelPool::Us);
+    assert_eq!(snapshot.pool, Some(ChannelPool::Us));
     assert!(snapshot.plan.is_none(), "nobody to cut for");
 
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(2)));
@@ -3809,7 +3882,7 @@ fn engine_cuts_new_pool_when_first_node_heartbeats_after_set_pool() {
 #[test]
 fn engine_moves_node_into_pool_when_pool_narrowed() {
     // Three nodes on `all` share every channel, so each holds some the US pool leaves out.
-    // Keeping them would go on scanning what the operator just took out of the pool.
+    // Keeping them would go on scanning what the bridge just took out of the pool.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..3 {
@@ -3823,7 +3896,7 @@ fn engine_moves_node_into_pool_when_pool_narrowed() {
         "it holds a channel the new pool leaves out: {last:?}"
     );
 
-    engine.handle(set_pool(ChannelPool::Us), clock.at(20));
+    engine.handle(pool_status(ChannelPool::Us), clock.at(20));
 
     for node in engine.nodes() {
         let held = node.desired.or(node.confirmed).expect("in the plan");
@@ -3847,7 +3920,7 @@ fn engine_keeps_ble_node_unchanged_when_pool_changes() {
     let (id, ..) = sent_admin(&engine.handle(heartbeat(peer(1), 3), clock.at(4)));
     engine.handle(delivered(id), clock.at(4));
 
-    engine.handle(set_pool(ChannelPool::Us), clock.at(5));
+    engine.handle(pool_status(ChannelPool::Us), clock.at(5));
 
     let scanner = engine.nodes().find(|node| node.mac == peer(0)).expect("here");
     assert!(!scanner.dirty, "an empty share with the flag is the same under any pool");
@@ -3924,7 +3997,7 @@ impl Logs {
 #[test]
 fn engine_logs_node_joined_when_first_heartbeat_arrives() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
 
     let lines = Logs::during(|| {
         engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -3938,7 +4011,7 @@ fn engine_logs_node_joined_when_first_heartbeat_arrives() {
 #[test]
 fn engine_logs_node_left_when_heartbeats_stop_for_topology_timeout() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3957,7 +4030,7 @@ fn engine_logs_node_left_when_heartbeats_stop_for_topology_timeout() {
 #[test]
 fn engine_logs_node_returned_when_heartbeat_follows_departure() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -3976,7 +4049,7 @@ fn engine_logs_node_returned_when_heartbeat_follows_departure() {
 #[test]
 fn engine_logs_node_restarted_when_heartbeat_counter_decreases() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 175), clock.at(1));
 
     let lines = Logs::during(|| {
@@ -3992,7 +4065,7 @@ fn engine_logs_node_restarted_when_heartbeat_counter_decreases() {
 #[test]
 fn engine_logs_reset_cause_when_node_restarts() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 175), clock.at(1));
 
     let msg = HeartbeatMsg { reset_cause: ResetCause::Brownout, ..beat_msg(NODE, 2) };
@@ -4070,7 +4143,7 @@ fn engine_counts_fault_restarts_when_node_restarts_for_faults_again() {
 #[test]
 fn engine_logs_nothing_when_heartbeats_arrive_on_time() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));
@@ -4088,7 +4161,7 @@ fn engine_logs_nothing_when_heartbeats_arrive_on_time() {
 #[test]
 fn engine_logs_nothing_when_link_outage_holds_heartbeats_past_timeout() {
     let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
+    let mut engine = engine_on(ChannelPool::Us, EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(delivered(id), clock.at(1));

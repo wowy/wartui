@@ -114,15 +114,16 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         ));
     }
     // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
-    // so nothing sniffs at all.
+    // so nothing sniffs at all. A plan is cut only from a pool, so both are here.
     if let Some(plan) = snapshot.plan
+        && let Some(pool) = snapshot.pool
         && !plan.unreachable().is_empty()
     {
         faults.push(format!(
             "every node in this fleet is scanning Bluetooth, so none of the {} channels of the \
              {} pool is being swept",
             thousands(u64::from(plan.unreachable().len())),
-            snapshot.pool
+            pool
         ));
     }
     if let Some(gps) = &snapshot.gps {

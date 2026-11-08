@@ -36,11 +36,13 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         first.push(Span::raw(format!("  {fan}")));
     }
 
-    let mut second = vec![
-        Span::raw(format!("pool {}  ", snapshot.pool)),
+    // No pool before the bridge's first `Status`.
+    let mut second: Vec<Span> =
+        snapshot.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
+    second.extend([
         planning(snapshot),
         Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms))),
-    ];
+    ]);
     second.extend(position(snapshot));
 
     let body = vec![Line::from(first), Line::from(second)];
@@ -167,14 +169,21 @@ mod tests {
         // The header is the only place the pool is named. It spells each one as the
         // manual does.
         let mut snapshot = busy();
-        snapshot.pool = ChannelPool::Us;
+        snapshot.pool = Some(ChannelPool::Us);
         assert!(rendered(&snapshot).contains("pool US"));
 
-        snapshot.pool = ChannelPool::Eu;
+        snapshot.pool = Some(ChannelPool::Eu);
         assert!(rendered(&snapshot).contains("pool EU"));
 
-        snapshot.pool = ChannelPool::All;
+        snapshot.pool = Some(ChannelPool::All);
         assert!(rendered(&snapshot).contains("pool All"));
+    }
+
+    #[test]
+    fn header_omits_pool_when_bridge_has_reported_none() {
+        let mut snapshot = busy();
+        snapshot.pool = None;
+        assert!(!rendered(&snapshot).contains("pool"), "{}", rendered(&snapshot));
     }
 
     #[test]

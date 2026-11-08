@@ -130,7 +130,7 @@ have no README; their `//!` module docs hold the detail.
 | `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
 | Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
-| `Enter`             | Apply every row; save them to `wartui.toml`, the fan to the bridge  |
+| `Enter`             | Apply every row; pool and fan to the bridge, rest to `wartui.toml`  |
 | `Esc` / `q`         | Close without changing anything                                     |
 | `ctrl-c`            | Quit                                                                |
 
@@ -157,7 +157,7 @@ An assignment answers the node's next heartbeat. Heartbeats come every 5 seconds
 assigned, so a new assignment can take up to that long to land. Until then, the node's `channels`
 column reads `1: 1…`.
 
-Set the pool with the `pool` key in `wartui.toml` or from settings (`c`):
+Set the pool from settings (`c`) or with `wartui pool`. The bridge keeps it across its reboots:
 
 - `all` (default): every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz
 - `us`: 2.4 GHz 1–11 and 5 GHz 36–165

@@ -51,6 +51,7 @@ use crate::link::{
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
+use crate::plan::ChannelPool;
 use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use crate::reset::ResetCause;
 
@@ -126,6 +127,8 @@ pub struct P4Counters {
     pub rx_oversize: u32,
     /// The carrier's lid fan, or `None` with no carrier.
     pub fan: Option<FanStats>,
+    /// The channel pool in force.
+    pub pool: ChannelPool,
 }
 
 /// The P4's pair state.
@@ -506,6 +509,7 @@ impl Pair {
             rx_count,
             rx_oversize,
             fan,
+            pool,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -536,6 +540,7 @@ impl Pair {
             radio_link,
             host_uart_errors,
             fan,
+            pool,
         }
     }
 }

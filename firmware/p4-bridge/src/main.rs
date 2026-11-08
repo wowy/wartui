@@ -31,6 +31,10 @@
 //! - **the fan** (`src/fan.rs`), on a carrier only, drives the lid fan's PWM at the duty stored on
 //!   flash, which a host's `SetFan` changes, and reads its tach for `Status`.
 //!
+//! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
+//! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
+//! change there.
+//!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
 //! watchdog, and the first host frame once the C6 has said hello confirms the image
@@ -59,6 +63,7 @@ mod gps;
 mod host;
 mod link;
 mod radio;
+mod settings;
 mod update;
 
 use core::cell::{Cell, RefCell};
@@ -86,6 +91,7 @@ use esp_hal::uart::{
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
+use wartui_proto::ChannelPool;
 use wartui_proto::bus::PER_BUS;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
@@ -94,6 +100,7 @@ use wartui_proto::link::{
     ShortStr, encode_frame,
 };
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
+use wartui_proto::ota::SECTOR;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
@@ -130,6 +137,10 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
 /// Where the writer encodes the packet for the wire.
 static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
+
+/// What the futures share. Static, to keep it out of `main`'s future, which `.clippy.toml`'s
+/// stack threshold bounds.
+static SHARED: StaticCell<Shared> = StaticCell::new();
 
 /// I2C0, shared by the GPS reader and the carrier's expander. Both lock it per transaction, and
 /// every future is in one task, so the lock needs no more than [`NoopRawMutex`].
@@ -212,6 +223,10 @@ pub struct Shared {
     power: Power,
     /// The carrier's lid fan, or `None` on the bench.
     fan: Option<&'static fan::Fan>,
+    /// The settings sector's image, read before each write (`src/settings.rs`).
+    sector: RefCell<&'static mut [u8; SECTOR]>,
+    /// The channel pool in force, which `Status` reports and a host's `SetPool` changes.
+    pool: Cell<ChannelPool>,
 }
 
 impl Shared {
@@ -223,8 +238,9 @@ impl Shared {
         cache: Cache,
         carrier: &Carrier,
     ) -> Self {
-        // The stored duty, read on a carrier before the fan's future runs.
-        let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(updates));
+        // The stored settings, read before any future runs.
+        let (sector, stored) = settings::boot(updates);
+        let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
         Self {
             // Here rather than in `main`, whose frame another `Pair` would grow.
             pair: RefCell::new(pair.with_node_board(carrier.board())),
@@ -257,6 +273,8 @@ impl Shared {
             nodes: bus::Nodes::new(carrier.per_bus()),
             power: Power::new(carrier),
             fan,
+            sector: RefCell::new(sector),
+            pool: Cell::new(stored.pool.unwrap_or_default()),
         }
     }
 
@@ -412,6 +430,7 @@ impl Shared {
             rx_count,
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
+            pool: self.pool.get(),
         };
         let status = self.pair.borrow().status(now_ms(), counters);
         self.push_host(&status);
@@ -556,23 +575,25 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
-    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier);
+    let shared = SHARED.init_with(|| {
+        Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier)
+    });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     match join(
         join4(
-            run_link(bus, &link, &shared),
-            radio_clock(&shared, c6_en),
-            host::run(host_bus, &shared),
-            gps::run(i2c, &shared),
+            run_link(bus, &link, shared),
+            radio_clock(shared, c6_en),
+            host::run(host_bus, shared),
+            gps::run(i2c, shared),
         ),
         join4(
-            carrier::run(carrier, i2c.ok(), &shared),
-            bus::run(bus_a, &shared),
-            bus::run(bus_b, &shared),
-            fan::run(fan_pins, &shared),
+            carrier::run(carrier, i2c.ok(), shared),
+            bus::run(bus_a, shared),
+            bus::run(bus_b, shared),
+            fan::run(fan_pins, shared),
         ),
     )
     .await {}

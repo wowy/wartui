@@ -78,13 +78,13 @@ pub enum Command {
         mac: Option<Mac>,
     },
 
-    /// Change the channel pool the fleet partitions.
+    /// Ask the bridge to hold the channel pool `pool`, and keep it across its reboots.
     ///
-    /// The planner re-cuts the fleet, and each node takes its new share on its next heartbeat
-    /// under a fresh epoch. A node whose share changes empties its own dedup ring. Setting the
-    /// current pool is a no-op.
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The engine
+    /// changes nothing here: the planner deals the pool the bridge's `Status` reports, so the
+    /// fleet re-cuts once that `Status` shows the change.
     SetPool {
-        /// The pool to partition from now on.
+        /// The pool for the bridge to hold.
         pool: ChannelPool,
     },
 

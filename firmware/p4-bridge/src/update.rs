@@ -144,7 +144,7 @@ impl Updates {
         Self { ota, receiver: RECEIVER.take(), trial, confirm_failed: false, rtc, lines, fault }
     }
 
-    /// The sector the fan's duty is stored in (`src/fan.rs`), through the flash this owns.
+    /// The sector the settings are stored in (`src/settings.rs`), through the flash this owns.
     pub fn settings(&mut self) -> Option<SettingsSector<'_>> {
         self.ota.settings()
     }

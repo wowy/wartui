@@ -12,7 +12,6 @@ use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::bus::{RecordKind, Slot};
 use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -27,7 +26,7 @@ fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();
