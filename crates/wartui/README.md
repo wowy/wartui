@@ -340,8 +340,8 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`ota` and `flash-bridge`. A named file that is missing is refused; a missing default file silently
-means the built-in defaults.
+`pool`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing default file
+silently means the built-in defaults.
 
 ### Benchmarking the store
 
@@ -758,8 +758,8 @@ share changes.
 
 **The planner cuts the pool, and nothing else does.** It deals the pool across every heartbeating,
 sniffing node. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"), or the
-bridge reports another pool (§ "Channel pools"). The header shows its inputs: `auto — 4 of 5` is
-four heartbeating nodes of five seen.
+bridge reports another pool (§ "Channel pools"). The header shows its inputs: `4 of 5` is four
+nodes in the plan of five heard.
 
 **A changed share waits for the node's next heartbeat.** An assignment answers a heartbeat, through
 the node-bus slot that heartbeat came from, and an assigned node heartbeats every 5 s, so an
@@ -821,8 +821,8 @@ An assignment's forty-two-bit mask can name any subset. The planner deals round-
 _k_ to node _k mod n_, so every node carries both bands. A block split would put one node on all of
 2.4 GHz, and losing it would blind the fleet to that band until the next re-cut landed.
 
-Every fleet change re-cuts the _whole_ fleet, and each node takes its share in its next admin
-window, so the fleet converges within one heartbeat interval. A node adopts only an epoch that
+Every fleet change re-cuts the _whole_ fleet, and each node takes its share on its next
+heartbeat, so the fleet converges within one heartbeat interval. A node adopts only an epoch that
 differs from its own, so an unchanged fleet is left alone.
 
 **A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1, 3,
@@ -986,7 +986,7 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 - **`N frames from an older firmware — update`**: a fleet mid-upgrade, speaking a wire format this
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
-  since the bridge booted, which is large and harmless on a dongle left powered with nothing
+  since the bridge booted, which is large and harmless on a bridge left powered with nothing
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
   radio link counters, and a `bridge_queue` row per queue it reported.
 - **`fan stopped at 40%: unplugged or stalled`**: the bridge read no tach pulse over a whole second
@@ -1000,14 +1000,13 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## When nothing arrives
 
 **wartui finds the bridge by asking.** It opens each attached CH343 in turn, and never a node,
-and keeps the first that answers the link protocol. `run` saves that address to
-`wartui.toml` as `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only
-that port. A capture given `--bridge` saves
-the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
-the board it found and flashed. `status`, `sniff`, `reset`, `power-cycle` and `ota` read it and
-save nothing, so
-questioning a board changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
-unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
+and keeps the first that answers the link protocol. `run` saves that address to `wartui.toml` as
+`[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only that port. A
+capture given `--bridge` saves the named board once it answers, since naming it for a capture is
+choosing it. `flash-bridge` saves the board it found and flashed. `status`, `sniff`, `reset`,
+`power-cycle`, `fan`, `pool` and `ota` read it and save nothing, so questioning a board changes
+nothing later, and `flash-fleet` never reads it. An answering board is held for the run: unplug the
+bridge to reflash a node, and wartui waits rather than transmit into it.
 
 Deleting the `mac` and `serial` lines is always safe, costs one slower start, and fixes wartui
 opening the wrong board. It also self-corrects: an answering board replaces it, and the remembered board is dropped
@@ -1016,7 +1015,7 @@ over in a sweep is kept; being slower than its neighbor proves nothing. With `re
 (settings, or `[bridge] remember = false`), `run` drops both, saves no bridge, and sweeps on every
 start.
 
-The header's `waiting for a bridge to announce itself` has three causes; the fault box names it:
+The header's `waiting for bridge` has three causes; the fault box names it:
 
 - **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
@@ -1117,14 +1116,14 @@ one reporting none reads `address not reported` and is named by its socket.
 
 **The P4 bridge is reached through its board's CH343** (`1a86:55d3`), whose serial number is the
 CH343's own. So `wartui ports` asks each CH343, every 500 ms for up to 3 s, and prints the address
-its `Ready` names: the C6's MAC, the address nodes see as the bridge, or the P4's own MAC when the
-C6 never answered. A CH343 that does not answer reads `not answering`, as a blank P4 does, and one another
-program holds reads `busy or refused`.
+its `Ready` names: the C6's MAC, or the P4's own MAC when the C6 never answered. A CH343 that does
+not answer reads `not answering`, as a blank P4 does, and one another program holds reads
+`busy or refused`.
 
-The bridge is the row with the address the fleet table shows for the bridge; a node is a row whose
-heartbeats `wartui sniff` attributes to its address. Across board generations the OUI differs too.
-Either name works as `--bridge`, as does an address's last one to five octets (two hex digits each)
-when exactly one bridge answers with it. An address names only a bridge that answers, and a path
+The bridge is the `P4 bridge on a CH343` row, with the address the header shows for the bridge. A
+node is a row whose heartbeats `wartui sniff` attributes to its address. Either name works as
+`--bridge`, as does an address's last one to five octets (two hex digits each) when exactly one
+bridge answers with it. An address names only a bridge that answers, and a path
 is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several matches
 are refused with a list, never guessed. Keep the address: a device node moves when the board
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.

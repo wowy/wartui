@@ -202,6 +202,10 @@ The serial number is the CH343's own, so `wartui ports` asks each CH343 which br
 `wartui flash-bridge` updates the bridge over this link and `wartui flash-fleet` skips every
 CH343. The MX1.25 high-speed port `P1` is unused.
 
+**The board's Type-A port always drives 5 V**, since it is wired as a host port. A cable from it to
+a PC must leave VBUS unconnected, or it back-feeds the PC whenever the Type-C is also connected
+([`docs/p4-spi-link-findings.md`](../../docs/p4-spi-link-findings.md)).
+
 ## GPS
 
 The default build reads a u-blox receiver over I2C and passes its bytes to the host. It parses

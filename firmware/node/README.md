@@ -9,8 +9,8 @@ It replaces the vendor firmware at
 porting it. The web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads, and
 dock mode don't come across. A node in this fleet has no use for any of them.
 
-It shares no wire format with the vendor firmware either. It sends no Wi-Fi at all: it is a node on
-the P4 bridge's SPI bus, and that bus carries everything it says and hears.
+It shares no wire format with the vendor firmware either. It sends no Wi-Fi of its own: it is a node
+on the P4 bridge's SPI bus, and that bus carries everything it says and hears.
 [`docs/node-bus.md`](../../docs/node-bus.md) has the pins, and
 [`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs) the framing. Each
 transfer carries records, one message each:
@@ -223,8 +223,8 @@ an update taken on trial would write over the only slot known to work.
 `esp-radio` defaults `country_info` to **China** and applies it under `WIFI_COUNTRY_POLICY_MANUAL`,
 so nothing on the air overrides it. China's 5 GHz allocation excludes 5470–5725, and the driver
 refuses those channels outright. A C5 left on the default silently loses 100–144 every sweep. The
-host can't tell that from a node whose radio didn't tune. So `src/main.rs` passes `US`, and
-`firmware/p4-radio` does the same. This is not a preference.
+host can't tell that from a node whose radio didn't tune. So `src/main.rs` passes `US`. This is not
+a preference.
 
 Otherwise, channel limits belong to the controller, not here. The node sends no Wi-Fi, so where it
 dwells is a coverage decision rather than a legal one. This firmware
