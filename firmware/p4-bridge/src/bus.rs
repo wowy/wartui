@@ -86,7 +86,7 @@ use crate::Shared;
 use crate::config::NODE_DOWN_BYTES;
 
 /// The bus clock, measured on the carrier.
-pub const BUS_HZ: u32 = 4_000_000;
+pub const BUS_HZ: u32 = 8_000_000;
 /// Slots on one bus, as many as any board drives.
 pub const PER_BUS: usize = wartui_proto::bus::PER_BUS as usize;
 /// Slots across both buses.
@@ -120,7 +120,7 @@ const SLOT_GAP: Duration = Duration::from_millis(1);
 /// armed before, which is empty.
 const EMPTY_PASSES: u8 = 2;
 /// How long a stuck bus waits before trying IRQ service again. A line that really is held costs
-/// [`EMPTY_PASSES`] empty passes per retry, about 3% of the bus at 4 MHz with five nodes.
+/// [`EMPTY_PASSES`] empty passes per retry, about 1.5% of the bus at 8 MHz with five nodes.
 const STUCK_RETRY: Duration = Duration::from_millis(1_000);
 /// How often each present slot's counters go to the host.
 const REPORT_EVERY: Duration = Duration::from_millis(5_000);
