@@ -242,7 +242,7 @@ is here rather than only in a `//!`.
   change it. Either way it changes what the planner cuts, never who holds which share.
 - **Only heartbeating nodes are assignable or in the plan** — an assignment answers a heartbeat,
   and goes to the slot that heartbeat came from. A node whose slot the bridge's `Status` shows
-  absent leaves the plan at that `Status`, until its next heartbeat. The 15 s heartbeat timeout is
+  absent leaves the plan at that `Status`, until its next heartbeat. The 20 s heartbeat timeout is
   the backstop for a node that answers the bus but has stopped heartbeating
   (`crates/wartui-core/src/engine/mod.rs`, `on_bus`). `stale`, `off bus`, `no heartbeat` and
   silence are deliberately distinct states, and `SCAN_CHANNELS` order is load-bearing: never sort

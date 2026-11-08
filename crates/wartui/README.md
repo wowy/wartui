@@ -1090,7 +1090,7 @@ Each node's membership changes are logged once each:
 | Message               | When                                                                                                 |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
 | `node joined`         | its first heartbeat this run                                                                         |
-| `node left the fleet` | its slot goes off the bus (`reason="off bus"`), or 15 s after its last heartbeat (`reason="silent"`) |
+| `node left the fleet` | its slot goes off the bus (`reason="off bus"`), or 20 s after its last heartbeat (`reason="silent"`) |
 | `node returned`       | its first heartbeat after `node left the fleet`                                                      |
 | `node restarted`      | its heartbeat counter fell, or its epoch reset                                                       |
 

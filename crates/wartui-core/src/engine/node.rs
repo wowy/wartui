@@ -49,6 +49,9 @@ pub struct NodeState {
     pub capabilities: Option<Capabilities>,
     /// The host logged this node leaving the fleet, so its next heartbeat logs it returning.
     pub departed: bool,
+    /// A bridge `Status` showed this node's slot absent, and no heartbeat has come since. Out of
+    /// the plan until one does ([`FleetEngine::on_bus`]).
+    pub off_bus: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
     /// What was delivered to the node. Cleared on reboot, because the node has forgotten.
@@ -147,6 +150,7 @@ impl NodeState {
             die_temp: DieTemp::NONE,
             capabilities: None,
             departed: false,
+            off_bus: false,
             desired: None,
             confirmed: None,
             dirty: false,

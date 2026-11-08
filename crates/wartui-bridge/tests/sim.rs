@@ -465,12 +465,26 @@ async fn sim_bridge_reports_slot_absent_when_power_cycled_until_node_boots() {
     next_heartbeat_from(&mut link, SimTransport::node_slot(1)).await;
     assert_eq!(next_present(&mut link).await, 0b11);
 
-    // Asked in the same breath as the cycle, before the node has run again.
     link.send_bulk(HostToBridge::PowerCycle { slot: node }).expect("queued");
-    assert_eq!(next_present(&mut link).await, 0b10, "A1 is off until its node boots");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::PowerCycled { .. }) =
+            link.recv().await.expect("running")
+        {
+            break;
+        }
+    }
+    let cycled = Instant::now();
+    // The paused clock moves only through timers, so the node is still inside its second-long
+    // hold at each of these, however the tasks are scheduled.
+    assert_eq!(next_present(&mut link).await, 0b10, "A1 is off once the cycle is answered");
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(next_present(&mut link).await, 0b10, "and stays off through the hold");
+    link.send_urgent(clear_command(node)).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode), "no node to take it");
 
-    next_heartbeat_from(&mut link, node).await;
-    assert_eq!(next_present(&mut link).await, 0b11, "A1 is back once it has booted");
+    let back = next_heartbeat_from(&mut link, node).await;
+    assert!(back - cycled >= Duration::from_secs(1), "not before the hold ends");
+    assert_eq!(next_present(&mut link).await, 0b11, "A1 is back once its node boots");
 }
 
 #[tokio::test(start_paused = true)]

@@ -50,6 +50,12 @@ impl Slot {
         self.0
     }
 
+    /// This slot's bit in a presence mask: bit n for slot byte n.
+    #[must_use]
+    pub const fn bit(self) -> u32 {
+        1 << self.0
+    }
+
     /// The bus, 0 for A and 1 for B.
     #[must_use]
     pub const fn bus(self) -> u8 {

@@ -372,6 +372,13 @@ fn slot_parses_text_form_when_valid() {
 }
 
 #[test]
+fn slot_names_its_byte_bit_when_read_as_presence_mask() {
+    assert_eq!(Slot::new(0, 0).expect("A1").bit(), 1);
+    // B3 is byte 9.
+    assert_eq!(Slot::new(1, 2).expect("B3").bit(), 1 << 9);
+}
+
+#[test]
 fn slot_refuses_byte_when_past_max_slots() {
     let max = u8::try_from(MAX_SLOTS).unwrap();
     assert!(Slot::from_u8(max - 1).is_some());
