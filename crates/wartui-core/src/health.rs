@@ -86,7 +86,8 @@ fn hwmon_named(root: &Path, name: &str) -> Option<std::path::PathBuf> {
         .find(|dir| std::fs::read_to_string(dir.join("name")).is_ok_and(|text| text.trim() == name))
 }
 
-// These items serve the Linux `throttled`. `test` keeps their tests running on every host.
+// The guarded items from here to `parse_throttled` serve the Linux `throttled`. `test` keeps
+// their tests running on every host.
 /// The mailbox's value buffer, in bytes: room for the command going out and the reply
 /// coming back. `vcgencmd` uses the same size.
 #[cfg(any(target_os = "linux", test))]
@@ -104,6 +105,7 @@ const GET_GENCMD_RESULT: u32 = 0x0003_0080;
 #[cfg(any(target_os = "linux", test))]
 const RESPONSE_SUCCESS: u32 = 0x8000_0000;
 
+// Left unguarded so the assert below checks this number on every 64-bit host.
 /// `_IOWR(100, 0, char *)`: direction read|write (3) in bits 30–31, the argument size
 /// (a pointer) in bits 16–29, type 100 (`0x64`) in bits 8–15, number 0 in bits 0–7.
 const MAILBOX_PROPERTY: u32 = (3 << 30) | ((size_of::<*mut u8>() as u32) << 16) | (100 << 8);
