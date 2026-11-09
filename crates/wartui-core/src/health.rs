@@ -86,17 +86,22 @@ fn hwmon_named(root: &Path, name: &str) -> Option<std::path::PathBuf> {
         .find(|dir| std::fs::read_to_string(dir.join("name")).is_ok_and(|text| text.trim() == name))
 }
 
+// These items serve the Linux `throttled`. `test` keeps their tests running on every host.
 /// The mailbox's value buffer, in bytes: room for the command going out and the reply
 /// coming back. `vcgencmd` uses the same size.
+#[cfg(any(target_os = "linux", test))]
 const MAX_STRING: usize = 1024;
 
 /// Six header words, the value buffer, and the end tag.
+#[cfg(any(target_os = "linux", test))]
 const WORDS: usize = 6 + MAX_STRING / 4 + 1;
 
 /// The property tag that runs a gencmd command and returns its text.
+#[cfg(any(target_os = "linux", test))]
 const GET_GENCMD_RESULT: u32 = 0x0003_0080;
 
 /// Set in word 1 of a reply the firmware processed.
+#[cfg(any(target_os = "linux", test))]
 const RESPONSE_SUCCESS: u32 = 0x8000_0000;
 
 /// `_IOWR(100, 0, char *)`: direction read|write (3) in bits 30–31, the argument size
@@ -108,6 +113,7 @@ const _: () = assert!(MAILBOX_PROPERTY == 0xC008_6400);
 
 /// A property-mailbox message asking the firmware to run `command`, as `vcgencmd` builds
 /// it. A command longer than the buffer allows is cut short to keep its terminating NUL.
+#[cfg(any(target_os = "linux", test))]
 fn gencmd_message(command: &str) -> [u32; WORDS] {
     let mut message = [0u32; WORDS];
     message[0] = (WORDS * 4) as u32;
@@ -129,6 +135,7 @@ fn gencmd_message(command: &str) -> [u32; WORDS] {
 
 /// The word in a `get_throttled` reply: `throttled=0x…` as hex, or `None` when the
 /// firmware did not process the message, reported an error, or said something else.
+#[cfg(any(target_os = "linux", test))]
 fn parse_throttled(reply: &[u32]) -> Option<u32> {
     if reply.get(1)? & RESPONSE_SUCCESS == 0 || *reply.get(5)? != 0 {
         return None;
