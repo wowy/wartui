@@ -85,16 +85,18 @@ garbage.
 Measured on 2026-11-09 on a HackberryPi CM5 (Raspberry Pi OS, kernel `6.18.60+rpt-rpi-2712`,
 kernel `cdc_acm`, the CH343 enumerated at full speed straight on an RP1 xHCI root port) against the
 10-node carrier and the production bridge firmware, after a drive whose footer reached
-`garbled 2,885` in 74 minutes with no node frame lost.
+`garbled 2,885` in 74 minutes with no node frame lost. A Raspberry Pi 5 (1 GB) then ran the same
+test and showed the same fault: the same rate, the same frame lengths, and the same damage shape.
 
 | Host | Path | Run | Status bursts | Undecodable frames |
 | --- | --- | --- | --- | --- |
 | CM5 | straight into the Pi | 3 min, `sniff` | 30 | 111 |
+| Pi 5 (1 GB) | straight into the Pi | 5 min 39 s, `sniff` | 54 | 264 |
 | Mac | straight into the Mac | 3 min, `sniff` | 37 | 0 |
 | CM5 | through an unpowered USB 2.0 hub | 3 min 42 s, `sniff` | 45 | 0 |
 
-What the hex dumps of the 111 showed (`RUST_LOG=wartui_bridge=debug` logs each `undecodable
-frame` with its bytes since this bench):
+What the hex dumps of the 111 showed, and the Pi 5's 264 repeated (`RUST_LOG=wartui_bridge=debug`
+logs each `undecodable frame` with its bytes since this bench):
 
 - Only long bursts were hit: the 512-byte `Gps` batches at 1 Hz and the ~1.3 KB `Log` burst every
   5 s. The node frames on the bench and the drive were short, 27-byte heartbeats and sighting
@@ -122,7 +124,5 @@ the xHCI then sees ordinary high-speed bulk packets. The firmware needs no chang
 path, and the hub removes the fault instead. Plugging the hub in hot rebooted the HackberryPi, so
 plug it in before boot or with the Pi off.
 
-Not measured: a Pi 5 proper (the READMEs name it because it has the same RP1 on its USB ports,
-but only the CM5 was on the bench), whether the fault is the RP1 silicon or the kernel's xHCI
-short-packet handling, whether a powered hub or another kernel behaves differently, and whether a
-Pi 4 does the same.
+Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
+whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.

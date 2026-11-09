@@ -10,7 +10,7 @@ please open an [issue](https://github.com/wowy/wartui/issues).
 On a Raspberry Pi 5 or CM5, put a USB 2.0 hub between the Pi and the bridge. Plugged straight in,
 the Pi's USB controller corrupts the bridge's longer bursts, and a full sighting batch from a dense
 area is one of them: the footer's `garbled` count climbs by the second and batches are `lost`.
-Measured on a CM5; `docs/p4-host-uart-findings.md` has the detail.
+Measured on both; `docs/p4-host-uart-findings.md` has the detail.
 
 The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
