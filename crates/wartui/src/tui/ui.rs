@@ -126,10 +126,6 @@ impl Ui {
             KeyCode::Char('c') => self.open_modal(snapshot),
             KeyCode::Char('g') => self.open_gps(),
             KeyCode::Char('p') => self.ask_power_cycle(snapshot),
-            // Matched on the character: crossterm sends shift+r as `'R'`, not as
-            // `'r'` with a modifier.
-            KeyCode::Char('r') => self.clear_ring(snapshot, commands),
-            KeyCode::Char('R') => self.clear_fleet_ring(snapshot, commands),
             KeyCode::Char('u') => {
                 if let Some(text) = self.upload.press(&self.settings, &snapshot.excluded_ssids) {
                     self.say(text, snapshot);
@@ -167,40 +163,6 @@ impl Ui {
         let said = match commands.try_send(Command::AssignBle { slot }) {
             Ok(()) if holds => format!("{name}: bluetooth off on its next heartbeat"),
             Ok(()) => format!("{name}: bluetooth on its next heartbeat"),
-            Err(_) => ENGINE_BUSY.to_owned(),
-        };
-        self.say(said, snapshot);
-    }
-
-    /// Clear the selected node's dedup ring on its next heartbeat.
-    fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        let Some(node) = snapshot.nodes.get(self.selected) else { return };
-        let target = node.state.mac;
-        let name = node_name(snapshot.node_board(), node.state.slot, &target);
-        // Same refusal as `toggle_ble`. The clear answers a heartbeat, and goes to the
-        // slot that heartbeat came from.
-        if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{name} {why}"), snapshot);
-            return;
-        }
-        let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
-            Ok(()) => format!("{name}: clearing its dedup ring on its next heartbeat"),
-            Err(_) => ENGINE_BUSY.to_owned(),
-        };
-        self.say(said, snapshot);
-    }
-
-    /// Clear every assignable node's dedup ring, each on its own next heartbeat.
-    fn clear_fleet_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        if snapshot.assignable == 0 {
-            self.say("no node is heartbeating, so there is no ring to clear".to_owned(), snapshot);
-            return;
-        }
-        let said = match commands.try_send(Command::ClearRing { mac: None }) {
-            Ok(()) => format!(
-                "clearing the dedup ring on {} nodes, each on its next heartbeat",
-                snapshot.assignable
-            ),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
@@ -495,23 +457,6 @@ mod tests {
         assert!(ui.notice(snapshot.now_ms).expect("a notice").contains("bluetooth off"));
     }
 
-    #[test]
-    fn ui_sends_clear_ring_when_r_key_is_pressed() {
-        let snapshot = busy();
-        let node = snapshot.nodes[0].state.mac;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: Some(node) });
-        assert!(
-            ui.notice(snapshot.now_ms)
-                .expect("a notice")
-                .starts_with("N7: clearing its dedup ring"),
-            "got {:?}",
-            ui.notice(snapshot.now_ms)
-        );
-    }
-
     fn press(code: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE)
     }
@@ -626,49 +571,6 @@ mod tests {
         ui.say("something since".to_owned(), &snapshot);
         ui.poll_power(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
-    }
-
-    #[test]
-    fn ui_sends_fleet_clear_ring_when_shift_r_key_is_pressed() {
-        let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        // crossterm sends shift+r as `'R'`, not `'r'` with a shift modifier.
-        ui.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: None });
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("clearing the dedup ring on"), "got {notice}");
-    }
-
-    #[test]
-    fn ui_refuses_clear_ring_when_node_has_not_heartbeated_yet() {
-        let mut snapshot = busy();
-        snapshot.nodes.push(unannounced(0x21));
-        snapshot.nodes.sort_by_key(|n| n.state.mac);
-        let row = snapshot
-            .nodes
-            .iter()
-            .position(|n| n.state.mac[5] == 0x21)
-            .expect("the unannounced node");
-
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui { selected: row, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &snapshot, &tx);
-        assert!(rx.try_recv().is_err(), "nothing was queued");
-        let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("heartbeated yet"), "got {notice}");
-    }
-
-    #[test]
-    fn ui_sends_nothing_when_fleet_clear_requested_with_no_assignable_nodes() {
-        let mut snapshot = busy();
-        snapshot.assignable = 0;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &snapshot, &tx);
-        assert!(rx.try_recv().is_err(), "nothing was queued");
-        let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("no node is heartbeating"), "got {notice}");
     }
 
     #[test]

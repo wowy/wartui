@@ -79,8 +79,8 @@ after another, back to back.
 
 **It forgets what it has reported in two cases.** An assignment that changes its channels or its
 Bluetooth flag empties the dedup ring, because the entries describe a neighborhood it no longer
-listens to. So does a clear, which the host sends on the operator's `r` or `R` and which
-carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoning.
+listens to. So does a clear, which carries no other instruction.
+`crates/wartui-proto/src/dedup.rs` has the reasoning.
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
 assignment adopted, or 0 for none. That is how the host tells adoption from a bus ack without

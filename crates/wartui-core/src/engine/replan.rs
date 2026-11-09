@@ -24,13 +24,12 @@ impl FleetEngine {
     /// Take an operator's instruction. What changes for a node is sent on its next heartbeat, so
     /// only a power-cycle, a fan duty, a pool and a Bluetooth slot, which are the bridge's to carry
     /// out or hold, go out from here.
-    pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
+    pub(super) fn on_command(&mut self, command: Command, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { slot } => {
                 batch.bulk.push(HostToBridge::SetBle { slot });
                 batch.bulk.push(HostToBridge::GetStatus);
             }
-            Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
             Command::SetFanDuty { duty } => {
@@ -67,32 +66,6 @@ impl FleetEngine {
     /// about what the host asks for.
     pub(super) fn on_bridge_ble(&mut self, slot: Option<Slot>) {
         self.ble_slot = slot;
-    }
-
-    /// Mark a node, or every assignable node, as owing a cleared dedup ring. A node never heard
-    /// from is ignored rather than given a row. `None` reads [`Self::is_assignable`] now: the set
-    /// the planner would partition.
-    fn on_clear_dedup_ring(&mut self, mac: Option<Mac>, now: Now) {
-        match mac {
-            Some(mac) => {
-                if let Some(node) = self.nodes.get_mut(&mac) {
-                    node.clear_dedup_ring = true;
-                }
-            }
-            None => {
-                let targets: Vec<Mac> = self
-                    .nodes
-                    .values()
-                    .filter(|node| self.is_assignable(node, now))
-                    .map(|node| node.mac)
-                    .collect();
-                for mac in targets {
-                    if let Some(node) = self.nodes.get_mut(&mac) {
-                        node.clear_dedup_ring = true;
-                    }
-                }
-            }
-        }
     }
 
     /// Re-mark a node's assignment for delivery under a new epoch.

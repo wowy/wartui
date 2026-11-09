@@ -429,7 +429,7 @@ fn compat(node: &NodeView) -> Option<Compat> {
 
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
-/// The text is the notice shown when `b` or `r` is refused, so it says what is wrong
+/// The text is the notice shown when `b` is refused, so it says what is wrong
 /// rather than naming a state.
 pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     let state = &node.state;

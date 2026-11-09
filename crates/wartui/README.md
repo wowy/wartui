@@ -706,13 +706,11 @@ The bridge keeps the Bluetooth slot beside the pool, the same way; see "Bluetoot
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
-| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
-Only `b`, `c`, `p`, `r`, and `R` reach the engine, and no key sets channels. `b` picks _which_
-node scans Bluetooth, which the bridge keeps; the planner still authors every share. `r` and `R`
-make a node forget every address it has reported, on its next heartbeat.
+Only `b`, `c`, and `p` reach the engine, and no key sets channels. `b` picks _which_ node scans
+Bluetooth, which the bridge keeps; the planner still authors every share.
 
 `u` asks before it sends, sends only what is new since the last upload, and leaves the capture
 running; see "Uploading to WDGWars".
@@ -1023,8 +1021,8 @@ whole fleet's topology.
 **An `alive` node gone quiet is usually fine.** A node reports each address once and holds it back,
 so a stationary node falls silent after reporting everything in range. That memory lives on the node
 and survives into your next session. A held address is reported again five minutes after it was last
-reported, or sooner if heard at least 5 dB louder (10 dB for a Bluetooth device). `r`/`R` clear it
-without a reboot, and a change of share or Bluetooth role empties it.
+reported, or sooner if heard at least 5 dB louder (10 dB for a Bluetooth device). A reboot, or a
+change of share or Bluetooth role, empties it.
 `crates/wartui-proto/src/dedup.rs` explains why.
 
 | Header says            | Meaning                                                                  |

@@ -18,7 +18,7 @@
 //!
 //! [`Command::AssignBle`] asks the bridge to give one slot's node the Bluetooth scan as its whole
 //! job. The bridge holds that slot as it holds the pool, and the engine gives the scan to whichever
-//! assignable node heartbeats from it. [`Command::ClearRing`] empties dedup rings.
+//! assignable node heartbeats from it.
 //! [`Command::SetPool`] asks the bridge to hold a new pool, which its next `Status` brings back.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
@@ -103,7 +103,7 @@ pub struct FleetEngine {
     dropped_baseline: Option<u32>,
     last_status_poll: Option<Instant>,
     started_at_ms: i64,
-    /// Assignments and clears in flight, keyed by the id the bridge will echo back.
+    /// Assignments in flight, keyed by the id the bridge will echo back.
     pending: BTreeMap<u16, Pending>,
     /// Wraps harmlessly: an id need only be unique among the few sends in flight.
     next_send_id: u16,
@@ -208,7 +208,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, now, &mut batch),
+            Event::Command(command) => self.on_command(command, &mut batch),
             Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {

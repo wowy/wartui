@@ -212,8 +212,6 @@ impl FleetEngine {
             }
             // The node forgot it. `reissue` below re-sends it.
             node.confirmed = None;
-            // Booting empties the ring.
-            node.clear_dedup_ring = false;
             // `seq` restarted too, so the gap since the last batch is history, not loss. An
             // identical batch after a reboot is new, not a retransmission.
             node.last_seq = None;
@@ -301,7 +299,6 @@ impl FleetEngine {
         // Answered off the heartbeat, through the slot it came from. A heartbeat read behind sends
         // nothing.
         self.send_admin(src, now, batch);
-        self.send_dedup_ring_clear(src, now, batch);
     }
 
     /// Whether the node at `src` runs firmware this build can drive, as far as its last heartbeat

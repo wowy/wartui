@@ -58,8 +58,8 @@ impl FleetEngine {
     /// - A heartbeat read behind is history (`on_heartbeat`): its epoch does not set what the node
     ///   holds, an epoch of 0 in it does not read as a restart, and it neither flags an assignment
     ///   as unadopted nor reissues one. A falling counter in it still reads as a restart.
-    /// - A heartbeat read behind sends no assignment or clear (`send_admin`,
-    ///   `send_dedup_ring_clear`), since the slot it names may be another node's now.
+    /// - A heartbeat read behind sends no assignment (`send_admin`), since the slot it names may
+    ///   be another node's now.
     /// - `note_batch_seq`'s replay flag: a gap after a replayed batch is the host link's loss,
     ///   not the node's.
     /// - The `live` flag each stored heartbeat carries.

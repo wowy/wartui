@@ -4,7 +4,6 @@ use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::Slot;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
 #[cfg(doc)]
@@ -64,13 +63,6 @@ pub enum Command {
         slot: Option<Slot>,
     },
 
-    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that
-    /// node's next heartbeat, like an assignment.
-    ClearRing {
-        /// Which node, or `None` for every node [`FleetEngine::is_assignable`] when this arrives.
-        mac: Option<Mac>,
-    },
-
     /// Ask the bridge to hold the channel pool `pool`, and keep it across its reboots.
     ///
     /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The engine
@@ -117,8 +109,7 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands sent ahead of `bulk`: assignments and dedup-ring clears, which answer a
-    /// heartbeat.
+    /// Commands sent ahead of `bulk`: assignments, which answer a heartbeat.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 

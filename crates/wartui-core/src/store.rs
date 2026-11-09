@@ -88,8 +88,7 @@ CREATE TABLE IF NOT EXISTS node (
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
 -- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
 -- across a capture is a leak in the node firmware. An assignment
--- sent in answer to a heartbeat is recorded in `assignment`; a dedup-ring clear
--- is not recorded.
+-- sent in answer to a heartbeat is recorded in `assignment`.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,

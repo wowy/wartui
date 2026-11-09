@@ -64,10 +64,6 @@ pub struct NodeState {
     /// scan moves, the node reboots, or its heartbeat shows a delivered assignment not adopted.
     /// Cleared on delivery, and when the node departs the plan. Never cleared on enqueue.
     pub dirty: bool,
-    /// Whether to clear this node's dedup ring on its next heartbeat. Set by
-    /// [`Command::ClearRing`]. Cleared once the clear is delivered, and on reboot, which empties
-    /// the ring anyway.
-    pub clear_dedup_ring: bool,
     /// How many times an assignment has been sent to this node.
     pub admin_attempts: u32,
     /// What happened to the most recent attempt.
@@ -167,7 +163,6 @@ impl NodeState {
             desired: None,
             confirmed: None,
             dirty: false,
-            clear_dedup_ring: false,
             admin_attempts: 0,
             last_outcome: None,
             last_latency_us: None,

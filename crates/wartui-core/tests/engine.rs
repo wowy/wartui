@@ -285,28 +285,6 @@ fn admins(batch: &ActionBatch) -> Vec<Assign> {
         .collect()
 }
 
-/// The one clear in a batch, as (id, node).
-///
-/// Filters rather than indexing `batch.urgent[0]`: a heartbeat that also owes an
-/// assignment can carry both, and this says nothing about that one.
-fn sent_clear(batch: &ActionBatch) -> (u16, Mac) {
-    let found = clears(batch);
-    assert_eq!(found.len(), 1, "exactly one clear");
-    found[0]
-}
-
-/// Every clear in a batch, as (id, node).
-fn clears(batch: &ActionBatch) -> Vec<(u16, Mac)> {
-    to_nodes(batch)
-        .into_iter()
-        .filter(|(_, _, kind, _)| *kind == DownType::Clear.as_u8())
-        .map(|(id, slot, _, body)| {
-            assert!(body.is_empty(), "a clear has no body");
-            (id, seated(slot))
-        })
-        .collect()
-}
-
 /// A sighting batch carrying `records`, in order, under `seq`.
 fn batch(seq: u16, records: &[SightingMsg<'_>]) -> Vec<u8> {
     let mut writer = SightingBatchWriter::new(seq);
@@ -2770,17 +2748,11 @@ fn engine_counts_reboot_when_epoch_returns_to_zero() {
     engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
     assert!(engine.nodes().next().expect("the node").adopted());
 
-    // Owed a cleared ring too, so this reboot's reset can be told apart from
-    // one that never ran.
-    engine.handle(Event::Command(Command::ClearRing { mac: Some(NODE) }), clock.at(10));
-    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
-
     engine.handle(heartbeat_holding(NODE, 4, 0), clock.at(11));
 
     let node = engine.nodes().next().expect("the node");
     assert_eq!(node.reboots, 1, "the epoch alone is enough to count it");
     assert!(node.confirmed.is_none(), "what it held is no longer believed");
-    assert!(!node.clear_dedup_ring, "a node that just booted already holds an empty ring");
 }
 
 #[test]
@@ -3751,12 +3723,8 @@ fn engine_reissues_nothing_when_same_bridge_reconnects() {
 }
 
 // ---------------------------------------------------------------------------
-// Command::ClearRing: not an assignment, delivered the same way one is.
+// Power cycles and fan duties: the bridge's to carry out, sent at once.
 // ---------------------------------------------------------------------------
-
-fn clear_ring(mac: Option<Mac>) -> Event {
-    Event::Command(Command::ClearRing { mac })
-}
 
 #[test]
 fn engine_sends_power_cycle_at_once_when_operator_asks() {
@@ -3814,127 +3782,9 @@ fn engine_names_power_cycle_outcome_when_bridge_answers() {
     }
 }
 
-#[test]
-fn engine_sends_clear_on_next_heartbeat_when_node_clear_requested() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    caught_up(&mut engine, &clock);
-    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
-    engine.handle(delivered(id), clock.at(1));
-
-    let command = engine.handle(clear_ring(Some(NODE)), clock.at(2));
-    assert!(command.urgent.is_empty(), "nothing sent until the node's own heartbeat");
-    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
-
-    let (_, dst) = sent_clear(&engine.handle(heartbeat_holding(NODE, 2, first.epoch), clock.at(3)));
-    assert_eq!(dst, NODE);
-    assert_eq!(counters(&engine).admin_sent, 1, "the clear does not count as an assignment");
-}
-
-#[test]
-fn engine_keeps_clear_owed_when_undelivered() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    caught_up(&mut engine, &clock);
-    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
-    engine.handle(delivered(id), clock.at(1));
-    engine.handle(clear_ring(Some(NODE)), clock.at(2));
-
-    let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
-    engine.handle(undelivered(id, Undelivered::Timeout), clock.at(3));
-    assert!(engine.nodes().next().expect("the node").clear_dedup_ring, "still owed");
-
-    // Retried on the next heartbeat, the same as an undelivered assignment.
-    let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 3), clock.at(4)));
-    assert_eq!(dst, NODE);
-}
-
-#[test]
-fn engine_drops_clear_owed_when_delivered() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    caught_up(&mut engine, &clock);
-    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
-    engine.handle(delivered(id), clock.at(1));
-    engine.handle(clear_ring(Some(NODE)), clock.at(2));
-
-    let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
-    engine.handle(delivered(id), clock.at(3));
-    assert!(!engine.nodes().next().expect("the node").clear_dedup_ring);
-
-    let next = engine.handle(heartbeat(NODE, 3), clock.at(4));
-    assert!(clears(&next).is_empty(), "nothing left to send");
-}
-
-#[test]
-fn engine_sends_one_clear_when_node_beats_twice_unanswered() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    caught_up(&mut engine, &clock);
-    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
-    engine.handle(delivered(id), clock.at(1));
-    engine.handle(clear_ring(Some(NODE)), clock.at(2));
-
-    let (id, _) = sent_clear(&engine.handle(heartbeat_holding(NODE, 2, first.epoch), clock.at(3)));
-    let second = engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(4));
-    assert!(clears(&second).is_empty(), "one clear in flight per node");
-
-    engine.handle(undelivered(id, Undelivered::Timeout), clock.at(4));
-    let (retry, dst) =
-        sent_clear(&engine.handle(heartbeat_holding(NODE, 4, first.epoch), clock.at(5)));
-    assert_eq!(dst, NODE);
-    assert_ne!(retry, id);
-}
-
-#[test]
-fn engine_clears_only_assignable_nodes_when_none_named() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(heartbeat(NODE, 1), clock.at(1));
-    // Filed, but a minor behind: not assignable, so not owed a clear.
-    engine.handle(beat_at(OTHER, 1, 0, outdated_capabilities(), 0), clock.at(1));
-
-    engine.handle(clear_ring(None), clock.at(2));
-
-    assert!(engine.nodes().find(|n| n.mac == NODE).expect("heartbeating").clear_dedup_ring);
-    assert!(
-        !engine.nodes().find(|n| n.mac == OTHER).expect("filed").clear_dedup_ring,
-        "needs an update, so it is not in the set the planner would cut for either"
-    );
-}
-
-#[test]
-fn engine_drops_clear_owed_when_node_reboots() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(heartbeat(NODE, 5), clock.at(1));
-    engine.handle(clear_ring(Some(NODE)), clock.at(2));
-    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
-
-    // The counter goes backwards: a reboot, and a freshly booted node already
-    // holds an empty ring.
-    engine.handle(heartbeat(NODE, 1), clock.at(3));
-    assert!(!engine.nodes().next().expect("the node").clear_dedup_ring);
-}
-
-#[test]
-fn engine_holds_clear_when_heartbeat_replayed() {
-    // A heartbeat read behind names the slot the node was in then, and a clear carries
-    // no MAC, so it waits for a live one.
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    caught_up(&mut engine, &clock);
-    let caps = Capabilities::here(Board::Esp32c5);
-    let first = engine.handle(beat_at(NODE, 1, 0, caps, 1_000), clock.at_ms(1));
-    assert!(stored_live(&first));
-    engine.handle(clear_ring(Some(NODE)), clock.at_ms(1));
-
-    let batch = engine.handle(beat_at(NODE, 2, 0, caps, 2_000_000), clock.at_ms(2));
-
-    assert!(!stored_live(&batch), "read behind the bridge");
-    assert!(clears(&batch).is_empty(), "nothing sent on a heartbeat read behind");
-    assert!(engine.nodes().next().expect("the node").clear_dedup_ring, "still owed");
-}
+// ---------------------------------------------------------------------------
+// Held epochs: an assignment never carries the epoch a node reports holding.
+// ---------------------------------------------------------------------------
 
 #[test]
 fn engine_skips_held_epoch_when_dealing_first_assignment() {
