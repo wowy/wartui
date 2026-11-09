@@ -1053,6 +1053,12 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   appears when a count passes zero, omits a kind still at zero, and stays. Not a fault: an address
   turned away is not held back, so the next pass reports it; only one never heard again is lost.
   A steadily growing count means a buffer too small for the area.
+- **`garbled N`**: USB frames from the bridge the host could not decode: the framing or the
+  checksum failed, the frame was cut short, or it spoke another protocol revision. A few after a
+  bridge reset are its bootloader's log and the half-frame the host caught while the framing
+  resynchronized, which it does on its own. A count that keeps climbing is a bad cable or a noisy
+  USB path. With `--log-file` and `RUST_LOG=wartui_bridge=debug`, each one is logged as
+  `undecodable frame` with its cause.
 - **`N frames from an older firmware — update`**: a fleet mid-upgrade, speaking a wire format this
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
