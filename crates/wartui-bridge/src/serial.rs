@@ -1004,6 +1004,8 @@ fn read_frames<R: Read>(
     let mut last_ready: Option<(u32, Instant)> = None;
     // Whether the last completed chunk decoded, and a copy of the current one taken before
     // `decode_frame` rewrites it in place: the evidence a garbled frame's debug line carries.
+    // The copy is taken only when debug logging is on; otherwise `debug!` does not evaluate
+    // its arguments, so a stale `raw` is never read.
     let mut prev_ok: Option<bool> = None;
     let mut raw = Vec::with_capacity(MAX_FRAME);
 
@@ -1019,8 +1021,10 @@ fn read_frames<R: Read>(
 
         for (at, &byte) in buf[..read].iter().enumerate() {
             let Some(frame) = acc.push(byte) else { continue };
-            raw.clear();
-            raw.extend_from_slice(frame);
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                raw.clear();
+                raw.extend_from_slice(frame);
+            }
             let decoded = decode_frame::<BridgeToHost>(frame);
             let prev = prev_ok.replace(decoded.is_ok());
             let event = match decoded {

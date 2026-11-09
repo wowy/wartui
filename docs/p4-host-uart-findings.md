@@ -122,5 +122,7 @@ the xHCI then sees ordinary high-speed bulk packets. The firmware needs no chang
 path, and the hub removes the fault instead. Plugging the hub in hot rebooted the HackberryPi, so
 plug it in before boot or with the Pi off.
 
-Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
-whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.
+Not measured: a Pi 5 proper (the READMEs name it because it has the same RP1 on its USB ports,
+but only the CM5 was on the bench), whether the fault is the RP1 silicon or the kernel's xHCI
+short-packet handling, whether a powered hub or another kernel behaves differently, and whether a
+Pi 4 does the same.

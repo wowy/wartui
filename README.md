@@ -7,12 +7,10 @@ a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.co
 Using an NVMe drive is preferred, but not a requirement. If you're running into poor performance on a microSD card,
 please open an [issue](https://github.com/wowy/wartui/issues).
 
-On a Raspberry Pi 5 or CM5, put a USB 2.0 hub between the Pi and the bridge rather than plugging the
-bridge straight into the Pi. Plugged in directly, the Pi's USB controller corrupts the bridge's longer
-bursts (the footer's `garbled` count climbs by the second); through a hub it is clean. A sparse drive
-loses little, since its sighting batches stay short, but a full batch from a dense area is as long as
-the bursts that fail, and each one lost is a dozen access points the node will not repeat for five
-minutes (`lost N` in the footer). `docs/p4-host-uart-findings.md` has the measurements.
+On a Raspberry Pi 5 or CM5, put a USB 2.0 hub between the Pi and the bridge. Plugged straight in,
+the Pi's USB controller corrupts the bridge's longer bursts, and a full sighting batch from a dense
+area is one of them: the footer's `garbled` count climbs by the second and batches are `lost`.
+Measured on a CM5; `docs/p4-host-uart-findings.md` has the detail.
 
 The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
