@@ -1,6 +1,6 @@
 # wartui
 
-A terminal-based fleet controller for ESP32-C5 wardriving nodes.
+A terminal-based fleet controller for ESP32-C5 wardriving nodes on the Dead Bear Racing 10 or 14 node carrier boards.
 
 Wartui runs on Linux and macOS, with the goal being good performance on something as low-powered as
 a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.com/ZitaoTech/HackberryPi5)).
@@ -17,6 +17,14 @@ The UI scales from something as big as a full laptop screen, to the 4" 720x720 d
 | Laptop (138x38)                                                                                                                           | HackberryPi5 (58x26)                                                                                                                                  |
 |-------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | <img src="docs/images/wartui-laptop.png" alt="The wartui application running in simulator mode on a laptop-sized terminal." width="500"/> | <img src="docs/images/wartui-hackberrypi5.png" alt="The wartui application running in simulator mode on a HackberryPi5-sized terminal." width="400"/> |
+
+## Coming Soon!
+
+The 10-node carrier boards have arrived and are currently undergoing testing. So far everything looks great!
+
+<img src="docs/images/10-node-rev-c-empty.jpg" width="800" alt="A green PCB with sockets for 10 XIAO ESP32-C5 nodes, empty"/>
+
+<img src="docs/images/10-node-rev-c-complete.jpg" width="800" alt="A green PCB with sockets for 10 XIAO ESP32-C5 nodes, fully populated and with antenna cables connected."/>
 
 ## Disclaimers
 
