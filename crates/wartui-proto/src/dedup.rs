@@ -24,8 +24,8 @@
 //!
 //! - **The node's job changed.** Entries built under the old share describe a
 //!   neighborhood the node no longer listens to, and only take up slots.
-//! - **The operator asked.** This gives a fresh capture from a stationary spot without
-//!   waiting out the refresh or rebooting the node.
+//! - **The node stopped** ([`Stop`](crate::bus::Stop)). It holds no job, and the next one
+//!   starts from nothing reported.
 //!
 //! Eviction is oldest-*inserted* first, and a re-report updates its entry in place rather
 //! than moving it to the front. A constantly-beaconing access point therefore ages out on
@@ -189,8 +189,8 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
     ///
     /// The entries are left as they are, since a lookup never reaches one through a cleared
     /// `index`. The index is reset, or a stale slot would go on pointing at an entry this call
-    /// means to forget. That writes `S` halfwords, 2 KB, and runs only on a share change or an
-    /// operator clear.
+    /// means to forget. That writes `S` halfwords, 2 KB, and runs only on a share change or a
+    /// stop.
     pub fn clear(&mut self) {
         self.len = 0;
         self.cursor = 0;

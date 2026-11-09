@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{
-    Assign, Clear, DecodeError, DownType, Heartbeat, NodeBoard, RecordKind, Slot, UpMsg, Version,
+    Assign, DecodeError, DownType, Heartbeat, NodeBoard, RecordKind, Slot, Stop, UpMsg, Version,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome, ToNodeBody, Undelivered};
@@ -94,9 +94,27 @@ fn assign_command(slot: Slot, assign: Assign) -> HostToBridge {
     HostToBridge::ToNode { slot, id: 1, kind: DownType::Assign.as_u8(), body }
 }
 
-fn clear_command(slot: Slot) -> HostToBridge {
-    let body = ToNodeBody::from_slice(&Clear.encode()).expect("a clear fits");
-    HostToBridge::ToNode { slot, id: 1, kind: DownType::Clear.as_u8(), body }
+fn stop_command(slot: Slot) -> HostToBridge {
+    let body = ToNodeBody::from_slice(&Stop.encode()).expect("a stop fits");
+    HostToBridge::ToNode { slot, id: 1, kind: DownType::Stop.as_u8(), body }
+}
+
+/// Every Wi-Fi address node 0 reports until its next heartbeat carrying `epoch`.
+async fn addresses_until_epoch(link: &mut LinkHandle, epoch: u8) -> HashSet<[u8; 6]> {
+    let node = SimTransport::node_slot(0);
+    let mut seen = HashSet::new();
+    loop {
+        let rec = next_frame(link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(beat)) if rec.slot == node && beat.epoch == epoch => {
+                return seen;
+            }
+            Ok(UpMsg::Sightings(batch)) if rec.slot == node => {
+                seen.extend(batch.iter().map(|(sighting, _)| sighting.bssid));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A slot the default fleets leave empty.
@@ -479,7 +497,7 @@ async fn sim_bridge_reports_slot_absent_when_power_cycled_until_node_boots() {
     assert_eq!(next_present(&mut link).await, 0b10, "A1 is off once the cycle is answered");
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert_eq!(next_present(&mut link).await, 0b10, "and stays off through the hold");
-    link.send_urgent(clear_command(node)).expect("queued");
+    link.send_urgent(stop_command(node)).expect("queued");
     assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode), "no node to take it");
 
     let back = next_heartbeat_from(&mut link, node).await;
@@ -636,19 +654,71 @@ async fn sim_bridge_reports_no_node_when_assignment_sent_to_empty_slot() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_reports_delivered_when_clear_sent_to_active_node() {
+async fn sim_bridge_reports_delivered_when_stop_sent_to_active_node() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    link.send_urgent(clear_command(SimTransport::node_slot(0))).expect("queued");
+    link.send_urgent(stop_command(SimTransport::node_slot(0))).expect("queued");
     assert_eq!(next_send_result(&mut link).await, Ok(1));
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_reports_no_node_when_clear_sent_to_empty_slot() {
+async fn sim_bridge_reports_no_node_when_stop_sent_to_empty_slot() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    link.send_urgent(clear_command(empty_slot())).expect("queued");
+    link.send_urgent(stop_command(empty_slot())).expect("queued");
     assert_eq!(next_send_result(&mut link).await, Err(Undelivered::NoNode));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_idles_at_epoch_zero_without_sightings_when_stopped() {
+    // A stopped node is the node at boot: epoch 0 at the idle beat, collecting nothing.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_slot(0);
+    assign(&link, 1, everything(), false);
+    assert!(!addresses_until_epoch(&mut link, 1).await.is_empty(), "sweeping before the stop");
+
+    link.send_urgent(stop_command(node)).expect("queued");
+    // Whatever was reported before the stop landed comes ahead of the first epoch-0 beat.
+    addresses_until_epoch(&mut link, 0).await;
+    let mut last = Instant::now();
+    let mut beats = 0;
+    while beats < 4 {
+        let rec = next_frame(&mut link).await;
+        match rec.msg() {
+            Ok(UpMsg::Heartbeat(beat)) => {
+                assert_eq!(beat.epoch, 0, "a stopped node holds no assignment");
+                let gap = Instant::now() - last;
+                assert_eq!(gap, Duration::from_millis(u64::from(IDLE_BEAT_MS)), "the idle beat");
+                last = Instant::now();
+                beats += 1;
+            }
+            Ok(UpMsg::Sightings(_)) => panic!("a stopped node reports nothing"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_adopts_assignment_when_reassigned_its_old_epoch_after_stop() {
+    // A stop leaves epoch 0, so the epoch held before it is new again, and the emptied ring
+    // reports what the node had already reported.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_slot(0);
+    assign(&link, 1, everything(), false);
+    let before = addresses_until_epoch(&mut link, 1).await;
+    assert!(!before.is_empty(), "sweeping before the stop");
+
+    link.send_urgent(stop_command(node)).expect("queued");
+    addresses_until_epoch(&mut link, 0).await;
+
+    assign(&link, 1, everything(), false);
+    let after = addresses_until_epoch(&mut link, 1).await;
+    assert!(
+        !after.is_disjoint(&before),
+        "addresses reported before the stop are reported again after it"
+    );
 }
 
 #[tokio::test(start_paused = true)]

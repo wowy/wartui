@@ -132,9 +132,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 struct Node {
     /// This node's station MAC, the address the host knows it by.
     mac: Mac,
-    /// The epoch of the assignment held. Zero means none has ever arrived, which
-    /// the host never puts on the wire. Sent back in every heartbeat, so the
-    /// host can tell adoption from a bus ack.
+    /// The epoch of the assignment held. Zero means none is held, since boot or the
+    /// last stop; no assignment carries it on the wire. Sent back in every heartbeat,
+    /// so the host can tell adoption from a bus ack.
     version: u8,
     /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
     channels: ChannelSet,
@@ -238,11 +238,26 @@ impl Node {
         true
     }
 
+    /// Drop the assignment and forget every reported address, returning to the state this
+    /// node boots in: [`Self::assigned`] is false, so the main loop idles, and heartbeats
+    /// carry epoch 0 at the idle rate. Any later assignment is adopted, whatever its epoch,
+    /// since none carries 0.
+    ///
+    /// A dwell or Bluetooth scan in progress runs out first, as it does when an assignment
+    /// changes: the record is acted on in the drain after it.
+    fn stop(&mut self) {
+        self.forget_reported("stopped");
+        self.version = 0;
+        self.channels = ChannelSet::empty();
+        self.ble = false;
+        self.cursor = SweepCursor::new();
+    }
+
     /// Empty the dedup ring, so the next sweep reports this node's whole
     /// neighborhood again.
     ///
     /// The one way the ring gets emptied: anything else that should empty it —
-    /// an adopted share change, a clear from the host — calls this rather than
+    /// an adopted share change, a stop — calls this rather than
     /// touching [`sniff::SEEN`] directly.
     fn forget_reported(&mut self, why: &str) {
         let len = sniff::SEEN.with(|seen| {
@@ -692,10 +707,10 @@ fn listen(node: &mut Node, ota: &mut ota::Ota, scanning: bool, ms: u32) {
     }
 }
 
-/// Service the bus and act on every record the P4 has sent: adopt an assignment, forget
-/// what was reported, and hand update records to `ota`.
+/// Service the bus and act on every record the P4 has sent: adopt an assignment, stop,
+/// and hand update records to `ota`.
 ///
-/// Any record from the P4 this node decodes confirms an image on trial — assign, clear,
+/// Any record from the P4 this node decodes confirms an image on trial — assign, stop,
 /// update confirm or an update record: decoding one is hearing the host over the bus,
 /// which is the whole test.
 fn drain(node: &mut Node, ota: &mut ota::Ota) {
@@ -716,9 +731,9 @@ fn drain(node: &mut Node, ota: &mut ota::Ota) {
                         );
                     }
                 }
-                Ok(DownMsg::Clear(_)) => {
+                Ok(DownMsg::Stop(_)) => {
                     confirm(node, ota);
-                    node.forget_reported("host asked");
+                    node.stop();
                 }
                 Ok(DownMsg::UpdateConfirm(_)) => confirm(node, ota),
                 Ok(DownMsg::UpdateBegin(msg)) => update(node, ota, &ota::Update::Begin(msg)),

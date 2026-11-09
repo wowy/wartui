@@ -20,7 +20,7 @@ transfer carries records, one message each:
 | Heartbeat      | Node → P4   | 27 bytes                |
 | Sighting batch | Node → P4   | Up to 1024 bytes        |
 | Assign         | P4 → node   | 8 bytes                 |
-| Clear          | P4 → node   | Empty                   |
+| Stop           | P4 → node   | Empty                   |
 
 - **Heartbeat**: every 5 s once assigned, every second until then. Fire-and-forget: a newer one
   replaces one the P4 has not clocked. Its body opens with a 5-byte prefix: the firmware version
@@ -33,7 +33,8 @@ transfer carries records, one message each:
   bytes. A record's trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
   advertiser's manufacturer identifier, when there are any.
 - **Assign**: the assignment.
-- **Clear**: empties the dedup ring.
+- **Stop**: drops the assignment and empties the dedup ring. The node idles at epoch 0, as at
+  boot, and adopts the next assignment whatever its epoch.
 
 It also takes an image over the bus, in the update records:
 
@@ -69,7 +70,7 @@ from dwell to dwell. Between dwells it reports what it heard and takes whatever 
 an assignment included. It heartbeats every 5 seconds from wherever it is.
 
 **An unassigned node waits rather than sweeping.** It services the bus and heartbeats every second
-until told what to scan. It **collects nothing until then**. wartui's planner answers
+until told what to scan, whether it has just booted or has been stopped. It **collects nothing until then**. wartui's planner answers
 the first heartbeat, so the wait lasts a single beat. That is the intended trade, and explains
 where the first second of a capture went.
 
@@ -79,7 +80,7 @@ after another, back to back.
 
 **It forgets what it has reported in two cases.** An assignment that changes its channels or its
 Bluetooth flag empties the dedup ring, because the entries describe a neighborhood it no longer
-listens to. So does a clear, which carries no other instruction.
+listens to. So does a stop, which also drops the assignment.
 `crates/wartui-proto/src/dedup.rs` has the reasoning.
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
@@ -214,7 +215,7 @@ so a hung image rolls back too: each power cycle counts a boot. A power cut mid-
 the sector armed and over the count, so the next boot rolls back again.
 
 **Confirmation.** The first record from the P4 the node decodes confirms the image: assign,
-clear, update confirm, or any update record. A confirmed image is one that has heard the host over
+stop, update confirm, or any update record. A confirmed image is one that has heard the host over
 the bus, which is the whole test. An update record confirms before the receiver sees it, because
 an update taken on trial would write over the only slot known to work.
 

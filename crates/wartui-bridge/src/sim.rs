@@ -199,13 +199,12 @@ const CACHE_CAPACITY: usize = 2 * 1024 * 1024;
 
 /// What the bus delivers to a simulated node.
 ///
-/// Mirrors what the firmware reads from the P4's records: an assignment to adopt, a request
-/// to empty the dedup ring, an update record, as received, or the confirmation of an image on
-/// trial.
+/// Mirrors what the firmware reads from the P4's records: an assignment to adopt, a stop, an
+/// update record, as received, or the confirmation of an image on trial.
 #[derive(Debug, Clone)]
 enum SimCommand {
     Assign(Assign),
-    Clear,
+    Stop,
     Update(u8, Vec<u8>),
     Confirm,
     /// The carrier switched the node off and on.
@@ -523,7 +522,7 @@ async fn deliver(
         .ok_or(Undelivered::NoNode)?;
     let command = match DownMsg::decode(kind, body) {
         Ok(DownMsg::Assign(assign)) => SimCommand::Assign(assign),
-        Ok(DownMsg::Clear(_)) => SimCommand::Clear,
+        Ok(DownMsg::Stop(_)) => SimCommand::Stop,
         Ok(DownMsg::UpdateConfirm(_)) => SimCommand::Confirm,
         // Never acknowledged on the bus. A delivered record reaches the node's inbox in order.
         Ok(DownMsg::UpdateChunk(_)) if rng.next_f64() < route.chunk_loss => {
@@ -754,6 +753,15 @@ impl SimNode {
         self.holds_ble = assign.scan_ble();
     }
 
+    /// Drop the assignment and forget every reported address, mirroring `Node::stop`: the
+    /// node idles, heartbeating epoch 0, and adopts the next assignment whatever its epoch.
+    fn stop(&mut self) {
+        self.forget_reported();
+        self.epoch = 0;
+        self.channels = ChannelSet::empty();
+        self.holds_ble = false;
+    }
+
     /// Whether this node is the one scanning Bluetooth.
     fn scanning_ble(&self) -> bool {
         self.holds_ble
@@ -898,6 +906,10 @@ async fn run_node(
             {
                 return;
             }
+            // Stopped during the scan: what it would have heard is not reported.
+            if !node.assigned() {
+                continue;
+            }
             let mut writer = SightingBatchWriter::new(node.seq);
             for _ in 0..ADVERTISERS_PER_SCAN {
                 if node.rng.next_f64() >= world.ble_chance {
@@ -938,6 +950,10 @@ async fn run_node(
         for idx in node.channels.indices() {
             if nap(dwell, &mut admin_rx, &mut node, &events, started).await.is_break() {
                 return;
+            }
+            // Stopped during the dwell: what it would have heard is not reported.
+            if !node.assigned() {
+                break;
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
             let mut writer = SightingBatchWriter::new(node.seq);
@@ -1048,9 +1064,9 @@ async fn nap_until(
                     node.confirm();
                     node.apply(assign);
                 }
-                Some(SimCommand::Clear) => {
+                Some(SimCommand::Stop) => {
                     node.confirm();
-                    node.forget_reported();
+                    node.stop();
                 }
                 Some(SimCommand::Confirm) => node.confirm(),
                 // Off for the carrier's hold, missing whatever is sent meanwhile, then a fresh boot

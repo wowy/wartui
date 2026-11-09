@@ -180,7 +180,7 @@ is here rather than only in a `//!`.
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
   `Heartbeat` (27 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
-  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
+  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Stop`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
   the host as `FromNode` and from it as `ToNode`, save the `UpdateChunk`s it builds from its
@@ -283,7 +283,7 @@ is here rather than only in a `//!`.
   changes when fleet membership changes, when the Bluetooth scan moves, when the bridge reports
   another pool, and at no other time.
 - **An updated node image is confirmed only by hearing the bridge.** The first record from the P4 a
-  trial image decodes — assign, clear, update confirm or an update record — marks it valid; nothing
+  trial image decodes — assign, stop, update confirm or an update record — marks it valid; nothing
   else does, because hearing the bridge is the whole test. Rollback is the node app's
   job, since the prebuilt espflash bootloader has none and reads no image state: the third
   unconfirmed boot returns `otadata` to the other slot. The `trial` flash sector, not `otadata`,
