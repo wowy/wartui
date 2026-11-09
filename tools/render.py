@@ -170,19 +170,48 @@ def press(pty, stream, decoder, proc, keys, settle):
     return True
 
 
-def stop(proc):
-    """Wait for it to go, and insist if it will not.
+def drain(pty, proc, seconds):
+    """Discard what the child writes until it exits; False if it outlasts this.
+
+    The frame is already printed, but `pty` has to be read to the end anyway. On
+    macOS a process cannot finish exiting while its terminal holds output nobody
+    has read: it sits in state `E`, where even SIGKILL does nothing, until the
+    output is read or `pty` closes.
+
+    Once `pty` reports EOF or EIO the child's end is closed, and `select` would
+    report it ready forever, so from there this only polls the exit status.
+    """
+    deadline = time.monotonic() + seconds
+    reading = True
+    while proc.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if not reading:
+            time.sleep(min(remaining, 0.05))
+            continue
+        ready, _, _ = select.select([pty], [], [], min(remaining, 0.05))
+        if ready:
+            try:
+                reading = bool(os.read(pty, 65536))
+            except OSError:
+                reading = False
+    return True
+
+
+def stop(pty, proc):
+    """Wait for it to go, and insist if it will not; its status, or None if it stays.
 
     Nothing here waits without a deadline. A child that has closed its stdio and
     carried on reads exactly like one that has exited, and a render that hangs
     with the screen unprinted is worse than one that kills something.
     """
     for insist in (proc.terminate, proc.kill):
-        try:
-            return proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            insist()
-    return proc.wait()
+        if drain(pty, proc, 5):
+            return proc.returncode
+        insist()
+    drain(pty, proc, 5)
+    return proc.returncode
 
 
 def quit_cleanly(pty, proc):
@@ -191,7 +220,7 @@ def quit_cleanly(pty, proc):
         os.write(pty, b"q")
     except OSError:
         pass
-    return stop(proc)
+    return stop(pty, proc)
 
 
 def styled_runs(screen):
@@ -310,7 +339,7 @@ def render(args, binary, db, config, lat, lon):
             # Whatever it managed to say is on the screen above — a clap usage
             # error, or a panic — so the note goes after it rather than into it.
             sys.stdout.flush()
-            stop(proc)
+            stop(pty, proc)
             print(f"\n# wartui stopped early, status {proc.returncode}", file=sys.stderr)
             return 1
     finally:
