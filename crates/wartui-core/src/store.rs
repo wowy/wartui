@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS assignment (
 );
 CREATE INDEX IF NOT EXISTS assign_node ON assignment(node_mac, created_at);
 
--- The capture's provenance (`capture.bus_version`, `capture.host_build` and the like) and its
+-- The capture's provenance (`capture.bus_version`, `capture.host_commit` and the like) and its
 -- settings history (`capture.settings.*`).
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
@@ -453,8 +453,8 @@ pub struct CaptureInfo {
 pub struct CaptureProvenance {
     /// Executable's package version.
     pub host_version: Option<String>,
-    /// Build-time source identity, including local source changes.
-    pub host_build: Option<String>,
+    /// Short git hash of the build.
+    pub host_commit: Option<String>,
     /// Release tag, if this is a tagged executable.
     pub release_tag: Option<String>,
     /// Applied settings before the runtime begins, committed atomically with capture metadata.
@@ -533,7 +533,7 @@ impl Store {
             ("capture.bus_version", Some(BUS_VERSION.to_string())),
             ("capture.core_version", Some(env!("CARGO_PKG_VERSION").to_owned())),
             ("capture.host_version", provenance.host_version.clone()),
-            ("capture.host_build", provenance.host_build.clone()),
+            ("capture.host_commit", provenance.host_commit.clone()),
             ("capture.release_tag", provenance.release_tag.clone()),
             (
                 "capture.settings.initial",
