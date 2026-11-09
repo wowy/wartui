@@ -55,6 +55,7 @@ import codecs
 import fcntl
 import json
 import os
+import re
 import select
 import shutil
 import struct
@@ -88,6 +89,15 @@ DEFAULT_SIM_NODES = 3
 # that is still on its way as one that never arrives.
 SIM_AFTER, SIM_SETTLE = 4.0, 1.0
 BRIDGE_AFTER, BRIDGE_SETTLE = 15.0, 15.0
+
+# How much of what the child writes after `q` to keep, and how much of that to report if it
+# never gave the terminal back, when all of it is the end of a frame.
+TAIL_CHARS, TAIL_WITHOUT_LEAVING = 16384, 200
+LEAVE_ALT_SCREEN = "\x1b[?1049l"
+# Terminal escape sequences, then any control character but a newline.
+CONTROL = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x09\x0b-\x1f\x7f]"
+)
 
 
 def build():
@@ -170,19 +180,61 @@ def press(pty, stream, decoder, proc, keys, settle):
     return True
 
 
-def stop(proc):
-    """Wait for it to go, and insist if it will not.
+class Tail:
+    """Stands in for a `pyte.Stream` once the frame is printed, keeping only the end."""
 
-    Nothing here waits without a deadline. A child that has closed its stdio and
-    carried on reads exactly like one that has exited, and a render that hangs
-    with the screen unprinted is worse than one that kills something.
+    def __init__(self):
+        self.text = ""
+
+    def feed(self, text):
+        self.text = (self.text + text)[-TAIL_CHARS:]
+
+    def last_words(self):
+        """What the child wrote after giving the terminal back, as plain text.
+
+        A failed commit or a panic is reported there, after the view has gone. A
+        child that never gave the terminal back leaves the end of its last frame,
+        so that is cut to the last few characters rather than printed whole.
+        """
+        before, left, after = self.text.rpartition(LEAVE_ALT_SCREEN)
+        said = after if left else after[-TAIL_WITHOUT_LEAVING:]
+        return CONTROL.sub("", said).strip()
+
+
+def drain(pty, tail, decoder, proc, seconds):
+    """Read what the child writes until it exits; False if it outlasts this.
+
+    The frame is already printed, but `pty` has to be read to the end anyway. On
+    macOS a process cannot finish exiting while its terminal holds output nobody
+    has read: it sits in state `E`, where even SIGKILL does nothing, until the
+    output is read or `pty` closes.
     """
+    deadline = time.monotonic() + seconds
+    if pump(pty, tail, decoder, proc, seconds):
+        return proc.poll() is not None
+    try:
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def stop(pty, proc):
+    """Wait for it to go, and insist if it will not; what it wrote on the way out.
+
+    `proc.returncode` is None afterward if it stayed. Nothing here waits without a
+    deadline. A child that has closed its stdio and carried on reads exactly like
+    one that has exited, and a render that hangs with the screen unprinted is worse
+    than one that kills something.
+    """
+    tail = Tail()
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     for insist in (proc.terminate, proc.kill):
-        try:
-            return proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            insist()
-    return proc.wait()
+        if drain(pty, tail, decoder, proc, 5):
+            return tail.last_words()
+        insist()
+    drain(pty, tail, decoder, proc, 5)
+    return tail.last_words()
 
 
 def quit_cleanly(pty, proc):
@@ -191,7 +243,16 @@ def quit_cleanly(pty, proc):
         os.write(pty, b"q")
     except OSError:
         pass
-    return stop(proc)
+    return stop(pty, proc)
+
+
+def outcome(proc):
+    """How the child ended, for a note on stderr."""
+    if proc.returncode is None:
+        return f"is still running as pid {proc.pid}"
+    if proc.returncode < 0:
+        return f"was killed by signal {-proc.returncode}"
+    return f"exited with status {proc.returncode}"
 
 
 def styled_runs(screen):
@@ -304,14 +365,22 @@ def render(args, binary, db, config, lat, lon):
             for y, x, text, style in styled_runs(screen):
                 print(f"  {y:>3},{x:<3} {text.strip():<40} {describe(style)}")
 
+        # The wait below can take seconds, and a caller's own timeout must not cost the frame.
+        sys.stdout.flush()
+
         if drawing:
-            quit_cleanly(pty, proc)
+            said = quit_cleanly(pty, proc)
+            if proc.returncode != 0:
+                # The frame looks fine either way, and a `--db` capture may be incomplete.
+                print(f"\n# wartui {outcome(proc)} after q", file=sys.stderr)
+                if said:
+                    print(said, file=sys.stderr)
+                return 1
         else:
             # Whatever it managed to say is on the screen above — a clap usage
             # error, or a panic — so the note goes after it rather than into it.
-            sys.stdout.flush()
-            stop(proc)
-            print(f"\n# wartui stopped early, status {proc.returncode}", file=sys.stderr)
+            stop(pty, proc)
+            print(f"\n# wartui stopped early: it {outcome(proc)}", file=sys.stderr)
             return 1
     finally:
         os.close(pty)
