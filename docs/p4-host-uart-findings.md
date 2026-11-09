@@ -79,3 +79,53 @@ The host opened and closed the CH343 20 times. The P4's uptime rose by about 1,0
 Every boot, the ROM banner and the second-stage bootloader's log go out at 115200 baud: about
 250 ms of text, partition table included. A host listening at the link's rate reads it as
 garbage.
+
+## A Pi 5 host corrupts long bursts unless a hub sits between them
+
+Measured on 2026-11-09 on a HackberryPi CM5 (Raspberry Pi OS, kernel `6.18.60+rpt-rpi-2712`,
+kernel `cdc_acm`, the CH343 enumerated at full speed straight on an RP1 xHCI root port) against the
+10-node carrier and the production bridge firmware, after a drive whose footer reached
+`garbled 2,885` in 74 minutes with no node frame lost. A Raspberry Pi 5 (1 GB) then ran the same
+test on each kind of port and showed the same fault on both: the same rate, the same frame lengths,
+and the same damage shape. The same hub cured it there too.
+
+| Host | Path | Run | Status bursts | Undecodable frames |
+| --- | --- | --- | --- | --- |
+| CM5 | straight into the Pi | 3 min, `sniff` | 30 | 111 |
+| Pi 5 (1 GB) | straight into a USB 3.0 (blue) port | 5 min 39 s, `sniff` | 54 | 264 |
+| Pi 5 (1 GB) | straight into a USB 2.0 (black) port | 3 min 35 s, `sniff` | 34 | 167 |
+| Mac | straight into the Mac | 3 min, `sniff` | 37 | 0 |
+| CM5 | through an unpowered USB 2.0 hub | 3 min 42 s, `sniff` | 45 | 0 |
+| Pi 5 (1 GB) | through the same hub | 2 min 11 s, `sniff` | 27 | 0 |
+
+What the hex dumps of the 111 showed, and the Pi 5's 264 and 167 repeated
+(`RUST_LOG=wartui_bridge=debug` logs each `undecodable frame` with its bytes since this bench):
+
+- Only long bursts were hit: the 512-byte `Gps` batches at 1 Hz and the ~1.3 KB `Log` burst every
+  5 s. The node frames on the bench and the drive were short, 27-byte heartbeats and sighting
+  batches averaging 36 bytes and never over 287, and about 29,000 of them came through intact with
+  the bridge's counters showing nothing dropped. That is the drive's doing, not an immunity: a
+  moving node rarely fills a batch, but a `Sightings` body runs to 1,024 bytes
+  (`bus::SIGHTING_BATCH_MAX`), and a dense area's dozen access points with real SSIDs make a 300 to
+  600 byte frame, the size band in which half the GPS batches failed. A sighting frame that fails
+  this way is a lost batch (`batch_gap`), since the P4 acknowledged it to the node. The 74-minute
+  drive lost 4 batches; a lost frame leaves no length behind, so whether those were its few longer
+  ones is not known.
+- Nothing was lost. Every garbled GPS frame had exactly the length a full batch encodes to (521
+  bytes, 457 for the shorter second batch of an epoch) and its COBS code byte at offset 255 in
+  place.
+- A stretch of 29 to 55 bytes starting on a 64-byte boundary near the frame's start (offset 0, 64
+  or 128) held a copy of the bytes from about 330 bytes later in the same burst, which were also
+  present at their own place. So a short USB packet near the start of a burst was delivered with a
+  later packet's payload. Hit at offset 0 the frame fails COBS, having lost its leading code byte;
+  hit later it fails the CRC. When the copied bytes carried a later frame's `0x00`, one frame
+  became two garbled chunks, which is why the log burst produced them in pairs.
+
+A high-speed hub's transaction translator does the full-speed splitting instead of the RP1, and
+the xHCI then sees ordinary high-speed bulk packets. The firmware needs no change: a shorter
+`GPS_FRAME`, a capped DMA chunk or a lower `HOST_BAUD` would have been workarounds for the Pi's
+path, and the hub removes the fault instead. Plugging the hub in hot rebooted the HackberryPi, so
+plug it in before boot or with the Pi off.
+
+Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
+whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.
