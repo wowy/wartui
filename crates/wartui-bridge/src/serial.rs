@@ -948,6 +948,27 @@ fn log_bridge_line(msg: &BridgeToHost) {
     }
 }
 
+/// One line describing a frame that did not decode, for the debug log: its length, where it
+/// sat in the `read()` that delivered its terminator, whether the chunk before it decoded, and
+/// its bytes as hex. `frame` is the raw COBS-encoded chunk as `FrameAccumulator::push` returned it
+/// (terminator excluded). `read_len` is that `read()`'s byte count and `offset` the index of the
+/// terminator within it, so a frame that began in an earlier `read()` shows `offset < len`.
+/// `prev_ok` is `None` for the first chunk of a connection.
+fn describe_garbled(frame: &[u8], read_len: usize, offset: usize, prev_ok: Option<bool>) -> String {
+    use std::fmt::Write as _;
+    let prev = match prev_ok {
+        Some(true) => "ok",
+        Some(false) => "bad",
+        None => "none",
+    };
+    let mut line = format!("len={} read={read_len} at={offset} prev={prev} hex=", frame.len());
+    for byte in frame {
+        // Writing to a `String` cannot fail.
+        let _ = write!(line, "{byte:02x}");
+    }
+    line
+}
+
 /// Blocking read loop. Returns the reason it stopped.
 ///
 /// Generic over the port only so a test can feed it bytes.
@@ -981,6 +1002,10 @@ fn read_frames<R: Read>(
     let mut buf = [0u8; 1024];
     // Local rather than shared: a property of one connection, not of the link.
     let mut last_ready: Option<(u32, Instant)> = None;
+    // Whether the last completed chunk decoded, and a copy of the current one taken before
+    // `decode_frame` rewrites it in place: the evidence a garbled frame's debug line carries.
+    let mut prev_ok: Option<bool> = None;
+    let mut raw = Vec::with_capacity(MAX_FRAME);
 
     while !state.stop.load(Ordering::Relaxed) {
         let read = match port.read(&mut buf) {
@@ -992,9 +1017,13 @@ fn read_frames<R: Read>(
             Err(e) => return format!("read failed: {e}"),
         };
 
-        for &byte in &buf[..read] {
+        for (at, &byte) in buf[..read].iter().enumerate() {
             let Some(frame) = acc.push(byte) else { continue };
-            let event = match decode_frame::<BridgeToHost>(frame) {
+            raw.clear();
+            raw.extend_from_slice(frame);
+            let decoded = decode_frame::<BridgeToHost>(frame);
+            let prev = prev_ok.replace(decoded.is_ok());
+            let event = match decoded {
                 Ok(BridgeToHost::Ready {
                     mac,
                     fw_version,
@@ -1082,7 +1111,11 @@ fn read_frames<R: Read>(
                 // talks.
                 Err(e) => {
                     state.garbled.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(error = %e, "undecodable frame");
+                    tracing::debug!(
+                        error = %e,
+                        "undecodable frame: {}",
+                        describe_garbled(&raw, read, at, prev)
+                    );
                     LinkEvent::Garbled(e)
                 }
             };
@@ -1257,8 +1290,8 @@ mod tests {
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        Attempt, PROBE_TICKS, SETTLE_TICKS, asks_on_tick, encode_for_wire, identify, is_a_new_life,
-        is_remembered_port, patience, read_loop, silence_disowns_it,
+        Attempt, PROBE_TICKS, SETTLE_TICKS, asks_on_tick, describe_garbled, encode_for_wire,
+        identify, is_a_new_life, is_remembered_port, patience, read_loop, silence_disowns_it,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
@@ -1491,6 +1524,48 @@ mod tests {
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_link_emits_garbled_and_keeps_decoding_when_a_frame_is_corrupt() {
+        // The framing resynchronizes on the next terminator, so one bad frame costs only itself.
+        let mut corrupt = frame(&rx(10));
+        let mid = corrupt.len() / 2;
+        // A changed interior byte that is not a terminator keeps the chunk whole but fails it.
+        corrupt[mid] = if corrupt[mid] == 0x55 { 0x56 } else { 0x55 };
+        let mut bytes = frame(&ready());
+        bytes.extend(corrupt);
+        bytes.extend(frame(&rx(20)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Garbled(_))));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. }))
+        ));
+        assert!(received.try_recv().is_err());
+        assert_eq!(state.garbled.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn describe_garbled_reports_length_offset_and_hex_when_given_a_frame() {
+        assert_eq!(
+            describe_garbled(&[0x01, 0xff, 0x7f], 1024, 611, Some(true)),
+            "len=3 read=1024 at=611 prev=ok hex=01ff7f"
+        );
+    }
+
+    #[test]
+    fn describe_garbled_names_previous_chunk_state_when_bad_or_unknown() {
+        assert_eq!(
+            describe_garbled(&[0x0a], 8, 2, Some(false)),
+            "len=1 read=8 at=2 prev=bad hex=0a"
+        );
+        assert_eq!(describe_garbled(&[], 8, 0, None), "len=0 read=8 at=0 prev=none hex=");
     }
 
     #[test]
