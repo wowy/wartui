@@ -131,7 +131,7 @@ pub struct Assignment {
 /// How far a node's rail reading must fall below its first, in millivolts, to count as a drop.
 ///
 /// The reading is low by a per-chip offset, so only a change on one node means anything.
-/// `crates/wartui/README.md` § "Reading the fleet table" has the measurements. Readings come in
+/// `crates/wartui/README.md` § "Reading the node blocks" has the measurements. Readings come in
 /// 12 mV steps and a healthy node's does not move, so this is well clear of noise.
 const SUPPLY_DROP_MV: u16 = 150;
 /// A warning on the die, which runs above ambient, so it comes well before the board around it

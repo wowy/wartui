@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS host_status (
 -- One row per gap in a node's batch `seq`. `rx_at` is when the batch after the gap
 -- arrived, not when the lost batches were sent. `lost` is `seq - after_seq - 1`
 -- modulo 2^16, and only gaps under 1024 are recorded, the rule the live count
--- follows. Summing `lost` per node gives the fleet table's `lost` column.
+-- follows. Summing `lost` gives the footer's `lost` total.
 CREATE TABLE IF NOT EXISTS batch_gap (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,

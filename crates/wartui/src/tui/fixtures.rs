@@ -15,7 +15,7 @@ use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
 };
 use wartui_proto::link::LoopPhase;
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
 use super::draw;
@@ -185,9 +185,18 @@ pub(super) fn busy() -> Snapshot {
             .collect(),
         unique_wifi_aps: 32,
         unique_ble_aps: 8,
+        wifi_by_channel: {
+            let mut by_channel = [0; NUM_SCAN_CHANNELS as usize];
+            by_channel[0] = 280;
+            by_channel[5] = 310;
+            by_channel[10] = 50;
+            by_channel
+        },
         counters: Counters {
             frames: 900,
             observations: 800,
+            wifi_observations: 640,
+            ble_observations: 160,
             heartbeats: 90,
             undecodable: 1,
             incompatible: 2,
@@ -236,6 +245,19 @@ pub(super) fn on_board(board: NodeBoard) -> Snapshot {
     snapshot
 }
 
+/// [`busy`] on a 14-node carrier with `n` alive nodes, `N1` up, and no stream.
+pub(super) fn fleet_of(n: u8) -> Snapshot {
+    // Byte 0x7E is slot 0 (`MAX_SLOTS` divides 126), so the slots run in order from `N1`.
+    let nodes: Vec<NodeView> = (0..n).map(|i| node(0x7E + i, 0, true)).collect();
+    Snapshot {
+        nodes,
+        alive: usize::from(n),
+        assignable: usize::from(n),
+        tail: Vec::new(),
+        ..on_board(NodeBoard::Carrier14)
+    }
+}
+
 /// No bridge, no nodes, no position.
 pub(super) fn empty() -> Snapshot {
     Snapshot {
@@ -250,6 +272,7 @@ pub(super) fn empty() -> Snapshot {
         tail: Vec::new(),
         unique_wifi_aps: 0,
         unique_ble_aps: 0,
+        wifi_by_channel: [0; NUM_SCAN_CHANNELS as usize],
         counters: Counters::default(),
         store: StoreStats::default(),
         bridge_status: None,
