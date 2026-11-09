@@ -317,6 +317,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "colorgrad"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4115799a737d62b06bc1028358f8cb69a753e174d6470f3be679ef643c55a53"
+dependencies = [
+ "csscolorparser 0.9.0",
+ "libm",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -470,6 +480,15 @@ name = "csscolorparser"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "168dbdf4dced8f57fa4246ac9080598452b49d70bb2d0e46422142f113140dd8"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "csscolorparser"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75c9db70df93ea049adaa5ef1a727079ada6ccb33d4b358f262923aef4fcac8c"
 dependencies = [
  "num-traits",
 ]
@@ -2413,7 +2432,7 @@ version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bab0faa57acc8ac4beb7e545c3d6e3ea059519c54c4b917385935e004ec3276e"
 dependencies = [
- "colorgrad",
+ "colorgrad 0.8.0",
  "document-features",
  "ratatui-core",
  "strum",
@@ -2593,7 +2612,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "colorgrad",
+ "colorgrad 0.9.0",
  "flate2",
  "ratatui",
  "serde",
