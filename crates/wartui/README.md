@@ -74,12 +74,12 @@ The initial metadata is committed with capture creation. Runtime settings use ze
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
 The source identity hashes sorted workspace-relative host Rust files, manifests and the lockfile
-with noncryptographic FNV-1a. It excludes firmware and generated files. Neither it nor the saved scan
-table proves which firmware a node ran: the table records only the host's interpretation.
+with noncryptographic FNV-1a. It excludes firmware and generated files, so it does not prove which
+firmware a node ran.
 
 An absent metadata field means unknown, not a default, in an older compatible capture. There are no
-migrations before 1.0. A capture with another schema version or fingerprint is refused; start a new
-capture at a new `--db` path.
+migrations before 1.0. A capture with another schema version is refused: read it with the wartui
+build that wrote it, or start a new capture at a different `--db` path to record.
 
 ### Exporting
 

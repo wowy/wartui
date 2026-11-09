@@ -7,6 +7,7 @@
 //! accepts until it is uploaded.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -1572,11 +1573,11 @@ fn wigle_csv_writes_identical_file_when_run_twice_on_one_connection() {
 
 #[test]
 fn store_refuses_database_when_schema_version_differs() {
-    // Reading another build's tables as this build's would export rows of the wrong
+    // Reading another shape's tables as this build's would export rows of the wrong
     // shape, or values that meant something else.
     //
-    // 1 is deliberately not in this list: it is the marker this build writes
-    for found in [99, 2] {
+    // 1 is the case that matters: captures stamped 1 span several shapes.
+    for found in [99, 1] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
         let other = Connection::open(&path).expect("creating");
@@ -1607,50 +1608,11 @@ fn create(path: &std::path::Path) {
 }
 
 #[test]
-fn store_reopens_database_when_fingerprint_matches() {
+fn store_reopens_database_when_schema_version_matches() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     create(&path);
     open_readonly(&path).expect("reopening a file this build wrote");
-}
-
-#[test]
-fn store_refuses_database_when_fingerprint_differs() {
-    // The marker stays at 1 while the schema changes shape, so the fingerprint is what
-    // tells this build's file from another's.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
-        .expect("overwriting the fingerprint");
-
-    let opened = open_readonly(&path);
-    assert!(
-        matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), ours })
-            if ours != 0xdead_beef),
-        "expected the other fingerprint to be refused, got {opened:?}"
-    );
-}
-
-#[test]
-fn store_refuses_database_when_fingerprint_missing() {
-    // A file from a build that stamped no fingerprint carries this build's marker over
-    // whatever shape that build's tables had.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("DELETE FROM kv WHERE k = 'schema_fingerprint'", [])
-        .expect("deleting the fingerprint");
-
-    let opened = open_readonly(&path);
-    assert!(
-        matches!(opened, Err(StoreError::SchemaDiffers { found: None, .. })),
-        "expected a file without a fingerprint to be refused, got {opened:?}"
-    );
 }
 
 #[test]
@@ -1684,6 +1646,320 @@ fn store_stamps_schema_version_when_creating_file() {
     let version: i32 =
         conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
     assert_eq!(version, SCHEMA_VERSION);
+}
+
+#[test]
+fn store_refuses_file_when_stamped_schema_version_has_no_capture_table() {
+    for setup in ["", "CREATE TABLE unrelated (id INTEGER PRIMARY KEY);"] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("other.db");
+        let other = Connection::open(&path).expect("creating");
+        other.execute_batch(setup).expect("creating the tables");
+        other.pragma_update(None, "user_version", SCHEMA_VERSION).expect("stamping");
+        drop(other);
+
+        let reading = open_readonly(&path);
+        assert!(matches!(reading, Err(StoreError::NotACapture)), "read-only: {reading:?}");
+        let writing = open_readwrite(&path);
+        assert!(matches!(writing, Err(StoreError::NotACapture)), "read-write: {writing:?}");
+    }
+}
+
+/// `SCHEMA_VERSION`, then the SQL of every table, index, trigger and view, by type then name.
+/// SQLite's own objects are left out.
+fn schema_shape(conn: &Connection) -> String {
+    let objects: Vec<String> = conn
+        .prepare(
+            "SELECT sql FROM sqlite_master
+             WHERE sql IS NOT NULL AND substr(name, 1, 7) != 'sqlite_'
+             ORDER BY type, name",
+        )
+        .expect("preparing the object query")
+        .query_map([], |row| row.get(0))
+        .expect("listing objects")
+        .collect::<Result<_, _>>()
+        .expect("reading objects");
+
+    let mut shape = format!("SCHEMA_VERSION {SCHEMA_VERSION}\n");
+    for sql in objects {
+        writeln!(shape, "\n{}", normalized_sql(&sql)).expect("writing to a string");
+    }
+    shape
+}
+
+/// `sql` without `--` comments and with whitespace collapsed, each column or constraint on its own
+/// line. Whitespace inside a parenthesis or around a comma is dropped too, so only a space added or
+/// removed just before `(` still shows.
+///
+/// It reads no string literals and no `/* */` comments, and `SCHEMA` has neither. A `--` inside a
+/// literal would hide the rest of its line, and a `/* */` comment would show as a change.
+fn normalized_sql(sql: &str) -> String {
+    let code: Vec<&str> = sql.lines().map(|line| line.split("--").next().unwrap_or("")).collect();
+    let collapsed = code.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let mut text = String::new();
+    let mut depth = 0;
+    for c in collapsed.chars() {
+        match c {
+            ' ' if text.ends_with(['(', ' ']) => {}
+            '(' => {
+                depth += 1;
+                text.push_str(if depth == 1 { "(\n  " } else { "(" });
+            }
+            ')' => {
+                text.truncate(text.trim_end().len());
+                text.push_str(if depth == 1 { "\n)" } else { ")" });
+                depth -= 1;
+            }
+            ',' => {
+                text.truncate(text.trim_end().len());
+                text.push_str(if depth == 1 { ",\n  " } else { ", " });
+            }
+            c => text.push(c),
+        }
+    }
+    text
+}
+
+/// What the shape test concludes. Each failure carries the version its replacement file is headed
+/// with, chosen so that pasting the replacement never passes until the constant has moved.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ShapeCheck {
+    Pass,
+    /// The SQL changed and the constant did not.
+    ForgottenBump {
+        replacement: i32,
+    },
+    /// The constant moved past the file, so the file needs updating.
+    FileBehind {
+        replacement: i32,
+    },
+    /// The file names a version the constant has not reached.
+    ConstantBehind {
+        replacement: i32,
+    },
+}
+
+fn shape_check(constant: i32, body: &str, file_version: i32, file_body: &str) -> ShapeCheck {
+    if constant < file_version {
+        ShapeCheck::ConstantBehind { replacement: file_version }
+    } else if constant > file_version {
+        ShapeCheck::FileBehind { replacement: constant }
+    } else if body != file_body {
+        ShapeCheck::ForgottenBump { replacement: file_version + 1 }
+    } else {
+        ShapeCheck::Pass
+    }
+}
+
+/// A shape's version line and the body after it.
+fn split_shape(shape: &str) -> (i32, &str) {
+    let (line, body) = shape.split_once('\n').expect("a shape has a version line");
+    let version = line.strip_prefix("SCHEMA_VERSION ").expect("a shape starts with its version");
+    (version.parse().expect("a shape's version is a number"), body)
+}
+
+/// The lines only `old` holds, marked `-`, and the lines only `new` holds, marked `+`.
+fn line_diff(old: &str, new: &str) -> String {
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    // `common[i][j]` is the longest common subsequence of `old[i..]` and `new[j..]`.
+    let mut common = vec![vec![0_usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            common[i][j] = if old[i] == new[j] {
+                common[i + 1][j + 1] + 1
+            } else {
+                common[i + 1][j].max(common[i][j + 1])
+            };
+        }
+    }
+
+    let mut diff = String::new();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() || j < new.len() {
+        if i < old.len() && j < new.len() && old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if j == new.len() || (i < old.len() && common[i + 1][j] >= common[i][j + 1]) {
+            writeln!(diff, "- {}", old[i]).expect("writing to a string");
+            i += 1;
+        } else {
+            writeln!(diff, "+ {}", new[j]).expect("writing to a string");
+            j += 1;
+        }
+    }
+    diff
+}
+
+/// What to do about a failed check, the lines that differ, and the file to regenerate from. `None`
+/// when the check passed.
+fn shape_failure(check: ShapeCheck, constant: i32, body: &str, file: &str) -> Option<String> {
+    const FILE: &str = "tests/schema_shape.txt";
+    let (advice, replacement) = match check {
+        ShapeCheck::Pass => return None,
+        ShapeCheck::ForgottenBump { replacement } => (
+            format!(
+                "the schema differs from {FILE} and SCHEMA_VERSION is still {constant}: set \
+                 SCHEMA_VERSION to {replacement} in store.rs, and replace the file with the text \
+                 below"
+            ),
+            replacement,
+        ),
+        ShapeCheck::FileBehind { replacement } => (
+            format!(
+                "SCHEMA_VERSION is {constant}, ahead of {FILE}: replace the file with the text \
+                 below"
+            ),
+            replacement,
+        ),
+        ShapeCheck::ConstantBehind { replacement } => (
+            format!(
+                "SCHEMA_VERSION is {constant}, behind {FILE}: set SCHEMA_VERSION to {replacement} \
+                 in store.rs, and make the file match the text below"
+            ),
+            replacement,
+        ),
+    };
+    let replacement = format!("SCHEMA_VERSION {replacement}\n{body}");
+    let diff = line_diff(file, &replacement);
+    let diff = if diff.is_empty() {
+        "The file already matches the text below.\n".to_owned()
+    } else {
+        format!("Lines that differ from the file:\n{diff}")
+    };
+    Some(format!("{advice}\n\n{diff}\nReplacement file:\n{replacement}"))
+}
+
+#[test]
+fn store_keeps_schema_shape_when_schema_version_unchanged() {
+    // A bump relies on someone remembering it, so this catches the forgotten one. It reads the
+    // live database, so a comment or whitespace change in `SCHEMA` passes.
+    //
+    // It cannot see a change in what a stored value means or a pragma. A hand edit of the file's
+    // body that leaves its version line also passes: the file's diff is what a reviewer checks.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+
+    let shape = schema_shape(&open_readonly(&path).expect("reopening"));
+    let (_, body) = split_shape(&shape);
+    let file = include_str!("schema_shape.txt");
+    let (file_version, file_body) = split_shape(file);
+    let check = shape_check(SCHEMA_VERSION, body, file_version, file_body);
+    if let Some(failure) = shape_failure(check, SCHEMA_VERSION, body, file) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn shape_check_passes_when_body_and_version_match() {
+    assert_eq!(shape_check(2, "a", 2, "a"), ShapeCheck::Pass);
+}
+
+#[test]
+fn shape_check_reports_forgotten_bump_when_body_differs_and_version_equal() {
+    assert_eq!(shape_check(2, "b", 2, "a"), ShapeCheck::ForgottenBump { replacement: 3 });
+}
+
+#[test]
+fn shape_check_reports_file_behind_when_constant_ahead() {
+    for body in ["a", "b"] {
+        assert_eq!(shape_check(4, body, 2, "a"), ShapeCheck::FileBehind { replacement: 4 });
+    }
+}
+
+#[test]
+fn shape_check_reports_constant_behind_when_file_ahead() {
+    for body in ["a", "b"] {
+        assert_eq!(shape_check(2, body, 3, "a"), ShapeCheck::ConstantBehind { replacement: 3 });
+    }
+}
+
+#[test]
+fn shape_check_stays_red_when_replacement_pasted_without_bump() {
+    let (constant, changed) = (2, "\nCREATE TABLE changed\n");
+    let mut file = "SCHEMA_VERSION 2\n\nCREATE TABLE original\n".to_owned();
+
+    // Each paste takes the replacement the last failure printed.
+    for pastes in 0..3 {
+        let (file_version, file_body) = split_shape(&file);
+        let check = shape_check(constant, changed, file_version, file_body);
+        assert_ne!(check, ShapeCheck::Pass, "after {pastes} pastes with no bump");
+        let failure = shape_failure(check, constant, changed, &file).expect("a failure");
+        let (_, replacement) = failure.split_once("Replacement file:\n").expect("a replacement");
+        assert!(replacement.starts_with("SCHEMA_VERSION 3\n"), "{replacement}");
+        file = replacement.to_owned();
+    }
+
+    let (file_version, file_body) = split_shape(&file);
+    assert_eq!(shape_check(3, changed, file_version, file_body), ShapeCheck::Pass);
+}
+
+#[test]
+fn shape_failure_shows_only_differing_lines_when_one_line_changes() {
+    let body = "\nkeep\nnew\nkeep too\n";
+    let file = "SCHEMA_VERSION 2\n\nkeep\nold\nkeep too\n";
+    let check = ShapeCheck::ForgottenBump { replacement: 3 };
+
+    let failure = shape_failure(check, 2, body, file).expect("a failure");
+    assert!(failure.contains("set SCHEMA_VERSION to 3"), "{failure}");
+    let diff = failure.split_once("differ from the file:\n").expect("a diff").1;
+    let diff = diff.split_once("\nReplacement file:").expect("a replacement").0;
+    assert_eq!(diff, "- SCHEMA_VERSION 2\n+ SCHEMA_VERSION 3\n- old\n+ new\n");
+}
+
+/// The body of the shape of a database made by `sql`.
+fn shape_of(sql: &str) -> String {
+    let conn = Connection::open_in_memory().expect("opening");
+    conn.execute_batch(sql).expect("applying the schema");
+    let shape = schema_shape(&conn);
+    split_shape(&shape).1.to_owned()
+}
+
+const SHAPE_BASE: &str = "
+    CREATE TABLE one (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT);
+    CREATE TABLE two (one_id INTEGER REFERENCES one(id), name TEXT);";
+
+#[test]
+fn schema_shape_changes_when_constraint_or_object_changes() {
+    let base = shape_of(SHAPE_BASE);
+    let trigger = "CREATE TRIGGER t AFTER INSERT ON one BEGIN DELETE FROM two; END;";
+    let cases = [
+        ("no check", SHAPE_BASE.replace(" CHECK (id = 1)", "")),
+        ("no references", SHAPE_BASE.replace(" REFERENCES one(id)", "")),
+        ("default", SHAPE_BASE.replace("one_id INTEGER", "one_id INTEGER DEFAULT 1")),
+        ("collate", SHAPE_BASE.replace("id = 1), name TEXT", "id = 1), name TEXT COLLATE NOCASE")),
+        ("unique", SHAPE_BASE.replace("id = 1), name TEXT", "id = 1), name TEXT UNIQUE")),
+        ("unique index", format!("{SHAPE_BASE} CREATE UNIQUE INDEX i ON two(name);")),
+        ("partial index", format!("{SHAPE_BASE} CREATE INDEX i ON two(name) WHERE one_id > 0;")),
+        ("trigger", format!("{SHAPE_BASE} {trigger}")),
+        ("view", format!("{SHAPE_BASE} CREATE VIEW v AS SELECT name FROM one;")),
+    ];
+    for (name, sql) in cases {
+        assert_ne!(shape_of(&sql), base, "{name}");
+    }
+}
+
+#[test]
+fn schema_shape_stays_same_when_comment_or_whitespace_changes() {
+    let base = shape_of(SHAPE_BASE);
+    let cases = [
+        SHAPE_BASE.replace("(id INTEGER", "(\n  -- A comment, with (punctuation.\n  id   INTEGER"),
+        SHAPE_BASE.replace("name TEXT);", "name TEXT -- The last column.\n);"),
+        SHAPE_BASE.replace(", name", " ,\n\tname"),
+    ];
+    for sql in cases {
+        assert_eq!(shape_of(&sql), base, "{sql}");
+    }
+}
+
+#[test]
+fn schema_shape_splits_columns_when_table_has_constraints() {
+    assert_eq!(
+        shape_of(SHAPE_BASE),
+        "\nCREATE TABLE one (\n  id INTEGER PRIMARY KEY CHECK (id = 1),\n  name TEXT\n)\n\
+         \nCREATE TABLE two (\n  one_id INTEGER REFERENCES one(id),\n  name TEXT\n)\n"
+    );
 }
 
 #[test]

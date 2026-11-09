@@ -17,12 +17,9 @@
 //! A file holds one run. [`Store::create`] refuses a path that exists, so every export, analysis
 //! and upload cutoff is about one file, with no run to pick.
 //!
-//! A capture from another build is somebody else's file, and the version marker cannot say so: it
-//! stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and queries against another shape
-//! fail or misread. So each file also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text,
-//! and [`check_version`] refuses a file whose fingerprint is missing or different. Even a
-//! whitespace or comment change refuses other builds' files: the safe direction, with no migration
-//! to offer.
+//! The version marker, [`SCHEMA_VERSION`], names a file's shape. [`check_version`] refuses any
+//! other marker, because queries against another shape fail or misread. There is no migration to
+//! offer, so the fix for a refused file is a new `--db` path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,31 +36,19 @@ use wartui_proto::plan::ChannelPool;
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, Record};
 
-/// The schema version this build writes and reads: 1 until wartui 1.0, as
-/// [`wartui_proto::link::LINK_PROTO_VERSION`] is. It is the lever for the first capture that must be read
-/// in an earlier build's terms, and none is before 1.0. Meanwhile [`SCHEMA_FINGERPRINT`] tells
-/// builds apart (see the module docs).
-pub const SCHEMA_VERSION: i32 = 1;
-
-/// FNV-1a over [`SCHEMA`], stamped into `kv` as `schema_fingerprint` and checked by
-/// [`check_version`] on every open. Not `DefaultHasher`, whose output may change between Rust
-/// releases, so a toolchain update would refuse every capture.
-const SCHEMA_FINGERPRINT: u64 = fnv1a_64(SCHEMA.as_bytes());
-
-/// The `kv` key [`SCHEMA_FINGERPRINT`] is stored under.
-const FINGERPRINT_KEY: &str = "schema_fingerprint";
-
-/// 64-bit FNV-1a: stable, and small enough to run at compile time.
-const fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        i += 1;
-    }
-    hash
-}
+/// The schema version this build writes and reads, and the only thing that names a file's shape.
+/// Bump it for any change to a table, column or index, or to what a stored value wartui reads back
+/// means. A comment or whitespace change does not bump it. Neither does a new optional `capture.*`
+/// key in `kv`, because an absent key means unknown. Nor does a scan-table change:
+/// `assignment.channels` holds the indices that went out, read against the scan table of the build
+/// that wrote the row, and no wartui code decodes the column against the scan table.
+///
+/// `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
+/// trigger and view, comments and whitespace aside, and fails on a difference without a bump. It
+/// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
+///
+/// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -128,8 +113,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- actually went out; they differ because the wire field is one byte wide.
 -- `channels` is the forty-two-bit SCAN_CHANNELS mask the assignment carried, stored as the
 -- integer it is: the indices are what the wire said, and which channels they name is
--- the scan table of the build that wrote the row. Nothing reads the column back, and
--- nothing rewrites it when the table changes -- a row records what went out.
+-- the scan table of the build that wrote the row. No wartui code decodes the column against the
+-- scan table, and nothing rewrites it when the table changes -- a row records what went out.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -144,7 +129,8 @@ CREATE TABLE IF NOT EXISTS assignment (
 );
 CREATE INDEX IF NOT EXISTS assign_node ON assignment(node_mac, created_at);
 
--- Holds `schema_fingerprint`, which `check_version` reads.
+-- The capture's provenance (`capture.bus_version`, `capture.host_build` and the like) and its
+-- settings history (`capture.settings.*`).
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS observation (
@@ -304,10 +290,10 @@ pub enum StoreError {
     /// The database file could not be created.
     #[error("could not create the database file: {0}")]
     Create(#[source] std::io::Error),
-    /// The database was written by a wartui with a different schema.
+    /// The database carries another schema version's marker.
     #[error(
-        "database schema is v{found}, but this build writes v{ours}; captures are not \
-         portable between wartui builds before 1.0 — start a new file"
+        "capture is schema v{found}, and this build handles only v{ours}: read it with the wartui \
+         build that wrote it, or start a new capture at a different --db path to record"
     )]
     SchemaMismatch {
         /// What the file says.
@@ -315,19 +301,9 @@ pub enum StoreError {
         /// What this build writes.
         ours: i32,
     },
-    /// The database carries this build's version marker over another build's schema.
-    #[error(
-        "database schema {} differs from this build's {ours:016x}; the capture was written \
-         by a different wartui build, and captures are not portable between wartui builds \
-         before 1.0 — start a new file with a different --db path",
-        found.map_or_else(|| "has no fingerprint and".to_owned(), |f| format!("{f:016x}"))
-    )]
-    SchemaDiffers {
-        /// The fingerprint the file carries, if it carries one that parses.
-        found: Option<u64>,
-        /// This build's.
-        ours: u64,
-    },
+    /// The file carries this build's marker and has no `capture` table.
+    #[error("this file is not a wartui capture: it has no capture table")]
+    NotACapture,
 }
 
 /// How the store should behave.
@@ -544,15 +520,11 @@ impl Store {
         )?;
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn, config)?;
-        // All or nothing. The marker and fingerprint say the tables exist, so a half-applied schema
-        // would pass `check_version` and fail on a missing table.
+        // All or nothing. The marker says the tables exist, so a half-applied schema would pass
+        // `check_version` and fail on a missing table.
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        tx.execute(
-            "INSERT INTO kv (k, v) VALUES (?1, ?2)",
-            params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
-        )?;
         tx.execute(
             "INSERT INTO capture (id, started_at, notes, simulated) VALUES (1, ?1, ?2, ?3)",
             params![started_at_ms, capture.notes, capture.simulated],
@@ -727,7 +699,7 @@ impl Drop for Store {
 /// an hour of data cannot stall ingest.
 ///
 /// # Errors
-/// [`StoreError`] if the file cannot be opened or is from a different wartui.
+/// [`StoreError`] if the file cannot be opened, carries another schema version, or is not a capture.
 pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -743,7 +715,8 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
 /// unwritable file read-only, so that is checked here.
 ///
 /// # Errors
-/// [`StoreError`] if the file cannot be opened or written, or is from a different wartui.
+/// [`StoreError`] if the file cannot be opened or written, carries another schema version, or is
+/// not a capture.
 pub fn open_readwrite(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -824,39 +797,26 @@ pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> 
     .optional()
 }
 
-/// Refuse a database written by any wartui but this one. With no migration before 1.0, a lower
-/// marker is as foreign as a higher one. A file reading 0 has not had [`Store::create`] commit its
-/// schema yet. A file with this build's marker must also carry this build's [`SCHEMA_FINGERPRINT`],
-/// and one with none is as foreign.
+/// Refuse a database stamped with any marker but this build's. With no migration before 1.0, a
+/// lower marker is as foreign as a higher one. A file reading 0 has not had [`Store::create`]
+/// commit its schema yet.
+///
+/// A file with this build's marker must also have a `capture` table, or it is not a capture. The
+/// marker commits in the same transaction as the tables, so a running capture never fails this.
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match found {
         0 => Ok(()),
-        SCHEMA_VERSION => match stored_fingerprint(conn)? {
-            Some(SCHEMA_FINGERPRINT) => Ok(()),
-            found => Err(StoreError::SchemaDiffers { found, ours: SCHEMA_FINGERPRINT }),
-        },
+        SCHEMA_VERSION => {
+            let is_capture: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'capture')",
+                [],
+                |row| row.get(0),
+            )?;
+            if is_capture { Ok(()) } else { Err(StoreError::NotACapture) }
+        }
         found => Err(StoreError::SchemaMismatch { found, ours: SCHEMA_VERSION }),
-    }
-}
-
-/// The fingerprint a file carries. `None` without a `kv` table, its row, or a hex `u64` value.
-fn stored_fingerprint(conn: &Connection) -> Result<Option<u64>, rusqlite::Error> {
-    let has_kv: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_kv {
-        return Ok(None);
-    }
-    let value = conn.query_row("SELECT v FROM kv WHERE k = ?1", [FINGERPRINT_KEY], |row| {
-        row.get::<_, String>(0)
-    });
-    match value {
-        Ok(v) => Ok(u64::from_str_radix(&v, 16).ok()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
     }
 }
 
@@ -1321,7 +1281,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
 
 #[cfg(test)]
 mod tests {
-    use super::{Store, fnv1a_64};
+    use super::Store;
     use crate::record::{BridgeStatusSeen, Record};
 
     fn status(rx_at_ms: i64) -> Record {
@@ -1349,12 +1309,5 @@ mod tests {
         // `submit` still counts what it could not queue.
         assert_eq!(store.submit(vec![status(2)]), 1);
         assert_eq!(store.stats().dropped, 1);
-    }
-
-    #[test]
-    fn fnv1a_64_matches_reference_when_hashing_known_vectors() {
-        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
     }
 }

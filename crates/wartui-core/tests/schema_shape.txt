@@ -1,0 +1,156 @@
+SCHEMA_VERSION 2
+
+CREATE INDEX assign_node ON assignment(
+  node_mac,
+  created_at
+)
+
+CREATE TABLE assignment (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  counter INTEGER NOT NULL,
+  wire_version INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  ble INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  outcome TEXT,
+  latency_us INTEGER
+)
+
+CREATE TABLE batch_gap (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  after_seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  lost INTEGER NOT NULL
+)
+
+CREATE TABLE bridge_queue (
+  status_id INTEGER NOT NULL REFERENCES bridge_status(id),
+  queue TEXT NOT NULL,
+  capacity INTEGER NOT NULL,
+  high_water INTEGER NOT NULL,
+  dropped INTEGER NOT NULL
+)
+
+CREATE TABLE bridge_status (
+  id INTEGER PRIMARY KEY,
+  rx_at INTEGER NOT NULL,
+  rx_count INTEGER NOT NULL,
+  dropped_tx INTEGER NOT NULL,
+  uptime_ms INTEGER NOT NULL,
+  host_frames INTEGER NOT NULL,
+  rx_oversize INTEGER NOT NULL,
+  radio_link_packets INTEGER NOT NULL,
+  radio_link_crc_fail INTEGER NOT NULL,
+  radio_link_bad_magic INTEGER NOT NULL,
+  radio_link_seq_gap INTEGER NOT NULL,
+  radio_link_uart_errors INTEGER NOT NULL,
+  radio_link_radio_crc_fail INTEGER NOT NULL,
+  radio_link_radio_bad_magic INTEGER NOT NULL,
+  radio_link_radio_seq_gap INTEGER NOT NULL,
+  radio_link_radio_uart_errors INTEGER NOT NULL,
+  host_uart_errors INTEGER NOT NULL,
+  fan_duty INTEGER,
+  fan_rpm INTEGER,
+  slots_present INTEGER NOT NULL
+)
+
+CREATE TABLE capture (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  bridge_mac BLOB,
+  bridge_fw TEXT,
+  node_board TEXT,
+  notes TEXT,
+  simulated INTEGER NOT NULL
+)
+
+CREATE TABLE heartbeat (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  counter INTEGER NOT NULL,
+  epoch INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  wifi_refused INTEGER NOT NULL,
+  ble_refused INTEGER NOT NULL,
+  reset_cause TEXT NOT NULL,
+  vdd_mv INTEGER,
+  die_temp_c INTEGER,
+  heap_free INTEGER NOT NULL,
+  live INTEGER NOT NULL
+)
+
+CREATE TABLE host_status (
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  duplicate_batches INTEGER NOT NULL,
+  garbled INTEGER NOT NULL,
+  undecodable INTEGER NOT NULL,
+  incompatible INTEGER NOT NULL,
+  lag_peak_us INTEGER NOT NULL,
+  store_written INTEGER NOT NULL,
+  store_dropped INTEGER NOT NULL,
+  store_queue_peak INTEGER NOT NULL,
+  store_commit_peak_us INTEGER NOT NULL,
+  throttled INTEGER,
+  soc_temp_mc INTEGER,
+  battery_mv INTEGER,
+  battery_ma INTEGER
+)
+
+CREATE TABLE kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+)
+
+CREATE TABLE node (
+  mac BLOB PRIMARY KEY,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  capabilities TEXT
+)
+
+CREATE TABLE observation (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  bssid BLOB NOT NULL,
+  ssid BLOB,
+  security TEXT NOT NULL,
+  channel INTEGER NOT NULL,
+  rssi INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  rcoi BLOB,
+  mfgr_id INTEGER,
+  lat REAL,
+  lon REAL,
+  alt REAL,
+  accuracy REAL,
+  pos_source TEXT NOT NULL,
+  pos_at INTEGER,
+  raw_body BLOB
+)
+
+CREATE TABLE raw_frame (
+  id INTEGER PRIMARY KEY,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  kind INTEGER NOT NULL,
+  bytes BLOB NOT NULL
+)
+
+CREATE TABLE upload (
+  id INTEGER PRIMARY KEY,
+  through_id INTEGER NOT NULL,
+  uploaded_at INTEGER NOT NULL,
+  job_id INTEGER NOT NULL,
+  rows INTEGER NOT NULL,
+  result TEXT
+)

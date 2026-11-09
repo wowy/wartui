@@ -162,9 +162,8 @@ planner's.
 **drops rather than blocks** (a stalled engine misses everything, including the assignment that
 answers a heartbeat). A capture file holds one run: `Store::create` refuses a path that exists.
 `export` (WiGLE CSV) is a view over the store, re-runnable against a finished or still-running
-capture. `SCHEMA` changes shape as freely as the work needs; `store::SCHEMA_VERSION` stays at 1
-until 1.0, and a capture stamped anything else, or stamped 1 over another build's `SCHEMA`
-fingerprint, is refused rather than migrated.
+capture. `SCHEMA` changes shape as freely as the work needs. Each change bumps
+`store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
 bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) → a host GPS found by
@@ -217,19 +216,26 @@ is here rather than only in a `//!`.
   bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
   The node's `trial` sector layout, which one image writes and the next reads, is frozen with the
-  bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker moves until 1.0**,
-  whatever a layout does. `bus::BUS_VERSION` names the node bus's frozen core and never moves:
-  the host can update any node in the field over that core, so a fleet survives every other change.
-  `store::SCHEMA_VERSION` is held for the first capture to be read in an earlier build's terms,
-  and none before 1.0 is one. **The store has no migrations before 1.0 either.** `check_version`
-  refuses any marker but its own — a lower one as firmly as a higher one — and its own marker over a
-  schema fingerprint that is not this build's, or over none. A capture from another build is
-  somebody else's file, and the fix is a new `--db` path rather than a `migrate` arm. The
-  fingerprint enforces only the shape of the tables. A build that keeps that shape but changes what
-  a stored value means still opens the file, so that half rests on the policy rather than the check.
-  Bringing one forward would mean deciding what an older build meant, which is the compatibility
-  this policy declines to claim: a stored `ChannelSet` is the indices that went out, read against
-  the scan table of the build that wrote them.
+  bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker but
+  `store::SCHEMA_VERSION` moves until 1.0**, whatever a layout does. `bus::BUS_VERSION` names the
+  node bus's frozen core and never moves: the host can update any node in the field over that core,
+  so a fleet survives every other change.
+  `store::SCHEMA_VERSION` moves with any change to a table, column or index, or to what a stored
+  value wartui reads back means. A scan-table change does not move it: `assignment.channels` holds
+  the indices that went out, read against the scan table of the build that wrote the row, and no
+  wartui code decodes the column against the scan table.
+  `.claude/skills/capture-review/scripts/survey.py` decodes it with its own mirror of
+  `SCAN_CHANNELS`, so it reads a capture written under another scan table in the mirror's terms.
+  `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
+  trigger and view, comments and whitespace aside, and fails on a difference without a bump. It
+  cannot see a change in meaning or a pragma, so the written rule alone enforces a bump for a
+  change in meaning. **The store has no migrations before 1.0 either.** `check_version` refuses
+  any marker but its own — a lower one
+  as firmly as a higher one. A capture with another marker is somebody else's file, and the fix is
+  a new `--db` path rather than a `migrate` arm. Bringing one forward would mean deciding what an
+  older build meant, which is the compatibility this policy declines to claim: a stored
+  `ChannelSet` is the indices that went out, read against the scan table of the build that wrote
+  them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's
