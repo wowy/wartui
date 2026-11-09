@@ -27,7 +27,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
-`sniff` names each record by the slot it came from, as the fleet table does, and each heartbeat by
+`sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
 for one, since the P4 stops writing to a host it has not heard from in 15 s.
 A node is reached through the slot its latest heartbeat came from, so moving a node to another
@@ -164,7 +164,7 @@ of its output, after the export summary:
 | `host link`    | Host-link reads on the P4 that saw line errors or overflows                     |
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
-| `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
+| `batches`      | Sighting batches lost between node and host; the footer's `lost`                |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
 `peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
@@ -175,7 +175,7 @@ label (`N3 57:84`).
 
 `supply drop` on a `loss by node` row means a node's rail reading fell 150 mV or more below its
 first in the capture, even if it later recovered. `analyze` prints no figure, and
-[Reading the fleet table](#reading-the-fleet-table) says why.
+[Reading the node blocks](#reading-the-node-blocks) says why.
 
 Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
 They are half-open: a sighting and one exactly a second earlier share no one-second window, so a
@@ -523,7 +523,7 @@ wartui ota --image wartui-node-app-esp32c5.bin --yes
 | Flag                 | Default          | What it is                                                     |
 |----------------------|------------------|----------------------------------------------------------------|
 | `--bridge PATH\|MAC` | detected         | The bridge, by path, address or `00:08`                        |
-| `--node SLOT`        | every node heard | A node to update, by the name the fleet table shows (`N3`)     |
+| `--node SLOT`        | every node heard | A node to update, by the name its node block shows (`N3`)      |
 | `--image BIN`        | —                | Send this app-only image, to the nodes of the board it is for  |
 | `--firmware-dir DIR` | the checkout's   | Build the image from the node firmware here                    |
 | `--listen SECS`      | `6`              | How long to gather heartbeats before choosing                  |
@@ -622,11 +622,11 @@ update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
 ### Power-cycling a node
 
 On the carrier board, the bridge switches each node's power, so a hung node comes back without
-anyone reaching for it. `p` on a fleet-table row asks first, then switches that node off for a
+anyone reaching for it. `p` on a node's block asks first, then switches that node off for a
 second and on again. From the shell:
 
 ```sh
-wartui power-cycle --slot N3              # the name the fleet table shows
+wartui power-cycle --slot N3              # the name its node block shows
 wartui power-cycle --slot N3 --bridge 44:C0
 ```
 
@@ -700,7 +700,8 @@ The bridge keeps the Bluetooth slot beside the pool, the same way; see "Bluetoot
 
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
+| `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
+| `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
@@ -773,8 +774,8 @@ nodes in the plan of five heard.
 **A changed share waits for the node's next heartbeat.** An assignment answers a heartbeat, through
 the node-bus slot that heartbeat came from, and an assigned node heartbeats every 5 s, so an
 assignment takes up to one heartbeat interval, not a sweep. That delay is the protocol, not lag.
-The `channels` column leads with a count (`1: 1…`) because a round-robin share is a dozen
-scattered channels, too many to fit.
+A wide block's `channels` line gives the share's count, and the line under it as much of the
+list as fits, because a round-robin share is a dozen scattered channels, too many for one line.
 
 **An assignment counts once the bridge says the node acknowledged it** on the node bus, never on the
 bridge's report of a successful enqueue. An ack does not prove the node took it. Adoption does:
@@ -794,10 +795,11 @@ boots into it, and reports it in every status, so it survives restarts of the ho
 `b` on a node asks the bridge to move the scan to its slot; `b` on the node holding it takes it off
 the fleet. `wartui bluetooth` sets the same slot from the command line. Whichever node heartbeats
 from that slot holds the scan, so a node swapped into the socket takes it over. That node's
-`channels` reads `bluetooth`, since it is dealt no channels, or `bluetooth…` while the change waits
-for the node's next heartbeat. Taking the scan off shows as its new share, pending. The header
-shows `bt N3` while the bridge holds a slot, and `b` on that slot's row takes the scan off even
-when its node is not heartbeating. `wartui status` prints a `bluetooth` line naming the slot, or
+block reads `bluetooth` where its channels would be, since it is dealt no channels, or
+`bluetooth…` while the change waits for the node's next heartbeat, and its border turns blue once
+the scan is adopted. Taking the scan off shows as its new share, pending. The header shows
+`bt N3` while the bridge holds a slot, and `b` on that slot's block takes the scan off even when
+its node is not heartbeating. `wartui status` prints a `bluetooth` line naming the slot, or
 `none`.
 
 ```sh
@@ -807,7 +809,7 @@ wartui bluetooth none           # take the scan off the fleet
 wartui bluetooth N3 --bridge 44:C0
 ```
 
-It resolves one bridge and takes `--config PATH` as `pool` does. A slot is named as the fleet table
+It resolves one bridge and takes `--config PATH` as `pool` does. A slot is named as its node block
 names it, either case, and a bridge with no carrier takes only `none`. A slot the bridge could not
 save prints its `fault` line, and the command fails when the slot read back is not the one sent.
 
@@ -915,14 +917,34 @@ nothing and says how many networks it left out.
   `gps no receiver`, or the port's error. The search keeps running there, so a puck replugged into
   a *different* socket is found under its new name.
 
-## Reading the fleet table
+## Reading the node blocks
 
-Rows name nodes by slot and chip: `N1 C5`. The slot is the node-bus slot its latest heartbeat came
-from, by the carrier's silk name, `N1` up. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14,
-and with no carrier a slot keeps its bus name. A capture stores the bus name. Rows run in slot
-order, and a node with no slot (`—`) comes last. The chip comes from the board its heartbeats
-announce, so a node not yet heartbeating shows `—`, and a board this build has no name for shows
-`??`.
+The screen under the header is a strip and a grid of node blocks, one block per node, in slot
+order, with a node with no slot last. `←` `→` move the cursor by one block and `↑` `↓` by a row.
+A screen too short for every row scrolls the grid, with a scrollbar at its right, and keeps the
+selected block in view.
+
+A block is titled by its node's slot, by the carrier's silk name, `N1` up: the node-bus slot its
+latest heartbeat came from. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14, and with no
+carrier a slot keeps its bus name. A capture stores the bus name. A node with no slot is titled
+`—`. The selected block has a double border.
+
+From 100 columns, a block has five labeled lines:
+
+| Line        | Shows                                                                                   |
+|-------------|-----------------------------------------------------------------------------------------|
+| `sightings` | Sightings recorded from the node                                                        |
+| `die temp`  | Its latest die reading, `—` for none, then `hot` and `supply drop` when they hold       |
+| `channels`  | How many channels its share holds, `bluetooth`, or `unassigned`                         |
+| (list)      | As much of the share's channel list as fits, ending `…` when cut                        |
+| (state)     | The node's state, below                                                                 |
+
+Narrower, a block has three: the sightings with the die reading at the right, the channel list
+(or `bluetooth`, or `unassigned`), and the state.
+
+The border takes the state's color: red for a fault, yellow for a warning, cyan for `rebooted xN`.
+A node with nothing to report is green, or blue when its assignment carries the Bluetooth scan.
+The state is spelled out as well, so color is never the only signal.
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -936,27 +958,39 @@ announce, so a node not yet heartbeating shows `—`, and a board this build has
 | `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
-The `channels` column shows where an assignment stands
+The channel lines' color shows where an assignment stands
 ([How channels are assigned](#how-channels-are-assigned)):
 
-| `channels`       | Meaning                                           |
+| Channels         | Meaning                                           |
 |------------------|---------------------------------------------------|
 | yellow, with `…` | Waiting for the node's next heartbeat             |
 | blue, with `…`   | Acknowledged by the node, not yet adopted         |
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
+| gray             | Nothing confirmed: `unassigned`                   |
 
-The line under the table shows the selected node's last two address octets, its firmware and its
-latest die reading: `N1 C5 57:84  v0.1.0  41 °C`, with `—` for a node that has sent none or whose
-read failed. `supply drop` follows it when the node's supply has fallen. It is the one place the
-main screen shows a node's address, which `flash-fleet --skip` and the OS's device names go by.
+The line under the grid shows the selected node's slot and chip, its last two address octets, its
+firmware and its latest die reading: `N1 C5 57:84  v0.1.0  41 °C`, with `—` for a node that has
+sent none or whose read failed. `supply drop` follows it when the node's supply has fallen. It is
+the one place the main screen shows a node's address, which `flash-fleet --skip` and the OS's
+device names go by. The chip comes from the board its heartbeats announce, so a node not yet
+heartbeating shows `—`, and a board this build has no name for shows `??`.
+
+The strip above the grid is titled by every sighting the capture holds. At its left are the
+estimated unique access points and Bluetooth devices, in big digits at every screen size, each
+with its count of sightings (`1,204 wifi`, `318 bt`). Only a strip under four rows or 24 columns
+prints them as one line of text. At its right is the number of Wi-Fi sightings on each channel,
+one bar per channel in scan-table order, with a gap between the 2.4 GHz band and each 5 GHz run.
+Where there is room, each channel's number is written downward under its bar, hundreds to ones;
+on a narrow screen, one row names each band's first channel and the last. Channel 14 is not
+charted, since no pool holds it, and neither is Bluetooth, which has no channel.
 
 The firmware is its version. A node on an older version than this build's adds an arrow and this
 build's version: `v0.1.2 ↑v0.1.3`. A different patch is still driven; an older major or minor is
 `needs update` and a newer one `host behind`.
 
-Either warning is yellow on that line, and turns an `alive` node's `state` yellow too; any other
-state keeps its own color:
+Either warning is yellow on that line and in the block, and turns an `alive` node's state and
+border yellow too; any other state keeps its own color:
 
 | Reading | Warns at                               | Why                                         |
 |---------|----------------------------------------|---------------------------------------------|
@@ -993,17 +1027,16 @@ without a reboot, and a change of share or Bluetooth role empties it.
 | `waiting for nodes`    | No node has heartbeated yet this session                                 |
 | `N need update`        | Heard only from nodes on an older minor; `N host behind` for newer ones  |
 | `all nodes silent`     | Nodes were seen, but none is heartbeating now                            |
-| `N alive, none usable` | Heartbeating, but none can be assigned channels; the node table says why |
+| `N alive, none usable` | Heartbeating, but none can be assigned channels; the node blocks say why |
 
 The footer shows faults only once they happen, so a clean run has a clean footer:
 
-- **`lost`** (a column, and `lost N` summed in the footer): whole batches missing between node and
-  host, from gaps in each batch's sequence number. The column reads `—` before a node's first batch,
-  then a running count; both appear once any node loses one. A sequence advances only when the P4
+- **`lost N`**: whole batches missing between node and host, summed over the fleet, from gaps in
+  each batch's sequence number. It appears once any node loses one. A sequence advances only when the P4
   acknowledges a batch, so a gap is lost after the P4 took it, in its queue or on USB, not on the
   node bus. A batch is up to about a dozen access points, hidden until the node's five-minute
-  refresh. Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final
-  value. A gap after a batch replayed from the bridge's backlog is not counted, because those
+  refresh. Each gap is a `batch_gap` row; summing its `lost` per node gives that node's
+  share of the total. A gap after a batch replayed from the bridge's backlog is not counted, because those
   batches were dropped while no host was reading.
 - **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
   2 s), the node bus resending a batch whose ack the node did not see. The first copy was

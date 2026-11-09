@@ -6,15 +6,15 @@
 //! Drawing per observation would back-pressure the link, since a busy fleet sends tens
 //! of rows a second.
 
-mod bignum;
-mod fleet;
+mod blocks;
+mod chart;
+mod counts;
 mod footer;
 mod format;
 mod gps;
 mod header;
 mod input;
 mod settings;
-mod stream;
 mod ui;
 mod upload;
 
@@ -28,18 +28,21 @@ use anyhow::{Context, Result};
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
+use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{Command, Snapshot};
 
-use fleet::draw_fleet;
+use blocks::draw_blocks;
+use chart::draw_chart;
+use counts::draw_counts;
 use footer::{buffer_full_line, draw_footer, fault_lines, faults};
 use gps::draw_gps_modal;
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
 pub use settings::Settings;
 use settings::draw_settings_modal;
-use stream::draw_stream;
 use ui::Ui;
 pub use upload::UploadTarget;
 use upload::draw_confirm_modal;
@@ -143,24 +146,24 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     let buffer_full = u16::from(buffer_full_line(&snapshot.counters).is_some());
     let upload = u16::from(ui.upload().status().is_some());
     let footer_height = 1 + buffer_full + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(6),
+    let area = frame.area();
+    let body = Rect { height: area.height.saturating_sub(HEADER_H + footer_height), ..area };
+    let wide = body.width >= WIDE_AT;
+    let strip_min = strip_min(snapshot, body.width, wide);
+    let grid_height = blocks::wanted_height(snapshot.nodes.len(), body.width, wide)
+        .min(body.height.saturating_sub(strip_min));
+    let [header, strip, grid, footer] = Layout::vertical([
+        Constraint::Length(HEADER_H),
+        Constraint::Min(strip_min),
+        Constraint::Length(grid_height),
         Constraint::Length(footer_height),
     ])
-    .areas(frame.area());
+    .areas(area);
 
     draw_header(frame, header, snapshot);
-
-    // Side by side when both fit, stacked otherwise. The fleet table needs 74
-    // columns before its state column clips.
-    let [fleet, stream] = if body.width >= 114 {
-        Layout::horizontal([Constraint::Length(74), Constraint::Min(40)]).areas(body)
-    } else {
-        Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
-    };
-    draw_fleet(frame, fleet, snapshot, ui.selected(), ui.fleet_offset_mut());
-    draw_stream(frame, stream, snapshot);
+    draw_strip(frame, strip, snapshot, wide);
+    let (selected, scroll, cols) = ui.grid_mut();
+    draw_blocks(frame, grid, snapshot, selected, scroll, cols, wide);
     draw_footer(frame, footer, snapshot, ui, &faults);
 
     if let Some(modal) = ui.modal() {
@@ -174,6 +177,47 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     }
     if let Some(lines) = ui.upload().confirm_lines() {
         draw_confirm_modal(frame, " upload to WDGWars ", &lines);
+    }
+}
+
+/// The header's rows.
+const HEADER_H: u16 = 4;
+
+/// The body width from which blocks carry labeled lines and the counts stack beside the chart.
+const WIDE_AT: u16 = 100;
+
+/// The strip's least height: its borders, then two stacked count groups in the wide layout, or
+/// in the narrow one a counts band over three bar rows and a label row. A narrow band that
+/// stacks the counts grows the strip by their height.
+fn strip_min(snapshot: &Snapshot, width: u16, wide: bool) -> u16 {
+    if wide { 10 } else { 2 + counts::band_height(snapshot, width.saturating_sub(2)).max(4) + 4 }
+}
+
+/// The strip under the header: the big unique counts, and the chart of Wi-Fi sightings per
+/// channel, under a title of every sighting this capture holds.
+fn draw_strip(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, wide: bool) {
+    let title = format!(" {} sightings ", crate::text::thousands(snapshot.counters.observations));
+    let right = " wifi sightings per channel ";
+    let mut block = Block::bordered().title(title.clone());
+    if usize::from(area.width) >= title.chars().count() + right.chars().count() + 4 {
+        block = block.title_top(Line::from(right).right_aligned());
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if wide {
+        let [counts, chart] = Layout::horizontal([
+            Constraint::Length(counts::wide_width(snapshot)),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        draw_counts(frame, counts, snapshot, true);
+        draw_chart(frame, chart, &snapshot.wifi_by_channel);
+    } else {
+        let band = counts::band_height(snapshot, inner.width);
+        let [counts, chart] =
+            Layout::vertical([Constraint::Length(band), Constraint::Min(0)]).areas(inner);
+        draw_counts(frame, counts, snapshot, false);
+        draw_chart(frame, chart, &snapshot.wifi_by_channel);
     }
 }
 
@@ -206,8 +250,20 @@ mod tests {
     fn view_renders_without_panicking_when_given_various_terminal_sizes() {
         let mut gps = Ui::default();
         gps.open_gps();
-        for snapshot in [busy(), empty(), with_sky(40)] {
-            for (width, height) in [(200, 50), (120, 30), (80, 24), (40, 10), (20, 5), (6, 3)] {
+        for snapshot in [busy(), empty(), with_sky(40), fleet_of(14)] {
+            for (width, height) in [
+                (200, 50),
+                (138, 38),
+                (120, 30),
+                (100, 20),
+                (99, 20),
+                (80, 24),
+                (58, 26),
+                (40, 10),
+                (20, 5),
+                (6, 3),
+                (1, 1),
+            ] {
                 for ui in [&mut Ui::default(), &mut gps] {
                     let mut terminal =
                         Terminal::new(TestBackend::new(width, height)).expect("test backend");
@@ -218,14 +274,34 @@ mod tests {
     }
 
     #[test]
-    fn view_shows_fleet_and_stream_side_by_side_when_terminal_is_wide() {
-        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+    fn view_shows_counts_chart_and_blocks_when_terminal_is_wide() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("test backend");
         terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains(" N7 C5 "), "the fleet table");
-        assert!(rendered.contains("AA:BB:CC:DD:EE"), "and the observation stream");
-        assert!(rendered.contains("4 of 5 alive"));
+        assert!(rendered.contains("unique APs"), "{rendered}");
+        assert!(rendered.contains("unique BLE"), "{rendered}");
+        assert!(rendered.contains("1 2 3 4 5 6 7 8 9 0 1 2 3"), "the channel labels: {rendered}");
+        assert!(rendered.contains("wifi sightings per channel"), "{rendered}");
+        assert!(rendered.contains(" N7 "), "the blocks: {rendered}");
         assert!(rendered.contains("no heartbeat"), "the one node nothing can be sent to yet");
+    }
+
+    #[test]
+    fn view_shows_big_counts_chart_and_two_blocks_per_row_when_terminal_is_58_by_26() {
+        let mut snapshot = fleet_of(6);
+        snapshot.unique_wifi_aps = 95;
+        snapshot.unique_ble_aps = 20;
+        let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        let counts = rendered.lines().find(|l| l.contains("unique APs")).expect("the counts");
+        assert!(counts.contains("unique BLE"), "side by side: {rendered}");
+        assert!(rendered.lines().any(|l| l.contains(" 36 ")), "a band label: {rendered}");
+        let blocks = rendered.lines().find(|l| l.contains(" N1 ")).expect("the first row");
+        assert!(blocks.contains(" N2 "), "two blocks a row: {rendered}");
+        assert!(!rendered.contains(" N5 "), "the third row is below the fold: {rendered}");
+        assert!(rendered.contains("N1 C5 57:7E"), "the detail line: {rendered}");
     }
 }

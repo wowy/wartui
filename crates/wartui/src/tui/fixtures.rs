@@ -185,12 +185,18 @@ pub(super) fn busy() -> Snapshot {
             .collect(),
         unique_wifi_aps: 32,
         unique_ble_aps: 8,
-        wifi_by_channel: [0; NUM_SCAN_CHANNELS as usize],
+        wifi_by_channel: {
+            let mut by_channel = [0; NUM_SCAN_CHANNELS as usize];
+            by_channel[0] = 280;
+            by_channel[5] = 310;
+            by_channel[10] = 50;
+            by_channel
+        },
         counters: Counters {
             frames: 900,
             observations: 800,
-            wifi_observations: 0,
-            ble_observations: 0,
+            wifi_observations: 640,
+            ble_observations: 160,
             heartbeats: 90,
             undecodable: 1,
             incompatible: 2,
@@ -237,6 +243,19 @@ pub(super) fn on_board(board: NodeBoard) -> Snapshot {
         bridge.node_board = board;
     }
     snapshot
+}
+
+/// [`busy`] on a 14-node carrier with `n` alive nodes, `N1` up, and no stream.
+pub(super) fn fleet_of(n: u8) -> Snapshot {
+    // Byte 0x7E is slot 0 (`MAX_SLOTS` divides 126), so the slots run in order from `N1`.
+    let nodes: Vec<NodeView> = (0..n).map(|i| node(0x7E + i, 0, true)).collect();
+    Snapshot {
+        nodes,
+        alive: usize::from(n),
+        assignable: usize::from(n),
+        tail: Vec::new(),
+        ..on_board(NodeBoard::Carrier14)
+    }
 }
 
 /// No bridge, no nodes, no position.

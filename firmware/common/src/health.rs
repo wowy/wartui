@@ -26,7 +26,7 @@ pub fn vdd_mv() -> u16 {
     // PBUS into debug mode, routes VDD3P3 to SAR2 over the analog I2C bus, reads SAR2,
     // restores the PBUS, and scales the reading (×206/100 on the C6, ×236/100 on the
     // C5). It returns 0 before the PHY is initialized. The unit is millivolts, reading low
-    // by a per-chip offset. `crates/wartui/README.md` § "Reading the fleet table" has the
+    // by a per-chip offset. `crates/wartui/README.md` § "Reading the node blocks" has the
     // measurements.
     unsafe { phy_get_vdd33() }
 }

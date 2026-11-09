@@ -37,7 +37,7 @@ pub(super) fn draw_footer(
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bt  c settings  g gps  u upload ",
+            " q quit  ↑↓←→ select  b bt  c settings  g gps  u upload ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -155,7 +155,7 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.garbled > 0 {
         faults.push(format!("garbled {}", thousands(c.garbled)));
     }
-    // A fleet half-way through a reflash is invisible to the fleet table, so this
+    // A fleet half-way through a reflash is invisible to the node blocks, so this
     // is the only place it shows.
     if c.incompatible > 0 {
         faults
@@ -217,8 +217,8 @@ fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
     reason.map(str::to_owned)
 }
 
-/// The most lines the fault box takes before it summarizes, so the fleet table keeps
-/// its room.
+/// The most lines the fault box takes before it summarizes, so the node blocks keep
+/// their room.
 const MAX_FAULT_LINES: usize = 3;
 
 /// Wrap faults to the terminal width rather than let it clip them.
@@ -489,8 +489,8 @@ mod tests {
         assert!(!screen.contains("bridge dropped"), "{screen}");
     }
 
-    /// The footer's totals line, found by `frames`. A plain search for "lost" would
-    /// also match the fleet table's `lost` column header.
+    /// The footer's totals line, found by `frames`. A plain search for "lost" could
+    /// match elsewhere on screen.
     fn totals_line(screen: &str) -> String {
         screen.lines().find(|line| line.contains("frames")).unwrap_or_default().to_owned()
     }

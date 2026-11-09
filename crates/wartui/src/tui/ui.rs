@@ -1,11 +1,12 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
+use tui_scrollview::ScrollViewState;
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
 use wartui_proto::mac::Mac;
 
 use super::Settings;
-use super::fleet::{LOST_SLOT, why_not_assignable};
+use super::blocks::{LOST_SLOT, why_not_assignable};
 use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_bridge};
 use super::upload::Upload;
 #[cfg(test)]
@@ -24,11 +25,13 @@ const NOT_CONNECTED: &str = "the bridge is not connected, so it cannot switch no
 /// GPS modal, saved settings and upload.
 #[derive(Debug, Default)]
 pub(super) struct Ui {
-    /// The fleet table row under the cursor.
+    /// The node block under the cursor.
     selected: usize,
-    /// Scroll offset from the last frame. Recomputing from row 0 pins the cursor to
-    /// the bottom edge, so `k` would scroll instead of move.
-    fleet_offset: usize,
+    /// The block grid's scroll from the last frame. Recomputing from the top pins the cursor
+    /// to the bottom edge, so `k` would scroll instead of move.
+    grid: ScrollViewState,
+    /// Blocks per row in the last frame, which `↑` and `↓` move by. 0 before the first.
+    grid_cols: usize,
     /// The notice, and the snapshot time it was sent. Set by [`Self::say`], read by
     /// [`Self::notice`].
     notice: Option<(String, i64)>,
@@ -58,14 +61,10 @@ impl Ui {
         Self { settings, ..Self::default() }
     }
 
-    /// The fleet table row under the cursor.
-    pub(super) fn selected(&self) -> usize {
-        self.selected
-    }
-
-    /// The fleet table's scroll offset, for `draw_fleet` to read and update.
-    pub(super) fn fleet_offset_mut(&mut self) -> &mut usize {
-        &mut self.fleet_offset
+    /// The block under the cursor, and the grid's scroll and blocks per row, for
+    /// `draw_blocks` to read and update.
+    pub(super) fn grid_mut(&mut self) -> (usize, &mut ScrollViewState, &mut usize) {
+        (self.selected, &mut self.grid, &mut self.grid_cols)
     }
 
     /// The settings modal, while open.
@@ -97,7 +96,7 @@ impl Ui {
         &self.upload
     }
 
-    /// Keep the cursor on a real row as the table grows and shrinks.
+    /// Keep the cursor on a real block as the fleet grows and shrinks.
     pub(super) fn clamp(&mut self, node_count: usize) {
         self.selected = self.selected.min(node_count.saturating_sub(1));
     }
@@ -109,15 +108,13 @@ impl Ui {
         snapshot: &Snapshot,
         commands: &mpsc::Sender<Command>,
     ) {
+        let last = snapshot.nodes.len().saturating_sub(1);
+        let row = self.grid_cols.max(1);
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.notice = None;
-                self.selected = (self.selected + 1).min(snapshot.nodes.len().saturating_sub(1));
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.notice = None;
-                self.selected = self.selected.saturating_sub(1);
-            }
+            KeyCode::Right | KeyCode::Char('l') => self.select((self.selected + 1).min(last)),
+            KeyCode::Left | KeyCode::Char('h') => self.select(self.selected.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Char('j') => self.select((self.selected + row).min(last)),
+            KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(row)),
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
             KeyCode::Char('g') => self.open_gps(),
@@ -135,6 +132,12 @@ impl Ui {
             // did nothing.
             _ => {}
         }
+    }
+
+    /// Put the cursor on block `selected`, clearing the notice.
+    fn select(&mut self, selected: usize) {
+        self.notice = None;
+        self.selected = selected;
     }
 
     /// Ask the bridge to move the Bluetooth scan onto the selected node's slot, or off the fleet
@@ -373,10 +376,10 @@ impl Ui {
         &self.settings.saved
     }
 
-    /// The fleet table's scroll offset.
+    /// The block grid's scroll offset, in rows.
     #[cfg(test)]
-    pub(super) fn fleet_offset(&self) -> usize {
-        self.fleet_offset
+    pub(super) fn grid_offset(&self) -> u16 {
+        self.grid.offset().y
     }
 
     /// The notice, while it is recent enough to be about what just happened: a key, or
@@ -697,6 +700,29 @@ mod tests {
         // A node aging out of the table must not leave the cursor past its end.
         ui.clamp(1);
         assert_eq!(ui.selected, 0);
+    }
+
+    #[test]
+    fn ui_moves_selection_by_row_when_down_is_pressed_on_grid() {
+        let snapshot = fleet_of(14);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui { grid_cols: 5, ..Default::default() };
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        ui.on_key(key(KeyCode::Down), &snapshot, &tx);
+        assert_eq!(ui.selected, 5, "one row down");
+        ui.on_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(ui.selected, 6, "one block right");
+        ui.on_key(key(KeyCode::Char('j')), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Down), &snapshot, &tx);
+        assert_eq!(ui.selected, 13, "clamped to the last block");
+        ui.on_key(key(KeyCode::Up), &snapshot, &tx);
+        assert_eq!(ui.selected, 8);
+        ui.on_key(key(KeyCode::Left), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Char('k')), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        assert_eq!(ui.selected, 1);
+        ui.on_key(key(KeyCode::Up), &snapshot, &tx);
+        assert_eq!(ui.selected, 0, "and to the first");
     }
 
     #[test]

@@ -128,7 +128,8 @@ have no README; their `//!` module docs hold the detail.
 
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
+| `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
+| `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
@@ -178,7 +179,7 @@ The default, `all`, is every channel a node can tune; `us` and `eu` are what the
 permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
-Wi-Fi, and its `channels` column reads `bluetooth`. Give the scan to a node with `b` or
+Wi-Fi, and its block's `channels` line reads `bluetooth`. Give the scan to a node with `b` or
 `wartui bluetooth N3`. The bridge keeps the slot across its reboots.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
@@ -234,8 +235,8 @@ There are two ways to see what the view draws:
 ```sh
 sudo dnf install python3-pyte    # or pip install pyte
 
-python3 tools/render.py --cols 120 --rows 30    # wide layout: fleet beside the stream
-python3 tools/render.py --cols 80 --rows 24     # narrow layout: stacked
+python3 tools/render.py --cols 120 --rows 30    # wide layout: counts and chart above the node blocks
+python3 tools/render.py --cols 80 --rows 24     # narrow layout: scrolling blocks
 python3 tools/render.py --keys jb --attrs       # press two keys first, then list what is drawn in color
 python3 tools/render.py --bridge 00:08 --keys b # the attached fleet, naming its bridge
 ```
