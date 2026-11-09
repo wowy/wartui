@@ -101,7 +101,7 @@ const WORDS: usize = 6 + MAX_STRING / 4 + 1;
 #[cfg(any(target_os = "linux", test))]
 const GET_GENCMD_RESULT: u32 = 0x0003_0080;
 
-/// Set in word 1 of a reply the firmware processed.
+/// The value of word 1 in a reply the firmware processed.
 #[cfg(any(target_os = "linux", test))]
 const RESPONSE_SUCCESS: u32 = 0x8000_0000;
 
@@ -139,7 +139,7 @@ fn gencmd_message(command: &str) -> [u32; WORDS] {
 /// firmware did not process the message, reported an error, or said something else.
 #[cfg(any(target_os = "linux", test))]
 fn parse_throttled(reply: &[u32]) -> Option<u32> {
-    if reply.get(1)? & RESPONSE_SUCCESS == 0 || *reply.get(5)? != 0 {
+    if *reply.get(1)? != RESPONSE_SUCCESS || *reply.get(5)? != 0 {
         return None;
     }
     let bytes: Vec<u8> = reply.get(6..)?.iter().flat_map(|word| word.to_ne_bytes()).collect();
@@ -242,6 +242,14 @@ mod tests {
     fn parse_throttled_returns_none_when_response_flag_missing() {
         let mut reply = reply("throttled=0x0");
         reply[1] = 0;
+        assert_eq!(parse_throttled(&reply), None);
+    }
+
+    #[test]
+    fn parse_throttled_returns_none_when_response_code_is_error() {
+        // The error code has the success bit set too, so only comparing the whole word rejects it.
+        let mut reply = reply("throttled=0x0");
+        reply[1] = RESPONSE_SUCCESS | 1;
         assert_eq!(parse_throttled(&reply), None);
     }
 
