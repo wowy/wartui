@@ -145,7 +145,7 @@ fn store_records_initial_provenance_when_capture_created() {
     );
     let provenance = CaptureProvenance {
         host_version: Some("0.1.0".to_owned()),
-        host_build: Some("fnv1a64:0123456789abcdef".to_owned()),
+        host_commit: Some("0123456".to_owned()),
         release_tag: Some("v-test".to_owned()),
         initial_settings: Some(engine.capture_settings()),
     };
@@ -163,7 +163,7 @@ fn store_records_initial_provenance_when_capture_created() {
             .expect("metadata")
     };
     assert_eq!(get("capture.host_version"), "0.1.0");
-    assert_eq!(get("capture.host_build"), "fnv1a64:0123456789abcdef");
+    assert_eq!(get("capture.host_commit"), "0123456");
     assert_eq!(get("capture.release_tag"), "v-test");
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
@@ -210,7 +210,7 @@ fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
     }
     assert!(rows[2].1.contains(&format!("at_ms={};", EPOCH_MS - 1)));
     let unknown: i64 = conn
-        .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.host_build'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.host_commit'", [], |r| r.get(0))
         .expect("unknown host identity");
     assert_eq!(unknown, 0, "a core-created capture must not invent executable identity");
 }

@@ -234,7 +234,7 @@ pub async fn run(args: Args) -> Result<()> {
     let engine = FleetEngine::new(config, started);
     let provenance = CaptureProvenance {
         host_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-        host_build: Some(env!("WARTUI_BUILD_ID").to_owned()),
+        host_commit: option_env!("WARTUI_HOST_COMMIT").map(str::to_owned),
         release_tag: option_env!("WARTUI_RELEASE_TAG").map(str::to_owned),
         initial_settings: Some(engine.capture_settings()),
     };

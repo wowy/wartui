@@ -59,7 +59,7 @@ The capture records the host build and its settings in SQLite metadata:
 | Key | Meaning |
 |-----|---------|
 | `capture.host_version` | Host crate version |
-| `capture.host_build` | Content-derived host source identity, including uncommitted edits |
+| `capture.host_commit` | Short git hash of the host build |
 | `capture.core_version` | Core crate version |
 | `capture.release_tag` | Release tag, when the host was built with one |
 | `capture.bus_version` | The node-bus version the host understands |
@@ -73,9 +73,8 @@ None of them says a node adopted anything.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
-The source identity hashes sorted workspace-relative host Rust files, manifests and the lockfile
-with noncryptographic FNV-1a. It excludes firmware and generated files, so it does not prove which
-firmware a node ran.
+The hash doesn't cover uncommitted edits or say which firmware a node ran, and the field is absent
+when the build had no git repository.
 
 An absent metadata field means unknown, not a default, in an older compatible capture. There are no
 migrations before 1.0. A capture with another schema version is refused: read it with the wartui
