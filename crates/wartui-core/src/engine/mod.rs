@@ -49,7 +49,7 @@ use wartui_proto::link::{
     NO_GPS_RECEIVER,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{ChannelPool, Job, Plan};
+use wartui_proto::plan::{ChannelPool, Job, NUM_SCAN_CHANNELS, Plan};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
@@ -93,6 +93,11 @@ pub struct FleetEngine {
     tail: VecDeque<TailEntry>,
     unique_wifi: Distinct,
     unique_ble: Distinct,
+    /// Wi-Fi sightings recorded per entry of [`SCAN_CHANNELS`], indexed like the table, for the
+    /// view's channel histogram. Index 13 (channel 14) is never dealt, so it stays 0.
+    ///
+    /// [`SCAN_CHANNELS`]: wartui_proto::plan::SCAN_CHANNELS
+    wifi_by_channel: [u64; NUM_SCAN_CHANNELS as usize],
     bridge_status: Option<BridgeStatus>,
     /// The bridge's drop count when this host attached, subtracted from later readings.
     dropped_baseline: Option<u32>,
@@ -174,6 +179,7 @@ impl FleetEngine {
             tail: VecDeque::new(),
             unique_wifi: Distinct::new(),
             unique_ble: Distinct::new(),
+            wifi_by_channel: [0; NUM_SCAN_CHANNELS as usize],
             bridge_status: None,
             dropped_baseline: None,
             last_status_poll: None,

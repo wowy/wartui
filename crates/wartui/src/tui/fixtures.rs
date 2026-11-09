@@ -15,7 +15,7 @@ use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
 };
 use wartui_proto::link::LoopPhase;
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
 use super::draw;
@@ -185,9 +185,12 @@ pub(super) fn busy() -> Snapshot {
             .collect(),
         unique_wifi_aps: 32,
         unique_ble_aps: 8,
+        wifi_by_channel: [0; NUM_SCAN_CHANNELS as usize],
         counters: Counters {
             frames: 900,
             observations: 800,
+            wifi_observations: 0,
+            ble_observations: 0,
             heartbeats: 90,
             undecodable: 1,
             incompatible: 2,
@@ -250,6 +253,7 @@ pub(super) fn empty() -> Snapshot {
         tail: Vec::new(),
         unique_wifi_aps: 0,
         unique_ble_aps: 0,
+        wifi_by_channel: [0; NUM_SCAN_CHANNELS as usize],
         counters: Counters::default(),
         store: StoreStats::default(),
         bridge_status: None,

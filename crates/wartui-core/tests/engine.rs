@@ -33,7 +33,7 @@ use wartui_proto::link::{
     RadioLinkStats, Undelivered,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, ChannelSet, plan};
+use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, plan};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -522,6 +522,72 @@ fn engine_keeps_ble_sighting_when_name_matches_excluded_ssid() {
 
     assert_eq!(observations(&batch), 1);
     assert_eq!(counters(&engine).observations, 1);
+}
+
+/// A sighting of `kind` on `channel` from `bssid_tail`, named `ssid`.
+fn sighting_on(kind: RecordKind, channel: u8, bssid_tail: u8, ssid: &[u8]) -> SightingMsg<'_> {
+    SightingMsg {
+        kind,
+        bssid: [0x02, 0x00, 0x00, 0x00, 0x00, bssid_tail],
+        channel,
+        rssi: -60,
+        security: Security::Wpa2Psk,
+        ssid,
+        ext: &[],
+    }
+}
+
+#[test]
+fn engine_counts_wifi_sightings_by_channel_when_batch_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    introduce(&mut engine, &clock, NODE);
+    let records = [
+        sighting_on(RecordKind::Wifi, 6, 1, b"example"),
+        sighting_on(RecordKind::Wifi, 36, 2, b"example"),
+        sighting_on(RecordKind::Wifi, 36, 3, b"example"),
+    ];
+
+    engine.handle(sightings(NODE, &batch(1, &records)), clock.at(1));
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    let mut expected = [0; NUM_SCAN_CHANNELS as usize];
+    expected[5] = 1; // channel 6
+    expected[14] = 2; // channel 36
+    assert_eq!(snapshot.wifi_by_channel, expected);
+    assert_eq!(snapshot.counters.wifi_observations, 3);
+    assert_eq!(snapshot.counters.ble_observations, 0);
+}
+
+#[test]
+fn engine_counts_no_channel_when_sighting_is_ble() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    introduce(&mut engine, &clock, NODE);
+    let msg = sighting_on(RecordKind::Ble, 6, 1, b"example");
+
+    engine.handle(sightings(NODE, &batch(1, &[msg])), clock.at(1));
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert_eq!(snapshot.counters.observations, 1);
+    assert_eq!(snapshot.counters.ble_observations, 1);
+    assert_eq!(snapshot.counters.wifi_observations, 0);
+    assert_eq!(snapshot.wifi_by_channel, [0; NUM_SCAN_CHANNELS as usize]);
+}
+
+#[test]
+fn engine_counts_no_channel_when_ssid_is_excluded() {
+    let clock = Clock::new();
+    let mut engine = excluding_home(&clock);
+    introduce(&mut engine, &clock, NODE);
+    let msg = sighting_on(RecordKind::Wifi, 6, 1, b"HomeNet");
+
+    engine.handle(sightings(NODE, &batch(1, &[msg])), clock.at(1));
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert_eq!(snapshot.counters.wifi_observations, 0);
+    assert_eq!(snapshot.counters.ble_observations, 0);
+    assert_eq!(snapshot.wifi_by_channel, [0; NUM_SCAN_CHANNELS as usize]);
 }
 
 #[test]

@@ -3,7 +3,9 @@ use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, Plan};
+#[cfg(doc)]
+use wartui_proto::plan::SCAN_CHANNELS;
+use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS, Plan};
 
 #[cfg(doc)]
 use super::rx::DUPLICATE_BATCH_WINDOW_US;
@@ -18,6 +20,10 @@ pub struct Counters {
     pub frames: u64,
     /// Sightings recorded.
     pub observations: u64,
+    /// Of [`Self::observations`], the Wi-Fi sightings.
+    pub wifi_observations: u64,
+    /// Of [`Self::observations`], the BLE sightings.
+    pub ble_observations: u64,
     /// Records that parsed as heartbeats.
     pub heartbeats: u64,
     /// Records of an unknown type, or that would not parse.
@@ -139,6 +145,9 @@ pub struct Snapshot {
     pub unique_wifi_aps: u64,
     /// Distinct BLE addresses seen this session, estimated the same way.
     pub unique_ble_aps: u64,
+    /// Wi-Fi sightings per entry of [`SCAN_CHANNELS`], indexed like the table. Index 13
+    /// (channel 14) is never dealt and stays 0.
+    pub wifi_by_channel: [u64; NUM_SCAN_CHANNELS as usize],
     /// Engine totals.
     pub counters: Counters,
     /// Store totals.
@@ -310,6 +319,7 @@ impl FleetEngine {
             tail: self.tail.iter().cloned().collect(),
             unique_wifi_aps: self.unique_wifi.estimate(),
             unique_ble_aps: self.unique_ble.estimate(),
+            wifi_by_channel: self.wifi_by_channel,
             counters: self.counters,
             store,
             bridge_status: self.bridge_status,
