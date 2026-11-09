@@ -79,3 +79,41 @@ The host opened and closed the CH343 20 times. The P4's uptime rose by about 1,0
 Every boot, the ROM banner and the second-stage bootloader's log go out at 115200 baud: about
 250 ms of text, partition table included. A host listening at the link's rate reads it as
 garbage.
+
+## A Pi 5 host corrupts long bursts unless a hub sits between them
+
+Measured on 2026-11-09 on a HackberryPi CM5 (Raspberry Pi OS, kernel `6.18.60+rpt-rpi-2712`,
+kernel `cdc_acm`, the CH343 enumerated at full speed straight on an RP1 xHCI root port) against the
+10-node carrier and the production bridge firmware, after a drive whose footer reached
+`garbled 2,885` in 74 minutes with no node frame lost.
+
+| Host | Path | Run | Status bursts | Undecodable frames |
+| --- | --- | --- | --- | --- |
+| CM5 | straight into the Pi | 3 min, `sniff` | 30 | 111 |
+| Mac | straight into the Mac | 3 min, `sniff` | 37 | 0 |
+| CM5 | through an unpowered USB 2.0 hub | 3 min 42 s, `sniff` | 45 | 0 |
+
+What the hex dumps of the 111 showed (`RUST_LOG=wartui_bridge=debug` logs each `undecodable
+frame` with its bytes since this bench):
+
+- Only long bursts were hit: the 512-byte `Gps` batches at 1 Hz and the ~1.3 KB `Log` burst every
+  5 s. Node frames, 27 to 214 bytes, came through intact in about 10,000 frames across the drive
+  and the bench, and the bridge's own counters showed nothing dropped.
+- Nothing was lost. Every garbled GPS frame had exactly the length a full batch encodes to (521
+  bytes, 457 for the shorter second batch of an epoch) and its COBS code byte at offset 255 in
+  place.
+- A stretch of 29 to 55 bytes starting on a 64-byte boundary near the frame's start (offset 0, 64
+  or 128) held a copy of the bytes from about 330 bytes later in the same burst, which were also
+  present at their own place. So a short USB packet near the start of a burst was delivered with a
+  later packet's payload. Hit at offset 0 the frame fails COBS, having lost its leading code byte;
+  hit later it fails the CRC. When the copied bytes carried a later frame's `0x00`, one frame
+  became two garbled chunks, which is why the log burst produced them in pairs.
+
+A high-speed hub's transaction translator does the full-speed splitting instead of the RP1, and
+the xHCI then sees ordinary high-speed bulk packets. The firmware needs no change: a shorter
+`GPS_FRAME`, a capped DMA chunk or a lower `HOST_BAUD` would have been workarounds for the Pi's
+path, and the hub removes the fault instead. Plugging the hub in hot rebooted the HackberryPi, so
+plug it in before boot or with the Pi off.
+
+Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
+whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.

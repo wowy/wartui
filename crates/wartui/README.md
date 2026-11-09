@@ -1056,12 +1056,14 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 - **`garbled N`**: USB frames from the bridge the host could not decode: the framing or the
   checksum failed, the frame was cut short, or it spoke another protocol revision. A few after a
   bridge reset are its bootloader's log and the half-frame the host caught while the framing
-  resynchronized, which it does on its own. A count that keeps climbing means something on the
-  path from the P4's UART to this process mangles frames, and so far only long bursts (the
-  bridge's GPS batches and its 5 s log burst) have been seen to suffer while the small node frames
-  came through. With `--log-file` and `RUST_LOG=wartui_bridge=debug`, each one is logged as
-  `undecodable frame` with its cause, its length, its place in the `read()` that delivered it, and
-  its bytes as hex, which is what tells a truncated frame from a merged or reordered one.
+  resynchronized, which it does on its own. A count that climbs by the second is the host's USB
+  path mangling the bridge's longer bursts: a Raspberry Pi 5 or CM5 does it to the GPS batches and
+  the 5 s log burst whenever the bridge is plugged straight into the Pi, and a USB 2.0 hub between
+  them stops it (`docs/p4-host-uart-findings.md` § "A Pi 5 host corrupts long bursts"). Node frames
+  are too short to be hit, so the capture loses nothing. With `--log-file` and
+  `RUST_LOG=wartui_bridge=debug`, each one is logged as `undecodable frame` with its cause, its
+  length, its place in the `read()` that delivered it, and its bytes as hex, which is what tells a
+  truncated frame from a merged or reordered one.
 - **`N frames from an older firmware — update`**: a fleet mid-upgrade, speaking a wire format this
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total

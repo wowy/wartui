@@ -7,6 +7,12 @@ a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.co
 Using an NVMe drive is preferred, but not a requirement. If you're running into poor performance on a microSD card,
 please open an [issue](https://github.com/wowy/wartui/issues).
 
+On a Raspberry Pi 5 or CM5, put a USB 2.0 hub between the Pi and the bridge rather than plugging the
+bridge straight into the Pi. Plugged in directly, the Pi's USB controller corrupts the bridge's longer
+bursts (the footer's `garbled` count climbs by the second); through a hub it is clean. The sightings
+themselves are too short to be affected, so a capture made without a hub is still good.
+`docs/p4-host-uart-findings.md` has the measurements.
+
 The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
 | Laptop (138x38)                                                                                                                           | HackberryPi5 (58x26)                                                                                                                                  |
