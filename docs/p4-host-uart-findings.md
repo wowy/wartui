@@ -87,7 +87,7 @@ kernel `cdc_acm`, the CH343 enumerated at full speed straight on an RP1 xHCI roo
 10-node carrier and the production bridge firmware, after a drive whose footer reached
 `garbled 2,885` in 74 minutes with no node frame lost. A Raspberry Pi 5 (1 GB) then ran the same
 test on each kind of port and showed the same fault on both: the same rate, the same frame lengths,
-and the same damage shape.
+and the same damage shape. The same hub cured it there too.
 
 | Host | Path | Run | Status bursts | Undecodable frames |
 | --- | --- | --- | --- | --- |
@@ -96,6 +96,7 @@ and the same damage shape.
 | Pi 5 (1 GB) | straight into a USB 2.0 (black) port | 3 min 35 s, `sniff` | 34 | 167 |
 | Mac | straight into the Mac | 3 min, `sniff` | 37 | 0 |
 | CM5 | through an unpowered USB 2.0 hub | 3 min 42 s, `sniff` | 45 | 0 |
+| Pi 5 (1 GB) | through the same hub | 2 min 11 s, `sniff` | 27 | 0 |
 
 What the hex dumps of the 111 showed, and the Pi 5's 264 and 167 repeated
 (`RUST_LOG=wartui_bridge=debug` logs each `undecodable frame` with its bytes since this bench):
@@ -127,5 +128,4 @@ path, and the hub removes the fault instead. Plugging the hub in hot rebooted th
 plug it in before boot or with the Pi off.
 
 Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
-whether a powered hub or another kernel behaves differently, whether the hub also cures a Pi 5
-proper (it was only tried on the CM5), and whether a Pi 4 does the same.
+whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.
