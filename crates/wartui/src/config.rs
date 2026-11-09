@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn config_loader_rejects_bluetooth_table() {
-        // The bridge holds the Bluetooth slot, so the table is as unknown as any other.
+        // The bridge picks the node that scans Bluetooth, so the table is as unknown as any other.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[bluetooth]\nremember = true\n").unwrap();

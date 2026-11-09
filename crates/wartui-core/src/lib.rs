@@ -26,9 +26,7 @@ pub mod runtime;
 pub mod store;
 pub mod ubx;
 
-pub use engine::{
-    ActionBatch, Assignment, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot,
-};
+pub use engine::{ActionBatch, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot};
 pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
 pub use position::{Fix, PositionChain, PositionSource};
 pub use record::{AdminOutcome, Record};

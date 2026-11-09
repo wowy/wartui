@@ -24,6 +24,7 @@ use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -93,6 +94,7 @@ pub async fn run(args: Args) -> Result<()> {
         host_uart_errors,
         fan,
         pool,
+        scan,
         ble,
         present,
     } = status
@@ -106,6 +108,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
     println!("pool       {pool}");
+    println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));
     println!("slots      {}", slots_text(info.node_board, present));
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
@@ -142,6 +145,16 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
 }
 
 /// The slot whose node scans Bluetooth, by its board's name, or `none`.
+/// What the bridge's planner is asked to scan.
+pub(crate) const fn scan_text(scan: ScanMode) -> &'static str {
+    match scan {
+        ScanMode::Stopped => "stopped",
+        ScanMode::Wifi => "wifi",
+        ScanMode::WifiBluetooth => "wifi + bluetooth",
+    }
+}
+
+/// The slot the bridge's planner gave the Bluetooth scan, by its label, or `none`.
 pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
     ble.map_or_else(|| "none".to_owned(), |slot| board.label(slot).to_string())
 }
@@ -287,8 +300,8 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, awaited, ble_text, board_line, diagnostic_lines, fan_text, human_uptime,
-        radio_line, silence_note, slots_text,
+        Awaited, ScanMode, awaited, ble_text, board_line, diagnostic_lines, fan_text, human_uptime,
+        radio_line, scan_text, silence_note, slots_text,
     };
     use wartui_bridge::LinkEvent;
     use wartui_proto::bus::{NodeBoard, Slot};
@@ -327,6 +340,13 @@ mod tests {
         let b2 = Slot::new(1, 1);
         assert_eq!(ble_text(NodeBoard::Carrier14, b2), "N9");
         assert_eq!(ble_text(NodeBoard::Carrier14, None), "none");
+    }
+
+    #[test]
+    fn status_prints_scan_mode_when_bridge_reports_one() {
+        assert_eq!(scan_text(ScanMode::Stopped), "stopped");
+        assert_eq!(scan_text(ScanMode::Wifi), "wifi");
+        assert_eq!(scan_text(ScanMode::WifiBluetooth), "wifi + bluetooth");
     }
 
     #[test]
@@ -435,6 +455,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            scan: ScanMode::Stopped,
             ble: None,
             present: 0,
         };

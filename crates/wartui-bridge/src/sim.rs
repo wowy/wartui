@@ -17,7 +17,17 @@
 //!
 //! Node `i` sits in node-bus slot `i` (`A1` up, then `B1`), on a fourteen-node carrier, so the
 //! view names it by the silk, `N1` up. The bridge answers each `ToNode` with `Delivered` once
-//! the node has it, or `Undelivered` for a slot with no node. A `PowerCycle` restarts the node in
+//! the node has it, or `Undelivered` for a slot with no node.
+//!
+//! The bridge plans the fleet as the P4 does, with the same [`Fleet`] core. Every record a node
+//! sends reaches the host through the bridge, which gives each heartbeat to the core on the way,
+//! and the core's `Assign` and `Stop` reach a node as a `ToNode` does, its outcome going back to
+//! the core. A full inbox is `QueueFull`, as a full downlink is on the P4, so the bridge never
+//! waits on a node for its own records. It boots stopped, takes `StartScan` and `StopScan`, and
+//! reports the plan in a `Fleet` frame on every change, after each `Status` and when the host
+//! attaches. The core runs on the bridge's clock, which [`SimConfig::speed`] does not scale. A
+//! report is sent before any record the core reads after it, so a host reads a plan ahead of
+//! the heartbeats that show nodes taking it. A `PowerCycle` restarts the node in
 //! that slot, which is answered `Done` at once, stays dark for the carrier's [`POWER_OFF`], and
 //! heartbeats again from a fresh boot, still on trial if it was. `Status` reports every node's slot
 //! present from the start, and a slot absent through a `PowerCycle`'s hold, when a record for it is
@@ -35,7 +45,7 @@
 //! verifies, and from the next `Begin` on, a chunk command is answered `NoImage`.
 //!
 //! Its board is a carrier, so it has a lid fan: a `SetFan` sets the duty `Status` reports, with a
-//! speed made up from it. A `SetPool` sets the pool `Status` reports, which starts at
+//! speed made up from it. A `SetPool` sets the pool the core cuts, which starts at
 //! [`SimConfig::pool`]. It has no flash, and connects once and never reboots, so both last the
 //! simulator's life, and the duty starts at full.
 
@@ -51,6 +61,7 @@ use wartui_proto::bus::{
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::fan::{FanDuty, FanStats};
+use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
 use wartui_proto::link::{
     BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, NodeImageCache,
     PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
@@ -266,6 +277,8 @@ impl SimTransport {
         // the moment it starts, and a host that has not seen a bridge yet has
         // nowhere to file that.
         let (attached_tx, attached_rx) = tokio::sync::watch::channel(false);
+        // What the nodes send, read by the bridge on its way to the host.
+        let (up_tx, up_rx) = mpsc::channel(UPLINK_CAPACITY);
 
         let mut routes: Vec<Route> = Vec::new();
         let mut fleet = Vec::new();
@@ -292,27 +305,27 @@ impl SimTransport {
             fleet.push((node, admin_rx));
         }
 
-        let events = plumbing.events.clone();
+        let planner = Arc::new(SimFleet {
+            core: tokio::sync::Mutex::new(Fleet::new(self.config.pool)),
+            routes,
+            present,
+            started,
+            wake: tokio::sync::Notify::new(),
+            events: plumbing.events.clone(),
+        });
         let no_image = self.config.no_image_answers.clone();
         let drop_cache_after = self.config.drop_cache_after;
-        let pool = self.config.pool;
+        tokio::spawn(run_uplink(up_rx, Arc::clone(&planner)));
+        tokio::spawn(run_clock(Arc::clone(&planner)));
         tokio::spawn(run_bridge(
             plumbing,
-            Bridge {
-                routes,
-                present,
-                started,
-                attached: attached_tx,
-                no_image,
-                drop_cache_after,
-                pool,
-            },
+            Bridge { fleet: planner, attached: attached_tx, no_image, drop_cache_after },
         ));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
                 node,
                 Arc::clone(&world),
-                events.clone(),
+                up_tx.clone(),
                 admin_rx,
                 self.config.speed,
                 started,
@@ -333,22 +346,130 @@ fn sim_fan_rpm(duty: FanDuty) -> u16 {
     }
 }
 
-/// What the dongle half starts with.
-struct Bridge {
+/// Records the nodes may have waiting for the bridge.
+const UPLINK_CAPACITY: usize = 64;
+
+/// The bridge's fleet planner, shared by the halves that feed it: the host's commands, the
+/// nodes' records and the clock.
+#[derive(Debug)]
+struct SimFleet {
+    /// Held while a report it produced is sent, so no record the core reads later can reach the
+    /// host ahead of it.
+    core: tokio::sync::Mutex<Fleet>,
     routes: Vec<Route>,
     /// Bit n set while the node in the slot whose byte is n has booted, as `Status` reports it.
     present: Arc<AtomicU32>,
     started: tokio::time::Instant,
+    /// Raised after every input, since it may move the core's deadline.
+    wake: tokio::sync::Notify,
+    events: mpsc::Sender<LinkEvent>,
+}
+
+impl SimFleet {
+    /// The bridge's clock, the time the core runs on.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Hand every record the core owes to its node, telling the core how each went. Returns the
+    /// report, if the plan changed.
+    fn pump(&self, core: &mut Fleet) -> Option<Report> {
+        let now = self.now_ms();
+        while let Some(to) = core.next_send(now) {
+            match self.offer(to) {
+                Ok(()) => core.on_delivered(to.id, now),
+                Err(_) => core.on_undelivered(to.id, now),
+            }
+        }
+        core.take_report()
+    }
+
+    /// [`Self::pump`] after an input, waking the clock, since the input may have moved the core's
+    /// deadline.
+    fn after_input(&self, core: &mut Fleet) -> Option<Report> {
+        self.wake.notify_one();
+        self.pump(core)
+    }
+
+    /// Put `to` in its node's inbox without waiting, as the P4 queues it in a downlink.
+    fn offer(&self, to: ToSlot) -> Result<(), Undelivered> {
+        let route = self
+            .routes
+            .iter()
+            .find(|route| route.slot == to.slot)
+            .filter(|_| self.present.load(Ordering::Relaxed) & to.slot.bit() != 0)
+            .ok_or(Undelivered::NoNode)?;
+        let command = match to.msg {
+            SlotMsg::Assign(assign) => SimCommand::Assign(assign),
+            SlotMsg::Stop => SimCommand::Stop,
+        };
+        route.tx.try_send(command).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(_) => Undelivered::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => Undelivered::NoNode,
+        })
+    }
+
+    /// Send `report` to the host, if there is one. Called with the core still held.
+    async fn say(&self, report: Option<Report>) -> Result<(), ()> {
+        let Some(report) = report else { return Ok(()) };
+        self.events.send(LinkEvent::Message(BridgeToHost::Fleet(report))).await.map_err(|_| ())
+    }
+}
+
+/// Carry every node record to the host, giving each heartbeat to the core first.
+async fn run_uplink(mut up: mpsc::Receiver<LinkEvent>, fleet: Arc<SimFleet>) {
+    while let Some(event) = up.recv().await {
+        let mut core = fleet.core.lock().await;
+        if let LinkEvent::Message(BridgeToHost::FromNode { slot, kind, body, .. }) = &event
+            && *kind == UpType::Heartbeat.as_u8()
+        {
+            core.on_heartbeat(*slot, body, fleet.now_ms());
+            let report = fleet.after_input(&mut core);
+            if fleet.say(report).await.is_err() {
+                return;
+            }
+        }
+        if fleet.events.send(event).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Give the core the time at its next deadline, or when an input may have moved it.
+async fn run_clock(fleet: Arc<SimFleet>) {
+    loop {
+        let deadline = fleet.core.lock().await.next_deadline_ms();
+        match deadline {
+            Some(ms) => {
+                let at = fleet.started + Duration::from_millis(ms);
+                tokio::select! {
+                    () = tokio::time::sleep_until(at) => {}
+                    () = fleet.wake.notified() => {}
+                }
+            }
+            None => fleet.wake.notified().await,
+        }
+        let mut core = fleet.core.lock().await;
+        core.on_tick(fleet.now_ms());
+        let report = fleet.pump(&mut core);
+        if fleet.say(report).await.is_err() || fleet.events.is_closed() {
+            return;
+        }
+    }
+}
+
+/// What the dongle half starts with.
+struct Bridge {
+    fleet: Arc<SimFleet>,
     attached: tokio::sync::watch::Sender<bool>,
     no_image: Option<Arc<AtomicU32>>,
     drop_cache_after: Option<u32>,
-    pool: ChannelPool,
 }
 
-/// The dongle half: announces itself, routes records to nodes, answers status.
+/// The dongle half: announces itself, routes records to nodes, plans the fleet, answers status.
 async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
-    let Bridge { routes, present, started, attached, no_image, mut drop_cache_after, mut pool } =
-        bridge;
+    let Bridge { fleet, attached, no_image, mut drop_cache_after } = bridge;
+    let (routes, present, started) = (&fleet.routes, &*fleet.present, fleet.started);
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
@@ -384,22 +505,43 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     if plumbing.events.send(LinkEvent::Message(no_gps)).await.is_err() {
         return;
     }
+    // A host attaching hears the plan, as the P4's announcement carries it.
+    let report = fleet.core.lock().await.report();
+    if fleet.say(Some(report)).await.is_err() {
+        return;
+    }
     let _ = attached.send(true);
 
     let mut rng = Xorshift::new(0x0DD5_EED5);
     let mut cache = sim_cache();
     let mut fan_duty = FanDuty::FULL;
-    // As a P4 with nothing stored: no node scans Bluetooth.
-    let mut ble = None;
 
     while let Some(cmd) = plumbing.commands.recv().await {
-        let reply = match cmd {
-            // The real bridge replies with `Ready`, but `Connected` has already
-            // gone out above and a host counting connections would be confused.
-            HostToBridge::Identify => None,
-            // No receiver on its GPS port to write to.
-            HostToBridge::GpsWrite { .. } => None,
-            HostToBridge::GetStatus => Some(BridgeToHost::Status {
+        // The planner's commands are answered by the report they produce, sent with the core held.
+        let planned = match &cmd {
+            HostToBridge::StartScan { bluetooth } => Some(Plan::Start(*bluetooth)),
+            HostToBridge::StopScan => Some(Plan::Stop),
+            HostToBridge::SetPool { pool } => Some(Plan::Pool(*pool)),
+            _ => None,
+        };
+        if let Some(plan) = planned {
+            let mut core = fleet.core.lock().await;
+            let now = fleet.now_ms();
+            match plan {
+                Plan::Start(bluetooth) => core.start(bluetooth, now),
+                Plan::Stop => core.stop(now),
+                Plan::Pool(pool) => core.set_pool(pool, now),
+            }
+            let report = fleet.after_input(&mut core);
+            if fleet.say(report).await.is_err() {
+                return;
+            }
+            continue;
+        }
+        if let HostToBridge::GetStatus = cmd {
+            // The status, then the plan, with the core held so nothing it reads comes between.
+            let core = fleet.core.lock().await;
+            let status = BridgeToHost::Status {
                 rx_count: 0,
                 dropped_tx: 0,
                 uptime_ms: elapsed_ms(started),
@@ -408,10 +550,29 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 radio_link: RadioLinkStats::default(),
                 host_uart_errors: 0,
                 fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
-                pool,
-                ble,
+                pool: core.pool(),
+                scan: core.mode(),
+                ble: core.bluetooth(),
                 present: present.load(Ordering::Relaxed),
-            }),
+            };
+            if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
+                || fleet.say(Some(core.report())).await.is_err()
+            {
+                return;
+            }
+            continue;
+        }
+        let reply = match cmd {
+            // The real bridge replies with `Ready`, but `Connected` has already
+            // gone out above and a host counting connections would be confused.
+            HostToBridge::Identify => None,
+            // No receiver on its GPS port to write to.
+            HostToBridge::GpsWrite { .. } => None,
+            // Answered above.
+            HostToBridge::GetStatus
+            | HostToBridge::StartScan { .. }
+            | HostToBridge::StopScan
+            | HostToBridge::SetPool { .. } => None,
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
             }),
@@ -421,7 +582,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     .unwrap_or_default(),
             }),
             HostToBridge::ToNode { slot, id, kind, body } => {
-                Some(match deliver(&routes, &present, slot, kind, &body, &mut rng).await {
+                Some(match deliver(routes, present, slot, kind, &body, &mut rng).await {
                     Ok(()) => BridgeToHost::Delivered { id },
                     Err(reason) => BridgeToHost::Undelivered { id, reason },
                 })
@@ -430,19 +591,18 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
             HostToBridge::PowerCycle { slot } => {
                 if let Some(route) = routes.iter().find(|route| route.slot == slot) {
                     present.fetch_and(!slot.bit(), Ordering::Relaxed);
+                    let mut core = fleet.core.lock().await;
+                    core.on_presence(present.load(Ordering::Relaxed), fleet.now_ms());
+                    let report = fleet.after_input(&mut core);
+                    if fleet.say(report).await.is_err() {
+                        return;
+                    }
+                    drop(core);
                     let _ = route.tx.send(SimCommand::PowerCycle).await;
                 }
                 Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
             }
-            // All three answered by the next `Status`, as the P4's are.
-            HostToBridge::SetPool { pool: wanted } => {
-                pool = wanted;
-                None
-            }
-            HostToBridge::SetBle { slot } => {
-                ble = slot;
-                None
-            }
+            // Answered by the next `Status`, as the P4's is.
             HostToBridge::SetFan { duty } => {
                 fan_duty = duty;
                 None
@@ -467,7 +627,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                         if let Some(left) = &mut drop_cache_after {
                             *left = left.saturating_sub(1);
                         }
-                        deliver(&routes, &present, slot, kind, &body[..n], &mut rng).await
+                        deliver(routes, present, slot, kind, &body[..n], &mut rng).await
                     }
                     None => {
                         if let Some(count) = &no_image {
@@ -488,6 +648,13 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
             return;
         }
     }
+}
+
+/// A command for the planner.
+enum Plan {
+    Start(bool),
+    Stop,
+    Pool(ChannelPool),
 }
 
 /// `status` as the cache answers it.

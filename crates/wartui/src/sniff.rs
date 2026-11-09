@@ -253,6 +253,26 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         BridgeToHost::Undelivered { id, reason } => {
             println!("# record {id} undelivered: {reason:?}");
         }
+        // The P4's plan: its mode and each slot's share.
+        BridgeToHost::Fleet(report) => {
+            let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
+            println!(
+                "# fleet {:?}, pool {}, {} shares",
+                report.mode,
+                report.pool,
+                report.shares.len()
+            );
+            if args.verbose {
+                for share in &report.shares {
+                    let job = if share.ble {
+                        "bluetooth".to_owned()
+                    } else {
+                        format!("{} channels", share.channels.len())
+                    };
+                    println!("#   {} epoch {}: {job}", board.label(share.slot), share.epoch);
+                }
+            }
+        }
         // Answers `power-cycle`, which `sniff` never sends.
         BridgeToHost::PowerCycled { slot, outcome } => {
             let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
@@ -417,6 +437,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            scan: wartui_proto::fleet::ScanMode::Stopped,
             ble: None,
             present: 0,
         };

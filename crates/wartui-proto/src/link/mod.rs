@@ -13,11 +13,16 @@
 //! nothing retries, half-written frames, and the bootloader's log a reset prints down the same
 //! pipe.
 //!
+//! The P4 plans the fleet ([`crate::fleet`]): the host asks it to start or stop scanning
+//! ([`HostToBridge::StartScan`], [`HostToBridge::StopScan`]) and mirrors the plan it reports
+//! ([`BridgeToHost::Fleet`]). The P4 authors every `Assign` and `Stop` itself.
+//!
 //! The host speaks to a node by its node-bus [`Slot`]: a [`HostToBridge::ToNode`] carries one
 //! record for it, of up to [`MAX_NODE_DOWN`] bytes, and the P4 answers each with
 //! [`BridgeToHost::Delivered`] or [`BridgeToHost::Undelivered`]. Every record a node sends
-//! arrives as a [`BridgeToHost::FromNode`] of up to [`MAX_NODE_PAYLOAD`] bytes. The P4 reads
-//! neither; [`crate::bus`] has the messages.
+//! arrives as a [`BridgeToHost::FromNode`] of up to [`MAX_NODE_PAYLOAD`] bytes. The P4 reads a
+//! heartbeat for its planner and forwards it verbatim, and reads nothing else; [`crate::bus`] has
+//! the messages.
 //!
 //! An update's chunks are the exception: the host uploads the image once into the P4's cache
 //! ([`HostToBridge::CacheImage`]), and a [`HostToBridge::ToNodeChunk`] asks the P4 to build each
@@ -26,6 +31,7 @@
 
 use crate::bus::{NodeBoard, Slot};
 use crate::fan::{FanDuty, FanStats};
+use crate::fleet::{Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
@@ -175,8 +181,8 @@ pub enum Undelivered {
 
 /// Commands the host sends to the bridge.
 ///
-/// The bridge understands framing, and nothing about what a node's bytes mean, except that it
-/// builds [`crate::bus::UpdateChunk`] records from its cache.
+/// The bridge understands framing, and of what a node's bytes mean only heartbeats, which its
+/// planner reads, and the [`crate::bus::UpdateChunk`] records it builds from its cache.
 // The payload variants dwarf the rest, but boxing them would need an allocator in the
 // bridge firmware, which this crate avoids. These values are built, serialized and
 // dropped, never stored in bulk.
@@ -262,14 +268,16 @@ pub enum HostToBridge {
         /// The pool to run and store.
         pool: ChannelPool,
     },
-    /// Give the Bluetooth scan to the node in `slot`, or to no node, and store it so the P4 boots
-    /// into it ([`crate::settings`]). No answer: the next [`BridgeToHost::Status`] shows the slot
-    /// in force, and a failed save answers [`BridgeToHost::Error`]. Every P4 takes it, carrier or
-    /// not.
-    SetBle {
-        /// The slot whose node scans Bluetooth, or `None` for no node.
-        slot: Option<Slot>,
+    /// Scan Wi-Fi, and Bluetooth too when `bluetooth` ([`crate::fleet::Fleet::start`]). The P4
+    /// keeps scanning until a [`HostToBridge::StopScan`], whether or not a host is listening. No
+    /// answer: a [`BridgeToHost::Fleet`] reports the plan once it changes.
+    StartScan {
+        /// Give one node the Bluetooth scan, once two nodes are members.
+        bluetooth: bool,
     },
+    /// Idle every node ([`crate::fleet::Fleet::stop`]). No answer, as for
+    /// [`HostToBridge::StartScan`].
+    StopScan,
 }
 
 /// Events and replies the bridge sends to the host.
@@ -330,10 +338,11 @@ pub enum BridgeToHost {
         host_uart_errors: u32,
         /// The carrier's lid fan, or `None` with no carrier.
         fan: Option<FanStats>,
-        /// The channel pool the bridge holds, which the host's planner deals.
+        /// The channel pool the bridge holds and its planner cuts.
         pool: ChannelPool,
-        /// The slot whose node scans Bluetooth, or `None` for no node. The bridge holds it; the
-        /// host's planner gives the scan to the node heartbeating from it.
+        /// What the bridge's planner is asked to scan.
+        scan: ScanMode,
+        /// The slot the bridge's planner gave the Bluetooth scan, or `None` for no node.
         ble: Option<Slot>,
         /// Bit n is set while the P4 counts the slot whose [`Slot`] byte is n present. A slot is
         /// present after one good transfer, and absent after five in a row fail the magic, once
@@ -401,6 +410,10 @@ pub enum BridgeToHost {
     /// Where an upload into the node image cache stands: an `Op::Status` in the
     /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::CacheImage`].
     CacheImage(#[serde(with = "bytes")] UpdateStatusBytes),
+    /// What the bridge's planner is doing: sent when it changes, after each
+    /// [`BridgeToHost::Status`], and when a host attaches. A priority frame, so it reaches the
+    /// host ahead of the heartbeats that show nodes adopting it.
+    Fleet(Report),
 }
 
 /// How a [`HostToBridge::PowerCycle`] went.

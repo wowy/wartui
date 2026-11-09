@@ -1,14 +1,12 @@
 use std::time::Instant;
 
-use wartui_proto::bus::{Capabilities, DieTemp, Slot, Vdd, wire_epoch};
+use wartui_proto::bus::{Capabilities, DieTemp, Slot, Vdd};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::ChannelSet;
 use wartui_proto::reset::ResetCause;
 
 use super::Now;
 #[cfg(doc)]
-use super::{Command, Counters, EngineConfig, FleetEngine};
-use crate::record::AdminOutcome;
+use super::{Counters, FleetEngine};
 
 /// Everything the engine knows about one node.
 #[derive(Debug, Clone)]
@@ -16,8 +14,9 @@ pub struct NodeState {
     /// Full six-byte MAC, the node's identity wherever it is plugged in.
     pub mac: Mac,
     /// The node-bus slot its latest heartbeat came from, and so the one this host sends it
-    /// anything through. `None` until a heartbeat names it, or once another node's heartbeat
-    /// takes the slot. A node without one cannot be sent anything.
+    /// anything through, and where the P4's plan finds its share. `None` until a heartbeat names
+    /// it, or once another node's heartbeat takes the slot. A node without one cannot be sent
+    /// anything.
     pub slot: Option<Slot>,
     /// Unix milliseconds of the first record in this session.
     pub first_seen_ms: i64,
@@ -26,12 +25,13 @@ pub struct NodeState {
     /// Monotonic time of the most recent record of any kind. Only a heartbeat refreshes
     /// `last_heartbeat`, which answers a different question.
     pub last_seen: Instant,
-    /// Monotonic time of the most recent heartbeat, which decides whether the node can be assigned.
+    /// Monotonic time of the most recent heartbeat, which decides whether the node is alive.
     pub last_heartbeat: Option<Instant>,
     /// The node's most recent heartbeat counter.
     pub counter: Option<u32>,
     /// Reboots detected: the heartbeat counter went backwards, or a live heartbeat's epoch fell
-    /// back to 0 after a real one. Each forgets the assignment held.
+    /// back to 0 after a real one while the P4's plan still gives its slot a share. Each forgets
+    /// the assignment held.
     pub reboots: u32,
     /// Heartbeats received in this session.
     pub heartbeats: u64,
@@ -48,28 +48,14 @@ pub struct NodeState {
     /// when that heartbeat's read failed.
     pub die_temp: DieTemp,
     /// What the node said it is, from its latest heartbeat, so a reflashed node stops claiming the
-    /// old build's features. `None` until a heartbeat arrives. Such a node is left out of the plan
+    /// old build's features. `None` until a heartbeat arrives. Such a node is not assignable
     /// ([`FleetEngine::is_assignable`]).
     pub capabilities: Option<Capabilities>,
     /// The host logged this node leaving the fleet, so its next heartbeat logs it returning.
     pub departed: bool,
-    /// A bridge `Status` showed this node's slot absent, and no heartbeat has come since. Out of
-    /// the plan until one does ([`FleetEngine::on_bus`]).
+    /// A bridge `Status` showed this node's slot absent, and no heartbeat has come since. Not
+    /// alive until one does ([`FleetEngine::on_bus`]).
     pub off_bus: bool,
-    /// What this host wants the node to be scanning.
-    pub desired: Option<Assignment>,
-    /// What was delivered to the node. Cleared on reboot, because the node has forgotten.
-    pub confirmed: Option<Assignment>,
-    /// Whether [`Self::desired`] still needs delivering. Set when the plan changes, the Bluetooth
-    /// scan moves, the node reboots, or its heartbeat shows a delivered assignment not adopted.
-    /// Cleared on delivery, and when the node departs the plan. Never cleared on enqueue.
-    pub dirty: bool,
-    /// How many times an assignment has been sent to this node.
-    pub admin_attempts: u32,
-    /// What happened to the most recent attempt.
-    pub last_outcome: Option<AdminOutcome>,
-    /// Send-to-delivery microseconds of the latest delivered assignment, by this host's clock.
-    pub last_latency_us: Option<u32>,
     /// The epoch this node's latest *live* heartbeat reported holding, `0` for none. A replayed
     /// heartbeat never sets it, since it says what the node held then, not now
     /// ([`FleetEngine::reading_live`]).
@@ -81,9 +67,6 @@ pub struct NodeState {
     pub fault_restart: Option<ResetCause>,
     /// How many restarts the host saw were faults. [`Self::fault_restart`] is the latest.
     pub fault_restarts: u32,
-    /// Times this node's heartbeat reported an epoch other than the one delivered to it. Each was
-    /// re-sent on that heartbeat.
-    pub unadopted: u32,
     /// The `seq` of this node's latest sighting batch. Reset on reboot, since `seq` restarts at
     /// boot and a gap across one is not a loss.
     pub last_seq: Option<u16>,
@@ -106,22 +89,6 @@ pub struct NodeState {
     pub(super) last_wifi_refused: Option<u16>,
     /// The same for `ble_refused` and [`Counters::ble_refused`].
     pub(super) last_ble_refused: Option<u16>,
-}
-
-/// What one node was told to do, and the fleet arithmetic it was computed against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Assignment {
-    /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on. Empty exactly when
-    /// [`ble`](Self::ble) is set. An empty set without the flag would idle a node while this host
-    /// believed it was sweeping. [`FleetEngine::replan`] reads both off one value so they cannot
-    /// drift.
-    pub channels: ChannelSet,
-    /// Whether this node's job is Bluetooth, sniffing no Wi-Fi. Part of the assignment: it travels
-    /// in the same message under the same epoch, so "delivered" stays unambiguous.
-    pub ble: bool,
-    /// The epoch counter it was allocated from: monotonic within a capture, not persisted
-    /// (`FleetEngine::last_counter`).
-    pub counter: u64,
 }
 
 /// How far a node's rail reading must fall below its first, in millivolts, to count as a drop.
@@ -160,16 +127,9 @@ impl NodeState {
             capabilities: None,
             departed: false,
             off_bus: false,
-            desired: None,
-            confirmed: None,
-            dirty: false,
-            admin_attempts: 0,
-            last_outcome: None,
-            last_latency_us: None,
             held_epoch: None,
             fault_restart: None,
             fault_restarts: 0,
-            unadopted: 0,
             last_seq: None,
             last_seq_live: false,
             last_batch: None,
@@ -179,19 +139,6 @@ impl NodeState {
             last_wifi_refused: None,
             last_ble_refused: None,
         }
-    }
-
-    /// Whether this node's heartbeat confirms it holds the assignment this host cares about.
-    ///
-    /// That is [`Self::desired`], which is newer, or else [`Self::confirmed`], so a node that left
-    /// the plan is read against what it holds. Stronger than [`Self::confirmed`]: delivery says
-    /// the message arrived, this says the node took it. `false` before a live heartbeat, or while
-    /// [`Self::held_epoch`] disagrees.
-    #[must_use]
-    pub fn adopted(&self) -> bool {
-        self.desired
-            .or(self.confirmed)
-            .is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
     }
 
     /// Whether the latest heartbeat's rail reading is at least [`SUPPLY_DROP_MV`] below

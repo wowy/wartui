@@ -33,6 +33,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
         .expect("creating the store");
 
     let config = EngineConfig {
+        auto_start: true,
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
         ..Default::default()
     };
@@ -96,23 +97,28 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_records_settings_history_when_operator_changes_pool_and_ble_slot() {
+async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("settings.db");
-    let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
+    let link = SimTransport::new(SimConfig { node_count: 2, speed: 60.0, ..Default::default() })
         .start()
         .expect("simulator");
     let started = now();
     let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
         .expect("store");
-    let engine = FleetEngine::new(EngineConfig::default(), started);
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
+    let engine = FleetEngine::new(config, started);
     let (snapshot_tx, mut snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    // The bridge's first `Status`, so the change below is told apart from it.
-    snapshot_rx.wait_for(|s| s.pool.is_some()).await.expect("the bridge reports a pool");
+    // The bridge's first `Status`, so the change below is told apart from it, and both nodes,
+    // so the bridge has two to give Bluetooth to one of.
+    snapshot_rx
+        .wait_for(|s| s.pool.is_some() && s.nodes.iter().filter(|n| n.adopted).count() == 2)
+        .await
+        .expect("the bridge reports a pool and the scan starts");
     command_tx
         .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
         .await
@@ -126,14 +132,11 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_ble_slot(
         .wait_for(|s| s.pool == Some(wartui_proto::plan::ChannelPool::Us))
         .await
         .expect("the bridge takes the pool");
-    command_tx
-        .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
-        .await
-        .expect("ble command");
+    command_tx.send(Command::SetBluetooth(true)).await.expect("bluetooth command");
     snapshot_rx
-        .wait_for(|s| s.ble_node.is_some())
+        .wait_for(|s| s.ble_slot.is_some())
         .await
-        .expect("the bridge takes the slot and its node the scan");
+        .expect("the bridge gives one node the scan");
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop_tx.send(()).expect("stop");
     assert_eq!(capture.await.expect("capture").dropped, 0);
@@ -150,8 +153,9 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_ble_slot(
     assert!(values[0].contains("pool=none;"), "before the bridge's first `Status`");
     assert!(values[1].contains("pool=all;"));
     assert!(values[2].contains("pool=us;") && values[2].contains("ble_slot=none;"));
-    let node = wartui_proto::mac::full(&SimTransport::node_mac(0)).to_string();
-    assert!(values[3].contains("ble_slot=A1;") && values[3].ends_with(&format!("ble_node={node}")));
+    // The highest slot, which the bridge's planner picks.
+    let node = wartui_proto::mac::full(&SimTransport::node_mac(1)).to_string();
+    assert!(values[3].contains("ble_slot=A2;") && values[3].ends_with(&format!("ble_node={node}")));
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written
@@ -179,6 +183,7 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     let gps = Gps::detached();
     gps.feed(FIRST, started.unix_ms);
     let config = EngineConfig {
+        auto_start: true,
         // A static position underneath, to prove the receiver is what the rows
         // actually used rather than the only thing they could have used.
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
@@ -197,10 +202,7 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     // whole drive: advertisers rotate their addresses and never fall into the dedup
     // ring, while the access points are all reported in the first sweep. Without a
     // live stream there is nothing for the second fix to be attached to.
-    command_tx
-        .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
-        .await
-        .expect("the engine is listening");
+    command_tx.send(Command::SetBluetooth(true)).await.expect("the engine is listening");
     tokio::time::sleep(Duration::from_millis(700)).await;
     gps.feed(SECOND, now().unix_ms);
     tokio::time::sleep(Duration::from_millis(700)).await;

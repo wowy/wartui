@@ -3,10 +3,11 @@ use tokio::sync::mpsc;
 use tui_scrollview::ScrollViewState;
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac::Mac;
 
 use super::Settings;
-use super::blocks::{LOST_SLOT, why_not_assignable};
+use super::blocks::LOST_SLOT;
 use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_bridge};
 use super::upload::Upload;
 #[cfg(test)]
@@ -16,6 +17,9 @@ use crate::text::node_name;
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
+
+/// The notice when `b` is pressed while the bridge's scan is stopped.
+const SCAN_STOPPED: &str = "the scan is stopped, so there is no Bluetooth to toggle";
 
 /// The notice when a power-cycle is asked for with the link down. The transport holds commands
 /// while it reconnects, so one sent now would cut the node whenever the bridge comes back.
@@ -143,26 +147,17 @@ impl Ui {
         self.selected = selected;
     }
 
-    /// Ask the bridge to move the Bluetooth scan onto the selected node's slot, or off the fleet
-    /// when that slot is the one the bridge holds. The bridge keeps the slot across restarts of
-    /// either end. Taking it off needs no assignable node: the bridge holds a slot, not a MAC, and
-    /// a silent or outdated node on it would otherwise leave the scan stuck there.
+    /// Ask the bridge to add the Bluetooth scan to the Wi-Fi scan, or take it off. The bridge
+    /// picks the node, so the cursor plays no part.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        let Some(node) = snapshot.nodes.get(self.selected) else { return };
-        let target = node.state.mac;
-        let name = node_name(snapshot.node_board(), node.state.slot, &target);
-        let holds = node.state.slot.is_some() && node.state.slot == snapshot.ble_slot;
-        // Same rule as an assignment. The flag travels in the assignment, which answers
-        // a heartbeat.
-        if !holds && let Some(why) = why_not_assignable(node) {
-            self.say(format!("{name} {why}"), snapshot);
+        if snapshot.scan == Some(ScanMode::Stopped) {
+            self.say(SCAN_STOPPED.to_owned(), snapshot);
             return;
         }
-        // An assignable node has a slot, so `None` here only ever means "off".
-        let slot = if holds { None } else { node.state.slot };
-        let said = match commands.try_send(Command::AssignBle { slot }) {
-            Ok(()) if holds => format!("{name}: bluetooth off on its next heartbeat"),
-            Ok(()) => format!("{name}: bluetooth on its next heartbeat"),
+        let on = snapshot.scan != Some(ScanMode::WifiBluetooth);
+        let said = match commands.try_send(Command::SetBluetooth(on)) {
+            Ok(()) if on => "bluetooth on: the bridge gives it to one node".to_owned(),
+            Ok(()) => "bluetooth off".to_owned(),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
@@ -369,92 +364,30 @@ mod tests {
     use crate::tui::fixtures::*;
 
     #[test]
-    fn ui_displays_specific_refusal_notice_when_toggling_ble_on_unassignable_node() {
-        // Three faults refuse `b`, and each needs a different fix, so each gets its
-        // own wording.
+    fn ui_toggles_bluetooth_scan_when_b_key_is_pressed() {
         let mut snapshot = busy();
-        snapshot.nodes.push(unannounced(0x21));
-        snapshot.nodes.push(stale_node(0x22));
-        snapshot.nodes.push(unslotted(0x23));
-        snapshot.nodes.sort_by_key(|n| n.state.mac);
-        // `expect`, not `continue`, so every reason is asserted.
-        let row = |mac_suffix: u8| {
-            snapshot
-                .nodes
-                .iter()
-                .position(|n| n.state.mac[5] == mac_suffix)
-                .expect("a row for every reason")
-        };
-
-        for (row, want) in [
-            (row(0x21), "heartbeated yet"),
-            (row(0x22), "not heartbeating"),
-            (row(0x23), "bus slot"),
-        ] {
-            let (tx, mut rx) = mpsc::channel(4);
-            let mut ui = Ui { selected: row, ..Default::default() };
-            ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(rx.try_recv().is_err(), "row {row} queued something");
-            let notice = ui.notice(snapshot.now_ms).expect("a reason");
-            assert!(notice.contains(want), "row {row}: wanted {want:?}, got {notice}");
-        }
-    }
-
-    #[test]
-    fn ui_displays_next_heartbeat_notice_when_assigning_ble_to_node_holding_nothing() {
-        // A node with no share yet can still take the scan. It hears the flag on its next
-        // heartbeat, with an empty share to carry it.
-        let snapshot = busy();
-        let idle = snapshot
-            .nodes
-            .iter()
-            .position(|n| n.assignable && n.state.desired.is_none() && n.state.confirmed.is_none())
-            .expect("a node with no share of its own");
-
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui { selected: idle, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert!(rx.try_recv().is_ok(), "the command goes out either way");
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("on its next heartbeat"), "got {notice}");
-    }
-
-    #[test]
-    fn ui_toggles_ble_assignment_when_b_key_is_pressed() {
-        let snapshot = busy();
-        let node = snapshot.nodes[0].state.mac;
-        let slot = snapshot.nodes[0].state.slot;
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot });
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.starts_with("N7: bluetooth on"), "named by its slot: {notice}");
+        assert_eq!(rx.try_recv().expect("a command"), Command::SetBluetooth(true));
+        assert!(ui.notice(snapshot.now_ms).expect("a notice").starts_with("bluetooth on"));
 
-        // Pressed on the node holding the scan, it takes the scan off the fleet. This
-        // is the only way back to no node scanning.
-        let mut holding = busy();
-        holding.ble_node = Some(node);
-        holding.ble_slot = slot;
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot: None });
-        assert!(ui.notice(holding.now_ms).expect("a notice").contains("bluetooth off"));
-    }
-
-    #[test]
-    fn ui_takes_ble_off_when_b_pressed_on_held_slot_with_unassignable_node() {
-        // The bridge holds the slot whatever its node is doing, so a silent node on it
-        // must not leave the scan stuck there.
-        let mut snapshot = busy();
-        let mac = snapshot.nodes[0].state.mac;
-        snapshot.nodes[0] = stale_node(mac[5]);
-        snapshot.ble_slot = snapshot.nodes[0].state.slot;
-        snapshot.ble_node = None;
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        // Whichever node is selected: the bridge picks the one that scans.
+        snapshot.scan = Some(ScanMode::WifiBluetooth);
+        let mut ui = Ui { selected: 3, ..Default::default() };
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { slot: None });
+        assert_eq!(rx.try_recv().expect("a command"), Command::SetBluetooth(false));
         assert!(ui.notice(snapshot.now_ms).expect("a notice").contains("bluetooth off"));
+    }
+
+    #[test]
+    fn ui_refuses_bluetooth_toggle_when_scan_is_stopped() {
+        let snapshot = Snapshot { scan: Some(ScanMode::Stopped), ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "nothing to toggle");
+        assert!(ui.notice(snapshot.now_ms).expect("a notice").contains("stopped"));
     }
 
     fn press(code: char) -> KeyEvent {
@@ -656,7 +589,7 @@ mod tests {
 
     #[test]
     fn ui_writes_nothing_to_config_when_b_pressed() {
-        // The bridge holds the Bluetooth slot, so `b` leaves `wartui.toml` alone.
+        // The bridge picks the Bluetooth node, so `b` leaves `wartui.toml` alone.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
@@ -665,10 +598,9 @@ mod tests {
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 
-        let slot = snapshot.nodes[0].state.slot;
-        assert_eq!(rx.try_recv().unwrap(), Command::AssignBle { slot });
+        assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(true));
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert_eq!(notice, "N7: bluetooth on its next heartbeat");
+        assert_eq!(notice, "bluetooth on: the bridge gives it to one node");
     }
 }

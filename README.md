@@ -143,7 +143,7 @@ have no README; their `//!` module docs hold the detail.
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
 | `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
-| `b`                    | Toggle Bluetooth scanning on the selected node                               |
+| `b`                    | Toggle Bluetooth scanning; the bridge picks the node that scans              |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
@@ -175,24 +175,23 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
-is the reason it exists. No key or flag assigns channels to a node. `b`, or `wartui bluetooth`,
-only picks which node scans Bluetooth; the planner then shares that node's channels among the
-rest.
+is the reason it exists. The bridge plans the fleet, and `run` starts its scan. No key or flag
+assigns channels to a node. `b` only adds Bluetooth to the scan or takes it off; the bridge picks
+the node and shares that node's channels among the rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
 
-An assignment answers the node's next heartbeat. Heartbeats come every 5 seconds once a node is
-assigned, so a new assignment can take up to that long to land. Until then, the node's `channels`
-column reads `1: 1…`.
+A node's `channels` line ends in `…` until its heartbeat, every 5 seconds once a node is assigned,
+says it holds its share.
 
 Set the pool from settings (`c`) or with `wartui pool`. The bridge keeps it across its reboots.
 The default, `all`, is every channel a node can tune; `us` and `eu` are what the FCC and ETSI
 permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
-Wi-Fi, and its block's `channels` line reads `bluetooth`. Give the scan to a node with `b` or
-`wartui bluetooth N3`. The bridge keeps the slot across its reboots.
+Wi-Fi, and its block's `channels` line reads `bluetooth`. `b` asks the bridge for the scan, which
+it gives to one node once two can scan.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
 [`crates/wartui/README.md`](crates/wartui/README.md).**
@@ -202,8 +201,8 @@ Wi-Fi, and its block's `channels` line reads `bluetooth`. Give the scan to a nod
 - **Maximum fourteen nodes** (`plan::MAX_NODES`), seven slots on each of the two node buses. The
   P4 drives seven per bus on the 14-node carrier, and none without a carrier
   ([`docs/node-bus.md`](docs/node-bus.md)).
-- **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
-  and the footer says so.
+- **The Bluetooth node sniffs no Wi-Fi.** So the bridge keeps a lone node on Wi-Fi, and gives
+  Bluetooth to one node only once two can scan.
 - **Channel 14 is never scanned**, because `esp-radio` can't tune it. It's Japan-only 802.11b, so
   this should rarely matter.
 - **No compatibility with earlier versions until 1.0.** Build the host and flash every board from

@@ -93,6 +93,7 @@ use wartui_proto::bus::{
     Capabilities, DownType, Heartbeat, Slot, UPDATE_CHUNK, UpType, UpdateAbort, UpdateBegin,
     UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus, Version,
 };
+use wartui_proto::fleet::BRIDGE_ID;
 use wartui_proto::link::{HostToBridge, ToNodeBody, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::SECTOR;
@@ -306,8 +307,8 @@ pub struct OtaImage {
 ///
 /// Sessions sharing a link step past each other's ids, so a delivery answer matches only the
 /// session that sent it: session `index` of `count` takes [`Ids::of`]. The ids wrap within the
-/// largest multiple of `step` a `u16` holds, so each stays `next` modulo `step`, and skip 0, which
-/// the engine never sends either.
+/// largest multiple of `step` below [`BRIDGE_ID`], so each stays `next` modulo `step` and never
+/// carries the bit the P4 marks its own sends with, and skip 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ids {
     /// The id the next record takes.
@@ -325,10 +326,11 @@ impl Ids {
         Self { next: index as u16 + 1, step: count.max(1) as u16 }
     }
 
-    fn take(&mut self) -> u16 {
+    /// The next id, moving on to the one after it.
+    pub fn take(&mut self) -> u16 {
         let id = self.next;
         let step = u32::from(self.step.max(1));
-        let span = (u32::from(u16::MAX) + 1) / step * step;
+        let span = u32::from(BRIDGE_ID) / step * step;
         let next = match (u32::from(self.next) + step) % span {
             0 => step,
             next => next,

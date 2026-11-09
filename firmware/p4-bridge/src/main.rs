@@ -27,13 +27,18 @@
 //!   supply, through the I/O expander that shares I2C0 with the GPS. Each locks the bus per
 //!   transaction;
 //! - **the node buses** (`src/bus.rs`), one future per SPI controller, carry each node's records
-//!   to and from the host, and report link counters to it as log lines;
+//!   to and from the host and the fleet planner, and report link counters to the host as log
+//!   lines;
 //! - **the fan** (`src/fan.rs`), on a carrier only, drives the lid fan's PWM at the duty stored on
-//!   flash, which a host's `SetFan` changes, and reads its tach for `Status`.
+//!   flash, which a host's `SetFan` changes, and reads its tach for `Status`;
+//! - **the fleet planner** (`src/fleet.rs`) sleeps until its core's next deadline, or until an
+//!   input wakes it, then ticks the core and sends what it owes. It decides what every node
+//!   scans, reading their heartbeats, and authors every `Assign` and `Stop`. It boots stopped, and
+//!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty, the channel pool and the Bluetooth slot, which `Status` reports. A host's `SetFan`,
-//! `SetPool` or `SetBle` stores its change there.
+//! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
+//! change there. The scan mode is not stored.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -59,6 +64,7 @@ mod cache;
 mod carrier;
 mod config;
 mod fan;
+mod fleet;
 mod gps;
 mod host;
 mod link;
@@ -91,8 +97,8 @@ use esp_hal::uart::{
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
-use wartui_proto::ChannelPool;
-use wartui_proto::bus::{PER_BUS, Slot};
+use wartui_proto::bus::PER_BUS;
+use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
@@ -137,6 +143,11 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
 /// Where the writer encodes the packet for the wire.
 static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
+
+/// The fleet planner's core, stopped and cutting the default pool until `Shared::new` gives it the
+/// stored one. Built at compile time, so its slot table is never on the stack.
+static FLEET: ConstStaticCell<Fleet> =
+    ConstStaticCell::new(Fleet::new(wartui_proto::ChannelPool::All));
 
 /// What the futures share. Static, to keep it out of `main`'s future, which `.clippy.toml`'s
 /// stack threshold bounds.
@@ -225,11 +236,11 @@ pub struct Shared {
     fan: Option<&'static fan::Fan>,
     /// The settings sector's image, read before each write (`src/settings.rs`).
     sector: RefCell<&'static mut [u8; SECTOR]>,
-    /// The channel pool in force, which `Status` reports and a host's `SetPool` changes.
-    pool: Cell<ChannelPool>,
-    /// The slot whose node scans Bluetooth, or `None` for no node, which `Status` reports and a
-    /// host's `SetBle` changes.
-    ble: Cell<Option<Slot>>,
+    /// The fleet planner's core: the mode, the pool in force and the Bluetooth pick, which
+    /// `Status` reports, and every slot's share (`src/fleet.rs`).
+    fleet: RefCell<&'static mut Fleet>,
+    /// Raised by an input that [`fleet::run`] must pump after, or whose deadline it must see.
+    fleet_wake: Signal<NoopRawMutex, ()>,
 }
 
 impl Shared {
@@ -244,6 +255,8 @@ impl Shared {
         // The stored settings, read before any future runs.
         let (sector, stored) = settings::boot(updates);
         let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
+        let fleet = FLEET.take();
+        fleet.set_pool(stored.pool.unwrap_or_default(), now_ms());
         Self {
             // Here rather than in `main`, whose frame another `Pair` would grow.
             pair: RefCell::new(pair.with_node_board(carrier.board())),
@@ -277,9 +290,8 @@ impl Shared {
             power: Power::new(carrier),
             fan,
             sector: RefCell::new(sector),
-            pool: Cell::new(stored.pool.unwrap_or_default()),
-            // No record is no node, as a record of none is.
-            ble: Cell::new(stored.ble.flatten()),
+            fleet: RefCell::new(fleet),
+            fleet_wake: Signal::new(),
         }
     }
 
@@ -350,6 +362,7 @@ impl Shared {
         }
         carrier::say(self);
         cache::say(self);
+        fleet::say(self);
         self.flush_update_lines();
     }
 
@@ -411,9 +424,14 @@ impl Shared {
         self.announce();
     }
 
-    /// Queue the `Status` a poll asked for.
-    #[inline(never)]
+    /// Queue the `Status` a poll asked for, then the plan, so a host always holds the current one.
     fn push_status(&self) {
+        self.push_status_only();
+        fleet::say(self);
+    }
+
+    #[inline(never)]
+    fn push_status_only(&self) {
         let host = self.host.borrow().stats();
         let down = {
             let ring = self.down.borrow();
@@ -435,8 +453,9 @@ impl Shared {
             rx_count,
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
-            pool: self.pool.get(),
-            ble: self.ble.get(),
+            pool: self.fleet.borrow().pool(),
+            scan: self.fleet.borrow().mode(),
+            ble: self.fleet.borrow().bluetooth(),
             present: self.nodes.present(),
         };
         let status = self.pair.borrow().status(now_ms(), counters);
@@ -600,7 +619,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             carrier::run(carrier, i2c.ok(), shared),
             bus::run(bus_a, shared),
             bus::run(bus_b, shared),
-            fan::run(fan_pins, shared),
+            join(fan::run(fan_pins, shared), fleet::run(shared)),
         ),
     )
     .await {}

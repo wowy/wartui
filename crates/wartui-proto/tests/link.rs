@@ -12,6 +12,7 @@ use wartui_proto::bus::{
     UpdateState, UpdateStatus, Vdd,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
+use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
     GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
@@ -56,7 +57,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::SetFan { duty: FanDuty::new(40).expect("in range") })
         .expect("sample_commands has room");
     v.push(HostToBridge::SetPool { pool: ChannelPool::Eu }).expect("sample_commands has room");
-    v.push(HostToBridge::SetBle { slot: Slot::new(0, 2) }).expect("sample_commands has room");
+    v.push(HostToBridge::StartScan { bluetooth: true }).expect("sample_commands has room");
+    v.push(HostToBridge::StopScan).expect("sample_commands has room");
     v
 }
 
@@ -175,6 +177,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         host_uart_errors: 0,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Us,
+        scan: ScanMode::WifiBluetooth,
         ble: Slot::new(1, 0),
         present: 0b11_1111,
     })
@@ -203,7 +206,24 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         next_offset: 905_000,
     })))
     .expect("sample_events has room");
+    v.push(BridgeToHost::Fleet(full_report())).expect("sample_events has room");
     v
+}
+
+/// A report with a share in every slot, the largest a [`BridgeToHost::Fleet`] carries.
+fn full_report() -> Report {
+    let mut shares = heapless::Vec::new();
+    for byte in 0..14 {
+        let channels = wartui_proto::plan::ChannelSet::from_bits(u64::MAX);
+        let slot = Slot::from_u8(byte).expect("a slot");
+        shares.push(Share { slot, epoch: 254, ble: byte == 13, channels }).expect("fits");
+    }
+    Report {
+        mode: ScanMode::WifiBluetooth,
+        pool: ChannelPool::All,
+        shares,
+        unreachable: wartui_proto::plan::ChannelSet::from_bits(u64::MAX),
+    }
 }
 
 #[test]
@@ -584,7 +604,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 12, "one of each");
+    assert_eq!(commands.len(), 13, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -608,6 +628,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
             },
         ),
         (10, BridgeToHost::CacheImage(UpdateStatusBytes::new())),
+        (11, BridgeToHost::Fleet(full_report())),
     ];
     for (want, event) in &events {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
@@ -651,6 +672,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::Eu,
+        scan: ScanMode::Stopped,
         ble: None,
         present: 0,
     };
@@ -731,6 +753,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         host_uart_errors: 9,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
         pool: ChannelPool::All,
+        scan: ScanMode::Stopped,
         ble: None,
         present: u32::MAX,
     };
@@ -808,9 +831,9 @@ fn link_refuses_set_fan_when_duty_is_over_100() {
 }
 
 #[test]
-fn link_codec_pins_fan_pool_ble_and_present_bytes_at_end_of_status_when_bridge_reports_them() {
+fn link_codec_pins_fan_pool_scan_ble_and_present_bytes_at_end_of_status_when_bridge_reports_them() {
     // `fan`: `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
-    // `pool`: postcard's variant index. `ble`: an option's tag, then the slot's byte.
+    // `pool` and `scan`: postcard's variant indices. `ble`: an option's tag, then the slot's byte.
     // `present`: a varint, last.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
@@ -823,23 +846,25 @@ fn link_codec_pins_fan_pool_ble_and_present_bytes_at_end_of_status_when_bridge_r
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        scan: ScanMode::Stopped,
         ble: None,
         present: 0,
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let none = frame_body(&out[..n]);
-    assert_eq!(none[none.len() - 4..], [0, 2, 0, 0]);
-    if let BridgeToHost::Status { fan, pool, ble, present, .. } = &mut status {
+    assert_eq!(none[none.len() - 5..], [0, 2, 0, 0, 0]);
+    if let BridgeToHost::Status { fan, pool, scan, ble, present, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
         *pool = ChannelPool::Us;
+        *scan = ScanMode::WifiBluetooth;
         *ble = Slot::new(1, 2);
         // A1, A3 and B3: bits 0, 2 and 9, 0x205.
         *present = 1 << 0 | 1 << 2 | 1 << 9;
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
     let some = frame_body(&out[..n]);
-    assert_eq!(some[..none.len() - 4], none[..none.len() - 4]);
-    assert_eq!(some[none.len() - 4..], [1, 40, 1, 0xAC, 0x02, 0, 1, 9, 0x85, 0x04]);
+    assert_eq!(some[..none.len() - 5], none[..none.len() - 5]);
+    assert_eq!(some[none.len() - 5..], [1, 40, 1, 0xAC, 0x02, 0, 2, 1, 9, 0x85, 0x04]);
     assert_eq!(round_trip(&status), status);
 }
 
@@ -854,14 +879,46 @@ fn link_codec_pins_set_pool_bytes_when_host_sets_a_pool() {
 }
 
 #[test]
-fn link_codec_pins_set_ble_bytes_when_host_sets_a_slot() {
-    // Postcard's variant index, then the option's tag and the slot's byte.
+fn link_codec_pins_scan_bytes_when_host_starts_or_stops() {
+    // Postcard's variant index, then `bluetooth`'s byte.
     let mut out = [0u8; MAX_HOST_FRAME];
-    let b3 = HostToBridge::SetBle { slot: Slot::new(1, 2) };
-    let n = encode_host_frame(&b3, &mut out).expect("encodes");
-    assert_eq!(frame_body(&out[..n]), [11, 1, 9]);
-    let n = encode_host_frame(&HostToBridge::SetBle { slot: None }, &mut out).expect("encodes");
-    assert_eq!(frame_body(&out[..n]), [11, 0]);
+    for (bluetooth, byte) in [(false, 0), (true, 1)] {
+        let cmd = HostToBridge::StartScan { bluetooth };
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [11, byte]);
+    }
+    let n = encode_host_frame(&HostToBridge::StopScan, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [12]);
+}
+
+#[test]
+fn link_codec_pins_fleet_bytes_when_bridge_reports_a_share() {
+    // Postcard's variant index; `mode`'s and `pool`'s; the share count; each share's slot byte,
+    // epoch, flag and channel bits as a varint; then `unreachable`'s bits.
+    let mut shares = heapless::Vec::new();
+    let channels = wartui_proto::plan::ChannelSet::from_bits(0b101);
+    shares
+        .push(Share { slot: Slot::new(1, 2).expect("B3"), epoch: 7, ble: false, channels })
+        .unwrap();
+    let report = Report {
+        mode: ScanMode::Wifi,
+        pool: ChannelPool::Eu,
+        shares,
+        unreachable: wartui_proto::plan::ChannelSet::empty(),
+    };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&BridgeToHost::Fleet(report.clone()), &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [11, 1, 1, 1, 9, 7, 0, 5, 0]);
+    assert_eq!(round_trip(&BridgeToHost::Fleet(report.clone())), BridgeToHost::Fleet(report));
+}
+
+#[test]
+fn link_round_trips_fleet_within_max_frame_when_every_slot_holds_a_share() {
+    let event = BridgeToHost::Fleet(full_report());
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("a full report fits MAX_FRAME");
+    assert!(n <= MAX_FRAME);
+    assert_eq!(round_trip(&event), event);
 }
 
 #[test]

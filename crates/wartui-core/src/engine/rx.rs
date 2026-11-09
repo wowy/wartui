@@ -1,6 +1,6 @@
 use wartui_proto::bus::{
     ACK_TIMEOUT_MS, Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind,
-    SightingBatch, SightingMsg, Slot, UpType, wire_epoch,
+    SightingBatch, SightingMsg, Slot, UpType,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::index_of;
@@ -147,7 +147,7 @@ impl FleetEngine {
         }
     }
 
-    /// A heartbeat: proof of life, the node's slot, and the moment to answer it.
+    /// A heartbeat: proof of life, the node's slot, and the epoch it holds.
     fn on_heartbeat(
         &mut self,
         rx: &FromNode<'_>,
@@ -163,13 +163,18 @@ impl FleetEngine {
         self.counters.heartbeats += 1;
         // Read before borrowing the node: liveness decides whether its epoch is believed.
         let live = self.reading_live();
+        // So does a live heartbeat reporting no epoch after a real one, while the P4's plan still
+        // gives the slot a share: the epoch reset at boot too. A node the P4 stopped or withdrew
+        // reports 0 as well, and the plan says so first: its report is a priority frame, ahead of
+        // the heartbeats that follow it.
+        let held_share = self.share_at(slot).is_some_and(|share| share.epoch != 0);
         let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
         // A falling counter means the node restarted and forgot its assignment.
         let counter_rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
-        // So does a live heartbeat reporting no epoch after a real one: the epoch reset at boot
-        // too.
-        let epoch_rebooted =
-            live && heartbeat.epoch == 0 && node.held_epoch.is_some_and(|previous| previous != 0);
+        let epoch_rebooted = live
+            && held_share
+            && heartbeat.epoch == 0
+            && node.held_epoch.is_some_and(|previous| previous != 0);
         let rebooted = counter_rebooted || epoch_rebooted;
         // `see_node` leaves `last_heartbeat` alone, so this is still the previous beat.
         match node.last_heartbeat {
@@ -210,8 +215,6 @@ impl FleetEngine {
                 node.fault_restart = Some(heartbeat.reset_cause);
                 node.fault_restarts += 1;
             }
-            // The node forgot it. `reissue` below re-sends it.
-            node.confirmed = None;
             // `seq` restarted too, so the gap since the last batch is history, not loss. An
             // identical batch after a reboot is new, not a retransmission.
             node.last_seq = None;
@@ -261,44 +264,6 @@ impl FleetEngine {
             heap_free: heartbeat.heap_free,
             live,
         }));
-
-        if rebooted && node.desired.is_some() {
-            self.reissue(src);
-        }
-        // Delivered but not adopted: the bus delivered the record, but the heartbeat says the node
-        // does not hold it (a length or version mismatch, a dropped inbox, or a bug). After a
-        // reboot `confirmed` is already `None`, so that case stays out. Re-sent on this heartbeat
-        // like an undelivered assignment, under the same epoch, which the node does not hold either
-        // way.
-        //
-        // Re-fetched because `reissue` above borrowed all of `self`.
-        if let Some(node) = self.nodes.get_mut(&src)
-            && live
-            && !node.dirty
-            && let Some(confirmed) = node.confirmed
-            && heartbeat.epoch != wire_epoch(confirmed.counter)
-        {
-            node.unadopted += 1;
-            node.dirty = true;
-            self.counters.admin_unadopted += 1;
-        }
-        // A first heartbeat joins the fleet and changes every node's range. Re-partitioning now
-        // lets the node take its share in answer to this heartbeat.
-        self.replan(now);
-        // The node holds exactly what `desired` carries, yet it is still dirty. Either `deal`
-        // allocated before `held_epoch` was known (a backlog replay leaves it `None`), or a
-        // delivery was lost after adoption. Re-issuing spends one epoch and is right either way.
-        if let Some(node) = self.nodes.get(&src)
-            && live
-            && node.dirty
-            && let Some(desired) = node.desired
-            && node.held_epoch == Some(wire_epoch(desired.counter))
-        {
-            self.reissue(src);
-        }
-        // Answered off the heartbeat, through the slot it came from. A heartbeat read behind sends
-        // nothing.
-        self.send_admin(src, now, batch);
     }
 
     /// Whether the node at `src` runs firmware this build can drive, as far as its last heartbeat
@@ -315,10 +280,8 @@ impl FleetEngine {
     ///
     /// The node is filed and shown with its version so the operator can find it, but it is never
     /// assignable ([`FleetEngine::is_assignable`]): nothing past the prefix is this build's
-    /// layout, so its counter, epoch and refusals mean nothing here. It is answered with nothing
-    /// and sets no `last_heartbeat`. If it holds the Bluetooth scan, the scan is withdrawn now rather
-    /// than when it ages out, and the bridge's Bluetooth slot stays as it is, so the node takes the
-    /// scan back once it can be driven again.
+    /// layout, so its counter, epoch and refusals mean nothing here. It sets no
+    /// `last_heartbeat`. The P4 reads the same prefix and leaves the node out of its plan.
     fn on_outdated_heartbeat(
         &mut self,
         rx: &FromNode<'_>,
@@ -355,9 +318,6 @@ impl FleetEngine {
         }
         node.capabilities = Some(capabilities);
         node.heartbeats += 1;
-        // A node that was in the plan on a compatible build leaves it now, and with it the
-        // Bluetooth scan: `replan` gives the scan only to an assignable node.
-        self.replan(now);
     }
 
     /// A batch of sightings, recorded unless it retransmits the batch before it.

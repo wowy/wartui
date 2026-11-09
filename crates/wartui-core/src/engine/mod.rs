@@ -5,20 +5,18 @@
 //! block on the link, and tests run it against a simulated clock.
 //!
 //! A node is known by its MAC and reached through the node-bus slot its latest heartbeat came
-//! from. Sending it anything means allocating an epoch, answering its heartbeat, and counting the
-//! record delivered only when the bridge says the node acknowledged it. The engine
-//! partitions the channel pool across live, heartbeating nodes, re-cutting when membership or the
-//! pool changes. Only the planner's re-cut decides what a node scans. The pool is the bridge's:
-//! the engine learns it from each `Status`, and cuts nothing before the first.
+//! from. The P4 decides what each node scans and sends it (`wartui_proto::fleet`). The engine
+//! mirrors the plan the P4 reports and reads each heartbeat's epoch against it, so the view shows
+//! which nodes hold their share (`scan.rs`).
 //!
-//! A node leaves the plan on the first `Status` that shows its slot absent from the bus, within
-//! about a poll of losing power, and stays out until its next heartbeat ([`FleetEngine::on_bus`]).
-//! The heartbeat timeout is the backstop for a node that still answers the bus but has stopped
-//! heartbeating: its bus re-arm runs in an interrupt, so a hung main loop still answers.
+//! A node counts as gone on the first `Status` that shows its slot absent from the bus, within
+//! about a poll of losing power, until its next heartbeat ([`FleetEngine::on_bus`]). The
+//! heartbeat timeout is the backstop for a node that still answers the bus but has stopped
+//! heartbeating: its bus re-arm runs in an interrupt, so a hung main loop still answers. Both
+//! mirror the P4's own membership rule.
 //!
-//! [`Command::AssignBle`] asks the bridge to give one slot's node the Bluetooth scan as its whole
-//! job. The bridge holds that slot as it holds the pool, and the engine gives the scan to whichever
-//! assignable node heartbeats from it.
+//! [`Command::SetBluetooth`] asks the P4 to scan Wi-Fi, with or without Bluetooth, and the P4
+//! picks the node that scans it. [`Command::StopScan`] asks it to idle every node.
 //! [`Command::SetPool`] asks the bridge to hold a new pool, which its next `Status` brings back.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
@@ -30,13 +28,12 @@
 //! stamps are stored nowhere else, so without the log a lag spike cannot be explained. It also
 //! logs each node joining, leaving, returning and restarting, so a log alone tells a run's story.
 
-mod admin;
 mod config;
 mod event;
 mod lag;
 mod node;
-mod replan;
 mod rx;
+mod scan;
 mod snapshot;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -44,16 +41,17 @@ use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
+use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
     BridgeToHost, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge,
     NO_GPS_RECEIVER,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{ChannelPool, Job, NUM_SCAN_CHANNELS, Plan};
+use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
-pub use node::{Assignment, NodeState};
+pub use node::NodeState;
 pub use snapshot::{
     BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, Snapshot, TailEntry,
     power_cycled_text,
@@ -67,10 +65,8 @@ use crate::distinct::Distinct;
 use crate::position::PositionChain;
 use crate::record::{BridgeStatusSeen, CaptureSettings, HostStatus, Record};
 use crate::ubx;
-use admin::Pending;
-#[cfg(doc)]
-use replan::next_epoch;
 use rx::FromNode;
+use scan::Startup;
 
 /// The fleet's state and the rules that advance it.
 #[derive(Debug)]
@@ -103,32 +99,24 @@ pub struct FleetEngine {
     dropped_baseline: Option<u32>,
     last_status_poll: Option<Instant>,
     started_at_ms: i64,
-    /// Assignments in flight, keyed by the id the bridge will echo back.
-    pending: BTreeMap<u16, Pending>,
-    /// Wraps harmlessly: an id need only be unique among the few sends in flight.
-    next_send_id: u16,
-    /// The last epoch handed out. Starts at 0 each capture and is not persisted. A node may hold an
-    /// epoch from an earlier run, so [`next_epoch`] skips the one its heartbeat reports.
-    last_counter: u64,
     /// The channel pool the bridge's last `Status` reported, kept across a disconnect. `None`
-    /// until the first, and nothing is cut until then.
+    /// until the first.
     pool: Option<ChannelPool>,
-    /// The partition in force.
-    plan: Option<Plan>,
-    /// The members the plan was cut for, in slot order, each with its job. [`Self::replan`]
-    /// re-partitions when the live membership differs, job included: a node that took the
-    /// Bluetooth scan holds a share of the wrong shape.
-    plan_members: Vec<(Mac, Job)>,
-    /// The slot whose node scans Bluetooth, as the bridge's last `Status` reported it, kept across
-    /// a disconnect like [`Self::pool`]. `None` for no node, and until the first `Status`.
+    /// The mode the bridge last reported, in a `Status` or a `Fleet` report, kept across a
+    /// disconnect like [`Self::pool`]. `None` until the first.
+    scan: Option<ScanMode>,
+    /// The slot the bridge's planner gave the Bluetooth scan, as its last `Status` reported it,
+    /// kept across a disconnect like [`Self::pool`]. `None` for no node, and until the first.
     ble_slot: Option<Slot>,
-    /// The one node asked to scan Bluetooth, if any: the assignable node heartbeating from
-    /// [`Self::ble_slot`], derived at the top of every [`Self::replan`].
-    ///
-    /// Beside the plan, not in it: the slot is an operator's choice the bridge holds, while the
-    /// plan follows who is present. It reaches the planner as a [`Job::Bluetooth`] slot on every
-    /// re-cut, which deals its Wi-Fi share to the rest.
-    ble_node: Option<Mac>,
+    /// The bridge's plan, from its last `Fleet` report. `None` on each connection until one
+    /// arrives, since a plan is the bridge life's that sent it.
+    fleet: Option<Report>,
+    /// Where this run stands on starting the scan ([`EngineConfig::auto_start`]).
+    startup: Startup,
+    /// The scan this run wants, with Bluetooth when `true`: set by every start the engine sends,
+    /// and cleared by [`Command::StopScan`]. `None` for an engine that starts nothing, or a fleet
+    /// the operator stopped. A P4 reporting stopped while it is `Some` is started again.
+    wanted: Option<bool>,
     /// The previous frame's bridge stamp and the host instant it was handled, to tell live reading
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
@@ -161,7 +149,7 @@ impl FleetEngine {
                 || (self.bridge_connected() && self.config.position.bridge_gps().is_some()),
             gps_max_age: self.config.position.max_age(),
             ble_slot: self.ble_slot,
-            ble_node: self.ble_node,
+            ble_node: self.ble_slot.and_then(|slot| self.slots.get(&slot).copied()),
         }
     }
     /// Start an engine. `now` fixes the session's start time.
@@ -184,14 +172,16 @@ impl FleetEngine {
             dropped_baseline: None,
             last_status_poll: None,
             started_at_ms: now.unix_ms,
-            pending: BTreeMap::new(),
-            next_send_id: 1,
-            last_counter: 0,
             pool: None,
-            plan: None,
-            plan_members: Vec::new(),
+            scan: None,
             ble_slot: None,
-            ble_node: None,
+            fleet: None,
+            startup: if config.auto_start {
+                Startup::AwaitingStatus { bluetooth: None }
+            } else {
+                Startup::Done
+            },
+            wanted: None,
             last_arrival: None,
             // Caught up, as on `Connected`.
             backlog_lag_us: 0,
@@ -230,6 +220,7 @@ impl FleetEngine {
                 self.reset_arrivals();
                 // A new connection means a new baseline, whether or not the bridge rebooted.
                 self.dropped_baseline = None;
+                self.on_connected_scan(&mut batch);
                 // Poll now: there is no status yet, and a restarted bridge's GPS receiver has
                 // forgotten its rate.
                 self.poll_bridge(now, &mut batch);
@@ -271,23 +262,13 @@ impl FleetEngine {
     }
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
-        self.expire_pending(now, batch);
-        self.follow_departures(now);
+        self.note_departures(now);
         let due = self
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
         if due && self.link_up {
             self.poll_bridge(now, batch);
         }
-    }
-
-    /// Act on the nodes that have left the fleet: log each once, and re-cut the plan without them.
-    /// The re-cut also takes the Bluetooth scan from one that held it, since it is no longer
-    /// assignable. A node leaves on a tick, past the heartbeat timeout, or on a `Status` that shows
-    /// its slot absent, and both call this.
-    fn follow_departures(&mut self, now: Now) {
-        self.note_departures(now);
-        self.replan(now);
     }
 
     /// Forget what the bridge said about the bus: one met again may have restarted, so heartbeats
@@ -301,7 +282,8 @@ impl FleetEngine {
     /// Log every node that has left the fleet, once, with why: off the bus, or silent past the
     /// topology timeout.
     ///
-    /// Such a node is out of the plan already. Waits until the link has been up a whole timeout:
+    /// The P4 has dropped such a node from its plan already. Waits until the link has been up a
+    /// whole timeout:
     /// an outage silences every node at once, and until heartbeats flow again after a reconnect,
     /// a live node looks a whole timeout silent.
     fn note_departures(&mut self, now: Now) {
@@ -384,10 +366,7 @@ impl FleetEngine {
                 self.note_arrival(rx.slot, rx.rx_us, now);
                 self.on_from_node(&rx, now, batch);
             }
-            BridgeToHost::Delivered { id } => self.on_send_result(*id, None, now, batch),
-            BridgeToHost::Undelivered { id, reason } => {
-                self.on_send_result(*id, Some(*reason), now, batch);
-            }
+            BridgeToHost::Fleet(report) => self.on_fleet(report, batch),
             BridgeToHost::PowerCycled { slot, outcome } => {
                 let text = power_cycled_text(self.node_board(), *slot, *outcome);
                 tracing::info!(slot = %self.slot_label(*slot), ?outcome, "{text}");
@@ -404,6 +383,7 @@ impl FleetEngine {
                 host_uart_errors,
                 fan,
                 pool,
+                scan,
                 ble,
                 present,
             } => {
@@ -440,11 +420,11 @@ impl FleetEngine {
                         node.off_bus = true;
                     }
                 }
-                self.on_bridge_pool(*pool);
-                self.on_bridge_ble(*ble);
-                // A node off the bus leaves now, not on the next tick. The re-cut also moves the
-                // Bluetooth scan to the slot just reported.
-                self.follow_departures(now);
+                self.pool = Some(*pool);
+                self.ble_slot = *ble;
+                self.on_scan_mode(*scan, batch);
+                // A node off the bus leaves now, not on the next tick.
+                self.note_departures(now);
             }
             // Bridge diagnostics are the transport's to log. The engine reads only those that
             // say whether the bridge has a GPS receiver, for the view.
@@ -457,9 +437,12 @@ impl FleetEngine {
                 self.bridge_lacks_gps = false;
             }
             // `Ready` arrives as `LinkEvent::Connected`. An update status answers
-            // `flash-bridge`, and a cache status `ota`, which `run` never is. GPS bytes are the
-            // runtime's, which feeds them to the position chain before the engine would see them.
+            // `flash-bridge`, and a cache status and a send's outcome `ota`, which `run` never is.
+            // GPS bytes are the runtime's, which feeds them to the position chain before the
+            // engine would see them.
             BridgeToHost::Ready { .. }
+            | BridgeToHost::Delivered { .. }
+            | BridgeToHost::Undelivered { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }
             | BridgeToHost::Gps { .. }
@@ -484,24 +467,36 @@ impl FleetEngine {
     ///
     /// A `Status` is a priority frame and overtakes bulk node frames, so a heartbeat read after it
     /// is almost always newer. A heartbeat queued behind bulk can still arrive after a `Status`
-    /// that already shows its slot absent: the node rejoins until the next `Status`, at the cost
-    /// of one extra re-cut.
+    /// that already shows its slot absent: the node shows as rejoined until the next `Status`.
     #[must_use]
     pub const fn on_bus(&self, node: &NodeState) -> bool {
         !node.off_bus
     }
 
-    /// Whether a node can be given channels.
+    /// Whether a node is one the P4 deals a share to, as far as this host can tell: for the view,
+    /// which mirrors the P4's membership rule (`wartui_proto::fleet`).
     ///
     /// Alive is not enough. A node that has not said what it is, or whose firmware does not speak
-    /// this build's layouts, heartbeats fine but never scans its share. Nor does one whose slot
-    /// another node's heartbeat has taken, which this host cannot reach. A share nobody scans is worse than one node fewer: the fleet covers less of
-    /// the pool than without it.
+    /// this build's layouts, heartbeats fine but is never dealt a share. Nor is one whose slot
+    /// another node's heartbeat has taken.
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
         self.is_alive(node, now)
             && node.capabilities.is_some_and(|caps| caps.version.compat_with_host().drivable())
             && node.slot.is_some()
+    }
+
+    /// What the bridge last said its planner is asked to scan. `None` before it first says.
+    #[must_use]
+    pub const fn scan(&self) -> Option<ScanMode> {
+        self.scan
+    }
+
+    /// Whether this engine drives a capture, and so starts the scan
+    /// ([`EngineConfig::auto_start`]) and stops it when the run ends.
+    #[must_use]
+    pub const fn drives_capture(&self) -> bool {
+        self.config.auto_start
     }
 
     /// Running totals, for tests and for the CLI's non-interactive modes.

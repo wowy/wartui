@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Paragraph};
 use wartui_core::engine::Snapshot;
 use wartui_core::gps::{GpsStatus, GpsView};
 use wartui_core::position::PositionSource;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac;
 
 use super::format::elapsed;
@@ -36,13 +37,11 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         first.push(Span::raw(format!("  {fan}")));
     }
 
-    // No pool before the bridge's first `Status`, and no `bt` before it either or while no
-    // node scans. The slot shows whether or not its node is heartbeating, so a scan held by a
-    // silent node is not invisible.
+    // No pool or scan before the bridge's first `Status`.
     let mut second: Vec<Span> =
         snapshot.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
-    if let Some(slot) = snapshot.ble_slot {
-        second.push(Span::raw(format!("bt {}  ", snapshot.node_board().label(slot))));
+    if let Some(scan) = scan(snapshot) {
+        second.push(Span::raw(format!("{scan}  ")));
     }
     second.extend([
         planning(snapshot),
@@ -73,24 +72,36 @@ fn fan(snapshot: &Snapshot) -> Option<String> {
     })
 }
 
-/// Planner status: `N of M` nodes in the plan, or why there is no plan.
+/// What the bridge's planner scans: `scan stopped`, `scan wifi`, or `scan wifi +bt N7` with the
+/// node it gave Bluetooth, `scan wifi +bt` while it has none. `None` before its first `Status`.
+fn scan(snapshot: &Snapshot) -> Option<String> {
+    Some(match snapshot.scan? {
+        ScanMode::Stopped => "scan stopped".to_owned(),
+        ScanMode::Wifi => "scan wifi".to_owned(),
+        ScanMode::WifiBluetooth => match snapshot.ble_slot {
+            Some(slot) => format!("scan wifi +bt {}", snapshot.node_board().label(slot)),
+            None => "scan wifi +bt".to_owned(),
+        },
+    })
+}
+
+/// Planner status: `N of M` nodes holding a share of the bridge's plan, or why none does.
 ///
 /// | Shown | Color | Meaning |
 /// |---|---|---|
-/// | `N of M` | green | `N` of the `M` nodes heard are in the plan |
+/// | `N of M` | green | `N` of the `M` nodes heard hold a share |
 /// | `N alive, none usable` | red | heartbeating, but none assignable |
 /// | `waiting for nodes` | yellow | none heard yet, normal at startup |
 /// | `2 need update` | red | heartbeating on another major or minor, nothing drivable |
 /// | `all nodes silent` | red | every node heard has stopped heartbeating |
 fn planning(snapshot: &Snapshot) -> Span<'static> {
-    let (text, color) = match snapshot.plan {
-        Some(plan) => (format!("{} of {}", plan.node_count(), snapshot.nodes.len()), Color::Green),
-        None if snapshot.alive > 0 => {
-            (format!("{} alive, none usable", snapshot.alive), Color::Red)
-        }
-        None if snapshot.nodes.is_empty() => ("waiting for nodes".to_owned(), Color::Yellow),
-        None if let Some(text) = snapshot.undrivable_text() => (text, Color::Red),
-        None => ("all nodes silent".to_owned(), Color::Red),
+    let shares = snapshot.nodes.iter().filter(|node| node.share.is_some()).count();
+    let (text, color) = match shares {
+        1.. => (format!("{shares} of {}", snapshot.nodes.len()), Color::Green),
+        0 if snapshot.alive > 0 => (format!("{} alive, none usable", snapshot.alive), Color::Red),
+        0 if snapshot.nodes.is_empty() => ("waiting for nodes".to_owned(), Color::Yellow),
+        0 if let Some(text) = snapshot.undrivable_text() => (text, Color::Red),
+        0 => ("all nodes silent".to_owned(), Color::Red),
     };
     Span::styled(text, Style::new().fg(color))
 }
@@ -152,7 +163,7 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
-    use wartui_proto::plan::{ChannelPool, plan};
+    use wartui_proto::plan::ChannelPool;
 
     use super::*;
     use crate::tui::draw;
@@ -193,13 +204,22 @@ mod tests {
     }
 
     #[test]
-    fn header_displays_ble_slot_when_bridge_holds_one() {
+    fn header_displays_scan_mode_and_bluetooth_node_when_bridge_reports_them() {
         let mut snapshot = on_board(NodeBoard::Carrier14);
+        snapshot.scan = Some(ScanMode::WifiBluetooth);
         snapshot.ble_slot = Slot::from_u8(2);
-        assert!(rendered(&snapshot).contains("bt N3"), "{}", rendered(&snapshot));
+        assert!(rendered(&snapshot).contains("scan wifi +bt N3"), "{}", rendered(&snapshot));
 
+        snapshot.scan = Some(ScanMode::Wifi);
         snapshot.ble_slot = None;
-        assert!(!rendered(&snapshot).contains("bt N"), "{}", rendered(&snapshot));
+        assert!(rendered(&snapshot).contains("scan wifi "), "{}", rendered(&snapshot));
+        assert!(!rendered(&snapshot).contains("+bt"), "{}", rendered(&snapshot));
+
+        snapshot.scan = Some(ScanMode::Stopped);
+        assert!(rendered(&snapshot).contains("scan stopped"), "{}", rendered(&snapshot));
+
+        snapshot.scan = None;
+        assert!(!rendered(&snapshot).contains("scan "), "{}", rendered(&snapshot));
     }
 
     #[test]
@@ -269,7 +289,6 @@ mod tests {
     fn view_warns_no_drivable_nodes_when_no_node_holds_a_slot() {
         // Every node heartbeating, none reachable, so there is nothing to partition.
         let mut snapshot = busy();
-        snapshot.plan = None;
         snapshot.nodes = vec![unslotted(0x21), unslotted(0x22), unslotted(0x23)];
         snapshot.alive = 3;
         snapshot.assignable = 0;
@@ -285,7 +304,6 @@ mod tests {
     fn view_names_undrivable_nodes_when_only_nodes_heard_run_another_minor() {
         // Heartbeating, so not silent, though none of them is alive to this host.
         let mut snapshot = busy();
-        snapshot.plan = None;
         snapshot.nodes = vec![outdated(0x21), outdated(0x22)];
         snapshot.alive = 0;
         snapshot.assignable = 0;
@@ -309,14 +327,19 @@ mod tests {
         assert!(waiting.backend().to_string().contains("waiting for nodes"));
 
         let mut snapshot = busy();
-        snapshot.plan = plan(ChannelPool::Us, 4);
+        for node in &mut snapshot.nodes {
+            node.share = node.share.or_else(|| assigned(0x84).share);
+        }
+        snapshot.nodes[1].share = None;
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("4 of 5"));
 
         // A lone node holds the whole pool. The header says nothing extra about it.
         let mut lone = busy();
-        lone.plan = plan(ChannelPool::Us, 1);
+        for node in &mut lone.nodes[1..] {
+            node.share = None;
+        }
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &lone, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
@@ -384,7 +407,6 @@ mod tests {
     #[test]
     fn planning_reports_waiting_in_yellow_when_no_node_has_been_seen() {
         let mut snapshot = busy();
-        snapshot.plan = None;
         snapshot.nodes.clear();
         snapshot.alive = 0;
         snapshot.assignable = 0;
@@ -396,7 +418,9 @@ mod tests {
     #[test]
     fn planning_reports_silence_in_red_when_seen_nodes_stop_heartbeating() {
         let mut snapshot = busy();
-        snapshot.plan = None;
+        for node in &mut snapshot.nodes {
+            node.share = None;
+        }
         assert!(!snapshot.nodes.is_empty());
         snapshot.alive = 0;
         snapshot.assignable = 0;

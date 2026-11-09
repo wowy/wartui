@@ -140,7 +140,8 @@ async fn read_host(
 }
 
 /// Decode one host frame, open the gate, and carry out the command: on the P4, by queueing
-/// a record for a node, or by passing a power-cycle to the carrier.
+/// a record for a node, by passing a power-cycle to the carrier, or by telling the fleet planner,
+/// which sends what it owes before the next frame is read (`src/fleet.rs`).
 ///
 /// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
@@ -177,7 +178,8 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         }
         HostToBridge::SetFan { duty } => crate::fan::set(shared, *duty),
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
-        HostToBridge::SetBle { slot } => crate::settings::set_ble(shared, *slot),
+        HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
+        HostToBridge::StopScan => crate::fleet::stop(shared),
     }
 }
 

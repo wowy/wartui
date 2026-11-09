@@ -129,7 +129,9 @@ pub struct P4Counters {
     pub fan: Option<FanStats>,
     /// The channel pool in force.
     pub pool: ChannelPool,
-    /// The slot whose node scans Bluetooth, or `None` for no node.
+    /// What the fleet planner is asked to scan.
+    pub scan: crate::fleet::ScanMode,
+    /// The slot the fleet planner gave the Bluetooth scan, or `None` for no node.
     pub ble: Option<crate::bus::Slot>,
     /// The slots that hold a node, bit n for [`crate::bus::Slot`] byte n.
     pub present: u32,
@@ -514,6 +516,7 @@ impl Pair {
             rx_oversize,
             fan,
             pool,
+            scan,
             ble,
             present,
         } = p4;
@@ -547,6 +550,7 @@ impl Pair {
             host_uart_errors,
             fan,
             pool,
+            scan,
             ble,
             present,
         }

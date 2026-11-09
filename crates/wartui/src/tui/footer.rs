@@ -47,13 +47,6 @@ pub(super) fn draw_footer(
             thousands(c.heartbeats),
             thousands(snapshot.store.written)
         )));
-        if c.admin_sent > 0 {
-            spans.push(Span::raw(format!(
-                "  admin {}/{}",
-                thousands(c.admin_acked),
-                thousands(c.admin_sent)
-            )));
-        }
         if c.batches_lost > 0 {
             spans.push(Span::raw(format!("  lost {}", thousands(c.batches_lost))));
         }
@@ -103,25 +96,13 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if snapshot.store.dropped > 0 {
         faults.push(format!("store dropped {}", thousands(snapshot.store.dropped)));
     }
-    if c.admin_failed > 0 {
-        faults.push(format!("{} assignments unacknowledged", thousands(c.admin_failed)));
-    }
-    if c.admin_unadopted > 0 {
-        faults.push(format!(
-            "{} assignments acknowledged but not adopted",
-            thousands(c.admin_unadopted)
-        ));
-    }
-    // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
-    // so nothing sniffs at all. A plan is cut only from a pool, so both are here.
-    if let Some(plan) = snapshot.plan
+    // Channels of the pool in no share of the bridge's plan, which nothing else reports.
+    if !snapshot.unreachable.is_empty()
         && let Some(pool) = snapshot.pool
-        && !plan.unreachable().is_empty()
     {
         faults.push(format!(
-            "every node in this fleet is scanning Bluetooth, so none of the {} channels of the \
-             {} pool is being swept",
-            thousands(u64::from(plan.unreachable().len())),
+            "no node is sweeping {} channels of the {} pool",
+            thousands(u64::from(snapshot.unreachable.len())),
             pool
         ));
     }
@@ -297,7 +278,7 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
     use wartui_proto::fan::{FanDuty, FanStats};
-    use wartui_proto::plan::{ChannelPool, Job, plan_for};
+    use wartui_proto::plan::ChannelPool;
 
     use super::*;
     use crate::tui::draw;
@@ -502,7 +483,7 @@ mod tests {
         let screen = rendered(&snapshot);
         assert!(totals_line(&screen).contains("lost 7"), "{screen}");
 
-        // `busy()` has nothing lost, so the total is left out, as `admin` is.
+        // `busy()` has nothing lost, so the total is left out.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("lost"), "{screen}");
     }
@@ -683,15 +664,13 @@ mod tests {
     }
 
     #[test]
-    fn view_warns_no_wifi_sniffing_when_all_nodes_scan_bluetooth() {
+    fn view_warns_channels_unswept_when_bridge_reports_them_unreachable() {
         let mut snapshot = busy();
-        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
+        snapshot.pool = Some(ChannelPool::Us);
+        snapshot.unreachable = ChannelPool::Us.channels();
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("every node in this fleet is scanning Bluetooth"),
-            "got {rendered}"
-        );
+        assert!(rendered.contains("no node is sweeping"), "got {rendered}");
     }
 }

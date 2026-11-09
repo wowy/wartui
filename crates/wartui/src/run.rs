@@ -225,6 +225,8 @@ pub async fn run(args: Args) -> Result<()> {
         upload,
     };
     let config = EngineConfig {
+        // A capture starts the scan, and stops it when it ends.
+        auto_start: true,
         record_raw: args.record_raw,
         position,
         excluded_ssids,

@@ -6,16 +6,15 @@
 //! because color alone is not the signal: a terminal without color, or an operator who cannot
 //! tell red from green, reads the word.
 //!
-//! The channel lines color each node's share by how far its assignment has got, because a
-//! delivery is not adoption. Only the node's heartbeat, carrying the epoch it holds, shows it
-//! took the frame (`NodeState::adopted`).
+//! The channel lines show each node's share of the bridge's plan, colored by whether the node
+//! holds it. Only the node's heartbeat, carrying the epoch it holds, shows it took the share
+//! (`NodeView::adopted`).
 //!
 //! | State | Wi-Fi share | Bluetooth node |
 //! |---|---|---|
-//! | pending: sent, not acked | yellow, the desired set then `…` | yellow `bluetooth…` |
-//! | acked, not adopted | blue, the confirmed set then `…` | blue `bluetooth…` |
-//! | adopted | plain, the confirmed set | cyan `bluetooth` |
-//! | nothing confirmed | gray `unassigned` | gray `unassigned` |
+//! | pending: in the plan, not adopted | yellow, the set then `…` | yellow `bluetooth…` |
+//! | adopted | plain, the set | cyan `bluetooth` |
+//! | no share | gray `unassigned` | gray `unassigned` |
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect, Size};
@@ -24,15 +23,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use wartui_core::engine::{NodeView, Snapshot};
-use wartui_core::record::AdminOutcome;
 use wartui_proto::bus::{Board, Compat, NODE_VERSION, NodeBoard, Version};
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
 use crate::text::thousands;
 
-/// The narrowest block: an inner 20 holds the longest state, `no admin ack`, and
-/// `channels   unassigned`.
+/// The narrowest block: an inner 20 holds the longest states, `needs update` and
+/// `rebooted xN`, and `channels   unassigned`.
 const MIN_BLOCK_W: u16 = 22;
 
 /// A block's height in the wide layout: five labeled lines and the border.
@@ -285,7 +283,7 @@ fn raised_state(node: &NodeView) -> (String, Severity) {
 fn border_style(node: &NodeView, severity: Severity) -> Style {
     match severity {
         Severity::Ok => {
-            let ble = node.state.desired.or(node.state.confirmed).is_some_and(|a| a.ble);
+            let ble = node.share.is_some_and(|share| share.ble);
             Style::new().fg(if ble { Color::Blue } else { Color::Green })
         }
         other => other.style(),
@@ -299,7 +297,7 @@ enum Severity {
     Ok,
     /// Worth knowing, needing nothing: `rebooted xN`.
     Notice,
-    /// Out of the plan for now, a supply drop or a hot die.
+    /// Out of the bridge's plan for now, a supply drop or a hot die.
     Warning,
     /// Something to fix.
     Fault,
@@ -361,21 +359,14 @@ enum Share {
 /// The node's share, whether it still waits on the node, and the style its lines take. The
 /// module docs list the states.
 fn share(node: &NodeView) -> (Share, bool, Style) {
-    let state = &node.state;
-    let of = |set: ChannelSet| if set.is_empty() { Share::Bluetooth } else { Share::Channels(set) };
-    if state.dirty
-        && let Some(desired) = state.desired
-    {
-        return (of(desired.channels), true, Style::new().fg(Color::Yellow));
-    }
-    let Some(confirmed) = state.confirmed else {
+    let Some(held) = node.share else {
         return (Share::Unassigned, false, Style::new().fg(Color::DarkGray));
     };
-    let share = of(confirmed.channels);
-    match (share, state.adopted()) {
+    let share = if held.ble { Share::Bluetooth } else { Share::Channels(held.channels) };
+    match (share, node.adopted) {
         (Share::Bluetooth, true) => (share, false, Style::new().fg(Color::Cyan)),
         (_, true) => (share, false, Style::new()),
-        (_, false) => (share, true, Style::new().fg(Color::Blue)),
+        (_, false) => (share, true, Style::new().fg(Color::Yellow)),
     }
 }
 
@@ -427,45 +418,13 @@ fn compat(node: &NodeView) -> Option<Compat> {
     node.state.capabilities.map(|caps| caps.version.compat_with_host())
 }
 
-/// Why a node cannot be given an assignment, or `None` if it can.
-///
-/// The text is the notice shown when `b` is refused, so it says what is wrong
-/// rather than naming a state.
-pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
-    let state = &node.state;
-    if state.capabilities.is_none() {
-        return Some("has not heartbeated yet, so nothing says what its radio can tune");
-    }
-    match compat(node) {
-        Some(Compat::NodeBehind) => {
-            return Some("runs older firmware than this host drives, so it needs an update first");
-        }
-        Some(Compat::NodeAhead) => {
-            return Some(
-                "runs newer firmware than this host drives, so update the host to drive it",
-            );
-        }
-        _ => {}
-    }
-    if state.slot.is_none() {
-        return Some(LOST_SLOT);
-    }
-    if !node.on_bus {
-        return Some("is off the node bus, so it cannot be reached");
-    }
-    if !node.assignable {
-        return Some("is not heartbeating, so it cannot be assigned");
-    }
-    None
-}
-
 /// Why a heartbeating node has no slot, the notice when a key that needs one is refused.
 pub(super) const LOST_SLOT: &str =
     "lost its bus slot to another node's heartbeat, so it cannot be reached";
 
 /// The state line: what the operator most needs to know about a node.
 ///
-/// `stale`: sightings arrive, heartbeats do not. The node cannot be assigned. This
+/// `stale`: sightings arrive, heartbeats do not. The bridge deals it no share. This
 /// differs from silence, which has other causes. `off bus`: the bridge's `Status` shows the
 /// node's slot absent, so the node lost power, crashed or was unplugged.
 fn node_state(node: &NodeView) -> (String, Severity) {
@@ -490,11 +449,6 @@ fn node_state(node: &NodeView) -> (String, Severity) {
     }
     if !node.assignable {
         return ("stale".to_owned(), Severity::Warning);
-    }
-    // The most actionable state: the bridge could not deliver the node's assignment, or
-    // never answered for it.
-    if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
-        return ("no admin ack".to_owned(), Severity::Fault);
     }
     if state.reboots > 0 {
         return (format!("rebooted x{}", state.reboots), Severity::Notice);
@@ -572,7 +526,6 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
-    use wartui_core::engine::Assignment;
     use wartui_proto::bus::{Capabilities, DieTemp, NodeBoard, Slot, Vdd};
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
@@ -703,12 +656,11 @@ mod tests {
     }
 
     #[test]
-    fn blocks_distinguish_confirmed_from_desired_assignments_when_rendering_channels() {
+    fn blocks_distinguish_pending_from_adopted_shares_when_rendering_channels() {
         let screen = rendered(&busy());
-        assert!(screen.contains("unassigned"), "a node nobody has assigned");
-        assert!(screen.contains("channels   25…"), "asked for, not yet acknowledged");
-        assert!(screen.contains("36-165"), "and the channels asked for");
-        assert!(screen.contains("no admin ack"), "sent, and the node never answered");
+        assert!(screen.contains("unassigned"), "a node with no share");
+        assert!(screen.contains("channels   25…"), "in the plan, not yet adopted");
+        assert!(screen.contains("36-165"), "and the channels in its share");
     }
 
     #[test]
@@ -790,10 +742,8 @@ mod tests {
     #[test]
     fn blocks_color_border_blue_when_node_scans_bluetooth() {
         let mut view = assigned(0x84);
-        let ble = Assignment { channels: ChannelSet::empty(), ble: true, counter: 1 };
-        view.state.confirmed = Some(ble);
-        view.state.desired = Some(ble);
-        adopt(&mut view.state);
+        give(&mut view, 1, ChannelSet::empty());
+        adopt(&mut view);
         assert_eq!(border_fg(view), Some(Color::Blue));
     }
 
@@ -886,22 +836,14 @@ mod tests {
     #[test]
     fn blocks_show_bluetooth_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
-        let mac = snapshot.nodes[0].state.mac;
 
-        // Adopted: confirmed and desired agree on the Bluetooth assignment, and the
-        // node's heartbeat says it holds it.
-        let existing = snapshot.nodes[0].state.confirmed.expect("assigned() sets one");
-        let ble = Assignment { channels: ChannelSet::empty(), ble: true, ..existing };
-        snapshot.nodes[0].state.confirmed = Some(ble);
-        snapshot.nodes[0].state.desired = Some(ble);
-        adopt(&mut snapshot.nodes[0].state);
-        snapshot.ble_node = Some(mac);
+        // Adopted: the node's heartbeat says it holds the Bluetooth share.
+        give(&mut snapshot.nodes[0], 2, ChannelSet::empty());
+        adopt(&mut snapshot.nodes[0]);
+        snapshot.ble_slot = snapshot.nodes[0].state.slot;
 
-        // Still dirty: sent but not yet acknowledged.
-        if let Some(desired) = snapshot.nodes[3].state.desired.as_mut() {
-            desired.channels = ChannelSet::empty();
-            desired.ble = true;
-        }
+        // In the plan, not yet adopted.
+        give(&mut snapshot.nodes[3], 3, ChannelSet::empty());
 
         let adopted = block_lines(&snapshot, " N7 ");
         assert!(adopted.iter().any(|l| l.trim_end() == " channels   bluetooth"), "{adopted:?}");
@@ -960,34 +902,11 @@ mod tests {
     }
 
     #[test]
-    fn share_span_renders_blue_ellipsis_when_acknowledged_but_not_adopted() {
-        let view = acked_not_adopted(0x11);
-        assert!(!view.state.adopted());
-        let span = share_span(&view, 20);
-        assert!(span.content.ends_with('…'), "the confirmed set, marked as not yet adopted");
-        assert!(span.content.starts_with('1'), "the confirmed set is still shown");
-        assert_eq!(span.style.fg, Some(Color::Blue));
-    }
-
-    #[test]
     fn share_span_renders_plain_when_assignment_is_adopted() {
         let view = assigned(0x11);
-        assert!(view.state.adopted());
+        assert!(view.adopted);
         let span = share_span(&view, 20);
         assert!(!span.content.ends_with('…'), "nothing left to wait for");
-        assert_eq!(span.style.fg, None, "plain, not colored");
-    }
-
-    #[test]
-    fn share_span_renders_plain_when_desired_is_cleared_and_confirmed_is_held() {
-        // A node that leaves the plan (`replan`'s departed loop, or `PeerTableFull`)
-        // keeps `confirmed` while `desired` clears. `adopted` must check what it
-        // still holds.
-        let mut view = assigned(0x11);
-        view.state.desired = None;
-        assert!(view.state.adopted(), "confirmed is still held, and its epoch still matches");
-        let span = share_span(&view, 20);
-        assert!(!span.content.ends_with('…'), "adopted, not stuck waiting");
         assert_eq!(span.style.fg, None, "plain, not colored");
     }
 
@@ -995,13 +914,11 @@ mod tests {
     fn share_span_displays_bluetooth_when_node_is_assigned_bluetooth_scan() {
         // `none` would read as a fault rather than a job.
         let mut view = assigned(0x11);
-        let assignment = Assignment { channels: ChannelSet::empty(), ble: true, counter: 1 };
-        view.state.confirmed = Some(assignment);
-        view.state.desired = Some(assignment);
-        adopt(&mut view.state);
+        give(&mut view, 1, ChannelSet::empty());
+        adopt(&mut view);
         assert_eq!(share_span(&view, 20).content, "bluetooth");
 
-        view.state.dirty = true;
+        view.adopted = false;
         assert_eq!(share_span(&view, 20).content, "bluetooth…", "and says so while it waits");
     }
 
@@ -1018,8 +935,6 @@ mod tests {
         view.alive = false;
         view.on_bus = false;
         assert_eq!(node_state(&view), ("off bus".to_owned(), Severity::Warning));
-        let why = why_not_assignable(&view).expect("refused");
-        assert!(why.contains("off the node bus"), "{why}");
     }
 
     #[test]
@@ -1038,7 +953,6 @@ mod tests {
         let (label, severity) = node_state(&view);
         assert_eq!(label, "needs update");
         assert_eq!(severity, Severity::Fault);
-        assert!(why_not_assignable(&view).is_some_and(|why| why.contains("update")));
     }
 
     #[test]
@@ -1047,8 +961,6 @@ mod tests {
         let (label, severity) = node_state(&view);
         assert_eq!(label, "host behind");
         assert_eq!(severity, Severity::Fault);
-        let why = why_not_assignable(&view).expect("refused");
-        assert!(why.contains("update the host"), "{why}");
         assert_eq!(
             version_label(&view, NODE_VERSION),
             format!("v{}", view.state.capabilities.unwrap().version)

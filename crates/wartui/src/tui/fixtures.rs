@@ -5,15 +5,15 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{
-    Assignment, BridgeStatus, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
+    BridgeStatus, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
 };
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
-use wartui_core::record::AdminOutcome;
 use wartui_proto::bus::{
-    Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version, wire_epoch,
+    Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
+use wartui_proto::fleet::{ScanMode, Share};
 use wartui_proto::link::LoopPhase;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
@@ -38,7 +38,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(Board::Esp32c5));
-    NodeView { state, alive: true, on_bus: true, assignable }
+    NodeView { state, alive: true, on_bus: true, assignable, share: None, adopted: false }
 }
 
 /// Known only by sightings filed under its slot: no heartbeat yet.
@@ -73,15 +73,6 @@ pub(super) fn ahead(last: u8) -> NodeView {
     view
 }
 
-/// Heartbeating stopped and nothing else is wrong. The only refusal whose cause is on
-/// the node rather than this host.
-pub(super) fn stale_node(last: u8) -> NodeView {
-    let mut view = node(last, 0, false);
-    // Heard, but not heartbeating: what `stale` means.
-    view.alive = false;
-    view
-}
-
 /// Heartbeating, but its slot's latest heartbeat named another node.
 pub(super) fn unslotted(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
@@ -89,51 +80,34 @@ pub(super) fn unslotted(last: u8) -> NodeView {
     view
 }
 
-/// Set `held_epoch` to the epoch `desired` carries, or `confirmed` without one, as
-/// the node's heartbeat would after adopting it. [`NodeState::adopted`] is then true.
-pub(super) fn adopt(state: &mut NodeState) {
-    let assignment = state.desired.or(state.confirmed).expect("something to adopt");
-    state.held_epoch = Some(wire_epoch(assignment.counter));
+/// Give `view` the share `channels` under `epoch`, or the Bluetooth scan when `channels` is
+/// empty, not yet adopted.
+pub(super) fn give(view: &mut NodeView, epoch: u8, channels: ChannelSet) {
+    let slot = view.state.slot.expect("a share goes to a slot");
+    view.share = Some(Share { slot, epoch, ble: channels.is_empty(), channels });
+    view.adopted = false;
 }
 
-/// Given channels, acked, and adopted: fully settled.
+/// Set `held_epoch` to the epoch of `view`'s share, as the node's heartbeat would after
+/// adopting it.
+pub(super) fn adopt(view: &mut NodeView) {
+    let share = view.share.expect("something to adopt");
+    view.state.held_epoch = Some(share.epoch);
+    view.adopted = true;
+}
+
+/// Given channels and adopted: fully settled.
 pub(super) fn assigned(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    let assignment =
-        Assignment { channels: ChannelSet::from_run(IndexRun::new(0, 0)), ble: false, counter: 9 };
-    view.state.confirmed = Some(assignment);
-    view.state.desired = Some(assignment);
-    view.state.last_outcome = Some(AdminOutcome::Acked);
-    view.state.last_latency_us = Some(4_200);
-    adopt(&mut view.state);
+    give(&mut view, 9, ChannelSet::from_run(IndexRun::new(0, 0)));
+    adopt(&mut view);
     view
 }
 
-/// Acked its assignment, but its heartbeat does not yet say it holds it.
-pub(super) fn acked_not_adopted(last: u8) -> NodeView {
-    let mut view = assigned(last);
-    view.state.held_epoch = None;
-    view
-}
-
-/// Sent an assignment the bridge could not deliver.
-pub(super) fn unacked(last: u8) -> NodeView {
-    let mut view = pending(last);
-    view.state.last_outcome = Some(AdminOutcome::Unacked);
-    view.state.admin_attempts = 3;
-    view
-}
-
-/// Given channels it has not had the chance to take. The window opens on its next
-/// heartbeat.
+/// Given channels its heartbeat does not yet say it holds.
 pub(super) fn pending(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    view.state.desired = Some(Assignment {
-        channels: ChannelSet::from_run(IndexRun::new(14, 38)),
-        ble: false,
-        counter: 10,
-    });
-    view.state.dirty = true;
+    give(&mut view, 10, ChannelSet::from_run(IndexRun::new(14, 38)));
     view
 }
 
@@ -155,15 +129,15 @@ pub(super) fn busy() -> Snapshot {
         link_error: None,
         // What a bridge with none stored reports.
         pool: Some(ChannelPool::All),
-        plan: None,
-        ble_node: None,
+        scan: Some(ScanMode::Wifi),
         ble_slot: None,
+        unreachable: ChannelSet::empty(),
         nodes: vec![
             assigned(0x84),
             unannounced(0x85),
             node(0x86, 2, true),
             pending(0x87),
-            unacked(0x88),
+            pending(0x88),
         ],
         alive: 4,
         assignable: 4,
@@ -201,12 +175,7 @@ pub(super) fn busy() -> Snapshot {
             undecodable: 1,
             incompatible: 2,
             garbled: 5,
-            admin_sent: 3,
-            admin_acked: 2,
-            admin_failed: 1,
-            admin_unadopted: 0,
             unknown_slot: 0,
-            replans: 0,
             batches_lost: 0,
             duplicate_batches: 0,
             wifi_refused: 0,
