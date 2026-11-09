@@ -929,15 +929,19 @@ latest heartbeat came from. `B1` is `N4` on the 6, `N6` on the 10 and `N8` on th
 carrier a slot keeps its bus name. A capture stores the bus name. A node with no slot is titled
 `—`. The selected block has a double border.
 
-From 100 columns, a block has five labeled lines:
+From 100 columns, a block has five labeled lines, six once any node has lost a batch:
 
 | Line        | Shows                                                                                   |
 |-------------|-----------------------------------------------------------------------------------------|
 | `sightings` | Sightings recorded from the node                                                        |
+| `lost`      | Batches lost between the node and the host, yellow when nonzero                         |
 | `die temp`  | Its latest die reading, `—` for none, then `hot` and `supply drop` when they hold       |
 | `channels`  | How many channels its share holds, `bluetooth`, or `unassigned`                         |
 | (list)      | As much of the share's channel list as fits, ending `…` when cut                        |
 | (state)     | The node's state, below                                                                 |
+
+The `lost` line appears on every block once any node has lost a batch, as the footer's `lost N`
+does, so the blocks keep one height.
 
 Narrower, a block has three: the sightings with the die reading at the right, the channel list
 (or `bluetooth`, or `unassigned`), and the state.
@@ -971,10 +975,11 @@ The channel lines' color shows where an assignment stands
 
 The line under the grid shows the selected node's slot and chip, its last two address octets, its
 firmware and its latest die reading: `N1 C5 57:84  v0.1.0  41 °C`, with `—` for a node that has
-sent none or whose read failed. `supply drop` follows it when the node's supply has fallen. It is
-the one place the main screen shows a node's address, which `flash-fleet --skip` and the OS's
-device names go by. The chip comes from the board its heartbeats announce, so a node not yet
-heartbeating shows `—`, and a board this build has no name for shows `??`.
+sent none or whose read failed. `supply drop` follows it when the node's supply has fallen, and
+`lost N` when the node has lost batches. It is the one place the main screen shows a node's
+address, which `flash-fleet --skip` and the OS's device names go by. The chip comes from the board
+its heartbeats announce, so a node not yet heartbeating shows `—`, and a board this build has no
+name for shows `??`.
 
 The strip above the grid is titled by every sighting the capture holds. At its left are the
 estimated unique access points and Bluetooth devices, in big digits at every screen size, each
@@ -1032,12 +1037,13 @@ without a reboot, and a change of share or Bluetooth role empties it.
 The footer shows faults only once they happen, so a clean run has a clean footer:
 
 - **`lost N`**: whole batches missing between node and host, summed over the fleet, from gaps in
-  each batch's sequence number. It appears once any node loses one. A sequence advances only when the P4
-  acknowledges a batch, so a gap is lost after the P4 took it, in its queue or on USB, not on the
-  node bus. A batch is up to about a dozen access points, hidden until the node's five-minute
-  refresh. Each gap is a `batch_gap` row; summing its `lost` per node gives that node's
-  share of the total. A gap after a batch replayed from the bridge's backlog is not counted, because those
-  batches were dropped while no host was reading.
+  each batch's sequence number. It appears once any node loses one, and each node's own count is
+  its block's `lost` line. A sequence advances only when the P4 acknowledges a batch, so a gap is
+  lost after the P4 took it, in its queue or on USB, not on the node bus. A batch is up to about a
+  dozen access points, hidden until the node's five-minute refresh. Each gap is a `batch_gap` row;
+  summing its `lost` per node gives that node's share of the total. A gap after a batch replayed
+  from the bridge's backlog is not counted, because those batches were dropped while no host was
+  reading.
 - **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
   2 s), the node bus resending a batch whose ack the node did not see. The first copy was
   recorded, so nothing is lost and `dup` never overlaps `lost`. A repeat 2 s or more later is

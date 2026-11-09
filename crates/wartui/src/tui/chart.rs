@@ -75,7 +75,8 @@ fn columns(bars: &[Bar], width: u16, highest: u64) -> Columns {
 
 /// Draw the chart into `area`: the axis at the left, the bars, and the channel labels under them.
 ///
-/// It sheds by height: below three bar rows the labels go first, then below two rows the axis.
+/// It sheds by height, keeping three bar rows: the three label rows drop to one, then that one
+/// goes, then below two rows the axis.
 pub(super) fn draw_chart(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -90,11 +91,14 @@ pub(super) fn draw_chart(
     let label_w = u16::try_from(top.len()).unwrap_or(u16::MAX).max(3);
     let gutter = if area.height >= 2 { label_w + 1 } else { 0 };
     let plot_w = area.width.saturating_sub(gutter);
-    let cols = columns(&bars, plot_w, highest);
-    // Three stacked digits under each channel when it has a column to spare; one row naming
-    // each band otherwise.
-    let label_rows = if cols.cell >= 2 { 3 } else { 1 };
-    let label_rows = if area.height >= 3 + label_rows { label_rows } else { 0 };
+    let Columns { values, first, cell, bar } = columns(&bars, plot_w, highest);
+    // Three stacked digits under each channel when it has a column to spare and the rows allow;
+    // one row naming each band otherwise.
+    let label_rows = match area.height {
+        h if cell >= 2 && h >= 6 => 3,
+        h if h >= 4 => 1,
+        _ => 0,
+    };
     let bar_rows = area.height - label_rows;
     let plot = Rect { x: area.x + gutter, y: area.y, width: plot_w, height: bar_rows };
 
@@ -111,7 +115,7 @@ pub(super) fn draw_chart(
         frame.render_widget(Paragraph::new(axis), Rect { width: gutter, height: bar_rows, ..area });
     }
     if plot.width > 0 && highest > 0 {
-        let graph = BarGraph::new(cols.values.clone())
+        let graph = BarGraph::new(values)
             .with_bar_style(BarStyle::Solid)
             .with_color_mode(ColorMode::VerticalGradient)
             .with_gradient(colorgrad::preset::viridis())
@@ -120,21 +124,28 @@ pub(super) fn draw_chart(
         frame.render_widget(graph, plot);
     }
     if label_rows > 0 && plot.width > 0 {
-        let lines = labels(&bars, &cols, label_rows, usize::from(plot.width));
+        let lines = labels(&bars, &first, bar, label_rows, usize::from(plot.width));
         let under = Rect { y: area.y + bar_rows, height: label_rows, ..plot };
         frame.render_widget(Paragraph::new(lines), under);
     }
 }
 
-/// The label rows under the bars, `width` columns wide.
+/// The label rows under the bars, `width` columns wide, for bars starting at the columns in
+/// `first` and `bar` columns wide.
 ///
 /// Three rows write every channel's number downward, hundreds to ones, in its bar's first
 /// column. One row names the first channel of each band under its first bar, and the last
 /// channel ending under the last bar.
-fn labels(bars: &[Bar], cols: &Columns, rows: u16, width: usize) -> Vec<Line<'static>> {
+fn labels(
+    bars: &[Bar],
+    first: &[usize],
+    bar: usize,
+    rows: u16,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut grid = vec![vec![' '; width]; usize::from(rows)];
     if rows == 3 {
-        for (b, &x) in bars.iter().zip(&cols.first) {
+        for (b, &x) in bars.iter().zip(first) {
             let digits = format!("{:>3}", b.channel);
             for (row, c) in grid.iter_mut().zip(digits.chars()) {
                 if let Some(cell) = row.get_mut(x) {
@@ -145,13 +156,13 @@ fn labels(bars: &[Bar], cols: &Columns, rows: u16, width: usize) -> Vec<Line<'st
     } else {
         let mut marks: Vec<(usize, String)> = bars
             .iter()
-            .zip(&cols.first)
+            .zip(first)
             .filter(|(b, _)| b.starts_band)
             .map(|(b, &x)| (x, b.channel.to_string()))
             .collect();
-        if let (Some(last), Some(&x)) = (bars.last(), cols.first.last()) {
+        if let (Some(last), Some(&x)) = (bars.last(), first.last()) {
             let text = last.channel.to_string();
-            let end = x + cols.bar;
+            let end = x + bar;
             marks.push((end.saturating_sub(text.len()), text));
         }
         let mut free = 0;
@@ -213,6 +224,19 @@ mod tests {
             labels.starts_with("    1             36       100          149  177"),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn chart_names_each_band_when_two_columns_per_channel_but_four_rows() {
+        let rows = chart(&sample(), 89, 4);
+        let labels = &rows[3];
+        let at: Vec<usize> = ["1 ", " 36 ", " 100 ", " 149 ", " 177"]
+            .iter()
+            .map(|label| labels.find(label).unwrap_or_else(|| panic!("{label:?}: {rows:#?}")))
+            .collect();
+        assert!(at.is_sorted(), "in band order: {rows:#?}");
+        assert!(!labels.contains('█'), "a label row, not bars: {rows:#?}");
+        assert!(rows[0].contains('█'), "over three bar rows: {rows:#?}");
     }
 
     #[test]

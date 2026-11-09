@@ -105,54 +105,66 @@ impl Group {
     }
 }
 
-/// The width the wide layout's counts column takes: [`WIDE_W`], or more when a group needs it.
-pub(super) fn wide_width(snapshot: &Snapshot) -> u16 {
-    Group::both(snapshot).iter().map(Group::width).fold(WIDE_W, u16::max)
+/// The two groups, built once a frame for the layout and the drawing.
+pub(super) struct Counts {
+    groups: [Group; 2],
 }
 
-/// Where the second group starts beside the first, clear of it.
-fn second_at(groups: &[Group; 2]) -> u16 {
-    SECOND_AT.max(groups[0].width().saturating_add(2))
-}
-
-/// Whether both groups fit side by side in `width`.
-fn side_by_side_fits(groups: &[Group; 2], width: u16) -> bool {
-    width >= second_at(groups).saturating_add(groups[1].width())
-}
-
-/// The rows the narrow layout's counts band takes at `width`: one group's height when both fit
-/// side by side, two when they stack.
-pub(super) fn band_height(snapshot: &Snapshot, width: u16) -> u16 {
-    if width < MIN_W {
-        return 1;
+impl Counts {
+    pub(super) fn new(snapshot: &Snapshot) -> Self {
+        Self { groups: Group::both(snapshot) }
     }
-    if side_by_side_fits(&Group::both(snapshot), width) { GROUP_H } else { 2 * GROUP_H }
-}
 
-/// Draw the counts into `area`: stacked when `stacked` and the rows allow, side by side when
-/// the columns allow, and as text when neither does.
-pub(super) fn draw_counts(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, stacked: bool) {
-    let groups = Group::both(snapshot);
-    let tall = area.height >= 2 * GROUP_H;
-    let beside = area.height >= GROUP_H && side_by_side_fits(&groups, area.width);
-    if area.height < GROUP_H || area.width < MIN_W || !(tall || beside) {
-        frame.render_widget(Paragraph::new(text_line(snapshot)), area);
-    } else if beside && !(stacked && tall) {
-        groups[0].draw(frame, area.x, area.y, area);
-        groups[1].draw(frame, area.x.saturating_add(second_at(&groups)), area.y, area);
-    } else {
-        groups[0].draw(frame, area.x, area.y, area);
-        groups[1].draw(frame, area.x, area.y.saturating_add(GROUP_H), area);
+    /// The width the wide layout's counts column takes: [`WIDE_W`], or more when a group needs it.
+    pub(super) fn wide_width(&self) -> u16 {
+        self.groups.iter().map(Group::width).fold(WIDE_W, u16::max)
     }
-}
 
-/// The counts as one line, for a strip too small for big glyphs: ` ~95 APs  ~20 BLE`.
-fn text_line(snapshot: &Snapshot) -> Line<'static> {
-    let bold = |color| Style::new().fg(color).add_modifier(Modifier::BOLD);
-    Line::from(vec![
-        Span::styled(format!(" ~{} APs", approx(snapshot.unique_wifi_aps)), bold(Color::Green)),
-        Span::styled(format!("  ~{} BLE", approx(snapshot.unique_ble_aps)), bold(Color::Blue)),
-    ])
+    /// Where the second group starts beside the first, clear of it.
+    fn second_at(&self) -> u16 {
+        SECOND_AT.max(self.groups[0].width().saturating_add(2))
+    }
+
+    /// Whether both groups fit side by side in `width`.
+    fn side_by_side_fits(&self, width: u16) -> bool {
+        width >= self.second_at().saturating_add(self.groups[1].width())
+    }
+
+    /// The rows the narrow layout's counts band takes at `width`: one group's height when both
+    /// fit side by side, two when they stack.
+    pub(super) fn band_height(&self, width: u16) -> u16 {
+        if width < MIN_W {
+            return 1;
+        }
+        if self.side_by_side_fits(width) { GROUP_H } else { 2 * GROUP_H }
+    }
+
+    /// Draw the counts into `area`: stacked when `stacked` and the rows allow, side by side when
+    /// the columns allow, and as text when neither does.
+    pub(super) fn draw(&self, frame: &mut Frame<'_>, area: Rect, stacked: bool) {
+        let [wifi, ble] = &self.groups;
+        let tall = area.height >= 2 * GROUP_H;
+        let beside = area.height >= GROUP_H && self.side_by_side_fits(area.width);
+        if area.height < GROUP_H || area.width < MIN_W || !(tall || beside) {
+            frame.render_widget(Paragraph::new(self.text_line()), area);
+        } else if beside && !(stacked && tall) {
+            wifi.draw(frame, area.x, area.y, area);
+            ble.draw(frame, area.x.saturating_add(self.second_at()), area.y, area);
+        } else {
+            wifi.draw(frame, area.x, area.y, area);
+            ble.draw(frame, area.x, area.y.saturating_add(GROUP_H), area);
+        }
+    }
+
+    /// The counts as one line, for a strip too small for big glyphs: ` ~95 APs  ~20 BLE`.
+    fn text_line(&self) -> Line<'static> {
+        let [wifi, ble] = &self.groups;
+        let bold = |color| Style::new().fg(color).add_modifier(Modifier::BOLD);
+        Line::from(vec![
+            Span::styled(format!(" ~{} APs", wifi.digits), bold(Color::Green)),
+            Span::styled(format!("  ~{} BLE", ble.digits), bold(Color::Blue)),
+        ])
+    }
 }
 
 #[cfg(test)]
@@ -243,9 +255,9 @@ mod tests {
 
     #[test]
     fn counts_fall_back_to_text_when_strip_is_under_four_rows() {
-        let snapshot = busy();
         let mut terminal = Terminal::new(TestBackend::new(60, 3)).expect("test backend");
-        terminal.draw(|frame| draw_counts(frame, frame.area(), &snapshot, false)).expect("drawing");
+        let counts = Counts::new(&busy());
+        terminal.draw(|frame| counts.draw(frame, frame.area(), false)).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("~32 APs  ~8 BLE"), "{rendered}");
         assert!(!rendered.contains("unique APs"), "{rendered}");

@@ -36,7 +36,6 @@ use wartui_core::engine::{Command, Snapshot};
 
 use blocks::draw_blocks;
 use chart::draw_chart;
-use counts::draw_counts;
 use footer::{buffer_full_line, draw_footer, fault_lines, faults};
 use gps::draw_gps_modal;
 use header::draw_header;
@@ -149,8 +148,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     let area = frame.area();
     let body = Rect { height: area.height.saturating_sub(HEADER_H + footer_height), ..area };
     let wide = body.width >= WIDE_AT;
-    let strip_min = strip_min(snapshot, body.width, wide);
-    let grid_height = blocks::wanted_height(snapshot.nodes.len(), body.width, wide)
+    let counts = counts::Counts::new(snapshot);
+    let strip_min = strip_min(&counts, body.width, wide);
+    let grid_height = blocks::wanted_height(snapshot, body.width, wide)
         .min(body.height.saturating_sub(strip_min));
     let [header, strip, grid, footer] = Layout::vertical([
         Constraint::Length(HEADER_H),
@@ -161,7 +161,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     .areas(area);
 
     draw_header(frame, header, snapshot);
-    draw_strip(frame, strip, snapshot, wide);
+    draw_strip(frame, strip, snapshot, &counts, wide);
     let (selected, scroll, cols) = ui.grid_mut();
     draw_blocks(frame, grid, snapshot, selected, scroll, cols, wide);
     draw_footer(frame, footer, snapshot, ui, &faults);
@@ -189,34 +189,39 @@ const WIDE_AT: u16 = 100;
 /// The strip's least height: its borders, then two stacked count groups in the wide layout, or
 /// in the narrow one a counts band over three bar rows and a label row. A narrow band that
 /// stacks the counts grows the strip by their height.
-fn strip_min(snapshot: &Snapshot, width: u16, wide: bool) -> u16 {
-    if wide { 10 } else { 2 + counts::band_height(snapshot, width.saturating_sub(2)).max(4) + 4 }
+fn strip_min(counts: &counts::Counts, width: u16, wide: bool) -> u16 {
+    if wide { 10 } else { 2 + counts.band_height(width.saturating_sub(2)).max(4) + 4 }
 }
 
 /// The strip under the header: the big unique counts, and the chart of Wi-Fi sightings per
 /// channel, under a title of every sighting this capture holds.
-fn draw_strip(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, wide: bool) {
+fn draw_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &Snapshot,
+    counts: &counts::Counts,
+    wide: bool,
+) {
     let title = format!(" {} sightings ", crate::text::thousands(snapshot.counters.observations));
     let right = " wifi sightings per channel ";
-    let mut block = Block::bordered().title(title.clone());
-    if usize::from(area.width) >= title.chars().count() + right.chars().count() + 4 {
+    let title_w = title.chars().count();
+    let mut block = Block::bordered().title(title);
+    if usize::from(area.width) >= title_w + right.chars().count() + 4 {
         block = block.title_top(Line::from(right).right_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if wide {
-        let [counts, chart] = Layout::horizontal([
-            Constraint::Length(counts::wide_width(snapshot)),
-            Constraint::Min(0),
-        ])
-        .areas(inner);
-        draw_counts(frame, counts, snapshot, true);
+        let [left, chart] =
+            Layout::horizontal([Constraint::Length(counts.wide_width()), Constraint::Min(0)])
+                .areas(inner);
+        counts.draw(frame, left, true);
         draw_chart(frame, chart, &snapshot.wifi_by_channel);
     } else {
-        let band = counts::band_height(snapshot, inner.width);
-        let [counts, chart] =
+        let band = counts.band_height(inner.width);
+        let [top, chart] =
             Layout::vertical([Constraint::Length(band), Constraint::Min(0)]).areas(inner);
-        draw_counts(frame, counts, snapshot, false);
+        counts.draw(frame, top, false);
         draw_chart(frame, chart, &snapshot.wifi_by_channel);
     }
 }
@@ -250,7 +255,9 @@ mod tests {
     fn view_renders_without_panicking_when_given_various_terminal_sizes() {
         let mut gps = Ui::default();
         gps.open_gps();
-        for snapshot in [busy(), empty(), with_sky(40), fleet_of(14)] {
+        let mut lossy = fleet_of(14);
+        lossy.nodes[3].state.batches_lost = 2;
+        for snapshot in [busy(), empty(), with_sky(40), fleet_of(14), lossy] {
             for (width, height) in [
                 (200, 50),
                 (138, 38),

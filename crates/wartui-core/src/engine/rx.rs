@@ -3,7 +3,7 @@ use wartui_proto::bus::{
     SightingBatch, SightingMsg, Slot, UpType, wire_epoch,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::SCAN_CHANNELS;
+use wartui_proto::plan::index_of;
 
 #[cfg(doc)]
 use super::Counters;
@@ -414,8 +414,8 @@ impl FleetEngine {
                 self.counters.wifi_observations += 1;
                 self.unique_wifi.insert(&sighting.bssid);
                 // A channel not in the table counts nowhere.
-                if let Some(i) = SCAN_CHANNELS.iter().position(|&c| c == sighting.channel) {
-                    self.wifi_by_channel[i] += 1;
+                if let Some(i) = index_of(sighting.channel) {
+                    self.wifi_by_channel[usize::from(i)] += 1;
                 }
             }
             RecordKind::Ble => {

@@ -113,8 +113,15 @@ impl Ui {
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => self.select((self.selected + 1).min(last)),
             KeyCode::Left | KeyCode::Char('h') => self.select(self.selected.saturating_sub(1)),
-            KeyCode::Down | KeyCode::Char('j') => self.select((self.selected + row).min(last)),
-            KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(row)),
+            // A move off the grid's first or last row leaves the cursor where it is, rather
+            // than sliding it sideways to the first or last block.
+            KeyCode::Down | KeyCode::Char('j') => {
+                let below = self.selected + row;
+                self.select(if below <= last { below } else { self.selected });
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.select(self.selected.checked_sub(row).unwrap_or(self.selected));
+            }
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
             KeyCode::Char('g') => self.open_gps(),
@@ -713,16 +720,36 @@ mod tests {
         ui.on_key(key(KeyCode::Char('l')), &snapshot, &tx);
         assert_eq!(ui.selected, 6, "one block right");
         ui.on_key(key(KeyCode::Char('j')), &snapshot, &tx);
-        ui.on_key(key(KeyCode::Down), &snapshot, &tx);
-        assert_eq!(ui.selected, 13, "clamped to the last block");
+        assert_eq!(ui.selected, 11);
         ui.on_key(key(KeyCode::Up), &snapshot, &tx);
-        assert_eq!(ui.selected, 8);
-        ui.on_key(key(KeyCode::Left), &snapshot, &tx);
-        ui.on_key(key(KeyCode::Char('k')), &snapshot, &tx);
+        assert_eq!(ui.selected, 6);
         ui.on_key(key(KeyCode::Char('h')), &snapshot, &tx);
-        assert_eq!(ui.selected, 1);
-        ui.on_key(key(KeyCode::Up), &snapshot, &tx);
-        assert_eq!(ui.selected, 0, "and to the first");
+        ui.on_key(key(KeyCode::Char('k')), &snapshot, &tx);
+        assert_eq!(ui.selected, 0);
+    }
+
+    #[test]
+    fn ui_keeps_selection_when_down_is_pressed_on_last_row() {
+        let snapshot = fleet_of(14);
+        let (tx, _rx) = mpsc::channel(4);
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let mut ui = Ui { grid_cols: 5, selected: 10, ..Default::default() };
+        ui.on_key(key, &snapshot, &tx);
+        assert_eq!(ui.selected, 10, "N11 has no block below it");
+        ui.selected = 4;
+        ui.on_key(key, &snapshot, &tx);
+        assert_eq!(ui.selected, 9);
+        ui.on_key(key, &snapshot, &tx);
+        assert_eq!(ui.selected, 9, "N10 has no block below it either");
+    }
+
+    #[test]
+    fn ui_keeps_selection_when_up_is_pressed_on_first_row() {
+        let snapshot = fleet_of(14);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui { grid_cols: 5, selected: 3, ..Default::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.selected, 3);
     }
 
     #[test]

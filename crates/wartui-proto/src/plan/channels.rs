@@ -249,7 +249,8 @@ pub const fn is_five_ghz(idx: u8) -> bool {
 }
 
 /// The [`SCAN_CHANNELS`] index of `channel`, or `None` when the table lacks it.
-const fn index_of(channel: u8) -> Option<u8> {
+#[must_use]
+pub const fn index_of(channel: u8) -> Option<u8> {
     let mut idx = 0;
     while idx < NUM_SCAN_CHANNELS {
         if SCAN_CHANNELS[idx as usize] == channel {
@@ -381,5 +382,20 @@ impl core::fmt::Display for ChannelPool {
             Self::Eu => "EU",
             Self::All => "All",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_of_finds_each_table_channel_and_rejects_others() {
+        for (i, &channel) in SCAN_CHANNELS.iter().enumerate() {
+            assert_eq!(index_of(channel), u8::try_from(i).ok(), "channel {channel}");
+        }
+        for channel in [0, 15, 35, 37, 178, 255] {
+            assert_eq!(index_of(channel), None, "channel {channel}");
+        }
     }
 }

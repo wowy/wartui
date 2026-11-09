@@ -38,6 +38,9 @@ const MIN_BLOCK_W: u16 = 22;
 /// A block's height in the wide layout: five labeled lines and the border.
 const WIDE_BLOCK_H: u16 = 7;
 
+/// The wide block's `lost` line, there while any node has lost a batch.
+const LOST_LINE_H: u16 = 1;
+
 /// A block's height in the narrow layout: three bare lines and the border.
 const NARROW_BLOCK_H: u16 = 5;
 
@@ -51,13 +54,17 @@ struct Grid {
     width: u16,
 }
 
-/// The grid for `n` blocks across `width` columns.
+/// The grid for `n` blocks across `width` columns, wide blocks one line taller when `lost`.
 ///
 /// Rows are balanced, so the last is never one lone block: as many rows as the widest fit
 /// needs, then as few columns as fill them. The columns `width` leaves over go one each to the
 /// first blocks of a row.
-fn grid(n: usize, width: u16, wide: bool) -> Grid {
-    let block_h = if wide { WIDE_BLOCK_H } else { NARROW_BLOCK_H };
+fn grid(n: usize, width: u16, wide: bool, lost: bool) -> Grid {
+    let block_h = match (wide, lost) {
+        (true, true) => WIDE_BLOCK_H + LOST_LINE_H,
+        (true, false) => WIDE_BLOCK_H,
+        (false, _) => NARROW_BLOCK_H,
+    };
     let max_cols = usize::from(width / MIN_BLOCK_W).max(1);
     let rows = n.div_ceil(max_cols);
     let cols = if rows == 0 { 0 } else { n.div_ceil(rows) };
@@ -86,12 +93,19 @@ impl Grid {
     }
 }
 
-/// The rows `n` blocks across `width` want: every row of blocks and the detail line.
-pub(super) fn wanted_height(n: usize, width: u16, wide: bool) -> u16 {
+/// Whether any node has lost a batch, which puts the `lost` line on every wide block. Like the
+/// footer's `lost N`, it is left out until there is something to show.
+fn any_lost(snapshot: &Snapshot) -> bool {
+    snapshot.nodes.iter().any(|n| n.state.batches_lost > 0)
+}
+
+/// The rows the snapshot's blocks across `width` want: every row of blocks and the detail line.
+pub(super) fn wanted_height(snapshot: &Snapshot, width: u16, wide: bool) -> u16 {
+    let n = snapshot.nodes.len();
     if n == 0 {
         return 0;
     }
-    grid(n, width, wide).height().saturating_add(1)
+    grid(n, width, wide, any_lost(snapshot)).height().saturating_add(1)
 }
 
 /// Draw the node blocks into `area`, block `selected` under the cursor, and the selected node's
@@ -110,7 +124,8 @@ pub(super) fn draw_blocks(
     wide: bool,
 ) {
     let n = snapshot.nodes.len();
-    let full = grid(n, area.width, wide);
+    let lost = any_lost(snapshot);
+    let full = grid(n, area.width, wide, lost);
     let (blocks, detail) = if area.height > full.block_h {
         let blocks = Rect { height: area.height - 1, ..area };
         (blocks, Some(Rect { y: area.bottom() - 1, height: 1, ..area }))
@@ -120,7 +135,7 @@ pub(super) fn draw_blocks(
     // A scrollbar takes the rightmost column, so a grid taller than its area is cut one
     // column narrower.
     let grid = if full.height() > blocks.height {
-        self::grid(n, area.width.saturating_sub(1), wide)
+        self::grid(n, area.width.saturating_sub(1), wide, lost)
     } else {
         full
     };
@@ -153,17 +168,18 @@ pub(super) fn draw_blocks(
         .vertical_scrollbar_visibility(ScrollbarVisibility::Automatic);
     for (i, node) in snapshot.nodes.iter().enumerate() {
         let rect = grid.rect(i);
-        view.render_widget(node_block(board, node, i == selected, wide, rect.width), rect);
+        view.render_widget(node_block(board, node, i == selected, wide, lost, rect.width), rect);
     }
     frame.render_stateful_widget(view, blocks, scroll);
 }
 
-/// One node's block, `width` columns wide.
+/// One node's block, `width` columns wide, with the `lost` line when wide and `lost`.
 fn node_block(
     board: NodeBoard,
     node: &NodeView,
     selected: bool,
     wide: bool,
+    lost: bool,
     width: u16,
 ) -> Paragraph<'static> {
     let (state, severity) = raised_state(node);
@@ -177,13 +193,19 @@ fn node_block(
     // Two borders and the left padding, then one column clear of the right border.
     let text = usize::from(width.saturating_sub(4));
     let state = Line::from(Span::styled(state, severity.style()));
-    let lines = if wide { wide_lines(node, text, state) } else { narrow_lines(node, text, state) };
+    let lines =
+        if wide { wide_lines(node, text, state, lost) } else { narrow_lines(node, text, state) };
     Paragraph::new(lines).block(block)
 }
 
-/// The wide block's labeled lines: sightings, die temperature, channel count, channel list and
-/// state.
-fn wide_lines(node: &NodeView, width: usize, state: Line<'static>) -> Vec<Line<'static>> {
+/// The wide block's labeled lines: sightings, batches lost when `lost`, die temperature, channel
+/// count, channel list and state.
+fn wide_lines(
+    node: &NodeView,
+    width: usize,
+    state: Line<'static>,
+    lost: bool,
+) -> Vec<Line<'static>> {
     let s = &node.state;
     let warn = s.hot() || s.supply_dropped();
     let mut reading = s.die_temp.to_string();
@@ -204,8 +226,15 @@ fn wide_lines(node: &NodeView, width: usize, state: Line<'static>) -> Vec<Line<'
         Share::Channels(set) => channel_line(set, width, false),
         Share::Bluetooth | Share::Unassigned => String::new(),
     };
-    vec![
-        Line::from(format!("sightings  {}", thousands(s.observations))),
+    let mut lines = vec![Line::from(format!("sightings  {}", thousands(s.observations)))];
+    if lost {
+        let style = if s.batches_lost > 0 { Severity::Warning.style() } else { Style::new() };
+        lines.push(Line::from(vec![
+            Span::raw("lost       "),
+            Span::styled(thousands(s.batches_lost), style),
+        ]));
+    }
+    lines.extend([
         Line::from(vec![
             Span::raw("die temp   "),
             Span::styled(reading, if warn { Severity::Warning.style() } else { Style::new() }),
@@ -213,7 +242,8 @@ fn wide_lines(node: &NodeView, width: usize, state: Line<'static>) -> Vec<Line<'
         Line::from(vec![Span::raw("channels   "), Span::styled(count, style)]),
         Line::from(Span::styled(list, style)),
         state,
-    ]
+    ]);
+    lines
 }
 
 /// The narrow block's bare lines: sightings with the die temperature at the right, the share
@@ -287,8 +317,9 @@ impl Severity {
 }
 
 /// The selected node's address, firmware and latest die reading, `—` for none, in the warning
-/// style when hot: `N7 C5 57:84  v0.1.0  41 °C`. `supply drop` follows, in the warning style,
-/// while `NodeState::supply_dropped` holds. The rail reading itself never shows: its per-chip
+/// style when hot: `N7 C5 57:84  v0.1.0  41 °C  lost 3`. `supply drop` follows, in the warning
+/// style, while `NodeState::supply_dropped` holds, then `lost N`, in the warning style, once the
+/// node has lost a batch. The rail reading itself never shows: its per-chip
 /// offset makes the figure meaningless. A block has no width left for these, so they show for
 /// one node at a time, and this is the one place the main screen shows a node's address.
 fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
@@ -306,6 +337,13 @@ fn health_line(board: NodeBoard, node: &NodeView) -> Line<'static> {
     if state.supply_dropped() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled("supply drop", Severity::Warning.style()));
+    }
+    if state.batches_lost > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("lost {}", thousands(state.batches_lost)),
+            Severity::Warning.style(),
+        ));
     }
     Line::from(spans)
 }
@@ -612,24 +650,24 @@ mod tests {
 
     #[test]
     fn blocks_wrap_five_per_row_when_fourteen_nodes_fit_120_columns() {
-        let g = grid(14, 120, true);
+        let g = grid(14, 120, true, false);
         assert_eq!((g.cols, g.rows, g.block_w, g.block_h), (5, 3, 24, 7));
-        let g = grid(1, 120, true);
+        let g = grid(1, 120, true, false);
         assert_eq!((g.cols, g.rows, g.block_w), (1, 1, 120));
     }
 
     #[test]
     fn blocks_balance_rows_when_last_row_would_hold_one_block() {
         // Five fit across, but five and one would leave a lone block.
-        let g = grid(6, 120, true);
+        let g = grid(6, 120, true, false);
         assert_eq!((g.cols, g.rows, g.block_w), (3, 2, 40));
-        let g = grid(6, 57, false);
+        let g = grid(6, 57, false, false);
         assert_eq!((g.cols, g.rows, g.block_h), (2, 3, 5));
     }
 
     #[test]
     fn blocks_spread_leftover_columns_when_width_does_not_divide() {
-        let g = grid(2, 57, false);
+        let g = grid(2, 57, false, false);
         assert_eq!((g.rect(0), g.rect(1)), (Rect::new(0, 0, 29, 5), Rect::new(29, 0, 28, 5)));
         assert_eq!(g.rect(2), Rect::new(0, 5, 29, 5), "the next row starts at the left");
     }
@@ -683,6 +721,57 @@ mod tests {
             lines,
             [" sightings  340", " die temp   72 °C hot", " channels   unassigned", "", " alive"]
         );
+    }
+
+    /// Fourteen nodes, N1 having lost three batches.
+    fn lossy() -> Snapshot {
+        let mut snapshot = fleet_of(14);
+        snapshot.nodes[0].state.batches_lost = 3;
+        snapshot
+    }
+
+    #[test]
+    fn blocks_show_lost_line_on_every_wide_block_when_any_node_lost_batches() {
+        let snapshot = lossy();
+        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let buffer = terminal.backend().buffer();
+        // The count's cell: the left border, then ` lost       `.
+        let count_fg = |((x, y), _): ((u16, u16), Vec<String>)| buffer[(x + 13, y + 2)].fg;
+        for i in 1..=14 {
+            let title = format!(" N{i} ");
+            let found = block(buffer, &title).unwrap_or_else(|| panic!("{title}"));
+            let lines = &found.1;
+            assert_eq!(lines.len(), 6, "{title}: {lines:?}");
+            let (want, fg) = if i == 1 { ("3", Color::Yellow) } else { ("0", Color::Reset) };
+            assert_eq!(lines[1].trim_end(), format!(" lost       {want}"), "{title}");
+            assert_eq!(count_fg(found), fg, "{title}: yellow only when nonzero");
+        }
+    }
+
+    #[test]
+    fn blocks_omit_lost_line_when_no_node_lost_batches() {
+        let snapshot = fleet_of(14);
+        assert_eq!(grid(14, 200, true, false).block_h, 7);
+        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let buffer = terminal.backend().buffer();
+        for i in 1..=14 {
+            let title = format!(" N{i} ");
+            let (_, lines) = block(buffer, &title).unwrap_or_else(|| panic!("{title}"));
+            assert_eq!(lines.len(), 5, "{title}: {lines:?}");
+            assert!(lines.iter().all(|line| !line.contains("lost")), "{title}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn health_line_shows_lost_when_node_lost_batches() {
+        let mut lossy = node(0x84, 0, true);
+        lossy.state.batches_lost = 1_234;
+        let line = health_line(NodeBoard::Carrier14, &lossy);
+        assert!(line.to_string().ends_with("  lost 1,234"), "{line}");
+        let warning = line.spans.last().expect("the count");
+        assert_eq!(warning.style.fg, Some(Color::Yellow));
+        let line = health_line(NodeBoard::Carrier14, &node(0x84, 0, true)).to_string();
+        assert!(!line.contains("lost"), "{line}");
     }
 
     #[test]
