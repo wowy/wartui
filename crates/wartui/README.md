@@ -1059,8 +1059,10 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   resynchronized, which it does on its own. A count that climbs by the second is the host's USB
   path mangling the bridge's longer bursts: a Raspberry Pi 5 or CM5 does it to the GPS batches and
   the 5 s log burst whenever the bridge is plugged straight into the Pi, and a USB 2.0 hub between
-  them stops it (`docs/p4-host-uart-findings.md` § "A Pi 5 host corrupts long bursts"). Node frames
-  are too short to be hit, so the capture loses nothing. With `--log-file` and
+  them stops it (`docs/p4-host-uart-findings.md` § "A Pi 5 host corrupts long bursts"). Sighting
+  batches are usually too short to be hit, but a full one from a dense area is as long as the GPS
+  batches that fail, and a batch that fails is a `lost` batch, so a Pi host needs the hub for every
+  drive. With `--log-file` and
   `RUST_LOG=wartui_bridge=debug`, each one is logged as `undecodable frame` with its cause, its
   length, its place in the `read()` that delivered it, and its bytes as hex, which is what tells a
   truncated frame from a merged or reordered one.

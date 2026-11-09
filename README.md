@@ -9,9 +9,10 @@ please open an [issue](https://github.com/wowy/wartui/issues).
 
 On a Raspberry Pi 5 or CM5, put a USB 2.0 hub between the Pi and the bridge rather than plugging the
 bridge straight into the Pi. Plugged in directly, the Pi's USB controller corrupts the bridge's longer
-bursts (the footer's `garbled` count climbs by the second); through a hub it is clean. The sightings
-themselves are too short to be affected, so a capture made without a hub is still good.
-`docs/p4-host-uart-findings.md` has the measurements.
+bursts (the footer's `garbled` count climbs by the second); through a hub it is clean. A sparse drive
+loses little, since its sighting batches stay short, but a full batch from a dense area is as long as
+the bursts that fail, and each one lost is a dozen access points the node will not repeat for five
+minutes (`lost N` in the footer). `docs/p4-host-uart-findings.md` has the measurements.
 
 The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
