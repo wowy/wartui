@@ -27,7 +27,7 @@ use wartui_proto::bus::{
     UpdateStatus, Vdd, Version,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
-use wartui_proto::fleet::{Report, ScanMode, Share};
+use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
     BridgeToHost, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, HostToBridge, LinkError,
     LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats,
@@ -92,6 +92,21 @@ fn pool_status(pool: ChannelPool) -> Event {
 
 /// [`pool_status`] showing only the slots in `present`.
 fn slots_status(pool: ChannelPool, present: u32) -> Event {
+    status_naming(pool, present, &[])
+}
+
+/// A `Status` on the default pool with every slot present, whose planner counts `members`.
+fn members_status(members: &[Member]) -> Event {
+    status_naming(ChannelPool::default(), ALL_PRESENT, members)
+}
+
+/// `mac` as a member of the bridge's planner, in its slot.
+fn member(mac: Mac) -> Member {
+    Member { slot: slot_of(mac), mac }
+}
+
+/// [`slots_status`] whose planner counts `members`.
+fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
     Event::Link(LinkEvent::Message(BridgeToHost::Status {
         rx_count: 0,
         dropped_tx: 0,
@@ -105,6 +120,7 @@ fn slots_status(pool: ChannelPool, present: u32) -> Event {
         scan: BRIDGE_SCAN.get(),
         ble: BRIDGE_BLE.get(),
         present,
+        members: members.iter().copied().collect(),
     }))
 }
 
@@ -1440,6 +1456,110 @@ fn engine_drops_sightings_when_no_heartbeat_has_named_slot() {
     assert_eq!(counters(&engine).unknown_slot, 1);
 }
 
+/// The observation records in `batch`.
+fn observation_records(batch: &ActionBatch) -> Vec<&wartui_core::record::Observation> {
+    batch
+        .records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Observation(observation) => Some(observation),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn engine_records_sightings_when_status_named_slot_before_any_heartbeat() {
+    // A run's first `Status` finds the bridge stopped and starts it. Nodes report their whole
+    // neighborhood within a second and heartbeat seconds later, and the bridge has acknowledged
+    // every batch, so one dropped here is never sent again.
+    let clock = Clock::new();
+    let mut engine = capture(&clock);
+
+    BRIDGE_SCAN.set(ScanMode::Stopped);
+    let batch = engine.handle(members_status(&[member(NODE)]), clock.at(1));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+
+    let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
+    let records = observation_records(&batch);
+    assert_eq!(records.len(), 1);
+    assert_eq!((records[0].node_mac, records[0].slot), (NODE, slot_of(NODE)));
+    assert_eq!(counters(&engine).unknown_slot, 0);
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.slot, Some(slot_of(NODE)));
+    assert_eq!(node.heartbeats, 0);
+}
+
+#[test]
+fn engine_drops_sightings_when_nothing_has_named_slot() {
+    // A `Status` naming other members says nothing about this slot.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(members_status(&[member(NODE)]), clock.at(1));
+
+    let batch = engine.handle(observation(OTHER, "AA:BB:CC:DD:EE:FF", -60), clock.at(2));
+
+    assert_eq!(observations(&batch), 0);
+    assert_eq!(counters(&engine).unknown_slot, 1);
+    assert_eq!(engine.nodes().count(), 0, "nobody to file it under");
+}
+
+#[test]
+fn engine_keeps_one_node_when_heartbeat_follows_status_naming_it() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(members_status(&[member(NODE)]), clock.at(1));
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
+    assert!(!engine.is_assignable(engine.nodes().next().expect("the node"), clock.at(1)));
+
+    engine.handle(heartbeat(NODE, 1), clock.at(2));
+    engine.handle(members_status(&[member(NODE)]), clock.at(3));
+
+    assert_eq!(engine.nodes().count(), 1, "one node, not two");
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.slot, Some(slot_of(NODE)));
+    assert_eq!((node.heartbeats, node.observations), (1, 1));
+    assert!(engine.is_assignable(node, clock.at(3)));
+    let c = counters(&engine);
+    assert_eq!((c.heartbeats, c.observations, c.unknown_slot), (1, 1, 0));
+}
+
+#[test]
+fn engine_moves_slot_to_mac_when_later_status_names_another_node() {
+    // As a heartbeat from a new node does: the node that held the slot keeps its row, and has no
+    // slot until its own heartbeat names one.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    introduce(&mut engine, &clock, NODE);
+    let slot = slot_of(NODE);
+
+    engine.handle(members_status(&[Member { slot, mac: OTHER }]), clock.at(1));
+    let batch =
+        engine.handle(from_slot(slot, UpType::Sightings.as_u8(), &seq_batch(1, 1), 0), clock.at(2));
+
+    let records = observation_records(&batch);
+    assert_eq!(records.len(), 1);
+    assert_eq!((records[0].node_mac, records[0].slot), (OTHER, slot));
+    let node_of = |mac: Mac| engine.nodes().find(|node| node.mac == mac).expect("the node");
+    assert_eq!(node_of(NODE).slot, None);
+    assert_eq!(node_of(OTHER).slot, Some(slot));
+}
+
+#[test]
+fn engine_files_members_when_auto_start_is_off() {
+    // `sniff` and `status` start nothing, and still name the slots a `Status` names.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let batch = engine.handle(members_status(&[member(NODE)]), clock.at(1));
+    assert!(scans(&batch).is_empty());
+
+    let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(2));
+
+    assert_eq!(observations(&batch), 1);
+    assert_eq!(counters(&engine).unknown_slot, 0);
+}
+
 #[test]
 fn engine_moves_node_when_heartbeat_arrives_from_another_slot() {
     // The MAC is the identity: unplugged and plugged in elsewhere, it is the same node.
@@ -2011,6 +2131,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
+            members: Default::default(),
         }))
     };
 
@@ -2067,6 +2188,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
+            members: Default::default(),
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2145,6 +2267,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
+            members: Default::default(),
         })),
         clock.at(4),
     );

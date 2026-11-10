@@ -4,7 +4,7 @@ use heapless::Vec;
 use wartui_proto::ChannelPool;
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::fan::{FanDuty, FanStats};
-use wartui_proto::fleet::ScanMode;
+use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
     BridgeToHost, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
 };
@@ -181,7 +181,14 @@ fn pair_status_sums_host_and_radio_drops() {
         scan: ScanMode::WifiBluetooth,
         ble: Slot::new(0, 1),
         present: 0b101,
+        members: [
+            Member { slot: Slot::new(0, 0).expect("A1"), mac: [0x02, 0, 0, 0, 0, 1] },
+            Member { slot: Slot::new(0, 2).expect("A3"), mac: [0x02, 0, 0, 0, 0, 3] },
+        ]
+        .into_iter()
+        .collect(),
     };
+    let sent = p4.members.clone();
     match pair.status(3_000, p4) {
         BridgeToHost::Status {
             rx_count,
@@ -196,9 +203,11 @@ fn pair_status_sums_host_and_radio_drops() {
             scan,
             ble,
             present,
+            members,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
             assert_eq!(present, 0b101, "passed through");
+            assert_eq!(members, sent, "passed through");
             assert_eq!(host_uart_errors, 9);
             assert_eq!(fan.and_then(|fan| fan.rpm), Some(1830), "passed through");
             assert_eq!(pool, ChannelPool::Eu, "passed through");
@@ -374,6 +383,7 @@ fn p4_zero() -> P4Counters {
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
+        members: Vec::new(),
     }
 }
 

@@ -275,8 +275,12 @@ is here rather than only in a `//!`.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
   per bus on the 14-node carrier, and none without a carrier (`bus::NodeBoard`). The P4 plans by
   slot (`bus::Slot`, `A1` to `B7`). The host knows a node by its MAC, which its heartbeat carries,
-  and finds its share at the slot that heartbeat came from. The operator reads a slot through its
-  board's label, `N1` up on a carrier, and the store keeps the bus name.
+  and finds its share at the slot that heartbeat came from. The bridge's `Status` also names each
+  member slot's MAC, because a sighting batch names no node, and one from a slot the host cannot
+  name is dropped after the bridge acknowledged it: a run's first `Status` names every slot before
+  it starts the scan (`Fleet::members`; `crates/wartui-core/src/engine/mod.rs`, the `Status` arm).
+  The operator reads a slot through its board's label, `N1` up on a carrier, and the store keeps
+  the bus name.
 - **Delivery is the P4's, and delivery is not adoption.** The planner takes a send as reaching
   its node only on the bus ack of the transfer that carried it, never on a successful enqueue.
   Every heartbeat carries the epoch the node holds, or 0 for none. A node adopts an assignment

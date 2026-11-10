@@ -858,3 +858,98 @@ fn fleet_starts_stopped_when_new() {
     assert_eq!(FLEET.bluetooth(), None);
     assert!(FLEET.report().shares.is_empty());
 }
+
+// ---- members ----
+
+/// The members `rig` lists now, as `(slot byte, mac)`.
+fn members(rig: &Rig) -> Vec<(u8, Mac)> {
+    rig.fleet.members(rig.now).iter().map(|member| (member.slot.as_u8(), member.mac)).collect()
+}
+
+#[test]
+fn fleet_lists_no_members_when_no_heartbeat_arrived() {
+    let mut rig = Rig::started(false);
+    rig.fleet.on_presence(0b11, rig.now);
+    assert!(members(&rig).is_empty());
+}
+
+#[test]
+fn fleet_lists_member_with_mac_when_slot_heartbeats() {
+    let mut rig = Rig::started(false);
+    rig.plug(3, 7);
+    rig.beat(3);
+    assert_eq!(members(&rig), [(3, mac(7))]);
+}
+
+#[test]
+fn fleet_lists_members_when_stopped() {
+    // The host files them before it starts the scan.
+    let mut rig = Rig::new();
+    rig.plug(0, 1);
+    rig.beat(0);
+    assert_eq!(rig.fleet.mode(), ScanMode::Stopped);
+    assert_eq!(members(&rig), [(0, mac(1))]);
+}
+
+#[test]
+fn fleet_lists_members_in_slot_order_when_nodes_join_out_of_order() {
+    let mut rig = Rig::started(false);
+    for (byte, n) in [(9, 1), (2, 2), (13, 3), (0, 4)] {
+        rig.plug(byte, n);
+        rig.beat(byte);
+    }
+    assert_eq!(members(&rig), [(0, mac(4)), (2, mac(2)), (9, mac(1)), (13, mac(3))]);
+}
+
+#[test]
+fn fleet_lists_every_slot_when_fourteen_nodes_heartbeat() {
+    let mut rig = Rig::started(false);
+    for byte in 0..14 {
+        rig.plug(byte, byte);
+        rig.beat(byte);
+    }
+    assert_eq!(rig.fleet.members(rig.now).len(), 14);
+}
+
+#[test]
+fn fleet_unlists_member_when_presence_shows_slot_absent() {
+    let mut rig = Rig::started(false);
+    rig.plug(0, 1);
+    rig.plug(1, 2);
+    rig.settle();
+    rig.unplug(1);
+    assert_eq!(members(&rig), [(0, mac(1))]);
+}
+
+#[test]
+fn fleet_unlists_member_when_heartbeat_times_out() {
+    let mut rig = Rig::started(false);
+    rig.plug(0, 1);
+    rig.beat(0);
+    rig.now += HEARTBEAT_TIMEOUT_MS - 1;
+    assert_eq!(members(&rig), [(0, mac(1))], "inside the timeout");
+    rig.now += 1;
+    assert!(members(&rig).is_empty(), "before any tick");
+    rig.fleet.on_tick(rig.now);
+    assert!(members(&rig).is_empty());
+}
+
+#[test]
+fn fleet_unlists_member_when_heartbeat_names_another_minor() {
+    let mut rig = Rig::started(false);
+    rig.plug(0, 1);
+    rig.beat(0);
+    let newer = Version::new(NODE_VERSION.major, NODE_VERSION.minor + 1, 0);
+    rig.fleet.on_heartbeat(slot(0), &beat_body(mac(1), newer, 9, 0), rig.now);
+    assert!(members(&rig).is_empty());
+}
+
+#[test]
+fn fleet_lists_new_mac_when_another_node_heartbeats_from_slot() {
+    let mut rig = Rig::started(false);
+    rig.plug(0, 1);
+    rig.settle();
+    rig.plug(0, 2);
+    rig.beat(0);
+    assert_eq!(members(&rig), [(0, mac(2))]);
+}

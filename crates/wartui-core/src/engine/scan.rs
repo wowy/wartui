@@ -13,7 +13,10 @@
 //! dedup ring empty. The start waits for the P4 to report stopped, since a start that reached it
 //! first would replace the stop and the rings would carry over. Each `Status` that still reports a
 //! scan meanwhile sends the stop again, since a stop lost on the link would otherwise leave the run
-//! waiting forever. Only an engine told to drive a capture
+//! waiting forever. A start sent on the first `Status` is safe for the data: that `Status` names
+//! every slot the planner can assign, and a node that joins later heartbeats before its share
+//! produces a batch, so the host can name the node behind every batch the start draws. Only an
+//! engine told to drive a capture
 //! ([`EngineConfig::auto_start`](super::EngineConfig::auto_start)) does any of this: `status`,
 //! `sniff`, `pool` and `ota` look at a fleet without starting it.
 //!

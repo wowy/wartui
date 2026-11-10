@@ -102,6 +102,8 @@ pub async fn run(args: Args) -> Result<()> {
         scan,
         ble,
         present,
+        // The plan below names each share's slot; the members' MACs are the engine's.
+        members: _,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -579,6 +581,7 @@ mod tests {
             scan: ScanMode::Stopped,
             ble: None,
             present: 0,
+            members: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

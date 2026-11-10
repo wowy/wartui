@@ -609,6 +609,7 @@ mod tests {
             scan: wartui_proto::fleet::ScanMode::Stopped,
             ble,
             present: 0,
+            members: Default::default(),
         }))
     }
 

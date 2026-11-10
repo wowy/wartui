@@ -29,9 +29,9 @@
 //! [`crate::bus::UpdateChunk`] from it ([`cache_chunk_body`]), answered like a
 //! [`HostToBridge::ToNode`].
 
-use crate::bus::{NodeBoard, Slot};
+use crate::bus::{MAX_SLOTS, NodeBoard, Slot};
 use crate::fan::{FanDuty, FanStats};
-use crate::fleet::{Report, ScanMode};
+use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
@@ -349,6 +349,11 @@ pub enum BridgeToHost {
         /// a second has passed since the last good one (`firmware/p4-bridge/src/bus.rs`). A u32,
         /// so a board with more slots than [`crate::bus::MAX_SLOTS`] fits without a wire change.
         present: u32,
+        /// Every slot the bridge's planner counts a member, with the MAC its heartbeat named, in
+        /// slot order ([`crate::fleet::Fleet::members`]). A sighting batch names no node, so the
+        /// host files each member under its slot from here as well as from its heartbeats. A
+        /// batch from a slot it cannot name is dropped, after the bridge acknowledged it.
+        members: Vec<Member, MAX_SLOTS>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
