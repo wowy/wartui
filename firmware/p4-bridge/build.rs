@@ -48,6 +48,7 @@ const RADIO_ENV: &[&str] = &[
     "WARTUI_RADIO_UP_QUEUE_BYTES",
     "WARTUI_RADIO_BLE_WINDOW_BYTES",
     "WARTUI_RADIO_CONN_INTERVAL_MS",
+    "WARTUI_RADIO_PHY",
 ];
 
 /// Variables the outer cargo sets for a build script that would steer the C6's build, beside

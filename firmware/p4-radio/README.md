@@ -30,6 +30,9 @@ latency 0 and a 4 s supervision timeout. Each bound is a multiple of 1.25 ms fro
 a central that refuses changes nothing. An iOS central wants a minimum of at least 15 ms
 (`src/config.rs`).
 
+The C6 requests the 2M PHY once connected. `WARTUI_RADIO_PHY` picks another: `1m` requests
+none, `coded` asks for LE Coded with S8 coding and `coded-s2` with S2; the C6 logs the request.
+
 ```sh
 cargo build --release
 ```

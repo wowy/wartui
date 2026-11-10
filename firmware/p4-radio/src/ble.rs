@@ -28,6 +28,9 @@
 //! TrouBLE reports only whether the request went out: an accepted one shows as the interval the
 //! next `BleState` carries, and a refusal as no change.
 //!
+//! **The PHY is the build's.** The C6 requests `WARTUI_RADIO_PHY` ([`PHY`]) once connected, 2M
+//! unless the build names another, and logs the request.
+//!
 //! **Each await reports where it is.** The notifier, the event loop, the advertiser and the
 //! runner set a phase in `BleStats` around each await, and the transport counts its own
 //! ([`crate::hci::Watch`]), so the counters of a stalled stack name the future that waits.
@@ -51,7 +54,7 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{BleState, BleStats, Up};
 use wartui_proto::spike::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
 
-use crate::config::{BLE_WINDOW_BYTES, CONN_INTERVAL_US};
+use crate::config::{BLE_WINDOW_BYTES, CONN_INTERVAL_US, PHY};
 use crate::hci::{Counting, Ledger, Watch};
 use crate::link::Shared;
 
@@ -436,8 +439,14 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         }
     });
     // Each answered by an event if the central agrees; a refusal leaves the link as it is.
-    if let Err(err) = raw.set_phy(stack, PhyKind::Le2M).await {
-        shared.log(format_args!("Bluetooth 2M PHY not requested: {err:?}"));
+    match PHY {
+        None => shared.log(format_args!("Bluetooth PHY not requested: the build keeps 1M")),
+        Some(phy) => match raw.set_phy(stack, phy).await {
+            Ok(()) => shared.log(format_args!("Bluetooth {} PHY requested", phy_name(phy))),
+            Err(err) => {
+                shared.log(format_args!("Bluetooth {} PHY not requested: {err:?}", phy_name(phy)))
+            }
+        },
     }
     if let Err(err) = raw.update_data_length(stack, 251, 2120).await {
         shared.log(format_args!("Bluetooth data length not requested: {err:?}"));
@@ -636,6 +645,16 @@ async fn watch_stall(shared: &Shared) -> ! {
             acl,
             read_wait.as_millis(),
         ));
+    }
+}
+
+/// A PHY's name in the log.
+fn phy_name(phy: PhyKind) -> &'static str {
+    match phy {
+        PhyKind::Le1M => "1M",
+        PhyKind::Le2M => "2M",
+        PhyKind::LeCoded => "Coded S8",
+        PhyKind::LeCodedS2 => "Coded S2",
     }
 }
 

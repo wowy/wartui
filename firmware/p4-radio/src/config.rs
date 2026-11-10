@@ -7,6 +7,7 @@
 //!
 //! A bench `wartui status` reports the queue's high-water mark, which is how to right-size it.
 
+use trouble_host::prelude::PhyKind;
 use wartui_proto::config::env_usize;
 
 /// Bytes of encoded `Up` records — the C6's lines and its status — waiting for a packet to
@@ -36,6 +37,32 @@ pub const BLE_WINDOW_BYTES: usize =
 /// maximum times three under the supervision timeout.
 pub const CONN_INTERVAL_US: Option<(u64, u64)> =
     interval_range(option_env!("WARTUI_RADIO_CONN_INTERVAL_MS"));
+
+/// The PHY the C6 asks a central for once it connects; `None` keeps the 1M PHY every
+/// connection starts on.
+///
+/// `WARTUI_RADIO_PHY` is `2m` (the default), `1m`, `coded` (LE Coded, S8 coding preferred) or
+/// `coded-s2` (S2 preferred). The controller and the central pick the coding in the end.
+pub const PHY: Option<PhyKind> = phy(option_env!("WARTUI_RADIO_PHY"));
+
+/// `WARTUI_RADIO_PHY`'s value as the PHY to request.
+const fn phy(value: Option<&str>) -> Option<PhyKind> {
+    let Some(text) = value else {
+        return Some(PhyKind::Le2M);
+    };
+    let text = text.as_bytes();
+    if text.eq_ignore_ascii_case(b"2m") {
+        Some(PhyKind::Le2M)
+    } else if text.eq_ignore_ascii_case(b"1m") {
+        None
+    } else if text.eq_ignore_ascii_case(b"coded") {
+        Some(PhyKind::LeCoded)
+    } else if text.eq_ignore_ascii_case(b"coded-s2") {
+        Some(PhyKind::LeCodedS2)
+    } else {
+        panic!("WARTUI_RADIO_PHY must be 2m, 1m, coded or coded-s2");
+    }
+}
 
 const INTERVAL_FORMAT: &str =
     "WARTUI_RADIO_CONN_INTERVAL_MS must be MIN-MAX ms, multiples of 1.25 in 7.5..2000, like 7.5-15";
@@ -93,3 +120,7 @@ const fn millis_as_micros(bytes: &[u8], start: usize, end: usize) -> u64 {
 const _: () = assert!(matches!(interval_range(Some("7.5-15")), Some((7_500, 15_000))));
 const _: () = assert!(matches!(interval_range(Some("11.25-11.25")), Some((11_250, 11_250))));
 const _: () = assert!(interval_range(None).is_none());
+const _: () = assert!(matches!(phy(None), Some(PhyKind::Le2M)));
+const _: () = assert!(phy(Some("1m")).is_none());
+const _: () = assert!(matches!(phy(Some("coded")), Some(PhyKind::LeCoded)));
+const _: () = assert!(matches!(phy(Some("coded-s2")), Some(PhyKind::LeCodedS2)));
