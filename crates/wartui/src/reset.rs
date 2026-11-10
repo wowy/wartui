@@ -258,7 +258,7 @@ mod tests {
     use crate::config::Bridge;
 
     const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
-    const TWIN_MAC: &str = "38:44:BE:12:44:C0";
+    const TWIN_MAC: &str = "02:44:BE:12:44:C0";
     const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
     fn ch343(path: &str, serial: &str) -> PortCandidate {

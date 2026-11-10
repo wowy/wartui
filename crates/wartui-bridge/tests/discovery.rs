@@ -11,7 +11,7 @@ use wartui_proto::mac;
 /// A P4 bridge on this bench, a second P4 bridge beside it, and a node, on adjacent device nodes
 /// with nothing but the address to tell them apart.
 const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
-const OTHER_BRIDGE_MAC: &str = "A0:F2:62:10:9D:24";
+const OTHER_BRIDGE_MAC: &str = "02:F2:62:10:9D:24";
 const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
 /// The CH343 serial numbers of the two bridges' boards.
@@ -115,7 +115,7 @@ fn bridge_spec_parses_last_octets_as_tail_when_given_one_to_five_pairs() {
     assert_eq!(lower, BridgeSpec::Tail(vec![0x44, 0xC0]));
     assert_eq!(lower.to_string(), "44:C0", "printed back as `wartui ports` spells it");
     // Six pairs is still a whole address.
-    let whole: BridgeSpec = "a0:f2:62:87:00:08".parse().expect("parsing cannot fail");
+    let whole: BridgeSpec = "02:f2:62:87:00:08".parse().expect("parsing cannot fail");
     assert!(matches!(whole, BridgeSpec::Mac(_)));
 }
 
@@ -321,7 +321,7 @@ fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
     // Two P4 bridges can share their last octets. Opening either on a guess is
     // transmitting into another fleet's bridge, so nothing is chosen, and the refusal
     // says why rather than claiming the board is not attached.
-    let twin = "38:44:BE:12:44:C0";
+    let twin = "02:44:BE:12:44:C0";
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", twin)];
     let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
     let refused = serial::named_board(&probed, &spec).expect_err("ambiguous");
