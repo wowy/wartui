@@ -99,7 +99,7 @@ Each run creates a new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the working directory,
 second it started. A capture holds one run, so `run` refuses a `--db` that exists. `export` reads the
 newest one; pass `--db` to pick another.
 
-`q` stops a capture and commits the last batch. The database is the record; `export` can rebuild
+`q` stops a capture, stops the bridge's scan and commits the last batch. The database is the record; `export` can rebuild
 the CSV at any time, even while a capture is still running.
 
 ```sh
@@ -109,6 +109,7 @@ wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
 wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware through the bridge
+wartui scan start # set the bridge scanning with no host attached; `scan stop` idles it
 ```
 
 ## Subprojects
@@ -148,7 +149,7 @@ have no README; their `//!` module docs hold the detail.
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
+| `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
 ### In settings (`c`)
 

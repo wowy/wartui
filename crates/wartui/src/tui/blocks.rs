@@ -8,13 +8,14 @@
 //!
 //! The channel lines show each node's share of the bridge's plan, colored by whether the node
 //! holds it. Only the node's heartbeat, carrying the epoch it holds, shows it took the share
-//! (`NodeView::adopted`).
+//! (`NodeView::adopted`), so nothing here waits on the bridge's own delivery.
 //!
 //! | State | Wi-Fi share | Bluetooth node |
 //! |---|---|---|
 //! | pending: in the plan, not adopted | yellow, the set then `…` | yellow `bluetooth…` |
 //! | adopted | plain, the set | cyan `bluetooth` |
-//! | no share | gray `unassigned` | gray `unassigned` |
+//! | no share, scan stopped | gray `idle` | gray `idle` |
+//! | no share, scanning | gray `unassigned` | gray `unassigned` |
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect, Size};
@@ -24,10 +25,11 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_proto::bus::{Board, Compat, NODE_VERSION, NodeBoard, Version};
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac;
-use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
+use wartui_proto::plan::ChannelSet;
 
-use crate::text::thousands;
+use crate::text::{channel_list, thousands};
 
 /// The narrowest block: an inner 20 holds the longest states, `needs update` and
 /// `rebooted xN`, and `channels   unassigned`.
@@ -140,6 +142,7 @@ pub(super) fn draw_blocks(
     *cols = grid.cols.max(1);
 
     let board = snapshot.node_board();
+    let stopped = snapshot.scan == Some(ScanMode::Stopped);
     if let (Some(detail), Some(node)) = (detail, snapshot.nodes.get(selected)) {
         let margin = Rect { x: detail.x + 1, width: detail.width.saturating_sub(1), ..detail };
         frame.render_widget(Paragraph::new(health_line(board, node)), margin);
@@ -166,9 +169,20 @@ pub(super) fn draw_blocks(
         .vertical_scrollbar_visibility(ScrollbarVisibility::Automatic);
     for (i, node) in snapshot.nodes.iter().enumerate() {
         let rect = grid.rect(i);
-        view.render_widget(node_block(board, node, i == selected, wide, lost, rect.width), rect);
+        let block =
+            node_block(board, node, i == selected, Look { wide, lost, stopped }, rect.width);
+        view.render_widget(block, rect);
     }
     frame.render_stateful_widget(view, blocks, scroll);
+}
+
+/// What every block on screen shares: the layout, whether any node has lost a batch, and whether
+/// the bridge's scan is stopped.
+#[derive(Debug, Clone, Copy)]
+struct Look {
+    wide: bool,
+    lost: bool,
+    stopped: bool,
 }
 
 /// One node's block, `width` columns wide, with the `lost` line when wide and `lost`.
@@ -176,8 +190,7 @@ fn node_block(
     board: NodeBoard,
     node: &NodeView,
     selected: bool,
-    wide: bool,
-    lost: bool,
+    look: Look,
     width: u16,
 ) -> Paragraph<'static> {
     let (state, severity) = raised_state(node);
@@ -191,18 +204,21 @@ fn node_block(
     // Two borders and the left padding, then one column clear of the right border.
     let text = usize::from(width.saturating_sub(4));
     let state = Line::from(Span::styled(state, severity.style()));
-    let lines =
-        if wide { wide_lines(node, text, state, lost) } else { narrow_lines(node, text, state) };
+    let lines = if look.wide {
+        wide_lines(node, text, state, look)
+    } else {
+        narrow_lines(node, text, state, look.stopped)
+    };
     Paragraph::new(lines).block(block)
 }
 
-/// The wide block's labeled lines: sightings, batches lost when `lost`, die temperature, channel
-/// count, channel list and state.
+/// The wide block's labeled lines: sightings, batches lost when any node lost one, die
+/// temperature, channel count, channel list and state.
 fn wide_lines(
     node: &NodeView,
     width: usize,
     state: Line<'static>,
-    lost: bool,
+    look: Look,
 ) -> Vec<Line<'static>> {
     let s = &node.state;
     let warn = s.hot() || s.supply_dropped();
@@ -213,19 +229,20 @@ fn wide_lines(
     if s.supply_dropped() {
         reading.push_str(" supply drop");
     }
-    let (share, waiting, style) = share(node);
+    let (share, waiting, style) = share(node, look.stopped);
     let marker = if waiting { "…" } else { "" };
     let count = match share {
         Share::Channels(set) => format!("{}{marker}", set.len()),
         Share::Bluetooth => format!("bluetooth{marker}"),
+        Share::Idle => "idle".to_owned(),
         Share::Unassigned => "unassigned".to_owned(),
     };
     let list = match share {
         Share::Channels(set) => channel_line(set, width, false),
-        Share::Bluetooth | Share::Unassigned => String::new(),
+        Share::Bluetooth | Share::Idle | Share::Unassigned => String::new(),
     };
     let mut lines = vec![Line::from(format!("sightings  {}", thousands(s.observations)))];
-    if lost {
+    if look.lost {
         let style = if s.batches_lost > 0 { Severity::Warning.style() } else { Style::new() };
         lines.push(Line::from(vec![
             Span::raw("lost       "),
@@ -246,7 +263,12 @@ fn wide_lines(
 
 /// The narrow block's bare lines: sightings with the die temperature at the right, the share
 /// with no count, and the state.
-fn narrow_lines(node: &NodeView, width: usize, state: Line<'static>) -> Vec<Line<'static>> {
+fn narrow_lines(
+    node: &NodeView,
+    width: usize,
+    state: Line<'static>,
+    stopped: bool,
+) -> Vec<Line<'static>> {
     let s = &node.state;
     let sightings = format!("{} sightings", thousands(s.observations));
     let temp = s.die_temp.to_string();
@@ -258,7 +280,7 @@ fn narrow_lines(node: &NodeView, width: usize, state: Line<'static>) -> Vec<Line
             Span::raw(" ".repeat(gap)),
             Span::styled(temp, temp_style),
         ]),
-        Line::from(share_span(node, width)),
+        Line::from(share_span(node, width, stopped)),
         state,
     ]
 }
@@ -353,14 +375,18 @@ enum Share {
     /// An empty set, the Bluetooth node's. As a list it would read `none`, which looks like a
     /// fault rather than a job.
     Bluetooth,
+    /// No share while the bridge's scan is stopped: every node idles.
+    Idle,
+    /// No share while the bridge scans.
     Unassigned,
 }
 
-/// The node's share, whether it still waits on the node, and the style its lines take. The
-/// module docs list the states.
-fn share(node: &NodeView) -> (Share, bool, Style) {
+/// The node's share, whether it still waits on the node, and the style its lines take, with the
+/// bridge's scan `stopped` or not. The module docs list the states.
+fn share(node: &NodeView, stopped: bool) -> (Share, bool, Style) {
     let Some(held) = node.share else {
-        return (Share::Unassigned, false, Style::new().fg(Color::DarkGray));
+        let none = if stopped { Share::Idle } else { Share::Unassigned };
+        return (none, false, Style::new().fg(Color::DarkGray));
     };
     let share = if held.ble { Share::Bluetooth } else { Share::Channels(held.channels) };
     match (share, node.adopted) {
@@ -371,13 +397,14 @@ fn share(node: &NodeView) -> (Share, bool, Style) {
 }
 
 /// The narrow block's share line, `width` columns at most: the bare channel list, or
-/// `bluetooth` or `unassigned`, with `…` while it waits on the node.
-fn share_span(node: &NodeView, width: usize) -> Span<'static> {
-    let (share, waiting, style) = share(node);
+/// `bluetooth`, `idle` or `unassigned`, with `…` while it waits on the node.
+fn share_span(node: &NodeView, width: usize, stopped: bool) -> Span<'static> {
+    let (share, waiting, style) = share(node, stopped);
     let text = match share {
         Share::Channels(set) => channel_line(set, width, waiting),
         Share::Bluetooth if waiting => "bluetooth…".to_owned(),
         Share::Bluetooth => "bluetooth".to_owned(),
+        Share::Idle => "idle".to_owned(),
         Share::Unassigned => "unassigned".to_owned(),
     };
     Span::styled(text, style)
@@ -456,40 +483,6 @@ fn node_state(node: &NodeView) -> (String, Severity) {
     ("alive".to_owned(), Severity::Ok)
 }
 
-/// Format a set as channel numbers, the units every other tool uses.
-///
-/// Runs collapse to `first-last`, so a contiguous set reads `1-11`.
-fn channel_list(set: ChannelSet) -> String {
-    let mut out = String::new();
-    let mut run: Option<(u8, u8)> = None;
-    for idx in set.indices() {
-        match run {
-            Some((start, end)) if idx == end + 1 => run = Some((start, idx)),
-            Some((start, end)) => {
-                push_run(&mut out, start, end);
-                run = Some((idx, idx));
-            }
-            None => run = Some((idx, idx)),
-        }
-    }
-    if let Some((start, end)) = run {
-        push_run(&mut out, start, end);
-    }
-    if out.is_empty() { "none".to_owned() } else { out }
-}
-
-/// Append one run to `out`: `6`, or `36-48`.
-fn push_run(out: &mut String, start: u8, end: u8) {
-    use core::fmt::Write as _;
-    let first = SCAN_CHANNELS.get(usize::from(start)).copied().unwrap_or(0);
-    let last = SCAN_CHANNELS.get(usize::from(end)).copied().unwrap_or(0);
-    if !out.is_empty() {
-        out.push(',');
-    }
-    // Writing into a `String` cannot fail.
-    let _ = if first == last { write!(out, "{first}") } else { write!(out, "{first}-{last}") };
-}
-
 /// A channel set in at most `width` columns: as much of the list as fits, then `…` when it was
 /// cut or, with `pending`, while the node has yet to take it.
 ///
@@ -527,7 +520,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use wartui_proto::bus::{Capabilities, DieTemp, NodeBoard, Slot, Vdd};
-    use wartui_proto::plan::{ChannelPool, IndexRun};
+    use wartui_proto::plan::ChannelPool;
 
     use super::*;
     use crate::tui::draw;
@@ -852,22 +845,44 @@ mod tests {
     }
 
     #[test]
-    fn channel_list_formats_indices_as_channel_numbers_when_given_index_runs() {
-        // Indices into SCAN_CHANNELS belong to the wire format, not the screen.
-        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
-        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
-        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 38))), "36-165");
+    fn blocks_show_idle_when_scan_is_stopped_and_node_holds_no_share() {
+        let snapshot = Snapshot {
+            scan: Some(ScanMode::Stopped),
+            nodes: vec![node(0x84, 0, true)],
+            tail: Vec::new(),
+            ..busy()
+        };
+        let lines = block_lines(&snapshot, " N7 ");
+        assert!(lines.iter().any(|l| l.trim_end() == " channels   idle"), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("unassigned")), "{lines:?}");
+        let (idle, waiting, style) = share(&snapshot.nodes[0], true);
+        assert_eq!((idle, waiting, style.fg), (Share::Idle, false, Some(Color::DarkGray)));
+        // A node the plan leaves out while the bridge scans has no share either, and says so.
+        let scanning = Snapshot { scan: Some(ScanMode::Wifi), ..snapshot };
+        let lines = block_lines(&scanning, " N7 ");
+        assert!(lines.iter().any(|l| l.trim_end() == " channels   unassigned"), "{lines:?}");
     }
 
     #[test]
-    fn channel_list_formats_channels_as_compact_runs_when_channel_set_is_scattered() {
-        assert_eq!(channel_list(ChannelPool::Us.channels()), "1-11,36-165");
-        let mut comb = ChannelSet::empty();
-        for idx in [0, 2, 4, 14, 15] {
-            comb.insert(idx);
-        }
-        assert_eq!(channel_list(comb), "1,3,5,36-40");
-        assert_eq!(channel_list(ChannelSet::empty()), "none");
+    fn blocks_show_idle_on_narrow_layout_when_scan_is_stopped() {
+        let snapshot = Snapshot {
+            scan: Some(ScanMode::Stopped),
+            nodes: vec![node(0x84, 0, true), node(0x85, 0, true)],
+            ..busy()
+        };
+        let terminal = terminal(&snapshot, &mut Ui::default(), 58, 26);
+        let (_, lines) = block(terminal.backend().buffer(), " N7 ").expect("N7's block");
+        assert_eq!(lines[1].trim(), "idle", "{lines:?}");
+    }
+
+    #[test]
+    fn blocks_color_pending_share_yellow_and_adopted_plain_when_node_takes_it() {
+        let mut view = pending(0x84);
+        assert_eq!(state_fg(view.clone(), "25…"), Some(Color::Yellow));
+        adopt(&mut view);
+        let lines = block_lines(&Snapshot { nodes: vec![view.clone()], ..busy() }, " N7 ");
+        assert!(lines.iter().any(|l| l.trim_end() == " channels   25"), "{lines:?}");
+        assert_eq!(state_fg(view, "25"), Some(Color::Reset));
     }
 
     #[test]
@@ -896,7 +911,7 @@ mod tests {
 
     #[test]
     fn share_span_renders_yellow_ellipsis_when_assignment_is_pending() {
-        let span = share_span(&pending(0x11), 20);
+        let span = share_span(&pending(0x11), 20, false);
         assert_eq!(span.content, "36-165…");
         assert_eq!(span.style.fg, Some(Color::Yellow));
     }
@@ -905,7 +920,7 @@ mod tests {
     fn share_span_renders_plain_when_assignment_is_adopted() {
         let view = assigned(0x11);
         assert!(view.adopted);
-        let span = share_span(&view, 20);
+        let span = share_span(&view, 20, false);
         assert!(!span.content.ends_with('…'), "nothing left to wait for");
         assert_eq!(span.style.fg, None, "plain, not colored");
     }
@@ -916,10 +931,14 @@ mod tests {
         let mut view = assigned(0x11);
         give(&mut view, 1, ChannelSet::empty());
         adopt(&mut view);
-        assert_eq!(share_span(&view, 20).content, "bluetooth");
+        assert_eq!(share_span(&view, 20, false).content, "bluetooth");
 
         view.adopted = false;
-        assert_eq!(share_span(&view, 20).content, "bluetooth…", "and says so while it waits");
+        assert_eq!(
+            share_span(&view, 20, false).content,
+            "bluetooth…",
+            "and says so while it waits"
+        );
     }
 
     #[test]

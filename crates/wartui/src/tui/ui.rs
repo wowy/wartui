@@ -18,8 +18,12 @@ use crate::text::node_name;
 /// and closed the channel.
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 
-/// The notice when `b` is pressed while the bridge's scan is stopped.
-const SCAN_STOPPED: &str = "the scan is stopped, so there is no Bluetooth to toggle";
+/// The notice when `b` is pressed while the bridge's scan is stopped. The run starts the scan
+/// whenever the bridge reports it stopped, and holds the port, so no other command can.
+const SCAN_STOPPED: &str = "scan stopped: this run starts it once the bridge answers";
+
+/// The notice when `b` adds Bluetooth to the scan. Both notices fit the 58-column screen.
+const BLUETOOTH_ON: &str = "bluetooth on: the bridge picks a node once two can scan";
 
 /// The notice when a power-cycle is asked for with the link down. The transport holds commands
 /// while it reconnects, so one sent now would cut the node whenever the bridge comes back.
@@ -156,7 +160,7 @@ impl Ui {
         }
         let on = snapshot.scan != Some(ScanMode::WifiBluetooth);
         let said = match commands.try_send(Command::SetBluetooth(on)) {
-            Ok(()) if on => "bluetooth on: the bridge gives it to one node".to_owned(),
+            Ok(()) if on => BLUETOOTH_ON.to_owned(),
             Ok(()) => "bluetooth off".to_owned(),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
@@ -381,13 +385,49 @@ mod tests {
     }
 
     #[test]
-    fn ui_refuses_bluetooth_toggle_when_scan_is_stopped() {
+    fn ui_says_how_scan_starts_when_b_is_pressed_while_scan_is_stopped() {
         let snapshot = Snapshot { scan: Some(ScanMode::Stopped), ..busy() };
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert!(rx.try_recv().is_err(), "nothing to toggle");
-        assert!(ui.notice(snapshot.now_ms).expect("a notice").contains("stopped"));
+        assert_eq!(ui.notice(snapshot.now_ms), Some(SCAN_STOPPED));
+        // `wartui scan start` cannot reach a bridge this run holds, so the notice does not offer it.
+        assert!(!SCAN_STOPPED.contains("wartui scan"), "{SCAN_STOPPED}");
+    }
+
+    #[test]
+    fn ui_fits_bluetooth_notices_on_one_line_when_screen_is_58_columns() {
+        // The footer pads a notice with one space, and clips what passes the edge.
+        for notice in [SCAN_STOPPED, BLUETOOTH_ON] {
+            assert!(notice.chars().count() < 58, "{notice}");
+        }
+    }
+
+    #[test]
+    fn view_shows_scan_stopped_notice_in_footer_when_b_is_pressed_while_scan_is_stopped() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let snapshot = Snapshot { scan: Some(ScanMode::Stopped), ..busy() };
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| crate::tui::draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains(SCAN_STOPPED), "{screen}");
+        assert!(!screen.contains("q quit"), "the notice replaces the key help: {screen}");
+    }
+
+    #[test]
+    fn ui_asks_for_bluetooth_when_b_is_pressed_before_bridge_reports_a_scan() {
+        // The run starts the scan on the bridge's first status, in the mode asked for meanwhile.
+        let snapshot = Snapshot { scan: None, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::SetBluetooth(true));
+        assert_eq!(ui.notice(snapshot.now_ms), Some(BLUETOOTH_ON));
     }
 
     fn press(code: char) -> KeyEvent {
@@ -601,6 +641,6 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(true));
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert_eq!(notice, "bluetooth on: the bridge gives it to one node");
+        assert_eq!(notice, BLUETOOTH_ON);
     }
 }

@@ -33,6 +33,7 @@ mod pool;
 mod power_cycle;
 mod reset;
 mod run;
+mod scan;
 mod sniff;
 mod status;
 #[cfg(test)]
@@ -82,6 +83,8 @@ enum Command {
     Fan(fan::Args),
     /// Read or set the channel pool, which the bridge keeps across its reboots.
     Pool(pool::Args),
+    /// Start or stop the bridge's scan, or show it. The bridge scans on with no host attached.
+    Scan(scan::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -104,7 +107,7 @@ async fn main() -> Result<()> {
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
-        // `power-cycle`, `fan`, `pool` and `ota` read a broken one as no bridge
+        // `power-cycle`, `fan`, `pool`, `scan` and `ota` read a broken one as no bridge
         // remembered, and `ports` and `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
         Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
         Some(Command::Fan(args)) => fan::run(args).await,
         Some(Command::Pool(args)) => pool::run(args).await,
+        Some(Command::Scan(args)) => scan::run(args).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
@@ -277,7 +281,7 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
 
 /// Open the one bridge `named` resolves to, as `wartui reset` resolves it
 /// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
-/// `Ready`. `fan`, `pool` and `power-cycle` connect through this.
+/// `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
 async fn connect_one(
     named: Option<&str>,
     config: Option<&Path>,
@@ -639,8 +643,37 @@ mod tests {
 
     #[test]
     fn cli_parser_refuses_bluetooth_when_given_as_a_command() {
-        // The bridge picks the node that scans Bluetooth; `b` in the view asks for the scan.
+        // The bridge picks the node that scans Bluetooth; `scan start --bluetooth` asks for it.
         assert!(parse(["wartui", "bluetooth", "N3"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_scan_when_given_an_action_or_none() {
+        for args in [
+            ["wartui", "scan"].as_slice(),
+            &["wartui", "scan", "--bridge", "44:C0", "--config", "w.toml"],
+            &["wartui", "scan", "start"],
+            &["wartui", "scan", "start", "--bluetooth", "--bridge", "44:C0"],
+            &["wartui", "scan", "stop", "--config", "w.toml"],
+            &["wartui", "scan", "stop", "--sim"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Scan(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_scan_when_given_unknown_action_or_bluetooth_on_stop() {
+        // Wi-Fi is the scan; Bluetooth is added to it, never started alone.
+        for args in [
+            ["wartui", "scan", "bluetooth"].as_slice(),
+            &["wartui", "scan", "wifi"],
+            &["wartui", "scan", "stop", "--bluetooth"],
+            &["wartui", "scan", "--bluetooth"],
+            &["wartui", "scan", "--bridge", "44:C0", "start"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
     }
 
     #[test]

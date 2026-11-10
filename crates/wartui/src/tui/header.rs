@@ -1,5 +1,8 @@
 //! The border is green only while a bridge's link is up and rows have a position, and
 //! red otherwise. A glance at it says whether the capture is working.
+//!
+//! The second line starts with what the bridge's planner scans, because the bridge decides it and
+//! keeps it with no host attached: the run asks for it, and only the bridge's report says it took.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -37,12 +40,11 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         first.push(Span::raw(format!("  {fan}")));
     }
 
-    // No pool or scan before the bridge's first `Status`.
+    // No pool before the bridge's first `Status`, and a placeholder for the scan.
     let mut second: Vec<Span> =
         snapshot.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
-    if let Some(scan) = scan(snapshot) {
-        second.push(Span::raw(format!("{scan}  ")));
-    }
+    second.extend(scan(snapshot));
+    second.push(Span::raw("  "));
     second.extend([
         planning(snapshot),
         Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms))),
@@ -72,18 +74,37 @@ fn fan(snapshot: &Snapshot) -> Option<String> {
     })
 }
 
-/// What the bridge's planner scans: `scan stopped`, `scan wifi`, or `scan wifi +bt N7` with the
-/// node it gave Bluetooth, `scan wifi +bt` while it has none. `None` before its first `Status`.
-fn scan(snapshot: &Snapshot) -> Option<String> {
-    Some(match snapshot.scan? {
-        ScanMode::Stopped => "scan stopped".to_owned(),
-        ScanMode::Wifi => "scan wifi".to_owned(),
-        ScanMode::WifiBluetooth => match snapshot.ble_slot {
-            Some(slot) => format!("scan wifi +bt {}", snapshot.node_board().label(slot)),
-            None => "scan wifi +bt".to_owned(),
-        },
-    })
+/// What the bridge's planner scans.
+///
+/// | Shown | Color | Meaning |
+/// |---|---|---|
+/// | `scan —` | gray | the bridge has not reported yet |
+/// | `scan stopped` | yellow | every node idles; the run starts the scan when the bridge answers |
+/// | `scan wifi` | plain | every node sniffs Wi-Fi |
+/// | `scan wifi +bt N7` | plain | and the bridge gave N7 the Bluetooth scan |
+/// | `scan wifi +bt waiting for a second node` | yellow hint | Bluetooth asked for, no node picked |
+fn scan(snapshot: &Snapshot) -> Vec<Span<'static>> {
+    let Some(mode) = snapshot.scan else {
+        return vec![Span::styled("scan —", Style::new().fg(Color::DarkGray))];
+    };
+    match (mode, snapshot.ble_slot) {
+        (ScanMode::Stopped, _) => {
+            vec![Span::styled("scan stopped", Style::new().fg(Color::Yellow))]
+        }
+        (ScanMode::Wifi, _) => vec![Span::raw("scan wifi")],
+        (ScanMode::WifiBluetooth, Some(slot)) => {
+            vec![Span::raw(format!("scan wifi +bt {}", snapshot.node_board().label(slot)))]
+        }
+        // The bridge keeps a lone node on Wi-Fi, so Bluetooth waits for a second to join.
+        (ScanMode::WifiBluetooth, None) => vec![
+            Span::raw("scan wifi +bt "),
+            Span::styled(SECOND_NODE, Style::new().fg(Color::Yellow)),
+        ],
+    }
 }
+
+/// The header's hint while Bluetooth is asked for and no node holds it.
+const SECOND_NODE: &str = "waiting for a second node";
 
 /// Planner status: `N of M` nodes holding a share of the bridge's plan, or why none does.
 ///
@@ -203,23 +224,56 @@ mod tests {
         assert!(!rendered(&snapshot).contains("pool"), "{}", rendered(&snapshot));
     }
 
+    /// The text of the header's scan spans, and the color of the last.
+    fn scan_shown(snapshot: &Snapshot) -> (String, Option<Color>) {
+        let spans = scan(snapshot);
+        let text = spans.iter().map(|span| span.content.as_ref()).collect();
+        (text, spans.last().and_then(|span| span.style.fg))
+    }
+
     #[test]
-    fn header_displays_scan_mode_and_bluetooth_node_when_bridge_reports_them() {
+    fn header_shows_scan_wifi_when_bridge_scans_wifi() {
+        let snapshot = Snapshot { scan: Some(ScanMode::Wifi), ..busy() };
+        assert_eq!(scan_shown(&snapshot), ("scan wifi".to_owned(), None));
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("pool All  scan wifi  "), "{screen}");
+        assert!(!screen.contains("+bt"), "{screen}");
+    }
+
+    #[test]
+    fn header_shows_picked_node_by_slot_label_when_bridge_gives_one_bluetooth() {
         let mut snapshot = on_board(NodeBoard::Carrier14);
         snapshot.scan = Some(ScanMode::WifiBluetooth);
-        snapshot.ble_slot = Slot::from_u8(2);
-        assert!(rendered(&snapshot).contains("scan wifi +bt N3"), "{}", rendered(&snapshot));
+        snapshot.ble_slot = Slot::from_u8(6);
+        assert_eq!(scan_shown(&snapshot), ("scan wifi +bt N7".to_owned(), None));
+        assert!(rendered(&snapshot).contains("scan wifi +bt N7"), "{}", rendered(&snapshot));
+        assert!(!rendered(&snapshot).contains(SECOND_NODE), "{}", rendered(&snapshot));
+    }
 
-        snapshot.scan = Some(ScanMode::Wifi);
-        snapshot.ble_slot = None;
-        assert!(rendered(&snapshot).contains("scan wifi "), "{}", rendered(&snapshot));
-        assert!(!rendered(&snapshot).contains("+bt"), "{}", rendered(&snapshot));
+    #[test]
+    fn header_hints_at_second_node_when_bluetooth_is_wanted_and_no_node_is_picked() {
+        let snapshot = Snapshot { scan: Some(ScanMode::WifiBluetooth), ble_slot: None, ..busy() };
+        let shown = scan_shown(&snapshot);
+        assert_eq!(
+            shown,
+            ("scan wifi +bt waiting for a second node".to_owned(), Some(Color::Yellow))
+        );
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("scan wifi +bt waiting for a second node"), "{screen}");
+    }
 
-        snapshot.scan = Some(ScanMode::Stopped);
+    #[test]
+    fn header_shows_scan_stopped_in_yellow_when_bridge_reports_stopped() {
+        let snapshot = Snapshot { scan: Some(ScanMode::Stopped), ..busy() };
+        assert_eq!(scan_shown(&snapshot), ("scan stopped".to_owned(), Some(Color::Yellow)));
         assert!(rendered(&snapshot).contains("scan stopped"), "{}", rendered(&snapshot));
+    }
 
-        snapshot.scan = None;
-        assert!(!rendered(&snapshot).contains("scan "), "{}", rendered(&snapshot));
+    #[test]
+    fn header_shows_scan_placeholder_when_bridge_has_not_reported() {
+        let snapshot = Snapshot { scan: None, pool: None, ..busy() };
+        assert_eq!(scan_shown(&snapshot), ("scan —".to_owned(), Some(Color::DarkGray)));
+        assert!(rendered(&snapshot).contains("scan —"), "{}", rendered(&snapshot));
     }
 
     #[test]

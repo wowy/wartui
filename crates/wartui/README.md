@@ -21,6 +21,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `power-cycle`  | Switch one node off and on through the carrier board; see "Power-cycling a node"    |
 | `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
 | `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
+| `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -324,10 +325,12 @@ wdgwars = ""
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
-wartui refuses to start on an unknown key or table, naming the file and line. An out-of-range value,
+wartui refuses to start on an unknown key or table, naming the file and line. A `pool` key or a
+`[bluetooth]` table is refused with the command that sets it instead: `wartui pool`, or
+`wartui scan start --bluetooth`, since the bridge keeps the pool and picks the Bluetooth node. An out-of-range value,
 a malformed `[bridge] mac`, a `mac` or `serial` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
-`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool` and `ota` read only `[bridge]
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `ota` read only `[bridge]
 mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
@@ -351,7 +354,7 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing
+`pool`, `scan`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing
 default file silently means the built-in defaults.
 
 ### Benchmarking the store
@@ -365,7 +368,8 @@ wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
 ```
 
 `--profile drive` (default) is ten nodes at real time; `burst` is fourteen (`plan::MAX_NODES`), the
-most a bridge takes. Every node reports every sweep in the simulated neighborhood, measuring starts
+most a bridge takes. Both scan Wi-Fi and Bluetooth, and the simulated bridge picks the Bluetooth
+node as a real one does; the report's `scan` says which mode ran. Every node reports every sweep in the simulated neighborhood, measuring starts
 once the fleet holds its assignments, and a run counts only if `idle_node_windows` reads 0.
 `--interval` (default 60 s) adds a timeline showing when the card slowed. Each SQLite and batching
 setting has a flag, so two settings compare on one binary. The store checkpoints on its own thread
@@ -703,6 +707,41 @@ pool once the bridge has reported one, and `wartui status` prints a `pool` line 
 
 The bridge picks the node that scans Bluetooth; see "Bluetooth".
 
+### The scan
+
+The bridge plans the fleet and scans with no host attached, so a board can be set scanning for a
+drive with nothing on the other end of its cable. It boots stopped, keeps no mode across a reboot,
+and scans until told to stop. Wi-Fi is the scan, and `--bluetooth` adds Bluetooth to it; the bridge
+picks the node ("Bluetooth").
+
+```sh
+wartui scan                     # the mode, the Bluetooth node and every share; changes nothing
+wartui scan start               # scan Wi-Fi
+wartui scan start --bluetooth   # scan Wi-Fi, and give one node Bluetooth once two can scan
+wartui scan stop                # idle every node
+wartui scan start --bridge 44:C0
+```
+
+```
+$ wartui scan start --bluetooth
+starting the wifi and bluetooth scan on bridge 02:00:5E:10:9D:24
+scan       wifi + bluetooth
+bluetooth  N3
+share      N1   21 channels  1,3,5,7,9,11,13,40,48,56,64,104,112,120,128,136,144,153,161,169,177
+share      N2   20 channels  2,4,6,8,10,12,36,44,52,60,100,108,116,124,132,140,149,157,165,173
+share      N3   bluetooth
+```
+
+It resolves one bridge and takes `--config PATH` as `pool` does, and `--sim` as `status` does. Each
+action waits up to 5 s for the bridge to report the change and fails if it does not. `start` then
+reads the bridge's reports for 3 s, so nodes joining on their next heartbeat are in the plan it
+prints. With one node that can scan, `bluetooth` reads `none yet: it needs two nodes that can scan,
+and a lone node stays on wifi`; the bridge gives Bluetooth to a node once a second joins.
+
+`run` holds the bridge's port, so `wartui scan` reaches a bridge only while no `run` is attached.
+In `run`, the scan starts on connecting (§ "How channels are assigned"), `b` toggles Bluetooth, and
+quitting stops it.
+
 ## Keyboard commands
 
 | Key                    | What it does                                                                 |
@@ -714,10 +753,13 @@ The bridge picks the node that scans Bluetooth; see "Bluetooth".
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
+| `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
 Only `b`, `c`, and `p` reach the engine, and no key sets channels. `b` adds Bluetooth to the
-bridge's scan or takes it off; the bridge picks the node and authors every share.
+bridge's scan or takes it off; the bridge picks the node and authors every share. While the bridge
+reports the scan stopped, `b` sends nothing and says `scan stopped: this run starts it once the
+bridge answers`. Before the bridge has reported a scan, `b` asks for Bluetooth, and the run starts
+the scan with it.
 
 `u` asks before it sends, sends only what is new since the last upload, and leaves the capture
 running; see "Uploading to WDGWars".
@@ -777,9 +819,11 @@ it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"),
 (§ "Channel pools"). The header shows `4 of 5`: four of the five nodes heard hold a share.
 
 **`run` starts the scan, and a clean quit stops it.** A bridge found stopped starts on Wi-Fi. One
-found scanning, left so by a run that did not quit, is stopped and started again in its mode, so
-every node's dedup ring starts empty. A reconnect later in the run leaves the scan alone. The
-bridge scans on through host silence until told to stop.
+found scanning, left so by a run that did not quit or by `wartui scan start`, is stopped and started
+again in its mode, so every node's dedup ring starts empty. A reconnect later in the run leaves the
+scan alone, and a bridge that reboots mid-run, and so boots stopped, is started again. The bridge
+scans on through host silence until told to stop; `wartui scan` starts and stops it with no run
+attached (§ "The scan").
 
 **A share counts once the node's heartbeat says it holds it.** Every heartbeat carries the epoch
 the node holds, and a share's `…` goes once it matches. A wide block's `channels` line gives the
@@ -789,12 +833,13 @@ dozen scattered channels, too many for one line.
 ## Bluetooth
 
 **At most one node scans Bluetooth, none by default, and it is that node's whole job.** `b` asks
-the bridge to add Bluetooth to the scan, or take it off, whichever node is selected. The bridge
-picks the node: the highest slot that can scan, kept while that node stays, and none while only
-one node can scan. That node's block reads `bluetooth` where its channels would be, since it is
-dealt no channels, or `bluetooth…` until its heartbeat says it holds the scan, and its border turns
-blue. The header shows `scan wifi +bt N3`. `wartui status` prints a `scan` line and a `bluetooth`
-line naming the node's slot, or `none`.
+the bridge to add Bluetooth to the scan, or take it off, whichever node is selected, and
+`wartui scan start --bluetooth` does the same with no run attached. The bridge picks the node: the
+highest slot that can scan, kept while that node stays, and none while only one node can scan.
+That node's block reads `bluetooth` where its channels would be, since it is dealt no channels, or
+`bluetooth…` until its heartbeat says it holds the scan, and its border turns blue. The header
+shows `scan wifi +bt N3`, or `scan wifi +bt waiting for a second node` while no node can take it.
+`wartui status` prints a `scan` line and a `bluetooth` line naming the node's slot, or `none`.
 
 **It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A Bluetooth
 controller left free takes it whenever the node is otherwise idle
@@ -917,7 +962,7 @@ From 100 columns, a block has five labeled lines, six once any node has lost a b
 | `sightings` | Sightings recorded from the node                                                        |
 | `lost`      | Batches lost between the node and the host, yellow when nonzero                         |
 | `die temp`  | Its latest die reading, `—` for none, then `hot` and `supply drop` when they hold       |
-| `channels`  | How many channels its share holds, `bluetooth`, or `unassigned`                         |
+| `channels`  | How many channels its share holds, `bluetooth`, `idle`, or `unassigned`                 |
 | (list)      | As much of the share's channel list as fits, ending `…` when cut                        |
 | (state)     | The node's state, below                                                                 |
 
@@ -925,7 +970,7 @@ The `lost` line appears on every block once any node has lost a batch, as the fo
 does, so the blocks keep one height.
 
 Narrower, a block has three: the sightings with the die reading at the right, the channel list
-(or `bluetooth`, or `unassigned`), and the state.
+(or `bluetooth`, `idle` or `unassigned`), and the state.
 
 The border takes the state's color: red for a fault, yellow for a warning, cyan for `rebooted xN`.
 A node with nothing to report is green, or blue when its assignment carries the Bluetooth scan.
@@ -950,7 +995,8 @@ The channel lines' color shows where an assignment stands
 | yellow, with `…` | In the bridge's plan, not yet adopted             |
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
-| gray             | No share: `unassigned`                            |
+| gray `idle`      | No share, because the bridge's scan is stopped    |
+| gray `unassigned`| No share while the bridge scans                   |
 
 The line under the grid shows the selected node's slot and chip, its last two address octets, its
 firmware and its latest die reading: `N1 C5 57:84  v0.1.0  41 °C`, with `—` for a node that has
@@ -989,8 +1035,7 @@ seen this way.
 
 A `stale`, `off bus`, `no slot`, `no heartbeat`, `needs update`, or `host behind` node is out of
 the plan: nothing sent would reach it, it has not yet said what it is, or its frames are not this
-build's, so its share might be nobody's. `b` on one says which state it is, because the fix
-differs: wait for a heartbeat, find out why heartbeats stopped, check the node's power and seat,
+build's, so its share might be nobody's. Its state names which, because the fix differs: wait for a heartbeat, find out why heartbeats stopped, check the node's power and seat,
 update the node with `ota`, or update wartui. Heartbeats from a `needs update` or `host behind`
 node are not counted among the footer's frames from an older firmware. Once its heartbeat has
 named its version, its sighting batches are, since none of them is recorded.
@@ -1008,6 +1053,11 @@ change of share or Bluetooth role, empties it.
 
 | Header says            | Meaning                                                                  |
 |------------------------|--------------------------------------------------------------------------|
+| `scan —`               | The bridge has not reported its scan yet                                 |
+| `scan stopped`         | Every node idles; the run starts the scan once the bridge answers        |
+| `scan wifi`            | Every node in the plan sniffs Wi-Fi                                      |
+| `scan wifi +bt N3`     | And the bridge gave N3 the Bluetooth scan                                |
+| `scan wifi +bt waiting for a second node` | Bluetooth is asked for, and fewer than two nodes can scan |
 | `waiting for nodes`    | No node has heartbeated yet this session                                 |
 | `N need update`        | Heard only from nodes on an older minor; `N host behind` for newer ones  |
 | `all nodes silent`     | Nodes were seen, but none is heartbeating now                            |
@@ -1045,6 +1095,9 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   `RUST_LOG=wartui_bridge=debug`, each one is logged as `undecodable frame` with its cause, its
   length, its place in the `read()` that delivered it, and its bytes as hex, which is what tells a
   truncated frame from a merged or reordered one.
+- **`pool All: 169-177 unswept, no node can tune them`**: channels of the pool the bridge's plan
+  gives no node, because none in the plan can tune them, such as 5 GHz with only 2.4 GHz nodes.
+  `wartui status` and `wartui scan` print them as `unswept`.
 - **`N frames from an older firmware — update`**: a fleet mid-upgrade, speaking a wire format this
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
@@ -1118,12 +1171,16 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
 - **`pool  …`**: the channel pool the bridge holds, which `run` deals; see "Channel pools".
-- **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "How channels
-  are assigned".
+- **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
+- **`share  N1   21 channels  1,3,5,…`**: one line per node holding a share of the bridge's plan,
+  by slot, with `bluetooth` for the Bluetooth node; `shares  none` while none does, as while the
+  scan is stopped. `unswept  …` follows when the pool holds channels no node can tune. They come
+  from the plan report the bridge sends behind its counters, and read `shares  not reported` if
+  none arrives within a second.
 
 `wartui reset` takes about thirty seconds to fail on a node named by path. The board it is for
 answers nothing, so it transmits before anything has identified itself. A node that is not reading

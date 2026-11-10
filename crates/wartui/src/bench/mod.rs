@@ -50,6 +50,7 @@ use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
 use wartui_proto::dedup::DEDUP_RING;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
@@ -83,10 +84,11 @@ const SIGHTINGS_PER_ADDRESS: u32 = 4;
 /// A named load, so runs on different machines are comparable.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum Profile {
-    /// Ten nodes in real time, one of them scanning Bluetooth: a busy street, sustained.
+    /// Ten nodes in real time, scanning Wi-Fi and Bluetooth, which the bridge gives one of
+    /// them: a busy street, sustained.
     #[default]
     Drive,
-    /// The fleet maximum in real time, one on Bluetooth, to find where the store stops
+    /// The fleet maximum in real time, scanning the same, to find where the store stops
     /// keeping up and starts dropping.
     Burst,
 }
@@ -141,9 +143,9 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     networks: Option<u16>,
 
-    /// Chance per advertiser slot in a scan that the Bluetooth node hears one. Such a
-    /// node dwells on nothing, so its whole second is one scan with a fixed number of
-    /// slots in it; zero means it reports nothing at all.
+    /// Chance per advertiser slot in a scan that the Bluetooth node, the one the bridge picks,
+    /// hears one. Such a node dwells on nothing, so its whole second is one scan with a fixed
+    /// number of slots in it; zero means it reports nothing at all.
     #[arg(long, value_name = "P")]
     ble_chance: Option<f64>,
 
@@ -297,13 +299,15 @@ pub async fn run(args: Args) -> Result<()> {
     // gives it is the only source of addresses that never dedup. A fleet of one, which the
     // flags allow, keeps Wi-Fi: the bridge deals Bluetooth only once two nodes can scan.
     let bluetooth = nodes > 1;
+    let scan =
+        crate::status::scan_text(if bluetooth { ScanMode::WifiBluetooth } else { ScanMode::Wifi });
     command_tx
         .send(Command::SetBluetooth(bluetooth))
         .await
         .context("the capture stopped before it began")?;
 
     if !args.json {
-        eprintln!("waiting for {nodes} nodes to take their assignments ...");
+        eprintln!("scanning {scan}; waiting for {nodes} nodes to take their shares ...");
     }
     let warmup = Instant::now();
     let Ok(settled) = tokio::time::timeout(
@@ -435,6 +439,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("fs_options", mount.as_ref().map(|m| m.fs_options.clone()));
     report.put("on_battery", on_battery.map(|yes| if yes { "yes" } else { "no" }));
     report.put("profile", args.profile.name());
+    report.put("scan", scan);
     report.put("duration_s", args.duration);
 
     report.put("sim_nodes", u64::from(sim.node_count));

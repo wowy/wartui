@@ -97,14 +97,8 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults.push(format!("store dropped {}", thousands(snapshot.store.dropped)));
     }
     // Channels of the pool in no share of the bridge's plan, which nothing else reports.
-    if !snapshot.unreachable.is_empty()
-        && let Some(pool) = snapshot.pool
-    {
-        faults.push(format!(
-            "no node is sweeping {} channels of the {} pool",
-            thousands(u64::from(snapshot.unreachable.len())),
-            pool
-        ));
+    if let Some(line) = unswept(snapshot) {
+        faults.push(line);
     }
     if let Some(gps) = &snapshot.gps {
         if let GpsStatus::Failed(reason) = &gps.status {
@@ -182,6 +176,19 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
     }
     faults
+}
+
+/// The fault-box line for the channels of the pool the bridge's plan leaves to no node, or `None`
+/// when every one is in a share: `pool All: 36-177 unswept, no node can tune them`.
+fn unswept(snapshot: &Snapshot) -> Option<String> {
+    if snapshot.unreachable.is_empty() {
+        return None;
+    }
+    let pool = snapshot.pool?;
+    Some(format!(
+        "pool {pool}: {} unswept, no node can tune them",
+        crate::text::channel_list(snapshot.unreachable)
+    ))
 }
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
@@ -278,7 +285,7 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
     use wartui_proto::fan::{FanDuty, FanStats};
-    use wartui_proto::plan::ChannelPool;
+    use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
     use super::*;
     use crate::tui::draw;
@@ -664,13 +671,19 @@ mod tests {
     }
 
     #[test]
-    fn view_warns_channels_unswept_when_bridge_reports_them_unreachable() {
-        let mut snapshot = busy();
+    fn footer_warns_channels_unswept_when_bridge_reports_them_unreachable() {
+        let mut snapshot = quiet();
         snapshot.pool = Some(ChannelPool::Us);
-        snapshot.unreachable = ChannelPool::Us.channels();
+        snapshot.unreachable = ChannelSet::from_run(IndexRun::new(14, 38));
+        assert_eq!(faults(&snapshot), ["pool US: 36-165 unswept, no node can tune them"]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("no node is sweeping"), "got {rendered}");
+        assert!(rendered.contains("36-165 unswept, no node can tune them"), "got {rendered}");
+    }
+
+    #[test]
+    fn footer_omits_unswept_warning_when_every_channel_is_in_a_share() {
+        assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
     }
 }
