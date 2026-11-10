@@ -266,6 +266,7 @@ fn full_spike_stats() -> SpikeStats {
         },
         ble_stats_age_ms: u32::MAX - 11,
         bulk_high_water: u32::MAX - 5,
+        bulk_capacity: u32::MAX - 12,
         refused: u32::MAX - 6,
         evicted: u32::MAX - 7,
         mtu: u16::MAX,
@@ -1300,6 +1301,7 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         ble: BleStats { delivered_bytes: 5, ..BleStats::default() },
         ble_stats_age_ms: 13,
         bulk_high_water: 6,
+        bulk_capacity: 14,
         refused: 7,
         evicted: 8,
         mtu: 9,
@@ -1322,7 +1324,7 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         0, 0, 0, 0, 0, 0, 0, 0,     // ble: disconnects to acl_outstanding
         0, 0, 0,                    // ble: disconnection_events to runner_restarts
         13,                         // ble_stats_age_ms
-        6, 7, 8,                    // bulk_high_water, refused, evicted
+        6, 14, 7, 8,                // bulk_high_water, bulk_capacity, refused, evicted
         9, 10, 11,                  // mtu, phy, interval_us
         12, 0, 0, 0, 0, 0, 0, 0, 0, // radio_link
     ];

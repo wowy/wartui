@@ -207,6 +207,13 @@ runs or a central owns the queue, with the C6's latest `BleStats` beside them.
 `cargo build --release --features sink-discard` bundles a C6 image that claims a subscriber at
 boot and credits every byte at once, which measures the P4→C6 link's ceiling with no Bluetooth.
 
+`cargo build --release --features psram-ring` holds the host bulk ring in PSRAM: 4 MB of what
+the node image cache leaves (`WARTUI_P4_PSRAM_BULK_BYTES`), so a burst the Bluetooth stream
+drains slowly is held rather than evicted. Its 240 KB of internal RAM goes to the main stack.
+PSRAM is slower than internal RAM, and the drain still copies a chunk at a time into the internal
+DMA buffer. A P4 whose PSRAM does not map runs the ring over no bytes and drops every bulk frame.
+`SpikeStats` reports the ring's high-water mark out of its size.
+
 ## Settings
 
 The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
@@ -281,6 +288,7 @@ as a drop in `Status`.
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `WARTUI_P4_HOST_BULK_BYTES` | 245760 | frames for the host that may be evicted: node records, GPS bytes and logs |
+| `WARTUI_P4_PSRAM_BULK_BYTES` | 4194304 | the same, in PSRAM, in a `psram-ring` build, which ignores `WARTUI_P4_HOST_BULK_BYTES` |
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
 | `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |

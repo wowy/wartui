@@ -10,15 +10,19 @@
 //! sliding the in-progress frame forward over the gap. Sliding costs one copy of a frame
 //! the size of one packet or two, against a second cursor into the middle of the ring.
 //!
-//! Every eviction and every refused frame counts one drop. [`FrameRing::high_water`] is
+//! Every eviction and every refused frame counts one drop. [`FrameRingIn::high_water`] is
 //! the deepest the ring has been, in bytes, to size it against a measured burst.
+//!
+//! The bytes are an array ([`FrameRing`]), which a firmware builds in a static, or a slice
+//! handed over at boot ([`FrameRingIn::over`]), as the P4's `psram-ring` build hands its bulk
+//! ring PSRAM. A ring of no bytes refuses every frame.
 
 /// Bytes of length prefix ahead of each frame.
 const PREFIX: usize = 2;
 
-/// Up to `N` bytes of frames, each behind a two-byte length.
-pub struct FrameRing<const N: usize> {
-    buf: [u8; N],
+/// Frames in the bytes of `S`, each behind a two-byte length.
+pub struct FrameRingIn<S> {
+    buf: S,
     /// Where the oldest frame's prefix starts.
     head: usize,
     /// Bytes in use, prefixes included.
@@ -30,6 +34,9 @@ pub struct FrameRing<const N: usize> {
     high_water: usize,
     dropped: u32,
 }
+
+/// Up to `N` bytes of frames in an array.
+pub type FrameRing<const N: usize> = FrameRingIn<[u8; N]>;
 
 impl<const N: usize> Default for FrameRing<N> {
     fn default() -> Self {
@@ -44,42 +51,15 @@ impl<const N: usize> FrameRing<N> {
     /// An empty ring.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            head: 0,
-            len: 0,
-            reading: false,
-            read_off: 0,
-            high_water: 0,
-            dropped: 0,
-        }
+        Self::over([0; N])
     }
+}
 
-    /// Queue `frame`, evicting the oldest whole frames until it fits.
-    ///
-    /// Returns `false`, and counts a drop, when it cannot fit even in an empty ring or the
-    /// frame being read blocks it. Each frame evicted counts one drop as well.
-    pub fn push(&mut self, frame: &[u8]) -> bool {
-        let need = PREFIX + frame.len();
-        let pinned = if self.reading { self.head_size() } else { 0 };
-        if frame.len() > usize::from(u16::MAX) || need > N - pinned {
-            self.dropped = self.dropped.saturating_add(1);
-            return false;
-        }
-        while N - self.len < need {
-            if self.reading {
-                self.evict_behind_head();
-            } else {
-                self.pop_head();
-            }
-            self.dropped = self.dropped.saturating_add(1);
-        }
-        let at = self.wrap(self.head + self.len);
-        self.write(at, &(frame.len() as u16).to_le_bytes());
-        self.write(self.wrap(at + PREFIX), frame);
-        self.len += need;
-        self.high_water = self.high_water.max(self.len);
-        true
+impl<S> FrameRingIn<S> {
+    /// An empty ring over `buf`, whatever it holds.
+    #[must_use]
+    pub const fn over(buf: S) -> Self {
+        Self { buf, head: 0, len: 0, reading: false, read_off: 0, high_water: 0, dropped: 0 }
     }
 
     /// Forget every frame, including one part-way read. Counts no drop.
@@ -88,38 +68,6 @@ impl<const N: usize> FrameRing<N> {
         self.len = 0;
         self.reading = false;
         self.read_off = 0;
-    }
-
-    /// Copy the next bytes of the current frame into `out`, starting the next frame when
-    /// none is in progress.
-    ///
-    /// Returns how many bytes were copied and whether that finished the frame.
-    pub fn read(&mut self, out: &mut [u8]) -> (usize, bool) {
-        if self.len == 0 {
-            return (0, false);
-        }
-        if !self.reading {
-            self.reading = true;
-            self.read_off = 0;
-        }
-        let frame_len = self.head_len();
-        let n = out.len().min(frame_len - self.read_off);
-        let from = self.wrap(self.head + PREFIX + self.read_off);
-        for (i, byte) in out[..n].iter_mut().enumerate() {
-            *byte = self.buf[self.wrap(from + i)];
-        }
-        self.read_off += n;
-        let finished = self.read_off == frame_len;
-        if finished {
-            self.pop_head();
-        }
-        (n, finished)
-    }
-
-    /// The length of the oldest frame, or `None` when none is queued.
-    #[must_use]
-    pub fn peek_len(&self) -> Option<usize> {
-        (self.len > 0).then(|| self.head_len())
     }
 
     /// Whether a frame has been partly read.
@@ -151,21 +99,90 @@ impl<const N: usize> FrameRing<N> {
     pub const fn dropped(&self) -> u32 {
         self.dropped
     }
+}
 
-    const fn wrap(&self, index: usize) -> usize {
-        index % N
+impl<S: AsRef<[u8]> + AsMut<[u8]>> FrameRingIn<S> {
+    /// Total bytes, length prefixes included.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.buf.as_ref().len()
+    }
+
+    /// Queue `frame`, evicting the oldest whole frames until it fits.
+    ///
+    /// Returns `false`, and counts a drop, when it cannot fit even in an empty ring or the
+    /// frame being read blocks it. Each frame evicted counts one drop as well.
+    pub fn push(&mut self, frame: &[u8]) -> bool {
+        let need = PREFIX + frame.len();
+        let capacity = self.capacity();
+        let pinned = if self.reading { self.head_size() } else { 0 };
+        if frame.len() > usize::from(u16::MAX) || need > capacity - pinned {
+            self.dropped = self.dropped.saturating_add(1);
+            return false;
+        }
+        while capacity - self.len < need {
+            if self.reading {
+                self.evict_behind_head();
+            } else {
+                self.pop_head();
+            }
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        let at = self.wrap(self.head + self.len);
+        self.write(at, &(frame.len() as u16).to_le_bytes());
+        self.write(self.wrap(at + PREFIX), frame);
+        self.len += need;
+        self.high_water = self.high_water.max(self.len);
+        true
+    }
+
+    /// Copy the next bytes of the current frame into `out`, starting the next frame when
+    /// none is in progress.
+    ///
+    /// Returns how many bytes were copied and whether that finished the frame.
+    pub fn read(&mut self, out: &mut [u8]) -> (usize, bool) {
+        if self.len == 0 {
+            return (0, false);
+        }
+        if !self.reading {
+            self.reading = true;
+            self.read_off = 0;
+        }
+        let frame_len = self.head_len();
+        let n = out.len().min(frame_len - self.read_off);
+        let from = self.wrap(self.head + PREFIX + self.read_off);
+        for (i, byte) in out[..n].iter_mut().enumerate() {
+            *byte = self.buf.as_ref()[self.wrap(from + i)];
+        }
+        self.read_off += n;
+        let finished = self.read_off == frame_len;
+        if finished {
+            self.pop_head();
+        }
+        (n, finished)
+    }
+
+    /// The length of the oldest frame, or `None` when none is queued.
+    #[must_use]
+    pub fn peek_len(&self) -> Option<usize> {
+        (self.len > 0).then(|| self.head_len())
+    }
+
+    fn wrap(&self, index: usize) -> usize {
+        index % self.capacity()
     }
 
     fn write(&mut self, at: usize, bytes: &[u8]) {
         for (i, &byte) in bytes.iter().enumerate() {
             let slot = self.wrap(at + i);
-            self.buf[slot] = byte;
+            self.buf.as_mut()[slot] = byte;
         }
     }
 
     /// The oldest frame's body length.
     fn head_len(&self) -> usize {
-        usize::from(u16::from_le_bytes([self.buf[self.head], self.buf[self.wrap(self.head + 1)]]))
+        let buf = self.buf.as_ref();
+        usize::from(u16::from_le_bytes([buf[self.head], buf[self.wrap(self.head + 1)]]))
     }
 
     /// The oldest frame's size with its prefix.
@@ -189,13 +206,15 @@ impl<const N: usize> FrameRing<N> {
             return;
         }
         let behind = self.wrap(self.head + size);
-        let gap = PREFIX
-            + usize::from(u16::from_le_bytes([self.buf[behind], self.buf[self.wrap(behind + 1)]]));
+        let buf = self.buf.as_ref();
+        let gap =
+            PREFIX + usize::from(u16::from_le_bytes([buf[behind], buf[self.wrap(behind + 1)]]));
         // Back to front, since the ranges overlap whenever the gap is shorter than the frame.
         for i in (0..size).rev() {
             let from = self.wrap(self.head + i);
             let to = self.wrap(self.head + gap + i);
-            self.buf[to] = self.buf[from];
+            let buf = self.buf.as_mut();
+            buf[to] = buf[from];
         }
         self.head = self.wrap(self.head + gap);
         self.len -= gap;

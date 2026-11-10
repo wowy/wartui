@@ -645,6 +645,7 @@ mod tests {
             },
             ble_stats_age_ms: 1_200,
             bulk_high_water: 243_000,
+            bulk_capacity: 245_760,
             refused: 0,
             evicted: 12,
             mtu: 0,
@@ -662,7 +663,7 @@ mod tests {
             "# spike stats: up 125.4 s, Bluetooth owned 120.0 s, seq 51234; \
              433333 B/s sent while Bluetooth owned the queue\n\
              #   queued 53000000 B, sent 52000000 B, credited 51990000 B, delivered 52000 B; \
-             bulk high-water 243000 B, 0 refused, 12 evicted\n\
+             bulk high-water 243000 of 245760 B, 0 refused, 12 evicted\n\
              #   mtu 0, phy 0, interval 0 us; C6 link 81234 packets in, crc 1/2, magic 0/0, \
              gap 0/0, uart 0/0 (P4/C6)\n\
              #   C6: 100 notifications, 51400 B notified, ACL 52200 B sent, 52000 B delivered; \

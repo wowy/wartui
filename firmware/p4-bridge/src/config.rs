@@ -9,12 +9,23 @@
 //! what the statics leave, about 32 KB with these defaults. A bench `wartui status` reports each
 //! queue's high-water mark, which is how to right-size them: the host bulk queue peaks well under
 //! 1% of its size on a carrier.
+//!
+//! A `psram-ring` build holds the host bulk ring in PSRAM instead (`PSRAM_BULK_BYTES`), and
+//! its internal RAM goes to the main stack.
 
 use wartui_proto::config::env_usize;
 
 /// Bytes of encoded frames bound for the host that may be evicted when it falls behind:
 /// node records, GPS bytes and logs.
+#[cfg(not(feature = "psram-ring"))]
 pub const HOST_BULK_BYTES: usize = env_usize(option_env!("WARTUI_P4_HOST_BULK_BYTES"), 240 * 1024);
+
+/// The bulk ring's bytes in a `psram-ring` build, taken from the PSRAM past the node image cache,
+/// and fewer when less is mapped. PSRAM is slower than internal RAM, which the ring's drain
+/// pays a byte at a time; the Bluetooth host stream is far slower still.
+#[cfg(feature = "psram-ring")]
+pub const PSRAM_BULK_BYTES: usize =
+    env_usize(option_env!("WARTUI_P4_PSRAM_BULK_BYTES"), 4 * 1024 * 1024);
 
 /// Bytes of encoded frames bound for the host that answer it: `Ready`, `Status`, delivery
 /// answers and errors.

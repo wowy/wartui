@@ -241,6 +241,7 @@ fn push_stats(shared: &Shared) {
         ble: shared.ble.stats(),
         ble_stats_age_ms: shared.ble.stats_age_ms(),
         bulk_high_water: bulk.high_water,
+        bulk_capacity: bulk.capacity,
         refused,
         // The rings count a refusal as a drop too.
         evicted: dropped.saturating_sub(refused),

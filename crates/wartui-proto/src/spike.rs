@@ -102,6 +102,8 @@ pub struct SpikeStats {
     pub ble_stats_age_ms: u32,
     /// The bulk ring's high-water mark, in bytes.
     pub bulk_high_water: u32,
+    /// The bulk ring's size, in bytes, which [`SpikeStats::bulk_high_water`] is out of.
+    pub bulk_capacity: u32,
     /// Frames the host rings refused.
     pub refused: u32,
     /// Frames the host rings evicted to make room.
@@ -149,8 +151,8 @@ impl fmt::Display for StatsText<'_> {
         let ble = &stats.ble;
         write!(
             f,
-            "\n#   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} B, \
-             {} refused, {} evicted\n\
+            "\n#   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} of \
+             {} B, {} refused, {} evicted\n\
              #   mtu {}, phy {}, interval {} us; C6 link {} packets in, crc {}/{}, magic {}/{}, \
              gap {}/{}, uart {}/{} (P4/C6)\n\
              #   C6: {} notifications, {} B notified, ACL {} B sent, {} B delivered; errors {} \
@@ -161,6 +163,7 @@ impl fmt::Display for StatsText<'_> {
             stats.credited_bytes,
             ble.delivered_bytes,
             stats.bulk_high_water,
+            stats.bulk_capacity,
             stats.refused,
             stats.evicted,
             stats.mtu,

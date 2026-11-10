@@ -21,9 +21,10 @@
 //! chunks.
 //!
 //! **The region is the mapped PSRAM**, capped at [`CACHE_MAX`], an app slot. A sector erase needs
-//! nothing, and a write is a copy. A P4 whose PSRAM does not map refuses every op as a table with
-//! no spare slot does, and every chunk command `NoImage`, and says so once to the first host
-//! announced to; everything else runs.
+//! nothing, and a write is a copy. The rest goes back to `main`, for a `psram-ring` build's host
+//! bulk ring, split off the one slice [`map`] makes. A P4 whose PSRAM does not map refuses every
+//! op as a table with no spare slot does, and every chunk command `NoImage`, and says so once to
+//! the first host announced to; everything else runs.
 //!
 //! The receiver is reset when the host gate closes, as the P4's own update receiver is, so a
 //! host that goes away leaves no image for the next one to send from unchecked.
@@ -64,13 +65,14 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Map the PSRAM and take it as the cache. Out of line, so the driver stays off `main`'s
-    /// frame.
+    /// Map the PSRAM, take up to [`CACHE_MAX`] of it as the cache, and return the rest. Out of
+    /// line, so the driver stays off `main`'s frame.
     #[inline(never)]
-    pub fn new(psram: PSRAM<'static>) -> Self {
+    pub fn new(psram: PSRAM<'static>) -> (Self, &'static mut [u8]) {
         let region = map(psram);
         let len = region.len().min(CACHE_MAX);
-        Self { inner: NodeImageCache::new(RECEIVER.take(), &mut region[..len]), said: false }
+        let (region, rest) = region.split_at_mut(len);
+        (Self { inner: NodeImageCache::new(RECEIVER.take(), region), said: false }, rest)
     }
 }
 

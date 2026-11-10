@@ -105,7 +105,11 @@ use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
 use wartui_proto::bus::PER_BUS;
 use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
-use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
+#[cfg(not(feature = "psram-ring"))]
+use wartui_proto::host_queue::HostQueue;
+#[cfg(feature = "psram-ring")]
+use wartui_proto::host_queue::HostQueueIn;
+use wartui_proto::host_queue::{HOST_CHUNK, is_priority};
 use wartui_proto::link::{
     BridgeToHost, HOST_BAUD, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
     ShortStr, encode_frame,
@@ -122,7 +126,11 @@ use wartui_proto::split::{P4Counters, Pair, PairEvent};
 use crate::ble::{Ble, BleFrames};
 use crate::cache::Cache;
 use crate::carrier::{Carrier, Power};
-use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
+#[cfg(not(feature = "psram-ring"))]
+use crate::config::HOST_BULK_BYTES;
+#[cfg(feature = "psram-ring")]
+use crate::config::PSRAM_BULK_BYTES;
+use crate::config::{DOWN_QUEUE_BYTES, HOST_PRIORITY_BYTES};
 use crate::host::Presence;
 use crate::link::{Bus, Link, run_link};
 use crate::radio::RADIO_DIGEST;
@@ -134,11 +142,20 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// How long the C6 is held in reset, at boot and when the pair asks.
 const C6_RESET_HOLD: Duration = Duration::from_millis(50);
 
+#[cfg(not(feature = "psram-ring"))]
 type HostFrames = HostQueue<HOST_PRIORITY_BYTES, HOST_BULK_BYTES>;
+#[cfg(feature = "psram-ring")]
+type HostFrames = HostQueueIn<HOST_PRIORITY_BYTES, &'static mut [u8]>;
 type DownQueue = FrameRing<DOWN_QUEUE_BYTES>;
 
 /// Frames waiting for the host. Built at compile time, so the rings are never on the stack.
+#[cfg(not(feature = "psram-ring"))]
 static HOST_QUEUE: ConstStaticCell<HostFrames> = ConstStaticCell::new(HostQueue::new());
+/// Frames waiting for the host, the bulk ring over no bytes until [`host_queue`] gives it PSRAM.
+/// Built at compile time, so the priority ring is never on the stack.
+#[cfg(feature = "psram-ring")]
+static HOST_QUEUE: ConstStaticCell<HostFrames> =
+    ConstStaticCell::new(HostQueueIn::with_bulk(&mut []));
 /// `Down` records waiting for the C6.
 static DOWN_QUEUE: ConstStaticCell<DownQueue> = ConstStaticCell::new(FrameRing::new());
 /// The record that did not fit the last packet.
@@ -523,8 +540,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
-    // The PSRAM, for the node image cache (`src/cache.rs`), mapped before the buses start.
-    let cache = Cache::new(peripherals.PSRAM);
+    // The PSRAM, for the node image cache (`src/cache.rs`), mapped before the buses start. A
+    // `psram-ring` build's host bulk ring takes what the cache leaves.
+    let (cache, spare_psram) = Cache::new(peripherals.PSRAM);
     let boot = Instant::now();
 
     let mut own_mac = [0; 6];
@@ -646,7 +664,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {
-        Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier)
+        Shared::new(pair, host_queue(spare_psram), DOWN_QUEUE.take(), updates, cache, &carrier)
     });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(
@@ -675,6 +693,21 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         ),
     )
     .await {}
+}
+
+/// The host queue, whose bulk ring a `psram-ring` build puts in `spare_psram`, up to
+/// `PSRAM_BULK_BYTES` of it. The default build's ring is the static's own, and leaves
+/// `spare_psram` unused.
+fn host_queue(spare_psram: &'static mut [u8]) -> &'static mut HostFrames {
+    let queue = HOST_QUEUE.take();
+    #[cfg(feature = "psram-ring")]
+    {
+        let len = spare_psram.len().min(PSRAM_BULK_BYTES);
+        queue.set_bulk(&mut spare_psram[..len]);
+    }
+    #[cfg(not(feature = "psram-ring"))]
+    let _ = spare_psram;
+    queue
 }
 
 /// Bring up I2C0 for the GPS receiver and a carrier's expander, read the expander blocking, then

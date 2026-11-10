@@ -21,6 +21,9 @@ bench = false
 # Bundle the C6 image built with its `sink-discard` feature (`build.rs`): a C6 that claims a
 # subscriber and credits the host stream at once, for measuring the P4→C6 link's ceiling.
 sink-discard = []
+# Hold the host bulk ring in PSRAM, `WARTUI_P4_PSRAM_BULK_BYTES` of it, rather than in internal
+# RAM, to measure how much a burst the Bluetooth host stream cannot drain needs (`src/config.rs`).
+psram-ring = []
 
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }

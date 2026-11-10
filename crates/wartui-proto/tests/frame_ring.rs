@@ -1,6 +1,6 @@
 //! The frame ring behind the P4's host queue and the C6's queue toward the P4.
 
-use wartui_proto::frame_ring::FrameRing;
+use wartui_proto::frame_ring::{FrameRing, FrameRingIn};
 
 fn read_all<const N: usize>(ring: &mut FrameRing<N>) -> Vec<u8> {
     let mut out = [0u8; 64];
@@ -137,4 +137,16 @@ fn frame_ring_starts_next_frame_from_its_head_when_cleared_mid_frame() {
     assert!(ring.push(b"222"));
     assert_eq!(ring.read(&mut [0u8; 64][..]), (3, true));
     assert_eq!(ring.dropped(), 0);
+}
+
+#[test]
+fn frame_ring_refuses_every_frame_when_it_has_no_bytes() {
+    // A `psram-ring` P4 whose PSRAM did not map runs its bulk ring over no bytes.
+    let mut ring = FrameRingIn::over(&mut [][..]);
+    assert_eq!(ring.capacity(), 0);
+    assert!(!ring.push(b""));
+    assert!(!ring.push(b"1"));
+    assert_eq!(ring.dropped(), 2);
+    assert_eq!(ring.read(&mut [0u8; 4]), (0, false));
+    assert!(ring.is_empty());
 }
