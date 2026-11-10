@@ -1,7 +1,10 @@
-//! The four commands and one event a BLE scan is made of.
+//! The four commands and two events a BLE scan is made of.
 
 use wartui_proto::bus::{RecordKind, SIGHTING_RECORD_MAX, Security, SightingMsg};
-use wartui_proto::hci::{RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters};
+use wartui_proto::hci::{
+    RESET, SET_EVENT_MASK, adv_reports, command_complete, opcode, set_scan_enable,
+    set_scan_parameters,
+};
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.
 ///
@@ -174,4 +177,54 @@ fn hci_parser_suppresses_manufacturer_id_when_data_structure_is_malformed() {
     let packet = event(&[(ADDR, &[0x05, 0xFF, 0x4C, 0x00], -70)]);
     let report = adv_reports(&packet).next().expect("one report");
     assert_eq!(report.mfgr, None);
+}
+
+#[test]
+fn hci_opcode_reads_each_command_when_given_its_packet() {
+    assert_eq!(opcode(&RESET), Some(0x0C03));
+    assert_eq!(opcode(&SET_EVENT_MASK), Some(0x0C01));
+    assert_eq!(opcode(&set_scan_parameters(0x0060, 0x0060)), Some(0x200B));
+    assert_eq!(opcode(&set_scan_enable(true)), Some(0x200C));
+}
+
+#[test]
+fn hci_opcode_returns_none_when_packet_is_not_a_command() {
+    assert_eq!(opcode(&[]), None);
+    assert_eq!(opcode(&[0x01, 0x03, 0x0C]), None, "no length byte");
+    assert_eq!(opcode(&[0x04, 0x0E, 0x04, 0x01]), None, "an event");
+}
+
+#[test]
+fn hci_command_complete_reads_success_when_status_is_zero() {
+    // Command Complete for `HCI_Reset`: one command allowed, opcode 0x0C03, status 0.
+    assert_eq!(command_complete(&[0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]), Some((0x0C03, 0)));
+}
+
+#[test]
+fn hci_command_complete_reads_refusal_when_status_is_nonzero() {
+    // 0x12 is Invalid HCI Command Parameters.
+    let packet = [0x04, 0x0E, 0x04, 0x01, 0x0B, 0x20, 0x12];
+    assert_eq!(command_complete(&packet), Some((0x200B, 0x12)));
+}
+
+#[test]
+fn hci_command_complete_returns_none_when_packet_is_an_advertising_report() {
+    let packet = event(&[(ADDR, &[0x02, 0x01, 0x06], -70)]);
+    assert_eq!(command_complete(&packet), None);
+}
+
+#[test]
+fn hci_command_complete_returns_none_when_packet_is_truncated() {
+    let packet = [0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00];
+    for cut in 0..packet.len() {
+        assert_eq!(command_complete(&packet[..cut]), None, "cut at {cut}");
+    }
+}
+
+#[test]
+fn hci_command_complete_names_no_command_when_controller_announces_itself() {
+    // At start-up the controller sends a Command Complete with opcode 0x0000 and no
+    // return parameters, only to say how many commands it takes. It answers nothing.
+    let answer = command_complete(&[0x04, 0x0E, 0x03, 0x01, 0x00, 0x00]);
+    assert!(matches!(answer, None | Some((0, _))), "{answer:?}");
 }

@@ -3,7 +3,7 @@
 //! the one 2.4 GHz antenna, and a controller left free takes it whenever the node is
 //! otherwise idle (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
 //!
-//! Two things here keep the two apart.
+//! Two things here keep the two apart, and a third keeps the scan hearing anything.
 //!
 //! The scan is **bounded and switched off** rather than left running.
 //! `HCI_LE_Set_Scan_Enable(0)` stops the controller taking the antenna at all,
@@ -14,6 +14,14 @@
 //! sweep for the scan to collide with: it runs one scan after another, back to
 //! back, and nothing else wants the antenna: everything the node says goes over the
 //! node bus.
+//!
+//! The scan **needs Wi-Fi awake**. The two share one radio, and the node is a station
+//! that never associates, which `esp-radio` lets sleep by default whenever promiscuous
+//! mode is off. The Bluetooth node sniffs nothing, so its radio sleeps, and a
+//! controller whose radio is asleep acknowledges every command and reports nothing.
+//! `main.rs` turns that power management off (`docs/bluetooth-scan-findings.md`).
+//! [`Scanner::new`] returns a refused command as an error, and [`Sweep::silent`]
+//! counts scans that heard nothing, so `main.rs` can say both on the console.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
 //! all this firmware wants is an address and a signal strength, so the packets are
@@ -27,8 +35,8 @@ use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::dedup::DEDUP_RSSI_GAIN_BLE_DB;
 use wartui_proto::hci::{
-    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
-    set_scan_parameters,
+    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, command_complete,
+    opcode, set_scan_enable, set_scan_parameters,
 };
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 use wartui_proto::pending::BlePending;
@@ -57,7 +65,7 @@ const _: () = assert!(
 /// heard is checked against the buffer with interrupts held off, and a linear search
 /// of 128 reports costs up to 18 µs there.
 /// [`refused`] counts those advertisers, once per scan each, and it is the only
-/// sign of saturation: the console's `heard` is capped here. The heartbeat carries
+/// sign of saturation: [`Sweep::heard`] is capped here. The heartbeat carries
 /// it to the host, which shows the fleet's total in the footer's `buffer full` line.
 ///
 /// It is also the ceiling on the burst: `report_ble` drains the sweep into
@@ -113,33 +121,68 @@ const SCAN_WINDOW: u16 = (30_000 / SCAN_UNIT_US) as u16;
 /// Granularity of the collection loop.
 const POLL_MS: u64 = 2;
 
+/// Why [`Scanner::new`] gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartError {
+    /// The controller would not come up, or would not take a command.
+    Controller,
+    /// The controller answered a command with a non-zero status.
+    Refused { opcode: u16, status: u8 },
+}
+
+/// What one [`Scanner::sweep`] heard.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sweep {
+    /// Distinct advertisers due to be reported, at most [`REPORTS`].
+    pub heard: usize,
+    /// Advertising-report events read, whatever they held.
+    pub events: u32,
+    /// Sweeps in a row, this one included, that read no advertising-report event.
+    pub silent: u32,
+}
+
 pub struct Scanner<'d> {
     connector: BleConnector<'d>,
     packet: [u8; PACKET_MAX],
+    silent: u32,
 }
 
 impl<'d> Scanner<'d> {
     /// Bring the controller up and tell it how to scan. Scanning stays off.
-    pub fn new(bt: BT<'d>) -> Option<Self> {
+    pub fn new(bt: BT<'d>) -> Result<Self, StartError> {
         let mut scanner = Self {
-            connector: BleConnector::new(bt, Config::default()).ok()?,
+            connector: BleConnector::new(bt, Config::default())
+                .map_err(|_| StartError::Controller)?,
             packet: [0; PACKET_MAX],
+            silent: 0,
         };
         // A reset first: the controller keeps whatever state the last run left it
         // in, and enabling a scan twice is an error rather than a no-op.
-        scanner.command(&RESET)?;
+        scanner.setup(&RESET)?;
         // After the reset, because the reset restores the default mask that
         // hides advertising reports. See `SET_EVENT_MASK`.
-        scanner.command(&SET_EVENT_MASK)?;
-        scanner.command(&set_scan_parameters(SCAN_WINDOW, SCAN_WINDOW))?;
-        Some(scanner)
+        scanner.setup(&SET_EVENT_MASK)?;
+        scanner.setup(&set_scan_parameters(SCAN_WINDOW, SCAN_WINDOW))?;
+        Ok(scanner)
+    }
+
+    /// Send one start-up command, and fail on a refusal.
+    fn setup(&mut self, bytes: &[u8]) -> Result<(), StartError> {
+        match self.command(bytes)? {
+            Some(status) if status != 0 => {
+                Err(StartError::Refused { opcode: opcode(bytes).unwrap_or(0), status })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Listen for `SCAN_MS`, then stop, filing what was heard in [`PENDING`].
     ///
-    /// Returns how many distinct advertisers due to be reported were heard, at
-    /// most [`REPORTS`]; the reports themselves come out through [`take`], one at
-    /// a time, so nothing here holds the buffer's lock across a sleep or a delivery.
+    /// Returns a [`Sweep`]: how many distinct advertisers due to be reported were
+    /// heard, at most [`REPORTS`], how many advertising-report events were read, and
+    /// how many sweeps in a row have read none. The reports themselves come out
+    /// through [`take`], one at a time, so nothing here holds the buffer's lock across
+    /// a sleep or a delivery.
     ///
     /// Distinct addresses only, keeping the strongest reading for each: the same
     /// advertiser is heard several times a second and only one belongs on the wire.
@@ -148,7 +191,7 @@ impl<'d> Scanner<'d> {
     /// drains on a budget and a busy room leaves a few reports queued for the next
     /// scan to count. Dedup absorbs the repeats, so the cost is the precision of a
     /// console figure; draining first would cost whole reports instead.
-    pub fn sweep(&mut self) -> usize {
+    pub fn sweep(&mut self) -> Sweep {
         // A fresh sweep discards nothing the main loop has not already taken:
         // the drain in `report_ble` runs to completion between sweeps.
         PENDING.with(BlePending::clear);
@@ -159,18 +202,24 @@ impl<'d> Scanner<'d> {
         // below absorbs the Command Complete at no cost, since `adv_reports` yields
         // nothing for a packet that is not one.
         if self.connector.write(&set_scan_enable(true)).is_err() {
-            return 0;
+            self.silent = self.silent.saturating_add(1);
+            return Sweep { silent: self.silent, ..Sweep::default() };
         }
 
         // `SEEN` changes only when `report_ble` records a delivery, after the
         // sweep, so one reading of the clock serves every report in it.
         let now = sniff::now_ms();
         let until = Instant::now() + Duration::from_millis(u64::from(SCAN_MS));
+        let mut events = 0u32;
         while Instant::now() < until {
             match self.connector.next(&mut self.packet) {
                 Ok(0) | Err(_) => CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS)),
                 Ok(read) => {
-                    for report in adv_reports(&self.packet[..read]) {
+                    let mut reports = adv_reports(&self.packet[..read]).peekable();
+                    if reports.peek().is_some() {
+                        events = events.saturating_add(1);
+                    }
+                    for report in reports {
                         PENDING.with(|pending| {
                             pending.record(report, |r| {
                                 sniff::SEEN.with(|seen| {
@@ -189,36 +238,49 @@ impl<'d> Scanner<'d> {
         }
 
         // Unconditionally, and before anything else happens. This is the line
-        // the whole module exists for.
-        self.command(&set_scan_enable(false));
-        PENDING.with(|pending| pending.len())
+        // the whole module exists for. Its answer changes nothing: there is no
+        // other way to stop the scan.
+        let _ = self.command(&set_scan_enable(false));
+        self.silent = if events == 0 { self.silent.saturating_add(1) } else { 0 };
+        Sweep { heard: PENDING.with(|pending| pending.len()), events, silent: self.silent }
     }
 
-    /// Send one command and drain whatever the controller says back.
+    /// Send one command, drain whatever the controller says back, and return the
+    /// status of the Command Complete answering it.
     ///
-    /// The completion event is not inspected: there is nothing useful to do with a
-    /// controller that refuses `HCI_Reset`, and reading the queue is what stops a
-    /// stale completion occupying it across a scan. This is about queue space, not
-    /// misparsing — `adv_reports` yields nothing for a packet that is not a report —
-    /// which is why `sweep` starts its scan without coming through here.
+    /// `None` when no Command Complete for its opcode arrived inside the budget,
+    /// which is not a refusal. `Err` when the command could not be written. Reading
+    /// the queue is also what stops a stale completion occupying it across a scan.
+    /// This is about queue space, not misparsing — `adv_reports` yields nothing for a
+    /// packet that is not a report — which is why `sweep` starts its scan without
+    /// coming through here.
     ///
     /// A command can be answered with both a Command Status and a Command Complete,
     /// so stopping at the first packet leaves one behind for the next `sweep`. It
     /// ends on a quiet queue or on a budget: a controller that will not stop talking
     /// must not hold the sweep.
-    fn command(&mut self, bytes: &[u8]) -> Option<()> {
-        self.connector.write(bytes).ok()?;
+    fn command(&mut self, bytes: &[u8]) -> Result<Option<u8>, StartError> {
+        self.connector.write(bytes).map_err(|_| StartError::Controller)?;
+        let sent = opcode(bytes);
+        let mut answer = None;
         let mut quiet = 0;
         for _ in 0..32 {
             CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS));
             match self.connector.next(&mut self.packet) {
                 // Two quiet reads rather than one: the first can simply be
                 // ahead of a controller that has not answered yet.
-                Ok(0) | Err(_) if quiet >= 1 => return Some(()),
+                Ok(0) | Err(_) if quiet >= 1 => return Ok(answer),
                 Ok(0) | Err(_) => quiet += 1,
-                Ok(_) => quiet = 0,
+                Ok(read) => {
+                    quiet = 0;
+                    if let Some((op, status)) = command_complete(&self.packet[..read])
+                        && Some(op) == sent
+                    {
+                        answer = Some(status);
+                    }
+                }
             }
         }
-        Some(())
+        Ok(answer)
     }
 }

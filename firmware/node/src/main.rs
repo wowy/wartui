@@ -322,9 +322,14 @@ fn main() -> ! {
     // `US` rather than `esp-radio`'s default, China under `WIFI_COUNTRY_POLICY_MANUAL`,
     // which refuses 5 GHz 100-144 outright and so silently costs a C5 those channels on
     // every sweep.
+    //
+    // Disconnected power management off, because the node never associates: the default
+    // lets the radio sleep whenever promiscuous mode is off, which is the whole of a
+    // Bluetooth node's scan. That scan then hears nothing while every command still
+    // succeeds (`docs/bluetooth-scan-findings.md`).
     let mut controller = WifiController::new(
         peripherals.WIFI,
-        ControllerConfig::default().with_country_info(*b"US"),
+        ControllerConfig::default().with_country_info(*b"US").with_sta_disconnected_pm(false),
     )
     .expect("Wi-Fi controller");
 
@@ -349,13 +354,20 @@ fn main() -> ! {
     // Brought up before the loop rather than on demand: initializing a radio
     // between two dwells is the kind of surprise to avoid.
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
-        Some(scanner) => Some(SCANNER.init(scanner)),
-        None => {
-            // The bridge cannot see this: capabilities carry no Bluetooth bit, so a
-            // controller that would not start is a fact only this node's own
-            // console knows. It sniffs Wi-Fi as normal, and idles if handed the
-            // scan anyway.
+        Ok(scanner) => Some(SCANNER.init(scanner)),
+        // The bridge cannot see either: capabilities carry no Bluetooth bit, so a
+        // controller that would not start is a fact only this node's own console
+        // knows. It sniffs Wi-Fi as normal, and idles if handed the scan anyway.
+        Err(ble::StartError::Controller) => {
             note!("bluetooth controller would not start; sniffing Wi-Fi only");
+            None
+        }
+        Err(ble::StartError::Refused { opcode, status }) => {
+            note!(
+                "bluetooth controller refused command {:#06X} with status {:#04X}; sniffing Wi-Fi only",
+                opcode,
+                status
+            );
             None
         }
     };
@@ -662,7 +674,7 @@ fn report(node: &mut Node, channel: u8) {
 /// Called once per scan on the node whose whole job this is. The node sniffs no
 /// Wi-Fi, so the scan competes with nothing for the antenna.
 fn report_ble(node: &mut Node, scanner: &mut ble::Scanner<'_>) {
-    let heard = scanner.sweep();
+    let sweep = scanner.sweep();
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
     let mut lines = 0u32;
@@ -677,15 +689,21 @@ fn report_ble(node: &mut Node, scanner: &mut ble::Scanner<'_>) {
         lines += report.with_msg(|msg| outgoing.offer(node, &msg, report.address, rssi, now));
     }
     lines += outgoing.flush(node, now);
-    if heard > 0 || outgoing.failed {
+    if sweep.heard > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(lines);
         note!(
-            "ble: {} heard, {} new, {} refused, {} unacked",
-            heard,
+            "ble: {} heard, {} events, {} new, {} refused, {} unacked",
+            sweep.heard,
+            sweep.events,
             lines,
             ble::refused(),
             node.unacked
         );
+    }
+    // The first silent scan, then about every five seconds of silence: a controller
+    // whose radio sleeps succeeds at every command and says nothing else.
+    if sweep.silent == 1 || (sweep.silent > 0 && sweep.silent.is_multiple_of(10)) {
+        note!("ble: no advertising events in {} scans", sweep.silent);
     }
 }
 
