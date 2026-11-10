@@ -279,6 +279,7 @@ impl Link {
                     self.confirm(shared);
                     if first {
                         claim_subscriber(shared);
+                        crate::last_panic::clear();
                     }
                 }
             }

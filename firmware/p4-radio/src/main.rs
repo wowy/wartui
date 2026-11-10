@@ -24,6 +24,7 @@
 mod ble;
 mod config;
 mod hci;
+mod last_panic;
 mod link;
 
 use core::cell::RefCell;
@@ -79,10 +80,11 @@ macro_rules! dma_buf {
     }};
 }
 
-/// Resets rather than hanging. The P4 sees the new life in the next hello and announces a
-/// fresh `Ready`.
+/// Resets rather than hanging, keeping the text for the next life to send (`src/last_panic.rs`).
+/// The P4 sees the new life in the next hello and announces a fresh `Ready`.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    last_panic::record(info);
     reboot()
 }
 
@@ -179,6 +181,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let shared = Shared::new(UP_QUEUE.take(), Ble::new(BLE_TX.take()));
+    // Queued behind the hello exchange, like the faults below.
+    last_panic::report(cause, &shared);
     shared.log(format_args!(
         "heap {} B, {} B free before Bluetooth starts",
         HEAP_RECLAIMED + HEAP_MAIN,

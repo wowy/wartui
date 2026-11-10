@@ -2080,6 +2080,7 @@ dependencies = [
  "esp-hal",
  "esp-radio",
  "esp-rtos",
+ "portable-atomic",
  "static_cell",
  "trouble-host",
  "wartui-firmware",

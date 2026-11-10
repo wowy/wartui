@@ -60,6 +60,9 @@ trouble-host = { version = "0.8.0", default-features = false, features = [
   "peripheral",
 ] }
 static_cell = "2.1.1"
+# The last panic's text, kept across the reset: `esp-hal` marks only `portable-atomic`'s
+# atomics as persistable.
+portable-atomic = { version = "1.15.0", default-features = false }
 # The reset funnel, the reset cause and the phase marker, shared with the P4, and the flash
 # half of updates, shared with the node, which brings `esp-storage` at the version
 # `firmware/common/Cargo.toml` holds.
