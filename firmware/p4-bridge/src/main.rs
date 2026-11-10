@@ -18,7 +18,8 @@
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
 //!   (`src/update.rs`), queues the host's records for its nodes, and fills the node image cache
-//!   in PSRAM that their update chunks are built from (`src/cache.rs`);
+//!   in PSRAM that their update chunks are built from (`src/cache.rs`). A central subscribed
+//!   over Bluetooth, through the C6, can be the host instead (`src/ble.rs`);
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
@@ -34,7 +35,9 @@
 //! - **the fleet planner** (`src/fleet.rs`) sleeps until its core's next deadline, or until an
 //!   input wakes it, then ticks the core and sends what it owes. It decides what every node
 //!   scans, reading their heartbeats, and authors every `Assign` and `Stop`. It boots stopped, and
-//!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
+//!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening;
+//! - **the spike's load generator** (`src/spike.rs`) sends a host the records a `SpikeLoad` asks
+//!   for, and the spike's counters.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
 //! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
@@ -60,6 +63,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod ble;
 mod cache;
 mod carrier;
 mod config;
@@ -70,11 +74,12 @@ mod host;
 mod link;
 mod radio;
 mod settings;
+mod spike;
 mod update;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::{join, join4};
+use embassy_futures::join::{join, join3, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -109,11 +114,12 @@ use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::ota::SECTOR;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
-    WIRE_MAX, encode_down,
+    BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held, PacketReader, RECORD_MAX,
+    RTS_THRESHOLD, WIRE_MAX, encode_down,
 };
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
+use crate::ble::{Ble, BleFrames};
 use crate::cache::Cache;
 use crate::carrier::{Carrier, Power};
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
@@ -143,6 +149,11 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
 /// Where the writer encodes the packet for the wire.
 static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
+/// Host stream bytes on their way into a `Down::HostBytes`.
+static HOST_BYTES: ConstStaticCell<[u8; HOST_BYTES_MAX]> =
+    ConstStaticCell::new([0; HOST_BYTES_MAX]);
+/// The host frame a central is part-way through writing.
+static BLE_FRAMES: ConstStaticCell<BleFrames> = ConstStaticCell::new(BleFrames::new());
 
 /// The fleet planner's core, stopped and cutting the default pool until `Shared::new` gives it the
 /// stored one. Built at compile time, so its slot table is never on the stack.
@@ -207,8 +218,12 @@ pub struct Shared {
     /// Raised by whatever may have given the link's writer something to send, so a waiting
     /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
     wake_link: Signal<NoopRawMutex, ()>,
-    /// Whether a host is present, by the frames it sends (`src/host.rs`).
+    /// Whether a host is present on UART0, by the frames it sends (`src/host.rs`).
     presence: Presence,
+    /// The host over Bluetooth, and whether it owns the host queue (`src/ble.rs`).
+    ble: Ble,
+    /// The spike's load generator and counters (`src/spike.rs`).
+    spike: spike::Spike,
     /// Raised when a host frame opens the gate.
     host_arrived: Signal<NoopRawMutex, ()>,
     /// Line errors on the host UART since boot.
@@ -279,6 +294,8 @@ impl Shared {
             }),
             wake_link: Signal::new(),
             presence: Presence::new(),
+            ble: Ble::new(BLE_FRAMES.take()),
+            spike: spike::Spike::new(),
             host_arrived: Signal::new(),
             host_uart_errors: Cell::new(0),
             status_asked: Signal::new(),
@@ -306,6 +323,18 @@ impl Shared {
         self.radio_link.set(radio_link);
     }
 
+    /// Whether a host owns the queue: UART0's, or a central's over Bluetooth.
+    fn host_open(&self) -> bool {
+        self.presence.is_open() || self.ble.owns()
+    }
+
+    /// A host attached, on UART0 or over Bluetooth: clear what was queued for another, and start
+    /// the spike's seq over.
+    fn host_attached(&self) {
+        self.host.borrow_mut().clear();
+        self.spike.attached();
+    }
+
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
     /// Dropped, and not counted, while no host is present. A backlog held for an absent host
@@ -316,14 +345,21 @@ impl Shared {
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
-        if !self.presence.is_open() {
+        let bluetooth = self.ble.owns();
+        if !bluetooth && !self.presence.is_open() {
             return;
         }
         let mut frame = [0; MAX_FRAME];
         // Every `BridgeToHost` fits `MAX_FRAME`.
         let Ok(len) = encode_frame(msg, &mut frame) else { return };
-        self.host.borrow_mut().push(&frame[..len], is_priority(msg));
-        self.pushed.signal(());
+        let taken = self.host.borrow_mut().push(&frame[..len], is_priority(msg));
+        self.spike.note_queued(len, taken);
+        // Each writer waits on its own signal: a central's is the C6 link's.
+        if bluetooth {
+            self.wake_link.signal(());
+        } else {
+            self.pushed.signal(());
+        }
     }
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.
@@ -331,7 +367,7 @@ impl Shared {
     /// Refused rather than evicting the oldest: an evicted record is lost with nothing to say
     /// so.
     #[inline(never)]
-    fn push_down(&self, down: &Down) -> bool {
+    fn push_down(&self, down: &Down<'_>) -> bool {
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
@@ -373,7 +409,7 @@ impl Shared {
     /// does. Only after a `Ready`, since the host drops what arrives on a connection before
     /// one, and only to a host that is present, since the lines are said once.
     fn flush_update_lines(&self) {
-        if !self.presence.is_open() {
+        if !self.host_open() {
             return;
         }
         update::say_lines(self);
@@ -420,9 +456,10 @@ impl Shared {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
-    /// A new pair life began: tell a host that is present, and the link's writer, since the
-    /// pair may bridge now.
+    /// A new pair life began: close the Bluetooth gate, since a restarted C6 has no subscriber,
+    /// then tell a host that is present, and the link's writer, since the pair may bridge now.
     fn new_life(&self) {
+        ble::on_new_life(self);
         self.wake_link.signal(());
         self.announce();
     }
@@ -612,7 +649,15 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier)
     });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
-    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
+    let link = RefCell::new(Link::new(
+        boot,
+        own_mac,
+        cause,
+        last_phase,
+        HELD.take(),
+        HOST_BYTES.take(),
+        link_image,
+    ));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     match join(
@@ -626,7 +671,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             carrier::run(carrier, i2c.ok(), shared),
             bus::run(bus_a, shared),
             bus::run(bus_b, shared),
-            join(fan::run(fan_pins, shared), fleet::run(shared)),
+            join3(fan::run(fan_pins, shared), fleet::run(shared), spike::run(shared)),
         ),
     )
     .await {}

@@ -37,6 +37,7 @@ use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
 use crate::radio_link::update::OP_MAX;
 use crate::reset::ResetCause;
+use crate::spike::{SpikeProfile, SpikeStats};
 use heapless::{String, Vec};
 use serde::Serialize;
 
@@ -80,6 +81,9 @@ pub const MAX_HOST_FRAME: usize = 1152;
 
 /// A record body a node sent, in transit to the host.
 pub type FromNodeBody = Vec<u8, MAX_NODE_PAYLOAD>;
+
+/// A [`BridgeToHost::SpikeLoad`] body, in transit to the host.
+pub type SpikeBody = Vec<u8, MAX_NODE_PAYLOAD>;
 
 /// A record body for a node, in transit to the P4.
 pub type ToNodeBody = Vec<u8, MAX_NODE_DOWN>;
@@ -278,6 +282,14 @@ pub enum HostToBridge {
     /// Idle every node ([`crate::fleet::Fleet::stop`]). No answer, as for
     /// [`HostToBridge::StartScan`].
     StopScan,
+    /// Run the Bluetooth host spike's load generator ([`crate::spike`]), answered by a stream of
+    /// [`BridgeToHost::SpikeLoad`].
+    SpikeLoad {
+        /// What to send.
+        profile: SpikeProfile,
+        /// Records in a [`SpikeProfile::Burst`]'s burst; the other profiles ignore it.
+        count: u32,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -422,6 +434,16 @@ pub enum BridgeToHost {
     /// [`BridgeToHost::Status`], and when a host attaches. A priority frame, so it reaches the
     /// host ahead of the heartbeats that show nodes adopting it.
     Fleet(Report),
+    /// One record from the spike's load generator ([`crate::spike`]).
+    SpikeLoad {
+        /// +1 per record, from 0 when a host attaches.
+        seq: u32,
+        /// The generator's pattern, ending in its [`crate::spike::crc32`].
+        #[serde(with = "bytes")]
+        body: SpikeBody,
+    },
+    /// The spike's counters ([`crate::spike::SpikeStats`]).
+    SpikeStats(SpikeStats),
 }
 
 /// How a [`HostToBridge::PowerCycle`] went.

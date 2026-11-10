@@ -193,6 +193,20 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 A refused or silent update also sends one line naming why: `the radio refused the bundled image:
 …` or `the radio stopped answering its update`.
 
+## Bluetooth host spike
+
+A central subscribed over Bluetooth, through the C6, can be the host instead of UART0
+(`src/ble.rs`). It owns the host queue while it stays subscribed, and the P4 sends it the host
+stream inside a credit window. A UART0 frame takes the queue back, so `wartui flash-bridge` works
+whatever the C6 says; once UART0 falls silent for 15 s, a central still subscribed takes it again.
+
+`HostToBridge::SpikeLoad` runs a load generator (`src/spike.rs`): a drive's rate, a 20-node
+fleet's, saturation, or a burst. `SpikeStats` reports the P4's counters every 2 s while a profile
+runs or a central owns the queue.
+
+`cargo build --release --features sink-discard` bundles a C6 image that claims a subscriber at
+boot and credits every byte at once, which measures the P4→C6 link's ceiling with no Bluetooth.
+
 ## Settings
 
 The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
@@ -270,6 +284,7 @@ as a drop in `Status`.
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
 | `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |
+| `WARTUI_P4_BLE_WINDOW_BYTES` | 16384 | host stream bytes sent to the C6 for a central and not yet credited |
 
 The C6 link's baud rate (4 Mbaud) is fixed, as part of its frozen core. The host link's is
 `wartui_proto::link::HOST_BAUD`.

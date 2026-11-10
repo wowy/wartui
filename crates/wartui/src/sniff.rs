@@ -18,6 +18,7 @@ use wartui_proto::bus::{
 };
 use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION};
 use wartui_proto::mac;
+use wartui_proto::spike::SpikeStats;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -278,6 +279,17 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
             println!("# {}", wartui_core::engine::power_cycled_text(board, *slot, *outcome));
         }
+        // The Bluetooth host spike's, which a phone reads; `sniff` never asks for them.
+        BridgeToHost::SpikeLoad { seq, body } => {
+            if args.verbose {
+                println!("# spike load {seq}, {} bytes", body.len());
+            }
+        }
+        BridgeToHost::SpikeStats(stats) => {
+            if args.verbose {
+                println!("{}", spike_stats_text(stats));
+            }
+        }
     }
 }
 
@@ -393,6 +405,48 @@ fn render(sighting: &SightingMsg<'_>) -> String {
         } else {
             format!("{:?}", String::from_utf8_lossy(sighting.ssid))
         }
+    )
+}
+
+/// The Bluetooth host spike's counters as one line, with the rate the C6 link carried while
+/// Bluetooth owned the queue: the bytes sent to the C6 over the time it owned it.
+fn spike_stats_text(stats: &SpikeStats) -> String {
+    let seconds = |ms: u32| format!("{}.{} s", ms / 1000, ms % 1000 / 100);
+    let rate = if stats.ble_owned_ms == 0 {
+        "no Bluetooth time yet".to_owned()
+    } else {
+        let per_s = u64::from(stats.sent_bytes) * 1000 / u64::from(stats.ble_owned_ms);
+        format!("{per_s} B/s sent while Bluetooth owned the queue")
+    };
+    let link = &stats.radio_link;
+    format!(
+        "# spike stats: up {}, Bluetooth owned {}, seq {}; {rate}\n\
+         #   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} B, \
+         {} refused, {} evicted\n\
+         #   mtu {}, phy {}, interval {} us; C6 link {} packets in, crc {}/{}, magic {}/{}, \
+         gap {}/{}, uart {}/{} (P4/C6)",
+        seconds(stats.uptime_ms),
+        seconds(stats.ble_owned_ms),
+        stats.seq,
+        stats.queued_bytes,
+        stats.sent_bytes,
+        stats.credited_bytes,
+        stats.delivered_bytes,
+        stats.bulk_high_water,
+        stats.refused,
+        stats.evicted,
+        stats.mtu,
+        stats.phy,
+        stats.interval_us,
+        link.packets,
+        link.crc_fail,
+        link.radio_crc_fail,
+        link.bad_magic,
+        link.radio_bad_magic,
+        link.seq_gap,
+        link.radio_seq_gap,
+        link.uart_errors,
+        link.radio_uart_errors,
     )
 }
 
@@ -592,5 +646,50 @@ mod tests {
             (1, 1, 0, 0)
         );
         assert!(counts.compat.is_empty());
+    }
+
+    #[test]
+    fn sniff_cmd_prints_spike_stats_with_rate_when_bluetooth_owned_the_queue() {
+        let stats = SpikeStats {
+            seq: 51_234,
+            uptime_ms: 125_400,
+            ble_owned_ms: 120_000,
+            queued_bytes: 53_000_000,
+            sent_bytes: 52_000_000,
+            credited_bytes: 51_990_000,
+            delivered_bytes: 0,
+            bulk_high_water: 243_000,
+            refused: 0,
+            evicted: 12,
+            mtu: 0,
+            phy: 0,
+            interval_us: 0,
+            radio_link: wartui_proto::link::RadioLinkStats {
+                packets: 81_234,
+                crc_fail: 1,
+                radio_crc_fail: 2,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            spike_stats_text(&stats),
+            "# spike stats: up 125.4 s, Bluetooth owned 120.0 s, seq 51234; \
+             433333 B/s sent while Bluetooth owned the queue\n\
+             #   queued 53000000 B, sent 52000000 B, credited 51990000 B, delivered 0 B; \
+             bulk high-water 243000 B, 0 refused, 12 evicted\n\
+             #   mtu 0, phy 0, interval 0 us; C6 link 81234 packets in, crc 1/2, magic 0/0, \
+             gap 0/0, uart 0/0 (P4/C6)"
+        );
+    }
+
+    #[test]
+    fn sniff_cmd_prints_spike_stats_without_rate_when_bluetooth_never_owned_the_queue() {
+        let text = spike_stats_text(&SpikeStats { sent_bytes: 5, ..SpikeStats::default() });
+        assert!(
+            text.starts_with(
+                "# spike stats: up 0.0 s, Bluetooth owned 0.0 s, seq 0; no Bluetooth time yet\n"
+            ),
+            "{text}"
+        );
     }
 }

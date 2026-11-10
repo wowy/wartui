@@ -455,7 +455,8 @@ impl FleetEngine {
             // `Ready` arrives as `LinkEvent::Connected`. An update status answers
             // `flash-bridge`, and a cache status and a send's outcome `ota`, which `run` never is.
             // GPS bytes are the runtime's, which feeds them to the position chain before the
-            // engine would see them.
+            // engine would see them. The Bluetooth host spike's load and counters are a phone's to
+            // read.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Delivered { .. }
             | BridgeToHost::Undelivered { .. }
@@ -463,7 +464,9 @@ impl FleetEngine {
             | BridgeToHost::Error { .. }
             | BridgeToHost::Gps { .. }
             | BridgeToHost::Update(_)
-            | BridgeToHost::CacheImage(_) => {}
+            | BridgeToHost::CacheImage(_)
+            | BridgeToHost::SpikeLoad { .. }
+            | BridgeToHost::SpikeStats(_) => {}
         }
     }
 

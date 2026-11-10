@@ -43,6 +43,10 @@
 //!
 //! **A host frame confirms the P4's image on trial once the C6 has said hello**, and
 //! `HostToBridge::Update` frames carry its next one; `src/update.rs` has both.
+//!
+//! **A central subscribed over Bluetooth can own the host queue instead** (`src/ble.rs`). Its
+//! frames take [`take_frame`] too, from their own accumulator, and while it owns the queue this
+//! writer sends nothing from it. A UART0 frame opens this gate and takes the queue back.
 
 use core::cell::Cell;
 
@@ -125,7 +129,7 @@ async fn read_host(
         mark(LoopPhase::DrainLink);
         for &byte in &last.as_slice()[..last_len] {
             if let Some(frame) = frames.push(byte) {
-                take_frame(frame, shared);
+                take_frame(frame, Source::Uart, shared);
             }
         }
         read.wait_for_done().await;
@@ -141,17 +145,27 @@ async fn read_host(
     }
 }
 
-/// Decode one host frame, open the gate, and carry out the command: on the P4, by queueing
-/// a record for a node, by passing a power-cycle to the carrier, or by telling the fleet planner,
-/// which sends what it owes before the next frame is read (`src/fleet.rs`).
+/// Where a host frame came from.
+#[derive(Clone, Copy)]
+pub enum Source {
+    /// UART0, whose frames open its gate.
+    Uart,
+    /// A central over Bluetooth, through the C6, which opens no gate: its subscription did.
+    Bluetooth,
+}
+
+/// Decode one host frame, open UART0's gate for one from UART0, and carry out the command: on
+/// the P4, by queueing a record for a node, by passing a power-cycle to the carrier, or by
+/// telling the fleet planner, which sends what it owes before the next frame is read
+/// (`src/fleet.rs`).
 ///
 /// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
-fn take_frame(frame: &mut [u8], shared: &Shared) {
+pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
     let Some(cmd) = &decoded else { return };
-    let opened = open(shared);
+    let opened = matches!(source, Source::Uart) && open(shared);
     let confirmed = crate::update::note_host_frame(shared);
     // An `Identify` announces below, and the announcement carries the confirm's line. Any other
     // frame announces a host's arrival here, and says the line to a host already announced to.
@@ -182,6 +196,7 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
         HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
         HostToBridge::StopScan => crate::fleet::stop(shared),
+        HostToBridge::SpikeLoad { profile, count } => crate::spike::take(shared, *profile, *count),
     }
 }
 
@@ -192,11 +207,22 @@ fn open(shared: &Shared) -> bool {
     if presence.present.get() {
         return false;
     }
-    // A new host: whatever is queued was for one that has gone.
-    shared.host.borrow_mut().clear();
+    // A new host: whatever is queued was for one that has gone, or for the central it takes the
+    // queue from.
+    crate::ble::uart_took(shared);
+    shared.host_attached();
     presence.present.set(true);
     shared.host_arrived.signal(());
     true
+}
+
+/// Close the gate, if it is open: drop any update session and the cached node image.
+pub fn close(shared: &Shared) {
+    if !shared.presence.present.replace(false) {
+        return;
+    }
+    crate::update::host_gone(shared);
+    crate::cache::host_gone(shared);
 }
 
 #[inline(never)]
@@ -210,7 +236,8 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
         buf.set_length(HOST_CHUNK);
         let chunk: &mut [u8; HOST_CHUNK] =
             buf.as_mut_slice().try_into().expect("the buffer holds a chunk");
-        let n = shared.host.borrow_mut().next_chunk(chunk);
+        // A central that owns the queue reads it through the C6 (`src/ble.rs`).
+        let n = if shared.ble.owns() { 0 } else { shared.host.borrow_mut().next_chunk(chunk) };
         if n == 0 {
             shared.pushed.wait().await;
             continue;
@@ -227,7 +254,8 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
     }
 }
 
-/// Close the gate once [`HOST_SILENCE`] passes without a host frame.
+/// Close the gate once [`HOST_SILENCE`] passes without a host frame, and hand the queue to a
+/// central still subscribed.
 async fn close_on_silence(shared: &Shared) -> ! {
     let presence = &shared.presence;
     loop {
@@ -241,9 +269,8 @@ async fn close_on_silence(shared: &Shared) -> ! {
             Timer::at(deadline).await;
             continue;
         }
-        presence.present.set(false);
-        crate::update::host_gone(shared);
-        crate::cache::host_gone(shared);
+        close(shared);
+        crate::ble::uart_gone(shared);
     }
 }
 

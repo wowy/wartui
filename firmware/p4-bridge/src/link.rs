@@ -30,6 +30,9 @@
 //! under a running P4 as well as the first exchange. The pair hears the seq of every C6
 //! packet, since a hello whose seq is not past the last is a restart.
 //!
+//! While a central over Bluetooth owns the host queue, each packet's room behind the queued records
+//! carries the host stream down as `Down::HostBytes`, inside the credit window (`src/ble.rs`).
+//!
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
 //! differently is sent none, and its records are not read. A C6 updating on this P4's revision
 //! has its records read too (`Pair::reads_records`), so its lines about the update reach the
@@ -56,9 +59,9 @@ use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
 use wartui_proto::radio_link::{
-    BODY_MAX, Chip, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
-    PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, WIRE_MAX, decode_up,
-    encode_packet, records, seal,
+    BODY_MAX, Chip, HEADER_LEN, HOST_BYTES_MAX, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX,
+    Packer, Packet, PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, WIRE_MAX,
+    decode_up, encode_packet, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{PairEvent, RadioState};
@@ -101,6 +104,8 @@ pub struct Link {
     /// A record from the down queue that did not fit the last packet. Static, since it
     /// holds up to [`RECORD_MAX`](wartui_proto::radio_link::RECORD_MAX) bytes.
     held: &'static mut Held,
+    /// Host stream bytes on their way into a `Down::HostBytes`. Static, for its size.
+    host_bytes: &'static mut [u8; HOST_BYTES_MAX],
     /// Sends the bundled image while the pair is updating. One per P4 life, as the pair
     /// attempts one update per life.
     sender: Sender<'static>,
@@ -117,6 +122,7 @@ impl Link {
         cause: ResetCause,
         phase: LoopPhase,
         held: &'static mut Held,
+        host_bytes: &'static mut [u8; HOST_BYTES_MAX],
         image: [u8; DIGEST_LEN],
     ) -> Self {
         Self {
@@ -130,6 +136,7 @@ impl Link {
             undecoded: 0,
             undecoded_said: 0,
             held,
+            host_bytes,
             sender: Sender::new(RADIO_IMAGE, RADIO_SHA256, &RADIO_DIGEST),
             install_noted: false,
             image,
@@ -211,7 +218,8 @@ impl Link {
         }
     }
 
-    /// Act on one record from the C6: a line for the host, or its counters.
+    /// Act on one record from the C6: a line for the host, its counters, or the Bluetooth host's
+    /// stream, credit and state.
     #[inline(never)]
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
@@ -221,6 +229,12 @@ impl Link {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());
             }
+            Ok(Up::HostBytes(bytes)) => crate::ble::take_bytes(shared, bytes),
+            Ok(Up::BleCredit { drained }) => crate::ble::on_credit(shared, drained),
+            // Only a bridging C6 is sent the stream; one updating is not.
+            Ok(Up::BleState(state)) if radio_up(shared) => crate::ble::on_state(shared, state),
+            Ok(Up::BleState(_)) => {}
+            Ok(Up::BleStats(stats)) => crate::ble::on_stats(shared, stats),
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }
@@ -254,6 +268,8 @@ impl Link {
         let mut packer = Packer::new(payload);
         let mut down = shared.down.borrow_mut();
         self.held.pack(&mut packer, |out| down.read(out).0);
+        drop(down);
+        crate::ble::pack(shared, &mut packer, self.host_bytes);
         (!packer.is_empty()).then(|| (Kind::Messages, packer.len()))
     }
 

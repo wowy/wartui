@@ -17,12 +17,13 @@ use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
     GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
     MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PowerOutcome, QueueId, QueueStat, QueueStats,
-    RadioInfo, RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
+    RadioInfo, RadioLinkStats, SpikeBody, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
     UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
     image_tag,
 };
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
+use wartui_proto::spike::{FULL_BODY, SpikeProfile, SpikeStats, body_checks, fill_body};
 
 fn sample_commands() -> Vec<HostToBridge, 16> {
     let assign = Assign { epoch: 3, flags: 0, channels: wartui_proto::plan::ChannelSet::empty() };
@@ -59,6 +60,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::SetPool { pool: ChannelPool::Eu }).expect("sample_commands has room");
     v.push(HostToBridge::StartScan { bluetooth: true }).expect("sample_commands has room");
     v.push(HostToBridge::StopScan).expect("sample_commands has room");
+    v.push(HostToBridge::SpikeLoad { profile: SpikeProfile::Burst, count: 300 })
+        .expect("sample_commands has room");
     v
 }
 
@@ -208,7 +211,43 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
     })))
     .expect("sample_events has room");
     v.push(BridgeToHost::Fleet(full_report())).expect("sample_events has room");
+    v.push(BridgeToHost::SpikeLoad {
+        seq: 9,
+        body: SpikeBody::from_slice(&[1, 2, 3]).expect("fits"),
+    })
+    .expect("sample_events has room");
+    v.push(BridgeToHost::SpikeStats(full_spike_stats())).expect("sample_events has room");
     v
+}
+
+/// Spike counters with every field distinct and largest.
+fn full_spike_stats() -> SpikeStats {
+    SpikeStats {
+        seq: u32::MAX,
+        uptime_ms: u32::MAX - 9,
+        ble_owned_ms: u32::MAX - 10,
+        queued_bytes: u32::MAX - 1,
+        sent_bytes: u32::MAX - 2,
+        credited_bytes: u32::MAX - 3,
+        delivered_bytes: u32::MAX - 4,
+        bulk_high_water: u32::MAX - 5,
+        refused: u32::MAX - 6,
+        evicted: u32::MAX - 7,
+        mtu: u16::MAX,
+        phy: u8::MAX,
+        interval_us: u32::MAX - 8,
+        radio_link: RadioLinkStats {
+            packets: u32::MAX,
+            crc_fail: u32::MAX,
+            bad_magic: u32::MAX,
+            seq_gap: u32::MAX,
+            uart_errors: u32::MAX,
+            radio_crc_fail: u32::MAX,
+            radio_bad_magic: u32::MAX,
+            radio_seq_gap: u32::MAX,
+            radio_uart_errors: u32::MAX,
+        },
+    }
 }
 
 /// A member in every slot, the most a [`BridgeToHost::Status`] carries.
@@ -615,7 +654,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 13, "one of each");
+    assert_eq!(commands.len(), 14, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -640,6 +679,8 @@ fn link_codec_pins_variant_indices_when_encoded() {
         ),
         (10, BridgeToHost::CacheImage(UpdateStatusBytes::new())),
         (11, BridgeToHost::Fleet(full_report())),
+        (12, BridgeToHost::SpikeLoad { seq: 0, body: SpikeBody::new() }),
+        (13, BridgeToHost::SpikeStats(SpikeStats::default())),
     ];
     for (want, event) in &events {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
@@ -1177,4 +1218,90 @@ fn cache_chunk_body_refuses_zero_and_oversize_len() {
     let oversize = u16::try_from(UPDATE_CHUNK + 1).expect("fits");
     assert_eq!(cache_chunk_body(&image, 1, 0, oversize, &mut out), None);
     assert_eq!(out, [0; UPDATE_CHUNK_MAX], "nothing written");
+}
+
+#[test]
+fn link_codec_pins_spike_load_bytes_when_host_asks_for_a_burst() {
+    // Postcard's variant index, the profile's, then the count as a varint.
+    let cmd = HostToBridge::SpikeLoad { profile: SpikeProfile::Burst, count: 300 };
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [13, 4, 0xAC, 0x02]);
+    for (want, profile) in [
+        SpikeProfile::Off,
+        SpikeProfile::Drive,
+        SpikeProfile::Fleet20,
+        SpikeProfile::Saturate,
+        SpikeProfile::Burst,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = encode_host_frame(&HostToBridge::SpikeLoad { profile, count: 0 }, &mut out)
+            .expect("encodes");
+        assert_eq!(frame_body(&out[..n])[1], want as u8, "{profile:?}");
+    }
+}
+
+#[test]
+fn link_codec_pins_spike_load_bytes_when_bridge_sends_a_record() {
+    // Postcard's variant index, the seq as a varint, then the body as a byte string.
+    let event =
+        BridgeToHost::SpikeLoad { seq: 300, body: SpikeBody::from_slice(&[9, 8]).expect("fits") };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [12, 0xAC, 0x02, 2, 9, 8]);
+}
+
+#[test]
+fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
+    let stats = SpikeStats {
+        seq: 1,
+        uptime_ms: 300,
+        ble_owned_ms: 200,
+        queued_bytes: 2,
+        sent_bytes: 3,
+        credited_bytes: 4,
+        delivered_bytes: 5,
+        bulk_high_water: 6,
+        refused: 7,
+        evicted: 8,
+        mtu: 9,
+        phy: 10,
+        interval_us: 11,
+        radio_link: RadioLinkStats { packets: 12, ..RadioLinkStats::default() },
+    };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&BridgeToHost::SpikeStats(stats), &mut out).expect("encodes");
+    #[rustfmt::skip]
+    let expected = [
+        13,                         // BridgeToHost::SpikeStats
+        1,                          // seq
+        0xAC, 0x02,                 // uptime_ms 300, varint
+        0xC8, 0x01,                 // ble_owned_ms 200, varint
+        2, 3, 4, 5, 6, 7, 8,        // queued_bytes to evicted
+        9, 10, 11,                  // mtu, phy, interval_us
+        12, 0, 0, 0, 0, 0, 0, 0, 0, // radio_link
+    ];
+    assert_eq!(frame_body(&out[..n]), expected);
+}
+
+#[test]
+fn link_round_trips_spike_load_when_body_is_full() {
+    let mut body = [0u8; FULL_BODY];
+    fill_body(u32::MAX, &mut body);
+    let event = BridgeToHost::SpikeLoad {
+        seq: u32::MAX,
+        body: SpikeBody::from_slice(&body).expect("fits"),
+    };
+    let decoded = round_trip(&event);
+    assert_eq!(decoded, event);
+    let BridgeToHost::SpikeLoad { body, .. } = decoded else { unreachable!() };
+    assert!(body_checks(&body));
+}
+
+#[test]
+fn link_round_trips_spike_stats_when_every_field_is_largest() {
+    let event = BridgeToHost::SpikeStats(full_spike_stats());
+    assert_eq!(round_trip(&event), event);
 }

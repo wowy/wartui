@@ -17,6 +17,11 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+# Bundle the C6 image built with its `sink-discard` feature (`build.rs`): a C6 that claims a
+# subscriber and credits the host stream at once, for measuring the P4→C6 link's ceiling.
+sink-discard = []
+
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }
 esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }

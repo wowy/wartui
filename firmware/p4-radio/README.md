@@ -7,6 +7,10 @@ hardware flow control, on the board's SDIO traces
 ([wiring](../p4-bridge/README.md#the-link-to-the-c6)). It never talks USB; the P4 owns the host
 link and the node buses. The queue size is in `src/config.rs`.
 
+The `sink-discard` feature discards the host stream the P4 sends for a Bluetooth central,
+crediting it at once, and claims a subscriber after the hello exchange. `firmware/p4-bridge`'s
+feature of the same name bundles it.
+
 ```sh
 cargo build --release
 ```

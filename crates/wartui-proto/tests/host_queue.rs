@@ -109,3 +109,46 @@ fn host_queue_sends_lone_terminator_when_cleared_mid_frame_and_nothing_follows()
     assert_eq!(chunk(&mut queue), [0x00]);
     assert!(chunk(&mut queue).is_empty());
 }
+
+#[test]
+fn host_queue_fills_short_slice_when_bluetooth_takes_less_than_a_chunk() {
+    // The Bluetooth sink takes the stream a packet's room at a time, not a chunk at a time.
+    let mut queue = HostQueue::<1024, 16384>::new();
+    assert!(queue.push(&[7u8; 300], false));
+    let mut out = [0u8; 100];
+    assert_eq!(queue.fill(&mut out), 100);
+    let mut got = out.to_vec();
+    // The priority frame waits for the bulk frame part-way out.
+    assert!(queue.push(&[8u8; 30], true));
+    loop {
+        let n = queue.fill(&mut out);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&out[..n]);
+    }
+    let mut want = vec![7u8; 300];
+    want.extend_from_slice(&[8u8; 30]);
+    assert_eq!(got, want);
+    assert_eq!(queue.fill(&mut []), 0);
+}
+
+#[test]
+fn host_queue_reports_bulk_room_when_frames_wait() {
+    let mut queue = HostQueue::<16, 64>::new();
+    assert_eq!(queue.bulk_room(), 64);
+    assert!(queue.push(&[1u8; 10], false));
+    // Each frame sits behind its two-byte length.
+    assert_eq!(queue.bulk_room(), 52);
+    assert!(queue.push(&[2u8; 5], true));
+    assert_eq!(queue.bulk_room(), 52);
+}
+
+#[test]
+fn host_queue_classifies_spike_messages_when_deciding_priority() {
+    use wartui_proto::link::SpikeBody;
+    use wartui_proto::spike::SpikeStats;
+    use wartui_proto::{BridgeToHost, host_queue::is_priority};
+    assert!(!is_priority(&BridgeToHost::SpikeLoad { seq: 0, body: SpikeBody::new() }));
+    assert!(is_priority(&BridgeToHost::SpikeStats(SpikeStats::default())));
+}

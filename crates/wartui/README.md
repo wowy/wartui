@@ -30,6 +30,9 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
 for one, since the P4 stops writing to a host it has not heard from in 15 s.
+With `--verbose`, a bridge built from the Bluetooth host spike also prints its `# spike stats`
+every 2 s: uptime, the time Bluetooth owned the host queue, the bytes sent to the C6 over that
+time, and the C6 link's counters.
 A node is known by its address wherever it sits, and the bridge plans by slot: a node moved to
 another slot leaves the plan at the old one and joins it at the new one on its next heartbeat.
 

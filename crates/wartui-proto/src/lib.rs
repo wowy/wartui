@@ -16,7 +16,7 @@
 //! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
 //! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
 //! the P4 keeps its settings in. [`fleet`] is the P4's fleet planner: who scans what, and the
-//! records that tell each node.
+//! records that tell each node. [`spike`] is the Bluetooth host spike's load generator.
 
 #![no_std]
 
@@ -40,6 +40,7 @@ pub mod plan;
 pub mod radio_link;
 pub mod reset;
 pub mod settings;
+pub mod spike;
 pub mod split;
 
 /// Re-exported so consumers can build link payloads without depending on

@@ -34,11 +34,16 @@
 //! work holds the task, so what the P4 sends meanwhile waits in DMA and the FIFO, then behind
 //! RTS; the P4 sends no records while it updates. `Install` on a verified session switches
 //! slots and reboots, and the P4 hears the new image's hello.
+//!
+//! **The host stream over Bluetooth is not carried yet.** The C6 sends its Bluetooth counters
+//! every [`BLE_STATS_EVERY`], zeros while no stack runs, and ignores `Down::HostBytes`. The
+//! `sink-discard` feature instead credits each one at once and claims a subscriber once the
+//! P4's hello arrives, so the P4 streams its host queue here; that measures the link's ceiling.
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
 
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
@@ -59,9 +64,9 @@ use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
-    PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
-    VerifyError, decode_down, encode_packet, encode_up, records, seal,
+    BAUD_RATE, BODY_MAX, BleState, BleStats, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello,
+    Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus,
+    SeqCheck, SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -77,6 +82,9 @@ const WRITE_POLL_HELD: Duration = Duration::from_millis(1);
 
 /// How often a C6 that has not heard the P4 looks again, with nothing else to wake it.
 const HELLO_EVERY: Duration = Duration::from_millis(HELLO_EVERY_MS);
+
+/// How often the C6 sends the P4 its Bluetooth counters.
+const BLE_STATS_EVERY: Duration = Duration::from_secs(2);
 
 /// The ring of encoded [`Up`] records waiting for a packet.
 pub type UpQueue = RefCell<FrameRing<UP_QUEUE_BYTES>>;
@@ -100,7 +108,7 @@ impl Shared {
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
-    pub fn push(&self, msg: &Up) {
+    pub fn push(&self, msg: &Up<'_>) {
         let mut record = [0; RECORD_MAX];
         // Only a record longer than any `Up` fails, and the ring counts its own drops.
         if let Ok(len) = encode_up(msg, &mut record) {
@@ -183,6 +191,10 @@ pub struct Link {
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
+    /// `Down::HostBytes` bytes taken since boot, wrapping: what `Up::BleCredit` reports.
+    drained: u32,
+    /// The Bluetooth counters `Up::BleStats` reports.
+    ble_stats: BleStats,
     /// A record from the ring that did not fit the last packet. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
     held: &'static mut Held,
@@ -213,6 +225,8 @@ impl Link {
             uart_errors: 0,
             undecoded: 0,
             undecoded_said: 0,
+            drained: 0,
+            ble_stats: BleStats::default(),
             held,
             updates,
         }
@@ -256,10 +270,14 @@ impl Link {
         match packet.kind {
             Kind::Hello => {
                 if Hello::decode(packet.payload).is_some() {
+                    let first = !self.heard_p4;
                     self.heard_p4 = true;
                     // What queued behind the hello exchange can go now.
                     shared.wake.signal(());
                     self.confirm(shared);
+                    if first {
+                        claim_subscriber(shared);
+                    }
                 }
             }
             Kind::Messages => {
@@ -343,6 +361,16 @@ impl Link {
         };
         match down {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared))),
+            Down::HostBytes(bytes) => self.host_bytes(bytes, shared),
+        }
+    }
+
+    /// Take the host stream's next bytes: credited at once in the discard sink, ignored
+    /// otherwise.
+    fn host_bytes(&mut self, bytes: &[u8], shared: &Shared) {
+        if cfg!(feature = "sink-discard") {
+            self.drained = self.drained.wrapping_add(bytes.len() as u32);
+            shared.push(&Up::BleCredit { drained: self.drained });
         }
     }
 
@@ -397,15 +425,45 @@ impl Link {
     }
 }
 
-/// Run the link forever: the reader and the writer.
+/// In the discard sink, tell the P4 a central has subscribed, so it streams its host queue
+/// here. A hello's arrival is the first moment the P4 reads records, and it reads this one
+/// after the new life it saw in the hello.
+fn claim_subscriber(shared: &Shared) {
+    if cfg!(feature = "sink-discard") {
+        shared.push(&Up::BleState(BleState {
+            subscribed: true,
+            mtu: 0,
+            phy: 0,
+            interval_us: 0,
+            conn: 0,
+        }));
+    }
+}
+
+/// Run the link forever: the reader, the writer and the Bluetooth counters.
 pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> ! {
     let Bus { rx, tx, rx_bufs, tx_buf, reader, body } = bus;
-    join(
+    join3(
         read_packets(rx, rx_bufs, reader, link, shared),
         write_packets(tx, tx_buf, body, link, shared),
+        report_ble(link, shared),
     )
     .await
     .0
+}
+
+/// Send the Bluetooth counters every [`BLE_STATS_EVERY`] once the P4 has said hello.
+async fn report_ble(link: &RefCell<Link>, shared: &Shared) -> ! {
+    loop {
+        Timer::after(BLE_STATS_EVERY).await;
+        let (heard, stats) = {
+            let link = link.borrow();
+            (link.heard_p4, link.ble_stats)
+        };
+        if heard {
+            shared.push(&Up::BleStats(stats));
+        }
+    }
 }
 
 /// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.

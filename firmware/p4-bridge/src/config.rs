@@ -31,3 +31,8 @@ pub const DOWN_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_P4_DOWN_QUEUE_
 ///
 /// A record that finds the queue full is refused at once, with `Undelivered`.
 pub const NODE_DOWN_BYTES: usize = env_usize(option_env!("WARTUI_P4_NODE_DOWN_BYTES"), 4160);
+
+/// Host stream bytes sent to the C6 as `Down::HostBytes` and not yet credited, at most
+/// (`src/ble.rs`). Small beside the bulk ring, so a slow central backs the stream up there, and
+/// the C6 link keeps room for its status, lines and updates.
+pub const BLE_WINDOW_BYTES: usize = env_usize(option_env!("WARTUI_P4_BLE_WINDOW_BYTES"), 16 * 1024);

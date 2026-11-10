@@ -40,6 +40,9 @@ const RADIO_INPUTS: &[&str] = &[
     "../../crates/wartui-proto/Cargo.toml",
 ];
 
+/// This crate's features that select the C6's of the same name, passed through.
+const RADIO_FEATURES: &[&str] = &["sink-discard"];
+
 /// The C6's build-time queue size (`firmware/p4-radio/src/config.rs`), passed through.
 const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES"];
 
@@ -80,6 +83,18 @@ fn bundle_radio() {
     let mut build = Command::new("cargo");
     build.current_dir(&radio).args(["build", "--release", "--locked"]);
     build.arg("--target-dir").arg(&target_dir);
+    // Read before the outer cargo's variables are cleared from the C6's build below.
+    let features: Vec<&str> = RADIO_FEATURES
+        .iter()
+        .copied()
+        .filter(|name| {
+            let var = format!("CARGO_FEATURE_{}", name.to_uppercase().replace('-', "_"));
+            env::var_os(var).is_some()
+        })
+        .collect();
+    if !features.is_empty() {
+        build.arg("--features").arg(features.join(","));
+    }
     for (key, _) in env::vars_os() {
         let Some(key) = key.to_str() else { continue };
         if (key.starts_with("CARGO_") && key != "CARGO_HOME") || OUTER.contains(&key) {

@@ -15,6 +15,13 @@ repository = "https://github.com/wowy/wartui"
 name = "wartui-p4-radio-fw"
 path = "src/main.rs"
 
+[features]
+# The Bluetooth host spike's discard sink: answer every `Down::HostBytes` with credit at once,
+# and claim a subscriber after the hello exchange, so the P4 routes its host queue here with no
+# Bluetooth present. For measuring the P4→C6 link's ceiling. `firmware/p4-bridge`'s feature of
+# the same name builds the bundled image with it.
+sink-discard = []
+
 [dependencies]
 # Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
 # for the reasons `README.md` § "Dependency versions" gives. Each that takes a chip feature

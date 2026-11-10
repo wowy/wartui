@@ -33,10 +33,12 @@ pub const fn is_priority(msg: &BridgeToHost) -> bool {
         | BridgeToHost::Update(_)
         | BridgeToHost::CacheImage(_)
         | BridgeToHost::PowerCycled { .. }
-        | BridgeToHost::Fleet(_) => true,
-        BridgeToHost::FromNode { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => {
-            false
-        }
+        | BridgeToHost::Fleet(_)
+        | BridgeToHost::SpikeStats(_) => true,
+        BridgeToHost::FromNode { .. }
+        | BridgeToHost::Log { .. }
+        | BridgeToHost::Gps { .. }
+        | BridgeToHost::SpikeLoad { .. } => false,
     }
 }
 
@@ -84,13 +86,24 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
     ///
     /// Returns 0 when nothing is queued.
     pub fn next_chunk(&mut self, out: &mut [u8; HOST_CHUNK]) -> usize {
+        self.fill(out)
+    }
+
+    /// Fill `out` with the next bytes for the host, as [`HostQueue::next_chunk`] does a chunk,
+    /// and return how many.
+    ///
+    /// Returns 0 when nothing is queued or `out` is empty.
+    pub fn fill(&mut self, out: &mut [u8]) -> usize {
         let mut filled = 0;
+        if out.is_empty() {
+            return 0;
+        }
         if self.cut {
             self.cut = false;
             out[0] = 0x00;
             filled = 1;
         }
-        while filled < HOST_CHUNK {
+        while filled < out.len() {
             // Priority only at a boundary: a frame part-way out is finished first.
             let from_priority = if self.priority.mid_frame() {
                 true
@@ -110,6 +123,12 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
             };
         }
         filled
+    }
+
+    /// Bytes free in the bulk ring, length prefixes included.
+    #[must_use]
+    pub const fn bulk_room(&self) -> usize {
+        B - self.bulk.len_bytes()
     }
 
     /// Both rings' depth, deepest point and drops, priority first.

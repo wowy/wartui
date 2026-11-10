@@ -4,13 +4,14 @@ use heapless::Vec;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
-    BODY_MAX, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN, HELLO_LEN, Held, Hello, Kind, MAGIC,
-    PAYLOAD_MAX, Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
-    WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up, records, seal, verify,
+    BODY_MAX, BleState, BleStats, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN, HELLO_LEN,
+    HOST_BYTES_MAX, Held, Hello, Kind, MAGIC, PAYLOAD_MAX, Packer, PacketReader, RECORD_MAX,
+    RadioStatus, SeqCheck, SeqNote, Up, VerifyError, WIRE_MAX, decode_down, decode_up, encode_down,
+    encode_packet, encode_up, host_bytes_fit, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
 
-fn log(text: &str) -> Up {
+fn log(text: &str) -> Up<'_> {
     Up::Log { message: text.try_into().unwrap() }
 }
 
@@ -469,10 +470,73 @@ fn radio_link_largest_messages_fit_one_packet() {
         uart_errors: u32::MAX,
     });
     let line = Up::Error { message: LogStr::try_from("x".repeat(96).as_str()).unwrap() };
-    for up in [status, line] {
+    let stream = [0xFFu8; HOST_BYTES_MAX];
+    let stats = Up::BleStats(BleStats {
+        notifications: u32::MAX,
+        notified_bytes: u32::MAX,
+        delivered_bytes: u32::MAX,
+        link_errors: u32::MAX,
+        heap_high_water: u32::MAX,
+    });
+    let state = Up::BleState(BleState {
+        subscribed: true,
+        mtu: u16::MAX,
+        phy: u8::MAX,
+        interval_us: u32::MAX,
+        conn: u8::MAX,
+    });
+    for up in [status, line, Up::HostBytes(&stream), stats, state] {
         let len = encode_up(&up, &mut out).unwrap();
-        assert!(len + 2 <= PAYLOAD_MAX, "{up:?} is {len} bytes");
+        assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
     }
+    let len = encode_down(&Down::HostBytes(&stream), &mut out).unwrap();
+    assert_eq!(len, RECORD_MAX);
+}
+
+#[test]
+fn radio_link_host_bytes_fit_room_when_record_is_any_size() {
+    let stream = [0x5Au8; RECORD_MAX];
+    let mut out = [0u8; BODY_MAX];
+    assert_eq!(HOST_BYTES_MAX, RECORD_MAX - 3);
+    for room in 0..=RECORD_MAX {
+        let fit = host_bytes_fit(room);
+        if room < 2 {
+            assert_eq!(fit, 0, "room {room}");
+            continue;
+        }
+        let down = encode_down(&Down::HostBytes(&stream[..fit]), &mut out).unwrap();
+        assert!(down <= room, "room {room}: {fit} bytes took {down}");
+        // One more byte would not fit.
+        let over = encode_down(&Down::HostBytes(&stream[..fit + 1]), &mut out).unwrap();
+        assert!(over > room, "room {room}: {} bytes took {over}", fit + 1);
+        let up = encode_up(&Up::HostBytes(&stream[..fit]), &mut out).unwrap();
+        assert_eq!(up, down, "room {room}");
+    }
+}
+
+#[test]
+fn radio_link_packer_pushes_record_written_in_place_when_it_fits() {
+    let mut payload = [0u8; 16];
+    let mut packer = Packer::new(&mut payload);
+    assert!(packer.push_encoded(&[1, 2]));
+    // Two records' prefixes and the first's two bytes leave ten.
+    assert_eq!(packer.room(), 10);
+    assert!(packer.push_with(|out| encode_down(&Down::HostBytes(&[7; 8]), out).ok()));
+    assert_eq!(packer.room(), 0);
+    assert!(!packer.push_with(|out| encode_down(&Down::GetRadioStatus, out).ok()));
+    let len = packer.len();
+    assert_eq!(len, 16);
+    let got: std::vec::Vec<_> = records(&payload[..len]).collect();
+    assert_eq!(got, [&[1u8, 2][..], &[1, 8, 7, 7, 7, 7, 7, 7, 7, 7]]);
+}
+
+#[test]
+fn radio_link_packer_changes_nothing_when_writer_refuses() {
+    let mut payload = [0u8; 16];
+    let mut packer = Packer::new(&mut payload);
+    assert!(!packer.push_with(|_| None));
+    assert!(!packer.push_with(|_| Some(0)));
+    assert!(packer.is_empty());
 }
 
 #[test]
@@ -522,6 +586,48 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_up(&error, &mut out).unwrap();
     assert_eq!(out[..len], [2, 2, b'n', b'o'], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), error);
+
+    let down = Down::HostBytes(&[0, 1, 2]);
+    let len = encode_down(&down, &mut out).unwrap();
+    // Down::HostBytes, then the bytes, length first.
+    assert_eq!(out[..len], [1, 3, 0, 1, 2], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), down);
+
+    let up = Up::HostBytes(&[0xAA, 0xBB]);
+    let len = encode_up(&up, &mut out).unwrap();
+    assert_eq!(out[..len], [3, 2, 0xAA, 0xBB], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), up);
+
+    let credit = Up::BleCredit { drained: 300 };
+    let len = encode_up(&credit, &mut out).unwrap();
+    assert_eq!(out[..len], [4, 0xAC, 0x02], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), credit);
+
+    let state =
+        Up::BleState(BleState { subscribed: true, mtu: 247, phy: 2, interval_us: 7_500, conn: 1 });
+    let len = encode_up(&state, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        5,          // Up::BleState
+        1,          // subscribed
+        0xF7, 0x01, // mtu 247, varint
+        2,          // phy
+        0xCC, 0x3A, // interval_us 7500, varint
+        1,          // conn
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), state);
+
+    let stats = Up::BleStats(BleStats {
+        notifications: 1,
+        notified_bytes: 2,
+        delivered_bytes: 3,
+        link_errors: 4,
+        heap_high_water: 5,
+    });
+    let len = encode_up(&stats, &mut out).unwrap();
+    assert_eq!(out[..len], [6, 1, 2, 3, 4, 5], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), stats);
 }
 
 #[test]

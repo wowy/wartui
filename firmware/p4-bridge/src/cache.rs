@@ -140,7 +140,7 @@ pub fn to_node_chunk(
 
 /// Say there is no PSRAM, once, to the first host present for an announcement.
 pub fn say(shared: &Shared) {
-    if !shared.presence.is_open() {
+    if !shared.host_open() {
         return;
     }
     let mut cache = shared.cache.borrow_mut();

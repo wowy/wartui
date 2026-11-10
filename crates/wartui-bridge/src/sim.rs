@@ -569,6 +569,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
             HostToBridge::Identify => None,
             // No receiver on its GPS port to write to.
             HostToBridge::GpsWrite { .. } => None,
+            // The Bluetooth host spike's load generator is the P4's alone.
+            HostToBridge::SpikeLoad { .. } => None,
             // Answered above.
             HostToBridge::GetStatus
             | HostToBridge::StartScan { .. }
