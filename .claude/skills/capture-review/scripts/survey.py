@@ -30,6 +30,10 @@ FLAGS = []  # (severity, area, text, sql)
 # Mirrors `ResetCause::is_fault` in crates/wartui-proto/src/reset.rs.
 NOT_FAULTS = ("power_on", "external")
 
+# Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
+# only, as the store does.
+SCHEMA_VERSION = 3
+
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
 
@@ -314,6 +318,20 @@ def provenance(db, ctx):
     if pools:
         later = "".join(f" -> {new} at {rel(at)}" for at, new in pools[1:])
         print(f"  pool      {pools[0][1]}{later}")
+    # The scan mode is the bridge's too: `none` until its first report, then each change.
+    modes = [(None, ctx["settings"]["mode"])] if "mode" in ctx.get("settings", {}) else []
+    modes += [(at, ch["mode"][1]) for at, ch in ctx.get("settings_changes", []) if "mode" in ch]
+    if modes:
+        later = "".join(f" -> {new} at {rel(at)}" for at, new in modes[1:])
+        print(f"  mode      {modes[0][1]}{later}")
+        if not any(m in ("wifi", "wifi+bluetooth") for _, m in modes):
+            flag("WARN", "plan", "the scan mode never left stopped: no node was given a share",
+                 "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'")
+        elif ctx.get("end") and modes[-1][1] != "stopped":
+            flag("INFO", "plan",
+                 f"the capture ended with the scan mode {modes[-1][1]}: the bridge did not report "
+                 "its scan stopped before the host quit, so the fleet was left scanning",
+                 "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'")
     if "settings_final" in ctx:
         ctx["settings"] = {**ctx.get("settings", {}), **ctx["settings_final"]}
     raw_values = {c[1] for _, ch in ctx.get("settings_changes", []) for k, c in ch.items()
@@ -355,7 +373,7 @@ def nodes(db, ctx):
         flag(
             "INFO",
             "config",
-            f"{label(ble_slot)} is the bridge's Bluetooth slot, but no assignment gave a node the "
+            f"{label(ble_slot)} is the bridge's Bluetooth slot, but no share gave a node the "
             "Bluetooth job, so no node heartbeated from that slot and none scanned Bluetooth",
             "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
         )
@@ -378,6 +396,16 @@ def heartbeats(db, ctx):
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
+    # Each slot's shares in report order, for the epoch reboot rule: (rx_at, epoch), 0 withdrawn.
+    plan = defaultdict(list)
+    for at, slot, epoch in db.q("SELECT rx_at, slot, epoch FROM assignment ORDER BY id"):
+        plan[slot].append((at, epoch))
+
+    def current_share(slot, rx):
+        """The epoch of the share the plan gave `slot` as of `rx`, None for none."""
+        epoch = next((e for at, e in reversed(plan[slot]) if at <= rx), 0)
+        return epoch or None
+
     ble_nodes = ctx.get("ble_nodes", set())
     total_reversals = 0
     for mac, hs in sorted(per.items(), key=lambda item: node_order(item[0])):
@@ -404,9 +432,10 @@ def heartbeats(db, ctx):
                 if slot != p_slot:
                     moves.append((rx, p_slot, slot))
                 # As the engine reads a restart: the counter fell, or a live beat reports no
-                # epoch after a live beat reported a real one.
+                # epoch after a live beat reported the share the plan still gives its slot.
+                share = current_share(slot, rx)
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
-                            or (live != 0 and epoch == 0 and held not in (None, 0)))
+                            or (live != 0 and epoch == 0 and share is not None and held == share))
                 if rebooted:
                     reboots += 1
                     boot_start = i
@@ -543,16 +572,33 @@ def heartbeats(db, ctx):
              "ORDER BY d LIMIT 10")
 
 
+def share_node(db, slot, at, epoch):
+    """The node a share row is for, which the row does not name: the first to heartbeat from its
+    slot at or after the row carrying its epoch, else the slot's next heartbeat, else None."""
+    return (db.one("SELECT node_mac FROM heartbeat WHERE slot=? AND rx_at>=? AND epoch=? "
+                   "ORDER BY id LIMIT 1", (slot, at, epoch))
+            or db.one("SELECT node_mac FROM heartbeat WHERE slot=? AND rx_at>=? ORDER BY id LIMIT 1",
+                      (slot, at)))
+
+
+def share_rows(db):
+    """Every assignment row, by id, as (id, rx_at, slot, node, epoch, channels, ble), with the
+    node resolved by `share_node`."""
+    rows = db.q("SELECT id, rx_at, slot, epoch, channels, ble FROM assignment ORDER BY id")
+    return [(i, at, slot, share_node(db, slot, at, epoch), epoch, chans, ble)
+            for i, at, slot, epoch, chans, ble in rows]
+
+
 def assignments(db, ctx):
     section("assignments")
-    rows = db.q(
-        "SELECT node_mac, counter, wire_version, channels, ble, created_at, delivered_at, outcome, "
-        "latency_us FROM assignment ORDER BY id"
-    )
-    outcomes = Counter(r[7] for r in rows)
-    lat = [r[8] for r in rows if r[8] is not None]
-    print(f"  rows {len(rows)}  outcomes {dict(outcomes)}  latency {spread(lat, ' us')}")
-    ble = {r[0] for r in rows if r[4]}
+    # One row per slot whose share changed between two of the P4's `Fleet` reports. The host
+    # sends nothing and sees no delivery: a heartbeat carrying the row's epoch is adoption.
+    # A row names no node: the one whose heartbeat from the slot carries the epoch took it.
+    rows = share_rows(db)
+    withdrawn = sum(r[4] == 0 for r in rows)
+    unnamed = sum(r[3] is None for r in rows)
+    print(f"  rows {len(rows)}  withdrawn {withdrawn}  with no heartbeat after {unnamed}")
+    ble = {r[3] for r in rows if r[6] and r[3] is not None}
     ctx["ble_nodes"] = ble
     if ble:
         print(f"  bluetooth job given to {', '.join(name(m) for m in sorted(ble, key=node_order))}")
@@ -560,64 +606,53 @@ def assignments(db, ctx):
         hours = (ctx["end"] - ctx["start"]) / 3_600_000
         if hours > 0:
             print(f"  {len(rows) / hours:.1f} assignment rows per hour")
-    bad = [r for r in rows if r[7] != "acked"]
-    if bad:
-        flag("WARN", "admin",
-             f"{len(bad)} assignment(s) not acked: {dict(Counter(r[7] for r in bad))}",
-             "SELECT * FROM assignment WHERE outcome IS NOT 'acked'")
-    counters = sorted(r[1] for r in rows)
-    if counters:
-        missing = sorted(set(range(counters[0], counters[-1] + 1)) - set(counters))
-        if missing:
-            print(f"  epochs with no row: {missing[:20]}{' ...' if len(missing) > 20 else ''}")
     assigned = defaultdict(set)
-    for r in rows:
-        chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
-        assigned[r[0]] |= set(chans)
-        print(
-            f"  {name(r[0])}  epoch {r[1]} (wire {r[2]})  {r[7]}  at {rel(r[5])}  "
-            f"{'BLE' if r[4] else ''}  {len(chans)} channels"
-        )
+    for _, at, slot, mac, epoch, bits, is_ble in rows:
+        chans = [c for i, c in enumerate(SCAN_CHANNELS) if bits >> i & 1]
+        if mac is not None:
+            assigned[mac] |= set(chans)
+        who = name(mac) if mac is not None else label(slot)
+        what = "withdrawn" if epoch == 0 else f"epoch {epoch}  {'BLE' if is_ble else ''}  " \
+                                                f"{len(chans)} channels"
+        print(f"  {who}  {what}  at {rel(at)}")
     ctx["assigned"] = assigned
-    print("  final share per node:")
+    print("  final share per slot:")
     last = {}
     for r in rows:
-        last[r[0]] = r
-    for mac, r in sorted(last.items(), key=lambda item: node_order(item[0])):
-        chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[3] >> i & 1]
-        print(f"    {name(mac)}  " + " ".join(str(c) for c in chans)
-              + ("  BLE" if r[4] else ""))
+        last[r[2]] = r
+    for slot, r in sorted(last.items()):
+        chans = [c for i, c in enumerate(SCAN_CHANNELS) if r[5] >> i & 1]
+        who = name(r[3]) if r[3] is not None else label(slot)
+        if r[4] == 0:
+            print(f"    {who}  withdrawn")
+        else:
+            print(f"    {who}  " + " ".join(str(c) for c in chans) + ("  BLE" if r[6] else ""))
 
-    # Adoption: a live heartbeat well after an acked assignment should carry that assignment's wire
-    # epoch, or the epoch of any assignment sent since. An unacked or silent one may still have
-    # landed (the transfer arrived, its ack did not), which the engine allows for too.
+    # Adoption: while a share stands (from its row to the slot's next row, or the capture's end),
+    # a live heartbeat from its node should carry its epoch. A node that kept heartbeating past
+    # the grace and never did, never took the share.
     hb = ctx.get("hb", {})
     grace = 15_000
-    for mac in {r[0] for r in rows}:
-        sent = sorted((r[5], r[2], r[7], r[6]) for r in rows if r[0] == mac)
-        if not any(o == "acked" for _, _, o, _ in sent):
+    never = defaultdict(list)
+    for k, (_, at, slot, mac, epoch, _, _) in enumerate(rows):
+        if epoch == 0 or mac is None:
             continue
-        mismatched = 0
-        first = None
+        until = next((r[1] for r in rows[k + 1:] if r[2] == slot), None)
         restarted_at = [r[0] for r in ctx.get("restarts", []) if r[1] == mac]
-        for h in hb.get(mac, []):
-            if h[7] == 0:
-                continue  # replayed from the backlog: its epoch is history, its rx_at is late
-            if any(0 <= h[2] - t <= 30_000 for t in restarted_at):
-                continue  # a restarted node holds no epoch until the host re-sends one
-            settled = [i for i, (_, _, o, d) in enumerate(sent)
-                       if o == "acked" and d and d <= h[2] - grace]
-            if not settled:
-                continue
-            fine = {w for t, w, _, _ in sent[settled[-1]:] if t <= h[2]}
-            if h[4] not in fine:
-                mismatched += 1
-                first = first or h[2]
-        if mismatched:
-            flag("WARN", "admin",
-                 f"{name(mac)}: {mismatched} live heartbeats >15 s after an acked assignment carry an "
-                 f"epoch it was never sent since (first at {rel(first)}): acked but not adopted",
-                 f"SELECT id, rx_at, epoch FROM heartbeat WHERE hex(node_mac)='{mac.hex().upper()}'")
+        live = [h for h in hb.get(mac, [])
+                if h[7] != 0 and h[2] >= at and (until is None or h[2] < until)
+                and not any(0 <= h[2] - t <= 30_000 for t in restarted_at)]
+        if any(h[4] == epoch for h in live):
+            continue
+        if any(h[2] >= at + grace for h in live):
+            never[mac].append((at, epoch))
+    for mac, shares in sorted(never.items(), key=lambda item: node_order(item[0])):
+        at, epoch = shares[0]
+        flag("WARN", "plan",
+             f"{name(mac)}: {len(shares)} share(s) never adopted: its live heartbeats >15 s "
+             f"after the row never carried the epoch (first epoch {epoch} at {rel(at)})",
+             f"SELECT id, rx_at, slot, epoch FROM heartbeat WHERE hex(node_mac)="
+             f"'{mac.hex().upper()}' AND rx_at >= {at} ORDER BY id LIMIT 20")
 
 
 def batch_gaps(db, ctx):
@@ -1329,12 +1364,16 @@ def main():
                                    "octets")
     args = ap.parse_args()
     db = Db(args.db)
+    found = db.one("PRAGMA user_version")
+    if found != SCHEMA_VERSION:
+        sys.exit(f"{args.db} is schema version {found}, and this survey reads {SCHEMA_VERSION} "
+                 "only: survey it with the wartui build that wrote it")
     ctx = {"only": args.node.upper() if args.node else None}
     print(f"survey of {args.db} (read-only)")
     print(f"tables: {', '.join(sorted(db.tables))}")
     provenance(db, ctx)
     # The Bluetooth node, read early so nodes() and heartbeats() can tell it from the sweepers.
-    ctx["ble_nodes"] = {m for (m,) in db.q("SELECT DISTINCT node_mac FROM assignment WHERE ble=1")}
+    ctx["ble_nodes"] = {r[3] for r in share_rows(db) if r[6] and r[3] is not None}
     nodes(db, ctx)
     heartbeats(db, ctx)
     assignments(db, ctx)

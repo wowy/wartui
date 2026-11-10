@@ -3,18 +3,20 @@
 //! five or seven on a carrier, and none without one.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the acknowledgment. The P4 checks
-//! framing only and reads no record. Each record a node sends goes to the host as a `FromNode`,
-//! and its transfer is acknowledged in the next one to that slot. Each `ToNode` the host sends
-//! waits in its slot's [`Downlink`] until a transfer carries it and the node acknowledges it,
-//! and is answered `Delivered`, or `Undelivered` with why: no node in the slot, a full queue, a
-//! body too long, or no ack after every try. The [`Downlink`] keeps two flights out, numbered,
-//! and tags its first to a slot, and its first after giving up, with `SYNC`, since a P4 cannot
-//! know where a node's numbering stands. A slot that loses its node answers for everything it
-//! held, so its next flight carries `SYNC` too. A header with no ack, from a node that has taken
-//! nothing since boot, sends the oldest flight out again with `SYNC`. The host reader queues a
-//! record and raises its bus's signal, so a waiting scheduler wakes. The one record the P4
-//! writes, an `UpdateChunk` it builds from its node image cache for a `ToNodeChunk`
-//! (`src/cache.rs`), is queued and answered the same way.
+//! framing, and reads only heartbeats, which its fleet planner takes (`src/fleet.rs`). Each record
+//! a node sends goes to the host as a `FromNode`, heartbeats included, and its transfer is
+//! acknowledged in the next one to that slot. Each `ToNode` the host sends, and each `Assign` and
+//! `Stop` the planner sends, waits in its slot's [`Downlink`] until a transfer carries it and the
+//! node acknowledges it, and is answered `Delivered`, or `Undelivered` with why: no node in the
+//! slot, a full queue, a body too long, or no ack after every try. The planner's answers go to it
+//! and the host's to the host, split by id ([`fleet::answer`]). The [`Downlink`] keeps two
+//! flights out, numbered, and tags its first to a slot, and its first after giving up, with
+//! `SYNC`, since a P4 cannot know where a node's numbering stands. A slot that loses its node
+//! answers for everything it held, so its next flight carries `SYNC` too. A header with no ack,
+//! from a node that has taken nothing since boot, sends the oldest flight out again with `SYNC`.
+//! The host reader queues a record and raises its bus's signal, so a waiting scheduler wakes. An
+//! `UpdateChunk` the P4 builds from its node image cache for a `ToNodeChunk` (`src/cache.rs`) is
+//! queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks
@@ -47,8 +49,11 @@
 //!   [`PROBE_EVERY`]. A slot is present after one good transfer, and absent after
 //!   [`ABSENT_AFTER`] transfers in a row that fail the magic, once [`ABSENT_SPAN`] has passed
 //!   since the last that had it. A node erasing flash cannot re-arm, so it fails the magic
-//!   until the erase ends, and a miss count alone would drop it mid-update. Each `Status` tells
-//!   the host which slots are present, and its planner drops a node whose slot is absent.
+//!   until the erase ends, and a miss count alone would drop it mid-update. Each change of
+//!   presence goes to the fleet planner, which drops a node whose slot is absent, and each
+//!   `Status` tells the host which slots are present. A slot is marked present before the records
+//!   of its first good transfer are forwarded, so the planner's reply to its first heartbeat
+//!   reaches a downlink that takes it.
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
 //!   If the retry fails too, the slot is not clocked again for [`MISS_BACKOFF`], in an IRQ pass
@@ -78,12 +83,12 @@ use esp_hal::time::Rate;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::bus::{
     AckTracker, Downlink, Header, NodeBoard, SeqCheck, SeqNote, Slot as BusSlot, TRANSFER_LEN,
-    VerifyError, verify,
+    UpType, VerifyError, verify,
 };
 use wartui_proto::link::{BridgeToHost, FromNodeBody, LogStr, QueueId, QueueStat, Undelivered};
 
-use crate::Shared;
 use crate::config::NODE_DOWN_BYTES;
+use crate::{Shared, fleet};
 
 /// The bus clock, measured on the carrier.
 pub const BUS_HZ: u32 = 8_000_000;
@@ -213,15 +218,26 @@ impl Nodes {
 
 /// Queue one record from the host for the node in `slot`, or answer at once why not.
 pub fn to_node(shared: &Shared, slot: BusSlot, id: u16, kind: u8, body: &[u8]) {
-    let nodes = &shared.nodes;
-    let queued = match nodes.driven(slot) {
-        Some(k) if nodes.is_present(k) => nodes.downlinks.borrow_mut()[k].push(id, kind, body),
-        _ => Err(Undelivered::NoNode),
-    };
-    match queued {
-        Ok(()) => nodes.queued[usize::from(slot.bus())].signal(()),
-        Err(reason) => shared.push_host(&BridgeToHost::Undelivered { id, reason }),
+    if let Err(reason) = push_down(shared, slot, id, kind, body) {
+        shared.push_host(&BridgeToHost::Undelivered { id, reason });
     }
+}
+
+/// Queue one record for the node in `slot` and wake its bus, or say why not.
+pub fn push_down(
+    shared: &Shared,
+    slot: BusSlot,
+    id: u16,
+    kind: u8,
+    body: &[u8],
+) -> Result<(), Undelivered> {
+    let nodes = &shared.nodes;
+    match nodes.driven(slot) {
+        Some(k) if nodes.is_present(k) => nodes.downlinks.borrow_mut()[k].push(id, kind, body)?,
+        _ => return Err(Undelivered::NoNode),
+    }
+    nodes.queued[usize::from(slot.bus())].signal(());
+    Ok(())
 }
 
 /// Each bus's slots and controller, in statics so its future stays small.
@@ -742,7 +758,7 @@ impl Controller {
             (gave_up, downlink.fill(buf, header))
         };
         for id in gave_up.into_iter().flatten() {
-            shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::Timeout });
+            fleet::answer(shared, id, fleet::Outcome::Undelivered(Undelivered::Timeout));
         }
         len
     }
@@ -760,26 +776,28 @@ impl Controller {
     ) -> Outcome {
         let k = self.driven(i);
         let id = self.slot_id(i);
+        let verified = verify(buf);
+        let (was_present, prev_misses, prev_heard) =
+            (self.slots[i].present, self.slots[i].misses, self.slots[i].heard);
+        // Present before its records are forwarded, so the planner's reply to a first heartbeat
+        // is queued.
+        let arrived = !was_present && verified.is_ok();
+        if arrived {
+            self.arrive(i, shared);
+        }
         let slot = &mut self.slots[i];
-        let (was_present, prev_misses, prev_heard) = (slot.present, slot.misses, slot.heard);
-        let outcome = match verify(buf) {
+        let outcome = match verified {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
                 slot.misses = 0;
                 slot.heard = Some(end);
-                if !slot.present {
-                    // A node that arrives may be a new life, whose seq restarts.
-                    slot.tracker = AckTracker::new();
-                    slot.peer = SeqCheck::new();
-                    slot.ack_owed = false;
-                }
                 if slot.peer.note(transfer.header.seq) == SeqNote::Gap {
                     slot.gaps = slot.gaps.wrapping_add(1);
                 }
                 let delivered =
                     shared.nodes.downlinks.borrow_mut()[k].on_header(&transfer.header, seq);
                 for id in delivered.into_iter().flatten() {
-                    shared.push_host(&BridgeToHost::Delivered { id });
+                    fleet::answer(shared, id, fleet::Outcome::Delivered);
                 }
                 // On the P4's clock, wrapping after about 71 minutes. The host only compares.
                 let rx_us = end.as_micros() as u32;
@@ -838,14 +856,10 @@ impl Controller {
                 u32::try_from(end.saturating_duration_since(heard).as_millis()).unwrap_or(u32::MAX);
             slot.deaf_ms = slot.deaf_ms.max(ms);
         }
-        if !slot.present && matches!(outcome, Outcome::Good { .. }) {
-            slot.present = true;
-            slot.deaf_ms = 0;
-            shared.nodes.set_present(k, true);
-            crate::carrier::presence(shared, shared.nodes.present());
-            // The node asserting a stuck line is usually the one that just arrived.
+        if arrived {
+            // The node asserting a stuck line is usually the one that just arrived. After the
+            // records, so the IRQ wait that brought them is counted.
             self.unlatch();
-            self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present
             && slot.misses >= ABSENT_AFTER
             && slot.heard.is_none_or(|heard| end.saturating_duration_since(heard) >= ABSENT_SPAN)
@@ -855,11 +869,28 @@ impl Controller {
             shared.nodes.set_present(k, false);
             crate::carrier::presence(shared, shared.nodes.present());
             shared.nodes.downlinks.borrow_mut()[k].drain(|id| {
-                shared.push_host(&BridgeToHost::Undelivered { id, reason: Undelivered::NoNode });
+                fleet::answer(shared, id, fleet::Outcome::Undelivered(Undelivered::NoNode));
             });
+            fleet::on_presence(shared, shared.nodes.present());
             self.line(shared, Some(i), format_args!("gone after {misses} transfers without magic"));
         }
         outcome
+    }
+
+    /// Mark slot `i` present after its first good transfer: a node that arrives may be a new life,
+    /// whose seq restarts. The carrier and the fleet planner hear of it at once.
+    fn arrive(&mut self, i: usize, shared: &Shared) {
+        let k = self.driven(i);
+        let slot = &mut self.slots[i];
+        slot.present = true;
+        slot.deaf_ms = 0;
+        slot.tracker = AckTracker::new();
+        slot.peer = SeqCheck::new();
+        slot.ack_owed = false;
+        shared.nodes.set_present(k, true);
+        crate::carrier::presence(shared, shared.nodes.present());
+        fleet::on_presence(shared, shared.nodes.present());
+        self.line(shared, Some(i), format_args!("appeared"));
     }
 
     /// Send the bus's IRQ counters, then each present slot's, to the host, and start each slot's
@@ -927,12 +958,16 @@ impl Controller {
 }
 
 /// Send one record from the node in `slot` to the host, or count it dropped when it is longer
-/// than any node of this build sends.
+/// than any node of this build sends. A heartbeat goes to the fleet planner too, and to the host
+/// unchanged.
 ///
 /// Out of line: a `FromNode` carries a kilobyte.
 #[inline(never)]
 fn forward(shared: &Shared, slot: BusSlot, rx_us: u32, kind: u8, body: &[u8]) {
     let nodes = &shared.nodes;
+    if kind == UpType::Heartbeat.as_u8() {
+        fleet::on_heartbeat(shared, slot, body);
+    }
     let Ok(body) = FromNodeBody::from_slice(body) else {
         nodes.rx_oversize.set(nodes.rx_oversize.get().wrapping_add(1));
         return;

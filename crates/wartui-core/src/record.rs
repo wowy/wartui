@@ -10,6 +10,7 @@ use std::time::Duration;
 use wartui_proto::beacon::visible_ssid;
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -232,73 +233,53 @@ pub struct BridgeSeen {
     pub node_board: NodeBoard,
 }
 
-/// What became of one assignment this host sent. Every attempt gets a row, so "the fleet keeps
-/// drifting off its channels" becomes a query.
+/// One slot's share as a P4 `Fleet` report gives it, written when it differs from the share the
+/// previous report gave that slot. The host sends no assignment and sees no delivery: this is what
+/// the P4 said it gave, and a heartbeat's epoch says whether the node took it. It names no node:
+/// the report comes ahead of the heartbeats that would say who sits in the slot, so the node is
+/// the one whose heartbeat from the slot carries the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdminOutcome {
-    /// The bridge delivered it: the node acknowledged the transfer that carried it.
-    Acked,
-    /// The bridge could not deliver it: no node in the slot, a full queue, or no ack after every
-    /// try.
-    Unacked,
-    /// No answer from the bridge inside the timeout, so unknown. Unlike `Unacked`, where the
-    /// bridge did report.
-    Silent,
-}
-
-impl AdminOutcome {
-    /// The token stored in the database.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Acked => "acked",
-            Self::Unacked => "unacked",
-            Self::Silent => "silent",
-        }
-    }
-}
-
-/// One assignment this host sent, and what came of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssignmentSent {
-    /// Which node it was addressed to.
-    pub node_mac: Mac,
-    /// The engine's epoch counter it was allocated from: monotonic within a capture, not persisted.
-    pub counter: u64,
-    /// The byte that went on the wire, `bus::wire_epoch(counter)`.
-    pub wire_version: u8,
-    /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
+pub struct ShareChange {
+    /// Unix milliseconds the report was read.
+    pub rx_at_ms: i64,
+    /// The node-bus slot the share is for.
+    pub slot: Slot,
+    /// The epoch the share's assignment carries, 0 for a share withdrawn.
+    pub epoch: u8,
+    /// Which `SCAN_CHANNELS` indices the share names, empty for one withdrawn.
     pub channels: ChannelSet,
-    /// Whether it was also told to scan Bluetooth.
+    /// Whether the share is the Bluetooth scan.
     pub ble: bool,
-    /// Unix milliseconds the assignment was handed to the link.
-    pub created_at_ms: i64,
-    /// Unix milliseconds the outcome arrived, if one did.
-    pub delivered_at_ms: Option<i64>,
-    /// What the bridge said.
-    pub outcome: AdminOutcome,
-    /// Microseconds from sending it to the bridge's `Delivered`, on this host's clock. `None`
-    /// when it was not delivered.
-    pub latency_us: Option<u32>,
+}
+
+impl ShareChange {
+    /// The row for a slot whose share left the report: epoch 0, no channels, no Bluetooth.
+    #[must_use]
+    pub const fn withdrawn(rx_at_ms: i64, slot: Slot) -> Self {
+        Self { rx_at_ms, slot, epoch: 0, channels: ChannelSet::empty(), ble: false }
+    }
 }
 
 /// Host settings that affect capture interpretation, not proof that a radio adopted them.
 ///
-/// Kept separately from assignments: the pool can change before any node is assignable.
+/// Kept separately from shares: the pool and the mode can change before any node holds one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureSettings {
     /// Pool the planner partitions, as the bridge reports it. `None` before its first `Status`.
     pub pool: Option<ChannelPool>,
+    /// The mode the bridge's planner scans in, as its last `Status` or `Fleet` report gave it.
+    /// `None` before the first.
+    pub mode: Option<ScanMode>,
     /// Whether undecoded node records are retained.
     pub record_raw: bool,
     /// Whether the position chain has a GPS receiver.
     pub gps: bool,
     /// Fix arrival-age limit, independent of receiver timestamps.
     pub gps_max_age: Duration,
-    /// Slot whose node scans Bluetooth, as the bridge reports it. `None` for no node, and before
-    /// its first `Status`.
+    /// Slot the bridge's planner gave the Bluetooth scan, as its last `Status` reported it. `None`
+    /// for no node, and before its first `Status`.
     pub ble_slot: Option<Slot>,
-    /// Node the host currently gives the Bluetooth job, if any.
+    /// The node whose latest heartbeat came from [`Self::ble_slot`], if any.
     pub ble_node: Option<Mac>,
 }
 
@@ -317,8 +298,8 @@ pub enum Record {
     Observation(Observation),
     /// Append an undecoded node record.
     Raw(RawFrame),
-    /// Append an assignment this host sent.
-    Assignment(AssignmentSent),
+    /// Append a slot's share changing in the bridge's `Fleet` reports.
+    Share(ShareChange),
     /// Append a bridge status reply.
     BridgeStatus(BridgeStatusSeen),
     /// Append a gap in a node's batch sequence.

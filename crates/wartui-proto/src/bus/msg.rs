@@ -9,7 +9,7 @@
 //! | Up, node → P4 | | Down, P4 → node | |
 //! |---|---|---|---|
 //! | 1 | [`Heartbeat`] | 1 | [`Assign`] |
-//! | 2 | [`SightingBatch`] | 2 | [`Clear`] |
+//! | 2 | [`SightingBatch`] | 2 | [`Stop`] |
 //! | 3 | [`UpdateStatus`] | 3 | [`UpdateBegin`] |
 //! | | | 4 | [`UpdateChunk`] |
 //! | | | 5 | [`UpdateCommit`] |
@@ -25,7 +25,7 @@
 use core::fmt;
 
 use super::{
-    Assign, Clear, EXT_MAX, Heartbeat, SSID_MAX, SightingBatch, UpdateAbort, UpdateBegin,
+    Assign, EXT_MAX, Heartbeat, SSID_MAX, SightingBatch, Stop, UpdateAbort, UpdateBegin,
     UpdateChunk, UpdateCommit, UpdateConfirm, UpdateStatus,
 };
 
@@ -72,8 +72,8 @@ impl UpType {
 pub enum DownType {
     /// [`Assign`].
     Assign = 1,
-    /// [`Clear`].
-    Clear = 2,
+    /// [`Stop`].
+    Stop = 2,
     /// [`UpdateBegin`].
     UpdateBegin = 3,
     /// [`UpdateChunk`].
@@ -98,7 +98,7 @@ impl DownType {
     pub const fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Self::Assign),
-            2 => Some(Self::Clear),
+            2 => Some(Self::Stop),
             3 => Some(Self::UpdateBegin),
             4 => Some(Self::UpdateChunk),
             5 => Some(Self::UpdateCommit),
@@ -211,8 +211,8 @@ impl<'a> UpMsg<'a> {
 pub enum DownMsg<'a> {
     /// A channel and Bluetooth assignment.
     Assign(Assign),
-    /// Forget every reported address.
-    Clear(Clear),
+    /// Stop scanning: drop the assignment, forget every reported address, and idle.
+    Stop(Stop),
     /// Open an update session.
     UpdateBegin(UpdateBegin),
     /// Image bytes.
@@ -234,7 +234,7 @@ impl<'a> DownMsg<'a> {
     pub fn decode(kind: u8, body: &'a [u8]) -> Result<Self, DecodeError> {
         match DownType::from_u8(kind).ok_or(DecodeError::UnknownType(kind))? {
             DownType::Assign => Assign::decode(body).map(Self::Assign),
-            DownType::Clear => Clear::decode(body).map(Self::Clear),
+            DownType::Stop => Stop::decode(body).map(Self::Stop),
             DownType::UpdateBegin => UpdateBegin::decode(body).map(Self::UpdateBegin),
             DownType::UpdateChunk => UpdateChunk::decode(body).map(Self::UpdateChunk),
             DownType::UpdateCommit => UpdateCommit::decode(body).map(Self::UpdateCommit),
@@ -248,7 +248,7 @@ impl<'a> DownMsg<'a> {
     pub const fn kind(&self) -> DownType {
         match self {
             Self::Assign(_) => DownType::Assign,
-            Self::Clear(_) => DownType::Clear,
+            Self::Stop(_) => DownType::Stop,
             Self::UpdateBegin(_) => DownType::UpdateBegin,
             Self::UpdateChunk(_) => DownType::UpdateChunk,
             Self::UpdateCommit(_) => DownType::UpdateCommit,
@@ -267,7 +267,7 @@ impl<'a> DownMsg<'a> {
         }
         match self {
             Self::Assign(msg) => put(out, &msg.encode()),
-            Self::Clear(msg) => put(out, &msg.encode()),
+            Self::Stop(msg) => put(out, &msg.encode()),
             Self::UpdateBegin(msg) => put(out, &msg.encode()),
             Self::UpdateChunk(msg) => msg.encode_into(out),
             Self::UpdateCommit(msg) => put(out, &msg.encode()),

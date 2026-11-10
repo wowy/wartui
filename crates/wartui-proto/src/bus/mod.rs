@@ -97,14 +97,20 @@
 //! the heartbeat prefix ([`NODE_VERSION`]): the clock rate, within what the node's SPI peripheral
 //! takes, which is the chip's limit rather than the image's; [`ACK_TIMEOUT_MS`] and
 //! [`SEND_TRIES`], as each sender's own policy; the P4's pins, and its scheduling beyond what it
-//! owes a node; up type 2, down types 1 and 2, and the heartbeat past its MAC. A core type code
-//! is never reused, and a new message takes a new code.
+//! owes a node; up type 2 ([`SightingBatch`]), down types 1 and 2 ([`Assign`], [`Stop`]), and
+//! the heartbeat past its MAC. A core type code is never reused, and a new message takes a new
+//! code.
 //!
-//! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
-//! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the
-//! messages are in [`UpMsg`] and [`DownMsg`]. The P4 needs no knowledge of them, so a change to
-//! a node's messages costs no P4 reflash. The exception is [`UpdateChunk`], which the P4 builds
-//! from its node image cache ([`crate::link::cache_chunk_body`]), and whose layout is in the core.
+//! **The P4 checks this framing and forwards every record a node sends.** A record's type byte
+//! is the message type ([`UpType`], [`DownType`]) and its body the message body; the messages are
+//! in [`UpMsg`] and [`DownMsg`]. The P4 reads and writes only what it needs, so a change to any
+//! other message costs no P4 reflash:
+//!
+//! - [`Heartbeat`], which its fleet planner reads ([`crate::fleet`]), and [`Assign`] and [`Stop`],
+//!   which the planner writes. A change to their layouts costs a P4 reflash beside the node
+//!   update.
+//! - [`UpdateChunk`], which the P4 builds from its node image cache
+//!   ([`crate::link::cache_chunk_body`]), and whose layout is in the core.
 //!
 //! [`crc16`]: crate::link::crc16
 
@@ -126,7 +132,7 @@ mod version;
 mod window;
 
 pub use ack::{ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, SEND_TRIES};
-pub use assign::{ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, CLEAR_LEN, Clear, wire_epoch};
+pub use assign::{ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, STOP_LEN, Stop, wire_epoch};
 pub use downlink::{Downlink, FLIGHT_MAX, Ids, RESEND_GAP_MS};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{

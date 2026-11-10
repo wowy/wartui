@@ -16,15 +16,16 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus,
-    NodeSeen, Observation, RawFrame, Record,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, NodeSeen, Observation, RawFrame,
+    Record, ShareChange,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType, wire_epoch};
+use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
 use wartui_proto::fan::{FanDuty, FanStats};
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -167,7 +168,8 @@ fn store_records_initial_provenance_when_capture_created() {
     assert_eq!(get("capture.release_tag"), "v-test");
     let settings = get("capture.settings.initial");
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
-    assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
+    assert!(settings.contains(";pool=none;mode=none;record_raw=true;gps=false;"), "{settings}");
+    assert!(settings.contains("gps_max_age_ms=5000;"), "{settings}");
     assert!(settings.ends_with(";ble_slot=none;ble_node=none"), "{settings}");
     assert_eq!(store.close().dropped, 0);
 }
@@ -269,6 +271,40 @@ fn store_records_pool_spelling_when_settings_are_written() {
     // `none` before the bridge has reported a pool.
     for (value, spelling) in values.iter().zip(["none", "us", "eu", "all"]) {
         assert!(value.contains(&format!(";pool={spelling};")), "{value}");
+    }
+    assert_eq!(values.len(), 4);
+}
+
+#[test]
+fn store_records_mode_spelling_when_settings_are_written() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let engine = FleetEngine::new(
+        EngineConfig::default(),
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let settings = engine.capture_settings();
+    let modes =
+        [None, Some(ScanMode::Stopped), Some(ScanMode::Wifi), Some(ScanMode::WifiBluetooth)];
+    let records = (0u64..)
+        .zip(modes)
+        .map(|(sequence, mode)| Record::CaptureSettings {
+            sequence,
+            at_ms: EPOCH_MS,
+            settings: wartui_core::record::CaptureSettings { mode, ..settings },
+        })
+        .collect();
+    let conn = write(&dir, records);
+    let mut stmt = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings query");
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("settings rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata strings");
+    // `none` before the bridge has reported a mode.
+    for (value, spelling) in values.iter().zip(["none", "stopped", "wifi", "wifi+bluetooth"]) {
+        assert!(value.contains(&format!(";mode={spelling};")), "{value}");
     }
     assert_eq!(values.len(), 4);
 }
@@ -1576,8 +1612,8 @@ fn store_refuses_database_when_schema_version_differs() {
     // Reading another shape's tables as this build's would export rows of the wrong
     // shape, or values that meant something else.
     //
-    // 1 is the case that matters: captures stamped 1 span several shapes.
-    for found in [99, 1] {
+    // 1 is the case that matters: captures stamped 1 span several shapes. 2 is the previous shape.
+    for found in [99, 1, SCHEMA_VERSION - 1] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
         let other = Connection::open(&path).expect("creating");
@@ -1989,47 +2025,59 @@ fn store_records_bridge_when_bridge_announces() {
 // Phase 4: assignment
 // ---------------------------------------------------------------------------
 
-fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> Record {
-    Record::Assignment(AssignmentSent {
-        node_mac: NODE,
-        counter,
-        wire_version: wire_epoch(counter),
-        channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),
-        ble: false,
-        created_at_ms: EPOCH_MS,
-        delivered_at_ms: Some(EPOCH_MS + 5),
-        outcome,
-        latency_us,
-    })
+/// An `assignment` row as stored: rx_at, slot, epoch, channels, ble.
+type ShareRow = (i64, String, u8, i64, bool);
+
+fn share_rows(conn: &Connection) -> Vec<ShareRow> {
+    conn.prepare("SELECT rx_at, slot, epoch, channels, ble FROM assignment ORDER BY id")
+        .expect("preparing")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect()
 }
 
 #[test]
-fn store_records_every_assignment_when_outcomes_differ() {
+fn store_records_share_and_withdrawn_rows_when_shares_change() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    let store = open_at(&path);
-    // Every attempt gets a row, which is what makes "the fleet keeps drifting off its
-    // channels" a query rather than a story.
-    store.submit(vec![
-        assignment(1, AdminOutcome::Unacked, None),
-        assignment(1, AdminOutcome::Acked, Some(4_500)),
-    ]);
-    store.close();
-
-    let conn = open_readonly(&path).expect("reopening");
-    let rows: Vec<(String, Option<u32>, u8)> = conn
-        .prepare("SELECT outcome, latency_us, wire_version FROM assignment ORDER BY id")
-        .expect("preparing")
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .expect("querying")
-        .map(|r| r.expect("row"))
-        .collect();
-
-    assert_eq!(
-        rows,
-        vec![("unacked".to_owned(), None, 1), ("acked".to_owned(), Some(4_500), 1)],
-        "a retry is a second row, not an update: the table is append-only"
+    let channels =
+        wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5));
+    let conn = write(
+        &dir,
+        vec![
+            Record::Share(ShareChange {
+                rx_at_ms: EPOCH_MS,
+                slot: SLOT,
+                epoch: 7,
+                channels,
+                ble: false,
+            }),
+            Record::Share(ShareChange::withdrawn(EPOCH_MS + 5, SLOT)),
+        ],
     );
+    let bits = i64::try_from(channels.bits()).expect("forty-two bits fit");
+    assert_eq!(
+        share_rows(&conn),
+        vec![
+            (EPOCH_MS, "A2".to_owned(), 7, bits, false),
+            (EPOCH_MS + 5, "A2".to_owned(), 0, 0, false),
+        ],
+        "a withdrawn share is epoch 0 with no channels and no Bluetooth"
+    );
+}
+
+#[test]
+fn store_records_bluetooth_share_when_share_holds_no_channels() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let share = ShareChange {
+        rx_at_ms: EPOCH_MS,
+        slot: SLOT,
+        epoch: 3,
+        channels: wartui_proto::plan::ChannelSet::empty(),
+        ble: true,
+    };
+    let conn = write(&dir, vec![Record::Share(share)]);
+    assert_eq!(share_rows(&conn), vec![(EPOCH_MS, "A2".to_owned(), 3, 0, true)]);
 }
 
 #[test]

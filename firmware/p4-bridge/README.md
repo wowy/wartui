@@ -24,12 +24,34 @@ and config, then `espflash save-image` on the result. A build fails if the saved
 appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
 too.
 
-It is also the SPI controller of two node buses, which carry each node's records to and from the
-host; [`docs/node-bus.md`](../../docs/node-bus.md) has the pins. The P4 reads none of them: it
-forwards what a node sends, queues what the host sends a node in that node's slot, and answers
-each of those `Delivered` once the node acknowledges it, or `Undelivered` (`src/bus.rs`). Two
-transfers of records are out to a node at once, and the node takes them in order. It
-writes one, the update chunks it builds from its node image cache, below.
+It is also the SPI controller of two node buses; [`docs/node-bus.md`](../../docs/node-bus.md) has
+the pins. It forwards every record a node sends to the host, heartbeats included, and queues what
+the host sends a node in that node's slot, answering each `Delivered` once the node acknowledges
+it, or `Undelivered` (`src/bus.rs`). Two transfers of records are out to a node at once, and the
+node takes them in order. It reads one kind of record, the heartbeat, for its fleet planner, and
+writes three: the planner's `Assign` and `Stop`, and the update chunks it builds from its node
+image cache, below.
+
+## The fleet planner
+
+The P4 decides what every node scans, so a board scans with no host attached
+(`src/fleet.rs`). The planner itself is `wartui_proto::fleet`, which `cargo test` covers on the
+host; this firmware feeds it and sends what it owes.
+
+- **It boots stopped.** Every node idles until a host's `StartScan`, and a node still scanning
+  from the P4's last life is sent a `Stop`.
+- **It scans until a `StopScan`**, whether or not a host is listening. The host gate closing
+  changes nothing.
+- **A member** is a present slot that has heartbeated within 20 s, on a node firmware of this
+  build's major and minor. The pool is cut across the members in slot order, and cut again when
+  membership, the mode or the pool changes.
+- **Bluetooth**, when the scan asks for it, goes to one member once there are two: the highest
+  slot, kept while its node stays.
+- **It reports its plan** to the host as a `Fleet` frame on every change, after each `Status` and
+  when a host attaches.
+
+Send ids at or above `0x8000` are the planner's, and their outcomes go to it rather than to the
+host, whose ids stay below.
 
 ## Boards
 
@@ -173,11 +195,11 @@ A refused or silent update also sends one line naming why: `the radio refused th
 
 ## Settings
 
-The P4 keeps three settings in the first sector of its `nvs` partition, on every board: the lid
-fan's duty, the channel pool and the Bluetooth slot. It reads them once at boot and runs them with
-no host present, or 100 %, `All` and no Bluetooth slot with none stored. A host's `SetFan`,
-`SetPool` or `SetBle` applies at once and is written only when the sector does not hold it.
-`Status` reports all three (`src/settings.rs`).
+The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty and the channel pool. It reads them once at boot and runs them with no host present, or
+100 % and `All` with none stored. A host's `SetFan` or `SetPool` applies at once and is written
+only when the sector does not hold it. `Status` reports both (`src/settings.rs`). The scan mode is
+not stored, so the P4 boots stopped.
 
 ## The host link
 

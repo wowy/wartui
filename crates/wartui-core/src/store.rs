@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
@@ -40,15 +41,15 @@ use crate::record::{CaptureSettings, Record};
 /// Bump it for any change to a table, column or index, or to what a stored value wartui reads back
 /// means. A comment or whitespace change does not bump it. Neither does a new optional `capture.*`
 /// key in `kv`, because an absent key means unknown. Nor does a scan-table change:
-/// `assignment.channels` holds the indices that went out, read against the scan table of the build
-/// that wrote the row, and no wartui code decodes the column against the scan table.
+/// `assignment.channels` holds the indices the bridge reported, read against the scan table of the
+/// build that wrote the row, and no wartui code decodes the column against the scan table.
 ///
 /// `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
 /// trigger and view, comments and whitespace aside, and fails on a difference without a bump. It
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -87,9 +88,8 @@ CREATE TABLE IF NOT EXISTS node (
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
 -- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
--- across a capture is a leak in the node firmware. An assignment
--- sent in answer to a heartbeat is recorded in `assignment`; a dedup-ring clear
--- is not recorded.
+-- across a capture is a leak in the node firmware. `epoch` is the share the node holds, which
+-- `assignment` says the bridge gave it.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -107,27 +107,24 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   live INTEGER NOT NULL
 );
 
--- One row per assignment sent, written when its outcome is known, so
--- the table is append-only and a retry is a second row rather than an update.
--- `counter` is the engine's monotonic epoch and `wire_version` the byte that
--- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-two-bit SCAN_CHANNELS mask the assignment carried, stored as the
--- integer it is: the indices are what the wire said, and which channels they name is
--- the scan table of the build that wrote the row. No wartui code decodes the column against the
--- scan table, and nothing rewrites it when the table changes -- a row records what went out.
+-- The shares the bridge's planner reports in its `Fleet` frames: one row per slot whose share
+-- differs from the one the previous report gave it, written as the report is read (`rx_at`).
+-- The host sends no assignment and sees no delivery, so a row is what the P4 said it gave, and a
+-- later `heartbeat` from `slot` carrying `epoch` is a node taking it: that row's `node_mac` names
+-- the node. A row names no node itself, since the P4 reports a share before the host can know
+-- who takes it. `slot` is the bus name, as in `heartbeat`. A slot whose share left the report
+-- gets a row with `epoch` 0, `channels` 0 and `ble` 0: withdrawn. `channels` is the forty-two-bit SCAN_CHANNELS mask the share named, stored as the
+-- integer it is: the indices are what the P4 reported, and which channels they name is the scan
+-- table of the build that wrote the row. No wartui code decodes the column against the scan
+-- table, and nothing rewrites it when the table changes -- a row records what was reported.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
-  node_mac BLOB NOT NULL,
-  counter INTEGER NOT NULL,
-  wire_version INTEGER NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
   channels INTEGER NOT NULL,
-  ble INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  delivered_at INTEGER,
-  outcome TEXT,
-  latency_us INTEGER
+  ble INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS assign_node ON assignment(node_mac, created_at);
 
 -- The capture's provenance (`capture.bus_version`, `capture.host_commit` and the like) and its
 -- settings history (`capture.settings.*`).
@@ -933,6 +930,16 @@ const fn pool_name(pool: Option<ChannelPool>) -> &'static str {
     }
 }
 
+/// The scan mode's name as a settings row stores it, `none` before the bridge has reported one.
+const fn mode_name(mode: Option<ScanMode>) -> &'static str {
+    match mode {
+        Some(ScanMode::Stopped) => "stopped",
+        Some(ScanMode::Wifi) => "wifi",
+        Some(ScanMode::WifiBluetooth) => "wifi+bluetooth",
+        None => "none",
+    }
+}
+
 /// Versioned key/value text, with no arbitrary strings needing escaping. Sequence lives in the
 /// key so equal or reversed timestamps cannot overwrite a settings change.
 fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
@@ -940,9 +947,10 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
     };
     format!(
-        "version=1;at_ms={at_ms};pool={};record_raw={};gps={};gps_max_age_ms={};\
+        "version=2;at_ms={at_ms};pool={};mode={};record_raw={};gps={};gps_max_age_ms={};\
          ble_slot={};ble_node={}",
         pool_name(settings.pool),
+        mode_name(settings.mode),
         settings.record_raw,
         settings.gps,
         settings.gps_max_age.as_millis(),
@@ -1153,25 +1161,17 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     bridge.node_board.name()
                 ])?;
             }
-            Record::Assignment(a) => {
+            Record::Share(share) => {
                 tx.prepare_cached(
-                    "INSERT INTO assignment
-                       (node_mac, counter, wire_version, channels, ble, created_at,
-                        delivered_at, outcome, latency_us)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    "INSERT INTO assignment (rx_at, slot, epoch, channels, ble)
+                     VALUES (?1,?2,?3,?4,?5)",
                 )?
                 .execute(params![
-                    &a.node_mac[..],
-                    // Saturating upwards: the column records which epoch went out, and one reading
-                    // lower than an epoch already spent is the failure this counter prevents.
-                    i64::try_from(a.counter).unwrap_or(i64::MAX),
-                    a.wire_version,
-                    i64::try_from(a.channels.bits()).unwrap_or(0),
-                    a.ble,
-                    a.created_at_ms,
-                    a.delivered_at_ms,
-                    a.outcome.as_str(),
-                    a.latency_us,
+                    share.rx_at_ms,
+                    share.slot.to_string(),
+                    share.epoch,
+                    i64::try_from(share.channels.bits()).unwrap_or(0),
+                    share.ble,
                 ])?;
             }
             Record::BridgeStatus(status) => {

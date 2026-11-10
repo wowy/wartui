@@ -50,6 +50,7 @@ use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
 use wartui_proto::dedup::DEDUP_RING;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
@@ -83,10 +84,11 @@ const SIGHTINGS_PER_ADDRESS: u32 = 4;
 /// A named load, so runs on different machines are comparable.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum Profile {
-    /// Ten nodes in real time, one of them scanning Bluetooth: a busy street, sustained.
+    /// Ten nodes in real time, scanning Wi-Fi and Bluetooth, which the bridge gives one of
+    /// them: a busy street, sustained.
     #[default]
     Drive,
-    /// The fleet maximum in real time, one on Bluetooth, to find where the store stops
+    /// The fleet maximum in real time, scanning the same, to find where the store stops
     /// keeping up and starts dropping.
     Burst,
 }
@@ -141,9 +143,9 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     networks: Option<u16>,
 
-    /// Chance per advertiser slot in a scan that the Bluetooth node hears one. Such a
-    /// node dwells on nothing, so its whole second is one scan with a fixed number of
-    /// slots in it; zero means it reports nothing at all.
+    /// Chance per advertiser slot in a scan that the Bluetooth node, the one the bridge picks,
+    /// hears one. Such a node dwells on nothing, so its whole second is one scan with a fixed
+    /// number of slots in it; zero means it reports nothing at all.
     #[arg(long, value_name = "P")]
     ble_chance: Option<f64>,
 
@@ -277,6 +279,8 @@ pub async fn run(args: Args) -> Result<()> {
         .with_context(|| format!("creating {}", args.db.display()))?;
     let engine = FleetEngine::new(
         EngineConfig {
+            // A capture, so the engine starts the bridge's scan.
+            auto_start: true,
             record_raw: args.record_raw,
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.
@@ -291,27 +295,24 @@ pub async fn run(args: Args) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    // Naming a slot before its node has been heard is allowed, and this node is the only
-    // source of addresses that never dedup.
-    //
-    // Not on a fleet of one, which the flags allow: Bluetooth is a whole node's job,
-    // so the only node would sniff nothing and the run would measure a stream of
-    // advertisers instead of the sweep its profile describes.
-    let ble_node = (nodes > 1).then(|| SimTransport::node_mac(0));
-    if ble_node.is_some() {
-        command_tx
-            .send(Command::AssignBle { slot: Some(SimTransport::node_slot(0)) })
-            .await
-            .context("the capture stopped before it began")?;
-    }
+    // Asked for before the bridge answers, so the run's start uses it. The node the bridge
+    // gives it is the only source of addresses that never dedup. A fleet of one, which the
+    // flags allow, keeps Wi-Fi: the bridge deals Bluetooth only once two nodes can scan.
+    let bluetooth = nodes > 1;
+    let scan =
+        crate::status::scan_text(if bluetooth { ScanMode::WifiBluetooth } else { ScanMode::Wifi });
+    command_tx
+        .send(Command::SetBluetooth(bluetooth))
+        .await
+        .context("the capture stopped before it began")?;
 
     if !args.json {
-        eprintln!("waiting for {nodes} nodes to take their assignments ...");
+        eprintln!("scanning {scan}; waiting for {nodes} nodes to take their shares ...");
     }
     let warmup = Instant::now();
     let Ok(settled) = tokio::time::timeout(
         SETTLE_TIMEOUT,
-        settle(&mut snapshot_rx, usize::from(nodes), ble_node),
+        settle(&mut snapshot_rx, usize::from(nodes), bluetooth),
     )
     .await
     else {
@@ -324,6 +325,11 @@ pub async fn run(args: Args) -> Result<()> {
     };
     let before = settled.context("the capture stopped while the fleet was joining")?;
     let warmup = warmup.elapsed();
+    let ble_node = before
+        .nodes
+        .iter()
+        .find(|node| node.share.is_some_and(|share| share.ble))
+        .map(|node| node.state.mac);
 
     // Everything from here is the measured window.
     let measured_from = Instant::now();
@@ -433,6 +439,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("fs_options", mount.as_ref().map(|m| m.fs_options.clone()));
     report.put("on_battery", on_battery.map(|yes| if yes { "yes" } else { "no" }));
     report.put("profile", args.profile.name());
+    report.put("scan", scan);
     report.put("duration_s", args.duration);
 
     report.put("sim_nodes", u64::from(sim.node_count));
@@ -589,10 +596,10 @@ fn busy_networks(nodes: u8, pool: ChannelPool) -> u16 {
 
 /// Wait until the fleet is at work, and return the snapshot it was at work in.
 ///
-/// At work means every node has been heard, holds an acknowledged assignment with
-/// nothing waiting to be re-sent, and has reported a sighting; and the Bluetooth node
-/// holds its scan. Nodes join one at a time and each join re-cuts every assignment, so
-/// nothing short of the whole fleet being quiet about its assignments will do.
+/// At work means every node has been heard, holds the share the bridge's plan gives it, as
+/// its heartbeat's epoch shows, and has reported a sighting; and, when `bluetooth`, one node
+/// holds the scan. Nodes join one at a time and each join re-cuts every share, so nothing
+/// short of the whole fleet holding the plan will do.
 ///
 /// A sighting is not asked of the Bluetooth node. Its only sightings are advertisers, at
 /// a rate `--ble-chance` sets and may set to zero, so waiting for one would wait out the
@@ -601,27 +608,17 @@ fn busy_networks(nodes: u8, pool: ChannelPool) -> u16 {
 async fn settle(
     snapshots: &mut watch::Receiver<Arc<Snapshot>>,
     nodes: usize,
-    ble_node: Option<Mac>,
+    bluetooth: bool,
 ) -> Result<Arc<Snapshot>, watch::error::RecvError> {
     let settled = snapshots
         .wait_for(|snapshot| {
             snapshot.nodes.len() == nodes
+                && snapshot.nodes.iter().any(|node| node.share.is_some_and(|s| s.ble)) == bluetooth
                 && snapshot.nodes.iter().all(|node| {
-                    let state = &node.state;
-                    let sniffing = ble_node != Some(state.mac);
-                    !state.dirty
-                        && (state.observations > 0 || !sniffing)
-                        && state.confirmed.as_ref().is_some_and(|confirmed| {
-                            // The Bluetooth node on its own terms: its whole job is
-                            // the scan, so an empty channel set is what "settled"
-                            // looks like for it and waiting for a share would wait
-                            // out the timeout.
-                            if sniffing {
-                                !confirmed.channels.is_empty()
-                            } else {
-                                confirmed.ble && confirmed.channels.is_empty()
-                            }
-                        })
+                    // The Bluetooth node on its own terms: its whole job is the scan, so
+                    // holding it is what "settled" looks like for it.
+                    let scanner = node.share.is_some_and(|share| share.ble);
+                    node.adopted && (node.state.observations > 0 || scanner)
                 })
         })
         .await?;

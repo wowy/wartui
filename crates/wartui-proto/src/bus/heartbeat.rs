@@ -67,10 +67,10 @@ impl Board {
 
 /// What a node says it is, in every heartbeat it sends: the prefix.
 ///
-/// `five_ghz` is shown to the operator, and the planner does not read it: every node that speaks
-/// this build's version is a C5. It travels as its own flag rather than being read off `board`, so
-/// a board this build does not name still says what its radio reaches. Bluetooth is not a
-/// capability: every node can scan it, and [`ASSIGN_FLAG_BLE`] is the operator's decision.
+/// `five_ghz` is shown to the operator, and the fleet planner does not read it: every node that
+/// speaks this build's version is a C5. It travels as its own flag rather than being read off
+/// `board`, so a board this build does not name still says what its radio reaches. Bluetooth is
+/// not a capability: every node can scan it, and [`ASSIGN_FLAG_BLE`] is the fleet planner's pick.
 ///
 /// The prefix is the first [`HEARTBEAT_PREFIX_LEN`] bytes of the body
 /// ([`Capabilities::decode_prefix`]).
@@ -190,8 +190,8 @@ pub struct Heartbeat {
     /// Counts up from node boot: once per sweep, Bluetooth scan or idle beat. A value
     /// below the last one means the node restarted and has forgotten its assignment.
     pub counter: u32,
-    /// The assignment epoch this node holds, or 0 for none (unassigned since boot). The
-    /// host never puts 0 on the wire, so 0 is unambiguous.
+    /// The assignment epoch this node holds, or 0 for none (unassigned since boot or the last
+    /// [`Stop`](super::Stop)). The P4 never puts 0 on the wire, so 0 is unambiguous.
     pub epoch: u8,
     /// Access points a full pending buffer turned away since boot, each once per dwell
     /// ([`crate::pending::Refused`]). Wraps. Most are reported on a later dwell, so this

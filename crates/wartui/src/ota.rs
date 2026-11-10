@@ -30,6 +30,11 @@
 //! once rather than on the node's next heartbeat. Events that queued while the run was busy are
 //! thrown away before the sessions start: a heartbeat that waited out an image build or the
 //! prompt is history. A node that moved since is found by its next heartbeat.
+//!
+//! **The scan stops before the first update record** ([`stop_scan`]), so the P4 sends the nodes
+//! nothing of its own while they update, and the fleet stays idle afterwards until a run starts
+//! it.
+//!
 //! [`wartui_core::ota`] has the session's own reasoning.
 
 use std::collections::{BTreeMap, HashMap};
@@ -45,7 +50,7 @@ use clap::Args as ClapArgs;
 use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::ota::{Failure, Ids, OtaImage, OtaSession, Outcome, Phase, Progress};
-use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now};
+use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now, stop_scan};
 use wartui_proto::bus::{
     Board, Capabilities, Heartbeat, NODE_VERSION, NodeBoard, Slot, UpType, UpdateState, Version,
 };
@@ -160,6 +165,9 @@ fn decide(node: &Capabilities, image: Option<Version>, force: bool) -> Action {
     }
 }
 
+/// How long `ota` waits for the bridge to report its scan stopped before updating anyway.
+const SCAN_STOP_WAIT: Duration = Duration::from_secs(2);
+
 pub async fn run(args: Args) -> Result<()> {
     if !args.yes && !std::io::stdin().is_terminal() {
         bail!("standard input is not a terminal, so nothing can answer; pass --yes to update");
@@ -203,6 +211,11 @@ pub async fn run(args: Args) -> Result<()> {
     if !args.yes && !tokio::task::spawn_blocking(confirm).await.context("asking")?? {
         println!("nothing updated");
         return Ok(());
+    }
+
+    // Stop the scan first, so the P4 sends the nodes nothing of its own while they update.
+    if !stop_scan(&mut link, SCAN_STOP_WAIT).await {
+        println!("the bridge did not report its scan stopped; updating anyway");
     }
 
     // From the clock, so a host restarted mid-update is unlikely to reuse the byte; the node

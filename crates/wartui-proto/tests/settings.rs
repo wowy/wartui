@@ -1,11 +1,10 @@
 //! The settings sector: its records, how it reads, and the write each change takes.
 
 use wartui_proto::ChannelPool;
-use wartui_proto::bus::Slot;
 use wartui_proto::fan::FanDuty;
 use wartui_proto::ota::SECTOR;
 use wartui_proto::settings::{
-    self, BLE, FAN, POOL, RECORDS, Setting, Stored, WORD, Write, record, write_for,
+    self, FAN, POOL, RECORDS, Setting, Stored, WORD, Write, record, write_for,
 };
 
 fn duty(pct: u8) -> FanDuty {
@@ -37,14 +36,6 @@ fn store(sector: &mut [u8; SECTOR], setting: Setting) {
 fn put(sector: &mut [u8; SECTOR], word: [u8; WORD]) {
     let at = sector.as_chunks::<WORD>().0.iter().position(|w| *w == [0xFF; WORD]).unwrap() * WORD;
     sector[at..at + WORD].copy_from_slice(&word);
-}
-
-fn slot(text: &str) -> Slot {
-    Slot::parse(text).expect("a slot")
-}
-
-fn ble(text: &str) -> Setting {
-    Setting::Ble(Some(slot(text)))
 }
 
 fn next_offset(sector: &[u8; SECTOR], setting: Setting) -> usize {
@@ -87,7 +78,7 @@ fn settings_read_each_tags_last_record_when_fan_and_pool_interleave() {
     store(&mut sector, fan(30));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu), ble: None }
+        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu) }
     );
 }
 
@@ -101,7 +92,7 @@ fn settings_skip_word_when_it_is_torn_or_its_tag_is_unknown() {
     put(&mut sector, [b'X', 7, !7, 0]);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: Some(ChannelPool::Us), ble: None }
+        Stored { fan: Some(duty(40)), pool: Some(ChannelPool::Us) }
     );
 
     // A record after them still reads.
@@ -120,27 +111,8 @@ fn settings_skip_record_when_value_is_unknown_or_check_byte_is_bad() {
     put(&mut sector, [POOL, 0, !0, 1]);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu), ble: None }
+        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu) }
     );
-}
-
-#[test]
-fn settings_skip_record_when_ble_byte_names_no_slot() {
-    let mut sector = [0xFF; SECTOR];
-    store(&mut sector, ble("A3"));
-    // 14 is one past the last slot, and 0xFE is neither a slot nor no node.
-    put(&mut sector, [BLE, 14, !14, 0]);
-    put(&mut sector, [BLE, 0xFE, !0xFE, 0]);
-    assert_eq!(settings::read(&sector).ble, Some(Some(slot("A3"))));
-}
-
-#[test]
-fn settings_read_no_ble_when_none_follows_a_slot() {
-    let mut sector = [0xFF; SECTOR];
-    store(&mut sector, ble("B2"));
-    store(&mut sector, Setting::Ble(None));
-    assert_eq!(settings::read(&sector).ble, Some(None));
-    assert_eq!(write_for(&sector, Setting::Ble(None)), None);
 }
 
 #[test]
@@ -179,36 +151,8 @@ fn settings_erase_and_keep_fan_when_sector_is_full_and_pool_is_written() {
     assert_eq!(records[WORD..2 * WORD], record(pool));
 
     store(&mut sector, pool);
-    assert_eq!(
-        settings::read(&sector),
-        Stored { fan: Some(last), pool: Some(ChannelPool::Us), ble: None }
-    );
+    assert_eq!(settings::read(&sector), Stored { fan: Some(last), pool: Some(ChannelPool::Us) });
     assert_eq!(next_offset(&sector, fan(5)), 2 * WORD);
-}
-
-#[test]
-fn settings_erase_and_keep_all_three_when_sector_is_full() {
-    let mut sector = [0xFF; SECTOR];
-    store(&mut sector, Setting::Pool(ChannelPool::Eu));
-    store(&mut sector, ble("A2"));
-    for i in 0..RECORDS - 2 {
-        store(&mut sector, fan(if i % 2 == 0 { 20 } else { 30 }));
-    }
-    let last = settings::read(&sector).fan.expect("a duty");
-
-    let Some(Write::Erase { records, len }) = write_for(&sector, ble("B7")) else {
-        panic!("a full sector erases")
-    };
-    assert_eq!(len, 3 * WORD);
-    assert_eq!(records[..WORD], record(Setting::Fan(last)));
-    assert_eq!(records[WORD..2 * WORD], record(Setting::Pool(ChannelPool::Eu)));
-    assert_eq!(records[2 * WORD..3 * WORD], record(ble("B7")));
-
-    store(&mut sector, ble("B7"));
-    assert_eq!(
-        settings::read(&sector),
-        Stored { fan: Some(last), pool: Some(ChannelPool::Eu), ble: Some(Some(slot("B7"))) }
-    );
 }
 
 #[test]
@@ -240,9 +184,28 @@ fn settings_record_pins_bytes_when_setting_is_a_fan_duty() {
 }
 
 #[test]
-fn settings_record_pins_bytes_when_setting_is_a_ble_slot() {
-    // A slot stores its link byte, bus * 7 + index.
-    assert_eq!(record(ble("A1")), [b'B', 0, 0xFF, 0]);
-    assert_eq!(record(ble("B3")), [b'B', 9, 0xF6, 0]);
-    assert_eq!(record(Setting::Ble(None)), [b'B', 0xFF, 0x00, 0]);
+fn settings_skip_record_when_tag_is_a_bluetooth_slot() {
+    // A `B` record, a tag this build does not know, reads as an unknown tag and is skipped.
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::Pool(ChannelPool::Eu));
+    put(&mut sector, [b'B', 9, !9, 0]);
+    store(&mut sector, fan(40));
+    assert_eq!(
+        settings::read(&sector),
+        Stored { fan: Some(duty(40)), pool: Some(ChannelPool::Eu) }
+    );
+}
+
+#[test]
+fn settings_erase_and_drop_bluetooth_record_when_sector_is_full() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::Pool(ChannelPool::Eu));
+    put(&mut sector, [b'B', 9, !9, 0]);
+    for i in 0..RECORDS - 2 {
+        store(&mut sector, fan(if i % 2 == 0 { 20 } else { 30 }));
+    }
+    let Some(Write::Erase { len, .. }) = write_for(&sector, fan(70)) else {
+        panic!("a full sector erases")
+    };
+    assert_eq!(len, 2 * WORD);
 }

@@ -32,8 +32,8 @@ their own: the bridge's own receiver is read if it has one, and no host port is 
 pin a position for whatever that leaves unfixed.
 
 Real nodes answer on their own schedule rather than an accelerated clock, which is what
-`--after` and `--settle` default differently for: an assignment answers the node's next
-heartbeat, up to 5 s away, and is confirmed on the one after, so a `b` read a second
+`--after` and `--settle` default differently for: the bridge sends a share at once, but
+the node's next heartbeat, up to 5 s away, is what shows it held, so a `b` read a second
 later reads as pending when it is merely early.
 
 The capture goes to a temporary database that is deleted on the way out, since `run`
@@ -46,8 +46,9 @@ and the operator's own is not a render's to change. Nor is it read, so a render 
 about the machine. `--config` passed through `-- ARGS` is used instead. A bare `--bridge` therefore
 has no remembered bridge and finds the board by sweeping the attached P4 bridges, so naming the
 bridge is the way to avoid opening another one. A `--bridge` render also drives the real fleet:
-it deals the pool and the Bluetooth slot the bridge holds, on otherwise default host settings, so
-the screen is not the operator's own setup, and a `b` pressed there moves the bridge's slot.
+`run` starts the bridge's scan on the pool it holds, on otherwise default host settings, so
+the screen is not the operator's own setup, and a `b` pressed there toggles the bridge's
+Bluetooth scan. Its closing `q` stops the scan.
 """
 
 import argparse
@@ -84,9 +85,9 @@ DEFAULT_SIM_NODES = 3
 
 # How long to let the fleet fill in, and how long to leave a key to land, when nothing on
 # the command line says. A simulated fleet runs on its own clock and has settled in well
-# under a second. A real one answers each node's own heartbeat, which comes every five
-# seconds once the node is assigned, so a screen read any sooner than this shows a share
-# that is still on its way as one that never arrives.
+# under a second. A real one shows a share held only on the node's next heartbeat, which
+# comes every five seconds once the node is assigned, so a screen read any sooner than this
+# shows a share that is still on its way as one that never arrives.
 SIM_AFTER, SIM_SETTLE = 4.0, 1.0
 BRIDGE_AFTER, BRIDGE_SETTLE = 15.0, 15.0
 

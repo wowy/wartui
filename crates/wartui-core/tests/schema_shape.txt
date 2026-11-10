@@ -1,21 +1,12 @@
-SCHEMA_VERSION 2
-
-CREATE INDEX assign_node ON assignment(
-  node_mac,
-  created_at
-)
+SCHEMA_VERSION 3
 
 CREATE TABLE assignment (
   id INTEGER PRIMARY KEY,
-  node_mac BLOB NOT NULL,
-  counter INTEGER NOT NULL,
-  wire_version INTEGER NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
   channels INTEGER NOT NULL,
-  ble INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  delivered_at INTEGER,
-  outcome TEXT,
-  latency_us INTEGER
+  ble INTEGER NOT NULL
 )
 
 CREATE TABLE batch_gap (

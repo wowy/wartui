@@ -2,9 +2,9 @@
 //!
 //! A node's heartbeat carries the epoch of the assignment it holds, so
 //! adoption — not just the bus's delivery — is directly observable rather than
-//! inferred from a sweep period. Nothing but the planner decides what a node
-//! holds, and the only thing that moves a share is how many nodes there are to
-//! share with.
+//! inferred from a sweep period. Nothing but the bridge's planner decides what a
+//! node holds, and the host mirrors its plan. The only thing that moves a share
+//! here is how many nodes there are to share with.
 //!
 //! This is the same check to make against real hardware: bring a second node
 //! up and watch the first one's assignment narrow and get re-adopted under a
@@ -18,7 +18,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
-use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -50,8 +49,8 @@ async fn until(
 /// its own heartbeat reports the epoch it was dealt, not merely took delivery
 /// of it — and report each node's adopted channels, in fleet order.
 ///
-/// Nobody asks for any of it: the nodes turn up, the planner cuts the pool,
-/// and each takes its share in answer to its own heartbeat.
+/// Nobody asks for any of it but the run's own start: the nodes turn up, the
+/// bridge's planner cuts the pool, and each takes its share.
 async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     let link = SimTransport::new(SimConfig {
         node_count: nodes,
@@ -65,7 +64,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     let info = CaptureInfo::default();
     let store =
         Store::create(&StoreConfig::new(path), &info, started.unix_ms).expect("creating the store");
-    let config = EngineConfig::default();
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =
@@ -77,52 +76,32 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     // Every node, because the last one to arrive re-cuts every share: a check
     // made before that would be against a range some node no longer holds.
     let settled = until(&snapshot_rx, "every node to adopt its share", |s| {
-        s.nodes.len() == usize::from(nodes) && s.nodes.iter().all(|n| n.state.adopted())
+        s.nodes.len() == usize::from(nodes) && s.nodes.iter().all(|n| n.adopted)
     })
     .await;
-    assert_eq!(settled.counters.admin_failed, 0);
 
     let channels: Vec<ChannelSet> =
-        settled.nodes.iter().map(|n| n.state.desired.expect("adopted has one").channels).collect();
+        settled.nodes.iter().map(|n| n.share.expect("adopted has one").channels).collect();
+    assert!(settled.nodes.iter().all(|n| !n.share.is_some_and(|s| s.ble)), "nobody asked");
     let mac = settled.nodes[0].state.mac;
 
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
 
-    // What was written down about the assignment that put the first node there,
-    // and the heartbeat that then confirmed it held it.
+    // The heartbeat that confirmed the first node held its share.
     let conn = open_readonly(path).expect("reopening the capture");
-    let (outcome, stored, ble, latency): (String, i64, bool, Option<i64>) = conn
-        .query_row(
-            "SELECT outcome, channels, ble, latency_us FROM assignment
-             WHERE node_mac = ?1 ORDER BY id DESC",
-            [&mac[..]],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .expect("an assignment row");
-    assert_eq!(outcome, AdminOutcome::Acked.as_str());
-    // Stored as the mask that went on the wire, so the row says what the node
-    // was told rather than an interpretation of it.
-    assert_eq!(ChannelSet::from_bits(u64::try_from(stored).expect("a 40-bit mask")), channels[0]);
-    assert!(!ble, "nobody asked for the Bluetooth scan");
-    // Measured on this host's clock, from the send to the bridge's `Delivered`; a
-    // paused test holds that clock still between the two, so it cannot run past
-    // the time the engine waits for an answer.
-    let latency = latency.expect("a delivered assignment carries its latency");
-    let admin_timeout = EngineConfig::default().admin_timeout;
-    assert!(
-        (0..i64::try_from(admin_timeout.as_micros()).expect("fits")).contains(&latency),
-        "{latency} us is inside the admin timeout"
-    );
-
     let epoch: i64 = conn
         .query_row(
-            "SELECT epoch FROM heartbeat WHERE node_mac = ?1 ORDER BY id DESC",
+            "SELECT epoch FROM heartbeat WHERE node_mac = ?1 AND epoch != 0 ORDER BY id DESC",
             [&mac[..]],
             |row| row.get(0),
         )
         .expect("a heartbeat row");
-    assert_ne!(epoch, 0, "the stored heartbeat says the node held something, not nothing");
+    assert_eq!(
+        Some(u8::try_from(epoch).expect("an epoch")),
+        settled.nodes[0].share.map(|s| s.epoch),
+        "the stored heartbeat says the node held its share"
+    );
 
     channels
 }
@@ -160,7 +139,7 @@ async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
     let store =
         Store::create(&StoreConfig::new(dir.path().join("outdated.db")), &info, started.unix_ms)
             .expect("creating the store");
-    let config = EngineConfig::default();
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
     let engine = FleetEngine::new(config, started);
     let (snapshot_tx, snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
@@ -172,17 +151,17 @@ async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
     let settled =
         until(&snapshot_rx, "the current node to adopt and the outdated one to show", |s| {
             s.nodes.len() == 2
-                && s.nodes.iter().any(|n| n.state.mac != outdated && n.state.adopted())
+                && s.nodes.iter().any(|n| n.state.mac != outdated && n.adopted)
                 && s.nodes.iter().any(|n| n.state.mac == outdated && n.state.heartbeats >= 2)
         })
         .await;
 
     let node = settled.nodes.iter().find(|n| n.state.mac == outdated).expect("visible");
     assert!(!node.assignable);
-    assert!(node.state.desired.is_none(), "never dealt a share");
+    assert!(node.share.is_none(), "never dealt a share");
     let current = settled.nodes.iter().find(|n| n.state.mac != outdated).expect("the other node");
     assert_eq!(
-        current.state.desired.expect("adopted has one").channels,
+        current.share.expect("adopted has one").channels,
         ChannelPool::All.channels(),
         "the current node shares the pool with nobody"
     );

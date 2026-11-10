@@ -6,12 +6,12 @@
 //! and changing one is changing the protocol. So every vector spells out what it pins.
 
 use wartui_proto::bus::{
-    ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, CLEAR_LEN, Capabilities, Clear, DecodeError,
-    DieTemp, DownMsg, DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
-    HEARTBEAT_PREFIX_LEN, Heartbeat, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX,
-    SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security,
-    SightingBatch, SightingBatchWriter, SightingMsg, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN,
-    UPDATE_CHUNK, UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
+    ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg,
+    DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN, HEARTBEAT_PREFIX_LEN, Heartbeat,
+    RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
+    SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, STOP_LEN, Security, SightingBatch,
+    SightingBatchWriter, SightingMsg, Stop, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK,
+    UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
     UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit,
     UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
 };
@@ -156,7 +156,7 @@ const ASSIGN_BLE_ONLY: &[u8] = &[
 ];
 
 /// Empty: the whole instruction is the type byte.
-const CLEAR: &[u8] = &[];
+const STOP: &[u8] = &[];
 
 /// An update session opening: session 7, a 0x0001_E240-byte image (123456), a hash of
 /// 0x00..=0x1F, version 0.2.3, for an ESP32-C6.
@@ -214,7 +214,7 @@ fn bus_msg_codec_matches_expected_body_lengths_when_checking_constants() {
         SIGHTING_BATCH_HEADER + WIFI_RECORD.len(),
         "the header plus the one record it carries"
     );
-    assert_eq!(CLEAR.len(), CLEAR_LEN, "empty");
+    assert_eq!(STOP.len(), STOP_LEN, "empty");
     // The ceiling is the 1024 bytes every body a node sends keeps to, and a batch is packed
     // to fill exactly that many.
     const {
@@ -862,16 +862,20 @@ fn assign_preserves_unknown_flag_bits_when_round_tripped() {
 }
 
 #[test]
-fn clear_serializes_byte_for_byte_when_encoded_and_decoded() {
-    assert_eq!(Clear.encode().as_slice(), CLEAR);
-    assert_eq!(Clear::decode(CLEAR), Ok(Clear));
+fn stop_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(Stop.encode().as_slice(), STOP);
+    assert_eq!(Stop::decode(STOP), Ok(Stop));
 }
 
 #[test]
-fn clear_rejects_body_when_not_empty() {
+fn stop_rejects_body_when_not_empty() {
     // The same reasoning `BadLength` exists for everywhere else: a wider body from a later
-    // build must not be taken as a plausible clear.
-    assert_eq!(Clear::decode(&[0xFF]), Err(DecodeError::BadLength { need: CLEAR_LEN, got: 1 }));
+    // build must not be taken as a plausible stop.
+    assert_eq!(Stop::decode(&[0xFF]), Err(DecodeError::BadLength { need: STOP_LEN, got: 1 }));
+    assert_eq!(
+        DownMsg::decode(DownType::Stop.as_u8(), ASSIGN),
+        Err(DecodeError::BadLength { need: STOP_LEN, got: ASSIGN_LEN })
+    );
 }
 
 #[test]
@@ -883,7 +887,7 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
     assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_BLE), Ok(UpMsg::Sightings(_))));
     assert!(matches!(up(UpType::UpdateStatus, OTA_STATUS), Ok(UpMsg::UpdateStatus(_))));
     assert!(matches!(down(DownType::Assign, ASSIGN), Ok(DownMsg::Assign(_))));
-    assert!(matches!(down(DownType::Clear, CLEAR), Ok(DownMsg::Clear(_))));
+    assert!(matches!(down(DownType::Stop, STOP), Ok(DownMsg::Stop(_))));
     assert!(matches!(down(DownType::UpdateBegin, OTA_BEGIN), Ok(DownMsg::UpdateBegin(_))));
     assert!(matches!(down(DownType::UpdateChunk, OTA_CHUNK_SHORT), Ok(DownMsg::UpdateChunk(_))));
     assert!(matches!(down(DownType::UpdateCommit, OTA_COMMIT), Ok(DownMsg::UpdateCommit(_))));
@@ -902,7 +906,7 @@ fn msg_types_number_each_direction_from_one_when_pinned() {
     }
     let down = [
         DownType::Assign,
-        DownType::Clear,
+        DownType::Stop,
         DownType::UpdateBegin,
         DownType::UpdateChunk,
         DownType::UpdateCommit,
@@ -928,7 +932,7 @@ fn down_msg_encodes_body_when_written_into_buffer() {
     let chunk = DownMsg::UpdateChunk(UpdateChunk::decode(OTA_CHUNK_SHORT).expect("valid"));
     let len = chunk.encode_into(&mut out).expect("fits");
     assert_eq!(&out[..len], OTA_CHUNK_SHORT);
-    assert_eq!(DownMsg::Clear(Clear).encode_into(&mut out), Some(0));
+    assert_eq!(DownMsg::Stop(Stop).encode_into(&mut out), Some(0));
 }
 
 #[test]

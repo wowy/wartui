@@ -31,7 +31,8 @@ cargo run --release -q -p wartui -- analyze --db <db>
 ```
 
 The survey opens the file read-only and ends with a `FLAGS` list, each with the SQL that
-reproduces it. `wartui analyze` is the project's own loss accounting. Its `peak` lines give the
+reproduces it. It reads this build's `store::SCHEMA_VERSION` only and refuses a file stamped
+another, as the store does. `wartui analyze` is the project's own loss accounting. Its `peak` lines give the
 arrival rate: the most sightings in any one second and any one minute, in total, per kind and per
 node.
 

@@ -2,6 +2,7 @@
 
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
 /// `n` with a comma between each group of three digits.
 pub(crate) fn thousands(n: u64) -> String {
@@ -62,12 +63,47 @@ pub(crate) fn node_name(board: NodeBoard, slot: Option<Slot>, mac: &Mac) -> Stri
     slot.map_or_else(|| mac::short(mac).to_string(), |slot| board.label(slot).to_string())
 }
 
+/// Format a set as channel numbers, the units every other tool uses.
+///
+/// Runs collapse to `first-last`, so a contiguous set reads `1-11`.
+pub(crate) fn channel_list(set: ChannelSet) -> String {
+    let mut out = String::new();
+    let mut run: Option<(u8, u8)> = None;
+    for idx in set.indices() {
+        match run {
+            Some((start, end)) if idx == end + 1 => run = Some((start, idx)),
+            Some((start, end)) => {
+                push_run(&mut out, start, end);
+                run = Some((idx, idx));
+            }
+            None => run = Some((idx, idx)),
+        }
+    }
+    if let Some((start, end)) = run {
+        push_run(&mut out, start, end);
+    }
+    if out.is_empty() { "none".to_owned() } else { out }
+}
+
+/// Append one run to `out`: `6`, or `36-48`.
+fn push_run(out: &mut String, start: u8, end: u8) {
+    use core::fmt::Write as _;
+    let first = SCAN_CHANNELS.get(usize::from(start)).copied().unwrap_or(0);
+    let last = SCAN_CHANNELS.get(usize::from(end)).copied().unwrap_or(0);
+    if !out.is_empty() {
+        out.push(',');
+    }
+    // Writing into a `String` cannot fail.
+    let _ = if first == last { write!(out, "{first}") } else { write!(out, "{first}-{last}") };
+}
+
 #[cfg(test)]
 mod tests {
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::mac::Mac;
+    use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-    use super::{node_name, slot_named, slot_range, thousands};
+    use super::{channel_list, node_name, slot_named, slot_range, thousands};
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 
@@ -105,5 +141,24 @@ mod tests {
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
+    }
+
+    #[test]
+    fn channel_list_formats_indices_as_channel_numbers_when_given_index_runs() {
+        // Indices into SCAN_CHANNELS belong to the wire format, not the screen.
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 38))), "36-165");
+    }
+
+    #[test]
+    fn channel_list_formats_channels_as_compact_runs_when_channel_set_is_scattered() {
+        assert_eq!(channel_list(ChannelPool::Us.channels()), "1-11,36-165");
+        let mut comb = ChannelSet::empty();
+        for idx in [0, 2, 4, 14, 15] {
+            comb.insert(idx);
+        }
+        assert_eq!(channel_list(comb), "1,3,5,36-40");
+        assert_eq!(channel_list(ChannelSet::empty()), "none");
     }
 }

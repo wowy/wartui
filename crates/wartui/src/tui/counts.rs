@@ -238,6 +238,24 @@ mod tests {
     }
 
     #[test]
+    fn counts_keep_big_digits_when_58_by_26_screen_shows_bluetooth_hint_and_unswept_warning() {
+        // The header's longest scan state and an extra fault line must not cost the glance values.
+        let mut snapshot = busy();
+        snapshot.scan = Some(wartui_proto::fleet::ScanMode::WifiBluetooth);
+        snapshot.ble_slot = None;
+        snapshot.unreachable = wartui_proto::plan::ChannelPool::All.channels();
+        let rendered = screen(&snapshot, 58, 26);
+        assert!(rendered.contains("waiting for a second"), "the hint: {rendered}");
+        assert!(rendered.contains("unswept"), "the warning: {rendered}");
+        let lines: Vec<&str> = rendered.lines().collect();
+        let ap = lines.iter().position(|l| l.contains("unique APs")).expect("the AP label");
+        assert!(lines[ap].contains("unique BLE"), "side by side: {rendered}");
+        for (i, glyphs) in big("32").iter().enumerate() {
+            assert!(lines[ap + i].contains(glyphs.trim_end()), "{glyphs:?} in\n{rendered}");
+        }
+    }
+
+    #[test]
     fn counts_stack_big_unique_counts_when_both_do_not_fit_beside_each_other() {
         // Five-glyph figures for both, so the pair is wider than the narrow strip.
         let mut snapshot = busy();

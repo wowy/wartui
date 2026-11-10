@@ -4,7 +4,6 @@ use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::Slot;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
 #[cfg(doc)]
@@ -46,36 +45,31 @@ pub enum Event {
 /// keypresses against heartbeats, testably.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Ask the bridge to give the node in one slot the Bluetooth scan as its whole job, or to take
-    /// the scan off the fleet.
+    /// Ask the bridge to scan Wi-Fi, and Bluetooth too when `true`.
     ///
-    /// At most one node, and by default none. The two radios share one 2.4 GHz antenna, and a scan
-    /// holds it through the window a node listens in. That cost a stock node every assignment sent
-    /// to it (`docs/phase-0-findings.md`). A node sniffing no Wi-Fi has nothing to hold the antenna
-    /// against, so Bluetooth costs the fleet a whole sniffer and buys back-to-back scans.
+    /// The P4 gives Bluetooth to one node as its whole job, once two nodes can take a share. The
+    /// two radios share one 2.4 GHz antenna, and a scan holds it through the window a node listens
+    /// in. That cost a stock node every assignment sent to it (`docs/phase-0-findings.md`). A
+    /// node sniffing no Wi-Fi has nothing to hold the antenna against, so Bluetooth costs the
+    /// fleet a whole sniffer and buys back-to-back scans.
     ///
-    /// The scan belongs to a slot, and the bridge holds it beside the pool, across its reboots.
-    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetPool`] is. The engine
-    /// changes nothing here: the planner gives the scan to the node heartbeating from the slot the
-    /// bridge's `Status` reports, and the re-cut deals that node's channels to the rest. Moving the
-    /// scan costs two assignments, since the old holder gets a share back.
-    AssignBle {
-        /// Which slot's node, or `None` to stop scanning BLE anywhere.
-        slot: Option<Slot>,
-    },
+    /// Sent at once, with a `GetStatus` behind it, while the run wants a scan, and it becomes the
+    /// mode the run restarts a reset bridge in. While a run is still starting the scan, it sets
+    /// the mode the start uses. A fleet the operator stopped ignores it.
+    /// [`EngineConfig::auto_start`] is how a run starts: a P4 found stopped starts on Wi-Fi, and
+    /// one found scanning is stopped and started again in the mode it held, so a capture starts
+    /// with every node's dedup ring empty. Later in the run, a P4 found scanning is left alone and
+    /// one found stopped is started again.
+    SetBluetooth(bool),
 
-    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out on that
-    /// node's next heartbeat, like an assignment.
-    ClearRing {
-        /// Which node, or `None` for every node [`FleetEngine::is_assignable`] when this arrives.
-        mac: Option<Mac>,
-    },
+    /// Ask the bridge to idle every node, as a clean quit and an update do. Sent at once, with a
+    /// `GetStatus` behind it. The run does not start the scan again.
+    StopScan,
 
     /// Ask the bridge to hold the channel pool `pool`, and keep it across its reboots.
     ///
-    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The engine
-    /// changes nothing here: the planner deals the pool the bridge's `Status` reports, so the
-    /// fleet re-cuts once that `Status` shows the change.
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The P4's
+    /// planner cuts it at once, and its next `Fleet` report shows the new shares.
     SetPool {
         /// The pool for the bridge to hold.
         pool: ChannelPool,
@@ -91,8 +85,8 @@ pub enum Command {
     /// Ask the bridge's carrier board to switch the node in `slot` off and on.
     ///
     /// Sent at once, and answered by the bridge whatever it carries; the answer reaches the
-    /// operator as [`Snapshot::power_answer`](super::Snapshot::power_answer). Nothing in the
-    /// plan changes: the node reboots, and its heartbeats say so.
+    /// operator as [`Snapshot::power_answer`](super::Snapshot::power_answer). The node reboots,
+    /// its heartbeats say so, and the P4 sends it its share again.
     PowerCycle {
         /// Which node, by the slot its heartbeat came from.
         slot: Slot,
@@ -117,8 +111,7 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands sent ahead of `bulk`: assignments and dedup-ring clears, which answer a
-    /// heartbeat.
+    /// Commands sent ahead of `bulk`: the scan's start and stop.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 

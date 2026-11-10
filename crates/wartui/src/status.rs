@@ -13,8 +13,10 @@
 //! this build sends: a node on another build.
 //!
 //! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed. `pool` is
-//! the channel pool the bridge holds, which `run`'s planner deals. `slots` names the slots the
-//! bridge counts a node in, as the operator reads them on its board.
+//! the channel pool the bridge holds, which its planner deals. `slots` names the slots the
+//! bridge counts a node in, as the operator reads them on its board. `scan`, `bluetooth` and the
+//! `share` lines are the planner's: its mode, the node it picked for Bluetooth, and each node's
+//! share, from the `Fleet` report the bridge sends behind every `Status`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -24,6 +26,7 @@ use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
+use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
@@ -33,6 +36,9 @@ use wartui_proto::mac;
 /// that a wedged one is reported rather than waited on. The same figure the
 /// notice quotes, so the two cannot disagree about how long was waited.
 const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
+
+/// How long to wait for the `Fleet` report the bridge sends behind a `Status`.
+const PLAN_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -79,7 +85,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
 
-    let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(&mut link))
+    let (status, plan) = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status_and_plan(&mut link))
         .await
         .context("the bridge did not answer a status request")??;
 
@@ -93,6 +99,7 @@ pub async fn run(args: Args) -> Result<()> {
         host_uart_errors,
         fan,
         pool,
+        scan,
         ble,
         present,
     } = status
@@ -106,8 +113,12 @@ pub async fn run(args: Args) -> Result<()> {
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
     println!("pool       {pool}");
+    println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));
     println!("slots      {}", slots_text(info.node_board, present));
+    for line in plan_lines(info.node_board, plan.as_ref()) {
+        println!("{line}");
+    }
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
@@ -141,9 +152,48 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
     }
 }
 
-/// The slot whose node scans Bluetooth, by its board's name, or `none`.
+/// What the bridge's planner is asked to scan.
+pub(crate) const fn scan_text(scan: ScanMode) -> &'static str {
+    match scan {
+        ScanMode::Stopped => "stopped",
+        ScanMode::Wifi => "wifi",
+        ScanMode::WifiBluetooth => "wifi + bluetooth",
+    }
+}
+
+/// The slot the bridge's planner gave the Bluetooth scan, by its label, or `none`.
 pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
     ble.map_or_else(|| "none".to_owned(), |slot| board.label(slot).to_string())
+}
+
+/// The bridge's plan, a line per share by `board`'s slot labels, then the channels of the pool
+/// no node can take. `shares     none` while no node holds one, and `not reported` with no report.
+pub(crate) fn plan_lines(board: NodeBoard, plan: Option<&Report>) -> Vec<String> {
+    let Some(plan) = plan else { return vec!["shares     not reported".to_owned()] };
+    if plan.shares.is_empty() {
+        return vec!["shares     none".to_owned()];
+    }
+    let mut lines: Vec<String> = plan
+        .shares
+        .iter()
+        .map(|share| {
+            let held = if share.ble {
+                "bluetooth".to_owned()
+            } else {
+                let count = share.channels.len();
+                let unit = if count == 1 { "channel" } else { "channels" };
+                format!("{count} {unit}  {}", crate::text::channel_list(share.channels))
+            };
+            format!("share      {:<4} {held}", board.label(share.slot).to_string())
+        })
+        .collect();
+    if !plan.unreachable.is_empty() {
+        lines.push(format!(
+            "unswept    {}, which no node can take",
+            crate::text::channel_list(plan.unreachable)
+        ));
+    }
+    lines
 }
 
 /// The slots `present` names, as `board` labels them, or `none`.
@@ -244,7 +294,34 @@ pub(crate) async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Res
         match awaited(link.recv().await)? {
             Awaited::Status(status) => return Ok(*status),
             Awaited::Fault(line) => println!("{line}"),
+            Awaited::Fleet(_) | Awaited::Other => {}
+        }
+    }
+}
+
+/// [`wait_for_status`], then the `Fleet` report the bridge sends behind it, or the last one
+/// before it when none follows within [`PLAN_AFTER`].
+pub(crate) async fn wait_for_status_and_plan(
+    link: &mut wartui_bridge::LinkHandle,
+) -> Result<(BridgeToHost, Option<Report>)> {
+    let mut plan = None;
+    let status = loop {
+        match awaited(link.recv().await)? {
+            Awaited::Status(status) => break *status,
+            Awaited::Fleet(report) => plan = Some(*report),
+            Awaited::Fault(line) => println!("{line}"),
             Awaited::Other => {}
+        }
+    };
+    let deadline = tokio::time::Instant::now() + PLAN_AFTER;
+    loop {
+        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
+            return Ok((status, plan));
+        };
+        match awaited(event)? {
+            Awaited::Fleet(report) => return Ok((status, Some(*report))),
+            Awaited::Fault(line) => println!("{line}"),
+            Awaited::Status(_) | Awaited::Other => {}
         }
     }
 }
@@ -254,6 +331,8 @@ pub(crate) async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Res
 enum Awaited {
     /// The answer.
     Status(Box<BridgeToHost>),
+    /// The planner's report.
+    Fleet(Box<Report>),
     /// A fault the bridge reported, as the line to print.
     Fault(String),
     /// Nothing `status` prints.
@@ -267,6 +346,9 @@ fn awaited(event: Option<LinkEvent>) -> Result<Awaited> {
         }
         Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
             Ok(Awaited::Fault(format!("fault      {message}")))
+        }
+        Some(LinkEvent::Message(BridgeToHost::Fleet(report))) => {
+            Ok(Awaited::Fleet(Box::new(report)))
         }
         Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
         Some(_) => Ok(Awaited::Other),
@@ -287,15 +369,17 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, awaited, ble_text, board_line, diagnostic_lines, fan_text, human_uptime,
-        radio_line, silence_note, slots_text,
+        Awaited, Report, ScanMode, awaited, ble_text, board_line, diagnostic_lines, fan_text,
+        human_uptime, plan_lines, radio_line, scan_text, silence_note, slots_text,
     };
     use wartui_bridge::LinkEvent;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
+    use wartui_proto::fleet::Share;
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
+    use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
     use wartui_proto::reset::ResetCause;
 
     #[test]
@@ -327,6 +411,63 @@ mod tests {
         let b2 = Slot::new(1, 1);
         assert_eq!(ble_text(NodeBoard::Carrier14, b2), "N9");
         assert_eq!(ble_text(NodeBoard::Carrier14, None), "none");
+    }
+
+    #[test]
+    fn status_prints_scan_mode_when_bridge_reports_one() {
+        assert_eq!(scan_text(ScanMode::Stopped), "stopped");
+        assert_eq!(scan_text(ScanMode::Wifi), "wifi");
+        assert_eq!(scan_text(ScanMode::WifiBluetooth), "wifi + bluetooth");
+    }
+
+    /// A plan holding `shares`, scanning Wi-Fi and Bluetooth over the `all` pool.
+    fn plan(shares: &[Share], unreachable: ChannelSet) -> Report {
+        Report {
+            mode: ScanMode::WifiBluetooth,
+            pool: ChannelPool::All,
+            shares: shares.iter().copied().collect(),
+            unreachable,
+        }
+    }
+
+    #[test]
+    fn status_prints_one_line_per_share_when_bridge_reports_a_plan() {
+        let a1 = Slot::new(0, 0).expect("A1");
+        let b2 = Slot::new(1, 1).expect("B2");
+        let channels = ChannelSet::from_run(IndexRun::new(0, 10));
+        let shares = [
+            Share { slot: a1, epoch: 3, ble: false, channels },
+            Share { slot: b2, epoch: 4, ble: true, channels: ChannelSet::empty() },
+        ];
+        assert_eq!(
+            plan_lines(NodeBoard::Carrier14, Some(&plan(&shares, ChannelSet::empty()))),
+            ["share      N1   11 channels  1-11", "share      N9   bluetooth"]
+        );
+    }
+
+    #[test]
+    fn status_prints_unswept_channels_when_no_node_can_take_them() {
+        let a1 = Slot::new(0, 0).expect("A1");
+        let channels = ChannelSet::from_run(IndexRun::new(0, 0));
+        let shares = [Share { slot: a1, epoch: 3, ble: false, channels }];
+        let unreachable = ChannelSet::from_run(IndexRun::new(14, 38));
+        let lines = plan_lines(NodeBoard::Carrier14, Some(&plan(&shares, unreachable)));
+        assert_eq!(lines[0], "share      N1   1 channel  1");
+        assert_eq!(lines[1], "unswept    36-165, which no node can take");
+    }
+
+    #[test]
+    fn status_prints_no_shares_when_plan_is_empty_or_unreported() {
+        let stopped = Report { mode: ScanMode::Stopped, ..plan(&[], ChannelSet::empty()) };
+        assert_eq!(plan_lines(NodeBoard::Carrier14, Some(&stopped)), ["shares     none"]);
+        assert_eq!(plan_lines(NodeBoard::Carrier14, None), ["shares     not reported"]);
+    }
+
+    #[test]
+    fn status_cmd_keeps_plan_when_fleet_report_arrives() {
+        let report = plan(&[], ChannelSet::empty());
+        let event = LinkEvent::Message(BridgeToHost::Fleet(report.clone()));
+        assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Fleet(Box::new(report)));
     }
 
     #[test]
@@ -435,6 +576,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool: wartui_proto::plan::ChannelPool::All,
+            scan: ScanMode::Stopped,
             ble: None,
             present: 0,
         };

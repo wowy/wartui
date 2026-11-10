@@ -9,8 +9,8 @@
 //!
 //! The pool and fan rows live on the bridge, not in the file. Each shows what the bridge last
 //! reported, and `Enter` sends it only when the row moved; the bridge stores it and boots into
-//! it. Neither is ever written to `wartui.toml`. The bridge holds the Bluetooth slot too, which
-//! `b` sets rather than a row here.
+//! it. Neither is ever written to `wartui.toml`. The bridge picks the Bluetooth node too, and `b`
+//! rather than a row here asks for the scan.
 //!
 //! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
 //! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
@@ -797,7 +797,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let mut snapshot = busy();
         // The bridge's to keep, so nothing about it reaches the file.
-        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
+        snapshot.scan = Some(wartui_proto::fleet::ScanMode::WifiBluetooth);
         snapshot.ble_slot = snapshot.nodes[0].state.slot;
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
@@ -838,7 +838,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = fan_snapshot(40);
         let (tx, mut rx) = mpsc::channel(2);
-        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        tx.try_send(Command::StopScan).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // The pool and fan rows moved, so the modal sends two commands.
@@ -849,7 +849,7 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         // Room for one of the modal's two commands, so none goes out.
-        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -862,7 +862,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(1);
-        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        tx.try_send(Command::StopScan).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
@@ -883,14 +883,14 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        tx.try_send(Command::StopScan).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -1748,11 +1748,11 @@ mod tests {
         let mut ui = open_excluded_page(&snapshot, settings);
         add_ssid(&mut ui, "HomeNet", &snapshot);
         let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        tx.try_send(Command::StopScan).unwrap();
 
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
 
-        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
         let modal = ui.modal().expect("still open");

@@ -5,14 +5,14 @@ use crate::plan::{CHANNEL_SET_BYTES, ChannelSet};
 /// Length of an [`Assign`] body.
 pub const ASSIGN_LEN: usize = 2 + CHANNEL_SET_BYTES;
 
-/// Length of a [`Clear`] body: nothing.
-pub const CLEAR_LEN: usize = 0;
+/// Length of a [`Stop`] body: nothing.
+pub const STOP_LEN: usize = 0;
 
 /// [`Assign::flags`] bit 0: scan Bluetooth.
 pub const ASSIGN_FLAG_BLE: u8 = 1 << 0;
 
 /// P4 → node: a channel and Bluetooth assignment. One of the two messages that change what a
-/// node scans; [`Clear`] is the other.
+/// node scans; [`Stop`] is the other.
 ///
 /// Eight bytes: [`epoch`](Self::epoch), [`flags`](Self::flags) and six bytes of
 /// [`ChannelSet`].
@@ -75,37 +75,39 @@ impl Assign {
     }
 }
 
-/// P4 → node: forget every address it has reported.
+/// P4 → node: stop scanning. The node drops its assignment, forgets every address it has
+/// reported, and idles servicing the bus, holding epoch 0 as it does at boot.
 ///
 /// An empty body; the type is the whole instruction. It carries no epoch because it is
-/// idempotent. Clearing an empty ring again costs one extra round of sightings, so there is
-/// no state for the two ends to disagree about.
+/// idempotent: a stopped node stopped again stays as it is. The next [`Assign`] is adopted
+/// whatever its epoch, since 0 is never one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Clear;
+pub struct Stop;
 
-impl Clear {
+impl Stop {
     /// Decode a body.
     ///
     /// # Errors
     /// [`DecodeError::BadLength`] for a body that is not empty.
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
-        fixed(body, CLEAR_LEN)?;
+        fixed(body, STOP_LEN)?;
         Ok(Self)
     }
 
     /// The empty body.
     #[must_use]
-    pub const fn encode(&self) -> [u8; CLEAR_LEN] {
+    pub const fn encode(&self) -> [u8; STOP_LEN] {
         []
     }
 }
 
-/// Turn a host-side monotonic assignment counter into the byte the wire carries.
+/// Turn the fleet planner's monotonic assignment counter into the byte the wire carries.
 ///
-/// A node adopts an assignment only when this byte *differs* from the one it holds, so
-/// an epoch reused after a host restart is silently discarded. The host therefore
-/// persists a `u64` counter and narrows it here. Zero is skipped, because a node's 0
-/// means it holds no assignment.
+/// A node adopts an assignment only when this byte *differs* from the one it holds, so an
+/// epoch repeated after a P4 restart is silently discarded. The planner therefore keeps a `u64`
+/// counter, narrows it here, and skips the byte a node's heartbeat says it holds
+/// ([`crate::fleet::next_epoch`]). Zero is skipped, because a node's 0 means it holds no
+/// assignment.
 #[must_use]
 pub const fn wire_epoch(counter: u64) -> u8 {
     // `% 255` lands in 0..=254; the offset moves that to 1..=255.

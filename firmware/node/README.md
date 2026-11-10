@@ -1,8 +1,8 @@
 # wartui node firmware
 
 A wardriving node. It listens on one channel at a time and reports every access point it hasn't
-reported lately. It takes its share of the channel pool from the host: `wartui` on a laptop behind
-the P4 bridge.
+reported lately. It takes its share of the channel pool from the P4 bridge, which plans the fleet,
+and reports everything to `wartui` on a laptop behind it.
 
 It replaces the vendor firmware at
 [ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver) rather than
@@ -20,7 +20,7 @@ transfer carries records, one message each:
 | Heartbeat      | Node → P4   | 27 bytes                |
 | Sighting batch | Node → P4   | Up to 1024 bytes        |
 | Assign         | P4 → node   | 8 bytes                 |
-| Clear          | P4 → node   | Empty                   |
+| Stop           | P4 → node   | Empty                   |
 
 - **Heartbeat**: every 5 s once assigned, every second until then. Fire-and-forget: a newer one
   replaces one the P4 has not clocked. Its body opens with a 5-byte prefix: the firmware version
@@ -33,7 +33,8 @@ transfer carries records, one message each:
   bytes. A record's trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
   advertiser's manufacturer identifier, when there are any.
 - **Assign**: the assignment.
-- **Clear**: empties the dedup ring.
+- **Stop**: drops the assignment and empties the dedup ring. The node idles at epoch 0, as at
+  boot, and adopts the next assignment whatever its epoch.
 
 It also takes an image over the bus, in the update records:
 
@@ -69,9 +70,10 @@ from dwell to dwell. Between dwells it reports what it heard and takes whatever 
 an assignment included. It heartbeats every 5 seconds from wherever it is.
 
 **An unassigned node waits rather than sweeping.** It services the bus and heartbeats every second
-until told what to scan. It **collects nothing until then**. wartui's planner answers
-the first heartbeat, so the wait lasts a single beat. That is the intended trade, and explains
-where the first second of a capture went.
+until told what to scan, whether it has just booted or has been stopped. It **collects nothing
+until then**. A scanning bridge answers the first heartbeat, so the wait lasts a single beat. That
+is the intended trade, and explains where the first second of a capture went. A bridge whose scan
+is stopped sends nothing, and the node idles until the scan starts.
 
 **The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and runs one scan
 after another, back to back.
@@ -79,13 +81,13 @@ after another, back to back.
 
 **It forgets what it has reported in two cases.** An assignment that changes its channels or its
 Bluetooth flag empties the dedup ring, because the entries describe a neighborhood it no longer
-listens to. So does a clear, which the host sends on the operator's `r` or `R` and which
-carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoning.
+listens to. So does a stop, which also drops the assignment.
+`crates/wartui-proto/src/dedup.rs` has the reasoning.
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
-assignment adopted, or 0 for none. That is how the host tells adoption from a bus ack without
-asking the node's own console. The five-byte prefix is the firmware version, the board and a flags
-byte, shown by the host as:
+assignment adopted, or 0 for none. That is how the bridge and the host tell adoption from a bus
+ack without asking the node's own console. The five-byte prefix is the firmware version, the
+board and a flags byte, shown by the host as:
 
 ```
 0.1.0;5g
@@ -93,10 +95,10 @@ byte, shown by the host as:
 
 That is the firmware version, then `5g` for the C5's radio. The board byte is 1 for an ESP32-C5.
 Flag bit 1 marks an image on trial, shown as `;trial`.
-Bluetooth isn't a capability. Every node can scan it, and the host's `ASSIGN_FLAG_BLE` decides
+Bluetooth isn't a capability. Every node can scan it, and the bridge's `ASSIGN_FLAG_BLE` decides
 whether one does, off at every boot.
 
-The host deals no channels to a node until it has heard this. Every heartbeat carries it, not only
+The bridge deals no channels to a node until it has heard this. Every heartbeat carries it, not only
 the first, because one sent once is lost to a dropped beat.
 
 ## Building and flashing
@@ -117,16 +119,17 @@ Diagnostics go out over USB serial-JTAG. The cargo runner is
 so espflash detects the part. Run it from this directory, since the table's path is relative. Unlike
 the bridge's, this monitor is worth watching, because nothing but diagnostics goes down that pipe.
 
-Every node can scan Bluetooth. It does so only if the host sets the flag, and a node that does scans
-nothing else.
+Every node can scan Bluetooth. It does so only if the bridge sets the flag, and a node that does
+scans nothing else.
 
 ## Versioning
 
 `version` in `Cargo.toml` is bumped on every firmware change. Before 1.0, a minor bump may change
 the wire and a patch bump may not. `wartui_proto::bus::NODE_VERSION` mirrors it, and a test in
 `crates/wartui-proto/tests/version.rs` fails when the two differ. The host drives a node on its own
-major and minor at any patch. It shows a node on an older major or minor as `needs update`, and
-one on a newer as `host behind`, and drives neither.
+major and minor at any patch, and so does the bridge's planner. The host shows a node on an older
+major or minor as `needs update`, and one on a newer as `host behind`, and the bridge assigns
+neither.
 
 The heartbeat's prefix and the MAC after it, and the update records, are part of the bus's frozen
 core ([`crates/wartui-proto/src/bus/mod.rs`](../../crates/wartui-proto/src/bus/mod.rs)
@@ -214,9 +217,11 @@ so a hung image rolls back too: each power cycle counts a boot. A power cut mid-
 the sector armed and over the count, so the next boot rolls back again.
 
 **Confirmation.** The first record from the P4 the node decodes confirms the image: assign,
-clear, update confirm, or any update record. A confirmed image is one that has heard the host over
-the bus, which is the whole test. An update record confirms before the receiver sees it, because
-an update taken on trial would write over the only slot known to work.
+stop, update confirm, or any update record. A confirmed image is one that has heard the bridge
+over the bus, which is the whole test. A bridge whose scan is stopped sends an idle node nothing,
+so there the update's own confirm, or the scan starting, is what confirms it. An update record
+confirms before the receiver sees it, because an update taken on trial would write over the only
+slot known to work.
 
 ## The regulatory domain is set here
 
@@ -240,18 +245,18 @@ reading of the driver.
 
 ## Bluetooth is a whole node's job
 
-**At most one node scans, and the host decides which.** Bit 0 of the assignment's flags byte
+**At most one node scans, and the bridge decides which.** Bit 0 of the assignment's flags byte
 carries it, clear at every boot on every build. Bluetooth scanning is always compiled in; the flag
 decides whether it runs. The assignment that sets it carries **no channels**, by design. An empty
 mask with the flag means "Bluetooth is all of it". An empty mask without the flag is the one thing
-the host never sends, and this firmware treats it as never having been told anything.
+the bridge never sends, and this firmware treats it as never having been told anything.
 
 The two radios share one 2.4 GHz antenna, and a Bluetooth controller left free takes it whenever
 the node is otherwise idle ([`docs/phase-0-findings.md`](../../docs/phase-0-findings.md),
 [`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with no sweep has nothing to
 hand the antenna back to, so the conflict is arranged away rather than scheduled around. That costs
-one node's Wi-Fi coverage. Which node is the operator's decision, not a property of the binary on
-the board.
+one node's Wi-Fi coverage. Whether a node scans it is the operator's choice of scan, and which
+node is the bridge's pick, never a property of the binary on the board.
 
 Scans run back to back: the controller off, the new advertisers reported, and straight into the next
 scan, with no deadline of its own. A `node::ASSIGNED_BEAT_MS` timer runs alongside, independent of

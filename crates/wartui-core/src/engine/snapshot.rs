@@ -1,11 +1,12 @@
 use wartui_bridge::BridgeInfo;
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
+use wartui_proto::fleet::{ScanMode, Share};
 use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
 #[cfg(doc)]
 use wartui_proto::plan::SCAN_CHANNELS;
-use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS, Plan};
+use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
 
 #[cfg(doc)]
 use super::rx::DUPLICATE_BATCH_WINDOW_US;
@@ -38,17 +39,6 @@ pub struct Counters {
     pub unknown_slot: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Assignments this host has sent.
-    pub admin_sent: u64,
-    /// Assignments the bridge delivered.
-    pub admin_acked: u64,
-    /// Assignments undelivered, or never answered for.
-    pub admin_failed: u64,
-    /// Assignments delivered but not taken, as the node's next heartbeat epoch shows. Each is
-    /// re-sent on that heartbeat, like an undelivered one.
-    pub admin_unadopted: u64,
-    /// Times the pool was re-partitioned.
-    pub replans: u64,
     /// Sighting batches lost between nodes and the host, from `seq` gaps after a live batch.
     /// Records the bridge evicted with no host reading are its `dropped_tx`.
     pub batches_lost: u64,
@@ -65,9 +55,8 @@ pub struct Counters {
 
 /// A node as of one snapshot.
 ///
-/// Both flags are carried because the UI cannot re-derive them. A node can stream observations yet
-/// take no assignment, since only a heartbeat is answered with one. And the liveness timeout is
-/// engine configuration the snapshot does not carry.
+/// The flags are carried because the UI cannot re-derive them. A node can stream observations yet
+/// hold no share. And the liveness timeout is engine configuration the snapshot does not carry.
 #[derive(Debug, Clone)]
 pub struct NodeView {
     /// Everything known about the node.
@@ -77,8 +66,13 @@ pub struct NodeView {
     pub alive: bool,
     /// Whether its slot is on the bus, as far as the bridge has said ([`FleetEngine::on_bus`]).
     pub on_bus: bool,
-    /// Whether it can take an assignment ([`FleetEngine::is_assignable`]).
+    /// Whether the P4 deals it a share, as far as this host can tell
+    /// ([`FleetEngine::is_assignable`]).
     pub assignable: bool,
+    /// The share the bridge's last plan gives its slot, if any.
+    pub share: Option<Share>,
+    /// Whether its latest live heartbeat holds [`Self::share`]'s epoch: it took the share.
+    pub adopted: bool,
 }
 
 /// One row of the UI's observation stream.
@@ -114,24 +108,23 @@ pub struct Snapshot {
     pub link_up: bool,
     /// Why it went down, if it did.
     pub link_error: Option<String>,
-    /// The channel pool the bridge reports, which the planner deals. `None` before its first
+    /// The channel pool the bridge reports, which its planner cuts. `None` before its first
     /// `Status`.
     pub pool: Option<ChannelPool>,
-    /// The partition in force. `None` with nothing heartbeating, or more nodes alive than wartui
-    /// supports.
-    pub plan: Option<Plan>,
-    /// Which node is scanning Bluetooth, if any.
-    pub ble_node: Option<Mac>,
-    /// The slot whose node scans Bluetooth, as the bridge reports it. `None` for no node, and
-    /// before its first `Status`.
+    /// What the bridge's planner is asked to scan. `None` before the bridge first says.
+    pub scan: Option<ScanMode>,
+    /// The slot the bridge's planner gave the Bluetooth scan. `None` for no node, and before its
+    /// first `Status`.
     pub ble_slot: Option<Slot>,
+    /// Channels of the pool no node can take, from the bridge's last plan. Empty before one.
+    pub unreachable: ChannelSet,
     /// Every node, ordered by slot as the carrier lays them out, then the slotless ones by MAC, so
     /// the table holds still.
     pub nodes: Vec<NodeView>,
     /// Nodes heartbeating inside the topology timeout and on the bus. Can exceed
     /// [`Self::assignable`]: a node with no declared radio is alive but undrivable.
     pub alive: usize,
-    /// How many can take an assignment: exactly the set the planner partitions.
+    /// How many the P4 deals a share to, as far as this host can tell.
     pub assignable: usize,
     /// Nodes heard inside the topology timeout whose heartbeat named an older major or minor than
     /// this build's. Never [`Self::alive`]: their heartbeats are not liveness.
@@ -280,11 +273,16 @@ impl FleetEngine {
         let mut nodes: Vec<NodeView> = self
             .nodes
             .values()
-            .map(|state| NodeView {
-                alive: self.is_alive(state, now),
-                on_bus: self.on_bus(state),
-                assignable: self.is_assignable(state, now),
-                state: state.clone(),
+            .map(|state| {
+                let share = state.slot.and_then(|slot| self.share_at(slot));
+                NodeView {
+                    alive: self.is_alive(state, now),
+                    on_bus: self.on_bus(state),
+                    assignable: self.is_assignable(state, now),
+                    adopted: share.is_some_and(|share| state.held_epoch == Some(share.epoch)),
+                    share,
+                    state: state.clone(),
+                }
             })
             .collect();
         nodes.sort_by_key(|n| (n.state.slot.is_none(), n.state.slot, n.state.mac));
@@ -308,9 +306,12 @@ impl FleetEngine {
             link_up: self.link_up,
             link_error: self.link_error.clone(),
             pool: self.pool,
-            plan: self.plan,
-            ble_node: self.ble_node,
+            scan: self.scan,
             ble_slot: self.ble_slot,
+            unreachable: self
+                .fleet
+                .as_ref()
+                .map_or(ChannelSet::empty(), |report| report.unreachable),
             nodes,
             alive,
             assignable,

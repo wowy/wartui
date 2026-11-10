@@ -47,13 +47,6 @@ pub(super) fn draw_footer(
             thousands(c.heartbeats),
             thousands(snapshot.store.written)
         )));
-        if c.admin_sent > 0 {
-            spans.push(Span::raw(format!(
-                "  admin {}/{}",
-                thousands(c.admin_acked),
-                thousands(c.admin_sent)
-            )));
-        }
         if c.batches_lost > 0 {
             spans.push(Span::raw(format!("  lost {}", thousands(c.batches_lost))));
         }
@@ -103,27 +96,9 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if snapshot.store.dropped > 0 {
         faults.push(format!("store dropped {}", thousands(snapshot.store.dropped)));
     }
-    if c.admin_failed > 0 {
-        faults.push(format!("{} assignments unacknowledged", thousands(c.admin_failed)));
-    }
-    if c.admin_unadopted > 0 {
-        faults.push(format!(
-            "{} assignments acknowledged but not adopted",
-            thousands(c.admin_unadopted)
-        ));
-    }
-    // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
-    // so nothing sniffs at all. A plan is cut only from a pool, so both are here.
-    if let Some(plan) = snapshot.plan
-        && let Some(pool) = snapshot.pool
-        && !plan.unreachable().is_empty()
-    {
-        faults.push(format!(
-            "every node in this fleet is scanning Bluetooth, so none of the {} channels of the \
-             {} pool is being swept",
-            thousands(u64::from(plan.unreachable().len())),
-            pool
-        ));
+    // Channels of the pool in no share of the bridge's plan, which nothing else reports.
+    if let Some(line) = unswept(snapshot) {
+        faults.push(line);
     }
     if let Some(gps) = &snapshot.gps {
         if let GpsStatus::Failed(reason) = &gps.status {
@@ -201,6 +176,19 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
     }
     faults
+}
+
+/// The fault-box line for the channels of the pool the bridge's plan leaves to no node, or `None`
+/// when every one is in a share: `pool All: 36-177 unswept, no node can tune them`.
+fn unswept(snapshot: &Snapshot) -> Option<String> {
+    if snapshot.unreachable.is_empty() {
+        return None;
+    }
+    let pool = snapshot.pool?;
+    Some(format!(
+        "pool {pool}: {} unswept, no node can tune them",
+        crate::text::channel_list(snapshot.unreachable)
+    ))
 }
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
@@ -297,7 +285,7 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
     use wartui_proto::fan::{FanDuty, FanStats};
-    use wartui_proto::plan::{ChannelPool, Job, plan_for};
+    use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
     use super::*;
     use crate::tui::draw;
@@ -502,7 +490,7 @@ mod tests {
         let screen = rendered(&snapshot);
         assert!(totals_line(&screen).contains("lost 7"), "{screen}");
 
-        // `busy()` has nothing lost, so the total is left out, as `admin` is.
+        // `busy()` has nothing lost, so the total is left out.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("lost"), "{screen}");
     }
@@ -683,15 +671,19 @@ mod tests {
     }
 
     #[test]
-    fn view_warns_no_wifi_sniffing_when_all_nodes_scan_bluetooth() {
-        let mut snapshot = busy();
-        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
+    fn footer_warns_channels_unswept_when_bridge_reports_them_unreachable() {
+        let mut snapshot = quiet();
+        snapshot.pool = Some(ChannelPool::Us);
+        snapshot.unreachable = ChannelSet::from_run(IndexRun::new(14, 38));
+        assert_eq!(faults(&snapshot), ["pool US: 36-165 unswept, no node can tune them"]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("every node in this fleet is scanning Bluetooth"),
-            "got {rendered}"
-        );
+        assert!(rendered.contains("36-165 unswept, no node can tune them"), "got {rendered}");
+    }
+
+    #[test]
+    fn footer_omits_unswept_warning_when_every_channel_is_in_a_share() {
+        assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
     }
 }

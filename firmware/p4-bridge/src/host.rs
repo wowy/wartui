@@ -34,7 +34,9 @@
 //! and announces this life. While the gate is closed nothing queues (`Shared::push_host`), and
 //! closing drops any update session and the cached node image (`update::host_gone`,
 //! `cache::host_gone`). The engine polls every 5 s, so three
-//! polls go missing before the gate closes on a running host.
+//! polls go missing before the gate closes on a running host. The fleet planner runs whatever
+//! the gate does: its reports are dropped while it is closed, and the announcement that opens it
+//! carries the current plan.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
 //! reads garbage after every reset. The host's framing resynchronizes on the next `0x00`.
@@ -140,7 +142,8 @@ async fn read_host(
 }
 
 /// Decode one host frame, open the gate, and carry out the command: on the P4, by queueing
-/// a record for a node, or by passing a power-cycle to the carrier.
+/// a record for a node, by passing a power-cycle to the carrier, or by telling the fleet planner,
+/// which sends what it owes before the next frame is read (`src/fleet.rs`).
 ///
 /// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
@@ -177,7 +180,8 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         }
         HostToBridge::SetFan { duty } => crate::fan::set(shared, *duty),
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
-        HostToBridge::SetBle { slot } => crate::settings::set_ble(shared, *slot),
+        HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
+        HostToBridge::StopScan => crate::fleet::stop(shared),
     }
 }
 

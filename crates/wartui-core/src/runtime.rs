@@ -12,6 +12,11 @@
 //! or the bridge disconnects. Whether a bridge is connected is the engine's to say
 //! ([`FleetEngine::bridge_connected`]), read after the engine has seen each link event. Each
 //! connection, and each disconnect, starts the bridge's stream over.
+//!
+//! **A capture ends by stopping the scan.** When `stop` fires, [`drive`] tells the engine to stop
+//! the P4's scan, and keeps reading until the P4 reports stopped or [`QUIT_WAIT`] passes. Dropping
+//! the link at once could lose the frame, and the fleet would scan on into the next run, which
+//! stops it again at its start.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +24,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{BridgeToHost, HostToBridge, Undelivered, UpdateOp};
 use wartui_proto::mac;
 use wartui_proto::radio_link::update::{self, OP_MAX, Op, Sender, Stage};
@@ -50,13 +56,17 @@ pub fn now() -> Now {
     }
 }
 
+/// The longest a capture waits, once told to stop, for the P4 to report its scan stopped.
+pub const QUIT_WAIT: Duration = Duration::from_millis(1_500);
+
 /// How many operator instructions may be waiting at once.
 ///
 /// Small on purpose: a queue deeper than the operator's patience would replay a burst
-/// of assignments minutes after they stopped pressing the key.
+/// of scan toggles minutes after they stopped pressing the key.
 pub const COMMAND_QUEUE: usize = 8;
 
-/// Run the fleet until the link closes or `stop` fires.
+/// Run the fleet until the link closes or `stop` fires. A capture's engine then stops the scan
+/// first ([`QUIT_WAIT`]).
 ///
 /// Consumes the store so the last batch commits and `ended_at` is written before returning: an
 /// interrupted capture is still a complete database. Returns what the store's writer did, for
@@ -87,11 +97,25 @@ pub async fn drive(
     let mut steerable = true;
     let bridge_gps = engine.position().bridge_gps().cloned();
     let host_gps = engine.position().gps().cloned();
+    // Once `stop` has fired on a capture: when to give up waiting for the P4 to stop.
+    let mut quitting: Option<tokio::time::Instant> = None;
 
     loop {
         let event = tokio::select! {
             biased;
-            _ = &mut stop => break,
+            _ = &mut stop, if quitting.is_none() => {
+                if !(engine.drives_capture() && engine.bridge_connected()) {
+                    break;
+                }
+                quitting = Some(tokio::time::Instant::now() + QUIT_WAIT);
+                Event::Command(Command::StopScan)
+            }
+            () = tokio::time::sleep_until(quitting.unwrap_or_else(tokio::time::Instant::now)),
+                if quitting.is_some() =>
+            {
+                tracing::warn!("the bridge did not report its scan stopped; quitting anyway");
+                break;
+            }
             // Ahead of the ticker, so pressing a key does not wait out a tick
             // and then miss the heartbeat it was meant to catch.
             command = commands.recv(), if steerable => match command {
@@ -153,6 +177,12 @@ pub async fn drive(
                 )
         );
 
+        // The P4's answer to the stop: a report of its mode, read after the stop was sent.
+        let reports_mode = matches!(
+            event,
+            Event::Link(LinkEvent::Message(BridgeToHost::Status { .. } | BridgeToHost::Fleet(_)))
+        );
+
         let now = now();
         let batch = engine.handle(event, now);
         settings.record(&store, engine.capture_settings(), now);
@@ -182,6 +212,9 @@ pub async fn drive(
             // not slow the engine.
             let _ = snapshot.send(view);
         }
+        if quitting.is_some() && reports_mode && engine.scan() == Some(ScanMode::Stopped) {
+            break;
+        }
     }
 
     // Before the last host row, so its drop count includes a lost settings change.
@@ -207,6 +240,33 @@ fn stand_host_down(
 ) {
     if let Some(host) = host {
         host.set_suspended(bridge_connected && bridge.is_some_and(|gps| gps.is_talking(now_ms)));
+    }
+}
+
+/// Ask the P4 to stop its scan and wait up to `wait` for it to report stopped, returning whether
+/// it did. `wartui ota` calls it before its first update record, so no node is sweeping while it
+/// takes an image. What arrives meanwhile is read and dropped.
+pub async fn stop_scan(link: &mut LinkHandle, wait: Duration) -> bool {
+    if link.send_urgent(HostToBridge::StopScan).is_err()
+        || link.send_bulk(HostToBridge::GetStatus).is_err()
+    {
+        return false;
+    }
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let event = match tokio::time::timeout_at(deadline, link.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) | Err(_) => return false,
+        };
+        match event {
+            LinkEvent::Message(BridgeToHost::Status { scan: ScanMode::Stopped, .. }) => {
+                return true;
+            }
+            LinkEvent::Message(BridgeToHost::Fleet(report)) if report.mode == ScanMode::Stopped => {
+                return true;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -534,7 +594,7 @@ mod tests {
         status(pool, None)
     }
 
-    /// A bridge `Status` reporting `pool` and the Bluetooth slot `ble`.
+    /// A bridge `Status` reporting `pool` and the Bluetooth slot `ble` its planner picked.
     fn status(pool: ChannelPool, ble: Option<wartui_proto::bus::Slot>) -> Event {
         Event::Link(wartui_bridge::LinkEvent::Message(BridgeToHost::Status {
             rx_count: 0,
@@ -546,6 +606,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool,
+            scan: wartui_proto::fleet::ScanMode::Stopped,
             ble,
             present: 0,
         }))

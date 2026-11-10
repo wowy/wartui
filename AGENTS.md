@@ -98,41 +98,45 @@ own.
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
-  `settings` (the records the P4 keeps its fan duty, channel pool and Bluetooth slot in), `beacon`, `hci`, `dedup`,
-  `link`,
-  `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `mac` (the
-  `Mac` type and its
-  text form), `plan` (channel pools and the partitioning planner), `node` (a node's timings and
-  sweep cursor), `pending` (the buffers sightings wait in on a node),
+  `settings` (the records the P4 keeps its fan duty and channel pool in), `beacon`, `hci`,
+  `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and their frozen
+  core), `mac` (the `Mac` type and its text form), `plan` (channel pools and the round-robin deal
+  that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
+  records that tell each node), `node` (a node's timings and sweep cursor), `pending` (the buffers
+  sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
-  rather than a reflash.
+  rather than a reflash, and the P4's planner testable without one.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
   and cannot tell a real bridge (`serial`) from the fake fleet (`sim`). It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `power-cycle`/`fan`/`pool`/`bluetooth`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`fan`/`pool`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
-  UART with RTS/CTS to its C6. It checks framing and forwards node records verbatim, with no
-  knowledge of what they mean. Fixes there cost a reflash, so logic belongs on the host. Its image
-  carries the C6's, and updates it. It caches a node image in PSRAM for `wartui ota`, and writes
-  the one record it builds from it, `UpdateChunk`, a layout in the bus's frozen core
-  (`src/cache.rs`). On a carrier it drives the lid fan (`src/fan.rs`). It keeps the fan's duty,
-  the channel pool and the Bluetooth slot in the `nvs` partition, the settings the bridge rather
-  than the host holds (`src/settings.rs`).
+  UART with RTS/CTS to its C6. It plans the fleet, so a board scans with no host attached: it
+  reads heartbeats, decides what every node scans and sends every `Assign` and `Stop`
+  (`src/fleet.rs`). The planner itself is `wartui_proto::fleet`, because a fix in firmware costs
+  a reflash and a fix there is tested with `cargo test` first. It forwards every node record to
+  the host, heartbeats included, and reads no other kind. Its image carries the C6's, and
+  updates it. It caches a node image in PSRAM for `wartui ota`, and builds `UpdateChunk`s from it,
+  a layout in the bus's frozen core (`src/cache.rs`). On a carrier it drives the lid fan
+  (`src/fan.rs`). It keeps the fan's duty and the channel pool in the `nvs` partition, the
+  settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
+  nowhere, so it boots stopped.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It holds the link for a future Bluetooth host link, and runs no radio today.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   and owns the channel (`firmware/node/README.md` § "What it does differently"). Hops from one
   assigned channel to the next, reporting each dwell over the node bus, and idles servicing the
-  bus when it holds no assignment. The node given the Bluetooth scan sniffs nothing and runs one
-  scan after another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
-  this crate is the conversation with the radio and the bus.
+  bus when it holds no assignment: from boot, and after a `Stop`. The P4 sends both. The node
+  given the Bluetooth scan sniffs nothing and runs one scan after another, back to back. Same rule
+  as the bridge: the logic lives in `wartui-proto`, and this crate is the conversation with the
+  radio and the bus.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
@@ -146,23 +150,25 @@ own.
 `ActionBatch` out. It reads no clock (time arrives as `Now`, carrying both a monotonic `Instant`
 and unix millis), touches no socket, opens no file. `wartui_core::runtime::drive` is the only
 place that reads a clock and performs actions. This is what makes liveness aging, reboot
-detection, assignment timing and auto-partitioning testable in microseconds against a clock the
-test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::now()`, I/O or
-`async` inside `engine`. An over-the-air update is split the same way: `ota::OtaSession` is the
-pure state machine and `runtime::drive_fleet` its driver, running every node's session at once
-(`crates/wartui-core/tests/ota.rs`).
+detection, adoption against the P4's reported plan and the run's scan start and restart rules
+testable in microseconds against a clock the test invents (`crates/wartui-core/tests/engine.rs`).
+Do not reach for `Instant::now()`, I/O or `async` inside `engine`. An over-the-air update is split
+the same way: `ota::OtaSession` is the pure state machine and `runtime::drive_fleet` its driver,
+running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is the P4's planner:
+`wartui_proto::fleet::Fleet` is pure, `firmware/p4-bridge/src/fleet.rs` drives it, and
+`crates/wartui-proto/tests/fleet.rs` tests it.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b`, `c`, `p`, `r` and `R` get that far; channels are the
-planner's.
+ordered against each other. Only `b`, `c` and `p` get that far, beside the `StopScan` a quit
+sends; channels are the P4's.
 
 ### Store is the system of record
 
 `store` is SQLite behind one owner thread with batched transactions and a bounded queue that
-**drops rather than blocks** (a stalled engine misses everything, including the assignment that
-answers a heartbeat). A capture file holds one run: `Store::create` refuses a path that exists.
-`export` (WiGLE CSV) is a view over the store, re-runnable against a finished or still-running
-capture. `SCHEMA` changes shape as freely as the work needs. Each change bumps
+**drops rather than blocks** (a stalled engine misses everything, the bridge's reports and every
+node's heartbeats included). A capture file holds one run: `Store::create` refuses a path that
+exists. `export` (WiGLE CSV) is a view over the store, re-runnable against a finished or
+still-running capture. `SCHEMA` changes shape as freely as the work needs. Each change bumps
 `store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
@@ -181,20 +187,24 @@ is here rather than only in a `//!`.
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
   `Heartbeat` (27 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
-  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Clear`
+  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Stop`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
-  and `UpdateConfirm` (empty). The P4 checks the framing and passes records through untouched, to
-  the host as `FromNode` and from it as `ToNode`, save the `UpdateChunk`s it builds from its
-  node image cache. Encode/decode is written out by hand, never by
+  and `UpdateConfirm` (empty). The P4 checks the framing and passes every node record to the host
+  as `FromNode`, heartbeats included, and every host `ToNode` to its node. It reads heartbeats for
+  its planner, authors every `Assign` and `Stop`, and builds the `UpdateChunk`s from its node image
+  cache; the host sends a node only an update's other records. Encode/decode is written out by
+  hand, never by
   transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/bus.rs` and
   `tests/wire.rs`. Link frames are up to 1152 bytes each way. `docs/node-bus.md` has the table.
 - **A wire change means updating every node at once.** `wartui-proto` is a path dependency of every
   firmware. A record whose body is not its type's length is counted as `incompatible` and named in
   the footer (`N frames from an older firmware — update`), never admitted to the node table and
   never half-decoded. A heartbeat whose prefix names another major or minor is the exception: its
-  node is shown as `needs update` (older) or `host behind` (newer) and never assigned. Once its
-  heartbeat has named that version, its sighting batches are counted `incompatible` and not
-  recorded. The bridge checks only the transfer framing, and does not need the update.
+  node is shown as `needs update` (older) or `host behind` (newer), and the P4 leaves it out of
+  its plan and sends it nothing. Once its heartbeat has named that version, its sighting batches
+  are counted `incompatible` and not recorded. The P4 decodes heartbeats and encodes `Assign` and
+  `Stop`, so a change to those three layouts costs a P4 reflash too (`wartui flash-bridge`, from
+  the same tree); any other node message passes through it unread and does not.
   `wartui ota` updates the nodes over the bus.
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
   protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
@@ -209,9 +219,9 @@ is here rather than only in a `//!`.
   `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
-  helpful about it. The host decodes and drives nothing from a node on another major or minor: it
-  never assigns that node and never records its sightings. It identifies that node by the frozen
-  heartbeat identity and updates it with `wartui ota`, so update the fleet together. The node
+  helpful about it. Nothing decodes or drives a node on another major or minor: the P4 never
+  assigns it and the host never records its sightings. Both identify it by the frozen heartbeat
+  identity, and `wartui ota` updates it, so update the fleet together. The node
   firmware's `version` in `firmware/node/Cargo.toml` is bumped on every change: before 1.0 a minor
   bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
@@ -222,8 +232,8 @@ is here rather than only in a `//!`.
   so a fleet survives every other change.
   `store::SCHEMA_VERSION` moves with any change to a table, column or index, or to what a stored
   value wartui reads back means. A scan-table change does not move it: `assignment.channels` holds
-  the indices that went out, read against the scan table of the build that wrote the row, and no
-  wartui code decodes the column against the scan table.
+  the indices the bridge reported, read against the scan table of the build that wrote the row, and
+  no wartui code decodes the column against the scan table.
   `.claude/skills/capture-review/scripts/survey.py` decodes it with its own mirror of
   `SCAN_CHANNELS`, so it reads a capture written under another scan table in the mirror's terms.
   `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
@@ -234,58 +244,62 @@ is here rather than only in a `//!`.
   as firmly as a higher one. A capture with another marker is somebody else's file, and the fix is
   a new `--db` path rather than a `migrate` arm. Bringing one forward would mean deciding what an
   older build meant, which is the compatibility this policy declines to claim: a stored
-  `ChannelSet` is the indices that went out, read against the scan table of the build that wrote
-  them.
-- **The planner is the only author of an assignment.** There is no operator override, no mode and
-  no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
-  `desired`. That is what lets the fleet table and the store read a node's share as the plan's
-  without asking who put it there. The Bluetooth slot is one input to the planner rather than an
-  exception to it, and it is the bridge's: kept in NVS beside the pool and reported in `Status`.
-  `Command::AssignBle` only asks the bridge to change it. The planner deals `Job::Bluetooth` to the
-  node heartbeating from that slot, which takes no channels while its share is handed round, and
-  an empty slot means no node scans. So moving the scan re-cuts the whole pool, and `replan` — not
-  `reissue` — is what delivers both ends of the move. The pool is the other input, and it is the
-  bridge's too: the planner cuts the pool the bridge's `Status` reports, and cuts nothing before
-  the first. `Command::SetPool` only asks the bridge to change it. Either way it changes what the
-  planner cuts, never who holds which share.
-- **Only heartbeating nodes are assignable or in the plan** — an assignment answers a heartbeat,
-  and goes to the slot that heartbeat came from. A node whose slot the bridge's `Status` shows
-  absent leaves the plan at that `Status`, until its next heartbeat. The 20 s heartbeat timeout is
-  the backstop for a node that answers the bus but has stopped heartbeating
-  (`crates/wartui-core/src/engine/mod.rs`, `on_bus`). `stale`, `off bus`, `no heartbeat` and
+  `ChannelSet` is the indices the bridge reported, read against the scan table of the build that
+  wrote them.
+- **The P4's planner is the only author of an assignment.** There is no operator override, no
+  per-node mode and no flag: `wartui_proto::fleet::Fleet` decides what every node scans and sends
+  every `Assign` and `Stop`, and the host authors no node record but an update's. That is what
+  lets the fleet table and the store read a node's share as the plan's without asking who put it
+  there. It has two inputs, both the bridge's: the pool, kept in NVS and set by `SetPool`, and the
+  scan mode, set by `StartScan { bluetooth }` and `StopScan` and kept nowhere. Which node scans
+  Bluetooth is its pick, not an input. The host's `Command::SetPool`, `SetBluetooth` and
+  `StopScan` only ask, and the engine believes what the next `Status` or `Fleet` report says.
+  → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
+- **Only heartbeating nodes are assignable or in the plan.** The P4 plans by slot: a member is a
+  present slot that has heartbeated within `fleet::HEARTBEAT_TIMEOUT_MS` (20 s), and its
+  assignment goes to that slot. A slot the P4 counts absent leaves the plan at once, until its
+  next heartbeat. The timeout is the backstop for a node that answers the bus but has stopped
+  heartbeating. The host mirrors the rule for the view with the same 20 s, dropping a node on the
+  first `Status` that shows its slot absent (`crates/wartui-core/src/engine/mod.rs`, `on_bus`,
+  `is_assignable`). `stale`, `off bus`, `no heartbeat` and
   silence are deliberately distinct states, and `SCAN_CHANNELS` order is load-bearing: never sort
   or deduplicate it, because those indices *are* the wire format.
-- **A node is only in the plan once it has said what it is.** `FleetEngine::is_assignable`
-  refuses a node whose heartbeats carry no `bus::Capabilities`, or whose version does not speak
-  `bus::NODE_VERSION` (another major or minor), alongside one whose bus slot another node's
-  heartbeat has taken.
-  `None` means only that nothing but a sighting has been heard from that address yet — an ordinary
-  few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
-  has confirmed is a share that may be nobody's.
+- **A node is only in the plan once it has said what it is.** The P4 makes a slot a member only
+  on a heartbeat that decodes and speaks `bus::NODE_VERSION` (its major and minor). A body that
+  does not decode is read for its MAC alone and leaves the slot out at once, and a heartbeat from
+  another MAC than the slot's last starts the slot afresh. `FleetEngine::is_assignable` mirrors
+  this for the view, and also refuses a node whose heartbeats carry no `bus::Capabilities` yet:
+  `None` means only that nothing but a sighting has been heard from that address — an ordinary
+  few seconds in the life of a node about to be perfectly drivable. A share cut for a node that
+  has not said what it is is a share that may be nobody's.
 - **Fourteen nodes maximum** (`plan::MAX_NODES`), the node bus's slots (`bus::MAX_SLOTS`): seven
-  per bus on the 14-node carrier, and none without a carrier (`bus::NodeBoard`). A node is known
-  by its MAC, which its heartbeat carries, and reached through the slot that heartbeat came from
-  (`bus::Slot`, `A1` to `B7`). The operator reads a slot through its board's label, `N1` up on a
-  carrier, and the store keeps the bus name.
-- **An assignment is believed only on delivery** (`BridgeToHost::Delivered`, sent once the node has
-  acknowledged the transfer that carried it), never on a successful enqueue — and delivery is not
-  adoption. Every heartbeat carries the epoch the node holds, or 0 for none, so the host can tell
-  whether the node actually took the assignment rather than merely receiving it. A node adopts an assignment only when the epoch/version differs
-  from the one it holds, so re-sending an identical one is acknowledged and silently discarded. If a
-  node's heartbeat reports an epoch other than the one it acked, the frame did not land after all,
-  and the host re-sends it on that heartbeat rather than waiting. The host never sends a
-  node the epoch its heartbeat says it already holds, because a fresh capture restarts the counter
-  while a running node keeps its epoch across it.
-  → `crates/wartui-core/src/engine/node.rs`, `NodeState::adopted`;
-  `crates/wartui-core/src/engine/snapshot.rs`, `Counters::admin_unadopted`
+  per bus on the 14-node carrier, and none without a carrier (`bus::NodeBoard`). The P4 plans by
+  slot (`bus::Slot`, `A1` to `B7`). The host knows a node by its MAC, which its heartbeat carries,
+  and finds its share at the slot that heartbeat came from. The operator reads a slot through its
+  board's label, `N1` up on a carrier, and the store keeps the bus name.
+- **Delivery is the P4's, and delivery is not adoption.** The planner takes a send as reaching
+  its node only on the bus ack of the transfer that carried it, never on a successful enqueue.
+  Every heartbeat carries the epoch the node holds, or 0 for none. A node adopts an assignment
+  only when its epoch differs from the one it holds, so re-sending an identical one is
+  acknowledged and silently discarded. If a node's heartbeat reports an epoch other than its want
+  while nothing is in flight, the record did not land after all, and the planner re-sends it
+  under the same epoch on that heartbeat rather than waiting. The planner never deals a node the
+  epoch its heartbeat says it already holds (`fleet::next_epoch`), because a P4 that reboots under
+  running nodes restarts its counter while they keep theirs. The host sees no delivery of the P4's
+  sends: it reads a node as holding its share when its latest live heartbeat carries the epoch
+  the last `Fleet` report gives that slot.
+  → `crates/wartui-proto/src/fleet.rs` `//!`, `next_epoch`;
+  `crates/wartui-core/src/engine/snapshot.rs`, `NodeView::adopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
-  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
+  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so `plan_for` flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
-  changes when fleet membership changes, when the Bluetooth scan moves, when the bridge reports
-  another pool, and at no other time.
+  changes when membership, the scan mode, the Bluetooth pick or the pool changes, and at no other
+  time (`Fleet::settle`).
 - **An updated node image is confirmed only by hearing the bridge.** The first record from the P4 a
-  trial image decodes — assign, clear, update confirm or an update record — marks it valid; nothing
-  else does, because hearing the bridge is the whole test. Rollback is the node app's
+  trial image decodes — assign, stop, update confirm or an update record — marks it valid; nothing
+  else does, because hearing the bridge is the whole test. A stopped P4 sends an idle node
+  nothing, so on a stopped fleet `wartui ota`'s `UpdateConfirm` or the next scan's `Assign` is what
+  confirms a trial image. Rollback is the node app's
   job, since the prebuilt espflash bootloader has none and reads no image state: the third
   unconfirmed boot returns `otadata` to the other slot. The `trial` flash sector, not `otadata`,
   records which slot is on trial and how many times it has booted, one cleared bit per boot,
@@ -348,32 +362,34 @@ edit stops; follow the pointer before changing the rule.
   polite to. → `crates/wartui-bridge/src/ports.rs` `//!`
 - **The planner deals only to a slot that is sniffing**, and what no slot can take comes back in
   `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
-  fleet of one that holds the scan reports the whole pool.
+  fleet whose one member held the scan would report the whole pool, and the P4 gives Bluetooth to
+  no member below two.
   → `crates/wartui-proto/src/plan/mod.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
-  `ASSIGN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
-  `b`, which asks the bridge to hold the slot whose node scans; the bridge keeps it in NVS. The node
-  holding it is dealt no channels and is counted in `Plan::node_count` anyway, because that reports
-  the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
-  is sent only with the flag beside it; without it, a node told to scan nothing parks
-  while the host believes it is sweeping, and `Plan::assign_for` refuses to build that frame.
+  `ASSIGN_FLAG_BLE` is never a property of the flashed firmware. Whether a node scans Bluetooth is
+  the operator's choice of scan mode (`b`, `wartui scan start --bluetooth`); which node is the P4's
+  pick: none below two members, so a lone node keeps Wi-Fi, the current pick while it stays a
+  member, and else the highest member slot. The node holding it is dealt no channels and is counted
+  in `Plan::node_count` anyway, because that reports the fleet size the plan was cut for rather
+  than a census of who is sniffing. An empty `ChannelSet` is sent only with the flag beside it;
+  without it, a node told to scan nothing parks while the fleet believes it is sweeping, and
+  `Plan::assign_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `assign_for`;
-  `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle`;
-  `crates/wartui-core/src/engine/replan.rs`, `on_bridge_ble` / `replan`;
-  `docs/phase-2-findings.md`
+  `crates/wartui-proto/src/fleet.rs`, `pick_bluetooth`; `docs/phase-2-findings.md`
 - **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains
   the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the gap is the
-  lag. Such a heartbeat's epoch is not believed, and no assignment or clear goes out on one: the
-  slot it names may be another node's now, and `deal` cannot skip an epoch it has not seen. Delete
-  either half of the check and the symptom is a plausible-looking lie rather than an error.
+  lag. Such a heartbeat's epoch is not believed: it does not set what the node holds, so the view
+  never shows a node adopting from one, and its epoch 0 never reads as a restart. A falling counter
+  in it still does. Delete the check and the symptom is a plausible-looking lie rather than an
+  error.
   A connection starts caught up, which is safe only because nothing older than it reaches the
   engine: a bridge clears its queue when a host connects, and the transport drops what decodes
   ahead of a connection's first `Ready`.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `BEHIND_US`;
-  `crates/wartui-core/src/engine/admin.rs`, `send_admin` / `send_dedup_ring_clear`;
-  `crates/wartui-bridge/src/serial.rs`, `read_loop`
+  `crates/wartui-core/src/engine/rx.rs`, `on_heartbeat`; `crates/wartui-bridge/src/serial.rs`,
+  `read_loop`
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
   `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
@@ -395,8 +411,28 @@ edit stops; follow the pointer before changing the rule.
   gate closes 15 s after the last one: three of the engine's 5 s status polls. Frames produced while
   it is closed are dropped, and opening clears whatever is queued before it is served, so a host
   never reads a backlog from before it attached. Bytes already past the queue still reach the port,
-  and the host drops every frame that decodes ahead of the connection's first `Ready`.
+  and the host drops every frame that decodes ahead of the connection's first `Ready`. The fleet
+  planner runs regardless: a P4 with no host keeps scanning, its reports are dropped, and the
+  announcement that opens the gate carries the current plan.
   → `firmware/p4-bridge/src/host.rs` `//!`, and `src/main.rs`, `Shared::push_host`
+- **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
+  and tick is followed at once by pulling every record the core owes into its downlink. A
+  `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and
+  the nodes keep their dedup rings across the restart. A delivery outcome, answered inside a
+  borrow of the downlinks, only wakes the driver to pump once the borrow is released.
+  → `firmware/p4-bridge/src/fleet.rs` `//!`
+- **Send ids split at `fleet::BRIDGE_ID` (`0x8000`).** The P4's own sends carry that bit and their
+  outcomes go to its planner; the host's stay below it and their outcomes go to the host. A host
+  id with the bit set would be answered to the planner, and the host's update would never hear.
+  → `firmware/p4-bridge/src/fleet.rs`, `answer`; `crates/wartui-core/src/ota.rs`, `Ids::take`
+- **A stop drains no downlink.** Draining would discard an update's queued records with the
+  planner's, and delivery toward a node is strictly in order, so a `Stop` lands after any `Assign`
+  queued ahead of it. → `firmware/p4-bridge/src/fleet.rs` `//!`
+- **A run stops a P4 found scanning before it starts the scan**, and starts only once the P4
+  reports stopped, so each capture begins with every node's dedup ring empty: a start that reached
+  the P4 first would replace the `Stop`. After that the run restarts a P4 found stopped, which is
+  how a P4 that resets mid-run comes back. → `crates/wartui-core/src/engine/scan.rs` `//!`,
+  `Startup`
 - **The node passes `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/node/src/main.rs`, `firmware/node/README.md`

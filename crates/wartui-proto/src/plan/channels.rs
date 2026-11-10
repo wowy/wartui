@@ -166,6 +166,20 @@ impl ChannelSet {
     }
 }
 
+/// On the link as its `u64` bits. Decoding goes through [`ChannelSet::from_bits`], so bits this
+/// build cannot scan are dropped, for the reason on the type.
+impl serde::Serialize for ChannelSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ChannelSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        u64::deserialize(deserializer).map(Self::from_bits)
+    }
+}
+
 /// The indices of a [`ChannelSet`], ascending.
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelSetIter(u64);

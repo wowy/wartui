@@ -1145,3 +1145,24 @@ async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_
     assert_eq!((after[2].version, after[2].trial), (old, false));
     assert_eq!((after[3].version, after[3].trial), (new, false));
 }
+
+#[test]
+fn ota_ids_stay_below_bridge_id_and_skip_zero_when_they_wrap() {
+    // The P4 marks its own sends with `BRIDGE_ID`, and answers those to its planner alone, so a
+    // host id carrying it would never be answered.
+    use wartui_proto::fleet::BRIDGE_ID;
+    for step in [1, 3, 14] {
+        let mut ids = Ids { next: 1, step };
+        let first = ids.take();
+        // Once round the cycle, and back to the start.
+        for _ in 0..BRIDGE_ID / step {
+            let id = ids.take();
+            assert!(id != 0 && id < BRIDGE_ID, "id {id} at step {step}");
+            assert_eq!(id % step, first % step, "each id keeps its residue at step {step}");
+            if id == first {
+                break;
+            }
+        }
+        assert_eq!(ids.next, first + step, "wrapped back to the first id at step {step}");
+    }
+}

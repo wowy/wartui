@@ -205,3 +205,22 @@ fn channel_info_gives_band_when_channel_in_table() {
     assert_eq!(band(36), Some(Band::Ghz5));
     assert_eq!(band(177), Some(Band::Ghz5));
 }
+
+#[test]
+fn channel_set_round_trips_when_serialized() {
+    let set = ChannelPool::Us.channels();
+    let mut buf = [0u8; 16];
+    let bytes = postcard::to_slice(&set, &mut buf).expect("encodes");
+    assert_eq!(postcard::from_bytes::<ChannelSet>(bytes).expect("decodes"), set);
+}
+
+#[test]
+fn channel_set_masks_unknown_bits_when_deserialized() {
+    // Bits 42 and up name channels this build cannot scan: dropped, the rest kept.
+    let raw = (1u64 << 63) | (1u64 << 42) | 0b101;
+    let mut buf = [0u8; 16];
+    let bytes = postcard::to_slice(&raw, &mut buf).expect("encodes");
+    let set = postcard::from_bytes::<ChannelSet>(bytes).expect("decodes");
+    assert_eq!(set, ChannelSet::from_bits(0b101));
+    assert_eq!(set.indices().collect::<Vec<_>>(), vec![0, 2]);
+}

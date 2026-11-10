@@ -6,8 +6,8 @@
 //! node's conversation: which records reach the receiver, when update mode ends, and what each
 //! step prints.
 //!
-//! **Any update record from the host confirms a trial image first**, as an assign, clear or
-//! update-confirm record does. Hearing the host is the test, and an update accepted on trial
+//! **Any update record confirms a trial image first**, as an assign, stop or update-confirm
+//! record does. Hearing the bridge is the test, and an update accepted on trial
 //! would write over the only slot known to work. So a `begin` the node still on trial would
 //! take is refused with [`UpdateState::FlashError`].
 

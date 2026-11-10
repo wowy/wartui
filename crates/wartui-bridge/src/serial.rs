@@ -2,8 +2,8 @@
 //!
 //! Deliberately built on blocking [`serialport`] reads and writes on dedicated
 //! threads rather than an async serial crate. A tty file descriptor is a poor
-//! fit for kqueue/epoll readiness, and the extra hop costs latency exactly
-//! where it counts — an assignment answers a heartbeat.
+//! fit for kqueue/epoll readiness, and the extra hop costs latency on every
+//! frame, an update's windowed records and the scan's start and stop among them.
 //! Two threads and a pair of channels are simpler and more predictable.
 
 use std::io::{ErrorKind, Read, Write};
@@ -761,11 +761,11 @@ async fn connect(
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
     // Unbounded, and deliberately so. The biased select below arbitrates when a
     // command is taken rather than when it reaches the wire, so a burst of bulk
-    // commands drains into this queue and an assignment behind them inherits the
-    // latency — 28-35 ms behind the heartbeat it answers, and that is the
+    // commands drains into this queue and an urgent one behind them inherits the
+    // latency: 28-35 ms measured for a record answering a heartbeat, and that is the
     // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
     // Two bounded channels and a condvar in `write_loop` is the fix if that ever
-    // changes, and `assignment.latency_us` is where it would show.
+    // changes.
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
     let reader = std::thread::Builder::new()

@@ -32,7 +32,8 @@ pub const fn is_priority(msg: &BridgeToHost) -> bool {
         | BridgeToHost::Error { .. }
         | BridgeToHost::Update(_)
         | BridgeToHost::CacheImage(_)
-        | BridgeToHost::PowerCycled { .. } => true,
+        | BridgeToHost::PowerCycled { .. }
+        | BridgeToHost::Fleet(_) => true,
         BridgeToHost::FromNode { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => {
             false
         }

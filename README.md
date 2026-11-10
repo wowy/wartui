@@ -99,8 +99,8 @@ Each run creates a new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the working directory,
 second it started. A capture holds one run, so `run` refuses a `--db` that exists. `export` reads the
 newest one; pass `--db` to pick another.
 
-`q` stops a capture and commits the last batch. The database is the record; `export` can rebuild
-the CSV at any time, even while a capture is still running.
+`q` stops a capture, stops the bridge's scan and commits the last batch. The database is the
+record; `export` can rebuild the CSV at any time, even while a capture is still running.
 
 ```sh
 wartui ports      # list attached boards and their addresses
@@ -109,6 +109,7 @@ wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
 wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware through the bridge
+wartui scan start # set the bridge scanning with no host attached; `scan stop` idles it
 ```
 
 ## Subprojects
@@ -119,19 +120,20 @@ wartui ota        # update node firmware through the bridge
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                 |
-| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses and the C6 link, forwarding records unread          |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses, the C6 link and the fleet planner                  |
 | [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4 and its updates, and no radio                                        |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
 | `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                      |
 
 The nodes connect by SPI to a USB-attached ESP32-P4 board, the bridge, on two buses
-([`docs/node-bus.md`](docs/node-bus.md)). wartui reaches them through it. It tracks the nodes,
-assigns their channels, and stores everything they see.
+([`docs/node-bus.md`](docs/node-bus.md)). The bridge assigns their channels. wartui reaches them
+through it: it starts and stops the scan, shows the fleet, and stores everything the nodes see.
 
 The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firmware/p4-radio`, all
 in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4-WIFI6:
-the P4 talks to the host and drives the node buses, and its on-board C6 runs no radio.
+the P4 talks to the host, drives the node buses and plans the fleet, and its on-board C6 runs no
+radio.
 
 Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Each
 depends on `crates/wartui-proto`, which keeps the ends of every wire consistent. The library crates
@@ -143,13 +145,12 @@ have no README; their `//!` module docs hold the detail.
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
 | `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
-| `b`                    | Toggle Bluetooth scanning on the selected node                               |
+| `b`                    | Toggle Bluetooth scanning; the bridge picks the node that scans              |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
-| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
+| `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
 ### In settings (`c`)
 
@@ -175,25 +176,25 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
-is the reason it exists. No key or flag assigns channels to a node. `b`, or `wartui bluetooth`,
-only picks which node scans Bluetooth; the planner then shares that node's channels among the
-rest.
+The bridge splits the channel pool across its nodes, and re-splits it whenever a node joins or
+leaves. That split is what the fleet is for. `run` starts the bridge's scan and a clean quit stops
+it; a run that is killed leaves the fleet scanning, and the next `run` restarts it clean. No key or
+flag assigns channels to a node. `b` only adds Bluetooth to the scan or takes it off; the bridge
+picks the node and shares that node's channels among the rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
 
-An assignment answers the node's next heartbeat. Heartbeats come every 5 seconds once a node is
-assigned, so a new assignment can take up to that long to land. Until then, the node's `channels`
-column reads `1: 1…`.
+A node's `channels` line ends in `…` until its heartbeat, every 5 seconds once a node is assigned,
+says it holds its share.
 
 Set the pool from settings (`c`) or with `wartui pool`. The bridge keeps it across its reboots.
 The default, `all`, is every channel a node can tune; `us` and `eu` are what the FCC and ETSI
 permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
-Wi-Fi, and its block's `channels` line reads `bluetooth`. Give the scan to a node with `b` or
-`wartui bluetooth N3`. The bridge keeps the slot across its reboots.
+Wi-Fi, and its block's `channels` line reads `bluetooth`. `b` asks the bridge for the scan, which
+it gives to one node once two can scan.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
 [`crates/wartui/README.md`](crates/wartui/README.md).**
@@ -203,13 +204,13 @@ Wi-Fi, and its block's `channels` line reads `bluetooth`. Give the scan to a nod
 - **Maximum fourteen nodes** (`plan::MAX_NODES`), seven slots on each of the two node buses. The
   P4 drives seven per bus on the 14-node carrier, and none without a carrier
   ([`docs/node-bus.md`](docs/node-bus.md)).
-- **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
-  and the footer says so.
+- **The Bluetooth node sniffs no Wi-Fi.** So the bridge keeps a lone node on Wi-Fi, and gives
+  Bluetooth to one node only once two can scan.
 - **Channel 14 is never scanned**, because `esp-radio` can't tune it. It's Japan-only 802.11b, so
   this should rarely matter.
 - **No compatibility with earlier versions until 1.0.** Build the host and flash every board from
-  the same tree. The bridge ignores the wire format, but a host and bridge from different trees
-  will not talk at all.
+  the same tree. A host and bridge from different trees will not talk at all, and the bridge
+  assigns no node whose firmware is another major or minor.
 
 ## Development
 
@@ -262,6 +263,6 @@ render never touches your own, and a `--bridge` render runs the fleet on default
 other boards.
 
 `--bridge` renders the attached boards instead of the simulator, optionally naming which one is
-the bridge. Real nodes take an assignment in the window after a heartbeat and confirm it on the next, so
-`--after` and `--settle` default to much longer waits than the simulator. Read any sooner, an assignment still in flight
-shows as pending.
+the bridge. A real node's share shows as held only on its next heartbeat, up to 5 s later, so
+`--after` and `--settle` default to much longer waits than the simulator. Read any sooner, a share
+not yet adopted shows as pending.

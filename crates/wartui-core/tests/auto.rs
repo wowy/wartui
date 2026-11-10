@@ -2,10 +2,10 @@
 //! fleet on a fake clock.
 //!
 //! The planner's arithmetic is property-tested in `wartui-proto`. What cannot be
-//! tested there is whether a partition survives the trip through the engine, the wire
-//! format, a node's `!=` on the epoch, and back out as the channels it scans — so six
-//! nodes converge on a partition of the US pool and the capture is then read back for
-//! any network reported on a channel the pool excludes.
+//! tested there is whether a partition survives the trip through the bridge, the wire
+//! format, a node's `!=` on the epoch, and back out as the channels it scans and the plan
+//! the host mirrors — so six nodes converge on a partition of the US pool and the capture
+//! is then read back for any network reported on a channel the pool excludes.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::bus::RecordKind;
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, SCAN_CHANNELS, plan};
 
 const NODES: usize = 6;
 
@@ -72,7 +72,7 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
     let info = CaptureInfo::default();
     let store = Store::create(&StoreConfig::new(&path), &info, started.unix_ms)
         .expect("creating the store");
-    let config = EngineConfig::default();
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =
@@ -81,33 +81,26 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
 
-    // Nobody asks for any of this: the nodes turn up and each takes its share in
-    // answer to its own heartbeat.
-    let settled = until(&snapshot_rx, "every node to acknowledge a range", |s| {
-        s.nodes.len() == NODES
-            && s.nodes.iter().all(|n| {
-                n.state
-                    .confirmed
-                    .is_some_and(|c| n.state.desired.is_some_and(|d| d.counter == c.counter))
-            })
+    // Nobody asks for any of this but the run's own start: the nodes turn up and each
+    // takes its share.
+    let settled = until(&snapshot_rx, "every node to adopt a range", |s| {
+        s.nodes.len() == NODES && s.nodes.iter().all(|n| n.adopted)
     })
     .await;
 
-    let plan = settled.plan.expect("a partition is in force");
-    assert_eq!(plan.node_count(), 6);
-
+    let plan = plan(ChannelPool::Us, 6).expect("a partition for six");
     let held: Vec<ChannelSet> =
-        settled.nodes.iter().map(|n| n.state.confirmed.expect("confirmed").channels).collect();
+        settled.nodes.iter().map(|n| n.share.expect("adopted").channels).collect();
     // Exact equality proves both things at once: the pool is covered, and no
     // two nodes overlap.
     assert_eq!(covered(&held), covered_runs(ChannelPool::Us.runs()));
 
-    // Nodes are ordered by MAC, the same order the planner slots them into, so
-    // each node's share should line up with the plan's own numbering.
+    // Nodes are ordered by slot, the same order the planner deals in, so each node's
+    // share should line up with the plan's own numbering.
     for (i, node) in settled.nodes.iter().enumerate() {
         let index = u8::try_from(i).expect("six fits");
         let expected = plan.channels_for(index).expect("a slot for every one of the six");
-        assert_eq!(node.state.confirmed.expect("confirmed").channels, expected, "slot {index}");
+        assert_eq!(node.share.expect("adopted").channels, expected, "slot {index}");
     }
 
     // A node adopts mid-sweep but finishes the sweep it is on, and heartbeats keep

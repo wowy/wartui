@@ -263,10 +263,37 @@ pub(crate) fn load_from(
         }
         Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
-    let config: Config =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let config: Config = match toml::from_str(&text) {
+        Ok(config) => config,
+        Err(error) => {
+            let error = anyhow::Error::new(error);
+            let error = match bridge_setting(&text) {
+                Some(hint) => error.context(hint),
+                None => error,
+            };
+            return Err(error.context(format!("parsing {}", path.display())));
+        }
+    };
     config.validate().with_context(|| format!("in {}", path.display()))?;
     Ok(config)
+}
+
+/// Why the file is refused, when it holds a setting the bridge keeps instead: the pool, and the
+/// Bluetooth scan, whose node the bridge picks. The parse error that follows names the line.
+fn bridge_setting(text: &str) -> Option<&'static str> {
+    let table: toml::Table = text.parse().ok()?;
+    if table.contains_key("pool") {
+        Some(
+            "the bridge holds the channel pool, so wartui.toml has no `pool`: set it with `wartui pool`",
+        )
+    } else if table.contains_key("bluetooth") {
+        Some(
+            "the bridge picks the node that scans Bluetooth, so wartui.toml has no `[bluetooth]`: \
+             add Bluetooth to the scan with `wartui scan start --bluetooth`, or `b` in `run`",
+        )
+    } else {
+        None
+    }
 }
 
 /// This host's `wartui.toml`: `XDG_CONFIG_HOME` when it is absolute, else `~/.config`, and
@@ -501,14 +528,15 @@ mod tests {
     }
 
     #[test]
-    fn config_loader_rejects_pool_key_and_names_file() {
+    fn config_loader_points_at_pool_command_when_file_has_pool_key() {
         // The bridge holds the pool, so the file has no key for it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "pool = \"us\"\n").unwrap();
         let chain = format!("{:#}", load(Some(&path)).unwrap_err());
         assert!(chain.contains("wartui.toml"), "{chain}");
-        assert!(chain.contains("pool"), "{chain}");
+        assert!(chain.contains("set it with `wartui pool`"), "{chain}");
+        assert!(chain.contains("line 1"), "the parse error still names the line: {chain}");
     }
 
     #[test]
@@ -590,12 +618,23 @@ mod tests {
     }
 
     #[test]
-    fn config_loader_rejects_bluetooth_table() {
-        // The bridge holds the Bluetooth slot, so the table is as unknown as any other.
+    fn config_loader_points_at_scan_command_when_file_has_bluetooth_table() {
+        // The bridge picks the node that scans Bluetooth, so the table is as unknown as any other.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[bluetooth]\nremember = true\n").unwrap();
-        assert!(load(Some(&path)).is_err());
+        let chain = format!("{:#}", load(Some(&path)).unwrap_err());
+        assert!(chain.contains("wartui.toml"), "{chain}");
+        assert!(chain.contains("`wartui scan start --bluetooth`"), "{chain}");
+    }
+
+    #[test]
+    fn config_loader_adds_no_bridge_hint_when_unknown_table_is_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[not-a-real-table]\nx = 1\n").unwrap();
+        let chain = format!("{:#}", load(Some(&path)).unwrap_err());
+        assert!(!chain.contains("the bridge"), "{chain}");
     }
 
     #[test]
