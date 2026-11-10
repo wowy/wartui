@@ -63,10 +63,14 @@ The same evening, all ten nodes of a carrier-10 behind bridge `E6:A0` took 0.5.1
   build before, it delivered none.
 - The nine nodes left on Wi-Fi delivered 130 observations from 82 distinct access points, 47 on
   2.4 GHz and 35 on 5 GHz. A 30 s run on the build before, on the same desk, heard 92.
+- Idle, with the scan stopped, the whole carrier draws the same power with the fix as it did on
+  0.5.0, to the tenth of a watt the bench meter shows. Holding Wi-Fi awake costs nothing that
+  meter resolves.
 
 ## What was not measured
 
-- What `sta_disconnected_pm = false` costs an idle node in current or die temperature.
+- What `sta_disconnected_pm = false` does to a node's die temperature, or to one node's current.
+  The power reading above is the whole carrier's.
 - Why the controller's own use of the radio does not keep it awake. The inference only:
   `esp-radio`'s C5 Bluetooth coexistence hooks, `coex_schm_status_bit_set` and `_clear`, are empty
   stubs in `src/ble/npl.rs`.
