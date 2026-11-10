@@ -39,8 +39,9 @@ pub type BleFrames = FrameAccumulator<MAX_HOST_FRAME>;
 pub struct Ble {
     /// The C6's latest `BleState`.
     state: Cell<BleState>,
-    /// The C6's latest `BleStats`.
+    /// The C6's latest `BleStats`, and when it arrived.
     stats: Cell<BleStats>,
+    stats_at: Cell<Option<Instant>>,
     /// Bluetooth owns the host queue.
     owns: Cell<bool>,
     /// Milliseconds of ownership before the current stretch, and when that stretch began.
@@ -62,6 +63,7 @@ impl Ble {
         Self {
             state: Cell::new(BleState::default()),
             stats: Cell::new(BleStats::default()),
+            stats_at: Cell::new(None),
             owns: Cell::new(false),
             owned_ms: Cell::new(0),
             owned_since: Cell::new(Instant::from_ticks(0)),
@@ -109,6 +111,12 @@ impl Ble {
         self.stats.get()
     }
 
+    /// Milliseconds since the C6's latest `BleStats` arrived, or `u32::MAX` before the first.
+    pub fn stats_age_ms(&self) -> u32 {
+        let age = |at: Instant| u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX - 1);
+        self.stats_at.get().map_or(u32::MAX, age)
+    }
+
     /// Stream bytes sent to the C6 and credited by it since boot, wrapping.
     pub fn totals(&self) -> (u32, u32) {
         (self.sent_total.get(), self.credited_total.get())
@@ -143,6 +151,7 @@ pub fn on_credit(shared: &Shared, drained: u32) {
 /// The C6's Bluetooth counters arrived.
 pub fn on_stats(shared: &Shared, stats: BleStats) {
     shared.ble.stats.set(stats);
+    shared.ble.stats_at.set(Some(Instant::now()));
 }
 
 /// A new C6 life: its subscriber and its count of drained bytes are gone.

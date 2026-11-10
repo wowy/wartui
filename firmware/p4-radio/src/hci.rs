@@ -10,15 +10,21 @@
 //! buffer it is read into, so the bytes the ledger needs are gone into it. [`Raw`] reads the
 //! packet into a buffer of its own first, the ledger looks, and the caller's type is read from
 //! those bytes.
+//!
+//! [`Watch`] counts the transport's packets and the awaits pending on it, so a stalled host
+//! shows whether the controller stopped answering. Spike diagnosis only.
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::convert::Infallible;
 
 use bt_hci::ReadHciError;
 use bt_hci::transport::{PacketKind, PacketToController, PacketToHost, Transport};
+use embassy_time::Instant;
 use embedded_io::{ErrorType, Read, ReadExactError, Write};
 use embedded_io_async::Read as AsyncRead;
-use wartui_proto::spike::AclLedger;
+use wartui_proto::spike::{
+    AclLedger, DISCONNECTION_COMPLETE, H4_EVENT, NUMBER_OF_COMPLETED_PACKETS,
+};
 
 /// Outgoing ACL packets the ledger tracks: above the 24 the controller buffers
 /// (`esp_radio::ble::Config`, `acl_buf_count`), so it never fills.
@@ -30,15 +36,71 @@ pub type Ledger = RefCell<AclLedger<LEDGER_PACKETS>>;
 /// The largest packet from the controller: what `bt_hci`'s `ExternalController` reads into.
 const PACKET_MAX: usize = 259;
 
-/// A transport whose traffic feeds a [`Ledger`].
+/// The transport's progress: packets each way, the awaits pending now, and the events that
+/// return controller buffers. Each count wraps.
+pub struct Watch {
+    pub reads: Cell<u32>,
+    pub writes: Cell<u32>,
+    pub reads_in_flight: Cell<u8>,
+    pub writes_in_flight: Cell<u8>,
+    pub nocp_events: Cell<u32>,
+    pub disconnection_events: Cell<u32>,
+    /// When the latest read completed.
+    pub read_done_at: Cell<Instant>,
+}
+
+impl Watch {
+    pub fn new() -> Self {
+        Self {
+            reads: Cell::new(0),
+            writes: Cell::new(0),
+            reads_in_flight: Cell::new(0),
+            writes_in_flight: Cell::new(0),
+            nocp_events: Cell::new(0),
+            disconnection_events: Cell::new(0),
+            read_done_at: Cell::new(Instant::from_ticks(0)),
+        }
+    }
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Counts one await in flight on `cell` for as long as it lives, so a dropped future
+/// uncounts too.
+struct InFlight<'a>(&'a Cell<u8>);
+
+impl<'a> InFlight<'a> {
+    fn new(cell: &'a Cell<u8>) -> Self {
+        cell.set(cell.get().wrapping_add(1));
+        Self(cell)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().wrapping_sub(1));
+    }
+}
+
+/// Add one to `cell`, wrapping.
+fn bump(cell: &Cell<u32>) {
+    cell.set(cell.get().wrapping_add(1));
+}
+
+/// A transport whose traffic feeds a [`Ledger`] and a [`Watch`].
 pub struct Counting<'a, T> {
     inner: T,
     ledger: &'a Ledger,
+    watch: &'a Watch,
 }
 
 impl<'a, T> Counting<'a, T> {
-    pub fn new(inner: T, ledger: &'a Ledger) -> Self {
-        Self { inner, ledger }
+    pub fn new(inner: T, ledger: &'a Ledger, watch: &'a Watch) -> Self {
+        Self { inner, ledger, watch }
     }
 }
 
@@ -53,7 +115,18 @@ where
 {
     async fn read<'a, P: PacketToHost<'a>>(&self, rx: &'a mut [u8]) -> Result<P, Self::Error> {
         let mut raw = [0; PACKET_MAX];
-        let Raw { kind, len } = self.inner.read(&mut raw).await?;
+        let pending = InFlight::new(&self.watch.reads_in_flight);
+        let read = self.inner.read(&mut raw).await;
+        drop(pending);
+        let Raw { kind, len } = read?;
+        let watch = self.watch;
+        bump(&watch.reads);
+        watch.read_done_at.set(Instant::now());
+        match (kind as u8, raw.first()) {
+            (H4_EVENT, Some(&NUMBER_OF_COMPLETED_PACKETS)) => bump(&watch.nocp_events),
+            (H4_EVENT, Some(&DISCONNECTION_COMPLETE)) => bump(&watch.disconnection_events),
+            _ => {}
+        }
         self.ledger.borrow_mut().on_controller_packet(kind as u8, &raw[..len]);
         let mut bytes = &raw[..len];
         Ok(P::read_hci(kind, &mut bytes, rx)?)
@@ -66,7 +139,11 @@ where
             let _ = tx.write_hci(&mut head);
             self.ledger.borrow_mut().on_host_packet(P::KIND as u8, &head.bytes[..head.len]);
         }
-        self.inner.write(tx).await
+        let pending = InFlight::new(&self.watch.writes_in_flight);
+        let written = self.inner.write(tx).await;
+        drop(pending);
+        bump(&self.watch.writes);
+        written
     }
 }
 

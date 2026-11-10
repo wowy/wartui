@@ -244,7 +244,27 @@ fn full_spike_stats() -> SpikeStats {
             untracked_acl: u32::MAX,
             heap_used: u32::MAX,
             heap_high_water: u32::MAX,
+            notify_phase: u8::MAX,
+            notify_oom_retries: u32::MAX,
+            notify_raw_calls: u32::MAX,
+            notify_raw_returns: u32::MAX,
+            events_seen: u32::MAX,
+            last_event: u8::MAX,
+            events_phase: u8::MAX,
+            adv_phase: u8::MAX,
+            connections: u32::MAX,
+            disconnects: u32::MAX,
+            hci_reads: u32::MAX,
+            hci_writes: u32::MAX,
+            reads_in_flight: u8::MAX,
+            writes_in_flight: u8::MAX,
+            nocp_events: u32::MAX,
+            acl_outstanding: u32::MAX,
+            disconnection_events: u32::MAX,
+            runner_phase: u8::MAX,
+            runner_restarts: u32::MAX,
         },
+        ble_stats_age_ms: u32::MAX - 11,
         bulk_high_water: u32::MAX - 5,
         refused: u32::MAX - 6,
         evicted: u32::MAX - 7,
@@ -1278,6 +1298,7 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         sent_bytes: 3,
         credited_bytes: 4,
         ble: BleStats { delivered_bytes: 5, ..BleStats::default() },
+        ble_stats_age_ms: 13,
         bulk_high_water: 6,
         refused: 7,
         evicted: 8,
@@ -1297,6 +1318,10 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         2, 3, 4,                    // queued_bytes, sent_bytes, credited_bytes
         0, 0, 0, 5,                 // ble: notifications to delivered_bytes
         0, 0, 0, 0, 0, 0, 0, 0, 0,  // ble: link_errors to heap_high_water
+        0, 0, 0, 0, 0, 0, 0, 0,     // ble: notify_phase to connections
+        0, 0, 0, 0, 0, 0, 0, 0,     // ble: disconnects to acl_outstanding
+        0, 0, 0,                    // ble: disconnection_events to runner_restarts
+        13,                         // ble_stats_age_ms
         6, 7, 8,                    // bulk_high_water, refused, evicted
         9, 10, 11,                  // mtu, phy, interval_us
         12, 0, 0, 0, 0, 0, 0, 0, 0, // radio_link

@@ -21,12 +21,17 @@
 //! sends a `BleState`; the P4 reads a subscribed one as Bluetooth taking the host queue. The
 //! buffer is cleared, and credited, on every change of subscription, so a new central never
 //! reads the last one's stream.
+//!
+//! **Each await reports where it is.** The notifier, the event loop, the advertiser and the
+//! runner set a phase in `BleStats` around each await, and the transport counts its own
+//! ([`crate::hci::Watch`]), so the counters of a stalled stack name the future that waits.
+//! [`watch_stall`] logs those phases when the notifier or the transport has waited too long.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 
 use bt_hci::cmd::info::ReadBdAddr;
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_futures::select::select;
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -41,7 +46,7 @@ use wartui_proto::radio_link::{BleState, BleStats, Up};
 use wartui_proto::spike::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
 
 use crate::config::BLE_WINDOW_BYTES;
-use crate::hci::{Counting, Ledger};
+use crate::hci::{Counting, Ledger, Watch};
 use crate::link::Shared;
 
 /// The host stream waiting to be notified. Static: it is the window's size.
@@ -84,6 +89,33 @@ const NAME_MAX: usize = NAME_PREFIX.len() + 5;
 /// How long one advertising interval is.
 const ADVERTISE_EVERY: Duration = Duration::from_millis(100);
 
+/// How long the notifier waits on TrouBLE, or a transport read stays pending with ACL
+/// outstanding, before [`watch_stall`] logs.
+const STALL_AFTER: Duration = Duration::from_secs(3);
+
+/// The least time between two of [`watch_stall`]'s lines.
+const STALL_LOG_EVERY: Duration = Duration::from_secs(5);
+
+/// How often [`watch_stall`] looks.
+const STALL_POLL: Duration = Duration::from_millis(500);
+
+/// `BleStats::notify_phase`, as `radio_link::NOTIFY_PHASES` names them.
+const NOTIFY_READY: u8 = 0;
+const NOTIFY_RAW: u8 = 1;
+const NOTIFY_OOM: u8 = 2;
+const NOTIFY_CREDIT: u8 = 3;
+
+/// `BleStats::events_phase`, as `radio_link::EVENTS_PHASES` names them.
+const EVENTS_NEXT: u8 = 0;
+const EVENTS_FORWARD: u8 = 1;
+const EVENTS_REPLY: u8 = 2;
+const EVENTS_OTHER: u8 = 3;
+
+/// `BleStats::adv_phase`, as `radio_link::ADV_PHASES` names them.
+const ADV_ADVERTISE: u8 = 0;
+const ADV_SERVE: u8 = 1;
+const ADV_BACKOFF: u8 = 2;
+
 type Controller<'a> = ExternalController<Counting<'a, BleConnector<'a>>, COMMAND_SLOTS>;
 type BleStack<'a> = Stack<'a, Controller<'a>, DefaultPacketPool>;
 type Conn<'a, 'b> = GattConnection<'a, 'b, DefaultPacketPool>;
@@ -109,6 +141,10 @@ pub struct Ble {
     tx: &'static TxRing,
     /// The link layer's delivery, fed by the transport.
     pub ledger: Ledger,
+    /// The transport's progress.
+    pub hci: Watch,
+    /// When the notifier last started waiting on TrouBLE: `notify_raw` or the OOM sleep.
+    notify_since: Cell<Instant>,
     /// The link as the C6 sees it, and as it last told the P4.
     state: Cell<BleState>,
     said: Cell<Option<BleState>>,
@@ -128,6 +164,8 @@ impl Ble {
         Self {
             tx,
             ledger: RefCell::new(wartui_proto::spike::AclLedger::new()),
+            hci: Watch::new(),
+            notify_since: Cell::new(Instant::from_ticks(0)),
             state: Cell::new(BleState::default()),
             said: Cell::new(None),
             drained: Cell::new(0),
@@ -147,6 +185,16 @@ impl Ble {
     /// Whether a central has subscribed to Up.
     fn subscribed(&self) -> bool {
         self.state.get().subscribed
+    }
+
+    /// Set the notifier's phase, timing each stretch of waiting on TrouBLE.
+    fn notify_phase(&self, phase: u8) {
+        let waits = |phase| matches!(phase, NOTIFY_RAW | NOTIFY_OOM);
+        let was = self.counters.get().notify_phase;
+        if waits(phase) && !waits(was) {
+            self.notify_since.set(Instant::now());
+        }
+        self.count(|c| c.notify_phase = phase);
     }
 }
 
@@ -177,6 +225,14 @@ pub fn stats(shared: &Shared) -> BleStats {
     stats.acl_bytes = ledger.acl_bytes();
     stats.delivered_bytes = ledger.delivered_bytes();
     stats.untracked_acl = ledger.untracked();
+    stats.acl_outstanding = ledger.in_flight() as u32;
+    let hci = &ble.hci;
+    stats.hci_reads = hci.reads.get();
+    stats.hci_writes = hci.writes.get();
+    stats.reads_in_flight = hci.reads_in_flight.get();
+    stats.writes_in_flight = hci.writes_in_flight.get();
+    stats.nocp_events = hci.nocp_events.get();
+    stats.disconnection_events = hci.disconnection_events.get();
     stats.heap_used = esp_alloc::HEAP.used() as u32;
     stats.heap_high_water = esp_alloc::HEAP.stats().max_usage as u32;
     stats
@@ -229,14 +285,20 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
         }
     };
     let controller: Controller<'_> =
-        ExternalController::new(Counting::new(connector, &shared.ble.ledger));
+        ExternalController::new(Counting::new(connector, &shared.ble.ledger, &shared.ble.hci));
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS, L2CAP_CHANNELS> =
         HostResources::new();
     let stack = trouble_host::new(controller, &mut resources).build();
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    join(run_host(&mut runner, shared), advertise(&stack, &mut peripheral, mac, shared)).await.0
+    join3(
+        run_host(&mut runner, shared),
+        advertise(&stack, &mut peripheral, mac, shared),
+        watch_stall(shared),
+    )
+    .await
+    .0
 }
 
 /// Run TrouBLE's host forever, starting it again if it stops.
@@ -245,7 +307,13 @@ async fn run_host(
     shared: &Shared,
 ) -> ! {
     loop {
-        if let Err(err) = runner.run().await {
+        shared.ble.count(|c| c.runner_phase = 1);
+        let ran = runner.run().await;
+        shared.ble.count(|c| {
+            c.runner_phase = 0;
+            c.runner_restarts = c.runner_restarts.wrapping_add(1);
+        });
+        if let Err(err) = ran {
             shared.ble.count(|c| c.hci_errors = c.hci_errors.wrapping_add(1));
             shared.error(format_args!("the Bluetooth host stopped: {err:?}"));
             Timer::after(Duration::from_secs(1)).await;
@@ -317,6 +385,7 @@ async fn advertise(
             adv_data: &adv_data[..adv_len],
             scan_data: &scan_data[..scan_len],
         };
+        shared.ble.count(|c| c.adv_phase = ADV_ADVERTISE);
         let conn = match peripheral.advertise(&params, advertisement).await {
             Ok(advertiser) => advertiser.accept().await.map_err(BleHostError::BleHost),
             Err(err) => Err(err),
@@ -324,13 +393,23 @@ async fn advertise(
         let conn = match conn.and_then(|conn| Ok(conn.with_attribute_server(server)?)) {
             Ok(conn) => conn,
             Err(err) => {
-                shared.ble.count(|c| c.hci_errors = c.hci_errors.wrapping_add(1));
+                shared.ble.count(|c| {
+                    c.hci_errors = c.hci_errors.wrapping_add(1);
+                    c.adv_phase = ADV_BACKOFF;
+                });
                 shared.error(format_args!("could not advertise or connect: {err:?}"));
                 Timer::after(Duration::from_secs(1)).await;
                 continue;
             }
         };
+        shared.ble.count(|c| {
+            c.connections = c.connections.wrapping_add(1);
+            c.adv_phase = ADV_SERVE;
+        });
         serve(stack, &conn, server, shared).await;
+        shared.ble.count(|c| c.disconnects = c.disconnects.wrapping_add(1));
+        // `serve` drops a notifier mid-await, which would read as a stall.
+        shared.ble.notify_phase(NOTIFY_READY);
         set_state(shared, |state| *state = BleState::default());
     }
 }
@@ -359,8 +438,17 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
 
 /// Handle the connection's events until it ends.
 async fn events(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
+    let ble = &shared.ble;
     loop {
-        match conn.next().await {
+        ble.count(|c| c.events_phase = EVENTS_NEXT);
+        let event = conn.next().await;
+        let kind = event_kind(&event, server);
+        ble.count(|c| {
+            c.events_seen = c.events_seen.wrapping_add(1);
+            c.last_event = kind;
+            c.events_phase = EVENTS_OTHER;
+        });
+        match event {
             GattConnectionEvent::Disconnected { .. } => return,
             GattConnectionEvent::PhyUpdated { tx_phy, .. } => {
                 set_state(shared, |state| state.phy = phy_number(tx_phy));
@@ -377,14 +465,20 @@ async fn events(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, 
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
                     GattEvent::Write(write) if write.handle() == server.link.down.handle => {
+                        ble.count(|c| c.events_phase = EVENTS_FORWARD);
                         forward(shared, &write).await;
+                        ble.count(|c| c.events_phase = EVENTS_OTHER);
                         write.accept_unprocessed()
                     }
                     event => event.accept(),
                 };
                 match reply {
-                    Ok(reply) => reply.send().await,
-                    Err(_) => shared.ble.count(|c| c.link_errors = c.link_errors.wrapping_add(1)),
+                    Ok(reply) => {
+                        ble.count(|c| c.events_phase = EVENTS_REPLY);
+                        reply.send().await;
+                        ble.count(|c| c.events_phase = EVENTS_OTHER);
+                    }
+                    Err(_) => ble.count(|c| c.link_errors = c.link_errors.wrapping_add(1)),
                 }
             }
             _ => {}
@@ -421,21 +515,32 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
     let mut chunk = [0; VALUE_MAX];
     loop {
         if !ble.subscribed() || ble.tx.borrow().is_empty() {
+            ble.notify_phase(NOTIFY_READY);
             ble.ready.wait().await;
             continue;
         }
+        ble.notify_phase(NOTIFY_CREDIT);
         // An MTU exchange raises no event, so the notifier is where a change shows.
         let mtu = conn.raw().att_mtu();
         set_state(shared, |state| state.mtu = mtu);
         let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
         let n = ble.tx.borrow_mut().take(&mut chunk[..room]);
         let sent = loop {
-            match server.link.up.notify_raw(conn, &chunk[..n], false).await {
+            ble.notify_phase(NOTIFY_RAW);
+            ble.count(|c| c.notify_raw_calls = c.notify_raw_calls.wrapping_add(1));
+            let sent = server.link.up.notify_raw(conn, &chunk[..n], false).await;
+            ble.count(|c| c.notify_raw_returns = c.notify_raw_returns.wrapping_add(1));
+            match sent {
                 // The pool is out of packets until the controller completes some.
-                Err(Error::OutOfMemory) => Timer::after(RETRY).await,
+                Err(Error::OutOfMemory) => {
+                    ble.notify_phase(NOTIFY_OOM);
+                    ble.count(|c| c.notify_oom_retries = c.notify_oom_retries.wrapping_add(1));
+                    Timer::after(RETRY).await;
+                }
                 other => break other,
             }
         };
+        ble.notify_phase(NOTIFY_CREDIT);
         match sent {
             Ok(()) => ble.count(|c| {
                 c.notifications = c.notifications.wrapping_add(1);
@@ -447,6 +552,62 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
         credit(shared, n, empty);
         // A send TrouBLE's queue had room for never waited, so the link gets its turn here.
         yield_now().await;
+    }
+}
+
+/// `BleStats::last_event`'s code for a connection event, as `radio_link::EVENT_KINDS` names it.
+fn event_kind(event: &GattConnectionEvent<'_, '_, DefaultPacketPool>, server: &Server<'_>) -> u8 {
+    match event {
+        GattConnectionEvent::Disconnected { .. } => 1,
+        GattConnectionEvent::PhyUpdated { .. } => 2,
+        GattConnectionEvent::ConnectionParamsUpdated { .. } => 3,
+        GattConnectionEvent::SubratingParamsUpdated { .. } => 4,
+        GattConnectionEvent::RequestConnectionParams(_) => 5,
+        GattConnectionEvent::DataLengthUpdated { .. } => 6,
+        GattConnectionEvent::FrameSpaceUpdated { .. } => 7,
+        GattConnectionEvent::ConnectionRateChanged { .. } => 8,
+        GattConnectionEvent::Gatt { event: GattEvent::Write(write) }
+            if write.handle() == server.link.down.handle =>
+        {
+            9
+        }
+        GattConnectionEvent::Gatt { .. } => 10,
+    }
+}
+
+/// Log the phases once the notifier has waited on TrouBLE, or a transport read has stayed
+/// pending with ACL outstanding, for [`STALL_AFTER`]; at most once per [`STALL_LOG_EVERY`].
+async fn watch_stall(shared: &Shared) -> ! {
+    let ble = &shared.ble;
+    let mut logged: Option<Instant> = None;
+    loop {
+        Timer::after(STALL_POLL).await;
+        let c = ble.counters.get();
+        let notify_wait = ble.notify_since.get().elapsed();
+        let notify_stuck =
+            matches!(c.notify_phase, NOTIFY_RAW | NOTIFY_OOM) && notify_wait > STALL_AFTER;
+        let read_wait = ble.hci.read_done_at.get().elapsed();
+        let acl = ble.ledger.borrow().in_flight();
+        let read_stuck = ble.hci.reads_in_flight.get() > 0 && read_wait > STALL_AFTER && acl > 0;
+        let recent = logged.is_some_and(|at| at.elapsed() < STALL_LOG_EVERY);
+        if !(notify_stuck || read_stuck) || recent {
+            continue;
+        }
+        logged = Some(Instant::now());
+        shared.log(format_args!(
+            "BLE stall: notify {} {}ms, events {} last {}, adv {}, runner {}, io {}r{}w, ACL {}, \
+             rx {}ms ago",
+            c.notify_phase,
+            notify_wait.as_millis(),
+            c.events_phase,
+            c.last_event,
+            c.adv_phase,
+            c.runner_phase,
+            ble.hci.reads_in_flight.get(),
+            ble.hci.writes_in_flight.get(),
+            acl,
+            read_wait.as_millis(),
+        ));
     }
 }
 

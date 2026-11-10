@@ -485,6 +485,25 @@ fn radio_link_largest_messages_fit_one_packet() {
         untracked_acl: u32::MAX,
         heap_used: u32::MAX,
         heap_high_water: u32::MAX,
+        notify_phase: u8::MAX,
+        notify_oom_retries: u32::MAX,
+        notify_raw_calls: u32::MAX,
+        notify_raw_returns: u32::MAX,
+        events_seen: u32::MAX,
+        last_event: u8::MAX,
+        events_phase: u8::MAX,
+        adv_phase: u8::MAX,
+        connections: u32::MAX,
+        disconnects: u32::MAX,
+        hci_reads: u32::MAX,
+        hci_writes: u32::MAX,
+        reads_in_flight: u8::MAX,
+        writes_in_flight: u8::MAX,
+        nocp_events: u32::MAX,
+        acl_outstanding: u32::MAX,
+        disconnection_events: u32::MAX,
+        runner_phase: u8::MAX,
+        runner_restarts: u32::MAX,
     });
     let state = Up::BleState(BleState {
         subscribed: true,
@@ -640,9 +659,35 @@ fn radio_link_revision_golden_bytes() {
         untracked_acl: 11,
         heap_used: 12,
         heap_high_water: 13,
+        notify_phase: 14,
+        notify_oom_retries: 15,
+        notify_raw_calls: 16,
+        notify_raw_returns: 17,
+        events_seen: 18,
+        last_event: 19,
+        events_phase: 20,
+        adv_phase: 21,
+        connections: 22,
+        disconnects: 23,
+        hci_reads: 24,
+        hci_writes: 25,
+        reads_in_flight: 26,
+        writes_in_flight: 27,
+        nocp_events: 28,
+        acl_outstanding: 29,
+        disconnection_events: 30,
+        runner_phase: 31,
+        runner_restarts: 32,
     });
     let len = encode_up(&stats, &mut out).unwrap();
-    assert_eq!(out[..len], [6, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "{MSG}");
+    #[rustfmt::skip]
+    let expected = [
+        6,                                                         // Up::BleStats
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,                 // notifications to heap_high_water
+        14, 15, 16, 17, 18, 19, 20, 21, 22, 23,                    // notify_phase to disconnects
+        24, 25, 26, 27, 28, 29, 30, 31, 32,                        // hci_reads to runner_restarts
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), stats);
 }
 

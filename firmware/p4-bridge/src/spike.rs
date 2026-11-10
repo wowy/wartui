@@ -9,13 +9,13 @@
 //! to [`SATURATE_HEADROOM`] short of full, at most [`SATURATE_BATCH`] records a pass, every
 //! [`SATURATE_POLL`], so it never evicts and the node buses keep their turns.
 //!
-//! `SpikeStats` goes out every `STATS_EVERY_MS` while a profile runs or Bluetooth owns the queue,
-//! as a priority frame.
+//! `SpikeStats` goes out every `STATS_EVERY_MS` while any host owns the queue, as a priority
+//! frame, so a UART0 host reads the C6's counters after its Bluetooth path stalls.
 //!
 //! **A `sink-discard` build needs no host to start it.** The sink's subscription starts Saturate
 //! when no profile runs, and losing the queue stops it again, so a UART0 host that takes the
-//! queue back reads the counters rather than the load. That build reports them always: they
-//! freeze while UART0 owns the queue, and `sent_bytes / ble_owned_ms` is the link's rate.
+//! queue back reads the counters rather than the load. They freeze while UART0 owns the queue,
+//! and `sent_bytes / ble_owned_ms` is the link's rate.
 
 use core::cell::Cell;
 
@@ -217,8 +217,7 @@ fn push_record(shared: &Shared, len: usize) {
 async fn report(shared: &Shared) -> ! {
     loop {
         Timer::after(Duration::from_millis(STATS_EVERY_MS)).await;
-        let running = shared.spike.load.get().0 != SpikeProfile::Off;
-        if running || shared.ble.owns() || cfg!(feature = "sink-discard") {
+        if shared.host_open() {
             push_stats(shared);
         }
     }
@@ -240,6 +239,7 @@ fn push_stats(shared: &Shared) {
         sent_bytes,
         credited_bytes,
         ble: shared.ble.stats(),
+        ble_stats_age_ms: shared.ble.stats_age_ms(),
         bulk_high_water: bulk.high_water,
         refused,
         // The rings count a refusal as a drop too.

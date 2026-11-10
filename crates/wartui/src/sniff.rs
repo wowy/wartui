@@ -627,8 +627,23 @@ mod tests {
                 delivered_bytes: 52_000,
                 heap_used: 30_000,
                 heap_high_water: 31_000,
+                notify_phase: 1,
+                notify_oom_retries: 3,
+                notify_raw_calls: 101,
+                notify_raw_returns: 100,
+                events_seen: 40,
+                last_event: 9,
+                adv_phase: 1,
+                connections: 1,
+                hci_reads: 900,
+                hci_writes: 800,
+                reads_in_flight: 1,
+                nocp_events: 200,
+                acl_outstanding: 24,
+                runner_phase: 1,
                 ..Default::default()
             },
+            ble_stats_age_ms: 1_200,
             bulk_high_water: 243_000,
             refused: 0,
             evicted: 12,
@@ -652,8 +667,22 @@ mod tests {
              gap 0/0, uart 0/0 (P4/C6)\n\
              #   C6: 100 notifications, 51400 B notified, ACL 52200 B sent, 52000 B delivered; \
              errors 0 link, 0 HCI; 0 B forwarded; dropped 0 B unsubscribed, 0 B overflow, 0 B \
-             written, 0 ACL untracked; heap 30000 B, high-water 31000 B"
+             written, 0 ACL untracked; heap 30000 B, high-water 31000 B\n\
+             #   C6 diag: stats 1.2 s old; notify 1 (notify_raw), 101 calls, 100 returns, 3 OOM \
+             retries; events 0 (next), 40 seen, last 9 (Gatt Down write); adv 1 (serve), 1 \
+             connections, 0 disconnects; HCI 900 reads, 800 writes, in flight 1 read 0 write, \
+             200 NOCP, 24 ACL outstanding, 0 disconnections; runner 1, 0 restarts"
         );
+    }
+
+    #[test]
+    fn sniff_cmd_prints_c6_stats_stale_when_ble_stats_are_old() {
+        let stats = SpikeStats { ble_stats_age_ms: 12_300, ..SpikeStats::default() };
+        let text = spike_stats_text(&stats);
+        assert!(text.contains("#   C6 diag: C6 stats stale 12.3 s; "), "{text}");
+        let stats = SpikeStats { ble_stats_age_ms: u32::MAX, ..SpikeStats::default() };
+        let text = spike_stats_text(&stats);
+        assert!(text.contains("#   C6 diag: no C6 stats yet; "), "{text}");
     }
 
     #[test]

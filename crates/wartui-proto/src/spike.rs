@@ -18,7 +18,7 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::link::{MAX_NODE_PAYLOAD, RadioLinkStats};
-use crate::radio_link::BleStats;
+use crate::radio_link::{ADV_PHASES, BleStats, EVENT_KINDS, EVENTS_PHASES, NOTIFY_PHASES};
 
 /// A sighting batch's typical body, the size the rate profiles send.
 pub const SMALL_BODY: usize = 45;
@@ -26,6 +26,8 @@ pub const SMALL_BODY: usize = 45;
 pub const FULL_BODY: usize = MAX_NODE_PAYLOAD;
 /// How often the P4 sends [`SpikeStats`].
 pub const STATS_EVERY_MS: u64 = 2_000;
+/// How old [`SpikeStats::ble_stats_age_ms`] gets before the text calls the C6's stats stale.
+pub const BLE_STATS_STALE_MS: u32 = 5_000;
 
 /// The "wartui link" GATT service.
 pub const SERVICE_UUID: u128 = 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877;
@@ -74,9 +76,8 @@ impl SpikeProfile {
     }
 }
 
-/// The P4's counters for the spike, every [`STATS_EVERY_MS`] while a profile runs or Bluetooth
-/// owns the host queue, and always in a `sink-discard` build. Byte counts are since the P4
-/// booted, and wrap.
+/// The P4's counters for the spike, every [`STATS_EVERY_MS`] while any host owns the host queue,
+/// UART0's or a central's. Byte counts are since the P4 booted, and wrap.
 ///
 /// `sent_bytes` grows only while Bluetooth owns the queue, so `sent_bytes / ble_owned_ms` is the
 /// rate the C6 link carried, read later from a UART0 host.
@@ -97,6 +98,8 @@ pub struct SpikeStats {
     pub credited_bytes: u32,
     /// The C6's latest `BleStats`.
     pub ble: BleStats,
+    /// Milliseconds since that `BleStats` arrived, or `u32::MAX` before the first.
+    pub ble_stats_age_ms: u32,
     /// The bulk ring's high-water mark, in bytes.
     pub bulk_high_water: u32,
     /// Frames the host rings refused.
@@ -114,7 +117,7 @@ pub struct SpikeStats {
 }
 
 impl SpikeStats {
-    /// The counters as four `#` lines, with the rate the C6 link carried while Bluetooth
+    /// The counters as five `#` lines, with the rate the C6 link carried while Bluetooth
     /// owned the queue: the bytes sent to the C6 over the time it owned it.
     #[must_use]
     pub const fn text(&self) -> StatsText<'_> {
@@ -185,7 +188,52 @@ impl fmt::Display for StatsText<'_> {
             ble.untracked_acl,
             ble.heap_used,
             ble.heap_high_water,
+        )?;
+        f.write_str("\n#   C6 diag: ")?;
+        match stats.ble_stats_age_ms {
+            u32::MAX => f.write_str("no C6 stats yet")?,
+            age if age > BLE_STATS_STALE_MS => write!(f, "C6 stats stale {}", Seconds(age))?,
+            age => write!(f, "stats {} old", Seconds(age))?,
+        }
+        write!(
+            f,
+            "; notify {} {}, {} calls, {} returns, {} OOM retries; events {} {}, {} seen, last {} \
+             {}; adv {} {}, {} connections, {} disconnects; HCI {} reads, {} writes, in flight \
+             {} read {} write, {} NOCP, {} ACL outstanding, {} disconnections; runner {}, {} \
+             restarts",
+            ble.notify_phase,
+            Named(&NOTIFY_PHASES, ble.notify_phase),
+            ble.notify_raw_calls,
+            ble.notify_raw_returns,
+            ble.notify_oom_retries,
+            ble.events_phase,
+            Named(&EVENTS_PHASES, ble.events_phase),
+            ble.events_seen,
+            ble.last_event,
+            Named(&EVENT_KINDS, ble.last_event),
+            ble.adv_phase,
+            Named(&ADV_PHASES, ble.adv_phase),
+            ble.connections,
+            ble.disconnects,
+            ble.hci_reads,
+            ble.hci_writes,
+            ble.reads_in_flight,
+            ble.writes_in_flight,
+            ble.nocp_events,
+            ble.acl_outstanding,
+            ble.disconnection_events,
+            ble.runner_phase,
+            ble.runner_restarts,
         )
+    }
+}
+
+/// A code's name from its table, in parentheses, or `(?)` for a code past the table.
+struct Named<'a>(&'a [&'a str], u8);
+
+impl fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({})", self.0.get(usize::from(self.1)).unwrap_or(&"?"))
     }
 }
 
@@ -317,9 +365,9 @@ pub const H4_ACL: u8 = 0x02;
 pub const H4_EVENT: u8 = 0x04;
 
 /// `HCI_Number_Of_Completed_Packets`.
-const NUMBER_OF_COMPLETED_PACKETS: u8 = 0x13;
+pub const NUMBER_OF_COMPLETED_PACKETS: u8 = 0x13;
 /// `HCI_Disconnection_Complete`.
-const DISCONNECTION_COMPLETE: u8 = 0x05;
+pub const DISCONNECTION_COMPLETE: u8 = 0x05;
 
 /// Link-layer delivery, from the HCI traffic between a host and its controller: each outgoing
 /// ACL packet's length waits here, by connection handle, until a Number Of Completed Packets

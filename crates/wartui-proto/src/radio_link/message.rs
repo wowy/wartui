@@ -119,7 +119,69 @@ pub struct BleStats {
     pub heap_used: u32,
     /// The most heap in use since boot, in bytes.
     pub heap_high_water: u32,
+    /// Where the notifier is now: [`NOTIFY_PHASES`] names each.
+    pub notify_phase: u8,
+    /// Notifications the packet pool had no room for, each retried after a sleep.
+    pub notify_oom_retries: u32,
+    /// Calls into TrouBLE's `notify_raw`.
+    pub notify_raw_calls: u32,
+    /// Returns from `notify_raw`.
+    pub notify_raw_returns: u32,
+    /// Connection events the event loop has taken.
+    pub events_seen: u32,
+    /// The latest connection event's kind: [`EVENT_KINDS`] names each, 0 before the first.
+    pub last_event: u8,
+    /// Where the event loop is now: [`EVENTS_PHASES`] names each.
+    pub events_phase: u8,
+    /// Where the advertiser is now: [`ADV_PHASES`] names each.
+    pub adv_phase: u8,
+    /// Connections accepted.
+    pub connections: u32,
+    /// Connections served to their end.
+    pub disconnects: u32,
+    /// HCI packets read from the controller.
+    pub hci_reads: u32,
+    /// HCI packets written to the controller.
+    pub hci_writes: u32,
+    /// Reads on the HCI transport pending now.
+    pub reads_in_flight: u8,
+    /// Writes on the HCI transport pending now.
+    pub writes_in_flight: u8,
+    /// Number Of Completed Packets events read from the controller.
+    pub nocp_events: u32,
+    /// ACL packets written that the controller has not completed, as the ledger tracks them.
+    pub acl_outstanding: u32,
+    /// Disconnection Complete events read from the controller.
+    pub disconnection_events: u32,
+    /// 1 while TrouBLE's runner runs, 0 between runs.
+    pub runner_phase: u8,
+    /// Returns from TrouBLE's runner, each followed by a fresh run.
+    pub runner_restarts: u32,
 }
+
+/// [`BleStats::notify_phase`]'s values, by index.
+pub const NOTIFY_PHASES: [&str; 4] = ["ready wait", "notify_raw", "OOM sleep", "credit"];
+
+/// [`BleStats::events_phase`]'s values, by index.
+pub const EVENTS_PHASES: [&str; 4] = ["next", "forward", "reply send", "other"];
+
+/// [`BleStats::adv_phase`]'s values, by index.
+pub const ADV_PHASES: [&str; 3] = ["advertise", "serve", "backoff"];
+
+/// [`BleStats::last_event`]'s values, by index.
+pub const EVENT_KINDS: [&str; 11] = [
+    "none",
+    "Disconnected",
+    "PhyUpdated",
+    "ConnectionParamsUpdated",
+    "SubratingParamsUpdated",
+    "RequestConnectionParams",
+    "DataLengthUpdated",
+    "FrameSpaceUpdated",
+    "ConnectionRateChanged",
+    "Gatt Down write",
+    "Gatt other",
+];
 
 /// The C6's counters, which the P4 reports beside its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
