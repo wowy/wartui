@@ -110,10 +110,10 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- The shares the bridge's planner reports in its `Fleet` frames: one row per slot whose share
 -- differs from the one the previous report gave it, written as the report is read (`rx_at`).
 -- The host sends no assignment and sees no delivery, so a row is what the P4 said it gave, and a
--- later heartbeat from `node_mac` carrying `epoch` is the node taking it. `slot` is the bus name,
--- as in `heartbeat`. `node_mac` is the node whose latest heartbeat came from that slot, NULL when
--- none has. A slot whose share left the report gets a row with `epoch` 0, `channels` 0 and `ble`
--- 0: withdrawn. `channels` is the forty-two-bit SCAN_CHANNELS mask the share named, stored as the
+-- later `heartbeat` from `slot` carrying `epoch` is a node taking it: that row's `node_mac` names
+-- the node. A row names no node itself, since the P4 reports a share before the host can know
+-- who takes it. `slot` is the bus name, as in `heartbeat`. A slot whose share left the report
+-- gets a row with `epoch` 0, `channels` 0 and `ble` 0: withdrawn. `channels` is the forty-two-bit SCAN_CHANNELS mask the share named, stored as the
 -- integer it is: the indices are what the P4 reported, and which channels they name is the scan
 -- table of the build that wrote the row. No wartui code decodes the column against the scan
 -- table, and nothing rewrites it when the table changes -- a row records what was reported.
@@ -121,7 +121,6 @@ CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
   slot TEXT NOT NULL,
-  node_mac BLOB,
   epoch INTEGER NOT NULL,
   channels INTEGER NOT NULL,
   ble INTEGER NOT NULL
@@ -1164,13 +1163,12 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             }
             Record::Share(share) => {
                 tx.prepare_cached(
-                    "INSERT INTO assignment (rx_at, slot, node_mac, epoch, channels, ble)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    "INSERT INTO assignment (rx_at, slot, epoch, channels, ble)
+                     VALUES (?1,?2,?3,?4,?5)",
                 )?
                 .execute(params![
                     share.rx_at_ms,
                     share.slot.to_string(),
-                    share.node_mac.as_ref().map(|mac| &mac[..]),
                     share.epoch,
                     i64::try_from(share.channels.bits()).unwrap_or(0),
                     share.ble,

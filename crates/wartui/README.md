@@ -74,10 +74,11 @@ a last row with `mode=stopped`.
 None of them says a node adopted anything.
 
 The `assignment` table holds the shares the bridge's planner reports: a row each time a slot's
-share changes, with the slot, the node heartbeating from it (NULL when none has yet), the epoch,
-the channels and whether it is the Bluetooth scan. A share withdrawn is a row with epoch 0 and no
-channels. The host sends no assignment, so a row says what the bridge gave, and the node's later
-heartbeats carrying that epoch say it took it.
+share changes, with the slot, the epoch, the channels and whether it is the Bluetooth scan. A
+share withdrawn is a row with epoch 0 and no channels. The row names no node: the bridge reports
+the share before the host can know who takes it. The host sends no assignment, so a row says what
+the bridge gave, and the `heartbeat` rows from that slot carrying that epoch say which node took
+it.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
@@ -823,7 +824,9 @@ it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"),
 `run` that is killed leaves the fleet scanning. One found scanning, left so by such a run or by
 `wartui scan start`, is stopped and started again in its mode, so every node's dedup ring starts
 empty. A reconnect later in the run leaves the
-scan alone, and a bridge that reboots mid-run, and so boots stopped, is started again. The bridge
+scan alone and takes its mode as the run's. After that, a status naming another mode than the
+run's asks for the run's again, and a bridge that reboots mid-run, and so boots stopped, is started
+again. The bridge
 scans on through host silence until told to stop; `wartui scan` starts and stops it with no run
 attached (§ "The scan").
 
@@ -987,7 +990,7 @@ The state is spelled out as well, so color is never the only signal.
 | `no slot`      | Another node's heartbeat came from its node-bus slot, so it cannot be reached until its own heartbeat names a slot                          |
 | `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; update it with `wartui ota`                            |
 | `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
-| `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0 while it held a share, so it has forgotten it; the bridge sends it again  |
+| `rebooted xN`  | Its heartbeat counter fell, or its epoch went to 0 while it held its slot's share, so it has forgotten it; the bridge sends it again        |
 
 The channel lines' color shows where an assignment stands
 ([How channels are assigned](#how-channels-are-assigned)):

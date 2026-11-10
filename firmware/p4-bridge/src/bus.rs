@@ -51,7 +51,9 @@
 //!   since the last that had it. A node erasing flash cannot re-arm, so it fails the magic
 //!   until the erase ends, and a miss count alone would drop it mid-update. Each change of
 //!   presence goes to the fleet planner, which drops a node whose slot is absent, and each
-//!   `Status` tells the host which slots are present.
+//!   `Status` tells the host which slots are present. A slot is marked present before the records
+//!   of its first good transfer are forwarded, so the planner's reply to its first heartbeat
+//!   reaches a downlink that takes it.
 //! - **Every transfer to a slot waits [`SLOT_GAP`] after the last**, so the node has re-armed.
 //!   A present slot that fails the magic is retried once after the gap and counted as a retry.
 //!   If the retry fails too, the slot is not clocked again for [`MISS_BACKOFF`], in an IRQ pass
@@ -774,19 +776,21 @@ impl Controller {
     ) -> Outcome {
         let k = self.driven(i);
         let id = self.slot_id(i);
+        let verified = verify(buf);
+        let (was_present, prev_misses, prev_heard) =
+            (self.slots[i].present, self.slots[i].misses, self.slots[i].heard);
+        // Present before its records are forwarded, so the planner's reply to a first heartbeat
+        // is queued.
+        let arrived = !was_present && verified.is_ok();
+        if arrived {
+            self.arrive(i, shared);
+        }
         let slot = &mut self.slots[i];
-        let (was_present, prev_misses, prev_heard) = (slot.present, slot.misses, slot.heard);
-        let outcome = match verify(buf) {
+        let outcome = match verified {
             Ok(transfer) => {
                 slot.ok = slot.ok.wrapping_add(1);
                 slot.misses = 0;
                 slot.heard = Some(end);
-                if !slot.present {
-                    // A node that arrives may be a new life, whose seq restarts.
-                    slot.tracker = AckTracker::new();
-                    slot.peer = SeqCheck::new();
-                    slot.ack_owed = false;
-                }
                 if slot.peer.note(transfer.header.seq) == SeqNote::Gap {
                     slot.gaps = slot.gaps.wrapping_add(1);
                 }
@@ -852,15 +856,10 @@ impl Controller {
                 u32::try_from(end.saturating_duration_since(heard).as_millis()).unwrap_or(u32::MAX);
             slot.deaf_ms = slot.deaf_ms.max(ms);
         }
-        if !slot.present && matches!(outcome, Outcome::Good { .. }) {
-            slot.present = true;
-            slot.deaf_ms = 0;
-            shared.nodes.set_present(k, true);
-            crate::carrier::presence(shared, shared.nodes.present());
-            fleet::on_presence(shared, shared.nodes.present());
-            // The node asserting a stuck line is usually the one that just arrived.
+        if arrived {
+            // The node asserting a stuck line is usually the one that just arrived. After the
+            // records, so the IRQ wait that brought them is counted.
             self.unlatch();
-            self.line(shared, Some(i), format_args!("appeared"));
         } else if slot.present
             && slot.misses >= ABSENT_AFTER
             && slot.heard.is_none_or(|heard| end.saturating_duration_since(heard) >= ABSENT_SPAN)
@@ -876,6 +875,22 @@ impl Controller {
             self.line(shared, Some(i), format_args!("gone after {misses} transfers without magic"));
         }
         outcome
+    }
+
+    /// Mark slot `i` present after its first good transfer: a node that arrives may be a new life,
+    /// whose seq restarts. The carrier and the fleet planner hear of it at once.
+    fn arrive(&mut self, i: usize, shared: &Shared) {
+        let k = self.driven(i);
+        let slot = &mut self.slots[i];
+        slot.present = true;
+        slot.deaf_ms = 0;
+        slot.tracker = AckTracker::new();
+        slot.peer = SeqCheck::new();
+        slot.ack_owed = false;
+        shared.nodes.set_present(k, true);
+        crate::carrier::presence(shared, shared.nodes.present());
+        fleet::on_presence(shared, shared.nodes.present());
+        self.line(shared, Some(i), format_args!("appeared"));
     }
 
     /// Send the bus's IRQ counters, then each present slot's, to the host, and start each slot's

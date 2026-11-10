@@ -120,6 +120,9 @@ pub struct FleetEngine {
     /// and cleared by [`Command::StopScan`]. `None` for an engine that starts nothing, or a fleet
     /// the operator stopped. A P4 reporting stopped while it is `Some` is started again.
     wanted: Option<bool>,
+    /// A `Status` has arrived on this connection. The first after a reconnect sets
+    /// [`Self::wanted`] from the P4's mode rather than asking for it again.
+    status_seen: bool,
     /// The previous frame's bridge stamp and the host instant it was handled, to tell live reading
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
@@ -187,6 +190,7 @@ impl FleetEngine {
                 Startup::Done
             },
             wanted: None,
+            status_seen: false,
             last_arrival: None,
             // Caught up, as on `Connected`.
             backlog_lag_us: 0,
@@ -427,7 +431,7 @@ impl FleetEngine {
                 }
                 self.pool = Some(*pool);
                 self.ble_slot = *ble;
-                self.on_scan_mode(*scan, batch);
+                self.on_scan_mode(*scan, scan::Source::Status, batch);
                 // A node off the bus leaves now, not on the next tick.
                 self.note_departures(now);
             }

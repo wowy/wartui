@@ -396,6 +396,16 @@ def heartbeats(db, ctx):
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
+    # Each slot's shares in report order, for the epoch reboot rule: (rx_at, epoch), 0 withdrawn.
+    plan = defaultdict(list)
+    for at, slot, epoch in db.q("SELECT rx_at, slot, epoch FROM assignment ORDER BY id"):
+        plan[slot].append((at, epoch))
+
+    def current_share(slot, rx):
+        """The epoch of the share the plan gave `slot` as of `rx`, None for none."""
+        epoch = next((e for at, e in reversed(plan[slot]) if at <= rx), 0)
+        return epoch or None
+
     ble_nodes = ctx.get("ble_nodes", set())
     total_reversals = 0
     for mac, hs in sorted(per.items(), key=lambda item: node_order(item[0])):
@@ -422,9 +432,10 @@ def heartbeats(db, ctx):
                 if slot != p_slot:
                     moves.append((rx, p_slot, slot))
                 # As the engine reads a restart: the counter fell, or a live beat reports no
-                # epoch after a live beat reported a real one.
+                # epoch after a live beat reported the share the plan still gives its slot.
+                share = current_share(slot, rx)
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
-                            or (live != 0 and epoch == 0 and held not in (None, 0)))
+                            or (live != 0 and epoch == 0 and share is not None and held == share))
                 if rebooted:
                     reboots += 1
                     boot_start = i
@@ -561,26 +572,32 @@ def heartbeats(db, ctx):
              "ORDER BY d LIMIT 10")
 
 
-def share_node(db, mac, slot, at):
-    """The node a share row is for: its `node_mac`, or with none, the first node to heartbeat from
-    its slot at or after the row."""
-    if mac is not None:
-        return mac
-    return db.one("SELECT node_mac FROM heartbeat WHERE slot=? AND rx_at>=? ORDER BY id LIMIT 1",
-                  (slot, at))
+def share_node(db, slot, at, epoch):
+    """The node a share row is for, which the row does not name: the first to heartbeat from its
+    slot at or after the row carrying its epoch, else the slot's next heartbeat, else None."""
+    return (db.one("SELECT node_mac FROM heartbeat WHERE slot=? AND rx_at>=? AND epoch=? "
+                   "ORDER BY id LIMIT 1", (slot, at, epoch))
+            or db.one("SELECT node_mac FROM heartbeat WHERE slot=? AND rx_at>=? ORDER BY id LIMIT 1",
+                      (slot, at)))
+
+
+def share_rows(db):
+    """Every assignment row, by id, as (id, rx_at, slot, node, epoch, channels, ble), with the
+    node resolved by `share_node`."""
+    rows = db.q("SELECT id, rx_at, slot, epoch, channels, ble FROM assignment ORDER BY id")
+    return [(i, at, slot, share_node(db, slot, at, epoch), epoch, chans, ble)
+            for i, at, slot, epoch, chans, ble in rows]
 
 
 def assignments(db, ctx):
     section("assignments")
     # One row per slot whose share changed between two of the P4's `Fleet` reports. The host
     # sends nothing and sees no delivery: a heartbeat carrying the row's epoch is adoption.
-    rows = db.q("SELECT id, rx_at, slot, node_mac, epoch, channels, ble FROM assignment "
-                "ORDER BY id")
-    rows = [(i, at, slot, share_node(db, mac, slot, at), epoch, chans, ble)
-            for i, at, slot, mac, epoch, chans, ble in rows]
+    # A row names no node: the one whose heartbeat from the slot carries the epoch took it.
+    rows = share_rows(db)
     withdrawn = sum(r[4] == 0 for r in rows)
-    unnamed = db.one("SELECT COUNT(*) FROM assignment WHERE node_mac IS NULL")
-    print(f"  rows {len(rows)}  withdrawn {withdrawn}  with no node yet {unnamed}")
+    unnamed = sum(r[3] is None for r in rows)
+    print(f"  rows {len(rows)}  withdrawn {withdrawn}  with no heartbeat after {unnamed}")
     ble = {r[3] for r in rows if r[6] and r[3] is not None}
     ctx["ble_nodes"] = ble
     if ble:
@@ -1356,8 +1373,7 @@ def main():
     print(f"tables: {', '.join(sorted(db.tables))}")
     provenance(db, ctx)
     # The Bluetooth node, read early so nodes() and heartbeats() can tell it from the sweepers.
-    ctx["ble_nodes"] = {m for (m,) in db.q("SELECT DISTINCT node_mac FROM assignment "
-                                            "WHERE ble=1 AND node_mac IS NOT NULL")}
+    ctx["ble_nodes"] = {r[3] for r in share_rows(db) if r[6] and r[3] is not None}
     nodes(db, ctx)
     heartbeats(db, ctx)
     assignments(db, ctx)

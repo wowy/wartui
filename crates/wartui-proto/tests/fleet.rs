@@ -9,8 +9,8 @@ use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, Heartbeat, NODE_VERSION, Slot, Vdd, Version,
 };
 use wartui_proto::fleet::{
-    BRIDGE_ID, Fleet, HEARTBEAT_TIMEOUT_MS, Report, SEND_TIMEOUT_MS, ScanMode, SlotMsg, ToSlot,
-    next_epoch, pick_bluetooth,
+    BRIDGE_ID, Fleet, HEARTBEAT_TIMEOUT_MS, Report, ScanMode, SlotMsg, ToSlot, next_epoch,
+    pick_bluetooth,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
@@ -579,15 +579,18 @@ fn fleet_resends_same_epoch_when_undelivered() {
 }
 
 #[test]
-fn fleet_resends_when_send_times_out() {
+fn fleet_queues_nothing_more_when_send_unanswered_long_after() {
     let mut rig = Rig::started(false);
     rig.plug(0, 1);
     let first = rig.beat(0);
-    rig.now += SEND_TIMEOUT_MS - 1;
-    rig.fleet.on_tick(rig.now);
-    assert!(rig.beat(0).is_empty(), "still in flight");
-    rig.now += 1;
-    rig.fleet.on_tick(rig.now);
+    // A backed-up downlink still holds it: a minute of heartbeats and ticks adds no duplicate.
+    for _ in 0..60 {
+        rig.now += 1_000;
+        rig.fleet.on_tick(rig.now);
+        assert!(rig.beat(0).is_empty(), "still in flight");
+    }
+    // Its answer comes at last, and the next heartbeat sends it again.
+    rig.fleet.on_undelivered(first[0].id, rig.now);
     assert_eq!(assigns(&rig.beat(0)), assigns(&first));
 }
 
@@ -727,7 +730,7 @@ fn fleet_sends_stop_when_stopped_with_assign_in_flight() {
     // The Assign's late answer is not the Stop's.
     rig.fleet.on_delivered(assign[0].id, rig.now);
     rig.fleet.on_undelivered(assign[0].id, rig.now);
-    assert_eq!(rig.fleet.next_deadline_ms(), Some(rig.now + SEND_TIMEOUT_MS));
+    assert_eq!(rig.fleet.next_deadline_ms(), Some(rig.now + HEARTBEAT_TIMEOUT_MS));
     // The node took the Assign before the Stop: its heartbeat now shows the epoch, and the Stop
     // is still in flight, so nothing more goes.
     rig.deliver(&assign);
@@ -830,13 +833,14 @@ fn fleet_sends_ids_at_or_above_bridge_id_when_counter_wraps() {
 }
 
 #[test]
-fn fleet_reports_deadlines_when_heartbeats_and_sends_wait() {
+fn fleet_reports_deadline_when_member_heartbeats() {
     let mut rig = Rig::started(false);
     assert_eq!(rig.fleet.next_deadline_ms(), None, "nothing pending");
     rig.plug(0, 1);
     let heard = rig.now;
     let sends = rig.beat(0);
-    assert_eq!(rig.fleet.next_deadline_ms(), Some(heard + SEND_TIMEOUT_MS));
+    // A send in flight waits on its answer, not on the clock.
+    assert_eq!(rig.fleet.next_deadline_ms(), Some(heard + HEARTBEAT_TIMEOUT_MS));
     rig.deliver(&sends);
     assert_eq!(rig.fleet.next_deadline_ms(), Some(heard + HEARTBEAT_TIMEOUT_MS));
     rig.now += 500;

@@ -4,7 +4,6 @@ CREATE TABLE assignment (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
   slot TEXT NOT NULL,
-  node_mac BLOB,
   epoch INTEGER NOT NULL,
   channels INTEGER NOT NULL,
   ble INTEGER NOT NULL

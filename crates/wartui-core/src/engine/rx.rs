@@ -163,18 +163,18 @@ impl FleetEngine {
         self.counters.heartbeats += 1;
         // Read before borrowing the node: liveness decides whether its epoch is believed.
         let live = self.reading_live();
-        // So does a live heartbeat reporting no epoch after a real one, while the P4's plan still
-        // gives the slot a share: the epoch reset at boot too. A node the P4 stopped or withdrew
-        // reports 0 as well, and the plan says so first: its report is a priority frame, ahead of
-        // the heartbeats that follow it.
-        let held_share = self.share_at(slot).is_some_and(|share| share.epoch != 0);
+        // So does a live heartbeat reporting no epoch from a node that held the share the P4's
+        // plan still gives its slot: the epoch reset at boot too. A node the P4 stopped or
+        // withdrew reports 0 as well, and the plan says so first: its report is a priority frame,
+        // ahead of the heartbeats that follow it. A plan that has dealt the slot a new share since
+        // is not that node's yet, so its 0 is the stop before the new share lands.
+        let current = self.share_at(slot).map(|share| share.epoch);
         let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
         // A falling counter means the node restarted and forgot its assignment.
         let counter_rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
-        let epoch_rebooted = live
-            && held_share
-            && heartbeat.epoch == 0
-            && node.held_epoch.is_some_and(|previous| previous != 0);
+        // A share's epoch is never 0, so holding it is holding a real one.
+        let epoch_rebooted =
+            live && heartbeat.epoch == 0 && current.is_some() && node.held_epoch == current;
         let rebooted = counter_rebooted || epoch_rebooted;
         // `see_node` leaves `last_heartbeat` alone, so this is still the previous beat.
         match node.last_heartbeat {

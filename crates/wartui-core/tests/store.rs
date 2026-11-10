@@ -2025,15 +2025,13 @@ fn store_records_bridge_when_bridge_announces() {
 // Phase 4: assignment
 // ---------------------------------------------------------------------------
 
-/// An `assignment` row as stored: rx_at, slot, node_mac, epoch, channels, ble.
-type ShareRow = (i64, String, Option<Vec<u8>>, u8, i64, bool);
+/// An `assignment` row as stored: rx_at, slot, epoch, channels, ble.
+type ShareRow = (i64, String, u8, i64, bool);
 
 fn share_rows(conn: &Connection) -> Vec<ShareRow> {
-    conn.prepare("SELECT rx_at, slot, node_mac, epoch, channels, ble FROM assignment ORDER BY id")
+    conn.prepare("SELECT rx_at, slot, epoch, channels, ble FROM assignment ORDER BY id")
         .expect("preparing")
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-        })
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
         .expect("querying")
         .map(|r| r.expect("row"))
         .collect()
@@ -2050,38 +2048,36 @@ fn store_records_share_and_withdrawn_rows_when_shares_change() {
             Record::Share(ShareChange {
                 rx_at_ms: EPOCH_MS,
                 slot: SLOT,
-                node_mac: Some(NODE),
                 epoch: 7,
                 channels,
                 ble: false,
             }),
-            Record::Share(ShareChange::withdrawn(EPOCH_MS + 5, SLOT, Some(NODE))),
+            Record::Share(ShareChange::withdrawn(EPOCH_MS + 5, SLOT)),
         ],
     );
     let bits = i64::try_from(channels.bits()).expect("forty-two bits fit");
     assert_eq!(
         share_rows(&conn),
         vec![
-            (EPOCH_MS, "A2".to_owned(), Some(NODE.to_vec()), 7, bits, false),
-            (EPOCH_MS + 5, "A2".to_owned(), Some(NODE.to_vec()), 0, 0, false),
+            (EPOCH_MS, "A2".to_owned(), 7, bits, false),
+            (EPOCH_MS + 5, "A2".to_owned(), 0, 0, false),
         ],
         "a withdrawn share is epoch 0 with no channels and no Bluetooth"
     );
 }
 
 #[test]
-fn store_records_null_node_mac_when_slot_has_no_heartbeat() {
+fn store_records_bluetooth_share_when_share_holds_no_channels() {
     let dir = tempfile::tempdir().expect("temp dir");
     let share = ShareChange {
         rx_at_ms: EPOCH_MS,
         slot: SLOT,
-        node_mac: None,
         epoch: 3,
         channels: wartui_proto::plan::ChannelSet::empty(),
         ble: true,
     };
     let conn = write(&dir, vec![Record::Share(share)]);
-    assert_eq!(share_rows(&conn), vec![(EPOCH_MS, "A2".to_owned(), None, 3, 0, true)]);
+    assert_eq!(share_rows(&conn), vec![(EPOCH_MS, "A2".to_owned(), 3, 0, true)]);
 }
 
 #[test]

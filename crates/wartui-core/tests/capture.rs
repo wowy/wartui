@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rusqlite::OptionalExtension;
 use tokio::sync::{oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, StoreStats};
@@ -67,28 +68,30 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert!(ended.is_some(), "a stopped capture should close its capture row out");
     assert!(bridge.is_some(), "and should say which bridge it came through");
 
-    // The P4's plan as its `Fleet` reports gave it: a share per node, which that node's later
-    // heartbeats report holding.
-    let shares: Vec<(Vec<u8>, i64, u8)> = conn
-        .prepare("SELECT node_mac, rx_at, epoch FROM assignment WHERE epoch != 0 ORDER BY id")
+    // The P4's plan as its `Fleet` reports gave it: a share per slot, which a later heartbeat
+    // from that slot reports holding, and that heartbeat names the node.
+    let shares: Vec<(String, i64, u8)> = conn
+        .prepare("SELECT slot, rx_at, epoch FROM assignment WHERE epoch != 0 ORDER BY id")
         .expect("shares")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .expect("share rows")
         .collect::<Result<_, _>>()
         .expect("share values");
-    let nodes: std::collections::HashSet<&Vec<u8>> = shares.iter().map(|(mac, ..)| mac).collect();
-    assert_eq!(nodes.len(), 3, "a share row per node: {shares:?}");
-    for (mac, rx_at, epoch) in &shares {
-        let adopted: bool = conn
+    let mut nodes = std::collections::HashSet::new();
+    for (slot, rx_at, epoch) in &shares {
+        let node: Option<Vec<u8>> = conn
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM heartbeat
-                 WHERE node_mac = ?1 AND rx_at >= ?2 AND epoch = ?3)",
-                rusqlite::params![mac, rx_at, epoch],
+                "SELECT node_mac FROM heartbeat
+                 WHERE slot = ?1 AND rx_at >= ?2 AND epoch = ?3 ORDER BY id LIMIT 1",
+                rusqlite::params![slot, rx_at, epoch],
                 |r| r.get(0),
             )
+            .optional()
             .expect("adoption");
-        assert!(adopted, "a heartbeat after the row reports epoch {epoch}");
+        let node = node.unwrap_or_else(|| panic!("a heartbeat from {slot} reports epoch {epoch}"));
+        nodes.insert(node);
     }
+    assert_eq!(nodes.len(), 3, "a share row per node: {shares:?}");
     // The clean stop withdraws every share.
     let last: Vec<u8> = conn
         .prepare(

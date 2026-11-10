@@ -241,6 +241,8 @@ pub struct Shared {
     fleet: RefCell<&'static mut Fleet>,
     /// Raised by an input that [`fleet::run`] must pump after, or whose deadline it must see.
     fleet_wake: Signal<NoopRawMutex, ()>,
+    /// The core deadline [`fleet::run`] sleeps toward, or `None` while it waits for a wake alone.
+    fleet_sleep: Cell<Option<u64>>,
 }
 
 impl Shared {
@@ -292,6 +294,7 @@ impl Shared {
             sector: RefCell::new(sector),
             fleet: RefCell::new(fleet),
             fleet_wake: Signal::new(),
+            fleet_sleep: Cell::new(None),
         }
     }
 

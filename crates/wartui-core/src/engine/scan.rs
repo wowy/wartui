@@ -11,16 +11,24 @@
 //! started on Wi-Fi. A P4 found scanning, left so by an earlier run that did not quit cleanly, is
 //! stopped and then started again in the mode it held, so each capture starts with every node's
 //! dedup ring empty. The start waits for the P4 to report stopped, since a start that reached it
-//! first would replace the stop and the rings would carry over. Only an engine told to drive a
-//! capture ([`EngineConfig::auto_start`](super::EngineConfig::auto_start)) does any of this:
-//! `status`, `sniff`, `pool` and `ota` look at a fleet without starting it.
+//! first would replace the stop and the rings would carry over. Each `Status` that still reports a
+//! scan meanwhile sends the stop again, since a stop lost on the link would otherwise leave the run
+//! waiting forever. Only an engine told to drive a capture
+//! ([`EngineConfig::auto_start`](super::EngineConfig::auto_start)) does any of this: `status`,
+//! `sniff`, `pool` and `ota` look at a fleet without starting it.
 //!
 //! **After that, the run keeps the scan it wants** (`FleetEngine::wanted`). The P4 boots stopped
 //! and keeps no mode, so a P4 that resets mid-run, often under a connection the CH343 holds up,
-//! reports stopped, and the run starts it again in the mode it wants. A P4 found scanning, on a
-//! reconnect or after a `Status`, is left alone, and its mode becomes the one the run wants. An
-//! operator's [`Command::StopScan`], which a clean quit sends too, clears what the run wants
-//! first, so nothing restarts a fleet the operator stopped.
+//! reports stopped, and the run starts it again in the mode it wants. The first `Status` of a
+//! reconnect that finds the P4 scanning leaves it alone, and its mode becomes the one the run
+//! wants, since another host may have changed it meanwhile. Any later `Status` naming another
+//! scanning mode than the one wanted draws the start again: it may have been sent before the
+//! operator's `b` reached the P4, or that start may have been lost. A start in the mode the P4
+//! holds is a no-op on its core, so a stale `Status` costs one duplicate. Only a `Status` drives a
+//! resend, of a start or a stop, one per `Status`: a `Fleet` report is pushed on every plan
+//! change, and resending on each would multiply the traffic it answers. An operator's
+//! [`Command::StopScan`], which a clean quit sends too, clears what the run wants first, so
+//! nothing restarts a fleet the operator stopped.
 
 use wartui_proto::bus::Slot;
 use wartui_proto::fleet::{Report, ScanMode, Share};
@@ -28,6 +36,15 @@ use wartui_proto::link::HostToBridge;
 
 use super::{ActionBatch, Command, FleetEngine, Now};
 use crate::record::{Record, ShareChange};
+
+/// What reported a scan mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    /// A `Status`, the answer to the engine's poll.
+    Status,
+    /// A `Fleet` report, pushed on every plan change.
+    Fleet,
+}
 
 /// Where a run stands on starting the scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +107,11 @@ impl FleetEngine {
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
-    /// The P4 reported `mode`: take it, and move the run's start on.
-    pub(super) fn on_scan_mode(&mut self, mode: ScanMode, batch: &mut ActionBatch) {
+    /// The P4 reported `mode` in a `source`: take it, and move the run's start on.
+    pub(super) fn on_scan_mode(&mut self, mode: ScanMode, source: Source, batch: &mut ActionBatch) {
         self.scan = Some(mode);
+        let from_status = source == Source::Status;
+        let first_status = from_status && !std::mem::replace(&mut self.status_seen, true);
         match (self.startup, mode) {
             (Startup::Done, ScanMode::Stopped) => {
                 // The P4 reset, and boots stopped. A `Status` queued just ahead of the run's own
@@ -104,8 +123,15 @@ impl FleetEngine {
                 }
             }
             (Startup::Done, ScanMode::Wifi | ScanMode::WifiBluetooth) => {
-                if self.wanted.is_some() {
-                    self.wanted = Some(mode == ScanMode::WifiBluetooth);
+                let bluetooth = mode == ScanMode::WifiBluetooth;
+                match self.wanted {
+                    // A reconnect adopts what the P4 is doing.
+                    Some(_) if first_status => self.wanted = Some(bluetooth),
+                    Some(wanted) if from_status && wanted != bluetooth => {
+                        tracing::info!(?mode, wanted, "bridge scanning another mode; asking again");
+                        batch.urgent.push(HostToBridge::StartScan { bluetooth: wanted });
+                    }
+                    _ => {}
                 }
             }
             (Startup::AwaitingStatus { bluetooth }, ScanMode::Stopped) => {
@@ -122,6 +148,11 @@ impl FleetEngine {
                 self.startup = Startup::Done;
                 self.start(bluetooth, batch);
             }
+            // The stop may have been lost on the link. The next poll's `Status` says whether it
+            // landed, so no `GetStatus` goes with it.
+            (Startup::Stopping { .. }, ScanMode::Wifi | ScanMode::WifiBluetooth) if from_status => {
+                batch.urgent.push(HostToBridge::StopScan);
+            }
             (Startup::Stopping { .. }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {}
         }
     }
@@ -130,6 +161,7 @@ impl FleetEngine {
     /// dropped may have been lost, so it goes again.
     pub(super) fn on_connected_scan(&mut self, batch: &mut ActionBatch) {
         self.fleet = None;
+        self.status_seen = false;
         if let Startup::Stopping { .. } = self.startup {
             stop(batch);
         }
@@ -143,7 +175,7 @@ impl FleetEngine {
         if let Startup::AwaitingStatus { .. } = self.startup {
             self.scan = Some(report.mode);
         } else {
-            self.on_scan_mode(report.mode, batch);
+            self.on_scan_mode(report.mode, Source::Fleet, batch);
         }
     }
 
@@ -158,7 +190,6 @@ impl FleetEngine {
                 batch.records.push(Record::Share(ShareChange {
                     rx_at_ms: now.unix_ms,
                     slot: share.slot,
-                    node_mac: self.slots.get(&share.slot).copied(),
                     epoch: share.epoch,
                     channels: share.channels,
                     ble: share.ble,
@@ -173,8 +204,7 @@ impl FleetEngine {
             .collect();
         for slot in withdrawn {
             self.recorded_shares.remove(&slot);
-            let node = self.slots.get(&slot).copied();
-            batch.records.push(Record::Share(ShareChange::withdrawn(now.unix_ms, slot, node)));
+            batch.records.push(Record::Share(ShareChange::withdrawn(now.unix_ms, slot)));
         }
     }
 

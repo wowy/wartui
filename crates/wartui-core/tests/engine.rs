@@ -2375,6 +2375,53 @@ fn engine_counts_no_reboot_when_withdrawn_node_reports_epoch_zero() {
 }
 
 #[test]
+fn engine_counts_no_reboot_when_node_reports_epoch_zero_across_stop_then_start() {
+    // A run that finds the bridge scanning stops and restarts it. The report with the new share
+    // is a priority frame, so the node's heartbeat at 0, between the Stop and the new Assign,
+    // follows it.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    holding_share(&mut engine, &clock, NODE, 7, 1);
+
+    engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(2));
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 9, false)]), clock.at(2));
+    engine.handle(heartbeat_holding(NODE, 2, 0), clock.at(3));
+
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 0);
+    engine.handle(heartbeat_holding(NODE, 3, 9), clock.at(4));
+    assert!(view_of(&engine, NODE, clock.at(4)).adopted);
+}
+
+#[test]
+fn engine_counts_no_reboot_when_redealt_member_reports_epoch_zero() {
+    // A member the bridge timed out is withdrawn and stopped, then dealt a new share when it
+    // heartbeats again.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    holding_share(&mut engine, &clock, NODE, 7, 1);
+
+    engine.handle(fleet(ScanMode::Wifi, &[(OTHER, 8, false)]), clock.at(2));
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 9, false), (OTHER, 10, false)]), clock.at(3));
+    engine.handle(heartbeat_holding(NODE, 2, 0), clock.at(3));
+
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 0);
+}
+
+#[test]
+fn engine_counts_reboot_when_counter_falls_across_stop_then_start() {
+    // The epoch says nothing across a re-deal, but a falling counter still does.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 7, false)]), clock.at(1));
+    engine.handle(heartbeat_holding(NODE, 5, 7), clock.at(1));
+
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 9, false)]), clock.at(2));
+    engine.handle(heartbeat_holding(NODE, 1, 0), clock.at(3));
+
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 1);
+}
+
+#[test]
 fn engine_mirrors_shares_into_snapshot_when_bridge_reports_its_plan() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -2485,8 +2532,9 @@ fn engine_stops_then_restarts_in_same_mode_when_first_status_says_scanning() {
         assert_eq!(scans(&batch), [HostToBridge::StopScan], "{mode:?}");
 
         // Not until the bridge says it stopped: a start reaching it first would replace the stop.
+        // A `Status` still scanning asks for the stop again.
         let batch = engine.handle(scan_status(mode), clock.at(2));
-        assert!(scans(&batch).is_empty(), "{mode:?}: still scanning, so nothing yet");
+        assert_eq!(scans(&batch), [HostToBridge::StopScan], "{mode:?}: still scanning");
         let batch = engine.handle(fleet(mode, &[]), clock.at(2));
         assert!(scans(&batch).is_empty(), "{mode:?}");
 
@@ -2528,6 +2576,64 @@ fn engine_adopts_bridge_mode_when_link_reconnects_to_scanning_bridge() {
     // Its mode is the one the run wants from here: a reset restarts it with Bluetooth.
     let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(6));
     assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: true }]);
+}
+
+#[test]
+fn engine_resends_stop_when_status_still_scanning_while_stopping() {
+    // The startup stop was lost on a live link: every later `Status` still says scanning.
+    let clock = Clock::new();
+    let mut engine = capture(&clock);
+    engine.handle(scan_status(ScanMode::Wifi), clock.at(1));
+
+    for at in 2..5 {
+        let batch = engine.handle(scan_status(ScanMode::Wifi), clock.at(at));
+        assert_eq!(batch.urgent, [HostToBridge::StopScan], "one per Status");
+        assert!(batch.bulk.is_empty(), "the next poll asks");
+    }
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[]), clock.at(5));
+    assert!(scans(&batch).is_empty(), "a report draws no resend");
+
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(6));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+}
+
+#[test]
+fn engine_resends_bluetooth_start_when_stale_status_follows_set_bluetooth() {
+    // A `Status` already on its way when the operator pressed `b` still says Wi-Fi.
+    let clock = Clock::new();
+    let mut engine = scanning_capture(&clock);
+    engine.handle(Event::Command(Command::SetBluetooth(true)), clock.at(3));
+
+    let batch = engine.handle(scan_status(ScanMode::Wifi), clock.at(3));
+    assert_eq!(batch.urgent, [HostToBridge::StartScan { bluetooth: true }]);
+    assert!(batch.bulk.is_empty(), "the next poll asks");
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[]), clock.at(3));
+    assert!(scans(&batch).is_empty(), "a report draws no resend");
+
+    // Bluetooth is still what the run wants: a reset restarts it so.
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(4));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: true }]);
+    let batch = engine.handle(scan_status(ScanMode::WifiBluetooth), clock.at(5));
+    assert!(scans(&batch).is_empty());
+}
+
+#[test]
+fn engine_resends_start_when_status_after_reconnect_names_another_mode() {
+    let clock = Clock::new();
+    let mut engine = scanning_capture(&clock);
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(3),
+    );
+    engine.handle(connected(), clock.at(4));
+    // A report ahead of the first `Status` adopts nothing.
+    let batch = engine.handle(fleet(ScanMode::WifiBluetooth, &[]), clock.at(5));
+    assert!(scans(&batch).is_empty());
+    let batch = engine.handle(scan_status(ScanMode::WifiBluetooth), clock.at(5));
+    assert!(scans(&batch).is_empty(), "the reconnect's first Status is adopted");
+
+    let batch = engine.handle(scan_status(ScanMode::Wifi), clock.at(6));
+    assert_eq!(batch.urgent, [HostToBridge::StartScan { bluetooth: true }]);
 }
 
 #[test]
@@ -2701,7 +2807,6 @@ fn engine_records_assignment_row_when_share_changes() {
         ShareChange {
             rx_at_ms: clock.at(2).unix_ms,
             slot: slot_of(NODE),
-            node_mac: Some(NODE),
             epoch: 1,
             channels: ChannelSet::from_bits(1),
             ble: false,
@@ -2743,30 +2848,21 @@ fn engine_records_withdrawn_row_when_share_leaves_report() {
     let batch = engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(3));
     assert_eq!(
         share_rows(&batch),
-        vec![ShareChange::withdrawn(clock.at(3).unix_ms, slot_of(NODE), Some(NODE))]
+        vec![ShareChange::withdrawn(clock.at(3).unix_ms, slot_of(NODE))]
     );
     let batch = engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(4));
     assert!(share_rows(&batch).is_empty(), "a withdrawn share is recorded once");
 }
 
 #[test]
-fn engine_records_node_mac_when_slot_has_heartbeated() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(heartbeat(NODE, 1), clock.at(1));
-
-    let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
-    assert_eq!(share_rows(&batch)[0].node_mac, Some(NODE));
-}
-
-#[test]
-fn engine_records_null_node_mac_when_slot_has_not_heartbeated() {
+fn engine_records_assignment_row_when_slot_has_not_heartbeated() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    // The P4 heard a heartbeat this host has not read yet.
+    // The P4 heard a heartbeat this host has not read yet. The row names the slot, and the
+    // heartbeat that follows names the node.
     let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
-    assert_eq!(share_rows(&batch)[0].node_mac, None);
+    assert_eq!(share_rows(&batch).iter().map(|row| row.slot).collect::<Vec<_>>(), [slot_of(NODE)]);
 }
 
 #[test]

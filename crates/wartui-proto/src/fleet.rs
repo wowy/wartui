@@ -7,6 +7,13 @@
 //! holds a fixed array of per-slot entries keyed by [`Slot`], allocates nothing and reads no
 //! clock, so `cargo test` covers what the firmware runs.
 //!
+//! **Every id from [`Fleet::next_send`] is answered**, once, by [`Fleet::on_delivered`] or
+//! [`Fleet::on_undelivered`]: that is the driver's contract. The P4's downlink answers every
+//! record it takes (delivered, given up after every try, or drained when its slot goes absent)
+//! and refuses at once one it cannot take, so the core keeps no timer of its own on a send. A
+//! timer would forget a record still queued behind a backed-up downlink, and every heartbeat
+//! after it would queue a duplicate.
+//!
 //! - **A member** is a slot that is present, has heartbeated within [`HEARTBEAT_TIMEOUT_MS`], and
 //!   whose heartbeat speaks [`NODE_VERSION`](crate::bus::NODE_VERSION). A heartbeat counts as
 //!   presence: the P4 marks a slot present after one good transfer, and a heartbeat is one, so
@@ -28,8 +35,8 @@
 //! - **A changed want goes out at once**, even over a send in flight: delivery toward a node is
 //!   strictly in order, so the newer record lands last, and the older send's answer is ignored.
 //!   After that a slot is re-sent its want, under the same epoch, only on a heartbeat whose epoch
-//!   differs from it while nothing is in flight, or on a reboot: a falling heartbeat counter, or
-//!   epoch 0 after the want was delivered.
+//!   differs from it while nothing is in flight, or on a falling heartbeat counter, a reboot,
+//!   which re-sends even over a send in flight: that send may have reached the node's last life.
 //! - **Idle is [`SlotMsg::Stop`]** for a slot whose heartbeat reports a non-zero epoch, and
 //!   nothing for one reporting 0. That is how [`Fleet::stop`] idles the fleet and how a core that
 //!   boots stopped idles nodes still scanning from the P4's last life. A start that arrives before
@@ -41,16 +48,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::bus::{ACK_TIMEOUT_MS, Assign, Heartbeat, MAX_SLOTS, SEND_TRIES, Slot, wire_epoch};
+use crate::bus::{Assign, Heartbeat, MAX_SLOTS, Slot, wire_epoch};
 use crate::mac::Mac;
 use crate::plan::{ChannelPool, ChannelSet, Job, plan_for};
 
 /// How long a slot stays a member after its last heartbeat.
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 20_000;
-
-/// How long a send stays in flight unanswered before the core forgets it: a node's every try,
-/// and a second to spare.
-pub const SEND_TIMEOUT_MS: u64 = ACK_TIMEOUT_MS * SEND_TRIES as u64 + 1_000;
 
 /// The high bit every id the core sends under carries. The host's ids stay below it.
 pub const BRIDGE_ID: u16 = 0x8000;
@@ -152,13 +155,6 @@ pub fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
     *last
 }
 
-/// A send awaiting its outcome.
-#[derive(Debug, Clone, Copy)]
-struct InFlight {
-    id: u16,
-    sent_ms: u64,
-}
-
 /// What the core knows of one slot.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -174,12 +170,10 @@ struct Entry {
     held: u8,
     /// What it should scan, or `None` to idle.
     want: Option<Assign>,
-    /// The send awaiting an outcome, if any.
-    in_flight: Option<InFlight>,
+    /// The id of the send awaiting an outcome, if any.
+    in_flight: Option<u16>,
     /// The want is to go out on the next [`Fleet::next_send`].
     owed: bool,
-    /// The want's last send was delivered.
-    delivered: bool,
 }
 
 impl Entry {
@@ -192,7 +186,6 @@ impl Entry {
         want: None,
         in_flight: None,
         owed: false,
-        delivered: false,
     };
 
     /// The epoch a settled node reports: the want's, or 0 for idle.
@@ -299,12 +292,10 @@ impl Fleet {
             Some(beat) => {
                 entry.drivable = beat.capabilities.version.compat_with_host().drivable();
                 let fell = entry.counter.is_some_and(|last| beat.counter < last);
-                let zeroed = beat.epoch == 0 && entry.delivered;
                 entry.counter = Some(beat.counter);
                 entry.held = beat.epoch;
-                if (fell || zeroed) && entry.want.is_some() {
+                if fell && entry.want.is_some() {
                     entry.owed = true;
-                    entry.delivered = false;
                 }
             }
             None => entry.drivable = false,
@@ -348,7 +339,6 @@ impl Fleet {
             if !entry.owed {
                 entry.held = entry.target();
             }
-            entry.delivered = !entry.owed && entry.want.is_some();
         }
     }
 
@@ -362,18 +352,11 @@ impl Fleet {
 
     /// The entry whose send in flight is `id`.
     fn flight(&mut self, id: u16) -> Option<&mut Entry> {
-        self.entries.iter_mut().find(|entry| entry.in_flight.is_some_and(|f| f.id == id))
+        self.entries.iter_mut().find(|entry| entry.in_flight == Some(id))
     }
 
-    /// The P4 clock reached `now_ms`: forget sends unanswered past [`SEND_TIMEOUT_MS`], and drop
-    /// members silent past [`HEARTBEAT_TIMEOUT_MS`].
+    /// The P4 clock reached `now_ms`: drop members silent past [`HEARTBEAT_TIMEOUT_MS`].
     pub fn on_tick(&mut self, now_ms: u64) {
-        for entry in &mut self.entries {
-            if entry.in_flight.is_some_and(|f| now_ms.saturating_sub(f.sent_ms) >= SEND_TIMEOUT_MS)
-            {
-                entry.in_flight = None;
-            }
-        }
         self.settle(now_ms);
     }
 
@@ -381,22 +364,14 @@ impl Fleet {
     /// the clock. A caller sleeps until then instead of polling.
     #[must_use]
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .enumerate()
-            .flat_map(|(index, entry)| {
-                let beat = (self.members & (1 << index) != 0)
-                    .then_some(entry.heard_ms + HEARTBEAT_TIMEOUT_MS);
-                let send = entry.in_flight.map(|f| f.sent_ms + SEND_TIMEOUT_MS);
-                [beat, send]
-            })
-            .flatten()
+        slots_of(self.members)
+            .map(|index| self.entries[index].heard_ms + HEARTBEAT_TIMEOUT_MS)
             .min()
     }
 
     /// The next record to send, lowest slot first, or `None` when nothing is owed. A caller
     /// drains it after every input.
-    pub fn next_send(&mut self, now_ms: u64) -> Option<ToSlot> {
+    pub fn next_send(&mut self, _now_ms: u64) -> Option<ToSlot> {
         for index in 0..MAX_SLOTS {
             let entry = &mut self.entries[index];
             if !entry.owed {
@@ -415,8 +390,7 @@ impl Fleet {
             let id = BRIDGE_ID | self.next_id;
             self.next_id = self.next_id.wrapping_add(1) & ID_MASK;
             let entry = &mut self.entries[index];
-            entry.in_flight = Some(InFlight { id, sent_ms: now_ms });
-            entry.delivered = false;
+            entry.in_flight = Some(id);
             #[allow(clippy::cast_possible_truncation)]
             let slot = Slot::from_u8(index as u8)?;
             return Some(ToSlot { slot, id, msg });
@@ -541,13 +515,11 @@ impl Fleet {
                 new.epoch = wire_epoch(next_epoch(&mut self.last_epoch, Some(entry.held)));
                 entry.want = Some(new);
                 entry.owed = entry.sendable();
-                entry.delivered = false;
                 self.changed = true;
             }
             (Some(_), None) => {
                 entry.want = None;
                 entry.owed = entry.sendable() && (entry.held != 0 || entry.in_flight.is_some());
-                entry.delivered = false;
                 self.changed = true;
             }
         }

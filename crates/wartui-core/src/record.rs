@@ -235,15 +235,15 @@ pub struct BridgeSeen {
 
 /// One slot's share as a P4 `Fleet` report gives it, written when it differs from the share the
 /// previous report gave that slot. The host sends no assignment and sees no delivery: this is what
-/// the P4 said it gave, and a heartbeat's epoch says whether the node took it.
+/// the P4 said it gave, and a heartbeat's epoch says whether the node took it. It names no node:
+/// the report comes ahead of the heartbeats that would say who sits in the slot, so the node is
+/// the one whose heartbeat from the slot carries the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShareChange {
     /// Unix milliseconds the report was read.
     pub rx_at_ms: i64,
     /// The node-bus slot the share is for.
     pub slot: Slot,
-    /// The node whose latest heartbeat came from that slot, `None` when none has yet.
-    pub node_mac: Option<Mac>,
     /// The epoch the share's assignment carries, 0 for a share withdrawn.
     pub epoch: u8,
     /// Which `SCAN_CHANNELS` indices the share names, empty for one withdrawn.
@@ -255,8 +255,8 @@ pub struct ShareChange {
 impl ShareChange {
     /// The row for a slot whose share left the report: epoch 0, no channels, no Bluetooth.
     #[must_use]
-    pub const fn withdrawn(rx_at_ms: i64, slot: Slot, node_mac: Option<Mac>) -> Self {
-        Self { rx_at_ms, slot, node_mac, epoch: 0, channels: ChannelSet::empty(), ble: false }
+    pub const fn withdrawn(rx_at_ms: i64, slot: Slot) -> Self {
+        Self { rx_at_ms, slot, epoch: 0, channels: ChannelSet::empty(), ble: false }
     }
 }
 

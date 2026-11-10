@@ -7,6 +7,12 @@
 //! `Fleet` frame. A `StopScan` pumped only after the `StartScan` behind it would see its `Stop`
 //! replaced by the new `Assign`, and the nodes would keep their dedup rings across the restart.
 //!
+//! **[`run`] wakes only for the clock, or for a pump it owes.** An input pumped inline wakes it
+//! only when it moves the core's deadline earlier than the one `run` sleeps toward
+//! ([`Shared::fleet_sleep`]), or gives the core one while `run` has none. A deadline that moves
+//! later costs `run` one early wake, at the deadline it read, after which it reads the new one.
+//! So a heartbeat, which moves its member's deadline later, does not wake it.
+//!
 //! **An input inside a `downlinks` borrow is recorded and deferred.** The bus answers delivery
 //! outcomes while it holds its downlinks mutably, where a pump, which pushes into them, cannot
 //! run. There the outcome goes to the core alone ([`answer`]) and [`Shared::fleet_wake`] wakes
@@ -46,6 +52,8 @@ pub enum Outcome {
 pub async fn run(shared: &Shared) -> ! {
     loop {
         let deadline = shared.fleet.borrow().next_deadline_ms();
+        // Read and stored with no await between, so an input sees the deadline being slept on.
+        shared.fleet_sleep.set(deadline);
         match deadline {
             Some(ms) => {
                 select(Timer::at(Instant::from_millis(ms)), shared.fleet_wake.wait()).await;
@@ -57,11 +65,25 @@ pub async fn run(shared: &Shared) -> ! {
     }
 }
 
-/// Send what the core owes, then report a changed plan, and wake [`run`], since the input before
-/// may have moved the core's deadline. Call after every input outside a `downlinks` borrow.
+/// Send what the core owes, then report a changed plan, and wake [`run`] when the input moved the
+/// core's deadline ahead of the one it sleeps toward. Call after every input outside a
+/// `downlinks` borrow.
 pub fn after_input(shared: &Shared) {
     pump(shared);
-    shared.fleet_wake.signal(());
+    let next = shared.fleet.borrow().next_deadline_ms();
+    if sooner(next, shared.fleet_sleep.get()) {
+        shared.fleet_wake.signal(());
+    }
+}
+
+/// Whether deadline `next` comes before `sleeping`, the one [`run`] waits for, where `None` is
+/// never.
+fn sooner(next: Option<u64>, sleeping: Option<u64>) -> bool {
+    match (next, sleeping) {
+        (Some(next), Some(sleeping)) => next < sleeping,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Push every record the core owes into its slot's downlink, then the report if it changed.
