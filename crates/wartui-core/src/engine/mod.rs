@@ -41,7 +41,7 @@ use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
-use wartui_proto::fleet::{Report, ScanMode};
+use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::{
     BridgeToHost, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, GpsWriteBytes, HostToBridge,
     NO_GPS_RECEIVER,
@@ -111,6 +111,9 @@ pub struct FleetEngine {
     /// The bridge's plan, from its last `Fleet` report. `None` on each connection until one
     /// arrives, since a plan is the bridge life's that sent it.
     fleet: Option<Report>,
+    /// Each slot's share as the last `Fleet` report of any connection gave it, which
+    /// [`Self::record_share_changes`] compares the next report against.
+    recorded_shares: BTreeMap<Slot, Share>,
     /// Where this run stands on starting the scan ([`EngineConfig::auto_start`]).
     startup: Startup,
     /// The scan this run wants, with Bluetooth when `true`: set by every start the engine sends,
@@ -142,6 +145,7 @@ impl FleetEngine {
     pub fn capture_settings(&self) -> CaptureSettings {
         CaptureSettings {
             pool: self.pool,
+            mode: self.scan,
             record_raw: self.config.record_raw,
             // The bridge's receiver is built for every run, so it counts only while a bridge is
             // connected.
@@ -176,6 +180,7 @@ impl FleetEngine {
             scan: None,
             ble_slot: None,
             fleet: None,
+            recorded_shares: BTreeMap::new(),
             startup: if config.auto_start {
                 Startup::AwaitingStatus { bluetooth: None }
             } else {
@@ -366,7 +371,7 @@ impl FleetEngine {
                 self.note_arrival(rx.slot, rx.rx_us, now);
                 self.on_from_node(&rx, now, batch);
             }
-            BridgeToHost::Fleet(report) => self.on_fleet(report, batch),
+            BridgeToHost::Fleet(report) => self.on_fleet(report, now, batch),
             BridgeToHost::PowerCycled { slot, outcome } => {
                 let text = power_cycled_text(self.node_board(), *slot, *outcome);
                 tracing::info!(slot = %self.slot_label(*slot), ?outcome, "{text}");

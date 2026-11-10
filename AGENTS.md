@@ -221,8 +221,8 @@ is here rather than only in a `//!`.
   so a fleet survives every other change.
   `store::SCHEMA_VERSION` moves with any change to a table, column or index, or to what a stored
   value wartui reads back means. A scan-table change does not move it: `assignment.channels` holds
-  the indices that went out, read against the scan table of the build that wrote the row, and no
-  wartui code decodes the column against the scan table.
+  the indices the bridge reported, read against the scan table of the build that wrote the row, and
+  no wartui code decodes the column against the scan table.
   `.claude/skills/capture-review/scripts/survey.py` decodes it with its own mirror of
   `SCAN_CHANNELS`, so it reads a capture written under another scan table in the mirror's terms.
   `store_keeps_schema_shape_when_schema_version_unchanged` compares the SQL of every table, index,
@@ -233,8 +233,8 @@ is here rather than only in a `//!`.
   as firmly as a higher one. A capture with another marker is somebody else's file, and the fix is
   a new `--db` path rather than a `migrate` arm. Bringing one forward would mean deciding what an
   older build meant, which is the compatibility this policy declines to claim: a stored
-  `ChannelSet` is the indices that went out, read against the scan table of the build that wrote
-  them.
+  `ChannelSet` is the indices the bridge reported, read against the scan table of the build that
+  wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's

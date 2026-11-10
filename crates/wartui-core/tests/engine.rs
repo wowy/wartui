@@ -19,7 +19,7 @@ use wartui_core::engine::{
 use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
-use wartui_core::record::{BatchGap, BridgeStatusSeen, HostStatus, Record};
+use wartui_core::record::{BatchGap, BridgeStatusSeen, HostStatus, Record, ShareChange};
 use wartui_core::ubx::valset_rate;
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, Heartbeat as HeartbeatMsg, MAX_SLOTS, NODE_VERSION, NodeBoard,
@@ -2670,6 +2670,117 @@ fn engine_records_bluetooth_slot_and_node_when_status_reports_pick() {
         (snapshot.scan, snapshot.ble_slot),
         (Some(ScanMode::WifiBluetooth), Some(slot_of(OTHER)))
     );
+}
+
+/// The share rows a batch records.
+fn share_rows(batch: &ActionBatch) -> Vec<ShareChange> {
+    batch
+        .records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Share(share) => Some(*share),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn engine_records_assignment_row_when_share_changes() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+
+    // The first report: every share is a change from nothing.
+    let batch =
+        engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false), (OTHER, 2, false)]), clock.at(2));
+    let rows = share_rows(&batch);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0],
+        ShareChange {
+            rx_at_ms: clock.at(2).unix_ms,
+            slot: slot_of(NODE),
+            node_mac: Some(NODE),
+            epoch: 1,
+            channels: ChannelSet::from_bits(1),
+            ble: false,
+        }
+    );
+
+    // OTHER takes the Bluetooth scan under a new epoch; NODE's share stands.
+    let batch = engine
+        .handle(fleet(ScanMode::WifiBluetooth, &[(NODE, 1, false), (OTHER, 3, true)]), clock.at(3));
+    let rows = share_rows(&batch);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].slot, rows[0].epoch, rows[0].ble), (slot_of(OTHER), 3, true));
+    assert_eq!(rows[0].channels, ChannelSet::empty());
+}
+
+#[test]
+fn engine_records_nothing_when_report_repeats_unchanged_shares() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
+
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(3));
+    assert!(share_rows(&batch).is_empty());
+
+    // A reconnect to the same plan changes no share either.
+    engine.handle(connected(), clock.at(4));
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(5));
+    assert!(share_rows(&batch).is_empty(), "compared against the report before the disconnect");
+}
+
+#[test]
+fn engine_records_withdrawn_row_when_share_leaves_report() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
+
+    let batch = engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(3));
+    assert_eq!(
+        share_rows(&batch),
+        vec![ShareChange::withdrawn(clock.at(3).unix_ms, slot_of(NODE), Some(NODE))]
+    );
+    let batch = engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(4));
+    assert!(share_rows(&batch).is_empty(), "a withdrawn share is recorded once");
+}
+
+#[test]
+fn engine_records_node_mac_when_slot_has_heartbeated() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
+    assert_eq!(share_rows(&batch)[0].node_mac, Some(NODE));
+}
+
+#[test]
+fn engine_records_null_node_mac_when_slot_has_not_heartbeated() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    // The P4 heard a heartbeat this host has not read yet.
+    let batch = engine.handle(fleet(ScanMode::Wifi, &[(NODE, 1, false)]), clock.at(2));
+    assert_eq!(share_rows(&batch)[0].node_mac, None);
+}
+
+#[test]
+fn engine_records_scan_mode_in_capture_settings_when_bridge_reports_it() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    assert_eq!(engine.capture_settings().mode, None, "nothing reported yet");
+
+    engine.handle(scan_status(ScanMode::Wifi), clock.at(1));
+    assert_eq!(engine.capture_settings().mode, Some(ScanMode::Wifi));
+
+    engine.handle(Event::Command(Command::StopScan), clock.at(2));
+    engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(3));
+    assert_eq!(engine.capture_settings().mode, Some(ScanMode::Stopped));
 }
 
 /// The default topology timeout, in whole seconds: the tests about it count from this.

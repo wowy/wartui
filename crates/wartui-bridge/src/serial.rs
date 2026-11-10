@@ -765,7 +765,7 @@ async fn connect(
     // latency — 28-35 ms behind the heartbeat it answers, and that is the
     // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
     // Two bounded channels and a condvar in `write_loop` is the fix if that ever
-    // changes, and `assignment.latency_us` is where it would show.
+    // changes.
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
     let reader = std::thread::Builder::new()

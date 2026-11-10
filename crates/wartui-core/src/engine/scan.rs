@@ -4,7 +4,8 @@
 //! The P4 decides what every node scans (`wartui_proto::fleet`). The host asks it to start, in
 //! Wi-Fi or Wi-Fi and Bluetooth, or to stop, and reads back what it is doing: the mode and pool
 //! in each `Status`, and every share in each `Fleet` report. Nothing here is believed ahead of
-//! the P4 saying so.
+//! the P4 saying so. Each share a report changes becomes an `assignment` row
+//! ([`FleetEngine::record_share_changes`]).
 //!
 //! **A run starts the scan once, on its first connection** ([`Startup`]). A P4 found stopped is
 //! started on Wi-Fi. A P4 found scanning, left so by an earlier run that did not quit cleanly, is
@@ -21,10 +22,12 @@
 //! operator's [`Command::StopScan`], which a clean quit sends too, clears what the run wants
 //! first, so nothing restarts a fleet the operator stopped.
 
+use wartui_proto::bus::Slot;
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::HostToBridge;
 
-use super::{ActionBatch, Command, FleetEngine};
+use super::{ActionBatch, Command, FleetEngine, Now};
+use crate::record::{Record, ShareChange};
 
 /// Where a run stands on starting the scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +137,8 @@ impl FleetEngine {
 
     /// The P4's plan, from a `Fleet` report. Its mode completes a stop, but the run's first
     /// decision waits for a `Status`, the answer to the engine's own poll.
-    pub(super) fn on_fleet(&mut self, report: &Report, batch: &mut ActionBatch) {
+    pub(super) fn on_fleet(&mut self, report: &Report, now: Now, batch: &mut ActionBatch) {
+        self.record_share_changes(report, now, batch);
         self.fleet = Some(report.clone());
         if let Startup::AwaitingStatus { .. } = self.startup {
             self.scan = Some(report.mode);
@@ -143,8 +147,39 @@ impl FleetEngine {
         }
     }
 
+    /// Record each slot whose share `report` changes: a share listed that differs from the one
+    /// last recorded for its slot, and a slot last recorded with a share that `report` leaves out,
+    /// as withdrawn. The comparison is against the last report of any connection, so the first
+    /// report after a reconnect records only what differs from the last one before it.
+    fn record_share_changes(&mut self, report: &Report, now: Now, batch: &mut ActionBatch) {
+        for share in &report.shares {
+            if self.recorded_shares.get(&share.slot) != Some(share) {
+                self.recorded_shares.insert(share.slot, *share);
+                batch.records.push(Record::Share(ShareChange {
+                    rx_at_ms: now.unix_ms,
+                    slot: share.slot,
+                    node_mac: self.slots.get(&share.slot).copied(),
+                    epoch: share.epoch,
+                    channels: share.channels,
+                    ble: share.ble,
+                }));
+            }
+        }
+        let withdrawn: Vec<Slot> = self
+            .recorded_shares
+            .keys()
+            .filter(|slot| !report.shares.iter().any(|share| share.slot == **slot))
+            .copied()
+            .collect();
+        for slot in withdrawn {
+            self.recorded_shares.remove(&slot);
+            let node = self.slots.get(&slot).copied();
+            batch.records.push(Record::Share(ShareChange::withdrawn(now.unix_ms, slot, node)));
+        }
+    }
+
     /// The share the P4's last report gives the node in `slot`, if any.
-    pub(super) fn share_at(&self, slot: wartui_proto::bus::Slot) -> Option<Share> {
+    pub(super) fn share_at(&self, slot: Slot) -> Option<Share> {
         self.fleet.as_ref()?.shares.iter().find(|share| share.slot == slot).copied()
     }
 }

@@ -65,11 +65,18 @@ The capture records the host build and its settings in SQLite metadata:
 | `capture.settings.initial` | Initial host settings, normalized by the engine |
 | `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
 
-Settings include the channel pool, raw recording, positioning configuration, the slot the bridge
-gave the Bluetooth scan (`ble_slot`, by its bus name) and the node in it (`ble_node`). The pool and
-the slot are the ones the bridge reports, `none` before its first status; the rest are desired host
-settings.
+Settings include the channel pool, the scan mode (`mode`: `stopped`, `wifi` or `wifi+bluetooth`),
+raw recording, positioning configuration, the slot the bridge gave the Bluetooth scan (`ble_slot`,
+by its bus name) and the node in it (`ble_node`). The pool, the mode and the slot are the ones the
+bridge reports, `none` before its first report; the rest are desired host settings. A clean quit
+leaves a last row with `mode=stopped`.
 None of them says a node adopted anything.
+
+The `assignment` table holds the shares the bridge's planner reports: a row each time a slot's
+share changes, with the slot, the node heartbeating from it (NULL when none has yet), the epoch,
+the channels and whether it is the Bluetooth scan. A share withdrawn is a row with epoch 0 and no
+channels. The host sends no assignment, so a row says what the bridge gave, and the node's later
+heartbeats carrying that epoch say it took it.
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.

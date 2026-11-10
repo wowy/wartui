@@ -67,11 +67,56 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert!(ended.is_some(), "a stopped capture should close its capture row out");
     assert!(bridge.is_some(), "and should say which bridge it came through");
 
-    let settings: i64 = conn
-        .query_row("SELECT COUNT(*) FROM kv WHERE k LIKE 'capture.settings.%'", [], |r| r.get(0))
-        .expect("counting settings history");
-    // The initial row has no pool, and the bridge's first `Status` brings one.
-    assert_eq!(settings, 2, "runtime records changes, not every event or tick");
+    // The P4's plan as its `Fleet` reports gave it: a share per node, which that node's later
+    // heartbeats report holding.
+    let shares: Vec<(Vec<u8>, i64, u8)> = conn
+        .prepare("SELECT node_mac, rx_at, epoch FROM assignment WHERE epoch != 0 ORDER BY id")
+        .expect("shares")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("share rows")
+        .collect::<Result<_, _>>()
+        .expect("share values");
+    let nodes: std::collections::HashSet<&Vec<u8>> = shares.iter().map(|(mac, ..)| mac).collect();
+    assert_eq!(nodes.len(), 3, "a share row per node: {shares:?}");
+    for (mac, rx_at, epoch) in &shares {
+        let adopted: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM heartbeat
+                 WHERE node_mac = ?1 AND rx_at >= ?2 AND epoch = ?3)",
+                rusqlite::params![mac, rx_at, epoch],
+                |r| r.get(0),
+            )
+            .expect("adoption");
+        assert!(adopted, "a heartbeat after the row reports epoch {epoch}");
+    }
+    // The clean stop withdraws every share.
+    let last: Vec<u8> = conn
+        .prepare(
+            "SELECT epoch FROM assignment
+             WHERE id IN (SELECT MAX(id) FROM assignment GROUP BY slot)",
+        )
+        .expect("last rows")
+        .query_map([], |r| r.get(0))
+        .expect("last row per slot")
+        .collect::<Result<_, _>>()
+        .expect("epochs");
+    assert_eq!(last, vec![0, 0, 0], "each slot ends withdrawn");
+
+    // The P4 boots stopped, the run starts it, and the clean quit stops it. The runtime records
+    // changes, not every event or tick.
+    let modes: Vec<String> = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings history")
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("settings rows")
+        .map(|v| {
+            let v = v.expect("settings text");
+            v.split(';').find_map(|kv| kv.strip_prefix("mode=")).expect("a mode").to_owned()
+        })
+        .collect();
+    let mut changes = modes.clone();
+    changes.dedup();
+    assert_eq!(changes, ["none", "stopped", "wifi", "stopped"], "{modes:?}");
 
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, &ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
@@ -149,13 +194,29 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth
         .expect("rows")
         .collect::<Result<Vec<_>, _>>()
         .expect("settings strings");
-    assert_eq!(values.len(), 4, "initial settings and three changes, not the repeated request");
-    assert!(values[0].contains("pool=none;"), "before the bridge's first `Status`");
-    assert!(values[1].contains("pool=all;"));
-    assert!(values[2].contains("pool=us;") && values[2].contains("ble_slot=none;"));
+    // The scan mode changes in rows of its own as the run starts and stops the P4, so set it and
+    // the time aside to read the pool and Bluetooth history.
+    let mut history: Vec<String> = values
+        .iter()
+        .map(|v| {
+            v.split(';')
+                .filter(|kv| !kv.starts_with("at_ms=") && !kv.starts_with("mode="))
+                .collect::<Vec<_>>()
+                .join(";")
+        })
+        .collect();
+    history.dedup();
+    assert_eq!(history.len(), 4, "initial settings and three changes, not the repeated request");
+    assert!(history[0].contains("pool=none;"), "before the bridge's first `Status`");
+    assert!(history[1].contains("pool=all;"));
+    assert!(history[2].contains("pool=us;") && history[2].contains("ble_slot=none;"));
+    assert!(values.iter().any(|v| v.contains(";mode=wifi+bluetooth;")), "{values:?}");
+    assert!(values.last().expect("a row").contains(";mode=stopped;"), "a clean quit stops");
     // The highest slot, which the bridge's planner picks.
     let node = wartui_proto::mac::full(&SimTransport::node_mac(1)).to_string();
-    assert!(values[3].contains("ble_slot=A2;") && values[3].ends_with(&format!("ble_node={node}")));
+    assert!(
+        history[3].contains("ble_slot=A2;") && history[3].ends_with(&format!("ble_node={node}"))
+    );
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written

@@ -29,7 +29,7 @@ pub mod ubx;
 pub use engine::{ActionBatch, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot};
 pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
 pub use position::{Fix, PositionChain, PositionSource};
-pub use record::{AdminOutcome, Record};
+pub use record::Record;
 pub use store::{
     BatchTiming, CaptureInfo, Checkpoint, CheckpointPass, CheckpointReport, Store, StoreConfig,
     StoreError, StoreReport,
