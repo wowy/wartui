@@ -22,6 +22,12 @@
 //! buffer is cleared, and credited, on every change of subscription, so a new central never
 //! reads the last one's stream.
 //!
+//! **The interval is the central's unless the build asks.** With
+//! `WARTUI_RADIO_CONN_INTERVAL_MS` set ([`CONN_INTERVAL_US`]), the C6 requests that range once
+//! connected, by the link-layer procedure where its controller supports it and L2CAP otherwise.
+//! TrouBLE reports only whether the request went out: an accepted one shows as the interval the
+//! next `BleState` carries, and a refusal as no change.
+//!
 //! **Each await reports where it is.** The notifier, the event loop, the advertiser and the
 //! runner set a phase in `BleStats` around each await, and the transport counts its own
 //! ([`crate::hci::Watch`]), so the counters of a stalled stack name the future that waits.
@@ -45,7 +51,7 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{BleState, BleStats, Up};
 use wartui_proto::spike::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
 
-use crate::config::BLE_WINDOW_BYTES;
+use crate::config::{BLE_WINDOW_BYTES, CONN_INTERVAL_US};
 use crate::hci::{Counting, Ledger, Watch};
 use crate::link::Shared;
 
@@ -73,6 +79,9 @@ const RETRY: Duration = Duration::from_millis(1);
 /// What a write to the queue to the P4 costs beyond its bytes: the ring's length prefix, the
 /// record's variant and the bytes' length.
 const FORWARD_OVERHEAD: usize = 2 + 1 + 2;
+
+/// The supervision timeout a connection interval request asks for.
+const SUPERVISION_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// HCI commands in flight at once.
 const COMMAND_SLOTS: usize = 4;
@@ -433,6 +442,19 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
     if let Err(err) = raw.update_data_length(stack, 251, 2120).await {
         shared.log(format_args!("Bluetooth data length not requested: {err:?}"));
     }
+    if let Some((min, max)) = CONN_INTERVAL_US {
+        let params = RequestedConnParams {
+            min_connection_interval: Duration::from_micros(min),
+            max_connection_interval: Duration::from_micros(max),
+            max_latency: 0,
+            supervision_timeout: SUPERVISION_TIMEOUT,
+            ..Default::default()
+        };
+        match raw.update_connection_params(stack, &params).await {
+            Ok(()) => shared.log(format_args!("Bluetooth interval {min}-{max} us requested")),
+            Err(err) => shared.log(format_args!("Bluetooth interval not requested: {err:?}")),
+        }
+    }
     select(events(stack, conn, server, shared), notify(conn, server, shared)).await;
 }
 
@@ -454,7 +476,13 @@ async fn events(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, 
                 set_state(shared, |state| state.phy = phy_number(tx_phy));
             }
             GattConnectionEvent::ConnectionParamsUpdated { conn_interval, .. } => {
-                set_state(shared, |state| state.interval_us = conn_interval.as_micros() as u32);
+                let us = conn_interval.as_micros();
+                if let Some((min, max)) = CONN_INTERVAL_US {
+                    let verdict =
+                        if (min..=max).contains(&us) { "accepted" } else { "not as requested" };
+                    shared.log(format_args!("Bluetooth interval now {us} us: {verdict}"));
+                }
+                set_state(shared, |state| state.interval_us = us as u32);
             }
             GattConnectionEvent::RequestConnectionParams(request) => {
                 if let Err(err) = request.accept(None, stack).await {

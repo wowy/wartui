@@ -23,6 +23,13 @@ On this branch it links `esp-radio` with `ble`, and has a 96 KB heap: 64 KB of r
 bootloader RAM and 32 KB more. The Bluetooth controller is the only thing that allocates.
 `BleStats` reports the heap's use and high-water mark.
 
+The central picks the connection interval unless the build names one.
+`WARTUI_RADIO_CONN_INTERVAL_MS=7.5-15 cargo build --release` asks for 7.5 to 15 ms, with
+latency 0 and a 4 s supervision timeout. Each bound is a multiple of 1.25 ms from 7.5 ms, under
+2 s. The C6 logs the request and, as each new interval arrives, whether it falls in the range;
+a central that refuses changes nothing. An iOS central wants a minimum of at least 15 ms
+(`src/config.rs`).
+
 ```sh
 cargo build --release
 ```
