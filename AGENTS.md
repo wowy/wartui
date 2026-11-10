@@ -84,6 +84,9 @@ cargo clippy --release --features esp32c6         # P4 bridge's radio
 cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf  # P4 bridge
 ```
 
+A change to the node's radio start-up, `src/ble.rs` or an `esp-*` version also needs the fleet
+check in `firmware/node/README.md` § "Bench check", which no CI job can run.
+
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
 when something it compiles changes, and `firmware/common` when it, `wartui-proto` or a
 firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware directory, so a
@@ -447,6 +450,9 @@ edit stops; follow the pointer before changing the rule.
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
   change it does not stick, and a node whose channel silently did not change reads as a dead node
   rather than a bug. → `firmware/node/src/radio.rs`, `park`
+- **A node turns off Wi-Fi's disconnected-station power management**, because the radio Bluetooth
+  shares sleeps without it, and a Bluetooth scan succeeds at every command and hears nothing.
+  → `firmware/node/src/main.rs`, `firmware/node/src/ble.rs` `//!`, `docs/bluetooth-scan-findings.md`
 - **A node's promiscuous callback runs in the Wi-Fi task, on a buffer that dies when it returns.**
   It cannot capture state and must not block. → `firmware/node/src/sniff.rs` `//!`
 

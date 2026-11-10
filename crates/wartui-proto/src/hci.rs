@@ -3,14 +3,15 @@
 //! A scan wants three things from Bluetooth: an address, a signal strength, and a
 //! manufacturer identifier when the advertiser sends one. A full host stack such as
 //! NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw
-//! HCI packet pipe, and four commands and one event cover the scan. This module holds
-//! their byte layouts and nothing that talks to hardware; the crate docs say why it
-//! lives here.
+//! HCI packet pipe, and four commands and two events cover the scan: the Command
+//! Complete that says whether a command was taken, and the advertising report. This
+//! module holds their byte layouts and nothing that talks to hardware; the crate docs
+//! say why it lives here.
 //!
 //! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
 //! transport in §2, `HCI_Reset` in §7.3.2, `HCI_Set_Event_Mask` in §7.3.1,
-//! `HCI_LE_Set_Scan_Parameters` in §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11
-//! and the LE Advertising Report in §7.7.65.2.
+//! `HCI_LE_Set_Scan_Parameters` in §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11,
+//! Command Complete in §7.7.14 and the LE Advertising Report in §7.7.65.2.
 
 use crate::bus::{RecordKind, Security, SightingMsg};
 
@@ -29,6 +30,9 @@ const _: () = assert!(
 /// H4 packet types.
 const CMD: u8 = 0x01;
 const EVT: u8 = 0x04;
+
+/// Command Complete event.
+const COMMAND_COMPLETE: u8 = 0x0E;
 
 /// `HCI_LE_Meta` event, and the advertising-report subevent inside it.
 const LE_META: u8 = 0x3E;
@@ -78,6 +82,35 @@ pub const fn set_scan_parameters(interval: u16, window: u16) -> [u8; 11] {
 #[must_use]
 pub const fn set_scan_enable(enable: bool) -> [u8; 6] {
     [CMD, 0x0C, 0x20, 0x02, enable as u8, 0x00]
+}
+
+/// The opcode of an H4 command packet, `None` for anything else.
+///
+/// The opcode is the two little-endian bytes after the packet type; a packet too short
+/// to carry its parameter length is not a command.
+#[must_use]
+pub const fn opcode(command: &[u8]) -> Option<u16> {
+    match command {
+        [CMD, lo, hi, _len, ..] => Some(u16::from_le_bytes([*lo, *hi])),
+        _ => None,
+    }
+}
+
+/// The opcode and status a Command Complete event carries, `None` for any other
+/// packet or one too short to hold a status.
+///
+/// A status of 0 is success; anything else is the controller refusing the command.
+/// The controller announces itself at start-up with a Command Complete for opcode
+/// 0x0000 and no status byte, which answers no command and reads as `None`.
+#[must_use]
+pub fn command_complete(packet: &[u8]) -> Option<(u16, u8)> {
+    // H4 type, event code, parameter length, commands allowed, opcode, status.
+    match packet {
+        [EVT, COMMAND_COMPLETE, _plen, _ncmd, lo, hi, status, ..] => {
+            Some((u16::from_le_bytes([*lo, *hi]), *status))
+        }
+        _ => None,
+    }
 }
 
 /// One advertiser, heard once.

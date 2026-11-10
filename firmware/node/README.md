@@ -271,15 +271,22 @@ Two things keep the antenna where it belongs:
 - The node sniffs no Wi-Fi while it holds the scan, so the scan is the only thing that takes the
   antenna.
 
+The scan needs Wi-Fi awake. The two share one radio, and the node is a station that never
+associates, which `esp-radio` lets sleep by default whenever promiscuous mode is off. The node
+holding the scan sniffs nothing, so its radio sleeps: the controller acknowledges every command and
+hears nothing. `src/main.rs` turns disconnected power management off for that reason
+([`docs/bluetooth-scan-findings.md`](../../docs/bluetooth-scan-findings.md)).
+
 The controller comes up at boot on every build. Initializing a radio between two dwells is exactly
 the kind of surprise this firmware exists to avoid. It is initialized and never
 enabled: `HCI_LE_Set_Scan_Enable` is only ever sent from inside a scan. If the controller won't
 start, a node handed the scan idles, sniffs nothing, and says so on its own console. The host can't
-tell, since capabilities carry no Bluetooth bit to withhold.
+tell, since capabilities carry no Bluetooth bit to withhold. A controller that refuses a command is
+named on the console, and the node scans anyway.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe. This firmware wants
 only an address, a signal strength, and a manufacturer identifier when an advertiser offers one. So
-the four commands and one event live in `wartui_proto::hci`, where they are unit-tested, and
+the four commands and two events live in `wartui_proto::hci`, where they are unit-tested, and
 `src/ble.rs` is only the conversation.
 
 ## What is testable
@@ -315,6 +322,24 @@ Every tag and length stays at its original offset. The SSID length and the DS Pa
 HT Operation, WPA, and Roaming Consortium elements arrive untouched, which is all that is being
 tested. `--raw` turns scrubbing off for a fixture you keep to yourself. Its output doesn't belong in
 a repository.
+
+## Bench check
+
+Run this before merging a change to the node's radio start-up, `src/ble.rs` or an `esp-*` version.
+No CI job can check it: a Bluetooth scan whose radio sleeps succeeds at every command.
+
+On a fleet of at least two nodes:
+
+```sh
+wartui scan start --bluetooth
+wartui status                   # its `bluetooth` line names the node holding the scan
+wartui sniff                    # 30 s, then ctrl-c
+wartui scan stop
+```
+
+Expect `ble` sightings from the slot `status` named, beside `wifi` sightings from the others. A
+holder that hears nothing in ten scans in a row prints `ble: no advertising events in N scans` on
+its own console.
 
 ## Two things that are easy to get wrong
 
