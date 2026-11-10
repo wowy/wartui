@@ -257,7 +257,7 @@ mod tests {
     use super::{FRESH_UPTIME_MS, board_to_reset, rebooted, unreachable_notice};
     use crate::config::Bridge;
 
-    const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+    const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
     const TWIN_MAC: &str = "38:44:BE:12:44:C0";
     const NODE_MAC: &str = "02:00:5E:10:9D:24";
 

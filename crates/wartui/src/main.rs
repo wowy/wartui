@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn cli_parser_accepts_mac_address_as_bridge_spec_when_parsing_args() {
-        let cli = parse(["wartui", "status", "--bridge", "10:BD:A3:EC:44:C0"]).unwrap();
+        let cli = parse(["wartui", "status", "--bridge", "02:00:5E:10:44:C0"]).unwrap();
         let Some(Command::Status(args)) = cli.command else { panic!("not status") };
         assert!(matches!(spec(args.bridge.as_deref().expect("a bridge")), BridgeSpec::Mac(_)));
     }

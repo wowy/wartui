@@ -3,7 +3,7 @@
 use wartui_bridge::remember::BridgeMemory;
 use wartui_proto::mac;
 
-const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
 
 fn address() -> [u8; 6] {
     mac::parse(BRIDGE_MAC).expect("an address")

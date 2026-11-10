@@ -107,7 +107,7 @@ const NODE: Firmware = Firmware {
 const NODE_APP: Firmware = Firmware { merged: false, asset: "wartui-node-app-esp32c5.bin", ..NODE };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
-    mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
+    mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 02:00:5E:10:44:C0"))
 }
 
 /// The chips the firmwares are built for.
@@ -621,7 +621,7 @@ mod testing {
 
     use super::Ran;
 
-    pub(super) const BRIDGE_MAC: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
+    pub(super) const BRIDGE_MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
     pub(super) const NODE_MAC: Mac = [0x3C, 0xDC, 0x75, 0x84, 0xA1, 0xB0];
 
     /// The first 24 bytes `espflash save-image --merge` wrote for each chip, from one ELF.

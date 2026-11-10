@@ -818,7 +818,7 @@ fn analyze_omits_host_when_no_host_rows() {
 /// A bridge on `board`, which is what a capture learns its carrier from.
 fn bridge_on(board: NodeBoard) -> Record {
     Record::Bridge(BridgeSeen {
-        mac: [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0],
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
         fw_version: "0.1.0".to_owned(),
         node_board: board,
     })
