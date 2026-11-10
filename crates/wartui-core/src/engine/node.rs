@@ -13,10 +13,10 @@ use super::{Counters, FleetEngine};
 pub struct NodeState {
     /// Full six-byte MAC, the node's identity wherever it is plugged in.
     pub mac: Mac,
-    /// The node-bus slot its latest heartbeat came from, and so the one this host sends it
-    /// anything through, and where the P4's plan finds its share. `None` until a heartbeat names
-    /// it, or once another node's heartbeat takes the slot. A node without one cannot be sent
-    /// anything.
+    /// The node-bus slot its latest heartbeat came from, or the bridge's `Status` lists it a
+    /// member at, and so the one this host sends it anything through, and where the P4's plan
+    /// finds its share. `None` until one of them names it, or once another node takes the slot.
+    /// A node without one cannot be sent anything.
     pub slot: Option<Slot>,
     /// Unix milliseconds of the first record in this session.
     pub first_seen_ms: i64,

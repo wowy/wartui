@@ -463,6 +463,9 @@ fn node_state(node: &NodeView) -> (String, Severity) {
         Some(Compat::NodeAhead) => return ("host behind".to_owned(), Severity::Fault),
         _ => {}
     }
+    if node.starting {
+        return ("starting".to_owned(), Severity::Ok);
+    }
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Severity::Warning);
     }
@@ -964,6 +967,13 @@ mod tests {
         let (label, _) = node_state(&view);
         assert_eq!(label, "no heartbeat");
         assert!(view.state.observations > 0, "and it is not silent");
+    }
+
+    #[test]
+    fn node_state_returns_starting_label_when_unannounced_node_is_inside_two_beats() {
+        let mut view = unannounced(0x21);
+        view.starting = true;
+        assert_eq!(node_state(&view), ("starting".to_owned(), Severity::Ok));
     }
 
     #[test]

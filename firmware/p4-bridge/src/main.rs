@@ -446,6 +446,8 @@ impl Shared {
             }
         };
         let (rx_count, rx_oversize) = self.nodes.rx_counts();
+        let now = now_ms();
+        let fleet = self.fleet.borrow();
         let counters = P4Counters {
             host,
             down,
@@ -456,12 +458,14 @@ impl Shared {
             rx_count,
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
-            pool: self.fleet.borrow().pool(),
-            scan: self.fleet.borrow().mode(),
-            ble: self.fleet.borrow().bluetooth(),
+            pool: fleet.pool(),
+            scan: fleet.mode(),
+            ble: fleet.bluetooth(),
             present: self.nodes.present(),
+            members: fleet.members(),
         };
-        let status = self.pair.borrow().status(now_ms(), counters);
+        drop(fleet);
+        let status = self.pair.borrow().status(now, counters);
         self.push_host(&status);
     }
 }

@@ -440,6 +440,7 @@ mod tests {
             scan: wartui_proto::fleet::ScanMode::Stopped,
             ble: None,
             present: 0,
+            members: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
     }

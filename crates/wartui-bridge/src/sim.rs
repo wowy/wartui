@@ -31,7 +31,7 @@
 //! that slot, which is answered `Done` at once, stays dark for the carrier's [`POWER_OFF`], and
 //! heartbeats again from a fresh boot, still on trial if it was. `Status` reports every node's slot
 //! present from the start, and a slot absent through a `PowerCycle`'s hold, when a record for it is
-//! answered `NoNode` as on the P4.
+//! answered `NoNode` as on the P4. Like the P4's, each `Status` names the core's members.
 //!
 //! A node takes updates with the receiver the firmware links, into a slot held in memory,
 //! and follows the firmware's rules around it: it listens continuously in update mode,
@@ -554,6 +554,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 scan: core.mode(),
                 ble: core.bluetooth(),
                 present: present.load(Ordering::Relaxed),
+                members: core.members(),
             };
             if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
                 || fleet.say(Some(core.report())).await.is_err()

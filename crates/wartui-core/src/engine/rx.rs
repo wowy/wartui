@@ -99,7 +99,7 @@ impl FleetEngine {
                 Err(_) => self.counters.undecodable += 1,
             },
             Some(UpType::Sightings) => {
-                // A batch names no node: the slot's latest heartbeat does.
+                // A batch names no node: the slot's latest heartbeat or `Status` does.
                 let Some(src) = self.slots.get(&slot).copied() else {
                     self.counters.unknown_slot += 1;
                     return;
@@ -332,6 +332,11 @@ impl FleetEngine {
         let FromNode { rx_us, body: payload, .. } = *rx;
         // Once per batch, not once per sighting.
         self.see_node(src, now, None, batch);
+        // A node a `Status` named has no row until its first batch, so nothing gave it its slot
+        // yet. The slot names it, so the slot is its.
+        if let Some(node) = self.nodes.get_mut(&src) {
+            node.slot.get_or_insert(rx.slot);
+        }
         if self.is_duplicate_batch(src, sightings.seq, payload, rx_us) {
             // A copy of the batch before. `see_node` already took it as proof of life. Recording
             // it again would double the observations.

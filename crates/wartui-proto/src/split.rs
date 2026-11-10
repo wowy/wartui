@@ -42,7 +42,7 @@
 
 use core::fmt::Write;
 
-use crate::bus::NodeBoard;
+use crate::bus::{MAX_SLOTS, NodeBoard};
 use crate::fan::FanStats;
 use crate::link::{
     BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING, RadioInfo,
@@ -107,7 +107,7 @@ pub enum PairEvent {
 }
 
 /// The P4's own counters, which [`Pair::status`] reports beside the C6's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct P4Counters {
     /// The host queue's two rings.
     pub host: [QueueStat; 2],
@@ -135,6 +135,8 @@ pub struct P4Counters {
     pub ble: Option<crate::bus::Slot>,
     /// The slots that hold a node, bit n for [`crate::bus::Slot`] byte n.
     pub present: u32,
+    /// The fleet planner's members ([`crate::fleet::Fleet::members`]).
+    pub members: heapless::Vec<crate::fleet::Member, MAX_SLOTS>,
 }
 
 /// The P4's pair state.
@@ -519,6 +521,7 @@ impl Pair {
             scan,
             ble,
             present,
+            members,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -553,6 +556,7 @@ impl Pair {
             scan,
             ble,
             present,
+            members,
         }
     }
 }

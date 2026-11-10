@@ -20,7 +20,8 @@
 //!   [`Fleet::on_heartbeat`] sets the slot's bit and only [`Fleet::on_presence`] clears it. A
 //!   heartbeat from another MAC than the slot's last starts the entry afresh, and an absent slot's
 //!   entry is cleared. A body that does not decode is read for its MAC alone, so a node that moved
-//!   to another layout leaves the plan at once rather than after the timeout.
+//!   to another layout leaves the plan at once rather than after the timeout. Every `Status`
+//!   lists the members and their MACs ([`Fleet::members`]).
 //! - **The plan** is [`plan_for`] over the members in ascending slot order: a member's index is
 //!   the number of members below it. It is cut again only when membership, the mode, the
 //!   Bluetooth pick or the pool changes, so a heartbeat that changes none of them costs nothing.
@@ -84,6 +85,15 @@ pub struct Share {
     pub ble: bool,
     /// Its channels.
     pub channels: ChannelSet,
+}
+
+/// A member and the MAC its heartbeat named, as a `Status` lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    /// Where the member sits.
+    pub slot: Slot,
+    /// The MAC its last heartbeat named.
+    pub mac: Mac,
 }
 
 /// What the fleet is doing, for the host to mirror.
@@ -422,6 +432,22 @@ impl Fleet {
             }
         }
         Report { mode: self.mode, pool: self.pool, shares, unreachable: self.unreachable }
+    }
+
+    /// The members the plan was last cut for, in ascending slot order.
+    #[must_use]
+    pub fn members(&self) -> heapless::Vec<Member, MAX_SLOTS> {
+        let mut members = heapless::Vec::new();
+        for index in slots_of(self.members) {
+            #[allow(clippy::cast_possible_truncation)]
+            if let Some(mac) = self.entries[index].mac
+                && let Some(slot) = Slot::from_u8(index as u8)
+            {
+                // One per slot, and there are `MAX_SLOTS`.
+                let _ = members.push(Member { slot, mac });
+            }
+        }
+        members
     }
 
     /// The mode in force.
