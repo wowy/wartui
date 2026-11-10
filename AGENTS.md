@@ -449,6 +449,10 @@ edit stops; follow the pointer before changing the rule.
   which builds and then panics on the first task the radio spawns. The node is the firmware that
   links `esp-radio`; Dependabot ignores them and each firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/p4-radio/README.md` § "Dependency versions"
+- **`colorgrad` is held at the version `tui-bar-graph` resolves.** `BarGraph::with_gradient` takes
+  that copy's `Gradient` trait, so a higher `colorgrad` is a second copy whose gradients do not
+  satisfy it, and `chart.rs` stops compiling (E0277). Dependabot ignores its minor and major
+  releases; a new `tui-bar-graph` moves both at once, by hand. → `.github/dependabot.yml`
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
   change it does not stick, and a node whose channel silently did not change reads as a dead node
   rather than a bug. → `firmware/node/src/radio.rs`, `park`
