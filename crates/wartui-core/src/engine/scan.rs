@@ -13,7 +13,19 @@
 //! dedup ring empty. The start waits for the P4 to report stopped, since a start that reached it
 //! first would replace the stop and the rings would carry over. Each `Status` that still reports a
 //! scan meanwhile sends the stop again, since a stop lost on the link would otherwise leave the run
-//! waiting forever. Only an engine told to drive a capture
+//! waiting forever.
+//!
+//! **The start also waits for a heartbeat from every slot the P4 reports present**, at most
+//! [`START_WAIT`]. A sighting batch names no node, so one from a slot no heartbeat has named yet is
+//! dropped, and the P4 has acknowledged it, so the node never sends it again. A node adopts its
+//! share while idle and reports its whole neighborhood before its next heartbeat, so a start sent
+//! ahead of that heartbeat loses the first sweep. The P4 forwards nothing from before the host
+//! attached, but idle nodes heartbeat every [`IDLE_BEAT_MS`], so the wait is about a beat. The
+//! bound is for a present slot that never heartbeats, a dead or updating node, which must not hold
+//! the capture. The restart of a P4 that reset mid-run waits the same way, though every slot it
+//! reports is usually known by then and it starts at once.
+//!
+//! Only an engine told to drive a capture
 //! ([`EngineConfig::auto_start`](super::EngineConfig::auto_start)) does any of this: `status`,
 //! `sniff`, `pool` and `ota` look at a fleet without starting it.
 //!
@@ -30,12 +42,18 @@
 //! [`Command::StopScan`], which a clean quit sends too, clears what the run wants first, so
 //! nothing restarts a fleet the operator stopped.
 
-use wartui_proto::bus::Slot;
+use std::time::{Duration, Instant};
+
+use wartui_proto::bus::{MAX_SLOTS, Slot};
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::HostToBridge;
+use wartui_proto::node::IDLE_BEAT_MS;
 
 use super::{ActionBatch, Command, FleetEngine, Now};
 use crate::record::{Record, ShareChange};
+
+/// The longest a start waits for heartbeats from the present slots: three idle beats.
+pub(super) const START_WAIT: Duration = Duration::from_millis(3 * IDLE_BEAT_MS as u64);
 
 /// What reported a scan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +81,14 @@ pub(super) enum Startup {
         /// The mode to start in.
         bluetooth: bool,
     },
+    /// The P4 reported stopped, and the start waits for a heartbeat from every slot it reports
+    /// present, or for [`START_WAIT`] past `since`.
+    AwaitingNodes {
+        /// The mode to start in.
+        bluetooth: bool,
+        /// When the wait began.
+        since: Instant,
+    },
 }
 
 impl FleetEngine {
@@ -76,6 +102,9 @@ impl FleetEngine {
                     self.startup = Startup::AwaitingStatus { bluetooth: Some(bluetooth) };
                 }
                 Startup::Stopping { .. } => self.startup = Startup::Stopping { bluetooth },
+                Startup::AwaitingNodes { since, .. } => {
+                    self.startup = Startup::AwaitingNodes { bluetooth, since };
+                }
                 // A fleet the operator stopped stays stopped.
                 Startup::Done if self.wanted.is_some() => self.start(bluetooth, batch),
                 Startup::Done => {}
@@ -108,7 +137,13 @@ impl FleetEngine {
     }
 
     /// The P4 reported `mode` in a `source`: take it, and move the run's start on.
-    pub(super) fn on_scan_mode(&mut self, mode: ScanMode, source: Source, batch: &mut ActionBatch) {
+    pub(super) fn on_scan_mode(
+        &mut self,
+        mode: ScanMode,
+        source: Source,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
         self.scan = Some(mode);
         let from_status = source == Source::Status;
         let first_status = from_status && !std::mem::replace(&mut self.status_seen, true);
@@ -119,7 +154,7 @@ impl FleetEngine {
                 // takes as a no-op.
                 if let Some(bluetooth) = self.wanted {
                     tracing::info!(bluetooth, "bridge found stopped; restarting the scan");
-                    self.start(bluetooth, batch);
+                    self.start_when_heard(bluetooth, now.mono, now, batch);
                 }
             }
             (Startup::Done, ScanMode::Wifi | ScanMode::WifiBluetooth) => {
@@ -135,8 +170,7 @@ impl FleetEngine {
                 }
             }
             (Startup::AwaitingStatus { bluetooth }, ScanMode::Stopped) => {
-                self.startup = Startup::Done;
-                self.start(bluetooth.unwrap_or(false), batch);
+                self.start_when_heard(bluetooth.unwrap_or(false), now.mono, now, batch);
             }
             (Startup::AwaitingStatus { bluetooth }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {
                 let bluetooth = bluetooth.unwrap_or(mode == ScanMode::WifiBluetooth);
@@ -145,8 +179,7 @@ impl FleetEngine {
                 stop(batch);
             }
             (Startup::Stopping { bluetooth }, ScanMode::Stopped) => {
-                self.startup = Startup::Done;
-                self.start(bluetooth, batch);
+                self.start_when_heard(bluetooth, now.mono, now, batch);
             }
             // The stop may have been lost on the link. The next poll's `Status` says whether it
             // landed, so no `GetStatus` goes with it.
@@ -154,16 +187,97 @@ impl FleetEngine {
                 batch.urgent.push(HostToBridge::StopScan);
             }
             (Startup::Stopping { .. }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {}
+            // Still stopped: the wait goes on from when it began.
+            (Startup::AwaitingNodes { bluetooth, since }, ScanMode::Stopped) => {
+                self.start_when_heard(bluetooth, since, now, batch);
+            }
+            (
+                Startup::AwaitingNodes { bluetooth, .. },
+                ScanMode::Wifi | ScanMode::WifiBluetooth,
+            ) if from_status => {
+                if self.wanted.is_some() {
+                    // A restart, and the P4 scans: the `Status` that began the wait was the one
+                    // queued ahead of the run's own start, or another host started it. Either
+                    // way the run keeps the scan, as `Done` would.
+                    self.startup = Startup::Done;
+                    self.wanted = Some(bluetooth);
+                    if bluetooth != (mode == ScanMode::WifiBluetooth) {
+                        batch.urgent.push(HostToBridge::StartScan { bluetooth });
+                    }
+                } else {
+                    // Someone else started it before this capture did: stopped again, so the
+                    // rings start empty.
+                    tracing::info!(?mode, "bridge scanning before the start; stopping it");
+                    self.startup = Startup::Stopping { bluetooth };
+                    stop(batch);
+                }
+            }
+            (Startup::AwaitingNodes { .. }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {}
         }
     }
 
+    /// While the start waits on heartbeats, start once it need wait no longer. Runs on every tick
+    /// and after every heartbeat.
+    pub(super) fn resume_start(&mut self, now: Now, batch: &mut ActionBatch) {
+        if let Startup::AwaitingNodes { bluetooth, since } = self.startup {
+            self.start_when_heard(bluetooth, since, now, batch);
+        }
+    }
+
+    /// Start the scan with Bluetooth when `bluetooth`, once every present slot has heartbeated or
+    /// [`START_WAIT`] has passed since `since`. Until then, wait in [`Startup::AwaitingNodes`].
+    fn start_when_heard(
+        &mut self,
+        bluetooth: bool,
+        since: Instant,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
+        let silent = self.silent_slots();
+        let waited = now.mono.saturating_duration_since(since);
+        if silent > 0 && waited < START_WAIT {
+            if !matches!(self.startup, Startup::AwaitingNodes { .. }) {
+                tracing::info!(
+                    silent,
+                    "waiting for every present slot to heartbeat before starting"
+                );
+            }
+            self.startup = Startup::AwaitingNodes { bluetooth, since };
+            return;
+        }
+        if silent > 0 {
+            let waited_ms = waited.as_millis() as u64;
+            tracing::info!(silent, waited_ms, "present slots still silent; starting the scan");
+        }
+        self.startup = Startup::Done;
+        self.start(bluetooth, batch);
+    }
+
+    /// How many slots the P4 last reported present that no heartbeat has named.
+    fn silent_slots(&self) -> usize {
+        (0..MAX_SLOTS)
+            .filter_map(|byte| Slot::from_u8(byte as u8))
+            .filter(|slot| self.present & slot.bit() != 0 && !self.slots.contains_key(slot))
+            .count()
+    }
+
     /// A new connection. The mirror is the last P4's, so it goes. A stop sent before the link
-    /// dropped may have been lost, so it goes again.
+    /// dropped may have been lost, so it goes again. A wait on heartbeats starts over: the first
+    /// `Status` of this connection decides again.
     pub(super) fn on_connected_scan(&mut self, batch: &mut ActionBatch) {
         self.fleet = None;
         self.status_seen = false;
-        if let Startup::Stopping { .. } = self.startup {
-            stop(batch);
+        match self.startup {
+            Startup::Stopping { .. } => stop(batch),
+            // A restart: `Done`'s rules read the P4 this connection finds.
+            Startup::AwaitingNodes { bluetooth, .. } if self.wanted.is_some() => {
+                self.wanted = Some(bluetooth);
+                self.startup = Startup::Done;
+            }
+            Startup::AwaitingNodes { bluetooth, .. } => {
+                self.startup = Startup::AwaitingStatus { bluetooth: Some(bluetooth) };
+            }
+            Startup::Done | Startup::AwaitingStatus { .. } => {}
         }
     }
 
@@ -175,7 +289,7 @@ impl FleetEngine {
         if let Startup::AwaitingStatus { .. } = self.startup {
             self.scan = Some(report.mode);
         } else {
-            self.on_scan_mode(report.mode, Source::Fleet, batch);
+            self.on_scan_mode(report.mode, Source::Fleet, now, batch);
         }
     }
 

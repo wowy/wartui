@@ -74,32 +74,15 @@ impl FleetEngine {
         }
 
         match UpType::from_u8(kind) {
-            Some(UpType::Heartbeat) => match HeartbeatMsg::decode(body) {
-                // The right length is no guarantee of the right layout: a minor version may move
-                // fields without resizing the body.
-                Ok(heartbeat) if !heartbeat.capabilities.version.compat_with_host().drivable() => {
-                    self.on_outdated_heartbeat(
-                        rx,
-                        heartbeat.mac,
-                        heartbeat.capabilities,
-                        now,
-                        batch,
-                    );
-                }
-                Ok(heartbeat) => self.on_heartbeat(rx, heartbeat, now, batch),
-                // A heartbeat of another length still opens with the prefix and the MAC. From a
-                // node on another major or minor that names a node one side must update; from one
-                // on this minor it is a bug, counted like any other mismatch.
-                Err(DecodeError::BadLength { .. }) => match HeartbeatMsg::identity(body) {
-                    Ok((caps, mac)) if !caps.version.compat_with_host().drivable() => {
-                        self.on_outdated_heartbeat(rx, mac, caps, now, batch);
-                    }
-                    _ => self.counters.incompatible += 1,
-                },
-                Err(_) => self.counters.undecodable += 1,
-            },
+            Some(UpType::Heartbeat) => {
+                self.on_heartbeat_record(rx, now, batch);
+                // A slot just filed may be the last the run's start waits on.
+                self.resume_start(now, batch);
+            }
             Some(UpType::Sightings) => {
-                // A batch names no node: the slot's latest heartbeat does.
+                // A batch names no node: the slot's latest heartbeat does. The bridge has
+                // acknowledged a batch dropped here, so its node never sends it again, which is
+                // why a run's start waits for every present slot's heartbeat (`scan.rs`).
                 let Some(src) = self.slots.get(&slot).copied() else {
                     self.counters.unknown_slot += 1;
                     return;
@@ -120,6 +103,29 @@ impl FleetEngine {
             // A node's update status is the update session's to read, not the engine's.
             Some(UpType::UpdateStatus) => {}
             None => self.counters.undecodable += 1,
+        }
+    }
+
+    /// A heartbeat record: decoded and filed, or counted as the mismatch it is.
+    fn on_heartbeat_record(&mut self, rx: &FromNode<'_>, now: Now, batch: &mut ActionBatch) {
+        let body = rx.body;
+        match HeartbeatMsg::decode(body) {
+            // The right length is no guarantee of the right layout: a minor version may move
+            // fields without resizing the body.
+            Ok(heartbeat) if !heartbeat.capabilities.version.compat_with_host().drivable() => {
+                self.on_outdated_heartbeat(rx, heartbeat.mac, heartbeat.capabilities, now, batch);
+            }
+            Ok(heartbeat) => self.on_heartbeat(rx, heartbeat, now, batch),
+            // A heartbeat of another length still opens with the prefix and the MAC. From a
+            // node on another major or minor that names a node one side must update; from one
+            // on this minor it is a bug, counted like any other mismatch.
+            Err(DecodeError::BadLength { .. }) => match HeartbeatMsg::identity(body) {
+                Ok((caps, mac)) if !caps.version.compat_with_host().drivable() => {
+                    self.on_outdated_heartbeat(rx, mac, caps, now, batch);
+                }
+                _ => self.counters.incompatible += 1,
+            },
+            Err(_) => self.counters.undecodable += 1,
         }
     }
 

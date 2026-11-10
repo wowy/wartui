@@ -58,8 +58,10 @@ pub enum Command {
     /// the mode the start uses. A fleet the operator stopped ignores it.
     /// [`EngineConfig::auto_start`] is how a run starts: a P4 found stopped starts on Wi-Fi, and
     /// one found scanning is stopped and started again in the mode it held, so a capture starts
-    /// with every node's dedup ring empty. Later in the run, a P4 found scanning is left alone and
-    /// one found stopped is started again.
+    /// with every node's dedup ring empty. Either start waits, at most three idle beats, for a
+    /// heartbeat from every slot the P4 reports present, since a batch from a slot not yet heard
+    /// is lost. Later in the run, a P4 found scanning is left alone and one found stopped is
+    /// started again.
     SetBluetooth(bool),
 
     /// Ask the bridge to idle every node, as a clean quit and an update do. Sent at once, with a

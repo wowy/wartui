@@ -114,6 +114,10 @@ pub struct FleetEngine {
     /// Each slot's share as the last `Fleet` report of any connection gave it, which
     /// [`Self::record_share_changes`] compares the next report against.
     recorded_shares: BTreeMap<Slot, Share>,
+    /// The slots the bridge's last `Status` reported present, a bit per slot ([`Slot::bit`]), kept
+    /// across a disconnect like [`Self::pool`]: the next `Status` replaces it. The run's start
+    /// waits for a heartbeat from each (`scan.rs`). 0 until the first.
+    present: u32,
     /// Where this run stands on starting the scan ([`EngineConfig::auto_start`]).
     startup: Startup,
     /// The scan this run wants, with Bluetooth when `true`: set by every start the engine sends,
@@ -184,6 +188,7 @@ impl FleetEngine {
             ble_slot: None,
             fleet: None,
             recorded_shares: BTreeMap::new(),
+            present: 0,
             startup: if config.auto_start {
                 Startup::AwaitingStatus { bluetooth: None }
             } else {
@@ -278,6 +283,7 @@ impl FleetEngine {
         if due && self.link_up {
             self.poll_bridge(now, batch);
         }
+        self.resume_start(now, batch);
     }
 
     /// Forget what the bridge said about the bus: one met again may have restarted, so heartbeats
@@ -431,7 +437,8 @@ impl FleetEngine {
                 }
                 self.pool = Some(*pool);
                 self.ble_slot = *ble;
-                self.on_scan_mode(*scan, scan::Source::Status, batch);
+                self.present = *present;
+                self.on_scan_mode(*scan, scan::Source::Status, now, batch);
                 // A node off the bus leaves now, not on the next tick.
                 self.note_departures(now);
             }

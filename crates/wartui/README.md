@@ -823,7 +823,9 @@ it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"),
 **`run` starts the scan, and a clean quit stops it.** A bridge found stopped starts on Wi-Fi. A
 `run` that is killed leaves the fleet scanning. One found scanning, left so by such a run or by
 `wartui scan start`, is stopped and started again in its mode, so every node's dedup ring starts
-empty. A reconnect later in the run leaves the
+empty. Either start waits until every node on the bus has heartbeated, about a second and at most
+3 s, since the host drops a node's first sweep when it arrives before that node's heartbeat. A
+reconnect later in the run leaves the
 scan alone and takes its mode as the run's. After that, a status naming another mode than the
 run's asks for the run's again, and a bridge that reboots mid-run, and so boots stopped, is started
 again. The bridge
@@ -1059,7 +1061,7 @@ change of share or Bluetooth role, empties it.
 | Header says            | Meaning                                                                  |
 |------------------------|--------------------------------------------------------------------------|
 | `scan —`               | The bridge has not reported its scan yet                                 |
-| `scan stopped`         | Every node idles; the run starts the scan once the bridge answers        |
+| `scan stopped`         | Every node idles; the run starts it once every node has heartbeated      |
 | `scan wifi`            | Every node in the plan sniffs Wi-Fi                                      |
 | `scan wifi +bt N3`     | And the bridge gave N3 the Bluetooth scan                                |
 | `scan wifi +bt waiting for a second node` | Bluetooth is asked for, and fewer than two nodes can scan |

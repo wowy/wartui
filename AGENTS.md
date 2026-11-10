@@ -430,9 +430,11 @@ edit stops; follow the pointer before changing the rule.
   queued ahead of it. → `firmware/p4-bridge/src/fleet.rs` `//!`
 - **A run stops a P4 found scanning before it starts the scan**, and starts only once the P4
   reports stopped, so each capture begins with every node's dedup ring empty: a start that reached
-  the P4 first would replace the `Stop`. After that the run restarts a P4 found stopped, which is
-  how a P4 that resets mid-run comes back. → `crates/wartui-core/src/engine/scan.rs` `//!`,
-  `Startup`
+  the P4 first would replace the `Stop`. The start also waits for a heartbeat from every slot the
+  P4 reports present, at most three idle beats: a sighting batch names no node, so one from a slot
+  not yet heard is dropped after the P4 acknowledged it, and the node never sends it again. After
+  that the run restarts a P4 found stopped, which is how a P4 that resets mid-run comes back.
+  → `crates/wartui-core/src/engine/scan.rs` `//!`, `Startup`, `START_WAIT`
 - **The node passes `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/node/src/main.rs`, `firmware/node/README.md`
