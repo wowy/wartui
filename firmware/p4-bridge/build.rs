@@ -43,8 +43,12 @@ const RADIO_INPUTS: &[&str] = &[
 /// This crate's features that select the C6's of the same name, passed through.
 const RADIO_FEATURES: &[&str] = &["sink-discard"];
 
-/// The C6's build-time queue size (`firmware/p4-radio/src/config.rs`), passed through.
-const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES"];
+/// The C6's build-time settings (`firmware/p4-radio/src/config.rs`), passed through.
+const RADIO_ENV: &[&str] = &[
+    "WARTUI_RADIO_UP_QUEUE_BYTES",
+    "WARTUI_RADIO_BLE_WINDOW_BYTES",
+    "WARTUI_RADIO_CONN_INTERVAL_MS",
+];
 
 /// Variables the outer cargo sets for a build script that would steer the C6's build, beside
 /// every `CARGO_*` but `CARGO_HOME`.
