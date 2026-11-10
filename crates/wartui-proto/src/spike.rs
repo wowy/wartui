@@ -4,6 +4,13 @@
 //! Each [`BridgeToHost::SpikeLoad`](crate::link::BridgeToHost::SpikeLoad) carries a `seq`, +1
 //! per record from 0 when a host attaches, and a body whose last four bytes are a [`crc32`] over
 //! the rest, little-endian. A host reads loss from the seq and corruption from the CRC.
+//!
+//! Over Bluetooth the C6 offers one GATT service, [`SERVICE_UUID`]. [`UP_UUID`] notifies the
+//! host stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes
+//! host frames written without response, framed as on USB. The UUIDs live here so the C6 and the
+//! host read the same ones.
+
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +22,15 @@ pub const SMALL_BODY: usize = 45;
 pub const FULL_BODY: usize = MAX_NODE_PAYLOAD;
 /// How often the P4 sends [`SpikeStats`].
 pub const STATS_EVERY_MS: u64 = 2_000;
+
+/// The "wartui link" GATT service.
+pub const SERVICE_UUID: u128 = 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877;
+/// The service's Up characteristic, notify: the bridge's frame stream.
+pub const UP_UUID: u128 = 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877;
+/// The service's Down characteristic, write without response: the host's frames.
+pub const DOWN_UUID: u128 = 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877;
+/// What the C6 advertises ahead of its MAC's last two octets: `wartui 96:C4`.
+pub const NAME_PREFIX: &str = "wartui ";
 
 /// What the generator sends.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +107,74 @@ pub struct SpikeStats {
     pub interval_us: u32,
     /// The P4–C6 link's counters.
     pub radio_link: RadioLinkStats,
+}
+
+impl SpikeStats {
+    /// The counters as three `#` lines, with the rate the C6 link carried while Bluetooth
+    /// owned the queue: the bytes sent to the C6 over the time it owned it.
+    #[must_use]
+    pub const fn text(&self) -> StatsText<'_> {
+        StatsText(self)
+    }
+}
+
+/// [`SpikeStats::text`].
+#[derive(Debug, Clone, Copy)]
+pub struct StatsText<'a>(&'a SpikeStats);
+
+impl fmt::Display for StatsText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let stats = self.0;
+        write!(
+            f,
+            "# spike stats: up {}, Bluetooth owned {}, seq {}; ",
+            Seconds(stats.uptime_ms),
+            Seconds(stats.ble_owned_ms),
+            stats.seq,
+        )?;
+        if stats.ble_owned_ms == 0 {
+            f.write_str("no Bluetooth time yet")?;
+        } else {
+            let per_s = u64::from(stats.sent_bytes) * 1000 / u64::from(stats.ble_owned_ms);
+            write!(f, "{per_s} B/s sent while Bluetooth owned the queue")?;
+        }
+        let link = &stats.radio_link;
+        write!(
+            f,
+            "\n#   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} B, \
+             {} refused, {} evicted\n\
+             #   mtu {}, phy {}, interval {} us; C6 link {} packets in, crc {}/{}, magic {}/{}, \
+             gap {}/{}, uart {}/{} (P4/C6)",
+            stats.queued_bytes,
+            stats.sent_bytes,
+            stats.credited_bytes,
+            stats.delivered_bytes,
+            stats.bulk_high_water,
+            stats.refused,
+            stats.evicted,
+            stats.mtu,
+            stats.phy,
+            stats.interval_us,
+            link.packets,
+            link.crc_fail,
+            link.radio_crc_fail,
+            link.bad_magic,
+            link.radio_bad_magic,
+            link.seq_gap,
+            link.radio_seq_gap,
+            link.uart_errors,
+            link.radio_uart_errors,
+        )
+    }
+}
+
+/// Milliseconds as seconds to a tenth.
+struct Seconds(u32);
+
+impl fmt::Display for Seconds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{} s", self.0 / 1000, self.0 % 1000 / 100)
+    }
 }
 
 /// Fill `body` as record `seq` carries it: a pattern from `seq`, then the [`crc32`] of the

@@ -1,6 +1,9 @@
 //! The Bluetooth host spike's load generator: its bodies and their CRC.
 
-use wartui_proto::spike::{FULL_BODY, SMALL_BODY, SpikeProfile, body_checks, crc32, fill_body};
+use wartui_proto::spike::{
+    DOWN_UUID, FULL_BODY, NAME_PREFIX, SERVICE_UUID, SMALL_BODY, SpikeProfile, UP_UUID,
+    body_checks, crc32, fill_body,
+};
 
 #[test]
 fn spike_crc32_matches_iso_hdlc_check_value_when_given_test_vector() {
@@ -45,4 +48,14 @@ fn spike_profile_gives_rate_and_body_when_asked() {
     assert_eq!(SpikeProfile::Drive.body_len(), 45);
     assert_eq!(SpikeProfile::Saturate.body_len(), 1024);
     assert_eq!(SpikeProfile::Burst.body_len(), 1024);
+}
+
+#[test]
+fn spike_uuids_stay_pinned_when_built() {
+    // The C6 firmware and the host stand-in read these; a change strands whichever was not
+    // rebuilt.
+    assert_eq!(SERVICE_UUID, 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877);
+    assert_eq!(UP_UUID, 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877);
+    assert_eq!(DOWN_UUID, 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877);
+    assert_eq!(NAME_PREFIX, "wartui ");
 }

@@ -408,46 +408,9 @@ fn render(sighting: &SightingMsg<'_>) -> String {
     )
 }
 
-/// The Bluetooth host spike's counters as one line, with the rate the C6 link carried while
-/// Bluetooth owned the queue: the bytes sent to the C6 over the time it owned it.
+/// The Bluetooth host spike's counters, as [`SpikeStats::text`] writes them.
 fn spike_stats_text(stats: &SpikeStats) -> String {
-    let seconds = |ms: u32| format!("{}.{} s", ms / 1000, ms % 1000 / 100);
-    let rate = if stats.ble_owned_ms == 0 {
-        "no Bluetooth time yet".to_owned()
-    } else {
-        let per_s = u64::from(stats.sent_bytes) * 1000 / u64::from(stats.ble_owned_ms);
-        format!("{per_s} B/s sent while Bluetooth owned the queue")
-    };
-    let link = &stats.radio_link;
-    format!(
-        "# spike stats: up {}, Bluetooth owned {}, seq {}; {rate}\n\
-         #   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} B, \
-         {} refused, {} evicted\n\
-         #   mtu {}, phy {}, interval {} us; C6 link {} packets in, crc {}/{}, magic {}/{}, \
-         gap {}/{}, uart {}/{} (P4/C6)",
-        seconds(stats.uptime_ms),
-        seconds(stats.ble_owned_ms),
-        stats.seq,
-        stats.queued_bytes,
-        stats.sent_bytes,
-        stats.credited_bytes,
-        stats.delivered_bytes,
-        stats.bulk_high_water,
-        stats.refused,
-        stats.evicted,
-        stats.mtu,
-        stats.phy,
-        stats.interval_us,
-        link.packets,
-        link.crc_fail,
-        link.radio_crc_fail,
-        link.bad_magic,
-        link.radio_bad_magic,
-        link.seq_gap,
-        link.radio_seq_gap,
-        link.uart_errors,
-        link.radio_uart_errors,
-    )
+    stats.text().to_string()
 }
 
 fn hex(bytes: &[u8]) -> String {
