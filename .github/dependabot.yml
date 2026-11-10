@@ -4,6 +4,16 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    # `colorgrad` is held at the version `tui-bar-graph` resolves. Its only use is
+    # the gradient handed to `BarGraph::with_gradient`, which takes the `Gradient`
+    # trait of `tui-bar-graph`'s own copy. A higher one is a second copy rather
+    # than an upgrade, and its gradients do not implement that trait (E0277 in
+    # `crates/wartui/src/tui/chart.rs`). `tui-bar-graph` itself is deliberately
+    # not ignored — a pull request there is the signal that the two can move,
+    # together and by hand. Patch releases move the one copy, so they stay.
+    ignore:
+      - dependency-name: "colorgrad"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   # The firmwares are their own workspaces, and every crate `esp-radio` also
   # depends on is held at the version `esp-radio` resolves. Bumping one out of

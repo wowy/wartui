@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
+# Must match the colorgrad `tui-bar-graph` depends on; see `.github/dependabot.yml`.
 colorgrad = { version = "0.8", default-features = false, features = ["preset"] }
 flate2 = "1.1.10"
 ratatui = "0.30.2"
