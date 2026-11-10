@@ -3,7 +3,7 @@
 use wartui_bridge::remember::BridgeMemory;
 use wartui_proto::mac;
 
-const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
 
 fn address() -> [u8; 6] {
     mac::parse(BRIDGE_MAC).expect("an address")
@@ -100,7 +100,7 @@ fn bridge_memory_drops_serial_when_another_address_is_remembered_without_port() 
     // A port held for another address would put the wrong board first.
     let memory = BridgeMemory::none();
     memory.remember_on(address(), Some("5CF7153520".to_owned()));
-    let other = mac::parse("A0:F2:62:10:9D:24").expect("an address");
+    let other = mac::parse("02:F2:62:10:9D:24").expect("an address");
     memory.remember_on(other, None);
     assert_eq!(memory.recall(), Some(other));
     assert_eq!(memory.recall_serial(), None);

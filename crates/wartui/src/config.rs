@@ -859,7 +859,7 @@ mod tests {
         let named = dir.path().join("named.toml");
         let default = dir.path().join("wartui.toml");
         std::fs::write(&named, "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\n").unwrap();
-        std::fs::write(&default, "[bridge]\nmac = \"10:BD:A3:EC:44:C0\"\n").unwrap();
+        std::fs::write(&default, "[bridge]\nmac = \"02:00:5E:10:44:C0\"\n").unwrap();
         let found = remembered_bridge_from(Some(&named), || Some(default)).mac;
         assert_eq!(found, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
     }

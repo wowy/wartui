@@ -10,8 +10,8 @@ use wartui_proto::mac;
 
 /// A P4 bridge on this bench, a second P4 bridge beside it, and a node, on adjacent device nodes
 /// with nothing but the address to tell them apart.
-const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
-const OTHER_BRIDGE_MAC: &str = "A0:F2:62:10:9D:24";
+const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
+const OTHER_BRIDGE_MAC: &str = "02:F2:62:10:9D:24";
 const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
 /// The CH343 serial numbers of the two bridges' boards.
@@ -72,7 +72,7 @@ fn ports_scanner_extracts_mac_address_when_given_esp32_serial_number() {
     // The whole reason `wartui ports` can say which board is which: an ESP32's
     // serial number is the address its radio transmits from.
     assert_eq!(esp("/dev/ttyACM0", BRIDGE_MAC).mac(), mac::parse(BRIDGE_MAC));
-    assert_eq!(esp("/dev/ttyACM0", BRIDGE_MAC).mac().expect("an address")[0], 0x10);
+    assert_eq!(esp("/dev/ttyACM0", BRIDGE_MAC).mac().expect("an address")[0], 0x02);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn bridge_spec_distinguishes_mac_address_from_file_path_when_parsed() {
 fn bridge_spec_parses_path_containing_colons_as_path_when_parsed() {
     // Nothing rules out a device node with colons in it, and reading one as an
     // address would open a board the operator never named.
-    let spec: BridgeSpec = "/dev/serial/by-id/usb-Espressif_10:BD:A3:EC:44:C0-if00"
+    let spec: BridgeSpec = "/dev/serial/by-id/usb-Espressif_02:00:5E:10:44:C0-if00"
         .parse()
         .expect("parsing cannot fail");
     assert!(matches!(spec, BridgeSpec::Path(_)));
@@ -115,7 +115,7 @@ fn bridge_spec_parses_last_octets_as_tail_when_given_one_to_five_pairs() {
     assert_eq!(lower, BridgeSpec::Tail(vec![0x44, 0xC0]));
     assert_eq!(lower.to_string(), "44:C0", "printed back as `wartui ports` spells it");
     // Six pairs is still a whole address.
-    let whole: BridgeSpec = "a0:f2:62:87:00:08".parse().expect("parsing cannot fail");
+    let whole: BridgeSpec = "02:f2:62:87:00:08".parse().expect("parsing cannot fail");
     assert!(matches!(whole, BridgeSpec::Mac(_)));
 }
 
@@ -133,7 +133,7 @@ fn bridge_spec_parses_text_as_path_when_pairs_are_not_two_hex_digits() {
 fn ports_scanner_prefers_by_id_symlink_when_stable_path_is_available() {
     // The path `wartui ports` prints is the one worth copying into `--bridge`: it
     // survives the re-enumeration that moves ttyACM0 to ttyACM1.
-    let by_id = "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:EC:44:C0-if00";
+    let by_id = "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:44:C0-if00";
     let names = StableNames::from_pairs(
         [link("/dev/ttyACM0", by_id)],
         [link("/dev/ttyACM0", "/dev/serial/by-path/pci-0000:00:14.0-usb-0:3.2:1.0")],
@@ -321,7 +321,7 @@ fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
     // Two P4 bridges can share their last octets. Opening either on a guess is
     // transmitting into another fleet's bridge, so nothing is chosen, and the refusal
     // says why rather than claiming the board is not attached.
-    let twin = "38:44:BE:12:44:C0";
+    let twin = "02:44:BE:12:44:C0";
     let probed = [answered("/dev/ttyACM0", BRIDGE_MAC), answered("/dev/ttyACM1", twin)];
     let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
     let refused = serial::named_board(&probed, &spec).expect_err("ambiguous");
@@ -329,7 +329,7 @@ fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
     let message = refused.to_string();
     assert!(message.contains(BRIDGE_MAC) && message.contains(twin), "{message}");
     // One more octet settles it.
-    let spec: BridgeSpec = "EC:44:C0".parse().expect("parsing cannot fail");
+    let spec: BridgeSpec = "10:44:C0".parse().expect("parsing cannot fail");
     assert_eq!(
         serial::named_board(&probed, &spec).expect("that board").candidate.path,
         "/dev/ttyACM0"

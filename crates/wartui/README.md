@@ -386,7 +386,7 @@ It uses `espflash`, which must be on `PATH`.
 ```sh
 wartui flash-fleet --dry-run     # what would be flashed, and from where
 wartui flash-fleet
-wartui flash-fleet --skip 10:BD:A3:EC:44:C0
+wartui flash-fleet --skip 02:00:5E:10:44:C0
 ```
 
 | Flag                    | Default        | What it is                                                                 |
@@ -1237,7 +1237,7 @@ nothing about which board it reaches. `wartui ports` names them:
 ```
 $ wartui ports
 /dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00
-  98:A3:16:81:96:C4     P4 bridge on a CH343  (1a86:55d3)
+  02:00:5E:10:96:C4     P4 bridge on a CH343  (1a86:55d3)
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
@@ -1262,6 +1262,6 @@ are refused with a list, never guessed. Keep the address: a device node moves wh
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 
 ```sh
-wartui --bridge 10:BD:A3:EC:44:C0
+wartui --bridge 02:00:5E:10:44:C0
 wartui status --bridge 44:C0
 ```

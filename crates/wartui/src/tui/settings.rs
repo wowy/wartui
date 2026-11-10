@@ -1041,7 +1041,7 @@ mod tests {
         config::load(Some(&dir.join("wartui.toml"))).expect("a valid file").bridge
     }
 
-    const OTHER_BRIDGE: wartui_proto::mac::Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
+    const OTHER_BRIDGE: wartui_proto::mac::Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
 
     #[test]
     fn ui_forgets_bridge_and_saves_off_when_remember_bridge_turned_off() {

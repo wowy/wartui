@@ -229,7 +229,7 @@ mod tests {
             "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00".to_owned();
         let probed = [p4.clone()];
         let found = listed(&[board("/dev/ttyACM1", Some(&NODE_MAC))], &probed);
-        for given in ["10:bd:a3:ec:44:c0", p4.candidate.path.as_str(), "/dev/ttyACM0"] {
+        for given in ["02:00:5e:10:44:c0", p4.candidate.path.as_str(), "/dev/ttyACM0"] {
             let (given, spec) = named(given);
             let chosen = target(&found, &probed, Some((given, &spec)), Some(NODE_MAC)).unwrap();
             assert_eq!(chosen, (p4.candidate.clone(), BRIDGE_MAC));
@@ -240,9 +240,9 @@ mod tests {
     fn flash_bridge_refuses_run_when_named_bridge_matches_no_board() {
         let probed = [bridge("/dev/ttyACM1", &NODE_MAC)];
         let found = listed(&[], &probed);
-        let (given, spec) = named("10:BD:A3:EC:44:C0");
+        let (given, spec) = named("02:00:5E:10:44:C0");
         let error = target(&found, &probed, Some((given, &spec)), None).unwrap_err().to_string();
-        assert!(error.contains("--bridge 10:BD:A3:EC:44:C0"), "{error}");
+        assert!(error.contains("--bridge 02:00:5E:10:44:C0"), "{error}");
         assert!(error.contains("wartui ports"), "{error}");
     }
 
