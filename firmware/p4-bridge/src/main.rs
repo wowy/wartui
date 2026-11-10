@@ -462,8 +462,7 @@ impl Shared {
             scan: fleet.mode(),
             ble: fleet.bluetooth(),
             present: self.nodes.present(),
-            // Every slot the planner can assign, so the host can name the slot of each batch.
-            members: fleet.members(now),
+            members: fleet.members(),
         };
         drop(fleet);
         let status = self.pair.borrow().status(now, counters);

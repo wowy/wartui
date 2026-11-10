@@ -5,7 +5,7 @@
 //! block on the link, and tests run it against a simulated clock.
 //!
 //! A node is known by its MAC and reached through the node-bus slot its latest heartbeat came
-//! from, or the slot the bridge's latest `Status` lists it a member at. The P4 decides what each
+//! from, or before then the slot a bridge `Status` lists it a member at. The P4 decides what each
 //! node scans and sends it (`wartui_proto::fleet`). The engine mirrors the plan the P4 reports and
 //! reads each heartbeat's epoch against it, so the view shows which nodes hold their share
 //! (`scan.rs`).
@@ -74,8 +74,8 @@ use scan::Startup;
 pub struct FleetEngine {
     config: EngineConfig,
     nodes: BTreeMap<Mac, NodeState>,
-    /// Which node each node-bus slot's latest heartbeat, or the bridge's latest `Status`, named.
-    /// A sighting batch carries no address, so this is how it finds its node.
+    /// Which node each node-bus slot's latest heartbeat named, or a `Status` named first. A
+    /// sighting batch carries no address, so this is how it finds its node.
     slots: HashMap<Slot, Mac>,
     bridge: Option<BridgeInfo>,
     /// Whether this bridge life last said no GPS receiver answers on its port
@@ -431,10 +431,10 @@ impl FleetEngine {
                         node.off_bus = true;
                     }
                 }
-                // Before any start this `Status` draws: a batch names no node, so every slot the
-                // planner can assign is named before a node is told to scan.
+                // Before any start this `Status` draws. It can overtake batches queued before it,
+                // so it names only a slot nothing has named (`BridgeToHost::Status`, `members`).
                 for member in members {
-                    self.take_slot(member.slot, member.mac);
+                    self.slots.entry(member.slot).or_insert(member.mac);
                 }
                 self.pool = Some(*pool);
                 self.ble_slot = *ble;

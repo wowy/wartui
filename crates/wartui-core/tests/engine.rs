@@ -34,6 +34,7 @@ use wartui_proto::link::{
     RadioLinkStats,
 };
 use wartui_proto::mac::Mac;
+use wartui_proto::node::ASSIGNED_BEAT_MS;
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -1431,9 +1432,9 @@ fn engine_drops_sightings_when_node_runs_another_minor() {
 }
 
 #[test]
-fn engine_drops_sightings_when_no_heartbeat_has_named_slot() {
-    // A batch carries no address, and nothing yet says whose slot it came from. A node's
-    // first seconds on the bus look like this.
+fn engine_drops_sightings_when_nothing_has_named_slot() {
+    // A batch carries no address, and neither a heartbeat nor a `Status` has said whose slot it
+    // came from.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
@@ -1491,7 +1492,7 @@ fn engine_records_sightings_when_status_named_slot_before_any_heartbeat() {
 }
 
 #[test]
-fn engine_drops_sightings_when_nothing_has_named_slot() {
+fn engine_drops_sightings_when_status_names_only_other_slots() {
     // A `Status` naming other members says nothing about this slot.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -1525,9 +1526,8 @@ fn engine_keeps_one_node_when_heartbeat_follows_status_naming_it() {
 }
 
 #[test]
-fn engine_moves_slot_to_mac_when_later_status_names_another_node() {
-    // As a heartbeat from a new node does: the node that held the slot keeps its row, and has no
-    // slot until its own heartbeat names one.
+fn engine_keeps_slot_when_status_names_another_node() {
+    // A `Status` can overtake the batches queued before it, so a heartbeat's naming stands.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     introduce(&mut engine, &clock, NODE);
@@ -1539,10 +1539,31 @@ fn engine_moves_slot_to_mac_when_later_status_names_another_node() {
 
     let records = observation_records(&batch);
     assert_eq!(records.len(), 1);
-    assert_eq!((records[0].node_mac, records[0].slot), (OTHER, slot));
-    let node_of = |mac: Mac| engine.nodes().find(|node| node.mac == mac).expect("the node");
-    assert_eq!(node_of(NODE).slot, None);
-    assert_eq!(node_of(OTHER).slot, Some(slot));
+    assert_eq!((records[0].node_mac, records[0].slot), (NODE, slot));
+    let node = engine.nodes().find(|node| node.mac == NODE).expect("the node");
+    assert_eq!(node.slot, Some(slot));
+    assert!(engine.nodes().all(|node| node.mac != OTHER), "no row for the other node");
+}
+
+#[test]
+fn engine_marks_node_starting_when_unannounced_inside_two_beats() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(members_status(&[member(NODE)]), clock.at(0));
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(0));
+
+    let last_ms = 2 * u64::from(ASSIGNED_BEAT_MS) - 1;
+    assert!(view_of(&engine, NODE, clock.at_ms(last_ms)).starting);
+}
+
+#[test]
+fn engine_stops_marking_node_starting_when_unannounced_past_two_beats() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(members_status(&[member(NODE)]), clock.at(0));
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(0));
+
+    assert!(!view_of(&engine, NODE, clock.at_ms(2 * u64::from(ASSIGNED_BEAT_MS))).starting);
 }
 
 #[test]

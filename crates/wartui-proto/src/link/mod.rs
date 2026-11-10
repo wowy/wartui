@@ -350,9 +350,12 @@ pub enum BridgeToHost {
         /// so a board with more slots than [`crate::bus::MAX_SLOTS`] fits without a wire change.
         present: u32,
         /// Every slot the bridge's planner counts a member, with the MAC its heartbeat named, in
-        /// slot order ([`crate::fleet::Fleet::members`]). A sighting batch names no node, so the
-        /// host files each member under its slot from here as well as from its heartbeats. A
-        /// batch from a slot it cannot name is dropped, after the bridge acknowledged it.
+        /// slot order ([`crate::fleet::Fleet::members`]). A sighting batch names no node, and the
+        /// host drops one from a slot it cannot name after the bridge acknowledged it, so the
+        /// host files each member here as well as from its heartbeats, and a run's first `Status`
+        /// names every slot before the scan starts. A `Status` is a priority frame and can
+        /// overtake batches queued before it, so it fills only a slot nothing has named; a
+        /// heartbeat, which travels in order with the batches, stays the authority.
         members: Vec<Member, MAX_SLOTS>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would

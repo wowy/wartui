@@ -20,9 +20,8 @@
 //!   [`Fleet::on_heartbeat`] sets the slot's bit and only [`Fleet::on_presence`] clears it. A
 //!   heartbeat from another MAC than the slot's last starts the entry afresh, and an absent slot's
 //!   entry is cleared. A body that does not decode is read for its MAC alone, so a node that moved
-//!   to another layout leaves the plan at once rather than after the timeout. The members and
-//!   their MACs go to the host in every `Status` ([`Fleet::members`]): a sighting batch names no
-//!   node, so the host learns whose slot it came from there or from a heartbeat.
+//!   to another layout leaves the plan at once rather than after the timeout. Every `Status`
+//!   lists the members and their MACs ([`Fleet::members`]).
 //! - **The plan** is [`plan_for`] over the members in ascending slot order: a member's index is
 //!   the number of members below it. It is cut again only when membership, the mode, the
 //!   Bluetooth pick or the pool changes, so a heartbeat that changes none of them costs nothing.
@@ -435,11 +434,11 @@ impl Fleet {
         Report { mode: self.mode, pool: self.pool, shares, unreachable: self.unreachable }
     }
 
-    /// The members at `now_ms`, in ascending slot order.
+    /// The members the plan was last cut for, in ascending slot order.
     #[must_use]
-    pub fn members(&self, now_ms: u64) -> heapless::Vec<Member, MAX_SLOTS> {
+    pub fn members(&self) -> heapless::Vec<Member, MAX_SLOTS> {
         let mut members = heapless::Vec::new();
-        for index in slots_of(self.member_mask(now_ms)) {
+        for index in slots_of(self.members) {
             #[allow(clippy::cast_possible_truncation)]
             if let Some(mac) = self.entries[index].mac
                 && let Some(slot) = Slot::from_u8(index as u8)

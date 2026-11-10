@@ -554,7 +554,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 scan: core.mode(),
                 ble: core.bluetooth(),
                 present: present.load(Ordering::Relaxed),
-                members: core.members(fleet.now_ms()),
+                members: core.members(),
             };
             if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
                 || fleet.say(Some(core.report())).await.is_err()

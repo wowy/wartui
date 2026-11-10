@@ -99,9 +99,7 @@ impl FleetEngine {
                 Err(_) => self.counters.undecodable += 1,
             },
             Some(UpType::Sightings) => {
-                // A batch names no node: the slot's latest heartbeat or `Status` does. What
-                // reaches the drop comes from a slot neither has named, such as a node still
-                // scanning a share from the P4's last life, ahead of its first heartbeat.
+                // A batch names no node: the slot's latest heartbeat or `Status` does.
                 let Some(src) = self.slots.get(&slot).copied() else {
                     self.counters.unknown_slot += 1;
                     return;
@@ -125,13 +123,12 @@ impl FleetEngine {
         }
     }
 
-    /// File the node a heartbeat from `slot`, or a `Status` listing it a member there, names as
-    /// that slot's.
+    /// File the node a heartbeat from `slot` names as that slot's.
     ///
     /// A known node on a new slot moves there, and a slot whose heartbeat names a new node is
     /// that node's from now on. The node that held it keeps its MAC and its row, but has no slot
-    /// until its own heartbeat or a `Status` names one, so nothing is sent to the wrong node.
-    pub(super) fn take_slot(&mut self, slot: Slot, mac: Mac) {
+    /// until its own heartbeat names one, so nothing is sent to the wrong node.
+    fn take_slot(&mut self, slot: Slot, mac: Mac) {
         let previous = self.slots.insert(slot, mac);
         if let Some(other) = previous.filter(|other| *other != mac)
             && let Some(node) = self.nodes.get_mut(&other)
@@ -335,8 +332,8 @@ impl FleetEngine {
         let FromNode { rx_us, body: payload, .. } = *rx;
         // Once per batch, not once per sighting.
         self.see_node(src, now, None, batch);
-        // A node first named by a `Status` has no row until now, so `take_slot` could not give
-        // it its slot. The slot names it, so the slot is its.
+        // A node a `Status` named has no row until its first batch, so nothing gave it its slot
+        // yet. The slot names it, so the slot is its.
         if let Some(node) = self.nodes.get_mut(&src) {
             node.slot.get_or_insert(rx.slot);
         }

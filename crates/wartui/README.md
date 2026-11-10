@@ -986,6 +986,7 @@ The state is spelled out as well, so color is never the only signal.
 | `alive`        | Heartbeating, so it can be given channels                                                                                                   |
 | `stale`        | Still being heard, but not heartbeating, so it cannot be given channels                                                                     |
 | `off bus`      | The bridge no longer hears its slot on the node bus: it lost power, crashed or was unplugged                                                |
+| `starting`     | Seen in the last 10 s, with its first heartbeat still to come; a node's sightings come first at every run start                             |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no slot`      | Another node's heartbeat came from its node-bus slot, so it cannot be reached until its own heartbeat names a slot                          |
 | `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; update it with `wartui ota`                            |

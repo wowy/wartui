@@ -48,8 +48,7 @@ host; this firmware feeds it and sends what it owes.
 - **Bluetooth**, when the scan asks for it, goes to one member once there are two: the highest
   slot, kept while its node stays.
 - **It reports its plan** to the host as a `Fleet` frame on every change, after each `Status` and
-  when a host attaches. Each `Status` names every member's slot and MAC, since a sighting batch
-  names no node.
+  when a host attaches. Each `Status` names every member's slot and MAC.
 
 Send ids at or above `0x8000` are the planner's, and their outcomes go to it rather than to the
 host, whose ids stay below.

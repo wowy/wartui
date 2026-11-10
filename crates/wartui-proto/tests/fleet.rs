@@ -863,7 +863,7 @@ fn fleet_starts_stopped_when_new() {
 
 /// The members `rig` lists now, as `(slot byte, mac)`.
 fn members(rig: &Rig) -> Vec<(u8, Mac)> {
-    rig.fleet.members(rig.now).iter().map(|member| (member.slot.as_u8(), member.mac)).collect()
+    rig.fleet.members().iter().map(|member| (member.slot.as_u8(), member.mac)).collect()
 }
 
 #[test]
@@ -908,7 +908,7 @@ fn fleet_lists_every_slot_when_fourteen_nodes_heartbeat() {
         rig.plug(byte, byte);
         rig.beat(byte);
     }
-    assert_eq!(rig.fleet.members(rig.now).len(), 14);
+    assert_eq!(rig.fleet.members().len(), 14);
 }
 
 #[test]
@@ -927,9 +927,9 @@ fn fleet_unlists_member_when_heartbeat_times_out() {
     rig.plug(0, 1);
     rig.beat(0);
     rig.now += HEARTBEAT_TIMEOUT_MS - 1;
+    rig.fleet.on_tick(rig.now);
     assert_eq!(members(&rig), [(0, mac(1))], "inside the timeout");
     rig.now += 1;
-    assert!(members(&rig).is_empty(), "before any tick");
     rig.fleet.on_tick(rig.now);
     assert!(members(&rig).is_empty());
 }

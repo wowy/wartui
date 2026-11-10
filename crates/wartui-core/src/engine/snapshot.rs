@@ -4,6 +4,7 @@ use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{ScanMode, Share};
 use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac::Mac;
+use wartui_proto::node::ASSIGNED_BEAT_MS;
 #[cfg(doc)]
 use wartui_proto::plan::SCAN_CHANNELS;
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
@@ -34,8 +35,8 @@ pub struct Counters {
     /// this, and nothing else says so. A heartbeat naming another major or minor is not counted:
     /// its node is shown instead.
     pub incompatible: u64,
-    /// Sighting batches from a slot no heartbeat has named yet, dropped: there is no node to
-    /// file them under. A node's first seconds after it is plugged in.
+    /// Sighting batches from a slot neither a heartbeat nor a `Status` has named, dropped: there
+    /// is no node to file them under.
     pub unknown_slot: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
@@ -73,6 +74,9 @@ pub struct NodeView {
     pub share: Option<Share>,
     /// Whether its latest live heartbeat holds [`Self::share`]'s epoch: it took the share.
     pub adopted: bool,
+    /// Whether it has never heartbeated and was first heard under two heartbeat periods
+    /// ([`ASSIGNED_BEAT_MS`]) ago: its sightings arrive first at every run start.
+    pub starting: bool,
 }
 
 /// One row of the UI's observation stream.
@@ -280,6 +284,9 @@ impl FleetEngine {
                     on_bus: self.on_bus(state),
                     assignable: self.is_assignable(state, now),
                     adopted: share.is_some_and(|share| state.held_epoch == Some(share.epoch)),
+                    starting: state.last_heartbeat.is_none()
+                        && now.unix_ms.saturating_sub(state.first_seen_ms)
+                            < 2 * i64::from(ASSIGNED_BEAT_MS),
                     share,
                     state: state.clone(),
                 }
