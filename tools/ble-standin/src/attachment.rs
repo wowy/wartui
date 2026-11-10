@@ -11,11 +11,14 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde::Serialize;
-use wartui_proto::bus::{NodeBoard, UpType};
+use wartui_proto::bus::{Heartbeat, NodeBoard, UpType};
+use wartui_proto::fleet::Report;
 use wartui_proto::link::{BridgeToHost, FrameAccumulator, MAX_FRAME, decode_frame};
 use wartui_proto::spike::{SpikeStats, body_checks};
 
+use crate::batches::{Batches, SlotBatches};
 use crate::beats::{Beats, SlotBeats};
+use crate::bridge::{self, Counters, FleetSummary};
 
 /// Something `main` acts on as it decodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +113,10 @@ pub struct Attachment {
     first_stats: Option<SpikeStats>,
     last_stats: Option<SpikeStats>,
     beats: Beats,
+    batches: Batches,
+    first_status: Option<Counters>,
+    last_status: Option<Counters>,
+    fleet: Option<Report>,
 }
 
 impl Attachment {
@@ -130,6 +137,10 @@ impl Attachment {
             first_stats: None,
             last_stats: None,
             beats: Beats::default(),
+            batches: Batches::default(),
+            first_status: None,
+            last_status: None,
+            fleet: None,
         }
     }
 
@@ -158,7 +169,15 @@ impl Attachment {
         self.first.get_or_insert(name);
         match msg {
             BridgeToHost::Ready { node_board, .. } => self.board = Some(node_board),
-            BridgeToHost::Status { .. } => seen.push(Seen::Status),
+            BridgeToHost::Status { .. } => {
+                let counters = bridge::counters(&msg);
+                if self.first_status.is_none() {
+                    self.first_status.clone_from(&counters);
+                }
+                self.last_status = counters;
+                seen.push(Seen::Status);
+            }
+            BridgeToHost::Fleet(report) => self.fleet = Some(report),
             BridgeToHost::Log { message } => seen.push(Seen::Message(format!("# log: {message}"))),
             BridgeToHost::Error { message } => {
                 seen.push(Seen::Message(format!("# error: {message}")));
@@ -168,11 +187,21 @@ impl Attachment {
                 self.first_stats.get_or_insert(stats);
                 self.last_stats = Some(stats);
             }
-            BridgeToHost::FromNode { slot, rx_us, kind, body }
-                if kind == UpType::Heartbeat.as_u8() =>
-            {
-                self.beats.take(slot, rx_us, &body);
-            }
+            BridgeToHost::FromNode { slot, rx_us, kind, body } => match UpType::from_u8(kind) {
+                Some(UpType::Heartbeat) => {
+                    self.beats.take(slot, rx_us, &body);
+                    if let Ok(heartbeat) = Heartbeat::decode(&body) {
+                        let share = self
+                            .fleet
+                            .as_ref()
+                            .and_then(|r| r.shares.iter().find(|s| s.slot == slot))
+                            .map(|s| s.epoch);
+                        self.batches.heartbeat(slot, &heartbeat, share);
+                    }
+                }
+                Some(UpType::Sightings) => self.batches.take(slot, rx_us, &body),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -234,9 +263,16 @@ impl Attachment {
         &self.beats
     }
 
+    /// The sighting batches seen.
+    #[must_use]
+    pub const fn batches(&self) -> &Batches {
+        &self.batches
+    }
+
     /// Everything checked, up to `now`.
     #[must_use]
     pub fn summary(&self, now: Instant) -> AttachmentSummary {
+        let board = self.board.unwrap_or(NodeBoard::NoCarrier);
         AttachmentSummary {
             rates: self.overall(now),
             bytes: self.bytes,
@@ -249,7 +285,11 @@ impl Attachment {
             spike: self.seq.clone(),
             first_stats: self.first_stats,
             last_stats: self.last_stats,
-            beats: self.beats.labeled(self.board.unwrap_or(NodeBoard::NoCarrier)),
+            beats: self.beats.labeled(board),
+            batches: self.batches.labeled(board),
+            first_status: self.first_status.clone(),
+            last_status: self.last_status.clone(),
+            fleet: self.fleet.as_ref().map(|r| FleetSummary::of(r, board)),
         }
     }
 }
@@ -281,6 +321,14 @@ pub struct AttachmentSummary {
     pub last_stats: Option<SpikeStats>,
     /// Heartbeats per slot, by label.
     pub beats: BTreeMap<String, SlotBeats>,
+    /// Sighting batches per slot, by label.
+    pub batches: BTreeMap<String, SlotBatches>,
+    /// The first `Status`'s counters.
+    pub first_status: Option<Counters>,
+    /// The latest `Status`'s counters.
+    pub last_status: Option<Counters>,
+    /// The latest `Fleet` report.
+    pub fleet: Option<FleetSummary>,
 }
 
 /// The variant's name, for counting.
@@ -494,6 +542,103 @@ mod tests {
         let summary = attachment.summary(Instant::now());
         // A ten-node carrier labels bus B's third slot N8.
         assert!(summary.beats.contains_key("N8"), "{:?}", summary.beats.keys());
+    }
+
+    #[test]
+    fn standin_counts_lost_batches_when_from_node_sightings_skip_seq() {
+        use wartui_proto::bus::{
+            Board, Capabilities, DieTemp, Heartbeat, RecordKind, Security, SightingBatchWriter,
+            SightingMsg, Slot, Vdd,
+        };
+        use wartui_proto::fleet::{Report, Share};
+        use wartui_proto::plan::ChannelSet;
+        let slot = Slot::new(0, 0).unwrap();
+        let from_node = |rx_us, kind: UpType, body: &[u8]| BridgeToHost::FromNode {
+            slot,
+            rx_us,
+            kind: kind.as_u8(),
+            body: body.try_into().unwrap(),
+        };
+        let beat = |rx_us, counter, epoch| {
+            let body = Heartbeat {
+                capabilities: Capabilities::here(Board::Esp32c5),
+                mac: [1; 6],
+                counter,
+                epoch,
+                wifi_refused: 0,
+                ble_refused: 0,
+                reset_cause: ResetCause::PowerOn,
+                vdd: Vdd::NONE,
+                die_temp: DieTemp::NONE,
+                heap_free: 0,
+            }
+            .encode();
+            from_node(rx_us, UpType::Heartbeat, &body)
+        };
+        let sightings = |rx_us, seq| {
+            let mut writer = SightingBatchWriter::new(seq);
+            let sighting = SightingMsg {
+                kind: RecordKind::Wifi,
+                bssid: [2; 6],
+                channel: 1,
+                rssi: -50,
+                security: Security::from_u8(0),
+                ssid: b"x",
+                ext: &[],
+            };
+            assert!(writer.push(&sighting));
+            from_node(rx_us, UpType::Sightings, writer.as_bytes())
+        };
+        let share = Share { slot, epoch: 5, ble: false, channels: ChannelSet::empty() };
+        let fleet = BridgeToHost::Fleet(Report {
+            mode: Default::default(),
+            pool: Default::default(),
+            shares: [share].into_iter().collect(),
+            unreachable: ChannelSet::empty(),
+        });
+        let msgs = [
+            ready(),
+            fleet,
+            beat(0, 10, 5),
+            sightings(1_000, 1),
+            sightings(2_000, 2),
+            sightings(3_000, 6),
+            // Epoch 0 under the share it held, counter still climbing: a restart.
+            beat(5_000_000, 12, 0),
+            sightings(6_000_000, 0),
+            sightings(7_000_000, 1),
+        ];
+        let attachment = fed(&stream(&msgs), 17);
+        let tally = attachment.batches().slot(slot).unwrap();
+        assert_eq!((tally.batches, tally.lost, tally.gaps, tally.restarts), (5, 3, 1, 1));
+        let summary = attachment.summary(Instant::now());
+        assert_eq!(summary.batches["N1"].lost, 3);
+        assert_eq!(summary.fleet.unwrap().members[0].slot, "N1");
+    }
+
+    #[test]
+    fn standin_keeps_first_and_latest_status_when_several_arrive() {
+        let status = |rx_count| BridgeToHost::Status {
+            rx_count,
+            dropped_tx: 0,
+            uptime_ms: 0,
+            rx_oversize: 0,
+            queues: Default::default(),
+            radio_link: Default::default(),
+            host_uart_errors: 0,
+            fan: None,
+            pool: Default::default(),
+            scan: Default::default(),
+            ble: None,
+            present: 0,
+            members: Default::default(),
+        };
+        let attachment = fed(&stream(&[ready(), status(3), status(4), status(9)]), 11);
+        let summary = attachment.summary(Instant::now());
+        let rx = |c: &Option<Counters>| {
+            c.as_ref().unwrap().iter().find(|(n, _)| n == "rx_count").map(|(_, v)| *v)
+        };
+        assert_eq!((rx(&summary.first_status), rx(&summary.last_status)), (Some(3), Some(9)));
     }
 
     #[test]

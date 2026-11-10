@@ -4,14 +4,19 @@
 //! Only the first attachment asks for load or a scan. The P4 keeps both across a reconnect, so a
 //! later attachment shows whether the queue really starts empty. The last attachment stops what
 //! the run started, so a host attached after it reads no leftover load.
+//!
+//! The first attachment asks for a `Status` before anything else, and the last asks for one when
+//! its time is up and waits for it before stopping anything, so the bridge counters span the run.
 
 use std::path::PathBuf;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ble_standin::rtt::RTT_TIMEOUT;
 use ble_standin::{
-    Attachment, AttachmentSummary, Reconcile, Rtt, RttSummary, Seen, hex, host_frame,
+    Attachment, AttachmentSummary, CounterDelta, FleetSummary, Reconcile, Rtt, RttSummary, Seen,
+    StatusAsk, bridge, hex, host_frame,
 };
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
@@ -30,6 +35,9 @@ use wartui_proto::spike::{DOWN_UUID, NAME_PREFIX, STATS_EVERY_MS, SpikeProfile, 
 const FIND_FOR: Duration = Duration::from_secs(20);
 /// The pause between attachments.
 const RECONNECT_AFTER: Duration = Duration::from_secs(3);
+/// How long the last attachment waits for its closing `Status`: a timed ask's timeout, then the
+/// closing ask's.
+const CLOSE_WAIT: Duration = Duration::from_secs(2 * RTT_TIMEOUT.as_secs());
 /// Gap ranges printed per attachment; the JSON has them all.
 const GAPS_SHOWN: usize = 20;
 
@@ -252,6 +260,10 @@ struct RunSummary {
     attachments: Vec<AttachmentSummary>,
     rtt: Option<RttSummary>,
     reconcile: Reconcile,
+    /// The bridge's counters, first `Status` to last.
+    bridge: Option<Vec<CounterDelta>>,
+    /// The last `Fleet` report.
+    fleet: Option<FleetSummary>,
 }
 
 async fn run(args: RunArgs) -> Result<()> {
@@ -259,6 +271,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let peripheral = find(&adapter, &args.name).await?;
     let each = Duration::from_secs(args.secs) / (args.reconnect + 1);
     let mut rtt = Rtt::new(args.rtt);
+    let mut ask = StatusAsk::default();
     let mut attachments = Vec::new();
     let mut ctrl_c = pin!(tokio::signal::ctrl_c());
     let mut stopped = false;
@@ -275,6 +288,11 @@ async fn run(args: RunArgs) -> Result<()> {
         let start = Instant::now();
         let mut attachment = Attachment::new(start);
         if index == 0 {
+            ask.want();
+            ask.sent(Instant::now());
+            send(&peripheral, &link, &HostToBridge::GetStatus)
+                .await
+                .context("asking for status")?;
             if let Some(profile) = args.profile {
                 let msg = HostToBridge::SpikeLoad { profile: profile.into(), count: args.count };
                 send(&peripheral, &link, &msg).await.context("asking for load")?;
@@ -289,14 +307,20 @@ async fn run(args: RunArgs) -> Result<()> {
         let mut poll = interval(Duration::from_millis(20));
         let mut done = pin!(sleep_until((start + each).into()));
         let mut dropped = false;
-        loop {
+        let mut closing = false;
+        'attachment: loop {
             tokio::select! {
                 note = notes.next() => match note {
                     Some(note) if note.uuid == Uuid::from_u128(UP_UUID) => {
                         for seen in attachment.feed(&note.value) {
                             match seen {
+                                // One ask is out at a time, so this answers it.
                                 Seen::Status => {
-                                    rtt.answered(Instant::now());
+                                    if !ask.answered() {
+                                        rtt.answered(Instant::now());
+                                    } else if closing {
+                                        break 'attachment;
+                                    }
                                 }
                                 Seen::Message(line) => println!("{line}"),
                             }
@@ -313,22 +337,41 @@ async fn run(args: RunArgs) -> Result<()> {
                 _ = poll.tick() => {
                     let now = Instant::now();
                     rtt.expire(now);
-                    if rtt.due(now) {
+                    ask.expire(now);
+                    if ask.due(rtt.is_out()) {
+                        ask.sent(now);
+                        if let Err(e) = send(&peripheral, &link, &HostToBridge::GetStatus).await {
+                            println!("# GetStatus write failed: {e:#}");
+                        }
+                    } else if !ask.pending() && !closing && rtt.due(now) {
                         rtt.sent(now);
                         if let Err(e) = send(&peripheral, &link, &HostToBridge::GetStatus).await {
                             println!("# GetStatus write failed: {e:#}");
                         }
                     }
                 }
-                () = &mut done => break,
+                () = &mut done => {
+                    if closing || index < args.reconnect {
+                        break;
+                    }
+                    closing = true;
+                    ask.want();
+                    done.as_mut().reset((Instant::now() + CLOSE_WAIT).into());
+                }
                 _ = &mut ctrl_c, if !stopped => {
                     stopped = true;
-                    break;
+                    if !closing {
+                        closing = true;
+                        ask.want();
+                        done.as_mut().reset((Instant::now() + CLOSE_WAIT).into());
+                    }
                 }
             }
         }
         let now = Instant::now();
         rtt.drop_out(now);
+        // An ask this attachment never heard answered is not the next one's.
+        ask = StatusAsk::default();
         let summary = attachment.summary(now);
         print_attachment(index, args.reconnect, &summary);
         attachments.push(summary);
@@ -350,6 +393,8 @@ async fn run(args: RunArgs) -> Result<()> {
         reconnect: args.reconnect,
         rtt: rtt.summary(),
         reconcile: Reconcile::of(&attachments),
+        bridge: bridge::over_run(&attachments),
+        fleet: attachments.iter().rev().find_map(|a| a.fleet.clone()),
         attachments,
     };
     print_run(&summary);
@@ -454,6 +499,20 @@ fn print_attachment(index: u32, reconnect: u32, summary: &AttachmentSummary) {
             f64::from(beats.max_spacing_ms) / 1000.0,
         );
     }
+    for (label, b) in &summary.batches {
+        println!(
+            "#   {label}: {} batches, {} lost in {} gaps, {} duplicates, {} reused seq, \
+             {} uncounted gaps, {} undecodable, {} restarts",
+            b.batches,
+            b.lost,
+            b.gaps,
+            b.duplicates,
+            b.reused_seq,
+            b.uncounted,
+            b.undecodable,
+            b.restarts,
+        );
+    }
 }
 
 fn print_run(summary: &RunSummary) {
@@ -474,4 +533,24 @@ fn print_run(summary: &RunSummary) {
         count(r.evicted),
         count(r.refused),
     );
+    let (batches, lost) = summary
+        .attachments
+        .iter()
+        .flat_map(|a| a.batches.values())
+        .fold((0, 0), |(n, l), b| (n + b.batches, l + b.lost));
+    if batches > 0 {
+        println!("# batches: {batches} received, {lost} lost over the run");
+    }
+    match &summary.bridge {
+        Some(counters) => {
+            println!("# bridge counters, first Status -> last:");
+            for counter in counters {
+                println!("#   {}", counter.text());
+            }
+        }
+        None => println!("# bridge counters: no Status arrived"),
+    }
+    if let Some(fleet) = &summary.fleet {
+        println!("# last fleet report: {}", fleet.text());
+    }
 }

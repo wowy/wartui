@@ -2,6 +2,8 @@
 //!
 //! A `Status` carries no id, so only one `GetStatus` is ever out: the next `Status` answers it.
 //! A `Status` is a priority frame, so the time measures the link both ways, not the bulk ring.
+//! A [`StatusAsk`], the bridge counters' snapshot, waits for a timed ask to finish and holds the
+//! next one back until its own is answered, so each `Status` answers the one ask out.
 
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,12 @@ impl Rtt {
         self.left > 0 && self.out.is_none() && self.next_at.is_none_or(|at| now >= at)
     }
 
+    /// Whether an ask is waiting for its answer.
+    #[must_use]
+    pub const fn is_out(&self) -> bool {
+        self.out.is_some()
+    }
+
     /// A `GetStatus` went out at `now`.
     pub fn sent(&mut self, now: Instant) {
         self.left = self.left.saturating_sub(1);
@@ -96,6 +104,50 @@ impl Rtt {
             p99_ms: ms(nearest_rank(&sorted, 99)),
             max_ms: ms(sorted.last()),
         })
+    }
+}
+
+/// A `GetStatus` for the bridge counters' snapshot, outside the timed round trips.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatusAsk {
+    wanted: bool,
+    out: Option<Instant>,
+}
+
+impl StatusAsk {
+    /// Ask once the timed ask, if any, is answered.
+    pub fn want(&mut self) {
+        self.wanted = true;
+    }
+
+    /// Whether to send it now, with `rtt_out` saying whether a timed ask is out.
+    #[must_use]
+    pub const fn due(&self, rtt_out: bool) -> bool {
+        self.wanted && self.out.is_none() && !rtt_out
+    }
+
+    /// It went out at `now`.
+    pub fn sent(&mut self, now: Instant) {
+        self.wanted = false;
+        self.out = Some(now);
+    }
+
+    /// Whether it is wanted or out, which holds the timed asks back.
+    #[must_use]
+    pub const fn pending(&self) -> bool {
+        self.wanted || self.out.is_some()
+    }
+
+    /// A `Status` arrived. Returns whether it answered this ask rather than a timed one.
+    pub fn answered(&mut self) -> bool {
+        self.out.take().is_some()
+    }
+
+    /// Give up on an ask out longer than [`RTT_TIMEOUT`] at `now`.
+    pub fn expire(&mut self, now: Instant) {
+        if self.out.is_some_and(|sent| now.saturating_duration_since(sent) >= RTT_TIMEOUT) {
+            self.out = None;
+        }
     }
 }
 
@@ -149,6 +201,35 @@ mod tests {
         let mut rtt = Rtt::new(1);
         assert_eq!(rtt.answered(Instant::now()), None);
         assert_eq!(rtt.summary(), None);
+    }
+
+    #[test]
+    fn status_ask_waits_when_timed_ask_is_out() {
+        let now = Instant::now();
+        let mut rtt = Rtt::new(5);
+        let mut ask = StatusAsk::default();
+        rtt.sent(now);
+        ask.want();
+        assert!(!ask.due(rtt.is_out()));
+        // The first `Status` answers the timed ask.
+        assert!(!ask.answered());
+        rtt.answered(now + ms(30));
+        assert!(ask.due(rtt.is_out()));
+        ask.sent(now + ms(40));
+        assert!(ask.pending(), "holds the next timed ask back");
+        assert!(ask.answered());
+        assert!(!ask.pending());
+    }
+
+    #[test]
+    fn status_ask_gives_up_when_answer_times_out() {
+        let now = Instant::now();
+        let mut ask = StatusAsk::default();
+        ask.want();
+        ask.sent(now);
+        ask.expire(now + RTT_TIMEOUT);
+        assert!(!ask.pending());
+        assert!(!ask.answered());
     }
 
     #[test]

@@ -32,9 +32,16 @@ cargo build --release
 - `SpikeLoad` seq gaps, listed by range, and body CRC failures;
 - frames that failed to decode;
 - the P4's latest `SpikeStats`, and the stand-in's own throughput over 2 s and the attachment;
-- with `--start-scan`, heartbeats per slot, with missed beats inferred from the P4's timestamps.
+- with `--start-scan`, heartbeats per slot, with missed beats inferred from the P4's timestamps,
+  and sighting batches per slot, with batches lost read from their `seq` the way `wartui-core`
+  reads them (`src/batches.rs`).
 
 Only the first attachment sends `--profile` and `--start-scan`. The P4 keeps both across a
 reconnect, so a later attachment tests that the queue starts empty. The last one sends
 `SpikeLoad off` and `StopScan`. `--rtt N` times N `GetStatus` round trips, one at a time, beside
 the load. The run ends by setting the seq gaps against `SpikeStats.evicted` and `refused`.
+
+The first attachment asks for a `Status` before anything else, and the last asks for one when its
+time is up, or on Ctrl-C, and waits up to 10 s for it before stopping the load and the scan. The run
+prints each node bus, radio link, drop and queue counter as `name first -> last (+delta)`, and the
+last `Fleet` report's members. `--json` carries all of it.
