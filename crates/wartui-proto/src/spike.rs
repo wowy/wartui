@@ -18,7 +18,9 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::link::{MAX_NODE_PAYLOAD, RadioLinkStats};
-use crate::radio_link::{ADV_PHASES, BleStats, EVENT_KINDS, EVENTS_PHASES, NOTIFY_PHASES};
+use crate::radio_link::{
+    ADV_PHASES, BleStats, EVENT_KINDS, EVENTS_PHASES, GATT_KINDS, NOTIFY_PHASES,
+};
 
 /// A sighting batch's typical body, the size the rate profiles send.
 pub const SMALL_BODY: usize = 45;
@@ -119,7 +121,7 @@ pub struct SpikeStats {
 }
 
 impl SpikeStats {
-    /// The counters as five `#` lines, with the rate the C6 link carried while Bluetooth
+    /// The counters as six `#` lines, with the rate the C6 link carried while Bluetooth
     /// owned the queue: the bytes sent to the C6 over the time it owned it.
     #[must_use]
     pub const fn text(&self) -> StatsText<'_> {
@@ -227,6 +229,19 @@ impl fmt::Display for StatsText<'_> {
             ble.disconnection_events,
             ble.runner_phase,
             ble.runner_restarts,
+        )?;
+        let [h0, h1, h2, h3] = ble.disconnect_reasons;
+        write!(
+            f,
+            "\n#   C6 link: disconnects reason last {:#04x} (history {h0:#04x} {h1:#04x} {h2:#04x} \
+             {h3:#04x}), gatt {} req / {} replied, last kind {} {} handle {}, mtu changes {}",
+            ble.last_disconnect_reason,
+            ble.gatt_requests,
+            ble.gatt_replies_sent,
+            ble.last_gatt_kind,
+            Named(&GATT_KINDS, ble.last_gatt_kind),
+            ble.last_gatt_handle,
+            ble.mtu_changes,
         )
     }
 }

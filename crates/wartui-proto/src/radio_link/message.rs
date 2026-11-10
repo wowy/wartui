@@ -157,6 +157,20 @@ pub struct BleStats {
     pub runner_phase: u8,
     /// Returns from TrouBLE's runner, each followed by a fresh run.
     pub runner_restarts: u32,
+    /// The latest disconnection's HCI reason code, or 0 before the first.
+    pub last_disconnect_reason: u8,
+    /// The last four disconnections' HCI reason codes, newest first, 0 where none.
+    pub disconnect_reasons: [u8; 4],
+    /// GATT requests the event loop took, Down's writes aside.
+    pub gatt_requests: u32,
+    /// Replies to those requests that TrouBLE finished sending.
+    pub gatt_replies_sent: u32,
+    /// The latest of those requests' kind: [`GATT_KINDS`] names each, 0 before the first.
+    pub last_gatt_kind: u8,
+    /// The latest of those requests' attribute handle, or 0 for one without.
+    pub last_gatt_handle: u16,
+    /// Changes of ATT MTU the notifier saw.
+    pub mtu_changes: u32,
 }
 
 /// [`BleStats::notify_phase`]'s values, by index.
@@ -182,6 +196,9 @@ pub const EVENT_KINDS: [&str; 11] = [
     "Gatt Down write",
     "Gatt other",
 ];
+
+/// [`BleStats::last_gatt_kind`]'s values, by index.
+pub const GATT_KINDS: [&str; 4] = ["none", "read", "write", "other"];
 
 /// The C6's counters, which the P4 reports beside its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

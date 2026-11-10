@@ -504,6 +504,13 @@ fn radio_link_largest_messages_fit_one_packet() {
         disconnection_events: u32::MAX,
         runner_phase: u8::MAX,
         runner_restarts: u32::MAX,
+        last_disconnect_reason: u8::MAX,
+        disconnect_reasons: [u8::MAX; 4],
+        gatt_requests: u32::MAX,
+        gatt_replies_sent: u32::MAX,
+        last_gatt_kind: u8::MAX,
+        last_gatt_handle: u16::MAX,
+        mtu_changes: u32::MAX,
     });
     let state = Up::BleState(BleState {
         subscribed: true,
@@ -678,6 +685,13 @@ fn radio_link_revision_golden_bytes() {
         disconnection_events: 30,
         runner_phase: 31,
         runner_restarts: 32,
+        last_disconnect_reason: 0x13,
+        disconnect_reasons: [0x13, 0x08, 0x22, 0],
+        gatt_requests: 33,
+        gatt_replies_sent: 34,
+        last_gatt_kind: 2,
+        last_gatt_handle: 300,
+        mtu_changes: 35,
     });
     let len = encode_up(&stats, &mut out).unwrap();
     #[rustfmt::skip]
@@ -686,6 +700,10 @@ fn radio_link_revision_golden_bytes() {
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,                 // notifications to heap_high_water
         14, 15, 16, 17, 18, 19, 20, 21, 22, 23,                    // notify_phase to disconnects
         24, 25, 26, 27, 28, 29, 30, 31, 32,                        // hci_reads to runner_restarts
+        0x13, 0x13, 0x08, 0x22, 0,                                 // last_disconnect_reason, disconnect_reasons
+        33, 34, 2,                                                 // gatt_requests to last_gatt_kind
+        0xAC, 0x02,                                                // last_gatt_handle 300, varint
+        35,                                                        // mtu_changes
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), stats);

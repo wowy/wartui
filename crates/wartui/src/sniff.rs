@@ -641,6 +641,13 @@ mod tests {
                 nocp_events: 200,
                 acl_outstanding: 24,
                 runner_phase: 1,
+                last_disconnect_reason: 0x13,
+                disconnect_reasons: [0x13, 0x08, 0, 0],
+                gatt_requests: 3,
+                gatt_replies_sent: 2,
+                last_gatt_kind: 1,
+                last_gatt_handle: 12,
+                mtu_changes: 1,
                 ..Default::default()
             },
             ble_stats_age_ms: 1_200,
@@ -672,7 +679,9 @@ mod tests {
              #   C6 diag: stats 1.2 s old; notify 1 (notify_raw), 101 calls, 100 returns, 3 OOM \
              retries; events 0 (next), 40 seen, last 9 (Gatt Down write); adv 1 (serve), 1 \
              connections, 0 disconnects; HCI 900 reads, 800 writes, in flight 1 read 0 write, \
-             200 NOCP, 24 ACL outstanding, 0 disconnections; runner 1, 0 restarts"
+             200 NOCP, 24 ACL outstanding, 0 disconnections; runner 1, 0 restarts\n\
+             #   C6 link: disconnects reason last 0x13 (history 0x13 0x08 0x00 0x00), gatt 3 \
+             req / 2 replied, last kind 1 (read) handle 12, mtu changes 1"
         );
     }
 

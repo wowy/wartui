@@ -263,6 +263,13 @@ fn full_spike_stats() -> SpikeStats {
             disconnection_events: u32::MAX,
             runner_phase: u8::MAX,
             runner_restarts: u32::MAX,
+            last_disconnect_reason: u8::MAX,
+            disconnect_reasons: [u8::MAX; 4],
+            gatt_requests: u32::MAX,
+            gatt_replies_sent: u32::MAX,
+            last_gatt_kind: u8::MAX,
+            last_gatt_handle: u16::MAX,
+            mtu_changes: u32::MAX,
         },
         ble_stats_age_ms: u32::MAX - 11,
         bulk_high_water: u32::MAX - 5,
@@ -1323,6 +1330,8 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         0, 0, 0, 0, 0, 0, 0, 0,     // ble: notify_phase to connections
         0, 0, 0, 0, 0, 0, 0, 0,     // ble: disconnects to acl_outstanding
         0, 0, 0,                    // ble: disconnection_events to runner_restarts
+        0, 0, 0, 0, 0,              // ble: last_disconnect_reason, disconnect_reasons
+        0, 0, 0, 0, 0,              // ble: gatt_requests to mtu_changes
         13,                         // ble_stats_age_ms
         6, 14, 7, 8,                // bulk_high_water, bulk_capacity, refused, evicted
         9, 10, 11,                  // mtu, phy, interval_us

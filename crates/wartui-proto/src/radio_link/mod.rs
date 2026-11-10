@@ -47,9 +47,9 @@ pub mod update;
 
 pub use hello::{Chip, HELLO_LEN, Hello};
 pub use message::{
-    ADV_PHASES, BleState, BleStats, Down, EVENT_KINDS, EVENTS_PHASES, HOST_BYTES_MAX, Held,
-    LINK_REVISION, NOTIFY_PHASES, Packer, RECORD_MAX, RadioStatus, Up, decode_down, decode_up,
-    encode_down, encode_up, host_bytes_fit, records,
+    ADV_PHASES, BleState, BleStats, Down, EVENT_KINDS, EVENTS_PHASES, GATT_KINDS, HOST_BYTES_MAX,
+    Held, LINK_REVISION, NOTIFY_PHASES, Packer, RECORD_MAX, RadioStatus, Up, decode_down,
+    decode_up, encode_down, encode_up, host_bytes_fit, records,
 };
 
 /// The link's baud rate. Both ends take it exactly or not at all.

@@ -480,7 +480,15 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
             c.events_phase = EVENTS_OTHER;
         });
         match event {
-            GattConnectionEvent::Disconnected { .. } => return,
+            GattConnectionEvent::Disconnected { reason } => {
+                let reason = reason.into_inner();
+                ble.count(|c| {
+                    c.last_disconnect_reason = reason;
+                    let [newest, older, oldest, _] = c.disconnect_reasons;
+                    c.disconnect_reasons = [reason, newest, older, oldest];
+                });
+                return;
+            }
             GattConnectionEvent::PhyUpdated { tx_phy, .. } => {
                 set_state(shared, |state| state.phy = phy_number(tx_phy));
             }
@@ -500,6 +508,17 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
             // controller returns the connection handle.
             GattConnectionEvent::RequestConnectionParams(_) => {}
             GattConnectionEvent::Gatt { event } => {
+                let down = matches!(&event, GattEvent::Write(write)
+                    if write.handle() == server.link.down.handle);
+                if !down {
+                    let kind = gatt_kind(&event);
+                    let handle = event.payload().handle().unwrap_or(0);
+                    ble.count(|c| {
+                        c.gatt_requests = c.gatt_requests.wrapping_add(1);
+                        c.last_gatt_kind = kind;
+                        c.last_gatt_handle = handle;
+                    });
+                }
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
                     GattEvent::Write(write) if write.handle() == server.link.down.handle => {
@@ -514,7 +533,12 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
                     Ok(reply) => {
                         ble.count(|c| c.events_phase = EVENTS_REPLY);
                         reply.send().await;
-                        ble.count(|c| c.events_phase = EVENTS_OTHER);
+                        ble.count(|c| {
+                            c.events_phase = EVENTS_OTHER;
+                            if !down {
+                                c.gatt_replies_sent = c.gatt_replies_sent.wrapping_add(1);
+                            }
+                        });
                     }
                     Err(_) => ble.count(|c| c.link_errors = c.link_errors.wrapping_add(1)),
                 }
@@ -551,6 +575,7 @@ async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>)
 async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! {
     let ble = &shared.ble;
     let mut chunk = [0; VALUE_MAX];
+    let mut last_mtu = conn.raw().att_mtu();
     loop {
         if !ble.subscribed() || ble.tx.borrow().is_empty() {
             ble.notify_phase(NOTIFY_READY);
@@ -560,6 +585,10 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
         ble.notify_phase(NOTIFY_CREDIT);
         // An MTU exchange raises no event, so the notifier is where a change shows.
         let mtu = conn.raw().att_mtu();
+        if mtu != last_mtu {
+            last_mtu = mtu;
+            ble.count(|c| c.mtu_changes = c.mtu_changes.wrapping_add(1));
+        }
         set_state(shared, |state| state.mtu = mtu);
         let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
         let n = ble.tx.borrow_mut().take(&mut chunk[..room]);
@@ -610,6 +639,15 @@ fn event_kind(event: &GattConnectionEvent<'_, '_, DefaultPacketPool>, server: &S
             9
         }
         GattConnectionEvent::Gatt { .. } => 10,
+    }
+}
+
+/// `BleStats::last_gatt_kind`'s code for a GATT request, as `radio_link::GATT_KINDS` names it.
+fn gatt_kind(event: &GattEvent<'_, '_, DefaultPacketPool>) -> u8 {
+    match event {
+        GattEvent::Read(_) => 1,
+        GattEvent::Write(_) => 2,
+        GattEvent::Other(_) | GattEvent::NotAllowed(_) => 3,
     }
 }
 
