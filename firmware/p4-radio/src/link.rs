@@ -35,8 +35,8 @@
 //! RTS; the P4 sends no records while it updates. `Install` on a verified session switches
 //! slots and reboots, and the P4 hears the new image's hello.
 //!
-//! **The host stream over Bluetooth is not carried yet.** The C6 sends its Bluetooth counters
-//! every [`BLE_STATS_EVERY`], zeros while no stack runs, and ignores `Down::HostBytes`. The
+//! **The host stream goes to a Bluetooth central** (`src/ble.rs`): `Down::HostBytes` is held for
+//! notifying, and the C6 sends its Bluetooth counters every [`BLE_STATS_EVERY`]. The
 //! `sink-discard` feature instead credits each one at once and claims a subscriber once the
 //! P4's hello arrives, so the P4 streams its host queue here; that measures the link's ceiling.
 
@@ -64,12 +64,13 @@ use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, BleState, BleStats, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello,
-    Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus,
-    SeqCheck, SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
+    BAUD_RATE, BODY_MAX, BleState, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind,
+    LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck,
+    SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 
+use crate::ble::Ble;
 use crate::config::UP_QUEUE_BYTES;
 
 /// How often a write looks for its end once its wire time has passed;
@@ -96,12 +97,19 @@ pub struct Shared {
     /// Raised by whatever may have given the writer something to send, so a waiting writer
     /// looks again.
     wake: Signal<NoopRawMutex, ()>,
+    /// The Bluetooth side.
+    pub ble: Ble,
 }
 
 impl Shared {
     /// Nothing queued yet. The ring is static, so it is never on the stack.
-    pub fn new(up: &'static UpQueue) -> Self {
-        Self { up, wake: Signal::new() }
+    pub fn new(up: &'static UpQueue, ble: Ble) -> Self {
+        Self { up, wake: Signal::new(), ble }
+    }
+
+    /// Bytes the ring has free. The writer reads a record whole, so none is pinned.
+    pub fn up_room(&self) -> usize {
+        UP_QUEUE_BYTES - self.up.borrow().len_bytes()
     }
 
     /// Queue `msg` for the P4, evicting the ring's oldest records if it is full.
@@ -191,10 +199,6 @@ pub struct Link {
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
-    /// `Down::HostBytes` bytes taken since boot, wrapping: what `Up::BleCredit` reports.
-    drained: u32,
-    /// The Bluetooth counters `Up::BleStats` reports.
-    ble_stats: BleStats,
     /// A record from the ring that did not fit the last packet. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
     held: &'static mut Held,
@@ -225,8 +229,6 @@ impl Link {
             uart_errors: 0,
             undecoded: 0,
             undecoded_said: 0,
-            drained: 0,
-            ble_stats: BleStats::default(),
             held,
             updates,
         }
@@ -365,12 +367,13 @@ impl Link {
         }
     }
 
-    /// Take the host stream's next bytes: credited at once in the discard sink, ignored
-    /// otherwise.
+    /// Take the host stream's next bytes: credited at once in the discard sink, held for the
+    /// central otherwise.
     fn host_bytes(&mut self, bytes: &[u8], shared: &Shared) {
         if cfg!(feature = "sink-discard") {
-            self.drained = self.drained.wrapping_add(bytes.len() as u32);
-            shared.push(&Up::BleCredit { drained: self.drained });
+            crate::ble::credit(shared, bytes.len(), true);
+        } else {
+            crate::ble::take_stream(shared, bytes);
         }
     }
 
@@ -456,12 +459,8 @@ pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> !
 async fn report_ble(link: &RefCell<Link>, shared: &Shared) -> ! {
     loop {
         Timer::after(BLE_STATS_EVERY).await;
-        let (heard, stats) = {
-            let link = link.borrow();
-            (link.heard_p4, link.ble_stats)
-        };
-        if heard {
-            shared.push(&Up::BleStats(stats));
+        if link.borrow().heard_p4 {
+            shared.push(&Up::BleStats(crate::ble::stats(shared)));
         }
     }
 }

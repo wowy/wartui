@@ -21,6 +21,7 @@ use wartui_proto::link::{
     UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
     image_tag,
 };
+use wartui_proto::radio_link::BleStats;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spike::{FULL_BODY, SpikeProfile, SpikeStats, body_checks, fill_body};
@@ -229,7 +230,21 @@ fn full_spike_stats() -> SpikeStats {
         queued_bytes: u32::MAX - 1,
         sent_bytes: u32::MAX - 2,
         credited_bytes: u32::MAX - 3,
-        delivered_bytes: u32::MAX - 4,
+        ble: BleStats {
+            notifications: u32::MAX,
+            notified_bytes: u32::MAX,
+            acl_bytes: u32::MAX,
+            delivered_bytes: u32::MAX - 4,
+            link_errors: u32::MAX,
+            hci_errors: u32::MAX,
+            forwarded_bytes: u32::MAX,
+            dropped_unsubscribed: u32::MAX,
+            dropped_overflow: u32::MAX,
+            dropped_writes: u32::MAX,
+            untracked_acl: u32::MAX,
+            heap_used: u32::MAX,
+            heap_high_water: u32::MAX,
+        },
         bulk_high_water: u32::MAX - 5,
         refused: u32::MAX - 6,
         evicted: u32::MAX - 7,
@@ -1262,7 +1277,7 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         queued_bytes: 2,
         sent_bytes: 3,
         credited_bytes: 4,
-        delivered_bytes: 5,
+        ble: BleStats { delivered_bytes: 5, ..BleStats::default() },
         bulk_high_water: 6,
         refused: 7,
         evicted: 8,
@@ -1279,7 +1294,10 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         1,                          // seq
         0xAC, 0x02,                 // uptime_ms 300, varint
         0xC8, 0x01,                 // ble_owned_ms 200, varint
-        2, 3, 4, 5, 6, 7, 8,        // queued_bytes to evicted
+        2, 3, 4,                    // queued_bytes, sent_bytes, credited_bytes
+        0, 0, 0, 5,                 // ble: notifications to delivered_bytes
+        0, 0, 0, 0, 0, 0, 0, 0, 0,  // ble: link_errors to heap_high_water
+        6, 7, 8,                    // bulk_high_water, refused, evicted
         9, 10, 11,                  // mtu, phy, interval_us
         12, 0, 0, 0, 0, 0, 0, 0, 0, // radio_link
     ];

@@ -26,14 +26,39 @@ sink-discard = []
 # Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
 # for the reasons `README.md` § "Dependency versions" gives. Each that takes a chip feature
 # names the only one: the P4 boards carry an ESP32-C6.
+# The Bluetooth controller allocates, and `esp-rtos` and `esp-radio` allocate through this
+# copy's `HEAP`, so it is held at the version `esp-radio` resolves, as the node holds it. The
+# heap stats give `BleStats` its high-water mark.
+esp-alloc = { version = "0.11.0", features = ["esp32c6", "internal-heap-stats"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
 esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
-# The executor and time driver. No allocator: nothing here allocates.
-esp-rtos = { version = "0.4.0", features = ["embassy", "esp32c6"] }
+# The node's `esp-radio`, with Bluetooth alone: the controller behind TrouBLE.
+esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
+  "ble",
+  "esp-alloc",
+  "esp32c6",
+  "unstable",
+] }
+# The executor and time driver, and the scheduler the radio runs on.
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
+# The Bluetooth host. 0.8 builds on `bt-hci` 0.10, whose transport trait lives in
+# `bt-hci-transport`, the crate `esp-radio`'s `BleConnector` implements it from, so the
+# connector plugs in as it is. `bt-hci` resolves twice, 0.9 for `esp-radio` and 0.10 here:
+# plain types with no global symbols. The packet pool's size is in `.cargo/config.toml`.
+bt-hci = { version = "0.10.1", default-features = false }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+trouble-host = { version = "0.8.0", default-features = false, features = [
+  "connection-params-update",
+  "default-packet-pool",
+  "derive",
+  "gatt",
+  "peripheral",
+] }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the P4, and the flash
 # half of updates, shared with the node, which brings `esp-storage` at the version

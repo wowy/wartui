@@ -1,13 +1,15 @@
 //! The C6 half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
 //!
 //! The P4 owns the USB link to the host and the node buses. This chip holds the UART link to
-//! the P4 for a Bluetooth host link to come: it answers the P4's status poll, sends its lines,
-//! and takes its own updates. It never talks USB. The two talk over the board's SDIO traces, on
-//! UART1 with hardware flow control, through UHCI's DMA (`src/link.rs`).
+//! the P4: it answers the P4's status poll, sends its lines, and takes its own updates. It never
+//! talks USB. The two talk over the board's SDIO traces, on UART1 with hardware flow control,
+//! through UHCI's DMA (`src/link.rs`). On the Bluetooth spike it also carries the host link to a
+//! central, as a GATT peripheral (`src/ble.rs`).
 //!
 //! Updates arrive from the P4 over the link and boot on trial, through
-//! [`wartui_firmware::ota`], the flash code a node uses. The link's futures share one task, and
-//! each waits on an interrupt, a signal or a timer rather than polling.
+//! [`wartui_firmware::ota`], the flash code a node uses. The link's futures and the Bluetooth
+//! host's share one task, and each waits on an interrupt, a signal or a timer rather than
+//! polling. Only the Bluetooth controller allocates, from the heap set up here.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -19,11 +21,14 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod ble;
 mod config;
+mod hci;
 mod link;
 
 use core::cell::RefCell;
 
+use embassy_futures::join::join;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
@@ -47,7 +52,9 @@ use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, FIFO_FULL_THRESHOLD, Held, PacketReader, RTS_THRESHOLD, RX_BUF_LEN,
     WIRE_MAX,
 };
+use wartui_proto::spike::ByteRing;
 
+use crate::ble::{Ble, TxRing};
 use crate::link::{Bus, Link, Shared, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -94,6 +101,13 @@ static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32c6));
 
+/// The host stream waiting for a Bluetooth central.
+static BLE_TX: ConstStaticCell<TxRing> = ConstStaticCell::new(RefCell::new(ByteRing::new()));
+
+/// The heap's two regions: the bootloader's RAM, reclaimed, and more of the app's.
+const HEAP_RECLAIMED: usize = 64 * 1024;
+const HEAP_MAIN: usize = 32 * 1024;
+
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
@@ -114,6 +128,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
     // Zeros name no image, so the P4 still sends its own.
     let image = ota.booted_digest().unwrap_or([0; 32]);
+
+    // The Bluetooth controller allocates, and the scheduler with it; nothing in wartui's own
+    // code does.
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: HEAP_RECLAIMED);
+    esp_alloc::heap_allocator!(size: HEAP_MAIN);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
@@ -159,7 +178,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         body: BODY.take(),
     };
 
-    let shared = Shared::new(UP_QUEUE.take());
+    let shared = Shared::new(UP_QUEUE.take(), Ble::new(BLE_TX.take()));
+    shared.log(format_args!(
+        "heap {} B, {} B free before Bluetooth starts",
+        HEAP_RECLAIMED + HEAP_MAIN,
+        esp_alloc::HEAP.free()
+    ));
     // Queued behind the hello exchange, for the P4 to relay once the link is up.
     if let Some(err) = table_fault {
         shared.error(format_args!("could not read the partition table: {err}; updates refused"));
@@ -173,5 +197,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         Updates { ota, receiver: RECEIVER.take(), trial: booted.trial, image, status: None };
     let link = RefCell::new(Link::new(boot, mac, cause, last_phase, HELD.take(), updates));
 
-    link_loop(bus, &link, &shared).await
+    if cfg!(feature = "sink-discard") {
+        link_loop(bus, &link, &shared).await
+    } else {
+        join(link_loop(bus, &link, &shared), ble::run(peripherals.BT, &mac, &shared)).await.0
+    }
 }

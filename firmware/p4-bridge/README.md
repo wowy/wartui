@@ -202,7 +202,7 @@ whatever the C6 says; once UART0 falls silent for 15 s, a central still subscrib
 
 `HostToBridge::SpikeLoad` runs a load generator (`src/spike.rs`): a drive's rate, a 20-node
 fleet's, saturation, or a burst. `SpikeStats` reports the P4's counters every 2 s while a profile
-runs or a central owns the queue.
+runs or a central owns the queue, with the C6's latest `BleStats` beside them.
 
 `cargo build --release --features sink-discard` bundles a C6 image that claims a subscriber at
 boot and credits every byte at once, which measures the P4→C6 link's ceiling with no Bluetooth.

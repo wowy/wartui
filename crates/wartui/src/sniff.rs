@@ -620,7 +620,15 @@ mod tests {
             queued_bytes: 53_000_000,
             sent_bytes: 52_000_000,
             credited_bytes: 51_990_000,
-            delivered_bytes: 0,
+            ble: wartui_proto::radio_link::BleStats {
+                notifications: 100,
+                notified_bytes: 51_400,
+                acl_bytes: 52_200,
+                delivered_bytes: 52_000,
+                heap_used: 30_000,
+                heap_high_water: 31_000,
+                ..Default::default()
+            },
             bulk_high_water: 243_000,
             refused: 0,
             evicted: 12,
@@ -638,10 +646,13 @@ mod tests {
             spike_stats_text(&stats),
             "# spike stats: up 125.4 s, Bluetooth owned 120.0 s, seq 51234; \
              433333 B/s sent while Bluetooth owned the queue\n\
-             #   queued 53000000 B, sent 52000000 B, credited 51990000 B, delivered 0 B; \
+             #   queued 53000000 B, sent 52000000 B, credited 51990000 B, delivered 52000 B; \
              bulk high-water 243000 B, 0 refused, 12 evicted\n\
              #   mtu 0, phy 0, interval 0 us; C6 link 81234 packets in, crc 1/2, magic 0/0, \
-             gap 0/0, uart 0/0 (P4/C6)"
+             gap 0/0, uart 0/0 (P4/C6)\n\
+             #   C6: 100 notifications, 51400 B notified, ACL 52200 B sent, 52000 B delivered; \
+             errors 0 link, 0 HCI; 0 B forwarded; dropped 0 B unsubscribed, 0 B overflow, 0 B \
+             written, 0 ACL untracked; heap 30000 B, high-water 31000 B"
         );
     }
 

@@ -474,8 +474,16 @@ fn radio_link_largest_messages_fit_one_packet() {
     let stats = Up::BleStats(BleStats {
         notifications: u32::MAX,
         notified_bytes: u32::MAX,
+        acl_bytes: u32::MAX,
         delivered_bytes: u32::MAX,
         link_errors: u32::MAX,
+        hci_errors: u32::MAX,
+        forwarded_bytes: u32::MAX,
+        dropped_unsubscribed: u32::MAX,
+        dropped_overflow: u32::MAX,
+        dropped_writes: u32::MAX,
+        untracked_acl: u32::MAX,
+        heap_used: u32::MAX,
         heap_high_water: u32::MAX,
     });
     let state = Up::BleState(BleState {
@@ -621,12 +629,20 @@ fn radio_link_revision_golden_bytes() {
     let stats = Up::BleStats(BleStats {
         notifications: 1,
         notified_bytes: 2,
-        delivered_bytes: 3,
-        link_errors: 4,
-        heap_high_water: 5,
+        acl_bytes: 3,
+        delivered_bytes: 4,
+        link_errors: 5,
+        hci_errors: 6,
+        forwarded_bytes: 7,
+        dropped_unsubscribed: 8,
+        dropped_overflow: 9,
+        dropped_writes: 10,
+        untracked_acl: 11,
+        heap_used: 12,
+        heap_high_water: 13,
     });
     let len = encode_up(&stats, &mut out).unwrap();
-    assert_eq!(out[..len], [6, 1, 2, 3, 4, 5], "{MSG}");
+    assert_eq!(out[..len], [6, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), stats);
 }
 

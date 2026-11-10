@@ -89,18 +89,35 @@ pub struct BleState {
     pub conn: u8,
 }
 
-/// The C6's Bluetooth counters since it booted, as [`Up::BleStats`] reports them.
+/// The C6's Bluetooth counters since it booted, as [`Up::BleStats`] reports them. Each wraps.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BleStats {
     /// Notifications sent.
     pub notifications: u32,
     /// Host stream bytes those notifications carried.
     pub notified_bytes: u32,
-    /// Bytes the link layer reported delivered.
+    /// ACL payload bytes handed to the controller: the notifications with their L2CAP and ATT
+    /// headers, and whatever else the host sent.
+    pub acl_bytes: u32,
+    /// ACL payload bytes the controller reported completed: link-layer delivery.
     pub delivered_bytes: u32,
     /// Link errors: failed notifications and dropped connections.
     pub link_errors: u32,
-    /// The most heap the Bluetooth stack has held, in bytes.
+    /// Host stack errors: transport failures and the host runner stopping.
+    pub hci_errors: u32,
+    /// Bytes a central wrote that went to the P4 as `Up::HostBytes`.
+    pub forwarded_bytes: u32,
+    /// `Down::HostBytes` bytes discarded, and credited, with no subscriber.
+    pub dropped_unsubscribed: u32,
+    /// `Down::HostBytes` bytes discarded, and credited, because the transmit buffer was full.
+    pub dropped_overflow: u32,
+    /// Bytes a central wrote that were dropped because the queue to the P4 stayed full.
+    pub dropped_writes: u32,
+    /// Outgoing ACL packets the delivery ledger had no room to track.
+    pub untracked_acl: u32,
+    /// Heap in use, in bytes.
+    pub heap_used: u32,
+    /// The most heap in use since boot, in bytes.
     pub heap_high_water: u32,
 }
 

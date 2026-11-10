@@ -239,7 +239,7 @@ fn push_stats(shared: &Shared) {
         queued_bytes: spike.queued.get(),
         sent_bytes,
         credited_bytes,
-        delivered_bytes: shared.ble.stats().delivered_bytes,
+        ble: shared.ble.stats(),
         bulk_high_water: bulk.high_water,
         refused,
         // The rings count a refusal as a drop too.

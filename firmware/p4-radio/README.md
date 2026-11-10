@@ -1,15 +1,27 @@
 # wartui P4 radio firmware
 
 The C6 half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the on-board ESP32-C6 runs this
-firmware: it holds the UART link to the P4 for a future Bluetooth host link, answers the P4's
-status poll, sends its lines and takes its own updates. It talks to the P4 over UART1, with DMA and
+firmware: it holds the UART link to the P4, answers the P4's status poll, sends its lines and
+takes its own updates. On the Bluetooth spike branch it also carries the host link to a central
+([below](#bluetooth-spike)). It talks to the P4 over UART1, with DMA and
 hardware flow control, on the board's SDIO traces
 ([wiring](../p4-bridge/README.md#the-link-to-the-c6)). It never talks USB; the P4 owns the host
 link and the node buses. The queue size is in `src/config.rs`.
 
 The `sink-discard` feature discards the host stream the P4 sends for a Bluetooth central,
-crediting it at once, and claims a subscriber after the hello exchange. `firmware/p4-bridge`'s
-feature of the same name bundles it.
+crediting it at once, and claims a subscriber after the hello exchange; Bluetooth does not start.
+`firmware/p4-bridge`'s feature of the same name bundles it.
+
+## Bluetooth spike
+
+The C6 advertises `wartui XX:YY` and serves the GATT service in `tools/ble-standin/README.md`,
+through TrouBLE 0.8 over `esp-radio`'s controller (`src/ble.rs`). It notifies the P4's host
+stream at up to an ATT MTU of 517, and counts link-layer delivery from the HCI traffic
+(`src/hci.rs`). It boots with one `Log` naming the controller's address.
+
+On this branch it links `esp-radio` with `ble`, and has a 96 KB heap: 64 KB of reclaimed
+bootloader RAM and 32 KB more. The Bluetooth controller is the only thing that allocates.
+`BleStats` reports the heap's use and high-water mark.
 
 ```sh
 cargo build --release
@@ -62,7 +74,7 @@ wire from the same tree carries the bundled digest and is not reflashed.
 
 ## Queue sizes
 
-The C6 has one queue. Its size is read at build time from an environment variable, so a bench
+The C6 has two queues. Each size is read at build time from an environment variable, so a bench
 run resizes it with a rebuild, for example
 `WARTUI_RADIO_UP_QUEUE_BYTES=16384 cargo build --release`. `wartui status` reports its high-water
 mark as `radio-up`.
@@ -70,6 +82,7 @@ mark as `radio-up`.
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `WARTUI_RADIO_UP_QUEUE_BYTES` | 8192 | the C6's lines and status waiting for a packet to the P4; a full queue evicts the oldest |
+| `WARTUI_RADIO_BLE_WINDOW_BYTES` | 16384 | the host stream waiting to be notified; matches the P4's `WARTUI_P4_BLE_WINDOW_BYTES` |
 
 ## Dependency versions
 
@@ -80,8 +93,8 @@ fixes the whole family. It holds the family in two ways:
 - **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, `esp-sync`, and
   `esp-storage`.
 
-This firmware and the P4's have no `esp-radio` of their own, and link the same `esp-hal`,
-`esp-rtos`, `esp-storage` and `esp-sync` as the node. Keep that true: the three share
+The P4's firmware has no `esp-radio` of its own; this one links the node's, on the Bluetooth
+spike. Both link the same `esp-hal`, `esp-rtos`, `esp-storage` and `esp-sync` as the node. Keep that true: the three share
 `wartui-proto` and `firmware/common`, which states the same `esp-hal` requirement.
 
 `embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are
@@ -89,7 +102,8 @@ held the same way, through `esp-rtos` and `esp-hal`.
 
 The C5's PAC resolves twice in the node, and that is known: `esp-hal 1.2.2` builds against
 `esp32c5 0.3`, `esp-radio 1.0.0-beta.1` against `esp32c5 0.4`. Both build and link. A later
-`esp-hal` release on the newer PAC lines them up.
+`esp-hal` release on the newer PAC lines them up. The C6's does the same here, `esp32c6` 0.24
+and 0.25, and so does `bt-hci`, 0.9 for `esp-radio` and 0.10 for TrouBLE: types only.
 
 ### Crates that double
 
@@ -129,8 +143,8 @@ cargo tree --locked -e normal --prefix none --format '{p}' \
   | grep -E '^esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56]) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-alloc` is the node's because the node owns the heap and declares its regions. This firmware
-and the P4's allocate nothing and have no heap.
+They are direct dependencies for reasons that do not go away. `esp-alloc` is the node's because the node owns the heap and declares its regions, and this
+firmware's on the Bluetooth spike for the same reason. The P4's allocates nothing and has no heap.
 
 `esp-storage` is a direct dependency of `firmware/common` alone, for the over-the-air updates
 every firmware takes. It is held at the version `esp-bootloader-esp-idf` resolves, and brings no

@@ -9,12 +9,16 @@
 //! host stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes
 //! host frames written without response, framed as on USB. The UUIDs live here so the C6 and the
 //! host read the same ones.
+//!
+//! The C6 holds the stream it has yet to notify in a [`ByteRing`], and counts link-layer
+//! delivery with an [`AclLedger`] over its HCI traffic.
 
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::link::{MAX_NODE_PAYLOAD, RadioLinkStats};
+use crate::radio_link::BleStats;
 
 /// A sighting batch's typical body, the size the rate profiles send.
 pub const SMALL_BODY: usize = 45;
@@ -91,8 +95,8 @@ pub struct SpikeStats {
     pub sent_bytes: u32,
     /// Host stream bytes the C6 credited.
     pub credited_bytes: u32,
-    /// Bytes the C6's link layer reported delivered, from its latest `BleStats`.
-    pub delivered_bytes: u32,
+    /// The C6's latest `BleStats`.
+    pub ble: BleStats,
     /// The bulk ring's high-water mark, in bytes.
     pub bulk_high_water: u32,
     /// Frames the host rings refused.
@@ -110,7 +114,7 @@ pub struct SpikeStats {
 }
 
 impl SpikeStats {
-    /// The counters as three `#` lines, with the rate the C6 link carried while Bluetooth
+    /// The counters as four `#` lines, with the rate the C6 link carried while Bluetooth
     /// owned the queue: the bytes sent to the C6 over the time it owned it.
     #[must_use]
     pub const fn text(&self) -> StatsText<'_> {
@@ -139,16 +143,20 @@ impl fmt::Display for StatsText<'_> {
             write!(f, "{per_s} B/s sent while Bluetooth owned the queue")?;
         }
         let link = &stats.radio_link;
+        let ble = &stats.ble;
         write!(
             f,
             "\n#   queued {} B, sent {} B, credited {} B, delivered {} B; bulk high-water {} B, \
              {} refused, {} evicted\n\
              #   mtu {}, phy {}, interval {} us; C6 link {} packets in, crc {}/{}, magic {}/{}, \
-             gap {}/{}, uart {}/{} (P4/C6)",
+             gap {}/{}, uart {}/{} (P4/C6)\n\
+             #   C6: {} notifications, {} B notified, ACL {} B sent, {} B delivered; errors {} \
+             link, {} HCI; {} B forwarded; dropped {} B unsubscribed, {} B overflow, {} B \
+             written, {} ACL untracked; heap {} B, high-water {} B",
             stats.queued_bytes,
             stats.sent_bytes,
             stats.credited_bytes,
-            stats.delivered_bytes,
+            ble.delivered_bytes,
             stats.bulk_high_water,
             stats.refused,
             stats.evicted,
@@ -164,6 +172,19 @@ impl fmt::Display for StatsText<'_> {
             link.radio_seq_gap,
             link.uart_errors,
             link.radio_uart_errors,
+            ble.notifications,
+            ble.notified_bytes,
+            ble.acl_bytes,
+            ble.delivered_bytes,
+            ble.link_errors,
+            ble.hci_errors,
+            ble.forwarded_bytes,
+            ble.dropped_unsubscribed,
+            ble.dropped_overflow,
+            ble.dropped_writes,
+            ble.untracked_acl,
+            ble.heap_used,
+            ble.heap_high_water,
         )
     }
 }
@@ -226,3 +247,195 @@ static CRC32_TABLE: [u32; 256] = {
     }
     table
 };
+
+/// The host stream bytes the C6 holds until it notifies them: a byte ring, oldest first.
+#[derive(Debug)]
+pub struct ByteRing<const N: usize> {
+    buf: [u8; N],
+    /// Where the oldest byte is.
+    head: usize,
+    len: usize,
+}
+
+impl<const N: usize> ByteRing<N> {
+    /// Empty. Const, so firmware builds it in a static.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { buf: [0; N], head: 0, len: 0 }
+    }
+
+    /// Appends as much of `bytes` as fits and returns how much did.
+    pub fn push(&mut self, bytes: &[u8]) -> usize {
+        let n = bytes.len().min(N - self.len);
+        let tail = (self.head + self.len) % N;
+        let first = n.min(N - tail);
+        self.buf[tail..tail + first].copy_from_slice(&bytes[..first]);
+        self.buf[..n - first].copy_from_slice(&bytes[first..n]);
+        self.len += n;
+        n
+    }
+
+    /// Moves the oldest bytes into `out`, as many as it holds, and returns how many.
+    pub fn take(&mut self, out: &mut [u8]) -> usize {
+        let n = out.len().min(self.len);
+        let first = n.min(N - self.head);
+        out[..first].copy_from_slice(&self.buf[self.head..self.head + first]);
+        out[first..n].copy_from_slice(&self.buf[..n - first]);
+        self.head = (self.head + n) % N;
+        self.len -= n;
+        n
+    }
+
+    /// Discards everything held.
+    pub const fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    /// Bytes held.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether nothing is held.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<const N: usize> Default for ByteRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The H4 packet type of ACL data.
+pub const H4_ACL: u8 = 0x02;
+/// The H4 packet type of an event.
+pub const H4_EVENT: u8 = 0x04;
+
+/// `HCI_Number_Of_Completed_Packets`.
+const NUMBER_OF_COMPLETED_PACKETS: u8 = 0x13;
+/// `HCI_Disconnection_Complete`.
+const DISCONNECTION_COMPLETE: u8 = 0x05;
+
+/// Link-layer delivery, from the HCI traffic between a host and its controller: each outgoing
+/// ACL packet's length waits here, by connection handle, until a Number Of Completed Packets
+/// event names it.
+///
+/// A completed packet is one the peer acknowledged at the link layer, so
+/// [`AclLedger::delivered_bytes`] is what reached the central, whatever the host above believes.
+/// A disconnection discards its handle's packets, which the controller never completes. Packets
+/// past `N` are counted in [`AclLedger::untracked`] rather than kept; the controller holds no
+/// more than its own buffer count, so `N` above that never fills.
+///
+/// Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E: ACL data in §5.4.2, Number Of
+/// Completed Packets in §7.7.19 (handle and count pairs, interleaved), Disconnection Complete in
+/// §7.7.5. `crate::hci` holds only the scan's packets, so none of its parsing applies.
+#[derive(Debug)]
+pub struct AclLedger<const N: usize> {
+    /// Handle and ACL payload length of each packet the controller holds, oldest first.
+    sent: heapless::Deque<(u16, u16), N>,
+    acl_bytes: u32,
+    delivered_bytes: u32,
+    untracked: u32,
+}
+
+impl<const N: usize> AclLedger<N> {
+    /// Nothing sent yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { sent: heapless::Deque::new(), acl_bytes: 0, delivered_bytes: 0, untracked: 0 }
+    }
+
+    /// The host wrote an H4 packet of type `kind` whose bytes, after the type, start with
+    /// `head`. Only ACL data is recorded.
+    pub fn on_host_packet(&mut self, kind: u8, head: &[u8]) {
+        let (H4_ACL, [lo, hi, len_lo, len_hi, ..]) = (kind, head) else { return };
+        let handle = u16::from_le_bytes([*lo, *hi]) & 0x0FFF;
+        let len = u16::from_le_bytes([*len_lo, *len_hi]);
+        self.acl_bytes = self.acl_bytes.wrapping_add(u32::from(len));
+        if self.sent.push_back((handle, len)).is_err() {
+            self.untracked = self.untracked.wrapping_add(1);
+        }
+    }
+
+    /// The controller sent an H4 packet of type `kind`, `packet` being its bytes after the
+    /// type. Completed packets count as delivered, and a disconnection forgets its handle's.
+    pub fn on_controller_packet(&mut self, kind: u8, packet: &[u8]) {
+        let (H4_EVENT, [code, plen, params @ ..]) = (kind, packet) else { return };
+        let params = &params[..usize::from(*plen).min(params.len())];
+        match (*code, params) {
+            (NUMBER_OF_COMPLETED_PACKETS, [count, pairs @ ..]) => {
+                for [h_lo, h_hi, c_lo, c_hi] in
+                    pairs.as_chunks::<4>().0.iter().take(usize::from(*count))
+                {
+                    let handle = u16::from_le_bytes([*h_lo, *h_hi]) & 0x0FFF;
+                    let completed = u16::from_le_bytes([*c_lo, *c_hi]);
+                    self.complete(handle, usize::from(completed));
+                }
+            }
+            (DISCONNECTION_COMPLETE, [0, lo, hi, ..]) => {
+                self.forget(u16::from_le_bytes([*lo, *hi]) & 0x0FFF);
+            }
+            _ => {}
+        }
+    }
+
+    /// Count the oldest `completed` packets on `handle` delivered, keeping every other
+    /// handle's in order.
+    fn complete(&mut self, handle: u16, mut completed: usize) {
+        for _ in 0..self.sent.len() {
+            let Some((on, len)) = self.sent.pop_front() else { break };
+            if on == handle && completed > 0 {
+                completed -= 1;
+                self.delivered_bytes = self.delivered_bytes.wrapping_add(u32::from(len));
+            } else {
+                // Room was just made by the pop.
+                let _ = self.sent.push_back((on, len));
+            }
+        }
+    }
+
+    /// Drop every packet on `handle`.
+    fn forget(&mut self, handle: u16) {
+        for _ in 0..self.sent.len() {
+            let Some(entry) = self.sent.pop_front() else { break };
+            if entry.0 != handle {
+                let _ = self.sent.push_back(entry);
+            }
+        }
+    }
+
+    /// ACL payload bytes the host wrote, wrapping.
+    #[must_use]
+    pub const fn acl_bytes(&self) -> u32 {
+        self.acl_bytes
+    }
+
+    /// ACL payload bytes the controller completed, wrapping.
+    #[must_use]
+    pub const fn delivered_bytes(&self) -> u32 {
+        self.delivered_bytes
+    }
+
+    /// Packets written while the ledger was full, wrapping.
+    #[must_use]
+    pub const fn untracked(&self) -> u32 {
+        self.untracked
+    }
+
+    /// Packets the controller holds that the ledger tracks.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.sent.len()
+    }
+}
+
+impl<const N: usize> Default for AclLedger<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

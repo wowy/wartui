@@ -14,3 +14,9 @@ rustflags = [
 # header, which the image's digest covers, so they match the image `firmware/p4-bridge/build.rs`
 # bundles: left to detection, a C6 with other flash would get another digest and be reflashed.
 runner = "espflash flash --before no-reset --after no-reset --partition-table partitions.csv --erase-parts otadata --flash-mode dio --flash-freq 40mhz --flash-size 4mb"
+
+[env]
+# TrouBLE's packet pool: an L2CAP PDU of 521 bytes carries the largest ATT MTU, 517, which
+# leaves 514 bytes of host stream in each notification. The pool's 16 packets are 8.3 KB of
+# static RAM. Read by `trouble-host`'s build script.
+TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "521"
