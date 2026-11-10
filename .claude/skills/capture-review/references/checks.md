@@ -17,7 +17,7 @@ reasoning.
 | Pending-buffer refusals (`wifi_refused`/`ble_refused` deltas) | Pending-buffer pressure on the node: a sighting was turned away once per dwell or scan. Usually reported on a later one, so not loss. | `crates/wartui-proto/src/pending.rs`, `crates/wartui-core/src/analyze.rs` `//!` |
 | `duplicate_batches` | The node bus resending a batch whose ack the node did not see, caught by the engine. The batch was stored once, so this is not loss. | `crates/wartui-core/src/engine/rx.rs` `DUPLICATE_BATCH_WINDOW_US` |
 
-## Admin and plan
+## Scan and plan
 
 | Symptom | Usual meaning | Read |
 |---|---|---|
@@ -27,7 +27,7 @@ reasoning.
 | `assignment.node_mac` NULL | The P4 reported a share for a slot before this host read a heartbeat from it. The survey names the node by the slot's next heartbeat. | `crates/wartui-core/src/engine/scan.rs` `record_share_changes` |
 | Host lag ≥ 100 ms | The host read the link behind the bridge. Heartbeats read then are history, and their epochs are not believed. | `crates/wartui-core/src/engine/lag.rs` `BEHIND_US` |
 | Replayed heartbeats (`live=0`) | The host drained the bridge's queue late, as after a stall. Their epochs are never believed. | `crates/wartui-core/src/engine/lag.rs` `note_arrival` / `reading_live` |
-| A node heartbeating from more than one slot (survey flags "heartbeated from N slots") | The node was moved to another slot, or another node's heartbeat came through its slot. Its assignment follows its latest slot, and a node whose slot another took shows `no slot`. | `crates/wartui-core/src/engine/rx.rs` `take_slot`, `docs/node-bus.md` |
+| A node heartbeating from more than one slot (survey flags "heartbeated from N slots") | The node was moved to another slot, or another node's heartbeat came through its slot. The P4 plans by slot, so it holds the share of its latest slot, and a node whose slot another took shows `no slot`. | `crates/wartui-core/src/engine/rx.rs` `take_slot`, `docs/node-bus.md` |
 | `capture.node_board` is a carrier (survey prints `board carrier-…`) | The survey prints labels, as the operator reads them. Rows store bus names, so raw SQL needs the board: bus A is `N1` up and bus B follows, so `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. | `crates/wartui-proto/src/bus/node_board.rs` `NodeBoard::label`, `docs/node-bus.md` § "On the carrier board" |
 | `ble_slot` set but no node holds the BLE job | The bridge's `Status` named a Bluetooth slot, but no `Fleet` report the host recorded gave a share the Bluetooth scan. The P4 picks both, so compare its slot pick with its plan, and check `store_dropped`. | `crates/wartui-proto/src/fleet.rs`, `crates/wartui/README.md` § "Bluetooth" |
 | BLE job assigned but zero `ble` rows | The node scanned and stored nothing. Check `firmware/node/src/ble.rs` and the engine's `on_sightings`. | `firmware/node/src/ble.rs`, `crates/wartui-core/src/engine/rx.rs` |

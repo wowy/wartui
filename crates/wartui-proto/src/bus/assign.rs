@@ -101,12 +101,13 @@ impl Stop {
     }
 }
 
-/// Turn a host-side monotonic assignment counter into the byte the wire carries.
+/// Turn the fleet planner's monotonic assignment counter into the byte the wire carries.
 ///
-/// A node adopts an assignment only when this byte *differs* from the one it holds, so
-/// an epoch reused after a host restart is silently discarded. The host therefore
-/// persists a `u64` counter and narrows it here. Zero is skipped, because a node's 0
-/// means it holds no assignment.
+/// A node adopts an assignment only when this byte *differs* from the one it holds, so an
+/// epoch repeated after a P4 restart is silently discarded. The planner therefore keeps a `u64`
+/// counter, narrows it here, and skips the byte a node's heartbeat says it holds
+/// ([`crate::fleet::next_epoch`]). Zero is skipped, because a node's 0 means it holds no
+/// assignment.
 #[must_use]
 pub const fn wire_epoch(counter: u64) -> u8 {
     // `% 255` lands in 0..=254; the offset moves that to 1..=255.

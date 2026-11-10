@@ -34,7 +34,9 @@
 //! and announces this life. While the gate is closed nothing queues (`Shared::push_host`), and
 //! closing drops any update session and the cached node image (`update::host_gone`,
 //! `cache::host_gone`). The engine polls every 5 s, so three
-//! polls go missing before the gate closes on a running host.
+//! polls go missing before the gate closes on a running host. The fleet planner runs whatever
+//! the gate does: its reports are dropped while it is closed, and the announcement that opens it
+//! carries the current plan.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
 //! reads garbage after every reset. The host's framing resynchronizes on the next `0x00`.

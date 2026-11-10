@@ -56,12 +56,21 @@ that re-arms the node between transfers, are in the `//!` of
 ## Messages
 
 A transfer carries records, each a type byte, a length and a body. The type byte is the message,
-numbered per direction. The P4 reads none of them: it forwards a node's records to the host as
-`FromNode`, and the host's `ToNode` records to the node. The layouts are in the `//!` of each
-message in [`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/). The P4 writes one:
-the `UpdateChunk`s it builds from the node image it caches for `wartui ota`
-([`firmware/p4-bridge/src/cache.rs`](../firmware/p4-bridge/src/cache.rs)), whose layout is in the
-frozen core.
+numbered per direction. The layouts are in the `//!` of each message in
+[`crates/wartui-proto/src/bus/`](../crates/wartui-proto/src/bus/).
+
+The P4 forwards every record a node sends to the host as `FromNode`, and every `ToNode` record the
+host sends to the node. Beyond that it reads and writes only what its fleet planner and its node
+image cache need:
+
+| The P4 | Messages | Where |
+| --- | --- | --- |
+| Reads | `Heartbeat`, which it also forwards | [`firmware/p4-bridge/src/fleet.rs`](../firmware/p4-bridge/src/fleet.rs) |
+| Writes | `Assign` and `Stop`: the planner decides what every node scans | [`crates/wartui-proto/src/fleet.rs`](../crates/wartui-proto/src/fleet.rs) |
+| Writes | `UpdateChunk`, built from the node image it caches for `wartui ota` | [`firmware/p4-bridge/src/cache.rs`](../firmware/p4-bridge/src/cache.rs) |
+
+The host sends only the update conversation's records. A change to `Heartbeat`, `Assign` or `Stop`
+costs a P4 reflash as well as a node update; `UpdateChunk`'s layout is in the frozen core.
 
 | Up, node → P4 | Message | Body bytes | Down, P4 → node | Message | Body bytes |
 | --- | --- | --- | --- | --- | --- |
@@ -131,8 +140,8 @@ Driving a port high powers its node:
   on the board. The P4 keeps the duty in its settings sector, the first sector of its `nvs`
   partition, as a record tagged `F`, and boots into it; the host sets it with `wartui fan` or
   settings (`crates/wartui/README.md` § "The lid fan"). With no carrier, the P4 configures neither
-  pin. The same sector holds the channel pool, tagged `P`, and the Bluetooth slot, tagged `B`, on
-  every P4, carrier or not (`crates/wartui-proto/src/settings.rs`).
+  pin. The same sector holds the channel pool, tagged `P`, on every P4, carrier or not
+  (`crates/wartui-proto/src/settings.rs`).
 - **The silk names the sockets `N1` to `Nn`**, bus A first: `N1` to `Nk` is bus A, with *k* per
   bus, and bus B follows. So `B1` is `N4` on the 6, `N6` on the 10 and `N8` on the 14. The fleet
   view, `sniff`, `status` and `--slot` use the silk names. A capture stores the bus name, beside the

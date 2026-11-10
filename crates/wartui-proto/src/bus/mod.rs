@@ -101,11 +101,16 @@
 //! the heartbeat past its MAC. A core type code is never reused, and a new message takes a new
 //! code.
 //!
-//! **The P4 checks only this framing**, then forwards the records verbatim. A record's type
-//! byte is the message type ([`UpType`], [`DownType`]) and its body the message body; the
-//! messages are in [`UpMsg`] and [`DownMsg`]. The P4 needs no knowledge of them, so a change to
-//! a node's messages costs no P4 reflash. The exception is [`UpdateChunk`], which the P4 builds
-//! from its node image cache ([`crate::link::cache_chunk_body`]), and whose layout is in the core.
+//! **The P4 checks this framing and forwards every record a node sends.** A record's type byte
+//! is the message type ([`UpType`], [`DownType`]) and its body the message body; the messages are
+//! in [`UpMsg`] and [`DownMsg`]. The P4 reads and writes only what it needs, so a change to any
+//! other message costs no P4 reflash:
+//!
+//! - [`Heartbeat`], which its fleet planner reads ([`crate::fleet`]), and [`Assign`] and [`Stop`],
+//!   which the planner writes. A change to their layouts costs a P4 reflash beside the node
+//!   update.
+//! - [`UpdateChunk`], which the P4 builds from its node image cache
+//!   ([`crate::link::cache_chunk_body`]), and whose layout is in the core.
 //!
 //! [`crc16`]: crate::link::crc16
 

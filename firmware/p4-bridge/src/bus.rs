@@ -9,14 +9,14 @@
 //! `Stop` the planner sends, waits in its slot's [`Downlink`] until a transfer carries it and the
 //! node acknowledges it, and is answered `Delivered`, or `Undelivered` with why: no node in the
 //! slot, a full queue, a body too long, or no ack after every try. The planner's answers go to it
-//! and the host's to the host, split by id ([`fleet::answer`]). The [`Downlink`] keeps two flights out, numbered,
-//! and tags its first to a slot, and its first after giving up, with `SYNC`, since a P4 cannot
-//! know where a node's numbering stands. A slot that loses its node answers for everything it
-//! held, so its next flight carries `SYNC` too. A header with no ack, from a node that has taken
-//! nothing since boot, sends the oldest flight out again with `SYNC`. The host reader queues a
-//! record and raises its bus's signal, so a waiting scheduler wakes. The one record the P4
-//! writes, an `UpdateChunk` it builds from its node image cache for a `ToNodeChunk`
-//! (`src/cache.rs`), is queued and answered the same way.
+//! and the host's to the host, split by id ([`fleet::answer`]). The [`Downlink`] keeps two
+//! flights out, numbered, and tags its first to a slot, and its first after giving up, with
+//! `SYNC`, since a P4 cannot know where a node's numbering stands. A slot that loses its node
+//! answers for everything it held, so its next flight carries `SYNC` too. A header with no ack,
+//! from a node that has taken nothing since boot, sends the oldest flight out again with `SYNC`.
+//! The host reader queues a record and raises its bus's signal, so a waiting scheduler wakes. An
+//! `UpdateChunk` the P4 builds from its node image cache for a `ToNodeChunk` (`src/cache.rs`) is
+//! queued and answered the same way.
 //!
 //! **Each bus runs on its own**, as a future in the main `join`, so a slow node on one never
 //! holds up the other. Within a bus, transfers are one at a time, and the scheduler picks

@@ -9,7 +9,7 @@
 //! so a change costs a word written and nothing erased. Reading ([`read`]) walks the words up to
 //! the first erased one, and each tag's last valid record wins. A word a power cut tore fails its
 //! check and is skipped, and so is a tag or a value this build does not know, such as a `B`
-//! record an earlier layout wrote.
+//! record another build wrote.
 //!
 //! **A full sector erases and rewrites what it holds** ([`Write::Erase`]): every setting [`read`]
 //! gives, with the new one in its place, so one setting never costs another. A power cut

@@ -62,7 +62,7 @@ pub const QUIT_WAIT: Duration = Duration::from_millis(1_500);
 /// How many operator instructions may be waiting at once.
 ///
 /// Small on purpose: a queue deeper than the operator's patience would replay a burst
-/// of assignments minutes after they stopped pressing the key.
+/// of scan toggles minutes after they stopped pressing the key.
 pub const COMMAND_QUEUE: usize = 8;
 
 /// Run the fleet until the link closes or `stop` fires. A capture's engine then stops the scan

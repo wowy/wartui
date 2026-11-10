@@ -185,7 +185,7 @@ fn settings_record_pins_bytes_when_setting_is_a_fan_duty() {
 
 #[test]
 fn settings_skip_record_when_tag_is_a_bluetooth_slot() {
-    // A `B` record, which an earlier layout wrote for the Bluetooth slot, reads as an unknown tag.
+    // A `B` record, a tag this build does not know, reads as an unknown tag and is skipped.
     let mut sector = [0xFF; SECTOR];
     store(&mut sector, Setting::Pool(ChannelPool::Eu));
     put(&mut sector, [b'B', 9, !9, 0]);

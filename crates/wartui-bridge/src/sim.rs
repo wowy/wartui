@@ -110,7 +110,7 @@ pub struct SimConfig {
     /// The index of one node that heartbeats a minor version behind [`NODE_VERSION`].
     ///
     /// `None` by default. A test knob: no CLI flag sets it. The host shows such a node as
-    /// `needs update` and never assigns it.
+    /// `needs update`, and the bridge never assigns it.
     pub outdated_node: Option<u8>,
     /// The firmware version every node but [`Self::outdated_node`] heartbeats.
     /// [`NODE_VERSION`] by default; `wartui ota --sim` sets an older one, so the fleet has
@@ -770,7 +770,7 @@ impl SimNode {
             bus_slot: SimTransport::node_slot(index),
             version,
             epoch: 0,
-            // Nothing until it is told, so a node that has never heard the host is not
+            // Nothing until it is told, so a node that has never heard the bridge is not
             // quietly duplicating the fleet's work.
             channels: ChannelSet::empty(),
             holds_ble: false,
@@ -815,7 +815,7 @@ impl SimNode {
         }
     }
 
-    /// End a trial on hearing the host, unless this node rejects its image.
+    /// End a trial on hearing the bridge, unless this node rejects its image.
     fn confirm(&mut self) {
         if self.trial && !self.rejecting {
             self.trial = false;
@@ -892,7 +892,7 @@ impl SimNode {
     ///
     /// The channels, or the Bluetooth scan. An empty mask with the flag clear counts
     /// as nothing, the way the firmware counts it: no assignment means "scan nothing", so
-    /// reaching this needs a confused host, and idling is the same answer as never
+    /// reaching this needs a confused planner, and idling is the same answer as never
     /// having been told anything at all.
     fn assigned(&self) -> bool {
         self.epoch != 0 && (!self.channels.is_empty() || self.bluetooth_only())
@@ -1033,8 +1033,8 @@ async fn run_node(
         }
         if !node.assigned() {
             // Unassigned: reachable throughout and collecting nothing. Heartbeat first and
-            // listen after, because the host assigns in answer to one — so this is how long
-            // joining takes. One idle beat is this node's whole cycle, so the counter
+            // listen after, because a scanning bridge assigns in answer to one — so this is how
+            // long joining takes. One idle beat is this node's whole cycle, so the counter
             // advances here too.
             if beat(&events, &mut node, started).await.is_err() {
                 return;
@@ -1173,8 +1173,8 @@ async fn beat(
     node: &mut SimNode,
     started: tokio::time::Instant,
 ) -> Result<(), ()> {
-    // Capabilities are what tell the host this is a node it can drive, so a fleet
-    // without them is a fleet the planner ignores.
+    // Capabilities are what tell the bridge and the host this is a node they can drive, so a
+    // fleet without them is a fleet the planner ignores.
     let msg = Heartbeat {
         capabilities: Capabilities {
             version: node.version,

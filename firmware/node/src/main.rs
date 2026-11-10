@@ -1,8 +1,9 @@
 //! wartui's wardriving node firmware.
 //!
 //! A node listens on one channel at a time, reports every access point it has not
-//! reported lately, and takes its share of the channel pool from the host: a laptop
-//! running `wartui` behind the P4 bridge, whose node bus is this node's only link to it.
+//! reported lately, and takes its share of the channel pool from the P4 bridge, which plans
+//! the fleet. Its node bus is this node's only link to the bridge, and through it to `wartui`
+//! on a laptop.
 //!
 //! A rewrite rather than a port: the web interface, SD card, display, buttons,
 //! fuel gauge, GPS, geofencing, uploads and dock mode did not come across, because
@@ -15,7 +16,7 @@
 //! return to; an unassigned node idles rather than sweeping the whole table; the node
 //! given the Bluetooth scan sniffs nothing; and every heartbeat says what this build can
 //! do. Its messages are wartui's own in both directions — [`wartui_proto::bus`]. It takes
-//! a new image over the bus, and boots it on trial until it hears the host — [`ota`].
+//! a new image over the bus, and boots it on trial until it hears the bridge — [`ota`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -98,8 +99,8 @@ const POLL_MS: u64 = 2;
 
 /// Resets rather than hanging, for the same reason the bridge does: a node that
 /// has stopped is indistinguishable from one out of range, and a reset at least
-/// restarts the heartbeat counter, which the host reads as `rebooted` and
-/// answers with a fresh assignment.
+/// restarts the heartbeat counter, which the bridge answers with a fresh assignment
+/// and the host shows as `rebooted`.
 ///
 /// The C5 failure [`reboot`] guards against is quieter on this end: a node that never
 /// comes back reads as `no heartbeat`, as one out of range does, so it would go
@@ -134,17 +135,17 @@ struct Node {
     mac: Mac,
     /// The epoch of the assignment held. Zero means none is held, since boot or the
     /// last stop; no assignment carries it on the wire. Sent back in every heartbeat,
-    /// so the host can tell adoption from a bus ack.
+    /// so the bridge and the host can tell adoption from a bus ack.
     version: u8,
     /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
     channels: ChannelSet,
-    /// Whether the host asked this node to scan Bluetooth.
+    /// Whether the bridge asked this node to scan Bluetooth.
     ble: bool,
     /// Where the sweep has got to in those indices.
     cursor: SweepCursor,
     /// Monotonic from boot, counting completed sweeps (a Bluetooth node's
-    /// completed scans, an idle node's beats). Its going backwards is how
-    /// the host notices a node has restarted and forgotten its assignment.
+    /// completed scans, an idle node's beats). Its going backwards is how the
+    /// bridge and the host notice a node has restarted and forgotten its assignment.
     counter: u32,
     /// When an assigned node next sends a heartbeat. An unassigned node heartbeats
     /// every [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
@@ -162,8 +163,8 @@ struct Node {
     unacked: u32,
     /// Why this boot happened, read once in `main`. Every heartbeat carries it.
     reset_cause: ResetCause,
-    /// Whether this image is on trial, unconfirmed by the host. Every heartbeat carries it
-    /// as [`Capabilities::trial`]; `ota` has the rest.
+    /// Whether this image is on trial, not yet confirmed by a record from the bridge. Every
+    /// heartbeat carries it as [`Capabilities::trial`]; `ota` has the rest.
     trial: bool,
 }
 
@@ -193,16 +194,16 @@ impl Node {
     ///
     /// Channels, or the Bluetooth scan. An empty mask with the flag clear counts as
     /// nothing rather than as an error: no assignment means "scan nothing", so this needs a
-    /// confused host, and idling is the same answer as never having been told anything.
+    /// confused planner, and idling is the same answer as never having been told anything.
     const fn assigned(&self, scanning: bool) -> bool {
         self.version != 0 && (!self.channels.is_empty() || self.bluetooth_only(scanning))
     }
 
     /// Whether this node's whole job is Bluetooth.
     ///
-    /// `scanning` is whether the controller started. The host cannot see that —
+    /// `scanning` is whether the controller started. The bridge cannot see that —
     /// every node can scan, so capabilities carry no Bluetooth bit — so this node
-    /// does not depend on the host never asking: a flag that reaches one with no
+    /// does not depend on the bridge never asking: a flag that reaches one with no
     /// controller leaves it idle and reporting nothing, honest and diagnosable
     /// from the adoption line.
     const fn bluetooth_only(&self, scanning: bool) -> bool {
@@ -211,7 +212,7 @@ impl Node {
 
     /// Take an assignment, if it is not the one already held.
     ///
-    /// The test is `!=` rather than `>`, so a host that restarted and went back to
+    /// The test is `!=` rather than `>`, so a bridge that restarted and went back to
     /// epoch 1 is still believed — and so re-sending an identical assignment is
     /// acknowledged and silently discarded.
     ///
@@ -286,7 +287,7 @@ const BOARD: Board = Board::Esp32c5;
 /// What this node is, as every heartbeat says it: `NODE_VERSION`, the board and its flags.
 ///
 /// Bluetooth is not a capability at all: every node can scan it, and the scan is the
-/// host's decision, off at every boot.
+/// bridge's decision, off at every boot.
 const CAPABILITIES: Capabilities = Capabilities::here(BOARD);
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
@@ -350,7 +351,7 @@ fn main() -> ! {
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
         Some(scanner) => Some(SCANNER.init(scanner)),
         None => {
-            // The host cannot see this: capabilities carry no Bluetooth bit, so a
+            // The bridge cannot see this: capabilities carry no Bluetooth bit, so a
             // controller that would not start is a fact only this node's own
             // console knows. It sniffs Wi-Fi as normal, and idles if handed the
             // scan anyway.
@@ -394,9 +395,10 @@ fn main() -> ! {
 
         if !node.assigned(scanning) {
             // Idle: servicing the bus the whole time, collecting nothing. Heartbeat first
-            // and listen afterwards, because the host sends an assignment in answer to
-            // one, so this is how long joining a fleet takes. One idle beat is this node's
-            // whole cycle, so the counter the heartbeat carries advances here too.
+            // and listen afterwards, because a scanning bridge sends an assignment in
+            // answer to one, so this is how long joining a fleet takes. One idle beat is
+            // this node's whole cycle, so the counter the heartbeat carries advances here
+            // too.
             heartbeat(node);
             node.counter = node.counter.wrapping_add(1).max(1);
             listen(node, &mut ota, scanning, IDLE_BEAT_MS);
@@ -493,9 +495,9 @@ fn next_beat_after(deadline: Instant) -> Instant {
 ///
 /// At most once every [`ASSIGNED_BEAT_MS`] for an assigned node. The counter it carries
 /// tracks completed sweeps on its own timer, so it advances whether or not a beat reaches
-/// the host; the host treats sixty seconds of silence as a node that has left the fleet.
-/// `node.version` is the epoch this node holds, which is how the host tells adoption from a
-/// bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
+/// the host; the bridge and the host treat 20 s of silence as a node that has left the fleet.
+/// `node.version` is the epoch this node holds, which is how the bridge and the host tell
+/// adoption from a bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
 /// (`bus::send`). The rail voltage, die temperature and free heap are read between dwells, so
 /// the voltage read's PBUS excursion never lands in one.
 fn heartbeat(node: &Node) {
@@ -711,7 +713,7 @@ fn listen(node: &mut Node, ota: &mut ota::Ota, scanning: bool, ms: u32) {
 /// and hand update records to `ota`.
 ///
 /// Any record from the P4 this node decodes confirms an image on trial — assign, stop,
-/// update confirm or an update record: decoding one is hearing the host over the bus,
+/// update confirm or an update record: decoding one is hearing the bridge over the bus,
 /// which is the whole test.
 fn drain(node: &mut Node, ota: &mut ota::Ota) {
     bus::service();

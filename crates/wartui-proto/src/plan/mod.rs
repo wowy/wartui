@@ -1,4 +1,7 @@
-//! Channel pools and the assignment planner.
+//! Channel pools, and the distribution math that cuts one across a fleet.
+//!
+//! [`crate::fleet`] is the planner: it decides who is in the fleet and which slot scans Bluetooth,
+//! and calls [`plan_for`] and [`Plan::assign_for`] to cut the pool. Nothing here holds state.
 //!
 //! A *pool* is described in runs, because that is the shape regulation gives it: every
 //! pool is two runs with a gap between. An *assignment* is not. [`crate::bus::Assign`]
@@ -23,12 +26,13 @@ pub use channels::{
 };
 
 /// The largest fleet wartui supports: the bridge's node-bus slots. A node in no slot is not
-/// one the host can drive.
+/// one the bridge can drive.
 pub const MAX_NODES: usize = MAX_SLOTS;
 
 /// What the planner is dealing to, one per fleet slot.
 ///
-/// The operator decides it. It reaches [`plan_for`] as one value per slot, so a node dealt
+/// The fleet planner decides it ([`crate::fleet::pick_bluetooth`]). It reaches [`plan_for`] as
+/// one value per slot, so a node dealt
 /// nothing for Bluetooth cannot get an assignment without the flag and be told to do
 /// nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +60,7 @@ pub struct Plan {
     /// One, not a set. At most one node scans Bluetooth, and this field makes that
     /// bound structural rather than a rule a caller must keep. A fleet naming two keeps
     /// the first. The rest are dealt nothing and told nothing: a defined outcome for a
-    /// call the host never makes.
+    /// call the fleet planner never makes.
     bluetooth: Option<u8>,
     unreachable: ChannelSet,
 }
@@ -110,11 +114,11 @@ impl Plan {
     ///
     /// `epoch` is the caller's persisted epoch byte; a node adopts only when it differs
     /// from the one it holds. `flags` is the caller's too: *which* node scans Bluetooth
-    /// is the operator's decision.
+    /// is the fleet planner's decision.
     ///
     /// `None` when there is nothing to say. Also `None` for the one assignment that must never
     /// exist: an empty [`ChannelSet`] without [`ASSIGN_FLAG_BLE`]. A node sent
-    /// one parks while the host believes it is sweeping.
+    /// one parks while the fleet believes it is sweeping.
     #[must_use]
     pub fn assign_for(&self, index: u8, epoch: u8, flags: u8) -> Option<Assign> {
         let channels = self.channels_for(index)?;

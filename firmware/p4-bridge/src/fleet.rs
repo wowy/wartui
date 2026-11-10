@@ -4,8 +4,8 @@
 //! **The core is fed, then pumped.** Every input (a heartbeat, a presence change, a delivery
 //! outcome, a host command, a tick) is followed by [`pump`]: every record `Fleet::next_send`
 //! owes goes into its slot's `Downlink`, and a changed plan goes to the host as a priority
-//! `Fleet` frame. A `StopScan` pumped only after the `StartScan` behind it would see its `Stop` replaced by the new
-//! `Assign`, and the nodes would keep their dedup rings across the restart.
+//! `Fleet` frame. A `StopScan` pumped only after the `StartScan` behind it would see its `Stop`
+//! replaced by the new `Assign`, and the nodes would keep their dedup rings across the restart.
 //!
 //! **An input inside a `downlinks` borrow is recorded and deferred.** The bus answers delivery
 //! outcomes while it holds its downlinks mutably, where a pump, which pushes into them, cannot
@@ -15,6 +15,11 @@
 //!
 //! **Ids split by [`BRIDGE_ID`]**: an outcome for an id with it set is the core's, and the host,
 //! whose ids stay below it, never hears of it. Every other outcome goes to the host.
+//!
+//! **A stop drains no downlink.** Its `Stop` queues behind whatever the slot holds. Draining the
+//! slot would discard an update's queued records with the planner's, and it buys nothing:
+//! delivery toward a node is strictly in order, so the `Stop` lands after any `Assign` ahead of
+//! it.
 //!
 //! A record that does not reach a downlink, a full queue or a slot not driven, is the core's
 //! `on_undelivered` at once, so it retries on a later heartbeat. The core is never borrowed across
