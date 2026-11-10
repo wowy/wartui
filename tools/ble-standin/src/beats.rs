@@ -33,6 +33,15 @@ pub struct SlotBeats {
     last: Option<(u32, u32)>,
 }
 
+/// Two beats spaced past one and a half assigned beats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeatGap {
+    /// The spacing, in milliseconds.
+    pub spacing_ms: u32,
+    /// Beats inferred missing between.
+    pub missed: u64,
+}
+
 /// Heartbeats per slot.
 #[derive(Debug, Clone, Default)]
 pub struct Beats {
@@ -40,25 +49,30 @@ pub struct Beats {
 }
 
 impl Beats {
-    /// Take one heartbeat record's body, from `slot`, stamped `rx_us` by the P4.
-    pub fn take(&mut self, slot: Slot, rx_us: u32, body: &[u8]) {
+    /// Take one heartbeat record's body, from `slot`, stamped `rx_us` by the P4, and the gap
+    /// since the slot's last beat when it counts missed beats.
+    pub fn take(&mut self, slot: Slot, rx_us: u32, body: &[u8]) -> Option<BeatGap> {
         let entry = self.slots.entry(slot).or_default();
         let Ok(heartbeat) = Heartbeat::decode(body) else {
             entry.undecodable += 1;
-            return;
+            return None;
         };
         entry.beats += 1;
+        let mut gap = None;
         if let Some((last_rx, last_counter)) = entry.last {
             let spacing = rx_us.wrapping_sub(last_rx);
             entry.max_spacing_ms = entry.max_spacing_ms.max(spacing / 1000);
             if spacing > MISSED_AFTER_US {
-                entry.missed += u64::from((spacing + BEAT_US / 2) / BEAT_US - 1);
+                let missed = u64::from((spacing + BEAT_US / 2) / BEAT_US - 1);
+                entry.missed += missed;
+                gap = Some(BeatGap { spacing_ms: spacing / 1000, missed });
             }
             if heartbeat.counter < last_counter {
                 entry.restarts += 1;
             }
         }
         entry.last = Some((rx_us, heartbeat.counter));
+        gap
     }
 
     /// Whether any heartbeat record arrived.
@@ -125,8 +139,16 @@ mod tests {
         let mut beats = Beats::default();
         beats.take(slot(), 1_000_000, &body(1));
         // 15 s later: two beats between went missing.
-        beats.take(slot(), 16_000_000, &body(20));
+        let gap = beats.take(slot(), 16_000_000, &body(20));
         assert_eq!(beats.slot(slot()).unwrap().missed, 2);
+        assert_eq!(gap, Some(BeatGap { spacing_ms: 15_000, missed: 2 }));
+    }
+
+    #[test]
+    fn beats_reports_no_gap_when_spacing_under_one_and_a_half_beats() {
+        let mut beats = Beats::default();
+        assert_eq!(beats.take(slot(), 0, &body(1)), None);
+        assert_eq!(beats.take(slot(), MISSED_AFTER_US, &body(7)), None);
     }
 
     #[test]

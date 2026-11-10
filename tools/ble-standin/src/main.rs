@@ -7,22 +7,27 @@
 //!
 //! The first attachment asks for a `Status` before anything else, and the last asks for one when
 //! its time is up and waits for it before stopping anything, so the bridge counters span the run.
+//!
+//! Events are stamped here, as their notification arrives, because the wall clock is the radio's
+//! side of the run; the library hands them back untimed so its checks stay testable.
 
 use std::path::PathBuf;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ble_standin::events::clock;
 use ble_standin::rtt::RTT_TIMEOUT;
 use ble_standin::{
-    Attachment, AttachmentSummary, CounterDelta, FleetSummary, Reconcile, Rtt, RttSummary, Seen,
-    StatusAsk, bridge, hex, host_frame,
+    Attachment, AttachmentSummary, CounterDelta, Event, FleetSummary, Reconcile, Rtt, RttSummary,
+    Seen, StatusAsk, bridge, hex, host_frame,
 };
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
     WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
+use chrono::Local;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures::{Stream, StreamExt};
 use serde::Serialize;
@@ -264,6 +269,8 @@ struct RunSummary {
     bridge: Option<Vec<CounterDelta>>,
     /// The last `Fleet` report.
     fleet: Option<FleetSummary>,
+    /// Every event, in the order seen.
+    events: Vec<Event>,
 }
 
 async fn run(args: RunArgs) -> Result<()> {
@@ -273,6 +280,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut rtt = Rtt::new(args.rtt);
     let mut ask = StatusAsk::default();
     let mut attachments = Vec::new();
+    let mut events = Vec::new();
     let mut ctrl_c = pin!(tokio::signal::ctrl_c());
     let mut stopped = false;
 
@@ -322,7 +330,17 @@ async fn run(args: RunArgs) -> Result<()> {
                                         break 'attachment;
                                     }
                                 }
-                                Seen::Message(line) => println!("{line}"),
+                                Seen::Event { rx_us, kind } => {
+                                    let event = Event {
+                                        wall: clock(&Local::now()),
+                                        attachment: index + 1,
+                                        secs: start.elapsed().as_secs_f64(),
+                                        rx_us,
+                                        kind,
+                                    };
+                                    println!("{}", event.line());
+                                    events.push(event);
+                                }
                             }
                         }
                     }
@@ -396,6 +414,7 @@ async fn run(args: RunArgs) -> Result<()> {
         bridge: bridge::over_run(&attachments),
         fleet: attachments.iter().rev().find_map(|a| a.fleet.clone()),
         attachments,
+        events,
     };
     print_run(&summary);
     if let Some(path) = &args.json {

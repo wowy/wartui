@@ -69,6 +69,17 @@ impl SlotBatches {
     }
 }
 
+/// A counted `seq` gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchGap {
+    /// The `seq` before it.
+    pub last_seq: u16,
+    /// The `seq` after it.
+    pub seq: u16,
+    /// Batches lost between.
+    pub lost: u16,
+}
+
 /// Sighting batches per slot.
 #[derive(Debug, Clone, Default)]
 pub struct Batches {
@@ -98,13 +109,15 @@ impl Batches {
         entry.held_epoch = Some(heartbeat.epoch);
     }
 
-    /// One sighting record's body, from `slot`, stamped `rx_us` by the P4.
-    pub fn take(&mut self, slot: Slot, rx_us: u32, body: &[u8]) {
+    /// One sighting record's body, from `slot`, stamped `rx_us` by the P4, and the gap before it
+    /// when that counts as loss.
+    pub fn take(&mut self, slot: Slot, rx_us: u32, body: &[u8]) -> Option<BatchGap> {
         let entry = self.slots.entry(slot).or_default();
         let Ok(batch) = SightingBatch::decode(body) else {
             entry.undecodable += 1;
-            return;
+            return None;
         };
+        let mut lost = None;
         let copy = entry.last_seq == Some(batch.seq)
             && entry.last_batch.as_ref().is_some_and(|(bytes, at)| {
                 bytes.as_slice() == body && u64::from(rx_us.wrapping_sub(*at)) < DUPLICATE_WINDOW_US
@@ -122,11 +135,13 @@ impl Batches {
                 } else if gap > 0 {
                     entry.lost += u64::from(gap);
                     entry.gaps += 1;
+                    lost = Some(BatchGap { last_seq: last, seq: batch.seq, lost: gap });
                 }
             }
             entry.last_seq = Some(batch.seq);
         }
         entry.last_batch = Some((body.to_vec(), rx_us));
+        lost
     }
 
     /// One slot's tally.
@@ -214,6 +229,17 @@ mod tests {
         let batches = fed([1, 2, 5, 6, 8]);
         let tally = batches.slot(slot()).unwrap();
         assert_eq!((tally.batches, tally.lost, tally.gaps), (5, 3, 2));
+    }
+
+    #[test]
+    fn batches_reports_gap_when_seq_skips() {
+        let mut batches = Batches::default();
+        assert_eq!(batches.take(slot(), 0, &batch(41, 1)), None);
+        assert_eq!(
+            batches.take(slot(), 3_000_000, &batch(44, 2)),
+            Some(BatchGap { last_seq: 41, seq: 44, lost: 2 })
+        );
+        assert_eq!(batches.take(slot(), 6_000_000, &batch(45, 3)), None);
     }
 
     #[test]

@@ -5,7 +5,8 @@
 //! and what the load generator's seq and CRC say was lost or damaged. [`Rtt`] times `GetStatus`
 //! one at a time, [`Beats`] tallies node heartbeats per slot, and [`Batches`] sighting batches and
 //! their losses. [`Reconcile`] sets the run's seq gaps against what the P4 says it dropped, and
-//! [`bridge`] the P4's own counters across the run. `main.rs` owns the radio.
+//! [`bridge`] the P4's own counters across the run. [`events`] stamps what happened, as it
+//! happened. `main.rs` owns the radio.
 
 use wartui_proto::link::{HostToBridge, MAX_HOST_FRAME, encode_host_frame};
 
@@ -13,13 +14,15 @@ pub mod attachment;
 pub mod batches;
 pub mod beats;
 pub mod bridge;
+pub mod events;
 pub mod reconcile;
 pub mod rtt;
 
 pub use attachment::{Attachment, AttachmentSummary, Rates, Seen, SeqCheck, SeqGap};
-pub use batches::{Batches, SlotBatches};
-pub use beats::{Beats, SlotBeats};
+pub use batches::{BatchGap, Batches, SlotBatches};
+pub use beats::{BeatGap, Beats, SlotBeats};
 pub use bridge::{CounterDelta, FleetSummary};
+pub use events::{Event, EventKind};
 pub use reconcile::Reconcile;
 pub use rtt::{Rtt, RttSummary, StatusAsk};
 

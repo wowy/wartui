@@ -19,6 +19,7 @@ all = { level = "deny", priority = -1 }
 [dependencies]
 anyhow = "1.0.104"
 btleplug = "0.13.5"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
 # btleplug's BlueZ backend links libdbus. Vendored, so the build needs no `dbus-devel`.
 dbus = { version = "0.9.12", features = ["vendored"] }

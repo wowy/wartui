@@ -45,3 +45,16 @@ The first attachment asks for a `Status` before anything else, and the last asks
 time is up, or on Ctrl-C, and waits up to 10 s for it before stopping the load and the scan. The run
 prints each node bus, radio link, drop and queue counter as `name first -> last (+delta)`, and the
 last `Fleet` report's members. `--json` carries all of it.
+
+`run` also prints each event as it happens, on a line starting `# event `, and `--json` lists them
+under `events`. Each carries the local time, the attachment and seconds since it started, and the
+P4's `rx_us` where the record has one:
+
+| Event | When |
+|---|---|
+| heartbeat spacing | a slot's beats spaced past 1.5 assigned beats, with ~missed (inferred from timing) |
+| sightings seq | a slot's batch `seq` skipped, with the batches lost |
+| spike stats | a `radio_link` error, `evicted`, `refused` or `ble.dropped_*` counter rose since the last `SpikeStats` |
+| load seq | `SpikeLoad` seqs that never arrived |
+| fleet | each `Fleet` report: mode, members and their epochs |
+| log, error | each bridge `Log` or `Error` |

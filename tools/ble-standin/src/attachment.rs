@@ -5,7 +5,8 @@
 //! `SpikeLoad` is not seq 0, read a backlog from before it attached. Within one, a seq that skips
 //! is records lost between the generator and here: evicted from the P4's host rings, refused by
 //! them, or lost on the way. Notifications split frames anywhere, so bytes go through a
-//! [`FrameAccumulator`] exactly as a serial port's do.
+//! [`FrameAccumulator`] exactly as a serial port's do. Each gap, counter rise, `Fleet` report and
+//! bridge message comes back from [`Attachment::feed`] as an event for `main` to stamp.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -19,14 +20,26 @@ use wartui_proto::spike::{SpikeStats, body_checks};
 use crate::batches::{Batches, SlotBatches};
 use crate::beats::{Beats, SlotBeats};
 use crate::bridge::{self, Counters, FleetSummary};
+use crate::events::{self, EventKind};
 
 /// Something `main` acts on as it decodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
     /// A `Status`, which answers a `GetStatus`.
     Status,
-    /// A `Log` or an `Error`, as a line to print.
-    Message(String),
+    /// Something to log, with the P4's `rx_us` where the record carries one.
+    Event {
+        /// The record's `rx_us`.
+        rx_us: Option<u32>,
+        /// What happened.
+        kind: EventKind,
+    },
+}
+
+impl Seen {
+    const fn event(kind: EventKind) -> Self {
+        Self::Event { rx_us: None, kind }
+    }
 }
 
 /// A run of seqs that never arrived, both ends included.
@@ -58,24 +71,28 @@ pub struct SeqCheck {
 }
 
 impl SeqCheck {
-    fn take(&mut self, seq: u32, body: &[u8]) {
+    /// Take one record, and the gap before it if its seq skipped.
+    fn take(&mut self, seq: u32, body: &[u8]) -> Option<SeqGap> {
         self.records += 1;
         if !body_checks(body) {
             self.crc_failures += 1;
         }
         self.first.get_or_insert(seq);
+        let mut gap = None;
         if let Some(last) = self.last {
             let next = last.wrapping_add(1);
             if seq > next {
-                self.gaps.push(SeqGap { from: next, to: seq - 1 });
+                gap = Some(SeqGap { from: next, to: seq - 1 });
+                self.gaps.extend(gap);
                 self.missing += u64::from(seq - next);
             } else if seq < next {
                 // A repeat or a straggler: the high-water mark stands.
                 self.backwards += 1;
-                return;
+                return None;
             }
         }
         self.last = Some(seq);
+        gap
     }
 }
 
@@ -163,6 +180,7 @@ impl Attachment {
     }
 
     fn take(&mut self, msg: BridgeToHost, seen: &mut Vec<Seen>) {
+        let board = self.board.unwrap_or(NodeBoard::NoCarrier);
         let name = variant(&msg);
         self.frames += 1;
         *self.by_variant.entry(name).or_default() += 1;
@@ -177,19 +195,38 @@ impl Attachment {
                 self.last_status = counters;
                 seen.push(Seen::Status);
             }
-            BridgeToHost::Fleet(report) => self.fleet = Some(report),
-            BridgeToHost::Log { message } => seen.push(Seen::Message(format!("# log: {message}"))),
-            BridgeToHost::Error { message } => {
-                seen.push(Seen::Message(format!("# error: {message}")));
+            BridgeToHost::Fleet(report) => {
+                seen.push(Seen::event(EventKind::Fleet(FleetSummary::of(&report, board))));
+                self.fleet = Some(report);
             }
-            BridgeToHost::SpikeLoad { seq, body } => self.seq.take(seq, &body),
+            BridgeToHost::Log { message } => {
+                seen.push(Seen::event(EventKind::Log { message: message.to_string() }));
+            }
+            BridgeToHost::Error { message } => {
+                seen.push(Seen::event(EventKind::Error { message: message.to_string() }));
+            }
+            BridgeToHost::SpikeLoad { seq, body } => {
+                if let Some(gap) = self.seq.take(seq, &body) {
+                    seen.push(Seen::event(EventKind::LoadGap(gap)));
+                }
+            }
             BridgeToHost::SpikeStats(stats) => {
+                if let Some(prev) = &self.last_stats {
+                    seen.extend(events::rises(prev, &stats).into_iter().map(Seen::event));
+                }
                 self.first_stats.get_or_insert(stats);
                 self.last_stats = Some(stats);
             }
             BridgeToHost::FromNode { slot, rx_us, kind, body } => match UpType::from_u8(kind) {
                 Some(UpType::Heartbeat) => {
-                    self.beats.take(slot, rx_us, &body);
+                    if let Some(gap) = self.beats.take(slot, rx_us, &body) {
+                        let kind = EventKind::BeatGap {
+                            slot: board.label(slot).to_string(),
+                            spacing_ms: gap.spacing_ms,
+                            missed: gap.missed,
+                        };
+                        seen.push(Seen::Event { rx_us: Some(rx_us), kind });
+                    }
                     if let Ok(heartbeat) = Heartbeat::decode(&body) {
                         let share = self
                             .fleet
@@ -199,7 +236,17 @@ impl Attachment {
                         self.batches.heartbeat(slot, &heartbeat, share);
                     }
                 }
-                Some(UpType::Sightings) => self.batches.take(slot, rx_us, &body),
+                Some(UpType::Sightings) => {
+                    if let Some(gap) = self.batches.take(slot, rx_us, &body) {
+                        let kind = EventKind::BatchGap {
+                            slot: board.label(slot).to_string(),
+                            last_seq: gap.last_seq,
+                            seq: gap.seq,
+                            lost: gap.lost,
+                        };
+                        seen.push(Seen::Event { rx_us: Some(rx_us), kind });
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -496,9 +543,40 @@ mod tests {
             members: Default::default(),
         };
         let log = BridgeToHost::Log { message: "hello".try_into().unwrap() };
+        let error = BridgeToHost::Error { message: "oops".try_into().unwrap() };
         let mut attachment = Attachment::new(Instant::now());
-        let seen = attachment.feed(&stream(&[ready(), status, log]));
-        assert_eq!(seen, [Seen::Status, Seen::Message("# log: hello".to_owned())]);
+        let seen = attachment.feed(&stream(&[ready(), status, log, error]));
+        assert_eq!(
+            seen,
+            [
+                Seen::Status,
+                Seen::event(EventKind::Log { message: "hello".to_owned() }),
+                Seen::event(EventKind::Error { message: "oops".to_owned() }),
+            ]
+        );
+    }
+
+    #[test]
+    fn standin_reports_load_gap_and_counter_rise_when_decoded() {
+        let stats = |radio_crc_fail| {
+            BridgeToHost::SpikeStats(SpikeStats {
+                radio_link: wartui_proto::link::RadioLinkStats {
+                    radio_crc_fail,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+        let msgs = [ready(), stats(5), load(0), load(3), stats(5), stats(8)];
+        let mut attachment = Attachment::new(Instant::now());
+        let seen = attachment.feed(&stream(&msgs));
+        assert_eq!(
+            seen,
+            [
+                Seen::event(EventKind::LoadGap(SeqGap { from: 1, to: 2 })),
+                Seen::event(EventKind::CounterRise { name: "radio_link.radio_crc_fail", delta: 3 }),
+            ]
+        );
     }
 
     #[test]
@@ -535,8 +613,15 @@ mod tests {
                 body: body.as_slice().try_into().unwrap(),
             }
         };
-        let attachment =
-            fed(&stream(&[ready(), beat(0, 1), beat(5_000_000, 7), beat(20_000_000, 30)]), 13);
+        let mut attachment = Attachment::new(Instant::now());
+        let seen = attachment.feed(&stream(&[
+            ready(),
+            beat(0, 1),
+            beat(5_000_000, 7),
+            beat(20_000_000, 30),
+        ]));
+        let gap = EventKind::BeatGap { slot: "N8".to_owned(), spacing_ms: 15_000, missed: 2 };
+        assert_eq!(seen, [Seen::Event { rx_us: Some(20_000_000), kind: gap }]);
         let tally = attachment.beats().slot(slot).unwrap();
         assert_eq!((tally.beats, tally.missed), (3, 2));
         let summary = attachment.summary(Instant::now());
@@ -608,7 +693,19 @@ mod tests {
             sightings(6_000_000, 0),
             sightings(7_000_000, 1),
         ];
-        let attachment = fed(&stream(&msgs), 17);
+        let mut attachment = Attachment::new(Instant::now());
+        let seen = attachment.feed(&stream(&msgs));
+        let gaps: Vec<_> = seen
+            .iter()
+            .filter_map(|s| match s {
+                Seen::Event { rx_us, kind: EventKind::BatchGap { slot, lost, .. } } => {
+                    Some((*rx_us, slot.as_str(), *lost))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gaps, [(Some(3_000), "N1", 3)]);
+        assert!(matches!(&seen[0], Seen::Event { kind: EventKind::Fleet(_), .. }));
         let tally = attachment.batches().slot(slot).unwrap();
         assert_eq!((tally.batches, tally.lost, tally.gaps, tally.restarts), (5, 3, 1, 1));
         let summary = attachment.summary(Instant::now());
