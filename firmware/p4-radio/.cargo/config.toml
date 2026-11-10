@@ -16,7 +16,10 @@ rustflags = [
 runner = "espflash flash --before no-reset --after no-reset --partition-table partitions.csv --erase-parts otadata --flash-mode dio --flash-freq 40mhz --flash-size 4mb"
 
 [env]
-# TrouBLE's packet pool: an L2CAP PDU of 521 bytes carries the largest ATT MTU, 517, which
-# leaves 514 bytes of host stream in each notification. The pool's 16 packets are 8.3 KB of
-# static RAM. Read by `trouble-host`'s build script.
-TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "521"
+# TrouBLE's packet pool: an L2CAP PDU of 251 bytes, an ATT MTU of 247, so every notification
+# fits one ACL packet at data length 251 and is never fragmented. esp-radio 1.0.0-beta.1 zeroes
+# the high byte of every outgoing ACL header (`ble/npl.rs`, `send_packet`), which forces each
+# fragment's packet-boundary flag to "start": a central drops the continuation fragments
+# (Linux logs `Unexpected start frame`) and a fragmented notification never arrives. At ATT MTU
+# 517 that stalled the stream within 2 s. Read by `trouble-host`'s build script.
+TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "251"
