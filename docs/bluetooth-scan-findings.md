@@ -49,9 +49,9 @@ ESP-NOW's init kept the radio awake, by accident.
 ## The fix
 
 The node builds its `ControllerConfig` with `with_sta_disconnected_pm(false)`
-(`firmware/node/src/main.rs`). The scanner returns a refused command as an error, and the node's
-console prints `ble: no advertising events in N scans` on the first silent scan and every tenth
-after it, so a silent scan is visible without a bench image. `firmware/node/README.md` § "Bench
+(`firmware/node/src/main.rs`). The node's console names a command the controller refuses and scans
+anyway, and prints `ble: no advertising events in N scans` after every ten silent scans in a row,
+so a silent scan is visible without a bench image. `firmware/node/README.md` § "Bench
 check" is the check to run on a fleet before a change to the radio start-up lands.
 
 ## On the carrier

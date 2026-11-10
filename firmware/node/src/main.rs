@@ -353,21 +353,24 @@ fn main() -> ! {
 
     // Brought up before the loop rather than on demand: initializing a radio
     // between two dwells is the kind of surprise to avoid.
+    //
+    // The bridge cannot see either outcome below: capabilities carry no Bluetooth bit, so
+    // they are facts only this node's own console knows. A controller that would not start
+    // leaves the node sniffing Wi-Fi as normal, and idling if handed the scan anyway. A
+    // refused command may be transient, so the node keeps the scanner and scans anyway.
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
-        Ok(scanner) => Some(SCANNER.init(scanner)),
-        // The bridge cannot see either: capabilities carry no Bluetooth bit, so a
-        // controller that would not start is a fact only this node's own console
-        // knows. It sniffs Wi-Fi as normal, and idles if handed the scan anyway.
-        Err(ble::StartError::Controller) => {
-            note!("bluetooth controller would not start; sniffing Wi-Fi only");
-            None
+        Some(scanner) => {
+            if let Some(refusal) = scanner.start_refusal() {
+                note!(
+                    "bluetooth controller refused command {:#06X} with status {:#04X}; scanning anyway",
+                    refusal.opcode,
+                    refusal.status
+                );
+            }
+            Some(SCANNER.init(scanner))
         }
-        Err(ble::StartError::Refused { opcode, status }) => {
-            note!(
-                "bluetooth controller refused command {:#06X} with status {:#04X}; sniffing Wi-Fi only",
-                opcode,
-                status
-            );
+        None => {
+            note!("bluetooth controller would not start; sniffing Wi-Fi only");
             None
         }
     };
@@ -700,10 +703,28 @@ fn report_ble(node: &mut Node, scanner: &mut ble::Scanner<'_>) {
             node.unacked
         );
     }
-    // The first silent scan, then about every five seconds of silence: a controller
-    // whose radio sleeps succeeds at every command and says nothing else.
-    if sweep.silent == 1 || (sweep.silent > 0 && sweep.silent.is_multiple_of(10)) {
-        note!("ble: no advertising events in {} scans", sweep.silent);
+    if sweep.newly_refused
+        && let Some(refusal) = sweep.refused
+    {
+        note!(
+            "ble: controller refused command {:#06X} with status {:#04X}",
+            refusal.opcode,
+            refusal.status
+        );
+    }
+    // Ten silent scans in a row, about five seconds: a controller whose radio sleeps
+    // succeeds at every command and says nothing else. A sparse room hears nothing in
+    // the odd scan, which is no reason to say so.
+    if sweep.silent > 0 && sweep.silent.is_multiple_of(10) {
+        match sweep.refused {
+            Some(refusal) => note!(
+                "ble: no advertising events in {} scans; controller refused command {:#06X} with status {:#04X}",
+                sweep.silent,
+                refusal.opcode,
+                refusal.status
+            ),
+            None => note!("ble: no advertising events in {} scans", sweep.silent),
+        }
     }
 }
 

@@ -280,8 +280,9 @@ hears nothing. `src/main.rs` turns disconnected power management off for that re
 The controller comes up at boot on every build. Initializing a radio between two dwells is exactly
 the kind of surprise this firmware exists to avoid. It is initialized and never
 enabled: `HCI_LE_Set_Scan_Enable` is only ever sent from inside a scan. If the controller won't
-start, or refuses a command, a node handed the scan idles, sniffs nothing, and says so on its own
-console. The host can't tell, since capabilities carry no Bluetooth bit to withhold.
+start, a node handed the scan idles, sniffs nothing, and says so on its own console. The host can't
+tell, since capabilities carry no Bluetooth bit to withhold. A controller that refuses a command is
+named on the console, and the node scans anyway.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe. This firmware wants
 only an address, a signal strength, and a manufacturer identifier when an advertiser offers one. So
@@ -337,7 +338,8 @@ wartui scan stop
 ```
 
 Expect `ble` sightings from the slot `status` named, beside `wifi` sightings from the others. A
-silent holder prints `ble: no advertising events in N scans` on its own console.
+holder that hears nothing in ten scans in a row prints `ble: no advertising events in N scans` on
+its own console.
 
 ## Two things that are easy to get wrong
 

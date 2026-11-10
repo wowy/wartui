@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "wartui-node-fw"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "esp-alloc",
  "esp-bootloader-esp-idf",

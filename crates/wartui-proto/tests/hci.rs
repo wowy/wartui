@@ -222,9 +222,9 @@ fn hci_command_complete_returns_none_when_packet_is_truncated() {
 }
 
 #[test]
-fn hci_command_complete_names_no_command_when_controller_announces_itself() {
+fn hci_command_complete_returns_none_when_controller_announces_itself() {
     // At start-up the controller sends a Command Complete with opcode 0x0000 and no
     // return parameters, only to say how many commands it takes. It answers nothing.
     let answer = command_complete(&[0x04, 0x0E, 0x03, 0x01, 0x00, 0x00]);
-    assert!(matches!(answer, None | Some((0, _))), "{answer:?}");
+    assert_eq!(answer, None);
 }
