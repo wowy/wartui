@@ -53,7 +53,6 @@ bt-hci = { version = "0.10.1", default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 trouble-host = { version = "0.8.0", default-features = false, features = [
-  "connection-params-update",
   "default-packet-pool",
   "derive",
   "gatt",

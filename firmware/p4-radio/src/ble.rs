@@ -464,11 +464,11 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
             Err(err) => shared.log(format_args!("Bluetooth interval not requested: {err:?}")),
         }
     }
-    select(events(stack, conn, server, shared), notify(conn, server, shared)).await;
+    select(events(conn, server, shared), notify(conn, server, shared)).await;
 }
 
 /// Handle the connection's events until it ends.
-async fn events(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
+async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
     let ble = &shared.ble;
     loop {
         ble.count(|c| c.events_phase = EVENTS_NEXT);
@@ -493,11 +493,12 @@ async fn events(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, 
                 }
                 set_state(shared, |state| state.interval_us = us as u32);
             }
-            GattConnectionEvent::RequestConnectionParams(request) => {
-                if let Err(err) = request.accept(None, stack).await {
-                    shared.log(format_args!("Bluetooth parameter request failed: {err:?}"));
-                }
-            }
+            // Never raised: without trouble-host's `connection-params-update` the controller
+            // keeps the remote parameter request event masked and answers a central's
+            // LL_CONNECTION_PARAM_REQ itself. Accepting it through bt-hci 0.10.1 panics: its
+            // LE Remote Connection Parameter Request Reply declares no return, and the
+            // controller returns the connection handle.
+            GattConnectionEvent::RequestConnectionParams(_) => {}
             GattConnectionEvent::Gatt { event } => {
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
