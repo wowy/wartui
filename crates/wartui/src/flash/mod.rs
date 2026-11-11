@@ -622,7 +622,7 @@ mod testing {
     use super::Ran;
 
     pub(super) const BRIDGE_MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
-    pub(super) const NODE_MAC: Mac = [0x3C, 0xDC, 0x75, 0x84, 0xA1, 0xB0];
+    pub(super) const NODE_MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0xA1, 0xB0];
 
     /// The first 24 bytes `espflash save-image --merge` wrote for each chip, from one ELF.
     pub(super) const C6_HEADER: [u8; 24] = [
@@ -648,7 +648,7 @@ Chip type:         esp32c5 (revision v0.1)
 Crystal frequency: 48 MHz
 Flash size:        8MB
 Features:          WiFi 6, BT 5, IEEE802.15.4
-MAC address:       3c:dc:75:84:a1:b0
+MAC address:       02:00:5e:10:a1:b0
 
 Security Information:
 =====================
@@ -721,7 +721,7 @@ mod tests {
     fn flash_returns_none_when_board_info_is_garbage() {
         assert_eq!(parse_board_info("Error: espflash::connection_failed\n  x timed out"), None);
         assert_eq!(parse_board_info("Chip type:         esp32c5 (revision v0.1)"), None);
-        assert_eq!(parse_board_info("MAC address:       3c:dc:75:84:a1:b0"), None);
+        assert_eq!(parse_board_info("MAC address:       02:00:5e:10:a1:b0"), None);
     }
 
     #[test]

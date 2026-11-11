@@ -54,8 +54,8 @@ serial log was read beside it. Three runs:
 | `10:D0` given the Bluetooth scan | 3.5 min | 86 | 0 | 0 | equal on every node; 105 of 105 on `10:D0` |
 | bridge unplugged for 137 s | 4 min | 96 | 0 | 65 during the outage | equal, or one more stored |
 
-- Every node logged `core is now 10:BD:A3:CC:0A:28` with its first assignment. A later
-  run against the same bridge logged no new core and re-sent nothing, as it should.
+- Every node logged `0A:28` as its core with its first assignment. A later run against the same
+  bridge logged no new core and re-sent nothing, as it should.
 - The Bluetooth node's acks arrive. It sent 185 scan reports and 40 batches straight
   after its scans, and none went unacknowledged.
 - An absent bridge costs the sweep nothing measurable. The heartbeat counter still

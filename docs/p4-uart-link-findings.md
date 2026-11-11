@@ -1,9 +1,8 @@
 # P4 ↔ C6 UART link — what UART1 through UHCI carries
 
-Measured on 2026-11-05 on Linux, on a Waveshare ESP32-P4-WIFI6: an ESP32-P4 rev v3.2
-(`E8:F6:0A:E8:1A:D1`) and its on-board ESP32-C6 (`98:A3:16:81:96:C4`, `96:C4`). The question was
-whether the board's SDIO traces carry the bridge's link as a UART with DMA, at what rate, and
-whether it holds under real and burst load.
+Measured on 2026-11-05 on Linux, on a Waveshare ESP32-P4-WIFI6: an ESP32-P4 rev v3.2 (`1A:D1`)
+and its on-board ESP32-C6 (`96:C4`). The question was whether the board's SDIO traces carry the
+bridge's link as a UART with DMA, at what rate, and whether it holds under real and burst load.
 
 The firmware is `1b77fd1` (transport) and `3f77492` (rename). The nodes are the C5s `F5:50` and
 `4F:98`, on firmware 0.3.0.

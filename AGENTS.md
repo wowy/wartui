@@ -482,6 +482,10 @@ edit stops; follow the pointer before changing the rule.
   They never give part numbers, component values, the power circuit, the layout or dimensions.
   The lid fan's model, a Noctua NF-A6x15 5V PWM, may be named: it is the operator's fan, plugged
   into the header, not a part of the board.
+- **No full real MAC address** in docs, comments, tests, commit messages or PRs, quoted output
+  included. Name a board by its last two octets (`96:C4`), the form `--bridge` takes, and shorten
+  a quoted line to them (`…:6A:4C on Esp32S3`). Where a whole address is needed, as in a test, use
+  a locally administered one (`02:00:5E:10:44:C0`). Broadcast is fine.
 - Use American spellings at all times: in prose, doc comments, identifiers, test names and
   commit messages (`meters`, `behavior`, `color`, `recognize`).
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the
