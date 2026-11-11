@@ -250,6 +250,33 @@ the C6's own receive, so the link's frozen wire stays as it is.
 - **`main`'s C6 receives the same way the previous build did,** re-arming after every read. Its
   P4 → C6 traffic is small, apart from updates.
 
+## Run 13 — the P4's host receive does not lose the byte (D0:1C)
+
+The P4 reads the host's UART0 the way the C6 used to read its link: two DMA buffers, the next read
+armed as each one ends (`firmware/p4-bridge/src/host.rs`). D0:1C ran `main` (`56af2ae`), with no
+firmware change. A program on the PC sent `GetStatus` one frame at a time through the CH343 and
+waited for each `Status`, so a frame that lost a byte would go unanswered. Most frames were written
+in two parts:
+
+- the last byte alone, 2 ms or 20 ms after the rest had drained, far past the idle that ends a
+  read, so the terminator had a read of its own (inferred: the PC cannot see the P4's reads)
+- the last byte after a gap of 0 to 2 ms, which USB timing scatters around the moment the P4 arms
+  its next read
+- the last 2 or 3 bytes after 2 ms, and whole frames, for comparison
+
+| Arm | Frames | Answered | Split before the terminator |
+| --- | --- | --- | --- |
+| nodes scanning, 10 min | 63,691 | 63,691 | 49,539 |
+| nodes idle, 10 min | 65,417 | 65,417 | 50,881 |
+
+- **No frame lost a byte,** in any split. `host_uart_errors` stayed 0, nothing came back garbled,
+  and the slowest answer took 3 ms.
+- **So the loss is the C6's, not the pattern's.** The same re-arm on the P4's own UHCI and DMA
+  keeps a lone terminator. Why the two chips differ was not found. This agrees with the 2026-11-05
+  host link bench, whose 17,164 reads at 4 Mbaud lost no frame (`docs/p4-host-uart-findings.md`).
+- The P4 still loses host bytes while it erases or writes its own flash, as that bench found. That
+  is interrupts held off, not the re-arm.
+
 ## Against the pass criteria
 
 | Criterion | Result |
@@ -312,11 +339,14 @@ Four design points the spike leaves for production:
 - The first D0:1C arm's lost batches came from a port probe aimed at the other bridge, not the bus.
 - Each P4 → C6 packet lost on D0:1C is a terminator the C6 drops when the P4 pauses one byte short
   of a packet's end, and a C6 receive that never re-arms loses none.
+- The P4's host receive, re-armed the same way, keeps a terminator that arrives alone, so it
+  needs no such change.
 
 It does not settle:
 
 - **Which step of the re-arm drops the byte,** the channel reset or the one-byte read that should
-  follow. The stream receive avoids both, so it does not matter for the fix.
+  follow, and why the P4 keeps it (run 13). The stream receive avoids both, so it does not matter
+  for the fix.
 - **Why the old receive held Bluetooth throughput at a third.**
 - **Phone throughput on the stream receive.** Runs 3 to 10 were all on the old one.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
