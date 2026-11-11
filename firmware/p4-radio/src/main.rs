@@ -7,7 +7,7 @@
 //!
 //! Updates arrive from the P4 over the link and boot on trial, through
 //! [`wartui_firmware::ota`], the flash code a node uses. The link's futures share one task, and
-//! each waits on an interrupt, a signal or a timer rather than polling.
+//! each waits on a signal or a timer between looks, so neither spins.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -26,7 +26,7 @@ use core::cell::RefCell;
 
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
-use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
+use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaTxBuf, descriptor_count};
 use esp_hal::gpio::{Input, InputConfig};
 use esp_hal::time::Instant;
 use esp_hal::timer::timg::TimerGroup;
@@ -48,7 +48,7 @@ use wartui_proto::radio_link::{
     WIRE_MAX,
 };
 
-use crate::link::{Bus, Link, Shared, UpQueue, Updates, link_loop};
+use crate::link::{Bus, Link, RX_CHUNK, RX_STREAM_LEN, Shared, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -143,6 +143,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     .with_rx(peripherals.GPIO18)
     .with_rts(peripherals.GPIO21)
     .with_cts(peripherals.GPIO19);
+    // `src/link.rs`, `RX_DMA_CHANNEL`, names this channel to read its stop.
     let mut uhci = Uhci::new(uart, peripherals.UHCI0, peripherals.DMA_CH0);
     uhci.apply_rx_config(&uhci::RxConfig::default().with_chunk_limit(RX_BUF_LEN as u16))
         .expect("UHCI read limit");
@@ -153,7 +154,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bus = Bus {
         rx,
         tx,
-        rx_bufs: [dma_buf!(DmaRxBuf, RX_BUF_LEN), dma_buf!(DmaRxBuf, RX_BUF_LEN)],
+        rx_buf: esp_hal::dma_rx_stream_buffer!(RX_STREAM_LEN, RX_CHUNK),
         tx_buf: dma_buf!(DmaTxBuf, WIRE_MAX),
         reader: READER.take(),
         body: BODY.take(),

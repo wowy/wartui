@@ -59,7 +59,7 @@ pub const FIFO_FULL_THRESHOLD: u16 = 64;
 /// RX FIFO bytes at which RTS tells the sender to hold. The FIFO holds 128, which leaves room
 /// for what the sender has already started.
 pub const RTS_THRESHOLD: u8 = 96;
-/// Bytes in each receive DMA buffer. A read ends at this many bytes or when the line goes idle,
+/// The longest receive DMA read: a read ends at this many bytes or when the line goes idle,
 /// and the hardware's limit is 4095. A multiple of the P4's 64-byte cache line.
 pub const RX_BUF_LEN: usize = 4032;
 /// How often the C6 sends its hello until it hears the P4's.
