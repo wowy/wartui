@@ -186,6 +186,31 @@ mid-burst.
 | 5. Attach and detach | Met for clean detaches and a supervision timeout |
 | 6. No starvation | Met: Bluetooth load cost the node bus nothing |
 
+## Workarounds a production build needs
+
+Each one cost a hardware run to find. The spike commit that applies it is named, so its diff is
+the recipe.
+
+| Workaround | Why | Where on `spike/c6-ble-host` | Drop it when |
+| --- | --- | --- | --- |
+| Cap TrouBLE's packet pool at 251 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "251"`, ATT MTU 247), and ask for data length 251 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start; any notification longer than one ACL packet is dropped by the central and the stream stalls | `8b40dd5`, `firmware/p4-radio/.cargo/config.toml` | esp-radio's `send_packet` (`ble/npl.rs`) stops zeroing the ACL header's high byte |
+| Leave `trouble-host`'s `connection-params-update` feature off | bt-hci 0.10.1 declares no return for LE Remote Connection Parameter Request Reply and Negative Reply; a central's LL_CONNECTION_PARAM_REQ (every Android phone tested) panics the C6 | `02b12ca` | bt-hci declares `Return = ConnHandle` for opcodes 0x2020 and 0x2021, in a release `trouble-host` accepts |
+| Ask for a connection interval through `update_connection_params`, which goes out as an L2CAP request without that feature | the feature above is what TrouBLE would use for the link-layer procedure | `0473202` | as above |
+| A phone app requests an MTU after connecting | Android stays at MTU 23 until the app asks: 20 bytes a notification, ~6.8 KB/s on the Pixel 8 | — | never: it is how Android works |
+| A phone app starts each write to Down with a `0x00` | a frame that arrives without its terminator merges with the next, and both are lost; a leading `0x00` ends any partial frame first | — | never: it costs one byte |
+| Keep the C6's last panic text in persistent RTC memory and report it at the next boot | the panic handler only reboots, and nothing else on the board records why; without it the bt-hci panic needed a serial adapter on header H4 | `889585c`, `firmware/p4-radio/src/last_panic.rs` | never: it is cheap and the only record |
+| Run the C6 on `trouble-host` 0.8.0 directly over `BleConnector` | esp-radio already implements `bt-hci-transport` 0.1's `Transport`, which `bt-hci` 0.10 re-exports; no byte adapter, no patch | `f8994d9` | — |
+
+Two design points the spike leaves for production:
+
+- **A lost P4 → C6 packet is not recovered.** `HostQueue::fill` splits frames across packets, so a
+  lost `Down::HostBytes` garbles the frame it cuts, and its bytes are never credited, so the credit
+  window shrinks by their size for the rest of the connection. Run 10 lost 6 such packets in 50
+  minutes. A production link needs either a resend or a credit that resynchronizes.
+- **Benchmarks against BlueZ need its cache cleared.** After the C6 requested 15 ms once, later
+  connections to the same address came up at 15 ms on an image that requests nothing (inferred,
+  not confirmed). Remove the device in `bluetoothctl` before comparing intervals.
+
 ## What this settles
 
 - A phone can be the wartui host through the C6 without touching the radio link's frozen core,
