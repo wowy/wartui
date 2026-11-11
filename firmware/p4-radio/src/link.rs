@@ -1,15 +1,17 @@
 //! The C6's end of the UART link to the P4: what each packet carries up, and what the C6
 //! does with what comes down.
 //!
-//! `wartui_proto::radio_link` has the framing. The link is two futures, and nothing ticks: the
-//! reader wakes when a DMA read ends, and the writer when [`Shared`]'s `wake` says there may be
+//! `wartui_proto::radio_link` has the framing. The link is two futures: the reader polls the
+//! receive DMA every [`RX_POLL`], and the writer wakes when [`Shared`]'s `wake` says there may be
 //! something to send. The writer loops until it has nothing left before it waits, so a record
 //! left held or queued never waits for a new signal. They share [`Link`] through a `RefCell`, with nothing borrowed across an `.await`.
 //!
-//! **A read ends at `RX_BUF_LEN` bytes or when the line goes idle.** The next read is armed
-//! before this one's bytes are looked at, which is why there are two buffers: DMA keeps
-//! landing while the C6 works, and a flash erase holds the CPU but not the DMA. Only the moment
-//! between two reads leans on the 128-byte FIFO, with RTS behind it.
+//! **The receive is one DMA transfer for the life of the link**, over a ring of descriptors
+//! ([`RX_STREAM_LEN`] bytes in [`RX_CHUNK`]-byte chunks). An idle line or `RX_BUF_LEN` bytes
+//! ends a "read": the UHCI EOF closes the descriptor it lands in. The reader takes closed
+//! descriptors every [`RX_POLL`] and hands each back at once, so the channel is never stopped or
+//! reset between packets, and a flash erase holds the CPU but not the DMA. Only a DMA that runs
+//! out of descriptors is restarted, which can lose a byte.
 //!
 //! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
 //! the UART, and the flush ends in a spin that does not yield until the transmitter is idle, so a
@@ -54,7 +56,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_hal::Async;
-use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+use esp_hal::dma::{DmaRxStreamBuf, DmaTxBuf};
+use esp_hal::peripherals::{DMA, UART1};
 use esp_hal::time::Instant;
 use esp_hal::uart::uhci::{UhciRx, UhciTx};
 use wartui_firmware::ota::{Note, Ota};
@@ -92,6 +95,20 @@ const HELLO_EVERY: Duration = Duration::from_millis(HELLO_EVERY_MS);
 
 /// How often the C6 sends the P4 its Bluetooth counters.
 const BLE_STATS_EVERY: Duration = Duration::from_secs(2);
+
+/// Bytes in the receive stream.
+pub const RX_STREAM_LEN: usize = 8192;
+
+/// Bytes in each of the receive stream's descriptors. Each EOF closes a descriptor however few
+/// bytes it holds, so the descriptor count, 32, bounds how many packets can land between two
+/// polls.
+pub const RX_CHUNK: usize = 256;
+
+/// How often the reader looks for closed receive descriptors.
+const RX_POLL: Duration = Duration::from_micros(250);
+
+/// The GDMA channel `main.rs` hands UHCI, `DMA_CH0`. The driver does not expose the number.
+const RX_DMA_CHANNEL: usize = 0;
 
 /// The ring of encoded [`Up`] records waiting for a packet.
 pub type UpQueue = RefCell<FrameRing<UP_QUEUE_BYTES>>;
@@ -172,7 +189,7 @@ pub struct Updates {
 pub struct Bus<'d> {
     pub rx: UhciRx<'d, Async>,
     pub tx: UhciTx<'d, Async>,
-    pub rx_bufs: [DmaRxBuf; 2],
+    pub rx_buf: DmaRxStreamBuf,
     pub tx_buf: DmaTxBuf,
     pub reader: &'static mut PacketReader,
     /// Where a packet's body is built, before it is encoded into `tx_buf`.
@@ -196,11 +213,6 @@ struct ReadEnd {
 impl ReadEnd {
     /// Before the first read: no bytes.
     const NONE: Self = Self { len: 0, last: 0 };
-
-    /// How `bytes`, a read's, ended, or `None` when it is empty.
-    fn of(bytes: &[u8]) -> Option<Self> {
-        bytes.last().map(|&last| Self { len: bytes.len(), last })
-    }
 }
 
 /// Where a DMA read's bytes began inside a frame, and how the read before it ended.
@@ -295,6 +307,8 @@ pub struct Link {
     /// which ended part-way through a packet.
     reads: u32,
     mid_packet_ends: u32,
+    /// Times the receive DMA ran out of descriptors and was restarted.
+    rx_restarts: u32,
     /// A record from the ring that did not fit the last packet. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
     held: &'static mut Held,
@@ -327,6 +341,7 @@ impl Link {
             undecoded_said: 0,
             reads: 0,
             mid_packet_ends: 0,
+            rx_restarts: 0,
             held,
             updates,
         }
@@ -435,7 +450,21 @@ impl Link {
         let head = &bytes[..bytes.len().min(EDGE)];
         let tail = &bytes[bytes.len().saturating_sub(EDGE)..];
         shared.error(format_args!("head {} tail {}", Hex(head), Hex(tail)));
-        shared.error(format_args!("{}, mid {}/{}", Splits(raw), self.mid_packet_ends, self.reads));
+        shared.error(format_args!(
+            "{}, mid {}/{}, rst {}",
+            Splits(raw),
+            self.mid_packet_ends,
+            self.reads,
+            self.rx_restarts
+        ));
+    }
+
+    /// Count a DMA read that has ended as `end`.
+    fn count_read(&mut self, end: ReadEnd) {
+        self.reads = self.reads.wrapping_add(1);
+        if end.last != 0 {
+            self.mid_packet_ends = self.mid_packet_ends.wrapping_add(1);
+        }
     }
 
     /// End this image's trial, if it is on one. A failure leaves it on trial, and the P4's
@@ -580,9 +609,9 @@ fn claim_subscriber(shared: &Shared) {
 
 /// Run the link forever: the reader, the writer and the Bluetooth counters.
 pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> ! {
-    let Bus { rx, tx, rx_bufs, tx_buf, reader, body, raw, scratch } = bus;
+    let Bus { rx, tx, rx_buf, tx_buf, reader, body, raw, scratch } = bus;
     join3(
-        read_packets(rx, rx_bufs, Frames { reader, raw, scratch }, link, shared),
+        read_packets(rx, rx_buf, Frames { reader, raw, scratch }, link, shared),
         write_packets(tx, tx_buf, body, link, shared),
         report_ble(link, shared),
     )
@@ -607,59 +636,122 @@ struct Frames {
     scratch: &'static mut [u8; WIRE_MAX],
 }
 
-/// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.
+/// Read forever: arm the receive once, then every [`RX_POLL`] hand the link what has landed.
 async fn read_packets(
-    mut rx: UhciRx<'_, Async>,
-    [mut armed, mut last]: [DmaRxBuf; 2],
+    rx: UhciRx<'_, Async>,
+    buf: DmaRxStreamBuf,
     frames: Frames,
     link: &RefCell<Link>,
     shared: &Shared,
 ) -> ! {
     let Frames { reader, raw, scratch } = frames;
-    let mut last_len = 0;
-    // How the last read with bytes in it before `last` ended.
+    let mut stream = rx.read(buf).map_err(|(err, ..)| err).expect("arm the UART receive");
+    // The read in progress: its bytes so far and the last of them.
+    let mut open = ReadEnd::NONE;
+    // How the last read with bytes in it ended.
     let mut before = ReadEnd::NONE;
     loop {
-        let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
-        mark(LoopPhase::RadioLink);
-        if last_len > 0 {
-            raw.split(before);
-        }
-        for &byte in &last.as_slice()[..last_len] {
-            if byte != 0 {
-                raw.push(byte);
+        let mut found = false;
+        loop {
+            // Up to the next EOF, so each read's end is seen.
+            let (bytes, eof) = stream.peek_until_eof();
+            if bytes.is_empty() && !eof {
+                break;
             }
-            if let Some(packet) = reader.push(byte) {
-                let bad = matches!(packet, Err(VerifyError::BadCrc | VerifyError::BadMagic));
-                link.borrow_mut().take(packet, shared);
-                if bad {
-                    link.borrow().report_bad(raw, scratch, shared);
+            if !found {
+                found = true;
+                mark(LoopPhase::RadioLink);
+            }
+            let len = bytes.len();
+            if open.len == 0 && len > 0 {
+                raw.split(before);
+            }
+            let end =
+                ReadEnd { len: open.len + len, last: bytes.last().copied().unwrap_or(open.last) };
+            if eof && end.len > 0 {
+                link.borrow_mut().count_read(end);
+            }
+            for &byte in bytes {
+                if byte != 0 {
+                    raw.push(byte);
+                }
+                if let Some(packet) = reader.push(byte) {
+                    let bad = matches!(packet, Err(VerifyError::BadCrc | VerifyError::BadMagic));
+                    link.borrow_mut().take(packet, shared);
+                    if bad {
+                        link.borrow().report_bad(raw, scratch, shared);
+                    }
+                }
+                if byte == 0 {
+                    raw.clear();
                 }
             }
-            if byte == 0 {
-                raw.clear();
+            stream.consume(len);
+            if !eof {
+                open = end;
+            } else {
+                if end.len > 0 {
+                    before = end;
+                }
+                open = ReadEnd::NONE;
             }
         }
-        if let Some(end) = ReadEnd::of(&last.as_slice()[..last_len]) {
-            before = end;
-        }
-        read.wait_for_done().await;
-        let (result, rx_back, done) = read.wait();
-        rx = rx_back;
-        armed = core::mem::replace(&mut last, done);
-        last_len = last.number_of_received_bytes();
-        let mut state = link.borrow_mut();
-        if let Some(end) = ReadEnd::of(&last.as_slice()[..last_len]) {
-            state.reads = state.reads.wrapping_add(1);
-            if end.last != 0 {
-                state.mid_packet_ends = state.mid_packet_ends.wrapping_add(1);
-            }
-        }
-        // The UART keeps line errors until they are read, so any since the last read are here.
-        if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
+        if found && take_line_errors() {
+            let mut state = link.borrow_mut();
             state.uart_errors = state.uart_errors.wrapping_add(1);
         }
+        // Everything landed has been taken, so a restart loses only what is in flight.
+        if rx_dma_stopped() {
+            let (rx, buf) = stream.cancel();
+            stream = rx.read(buf).map_err(|(err, ..)| err).expect("rearm the UART receive");
+            let mut state = link.borrow_mut();
+            if open.len > 0 {
+                state.count_read(open);
+                before = open;
+                open = ReadEnd::NONE;
+            }
+            state.rx_restarts = state.rx_restarts.wrapping_add(1);
+            if state.rx_restarts == 1 {
+                shared.log(format_args!(
+                    "receive DMA ran out of descriptors and restarted (rx_restarts {})",
+                    state.rx_restarts
+                ));
+            }
+        }
+        Timer::after(RX_POLL).await;
     }
+}
+
+/// Whether the receive DMA has stopped for want of a descriptor. Read from the channel's raw
+/// interrupt bits, which only arming a transfer clears: nothing here awaits the DMA's future,
+/// and the interrupt handler only wakes.
+fn rx_dma_stopped() -> bool {
+    DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read().in_dscr_empty().bit_is_set()
+}
+
+/// Whether UART1 has seen a line error since the last call, as `UartRx::check_for_errors`
+/// reads them; the running transfer holds the `UartRx`. Clears only the bits it read: UHCI's
+/// DMA path uses no UART interrupts and nothing here awaits a UART future, so nothing else
+/// depends on them.
+fn take_line_errors() -> bool {
+    let uart = UART1::regs();
+    let raw = uart.int_raw().read();
+    let (ovf, glitch, frame, parity) = (
+        raw.rxfifo_ovf().bit_is_set(),
+        raw.glitch_det().bit_is_set(),
+        raw.frm_err().bit_is_set(),
+        raw.parity_err().bit_is_set(),
+    );
+    let any = ovf || glitch || frame || parity;
+    if any {
+        uart.int_clr().write(|w| {
+            w.rxfifo_ovf().bit(ovf);
+            w.glitch_det().bit(glitch);
+            w.frm_err().bit(frame);
+            w.parity_err().bit(parity)
+        });
+    }
+    any
 }
 
 /// Write forever: every packet the link has to send, then wait for a reason to look again.
