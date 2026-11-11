@@ -181,25 +181,55 @@ mid-burst.
   - What was queued in those windows was lost from every node at once: the 16 batches, and at one
     beat per 5 s, the 6–7 heartbeats per node. The bus lost nothing, and the repeat arm, with no
     other command running, lost no batch.
-- **The P4 → C6 direction lost 6 packets in the first 30 minutes and none in the 20 after.** Each
-  CRC failure at the C6 matched a sequence gap. 96:C4 had none over hours of `saturate`.
-  - All six came in arms with a scan running. The one arm without a scan ran after they had
-    stopped, so it cannot rule scanning, or the node bus's traffic, out.
-  - None came in the `saturate` arm, so Bluetooth load did not drive them. The cause was not
-    found.
-  - A lost packet drops stream bytes. At `fleet20` rates a packet usually holds one whole frame,
-    so it drops cleanly (inferred). The one record missing with no eviction in the `fleet20` arm
-    fits that.
-  - Bytes lost this way are never credited, so the window shrinks by their size.
+- **The P4 → C6 direction lost 6 packets in 50 minutes.** Each CRC failure at the C6 matched a
+  sequence gap, with no UART error. 96:C4 had none over hours. Run 11 found the cause.
+  - A lost packet drops stream bytes, and bytes lost this way are never credited, so the window
+    shrinks by their size. The one record missing with no eviction in the `fleet20` arm fits a
+    lost packet (inferred).
 - **`saturate`'s evictions** (7 with a scan, 68 without) come from the generator keeping the ring
   within two frames of full: real frames arriving on top evict. No load record was lost to them
   in the no-scan arm.
+
+## Run 11 — what the lost P4 → C6 packets were (D0:1C)
+
+The C6 was built to keep each failed packet's bytes as they arrived, work out which single-byte
+change would make it verify, and record where its DMA reads split it (`193bff4`, `6f4ce49`).
+Five 20-minute arms ran with nothing else touching the PC's serial ports:
+
+| Arm | Failed P4 → C6 packets |
+| --- | --- |
+| no load, nodes scanning | 4 |
+| no load, nodes idle | 6 |
+| `fleet20`, nodes scanning | 1 |
+| `fleet20`, nodes idle | 24, then 9 in a repeat |
+
+- **Every failure whose report arrived, 32 of 44, is two packets merged by a lost terminator.**
+  The reports travel back through the same link, so some were lost with it (inferred). A 120-byte
+  frame is exactly two 60-byte packets with nothing between them: the `0x00` that ends the first
+  is gone, not changed into another byte, and the C6 next sees the packet after the second. No
+  stray byte, no flipped bit, no UART error, so it is not line noise.
+- **The byte goes missing at the end of a C6 read.** In all six reports from the repeat arm, one
+  DMA read ended on the previous packet's `0x00`. The next read held exactly the failed
+  packet minus its terminator, and it ended on an idle line, not at its size limit. The read after
+  that started with the next packet.
+  - So the P4 paused one byte short of the packet's end, long enough for the C6 to end the read.
+    The lone `0x00` it then sent never reached the C6's memory.
+  - 21 reads ended mid-packet in that arm and 9 packets failed, so at least 12 mid-packet ends
+    lost nothing. Every loss seen was a single trailing byte.
+- **Where each half comes from:**
+  - The P4 writes a packet in pieces as FIFO space frees up (`write_async`). A pause before the
+    last piece needs the P4 to be late refilling the FIFO, and only D0:1C's P4 is also serving a
+    node bus's interrupts (inferred). More small packets, as idle nodes beating every second
+    send, give it more chances.
+  - The C6 ends each read on an idle line and arms the next. Arming resets the receive DMA channel
+    (esp-hal 1.2.2 `ChannelRx::do_prepare`). Whether that reset, or the one-byte read that should
+    follow, loses the byte is not settled.
 
 ## Against the pass criteria
 
 | Criterion | Result |
 | --- | --- |
-| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus |
+| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus. Each is a packet terminator the C6 loses when the P4 pauses just before it (run 11) |
 | 2. At least 16 KB/s | Met at 2M on every device and the stand-in, at MTU 247. Not met at 1M with a 30 ms interval, or at MTU 23 |
 | 3. Same data, in order, no gaps | Met on 96:C4. On D0:1C one record was lost to a P4 → C6 packet loss (inferred) |
 | 4. Commands work | Every device's writes reached the P4; p50 23.8 ms, p99 29.7 ms on the stand-in |
@@ -245,11 +275,17 @@ Three design points the spike leaves for production:
   bound). That is 2.4× the bar or more.
 - The P4's 240 KB ring evicts on a 500-batch burst at Bluetooth rates. A 4 MB PSRAM ring does not.
 - Bluetooth load does not starve the node bus.
+- The first D0:1C arm's lost batches came from a port probe aimed at the other bridge, not the bus.
+- Each P4 → C6 packet lost on D0:1C is a terminator the C6 drops when the P4 pauses one byte short
+  of a packet's end.
 
 It does not settle:
 
-- **Why P4 → C6 packets fail on D0:1C.** Intermittent. All six came with a scan running, but no
-  arm without a scan ran while they were occurring.
+- **The fix for the lost terminator.** Run 11 found where the byte goes, not which part of the C6's
+  receive path drops it. Candidates: a C6 read that never stops (a streaming DMA buffer, if
+  esp-hal's UHCI accepts one), or a P4 that writes the whole of a short packet only when the FIFO
+  has room for it. The link is frozen and production's P4 → C6 traffic is small, but a Bluetooth
+  host stream would cross it.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
