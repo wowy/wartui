@@ -264,6 +264,15 @@ impl SeqCheck {
         Self { last: None }
     }
 
+    /// The seq that would follow the last in order, or `None` before the first.
+    #[must_use]
+    pub const fn expected(&self) -> Option<u32> {
+        match self.last {
+            Some(last) => Some(last.wrapping_add(1)),
+            None => None,
+        }
+    }
+
     /// Notes `seq` and says how it follows the last. After a gap, `seq` is the new last.
     pub fn note(&mut self, seq: u32) -> SeqNote {
         let note = match self.last {

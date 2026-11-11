@@ -1,9 +1,11 @@
-//! The Bluetooth host spike's load generator, its bodies and their CRC, and the C6's transmit
-//! buffer and delivery ledger.
+//! The Bluetooth host spike's load generator, its bodies and their CRC, the C6's transmit
+//! buffer and delivery ledger, and its diagnosis of corrupted P4 packets.
 
+use wartui_proto::radio_link::{BODY_MAX, HEADER_LEN, Kind, WIRE_MAX, encode_packet, seal};
 use wartui_proto::spike::{
-    AclLedger, ByteRing, DOWN_UUID, FULL_BODY, H4_ACL, H4_EVENT, NAME_PREFIX, SERVICE_UUID,
-    SMALL_BODY, SpikeProfile, UP_UUID, body_checks, crc32, fill_body,
+    AclLedger, ByteRing, DOWN_UUID, Diagnosis, FLIP_SEARCH_MAX, FULL_BODY, Fault, H4_ACL, H4_EVENT,
+    Header, NAME_PREFIX, SERVICE_UUID, SMALL_BODY, SpikeProfile, UP_UUID, body_checks, crc32,
+    diagnose, fill_body,
 };
 
 #[test]
@@ -175,4 +177,105 @@ fn acl_ledger_ignores_packet_when_not_acl_or_completion() {
     assert_eq!(ledger.acl_bytes(), 4);
     assert_eq!(ledger.delivered_bytes(), 0);
     assert_eq!(ledger.in_flight(), 1);
+}
+
+const SEQ: u32 = 0x0102_0304;
+
+/// A `Messages` packet of `len` payload bytes as it arrives: COBS-encoded, without its
+/// terminator. Every ninth payload byte is zero, so the frame has several COBS blocks.
+fn frame(len: usize) -> Vec<u8> {
+    let mut body = vec![0u8; BODY_MAX];
+    for (i, byte) in body[HEADER_LEN..HEADER_LEN + len].iter_mut().enumerate() {
+        *byte = if i % 9 == 0 { 0 } else { (i * 7) as u8 | 1 };
+    }
+    let body_len = seal(&mut body, Kind::Messages, SEQ, len);
+    let mut wire = vec![0u8; WIRE_MAX];
+    let wire_len = encode_packet(&body[..body_len], &mut wire);
+    wire.truncate(wire_len - 1);
+    assert!(!wire.contains(&0));
+    wire
+}
+
+fn diagnosed(raw: &[u8]) -> Diagnosis {
+    let mut scratch = vec![0u8; raw.len()];
+    diagnose(raw, &mut scratch)
+}
+
+#[test]
+fn diagnose_finds_clean_when_frame_is_intact() {
+    let raw = frame(40);
+    assert_eq!(diagnosed(&raw), Diagnosis { raw_len: raw.len(), fault: Fault::Clean { seq: SEQ } });
+}
+
+#[test]
+fn diagnose_finds_leading_stray_when_a_byte_precedes_the_frame() {
+    let mut raw = frame(40);
+    raw.insert(0, 0xFF);
+    let diagnosis = diagnosed(&raw);
+    assert_eq!(diagnosis.fault, Fault::LeadingStray { byte: 0xFF, seq: SEQ });
+    assert_eq!(diagnosis.to_string(), format!("{} B, leading stray 0xff, seq {SEQ}", raw.len()));
+}
+
+#[test]
+fn diagnose_finds_trailing_stray_when_a_byte_follows_the_frame() {
+    let mut raw = frame(40);
+    raw.push(0x5A);
+    assert_eq!(diagnosed(&raw).fault, Fault::TrailingStray { byte: 0x5A, seq: SEQ });
+}
+
+#[test]
+fn diagnose_finds_extra_byte_when_one_is_inserted_mid_frame() {
+    let mut raw = frame(40);
+    // Unlike either neighbor, so only removing it restores the frame.
+    assert!(raw[19] != 0xC3 && raw[20] != 0xC3);
+    raw.insert(20, 0xC3);
+    let diagnosis = diagnosed(&raw);
+    assert_eq!(diagnosis.fault, Fault::Extra { at: 20, byte: 0xC3, seq: SEQ });
+    assert_eq!(diagnosis.to_string(), format!("{} B, extra 0xc3 at 20, seq {SEQ}", raw.len()));
+}
+
+#[test]
+fn diagnose_finds_bit_flip_when_one_bit_is_wrong() {
+    let mut raw = frame(40);
+    raw[25] ^= 0x08;
+    assert_ne!(raw[25], 0);
+    let diagnosis = diagnosed(&raw);
+    assert_eq!(diagnosis.fault, Fault::BitFlip { at: 25, bit: 3, seq: SEQ });
+    assert_eq!(diagnosis.to_string(), format!("{} B, bit 3 flipped at 25, seq {SEQ}", raw.len()));
+}
+
+#[test]
+fn diagnose_reports_header_longer_than_arrived_when_a_byte_is_dropped() {
+    let mut raw = frame(40);
+    raw.remove(25);
+    let diagnosis = diagnosed(&raw);
+    assert_eq!(diagnosis.fault, Fault::Unexplained { header: Some(Header { seq: SEQ, len: 40 }) });
+    // The header wants 40 payload bytes, which would take more than arrived.
+    assert!(raw.len() < 40 + 15);
+    assert_eq!(
+        diagnosis.to_string(),
+        format!("{} B, unexplained, seq {SEQ} len 40 (>= 55 B)", raw.len())
+    );
+}
+
+#[test]
+fn diagnose_skips_bit_flip_search_when_frame_is_past_flip_search_max() {
+    let mut raw = frame(FLIP_SEARCH_MAX);
+    assert!(raw.len() > FLIP_SEARCH_MAX);
+    raw[500] ^= 0x01;
+    assert_ne!(raw[500], 0);
+    let len = FLIP_SEARCH_MAX as u16;
+    assert_eq!(
+        diagnosed(&raw).fault,
+        Fault::Unexplained { header: Some(Header { seq: SEQ, len }) }
+    );
+}
+
+#[test]
+fn diagnose_reports_no_header_when_frame_is_noise() {
+    let raw = [0x03, 0xAA, 0xBB, 0x02, 0xCC];
+    let diagnosis = diagnosed(&raw);
+    assert_eq!(diagnosis.fault, Fault::Unexplained { header: None });
+    assert_eq!(diagnosis.to_string(), "5 B, unexplained, no header");
+    assert_eq!(diagnosed(&[]).fault, Fault::Unexplained { header: None });
 }

@@ -39,6 +39,10 @@
 //! notifying, and the C6 sends its Bluetooth counters every [`BLE_STATS_EVERY`]. The
 //! `sink-discard` feature instead credits each one at once and claims a subscriber once the
 //! P4's hello arrives, so the P4 streams its host queue here; that measures the link's ceiling.
+//!
+//! **A P4 packet that fails its check is diagnosed** (`wartui_proto::spike::diagnose`): the reader
+//! keeps each frame's bytes as they arrived, and a frame that fails goes up as two `Error` lines,
+//! what went wrong and its first and last bytes. So does each break in the P4's seq.
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -66,9 +70,10 @@ use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, BleState, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind,
     LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck,
-    SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
+    SeqNote, Up, VerifyError, WIRE_MAX, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
+use wartui_proto::spike::diagnose;
 
 use crate::ble::Ble;
 use crate::config::UP_QUEUE_BYTES;
@@ -171,6 +176,45 @@ pub struct Bus<'d> {
     pub reader: &'static mut PacketReader,
     /// Where a packet's body is built, before it is encoded into `tx_buf`.
     pub body: &'static mut [u8; BODY_MAX],
+    /// The frame the reader is part-way through, as it arrived.
+    pub raw: &'static mut RawFrame,
+    /// Where a failed frame is diagnosed.
+    pub scratch: &'static mut [u8; WIRE_MAX],
+}
+
+/// The bytes of the frame the reader is part-way through, as they arrived, for diagnosing one
+/// that fails.
+pub struct RawFrame {
+    bytes: [u8; WIRE_MAX],
+    len: usize,
+    /// More arrived than `bytes` holds, so only the first `WIRE_MAX` are kept.
+    truncated: bool,
+}
+
+impl RawFrame {
+    /// Empty. Const, so it is built in a static.
+    pub const fn new() -> Self {
+        Self { bytes: [0; WIRE_MAX], len: 0, truncated: false }
+    }
+
+    fn push(&mut self, byte: u8) {
+        match self.bytes.get_mut(self.len) {
+            Some(slot) => {
+                *slot = byte;
+                self.len += 1;
+            }
+            None => self.truncated = true,
+        }
+    }
+
+    const fn clear(&mut self) {
+        self.len = 0;
+        self.truncated = false;
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
 }
 
 /// The link's state.
@@ -265,8 +309,18 @@ impl Link {
                 return;
             }
         };
+        let expected = self.p4_seq.expected();
         match self.p4_seq.note(packet.seq) {
-            SeqNote::Gap => self.seq_gap = self.seq_gap.wrapping_add(1),
+            SeqNote::Gap => {
+                self.seq_gap = self.seq_gap.wrapping_add(1);
+                if let Some(expected) = expected {
+                    shared.error(format_args!(
+                        "P4 seq gap at {}: {expected} -> {}",
+                        Uptime(self.boot.elapsed().as_millis()),
+                        packet.seq
+                    ));
+                }
+            }
             SeqNote::First | SeqNote::InOrder => {}
         }
         match packet.kind {
@@ -302,6 +356,30 @@ impl Link {
             self.undecoded_said = self.undecoded;
             shared.error(format_args!("a P4 command did not decode"));
         }
+    }
+
+    /// Send the P4 what `raw`, a frame that failed its check, says about how it went wrong, and
+    /// its first and last bytes.
+    ///
+    /// The search holds this task, the Bluetooth host's included, for an estimated second on a
+    /// frame of `FLIP_SEARCH_MAX` bytes (unmeasured). A failed frame is rare, and meanwhile what
+    /// the P4 sends lands in DMA and the FIFO, then waits behind RTS.
+    fn report_bad(&self, raw: &RawFrame, scratch: &mut [u8; WIRE_MAX], shared: &Shared) {
+        // Every bad packet this boot, since `take` has counted this one.
+        let n = self.crc_fail.wrapping_add(self.bad_magic);
+        let at = Uptime(self.boot.elapsed().as_millis());
+        let bytes = raw.bytes();
+        if raw.truncated {
+            shared.error(format_args!(
+                "P4 packet bad #{n} at {at}: over {WIRE_MAX} B, not diagnosed"
+            ));
+        } else {
+            let diagnosis = diagnose(bytes, scratch);
+            shared.error(format_args!("P4 packet bad #{n} at {at}: {diagnosis}"));
+        }
+        let head = &bytes[..bytes.len().min(EDGE)];
+        let tail = &bytes[bytes.len().saturating_sub(EDGE)..];
+        shared.error(format_args!("head {} tail {}", Hex(head), Hex(tail)));
     }
 
     /// End this image's trial, if it is on one. A failure leaves it on trial, and the P4's
@@ -446,9 +524,9 @@ fn claim_subscriber(shared: &Shared) {
 
 /// Run the link forever: the reader, the writer and the Bluetooth counters.
 pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> ! {
-    let Bus { rx, tx, rx_bufs, tx_buf, reader, body } = bus;
+    let Bus { rx, tx, rx_bufs, tx_buf, reader, body, raw, scratch } = bus;
     join3(
-        read_packets(rx, rx_bufs, reader, link, shared),
+        read_packets(rx, rx_bufs, Frames { reader, raw, scratch }, link, shared),
         write_packets(tx, tx_buf, body, link, shared),
         report_ble(link, shared),
     )
@@ -466,21 +544,39 @@ async fn report_ble(link: &RefCell<Link>, shared: &Shared) -> ! {
     }
 }
 
+/// The reader, the raw copy of its frame, and where a failed one is diagnosed.
+struct Frames {
+    reader: &'static mut PacketReader,
+    raw: &'static mut RawFrame,
+    scratch: &'static mut [u8; WIRE_MAX],
+}
+
 /// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.
 async fn read_packets(
     mut rx: UhciRx<'_, Async>,
     [mut armed, mut last]: [DmaRxBuf; 2],
-    reader: &'static mut PacketReader,
+    frames: Frames,
     link: &RefCell<Link>,
     shared: &Shared,
 ) -> ! {
+    let Frames { reader, raw, scratch } = frames;
     let mut last_len = 0;
     loop {
         let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
         mark(LoopPhase::RadioLink);
         for &byte in &last.as_slice()[..last_len] {
+            if byte != 0 {
+                raw.push(byte);
+            }
             if let Some(packet) = reader.push(byte) {
+                let bad = matches!(packet, Err(VerifyError::BadCrc | VerifyError::BadMagic));
                 link.borrow_mut().take(packet, shared);
+                if bad {
+                    link.borrow().report_bad(raw, scratch, shared);
+                }
+            }
+            if byte == 0 {
+                raw.clear();
             }
         }
         read.wait_for_done().await;
@@ -530,6 +626,33 @@ async fn write_packets(
             waited += poll;
         }
         (tx, buf) = write.cancel();
+    }
+}
+
+/// Bytes of a failed frame's head and of its tail sent up.
+const EDGE: usize = 12;
+
+/// Milliseconds since boot, as seconds to the millisecond.
+struct Uptime(u64);
+
+impl fmt::Display for Uptime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{:03} s", self.0 / 1000, self.0 % 1000)
+    }
+}
+
+/// Bytes as hex pairs, space-separated.
+struct Hex<'a>(&'a [u8]);
+
+impl fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, byte) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 

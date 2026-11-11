@@ -734,6 +734,16 @@ fn radio_link_seq_check_reads_equal_seq_as_gap() {
 }
 
 #[test]
+fn radio_link_seq_check_expects_next_seq_when_one_is_noted() {
+    let mut check = SeqCheck::new();
+    assert_eq!(check.expected(), None);
+    check.note(41);
+    assert_eq!(check.expected(), Some(42));
+    check.note(u32::MAX);
+    assert_eq!(check.expected(), Some(0));
+}
+
+#[test]
 fn radio_link_held_sends_record_whole_in_next_packet_when_it_does_not_fit() {
     let mut ring = FrameRing::<4096>::new();
     let mut held = Held::new();

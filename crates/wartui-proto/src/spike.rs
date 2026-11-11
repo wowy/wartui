@@ -12,6 +12,11 @@
 //!
 //! The C6 holds the stream it has yet to notify in a [`ByteRing`], and counts link-layer
 //! delivery with an [`AclLedger`] over its HCI traffic.
+//!
+//! [`diagnose`] reads a P4 packet that failed its check for how it went wrong: a stray byte
+//! added, a bit flipped, or neither, which leaves a dropped byte. The link's counters cannot
+//! tell, since [`PacketReader`](crate::radio_link::PacketReader) reads almost every corruption
+//! as a failed COBS decode.
 
 use core::fmt;
 
@@ -19,7 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::link::{MAX_NODE_PAYLOAD, RadioLinkStats};
 use crate::radio_link::{
-    ADV_PHASES, BleStats, EVENT_KINDS, EVENTS_PHASES, GATT_KINDS, NOTIFY_PHASES,
+    ADV_PHASES, BleStats, CRC_LEN, EVENT_KINDS, EVENTS_PHASES, GATT_KINDS, HEADER_LEN, MAGIC,
+    NOTIFY_PHASES, verify,
 };
 
 /// A sighting batch's typical body, the size the rate profiles send.
@@ -503,5 +509,153 @@ impl<const N: usize> AclLedger<N> {
 impl<const N: usize> Default for AclLedger<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Raw frames past this many bytes skip [`diagnose`]'s bit-flip search, which decodes the frame
+/// once per bit: O(n²).
+pub const FLIP_SEARCH_MAX: usize = 1100;
+
+/// What [`diagnose`] made of a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diagnosis {
+    /// The frame's bytes as received, without its terminator.
+    pub raw_len: usize,
+    /// What went wrong.
+    pub fault: Fault,
+}
+
+/// How a frame went wrong. Each recovered packet carries its `seq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The frame verifies as it arrived.
+    Clean { seq: u32 },
+    /// A byte ahead of the frame.
+    LeadingStray { byte: u8, seq: u32 },
+    /// A byte after the frame.
+    TrailingStray { byte: u8, seq: u32 },
+    /// A byte inside the frame, at `at`.
+    Extra { at: usize, byte: u8, seq: u32 },
+    /// Bit `bit` of the byte at `at` flipped.
+    BitFlip { at: usize, bit: u8, seq: u32 },
+    /// No single fault above explains it. `header` is the decoded header, when the frame's
+    /// decodable prefix starts with [`MAGIC`]: a `len` longer than what arrived means bytes
+    /// were dropped.
+    Unexplained { header: Option<Header> },
+}
+
+/// The fields of a header [`Fault::Unexplained`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header {
+    pub seq: u32,
+    pub len: u16,
+}
+
+/// Find the one fault that makes `raw` verify: the frame as it arrived, then without its first
+/// byte, without its last, without any one byte, and then with any one bit flipped. `raw` is
+/// the bytes since the last `0x00`, without the one that ends it. `scratch` is a working
+/// buffer.
+///
+/// A CRC-16 matches a wrong body one time in 65,536, so a search over n candidates names a
+/// fault falsely about n / 65,536 of the time: up to 13% on a two-bit error in a frame of
+/// [`FLIP_SEARCH_MAX`] bytes.
+///
+/// # Panics
+/// If `scratch` is shorter than `raw`.
+pub fn diagnose(raw: &[u8], scratch: &mut [u8]) -> Diagnosis {
+    let scratch = &mut scratch[..raw.len()];
+    Diagnosis { raw_len: raw.len(), fault: find_fault(raw, scratch) }
+}
+
+fn find_fault(raw: &[u8], scratch: &mut [u8]) -> Fault {
+    if let Some(seq) = verifies(scratch, raw, &[]) {
+        return Fault::Clean { seq };
+    }
+    if let [byte, rest @ ..] = raw
+        && let Some(seq) = verifies(scratch, rest, &[])
+    {
+        return Fault::LeadingStray { byte: *byte, seq };
+    }
+    if let [rest @ .., byte] = raw
+        && let Some(seq) = verifies(scratch, rest, &[])
+    {
+        return Fault::TrailingStray { byte: *byte, seq };
+    }
+    for at in 1..raw.len().saturating_sub(1) {
+        if let Some(seq) = verifies(scratch, &raw[..at], &raw[at + 1..]) {
+            return Fault::Extra { at, byte: raw[at], seq };
+        }
+    }
+    if raw.len() <= FLIP_SEARCH_MAX {
+        for (at, &byte) in raw.iter().enumerate() {
+            for bit in 0..8 {
+                let flipped = byte ^ (1 << bit);
+                // A 0x00 would have ended the frame there.
+                if flipped == 0 {
+                    continue;
+                }
+                scratch.copy_from_slice(raw);
+                scratch[at] = flipped;
+                if let Some(seq) = decoded_seq(scratch) {
+                    return Fault::BitFlip { at, bit, seq };
+                }
+            }
+        }
+    }
+    Fault::Unexplained { header: header(raw, scratch) }
+}
+
+/// The seq of `head` then `tail`, as a frame, if it verifies.
+fn verifies(scratch: &mut [u8], head: &[u8], tail: &[u8]) -> Option<u32> {
+    let len = head.len() + tail.len();
+    scratch[..head.len()].copy_from_slice(head);
+    scratch[head.len()..len].copy_from_slice(tail);
+    decoded_seq(&mut scratch[..len])
+}
+
+/// The seq of `frame` if it decodes and verifies. Decodes in place.
+fn decoded_seq(frame: &mut [u8]) -> Option<u32> {
+    let len = cobs::decode_in_place(frame).ok()?;
+    verify(&frame[..len]).ok().map(|packet| packet.seq)
+}
+
+/// The header of `raw`, decoded as far as it decodes, if that much starts with [`MAGIC`].
+fn header(raw: &[u8], scratch: &mut [u8]) -> Option<Header> {
+    scratch.copy_from_slice(raw);
+    let decoded = match cobs::decode_in_place(scratch) {
+        Ok(len) | Err(cobs::DecodeError::InvalidFrame { decoded_bytes: len }) => len,
+        Err(_) => 0,
+    };
+    let [m0, m1, _, _, s0, s1, s2, s3, l0, l1, ..] = scratch[..decoded] else { return None };
+    (u16::from_le_bytes([m0, m1]) == MAGIC).then(|| Header {
+        seq: u32::from_le_bytes([s0, s1, s2, s3]),
+        len: u16::from_le_bytes([l0, l1]),
+    })
+}
+
+impl fmt::Display for Diagnosis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} B, {}", self.raw_len, self.fault)
+    }
+}
+
+impl fmt::Display for Fault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Clean { seq } => write!(f, "clean, seq {seq}"),
+            Self::LeadingStray { byte, seq } => write!(f, "leading stray {byte:#04x}, seq {seq}"),
+            Self::TrailingStray { byte, seq } => {
+                write!(f, "trailing stray {byte:#04x}, seq {seq}")
+            }
+            Self::Extra { at, byte, seq } => write!(f, "extra {byte:#04x} at {at}, seq {seq}"),
+            Self::BitFlip { at, bit, seq } => write!(f, "bit {bit} flipped at {at}, seq {seq}"),
+            // A body of `len` payload bytes takes at least one COBS byte more on the wire.
+            Self::Unexplained { header: Some(Header { seq, len }) } => write!(
+                f,
+                "unexplained, seq {seq} len {len} (>= {} B)",
+                usize::from(len) + HEADER_LEN + CRC_LEN + 1
+            ),
+            Self::Unexplained { header: None } => f.write_str("unexplained, no header"),
+        }
     }
 }

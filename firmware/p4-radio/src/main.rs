@@ -56,7 +56,7 @@ use wartui_proto::radio_link::{
 use wartui_proto::spike::ByteRing;
 
 use crate::ble::{Ble, TxRing};
-use crate::link::{Bus, Link, Shared, UpQueue, Updates, link_loop};
+use crate::link::{Bus, Link, RawFrame, Shared, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -99,6 +99,10 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 
 /// Where the writer builds a packet's body.
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
+
+/// The reader's packet as it arrived, and where a failed one is diagnosed.
+static RAW: ConstStaticCell<RawFrame> = ConstStaticCell::new(RawFrame::new());
+static SCRATCH: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
 
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32c6));
@@ -178,6 +182,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         tx_buf: dma_buf!(DmaTxBuf, WIRE_MAX),
         reader: READER.take(),
         body: BODY.take(),
+        raw: RAW.take(),
+        scratch: SCRATCH.take(),
     };
 
     let shared = Shared::new(UP_QUEUE.take(), Ble::new(BLE_TX.take()));
