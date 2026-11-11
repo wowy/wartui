@@ -6,7 +6,7 @@ at least 16 KB/s of application throughput, about 10× the 20-node average
 ([`superpowers/plans/2026-10-30-p4-uart-hci-spike.md`](superpowers/plans/2026-10-30-p4-uart-hci-spike.md)
 has the bar and the load figures).
 
-The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `83c1e25`.
+The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `cd7d94d`.
 
 ## The split moved to the C6
 
@@ -32,7 +32,7 @@ So the spike ran the host stack on the C6 instead:
 | C6 static SRAM | 134,796 B, plus a 96 KB heap whose high-water mark reached 37,976 B |
 | C6 image | 462,992 B of a 1,966,080 B slot |
 | GATT | one service, Up (notify) and Down (write without response); UUIDs in `wartui_proto::spike` |
-| Advertised name | `wartui XX:YY` from the station MAC; the advertising address was the station MAC with the locally administered bit set and the last octet plus 1 (`98:A3:16:81:96:C4` → `9A:A3:16:81:96:C5`) |
+| Advertised name | `wartui XX:YY` from the station MAC; the advertising address was the station MAC with the locally administered bit set and the last octet plus 1 (`96:C4` → `96:C5`) |
 
 ## The setup
 
@@ -93,7 +93,8 @@ path runs near the line. The link to the C6 is not what limits Bluetooth.
 At 1M this adapter took one notification per connection event, so throughput followed the event
 rate. At 2M it took about three at 30 ms and about two at 15 ms. Runs 7 to 9 also negotiated
 15 ms on the default image, which asks for no interval: inferred to be BlueZ reusing the 15 ms
-the C6 requested in run 3's 2M arm just before, not confirmed.
+the C6 requested in run 3's 2M arm just before, not confirmed. Remove the device in `bluetoothctl`
+before comparing intervals.
 
 ## Run 4 — every device cleared the bar at MTU 247
 
@@ -166,7 +167,7 @@ mid-burst.
 | `saturate` | 24.3 KB/s | 205, 0 | ~0 | 0 |
 | `fleet20` | 2.6 KB/s | 218, 0 | ~0–2 | 5 |
 | no load again | 1.2 KB/s | 210, 0 | ~0 | 0 |
-| `saturate`, no scan | 24.4 KB/s | idle nodes | 588–590 of ~600 | 0 |
+| `saturate`, no scan | 24.4 KB/s | idle nodes | ~10–12 (588–590 of ~600 arrived) | 0 |
 
 - **Bluetooth load did not starve the bus.** No loaded arm lost a batch.
 - **The first arm's gaps were the test's own doing.** Two commands aimed at 96:C4 ran during it:
@@ -229,8 +230,9 @@ Five 20-minute arms ran with nothing else touching the PC's serial ports:
 The C6 was changed to receive through a `DmaRxStreamBuf` (`cd7d94d`): one UHCI transfer armed at
 boot and never stopped, 32 descriptors of 256 bytes, each closed by an idle EOF, polled every
 250 µs and handed back to the DMA as it is read. It would restart only if the DMA ran out of
-descriptors, and counts each restart. It costs 428 bytes of the C6's RAM. The change is inside
-the C6's own receive, so the link's frozen wire stays as it is.
+descriptors, and counts each restart. It costs 428 bytes more of the C6's RAM than the two
+4,032-byte buffers it replaces. The change is inside the C6's own receive, so the link's frozen
+wire stays as it is.
 
 | Arm | Build | Failed P4 → C6 packets | Load records lost | Throughput |
 | --- | --- | --- | --- | --- |
@@ -273,7 +275,8 @@ in two parts:
   and the slowest answer took 3 ms.
 - **So the loss is the C6's, not the pattern's.** The same re-arm on the P4's own UHCI and DMA
   keeps a lone terminator. Why the two chips differ was not found. This agrees with the 2026-11-05
-  host link bench, whose 17,164 reads at 4 Mbaud lost no frame (`docs/p4-host-uart-findings.md`).
+  host link bench, whose 17,164 reads at 4 Mbaud lost no frame
+  ([`p4-host-uart-findings.md`](p4-host-uart-findings.md)).
 - The P4 still loses host bytes while it erases or writes its own flash, as that bench found. That
   is interrupts held off, not the re-arm.
 
@@ -281,9 +284,9 @@ in two parts:
 
 | Criterion | Result |
 | --- | --- |
-| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus. Each is a packet terminator the C6 loses when the P4 pauses just before it (run 11). The stream receive lost none (run 12) |
+| 1. Link clean for 10 minutes at full load with the buses running | **Not met on the old receive.** On D0:1C the C6 failed 6 P4 → C6 packets in run 10, 44 in run 11 and 6 in run 12's old-build `saturate` arm. 0 on 96:C4, which has no bus. Each is a packet terminator the C6 loses when the P4 pauses just before it (run 11). The stream receive lost none in either of its arms (run 12) |
 | 2. At least 16 KB/s | Met at 2M on every device and the stand-in, at MTU 247. Not met at 1M with a 30 ms interval, or at MTU 23 |
-| 3. Same data, in order, no gaps | Met on 96:C4. On D0:1C one record was lost to a P4 → C6 packet loss (inferred) |
+| 3. Same data, in order, no gaps | Met on 96:C4. Not met on D0:1C on the old receive: P4 → C6 packet loss cost one record in run 10 (inferred) and 21 of 21,175 load records in run 12's `saturate` arm. The stream receive lost none of 95,059 (run 12) |
 | 4. Commands work | Every device's writes reached the P4; p50 23.8 ms, p99 29.7 ms on the stand-in |
 | 5. Attach and detach | Met for clean detaches and a supervision timeout |
 | 6. No starvation | Met: Bluetooth load cost the node bus nothing |
@@ -323,9 +326,6 @@ Four design points the spike leaves for production:
   the queue and drops what was in it, then hands it back after 15 s and drops it again. A
   production build should answer `Identify` without taking the queue. Until then, nothing else
   that probes ports runs during a Bluetooth measurement.
-- **Benchmarks against BlueZ need its cache cleared.** After the C6 requested 15 ms once, later
-  connections to the same address came up at 15 ms on an image that requests nothing (inferred,
-  not confirmed). Remove the device in `bluetoothctl` before comparing intervals.
 
 ## What this settles
 
@@ -334,7 +334,8 @@ Four design points the spike leaves for production:
 - Throughput at 2M and MTU 247 cleared the bar on all four test devices: 38.3 KB/s measured on
   the iPad, and ~48 to ~90 KB/s on the others, inferred from counters (the Flip's is an upper
   bound). That is 2.4× the bar or more.
-- The P4's 240 KB ring evicts on a 500-batch burst at Bluetooth rates. A 4 MB PSRAM ring does not.
+- On the old receive, draining at about 30 KB/s, the P4's 240 KB ring evicts on a 500-batch
+  burst. A 4 MB PSRAM ring does not.
 - Bluetooth load does not starve the node bus.
 - The first D0:1C arm's lost batches came from a port probe aimed at the other bridge, not the bus.
 - Each P4 → C6 packet lost on D0:1C is a terminator the C6 drops when the P4 pauses one byte short
@@ -349,6 +350,9 @@ It does not settle:
   for the fix.
 - **Why the old receive held Bluetooth throughput at a third.**
 - **Phone throughput on the stream receive.** Runs 3 to 10 were all on the old one.
+- **Whether the internal ring still evicts on a 500-batch burst.** Run 8 drained on the old
+  receive, and the stream receive carried 3.1× more in run 12, so it may drain the burst before
+  the ring fills (inferred).
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
