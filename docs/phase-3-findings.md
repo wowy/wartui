@@ -533,7 +533,7 @@ SD slot are simply never initialized:
 
 | what | result |
 | --- | --- |
-| `wartui status` | `44:1B:F6:85:6A:4C on Esp32S3, firmware 0.1.0`, channel 6, heap free 55764 |
+| `wartui status` | `…:6A:4C on Esp32S3, firmware 0.1.0`, channel 6, heap free 55764 |
 | link round trip | works; a `GetStatus` is answered, so the USB-C really is the native USB Serial/JTAG |
 | reset cause after `espflash flash` | `External` — and via `CoreUsbJtag`, since the S3 has no `Cpu0JtagCpu` |
 | `wartui reset` | `Software`, `uptime 1ms, so it did reboot` |
@@ -757,7 +757,7 @@ Same fault build, with the 20 s fault armed from each boot's own start rather th
 systimer reading — whether a software reset restarts the systimer was not checked, and the banner
 alone explains the first build's silence, so this only rules the question out:
 
-| host | `wartui status --bridge A0:F2:62:87:00:08` |
+| host | `wartui status --bridge 00:08` |
 |---|---|
 | before #126 | answered in 3.41 s: software reset, *its transmit path had stopped draining*, uptime 0 s |
 | this branch | answered in 3.41 s, the same |

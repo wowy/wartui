@@ -1,9 +1,8 @@
 # P4 host link over the Type-C — what UART0 through the CH343 carries
 
-Measured on 2026-11-05 on Linux, on a Waveshare ESP32-P4-WIFI6: an ESP32-P4 rev v3.2
-(`E8:F6:0A:E8:1A:D1`) and its C6 (`98:A3:16:81:96:C4`, `96:C4`). The board's Type-C reaches a
-CH343 (`1a86:55d3`, USB full speed), which is wired to the P4's UART0 on GPIO37 (TX) and GPIO38
-(RX). The bench answered three questions:
+Measured on 2026-11-05 on Linux, on a Waveshare ESP32-P4-WIFI6: an ESP32-P4 rev v3.2 (`1A:D1`)
+and its C6 (`96:C4`). The board's Type-C reaches a CH343 (`1a86:55d3`, USB full speed), which is
+wired to the P4's UART0 on GPIO37 (TX) and GPIO38 (RX). The bench answered three questions:
 - Can the host link run there, and at what rate?
 - Does the C6 link hold up on its FIFO once the P4's single UHCI moves to UART0?
 - Does opening the port reset the board?

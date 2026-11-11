@@ -252,7 +252,7 @@ mod tests {
         // of the fleet.
         let probed = [bridge("/dev/ttyACM1", &BRIDGE_MAC)];
         let found = listed(&[board("/dev/ttyACM0", Some(&NODE_MAC))], &probed);
-        for given in ["3C:DC:75:84:A1:B0", "A1:B0", "/dev/ttyACM0"] {
+        for given in ["02:00:5E:10:A1:B0", "A1:B0", "/dev/ttyACM0"] {
             let (given, spec) = named(given);
             let error =
                 target(&found, &probed, Some((given, &spec)), None).unwrap_err().to_string();
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn flash_bridge_refuses_run_when_named_tail_matches_several_boards() {
         // A guess between two bridges ending the same way is never made.
-        let twin = [0x3C, 0xDC, 0x75, 0x84, 0x44, 0xC0];
+        let twin = [0x02, 0x00, 0x5E, 0x20, 0x44, 0xC0];
         let probed = [bridge("/dev/ttyACM0", &twin), bridge("/dev/ttyACM1", &BRIDGE_MAC)];
         let (given, spec) = named("44:C0");
         let found = listed(&[], &probed);
@@ -329,7 +329,7 @@ mod tests {
     fn flash_bridge_refuses_run_when_remembered_bridge_does_not_answer() {
         // The one bridge present is known not to be the bridge.
         let probed = [bridge("/dev/ttyACM0", &BRIDGE_MAC)];
-        let absent = [0x3C, 0xDC, 0x75, 0x84, 0x00, 0x08];
+        let absent = [0x02, 0x00, 0x5E, 0x10, 0x00, 0x08];
         let error = target(&listed(&[], &probed), &probed, None, Some(absent)).unwrap_err();
         let error = error.to_string();
         assert!(error.contains("did not answer on any CH343"), "{error}");
@@ -389,7 +389,7 @@ mod tests {
     fn flash_bridge_remembers_flashed_board_when_file_holds_other_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        let text = "excluded-ssids = [\"HomeNet\"]\n[bridge]\nmac = \"3C:DC:75:84:A1:B0\"\n";
+        let text = "excluded-ssids = [\"HomeNet\"]\n[bridge]\nmac = \"02:00:5E:10:A1:B0\"\n";
         std::fs::write(&path, text).unwrap();
 
         remember_flashed(&path, BRIDGE_MAC, Some("5CF7153520".to_owned())).unwrap();
