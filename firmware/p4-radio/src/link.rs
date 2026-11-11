@@ -11,7 +11,7 @@
 //! ends a "read": the UHCI EOF closes the descriptor it lands in. The reader takes closed
 //! descriptors every [`RX_POLL`] and hands each back at once, so the channel is never stopped or
 //! reset between packets, and a flash erase holds the CPU but not the DMA. Only a DMA that runs
-//! out of descriptors is restarted, which can lose a byte.
+//! out of descriptors or meets a descriptor error is restarted, which can lose a byte.
 //!
 //! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
 //! the UART, and the flush ends in a spin that does not yield until the transmitter is idle, so a
@@ -307,7 +307,7 @@ pub struct Link {
     /// which ended part-way through a packet.
     reads: u32,
     mid_packet_ends: u32,
-    /// Times the receive DMA ran out of descriptors and was restarted.
+    /// Times the receive DMA stopped and was restarted.
     rx_restarts: u32,
     /// A record from the ring that did not fit the last packet. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
@@ -651,6 +651,7 @@ async fn read_packets(
     // How the last read with bytes in it ended.
     let mut before = ReadEnd::NONE;
     loop {
+        let stopped = rx_dma_stopped();
         let mut found = false;
         loop {
             // Up to the next EOF, so each read's end is seen.
@@ -696,12 +697,14 @@ async fn read_packets(
                 open = ReadEnd::NONE;
             }
         }
-        if found && take_line_errors() {
+        if take_line_errors() {
             let mut state = link.borrow_mut();
             state.uart_errors = state.uart_errors.wrapping_add(1);
         }
-        // Everything landed has been taken, so a restart loses only what is in flight.
-        if rx_dma_stopped() {
+        // The stop bit is read before the drain: a stopped DMA lands nothing more, so the drain
+        // took everything, and a restart, which resets every descriptor, loses only what is in
+        // flight.
+        if stopped {
             let (rx, buf) = stream.cancel();
             stream = rx.read(buf).map_err(|(err, ..)| err).expect("rearm the UART receive");
             let mut state = link.borrow_mut();
@@ -713,7 +716,7 @@ async fn read_packets(
             state.rx_restarts = state.rx_restarts.wrapping_add(1);
             if state.rx_restarts == 1 {
                 shared.log(format_args!(
-                    "receive DMA ran out of descriptors and restarted (rx_restarts {})",
+                    "receive DMA stopped and restarted (rx_restarts {})",
                     state.rx_restarts
                 ));
             }
@@ -722,17 +725,19 @@ async fn read_packets(
     }
 }
 
-/// Whether the receive DMA has stopped for want of a descriptor. Read from the channel's raw
-/// interrupt bits, which only arming a transfer clears: nothing here awaits the DMA's future,
-/// and the interrupt handler only wakes.
+/// Whether the receive DMA has stopped, for want of a descriptor or on a descriptor error;
+/// either way a restart recovers it. Read from the channel's raw interrupt bits, which only
+/// arming a transfer clears: nothing here awaits the DMA's future, and the interrupt handler
+/// only wakes.
 fn rx_dma_stopped() -> bool {
-    DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read().in_dscr_empty().bit_is_set()
+    let raw = DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read();
+    raw.in_dscr_empty().bit_is_set() || raw.in_dscr_err().bit_is_set()
 }
 
 /// Whether UART1 has seen a line error since the last call, as `UartRx::check_for_errors`
 /// reads them; the running transfer holds the `UartRx`. Clears only the bits it read: UHCI's
 /// DMA path uses no UART interrupts and nothing here awaits a UART future, so nothing else
-/// depends on them.
+/// depends on them. Resets the RX FIFO after an overflow, as `UartRx::check_for_errors` does.
 fn take_line_errors() -> bool {
     let uart = UART1::regs();
     let raw = uart.int_raw().read();
@@ -750,6 +755,16 @@ fn take_line_errors() -> bool {
             w.frm_err().bit(frame);
             w.parity_err().bit(parity)
         });
+    }
+    if ovf {
+        // Set, then clear, `rxfifo_rst`, each synced into the UART's clock domain.
+        for reset in [true, false] {
+            uart.conf0().modify(|_, w| w.rxfifo_rst().bit(reset));
+            uart.reg_update().write(|w| w.reg_update().set_bit());
+            while uart.reg_update().read().reg_update().bit_is_set() {
+                core::hint::spin_loop();
+            }
+        }
     }
     any
 }
