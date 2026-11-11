@@ -162,15 +162,25 @@ mid-burst.
 
 | Arm | Throughput | Batches, lost | Heartbeats missed per node | C6-side CRC failures |
 | --- | --- | --- | --- | --- |
-| no load (first after flashing) | 1.1 KB/s | 176, 16 | ~6–7, about 20 s gaps on all ten (inferred from timing) | 1 |
+| no load, disturbed (see below) | 1.1 KB/s | 176, 16 | ~6–7, in two gaps on all ten (inferred from timing) | 1 |
 | `saturate` | 24.3 KB/s | 205, 0 | ~0 | 0 |
 | `fleet20` | 2.6 KB/s | 218, 0 | ~0–2 | 5 |
 | no load again | 1.2 KB/s | 210, 0 | ~0 | 0 |
 | `saturate`, no scan | 24.4 KB/s | idle nodes | 588–590 of ~600 | 0 |
 
 - **Bluetooth load did not starve the bus.** No loaded arm lost a batch.
-- **The first arm's 20 s gaps did not recur.** They hit every node at once and came with all 16
-  lost batches, but the repeat arm, with timestamped events, had neither. The cause was not found.
+- **The first arm's gaps were the test's own doing.** Two commands aimed at 96:C4 ran during it:
+  `flash-bridge --bridge 96:C4`, 8 s in, and `status --bridge 96:C4`, 52 s in. `--bridge` finds a
+  board by sending `Identify` to every CH343 on the PC (`named_board`), so D0:1C's UART0 got one
+  each time.
+  - A UART0 frame takes the queue from Bluetooth and clears it. Nothing read UART0, so its gate
+    closed after `HOST_SILENCE` (15 s), and Bluetooth took the queue back, clearing it again.
+  - The arm's record shows both: three `Ready`s instead of one, and the P4's count of time with
+    Bluetooth owning the queue stopped for about 15 s at each of those two moments, while the
+    stand-in received nothing.
+  - What was queued in those windows was lost from every node at once: the 16 batches, and at one
+    beat per 5 s, the 6–7 heartbeats per node. The bus lost nothing, and the repeat arm, with no
+    other command running, lost no batch.
 - **The P4 → C6 direction lost 6 packets in the first 30 minutes and none in the 20 after.** Each
   CRC failure at the C6 matched a sequence gap. 96:C4 had none over hours of `saturate`.
   - All six came in arms with a scan running. The one arm without a scan ran after they had
@@ -211,12 +221,17 @@ the recipe.
 | Keep the C6's last panic text in persistent RTC memory and report it at the next boot | the panic handler only reboots, and nothing else on the board records why; without it the bt-hci panic needed a serial adapter on header H4 | `889585c`, `firmware/p4-radio/src/last_panic.rs` | never: it is cheap and the only record |
 | Run the C6 on `trouble-host` 0.8.0 directly over `BleConnector` | esp-radio already implements `bt-hci-transport` 0.1's `Transport`, which `bt-hci` 0.10 re-exports; no byte adapter, no patch | `f8994d9` | — |
 
-Two design points the spike leaves for production:
+Three design points the spike leaves for production:
 
 - **A lost P4 → C6 packet is not recovered.** `HostQueue::fill` splits frames across packets, so a
   lost `Down::HostBytes` garbles the frame it cuts, and its bytes are never credited, so the credit
   window shrinks by their size for the rest of the connection. Run 10 lost 6 such packets in 50
   minutes. A production link needs either a resend or a credit that resynchronizes.
+- **A `wartui` command for another bridge takes the queue from a Bluetooth host.** Any `--bridge`
+  lookup on a PC that a Bluetooth-hosted bridge is plugged into sends it `Identify`, which takes
+  the queue and drops what was in it, then hands it back after 15 s and drops it again. A
+  production build should answer `Identify` without taking the queue. Until then, nothing else
+  that probes ports runs during a Bluetooth measurement.
 - **Benchmarks against BlueZ need its cache cleared.** After the C6 requested 15 ms once, later
   connections to the same address came up at 15 ms on an image that requests nothing (inferred,
   not confirmed). Remove the device in `bluetoothctl` before comparing intervals.
@@ -235,7 +250,6 @@ It does not settle:
 
 - **Why P4 → C6 packets fail on D0:1C.** Intermittent. All six came with a scan running, but no
   arm without a scan ran while they were occurring.
-- **Why the first D0:1C arm lost 16 batches** to 20 s pauses on every node at once.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
