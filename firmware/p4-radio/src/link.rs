@@ -10,10 +10,11 @@
 //! ([`RX_STREAM_LEN`] bytes in [`RX_CHUNK`]-byte chunks). An idle line or `RX_BUF_LEN` bytes is a
 //! UHCI EOF, which closes the descriptor it lands in. Every [`RX_POLL`] the reader takes the
 //! closed descriptors and hands each straight back, so DMA keeps landing while the C6 works, and a
-//! flash erase holds the CPU but not the DMA. Only a DMA that runs out of descriptors stops; the
-//! reader restarts it, which can lose a byte. It is never re-armed between packets, because
-//! arming resets the receive channel: a terminator that arrives alone after an idle EOF is lost,
-//! and two packets merge and fail their CRC (`docs/c6-ble-host-findings.md`, runs 11 and 12).
+//! flash erase holds the CPU but not the DMA. Only a DMA that runs out of descriptors or meets a
+//! descriptor error stops; the reader restarts it, which can lose a byte. It is never re-armed
+//! between packets, because arming resets the receive channel: a terminator that arrives alone
+//! after an idle EOF is lost, and two packets merge and fail their CRC
+//! (`docs/c6-ble-host-findings.md`, runs 11 and 12).
 //!
 //! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
 //! the UART, and the flush ends in a spin that does not yield until the transmitter is idle, so a
@@ -202,8 +203,7 @@ pub struct Link {
     seq_gap: u32,
     /// Line errors on this end's UART.
     uart_errors: u32,
-    /// Times the receive DMA ran out of descriptors and was restarted, and when the P4 was last
-    /// told.
+    /// Times the receive DMA stopped and was restarted, and when the P4 was last told.
     rx_restarts: u32,
     rx_restarts_said: Option<Instant>,
     /// P4 records that did not decode, and how many of them have been reported.
@@ -321,7 +321,7 @@ impl Link {
         if due {
             self.rx_restarts_said = Some(Instant::now());
             shared.log(format_args!(
-                "receive DMA ran out of descriptors and restarted, {} times since boot",
+                "receive DMA stopped and restarted, {} times since boot",
                 self.rx_restarts
             ));
         }
@@ -462,6 +462,7 @@ async fn read_packets(
 ) -> ! {
     let mut stream = rx.read(buf).map_err(|(err, ..)| err).expect("arm the UART receive");
     loop {
+        let stopped = rx_dma_stopped();
         let mut found = false;
         loop {
             // Up to the next EOF, so a descriptor an EOF closed empty is handed back too.
@@ -481,12 +482,14 @@ async fn read_packets(
             }
             stream.consume(len);
         }
-        if found && take_line_errors() {
+        if take_line_errors() {
             let mut link = link.borrow_mut();
             link.uart_errors = link.uart_errors.wrapping_add(1);
         }
-        // Everything landed has been taken, so a restart loses only what is in flight.
-        if rx_dma_stopped() {
+        // The stop bit is read before the drain: a stopped DMA lands nothing more, so the drain
+        // took everything, and a restart, which resets every descriptor, loses only what is in
+        // flight.
+        if stopped {
             let (rx, buf) = stream.cancel();
             stream = rx.read(buf).map_err(|(err, ..)| err).expect("restart the UART receive");
             link.borrow_mut().note_rx_restart(shared);
@@ -495,17 +498,19 @@ async fn read_packets(
     }
 }
 
-/// Whether the receive DMA has stopped for want of a descriptor. Read from the channel's raw
-/// interrupt bits, which only arming a transfer clears: nothing here awaits the DMA's future,
-/// and the interrupt handler only wakes.
+/// Whether the receive DMA has stopped, for want of a descriptor or on a descriptor error;
+/// either way a restart recovers it. Read from the channel's raw interrupt bits, which only
+/// arming a transfer clears: nothing here awaits the DMA's future, and the interrupt handler
+/// only wakes.
 fn rx_dma_stopped() -> bool {
-    DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read().in_dscr_empty().bit_is_set()
+    let raw = DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read();
+    raw.in_dscr_empty().bit_is_set() || raw.in_dscr_err().bit_is_set()
 }
 
 /// Whether UART1 has seen a line error since the last call, as `UartRx::check_for_errors`
 /// reads them; the running transfer holds the `UartRx`. Clears only the bits it read: UHCI's
 /// DMA path uses no UART interrupts and nothing here awaits a UART future, so nothing else
-/// depends on them.
+/// depends on them. Resets the RX FIFO after an overflow, as `UartRx::check_for_errors` does.
 fn take_line_errors() -> bool {
     let uart = UART1::regs();
     let raw = uart.int_raw().read();
@@ -523,6 +528,16 @@ fn take_line_errors() -> bool {
             w.frm_err().bit(frame);
             w.parity_err().bit(parity)
         });
+    }
+    if ovf {
+        // Set, then clear, `rxfifo_rst`, each synced into the UART's clock domain.
+        for reset in [true, false] {
+            uart.conf0().modify(|_, w| w.rxfifo_rst().bit(reset));
+            uart.reg_update().write(|w| w.reg_update().set_bit());
+            while uart.reg_update().read().reg_update().bit_is_set() {
+                core::hint::spin_loop();
+            }
+        }
     }
     any
 }
