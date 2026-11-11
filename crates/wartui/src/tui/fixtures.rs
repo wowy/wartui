@@ -210,6 +210,7 @@ pub(super) fn busy() -> Snapshot {
         gps: None,
         excluded_ssids: Vec::new(),
         power_answer: None,
+        awaiting_fix: false,
     }
 }
 
@@ -333,6 +334,22 @@ pub(super) fn with_bridge_sky(in_view: u16) -> Snapshot {
     if let Some(gps) = snapshot.gps.as_mut() {
         gps.via_bridge = true;
         gps.settled = None;
+    }
+    snapshot
+}
+
+/// A run holding its scan for a GPS fix: a receiver searching the sky, the bridge stopped.
+pub(super) fn awaiting_fix() -> Snapshot {
+    let mut snapshot = with_gps(
+        GpsStatus::Searching,
+        GpsCounters { sentences: 40, fixes: 0, rejected: 0 },
+        PositionSource::None,
+    );
+    snapshot.scan = Some(ScanMode::Stopped);
+    snapshot.awaiting_fix = true;
+    let now_ms = snapshot.now_ms;
+    if let Some(gps) = snapshot.gps.as_mut() {
+        gps.heard_ms = Some(now_ms - 500);
     }
     snapshot
 }

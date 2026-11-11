@@ -60,6 +60,11 @@ const HEALTHY: Duration = Duration::from_secs(2);
 /// the ladder. The search resumes when the path leaves the enumeration or these are spent.
 const RETRIES_BEFORE_SEARCHING: u32 = 3;
 
+/// The longest gap between fix reports that still counts as holding a fix ([`Gps::fix_run`]).
+/// A report after a longer gap starts a new run.
+/// At 1 Hz this rides out one late report; a receiver that has gone quiet past it holds nothing.
+pub const FIX_GAP: Duration = Duration::from_millis(1_500);
+
 /// Which port to read, and how fast, or neither, and go and find out.
 #[derive(Debug, Clone)]
 pub struct GpsConfig {
@@ -190,6 +195,8 @@ struct Inner {
     nmea: Nmea,
     fix: Option<Fix>,
     received_at_ms: Option<i64>,
+    /// When the current unbroken run of fix reports began, cleared by a report of no fix.
+    fixed_since_ms: Option<i64>,
     heard_ms: Option<i64>,
     status: GpsStatus,
     counters: GpsCounters,
@@ -329,10 +336,16 @@ impl Inner {
                     source: PositionSource::Gps,
                     at_ms: new.at_ms,
                 });
+                // A report after a silence past the gap starts a new run.
+                if self.received_at_ms.is_none_or(|at_ms| !is_fresh(at_ms, now_ms, FIX_GAP)) {
+                    self.fixed_since_ms = None;
+                }
                 self.received_at_ms = Some(now_ms);
+                self.fixed_since_ms.get_or_insert(now_ms);
             }
             Ok(Report::NoFix) => {
                 self.last_failure = None;
+                self.fixed_since_ms = None;
                 self.counters.sentences += 1;
                 // Keep the last fix: losing lock under a bridge has not moved the host, and the
                 // chain's staleness rule decides when to stop believing it.
@@ -374,6 +387,7 @@ impl Gps {
                 nmea: Nmea::new(),
                 fix: None,
                 received_at_ms: None,
+                fixed_since_ms: None,
                 heard_ms: None,
                 status: GpsStatus::Connecting,
                 counters: GpsCounters::default(),
@@ -489,6 +503,20 @@ impl Gps {
         Some((inner.fix?, inner.received_at_ms?))
     }
 
+    /// The run of fix reports the receiver holds as of `now_ms`, named by the arrival stamp of
+    /// its first report: the reports have run unbroken by a report of no fix, and the latest
+    /// arrived within [`FIX_GAP`]. `None` while it holds none. The retained fix [`Self::latest`]
+    /// serves outlives this: one fix followed by silence holds nothing.
+    ///
+    /// The stamp is the run's identity, not a time to measure from: it is wall-clock, which an
+    /// NTP step moves. A caller times the run on its own monotonic clock.
+    #[must_use]
+    pub fn fix_run(&self, now_ms: i64) -> Option<i64> {
+        let inner = self.lock();
+        let since = inner.fixed_since_ms?;
+        is_fresh(inner.received_at_ms?, now_ms, FIX_GAP).then_some(since)
+    }
+
     /// What to say about the receiver on screen.
     #[must_use]
     pub fn view(&self) -> GpsView {
@@ -595,10 +623,10 @@ impl Gps {
 
     /// Find a receiver, read it, and look again when it goes away.
     ///
-    /// The search runs here because nothing waits for it: a capture starts at once and takes
-    /// whatever position exists as each row is written, so seconds spent listening cost nothing. It
-    /// also lets a receiver survive moving to another socket, which a reader given one literal path
-    /// cannot.
+    /// The search runs here because nothing blocks on it: each row takes whatever position exists
+    /// as it is written, and a run waiting for a fix checks [`Self::fix_run`] on its tick, so
+    /// seconds spent listening stall nothing. It also lets a receiver survive moving to another
+    /// socket, which a reader given one literal path cannot.
     fn read_forever(&self, config: &GpsConfig) {
         let mut backoff = MIN_BACKOFF;
         // What the search settled on, kept across reconnections: a puck put back is the same port
@@ -1149,6 +1177,41 @@ mod tests {
 
     const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";
     const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76";
+
+    #[test]
+    fn gps_names_fix_run_by_its_first_report_when_reports_run_unbroken() {
+        let gps = Gps::detached();
+        assert_eq!(gps.fix_run(1_000), None);
+        for now_ms in [1_000, 2_000, 3_000] {
+            gps.feed(GGA, now_ms);
+        }
+        assert_eq!(gps.fix_run(3_500), Some(1_000));
+        // A clock stepping back keeps the run.
+        assert_eq!(gps.fix_run(500), Some(1_000));
+    }
+
+    #[test]
+    fn gps_holds_no_fix_run_when_reports_stop_past_the_gap() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        assert_eq!(gps.fix_run(2_500), Some(1_000));
+        assert_eq!(gps.fix_run(2_501), None);
+        // The retained fix still serves the chain.
+        assert!(gps.latest().is_some());
+        // A fix after the silence starts a new run.
+        gps.feed(GGA, 10_000);
+        assert_eq!(gps.fix_run(10_000), Some(10_000));
+    }
+
+    #[test]
+    fn gps_starts_new_fix_run_when_no_fix_report_arrives() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        gps.feed(GGA_NO_FIX, 2_000);
+        assert_eq!(gps.fix_run(2_000), None);
+        gps.feed(GGA, 3_000);
+        assert_eq!(gps.fix_run(4_000), Some(3_000));
+    }
 
     #[test]
     fn gps_has_no_fix_when_receiver_reports_none() {

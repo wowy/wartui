@@ -109,12 +109,19 @@ async fn view(
                 Some(Input::Key(key)) if ui.power_confirming() => {
                     ui.on_power_key(key, &current, commands);
                 }
-                // Ahead of `quits()`, so `q` closes the modal rather than the view.
+                // Ahead of `quits()`, so `q` closes the modal rather than the view. Also ahead of
+                // the waiting-for-GPS pop-up it may be opened over, which keys reach again once
+                // it closes.
                 Some(Input::Key(key)) if ui.gps_open() => ui.on_gps_key(key),
                 // An open modal gets the key ahead of `quits()`, so `esc` and `q`
                 // close the modal, not the view.
                 Some(Input::Key(key)) if ui.modal().is_some() => {
                     ui.on_modal_key(key, &current, commands);
+                }
+                // The waiting-for-GPS pop-up has nothing to back out to, so `q` and `esc` fall
+                // through to `quits()` and quit, as in the fleet view.
+                Some(Input::Key(key)) if current.awaiting_fix && !quits(key) => {
+                    ui.on_fix_wait_key(key, &current, commands);
                 }
                 Some(Input::Key(key)) if quits(key) => break Ok(()),
                 Some(Input::Key(key)) => ui.on_key(key, &current, commands),
@@ -166,6 +173,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     draw_blocks(frame, grid, snapshot, selected, scroll, cols, wide);
     draw_footer(frame, footer, snapshot, ui, &faults);
 
+    if let Some(lines) = ui.fix_wait_lines(snapshot) {
+        draw_confirm_modal(frame, " waiting for GPS ", &lines);
+    }
     if let Some(modal) = ui.modal() {
         draw_settings_modal(frame, modal);
     }
@@ -257,7 +267,7 @@ mod tests {
         gps.open_gps();
         let mut lossy = fleet_of(14);
         lossy.nodes[3].state.batches_lost = 2;
-        for snapshot in [busy(), empty(), with_sky(40), fleet_of(14), lossy] {
+        for snapshot in [busy(), empty(), with_sky(40), fleet_of(14), lossy, awaiting_fix()] {
             for (width, height) in [
                 (200, 50),
                 (138, 38),
@@ -278,6 +288,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn view_draws_fix_wait_pop_up_over_live_view_when_awaiting_fix() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &awaiting_fix(), &mut Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains(" waiting for GPS "), "{rendered}");
+        assert!(rendered.contains("Waiting for a GPS fix before the scan starts."), "{rendered}");
+        assert!(rendered.contains("gps: searching"), "{rendered}");
+        assert!(rendered.contains("[ ] skip this wait at every launch"), "{rendered}");
+        assert!(
+            rendered.contains("space tick · enter scan without a fix · g gps · q quit"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("unique APs"), "the live view behind it: {rendered}");
+
+        terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
+        assert!(!terminal.backend().to_string().contains("waiting for GPS"), "gone with the wait");
+    }
+
+    #[test]
+    fn view_draws_gps_modal_over_fix_wait_pop_up_when_both_are_open() {
+        let mut ui = Ui::default();
+        ui.open_gps();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &awaiting_fix(), &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains(" gps "), "{rendered}");
+        assert!(rendered.contains("sentences"), "the modal's rows: {rendered}");
+        assert!(rendered.contains("esc close"), "{rendered}");
+        assert!(!rendered.contains("skip this wait"), "the pop-up is under it: {rendered}");
     }
 
     #[test]

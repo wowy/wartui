@@ -190,6 +190,18 @@ impl PositionChain {
             .unwrap_or_else(Fix::none)
     }
 
+    /// The run of fix reports the chain holds as of `now_ms` ([`Gps::fix_run`]): the earliest
+    /// among its receivers that hold one, so a second receiver flapping does not disturb a steady
+    /// one. `None` while none holds a fix. A static position holds no fix: it is test data.
+    #[must_use]
+    pub fn fix_run(&self, now_ms: i64) -> Option<i64> {
+        [self.gps.as_ref(), self.bridge_gps.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|gps| gps.fix_run(now_ms))
+            .min()
+    }
+
     /// The receiver's last fix, if it arrived within [`Self::max_age`] of `now_ms`.
     fn fresh(&self, gps: &Gps, now_ms: i64) -> Option<Fix> {
         let (fix, received_at_ms) = gps.latest()?;
@@ -364,6 +376,23 @@ mod tests {
         bridge.feed(GGA, 1_000);
         assert_eq!(chain.resolve(6_000).source, PositionSource::Gps);
         assert_eq!(chain.resolve(6_001).source, PositionSource::None);
+    }
+
+    #[test]
+    fn position_chain_reports_earliest_fix_run_when_both_receivers_fix() {
+        let (bridge, host, chain) = chain_with_both();
+        assert_eq!(chain.fix_run(1_000), None);
+        host.feed(GGA, 1_000);
+        bridge.feed(GGA, 2_000);
+        assert_eq!(chain.fix_run(2_000), Some(1_000));
+        // The host's goes quiet past the gap; the bridge's still holds.
+        bridge.feed(GGA, 3_000);
+        assert_eq!(chain.fix_run(3_000), Some(2_000));
+    }
+
+    #[test]
+    fn position_chain_holds_no_fix_run_when_only_static() {
+        assert_eq!(PositionChain::fixed(37.7749, -122.4194, None).fix_run(0), None);
     }
 
     #[test]

@@ -66,6 +66,10 @@ pub enum Command {
     /// `GetStatus` behind it. The run does not start the scan again.
     StopScan,
 
+    /// Start this run's scan without waiting for a GPS fix ([`EngineConfig::wait_for_fix`]).
+    /// The start then follows the usual rule. Nothing once the wait is over.
+    StartWithoutFix,
+
     /// Ask the bridge to hold the channel pool `pool`, and keep it across its reboots.
     ///
     /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is. The P4's

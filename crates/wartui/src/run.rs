@@ -10,6 +10,12 @@
 //! that decides what a node scans, and nothing on the command line or at the
 //! keyboard overrides it. The pool is the bridge's, which reports it in each `Status`;
 //! the settings modal only asks the bridge to change it.
+//!
+//! The scan waits for a GPS fix by default, so a capture's first rows carry a position
+//! (`[gps] wait-for-fix`). The wait applies only when a real receiver could fix: not with
+//! `--no-gps`, not with `--lat`/`--lon`, whose capture is test data, and not under `--sim`
+//! unless `--gps PATH` names a host port, since the simulated bridge has no receiver and
+//! `--sim` searches no ports.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,9 +168,9 @@ pub async fn run(args: Args) -> Result<()> {
         _ => bail!("--lat and --lon must be given together"),
     };
 
-    // The receiver is started before the link so that the first observations
-    // of the capture have a chance of being positioned; it takes a few seconds
-    // to answer, and nothing waits for it either way.
+    // The receiver is started before the link so that it is reading by the time the
+    // bridge answers; it takes a few seconds to answer, and the scan waits for its fix
+    // unless the operator has turned the wait off.
     // Not under `--sim` unless a receiver was named. A simulated fleet is the way to
     // work on wartui with nothing plugged in, and a search that opens every serial
     // port on a developer's machine four times over — resetting whatever is wired for
@@ -215,6 +221,9 @@ pub async fn run(args: Args) -> Result<()> {
     let store_config = StoreConfig::new(&db);
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
+    let wait_for_fix = config.gps.waits_for_fix()
+        && args.lat.is_none()
+        && (gps.is_some() || (bridge_gps.is_some() && args.sim.is_none()));
     let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
     let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
     let settings = tui::Settings {
@@ -227,6 +236,7 @@ pub async fn run(args: Args) -> Result<()> {
     let config = EngineConfig {
         // A capture starts the scan, and stops it when it ends.
         auto_start: true,
+        wait_for_fix,
         record_raw: args.record_raw,
         position,
         excluded_ssids,
