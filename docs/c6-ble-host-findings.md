@@ -24,8 +24,7 @@ So the spike ran the host stack on the C6 instead:
 - **One owner for the host queue:** a subscribed central takes it, and any UART0 frame takes it
   back, so `flash-bridge` always gets in and out.
 
-`flash-bridge` carried each spike build in and back out. On 96:C4, `main` → spike → `main` →
-spike crossed with a confirmed trial each time, and no image advertised on `main`.
+`flash-bridge` carried each spike build in and back out.
 
 | | |
 | --- | --- |
@@ -72,7 +71,14 @@ A C6 build that credits the stream at once and runs no Bluetooth: 55.0 MB in 145
 zero CRC, magic and UART errors at both ends. 4 Mbaud 8N1 carries at most 400 KB/s, so the FIFO
 path runs near the line. The link to the C6 is not what limits Bluetooth.
 
-## Linux throughput depends on the interval and the PHY
+## Run 2 — Bluetooth up, and the way back
+
+- **Up:** the stand-in connected at 2M, 30 ms and MTU 247. `Ready` came first, and 20 `GetStatus`
+  round trips were all answered, with p50 38.8 ms and p99 58.9 ms.
+- **The way back:** on 96:C4, `main` → spike → `main` → spike crossed with a confirmed trial each
+  time, and no image advertised on `main`.
+
+## Run 3 — Linux throughput depends on the interval and the PHY
 
 `saturate` for 120 s to the stand-in, every record checked:
 
@@ -85,9 +91,9 @@ path runs near the line. The link to the C6 is not what limits Bluetooth.
 | LE Coded (S8 requested) | 15 ms | 1.8 KB/s | 203, 0 |
 
 At 1M this adapter took one notification per connection event, so throughput followed the event
-rate. At 2M it took about three. Runs 7 to 9 also negotiated 15 ms on the default image, which
-asks for no interval: inferred to be BlueZ reusing the 15 ms the C6 requested in the run before,
-not confirmed.
+rate. At 2M it took about three at 30 ms and about two at 15 ms. Runs 7 to 9 also negotiated
+15 ms on the default image, which asks for no interval: inferred to be BlueZ reusing the 15 ms
+the C6 requested in run 3's 2M arm just before, not confirmed.
 
 ## Run 4 — every device cleared the bar at MTU 247
 
@@ -105,7 +111,8 @@ not confirmed.
   over the time the user reported. The Flip's is an upper bound, since it includes a short first
   connection.
 - **Android needs the app to ask for an MTU.** nRF Connect on Android kept MTU 23 until asked, so
-  each notification carried 20 bytes. The Pixel still packed about 20 of them into each event.
+  each notification carried at most 20 bytes. The Pixel still packed ~20 of them into each event,
+  ~17 B each on average (inferred from the notification count over the run).
 - **Writes:** every device's Down writes reached the P4. nRF Connect on iOS once sent a frame
   without its trailing `00`, which the P4 merged with the next and dropped. A leading `00` on
   each hand-typed frame avoided it.
@@ -121,8 +128,9 @@ not confirmed.
   - The C6 recorded reason `0x08`, did not restart, and advertised again.
   - After the reconnect the generator's sequence started from 0, so nothing queued for the absent
     phone arrived (inferred from the sequence count).
-  - 60 records were evicted, all counted. That is inferred to be the near-full ring left by the
-    preceding `saturate`, filling as the link faded and before the timeout fired.
+  - 60 records were evicted, all counted. The cause was not found. `saturate` had left the ring
+    nearly full when `fleet20` started, but at the Pixel's ~57 KB/s that drains within seconds, so
+    it explains them only if the link was already fading at the switch.
   - nRF Connect cannot show whether `Ready` came first; run 5 checked that path on the stand-in.
 
 ## Runs 7 to 9 — soak, bursts and command latency (96:C4, 2M, 15 ms)
@@ -130,8 +138,7 @@ not confirmed.
 - **Soak (run 7):** `saturate` for 10 minutes, 32.5 KB/s. 18,770 records arrived with no gap, and
   the link had zero errors at both ends. 96:C4 has no node bus, so this is the link alone.
 - **Command latency (run 9):** 1,000 `GetStatus` round trips under `fleet20`. All 1,000 were
-  answered, with p50 23.8 ms, p99 29.7 ms and max 34.2 ms. At 2M and 30 ms, 20 round trips had
-  p50 38.8 ms and p99 58.9 ms.
+  answered, with p50 23.8 ms, p99 29.7 ms and max 34.2 ms. Run 2 gives the 30 ms figures.
 - **Bursts (run 8):** the ring drained at about 30 KB/s. Stats arrive every 2 s, so peaks and
   times are to the nearest sample.
 
@@ -165,8 +172,11 @@ mid-burst.
 - **The first arm's 20 s gaps did not recur.** They hit every node at once and came with all 16
   lost batches, but the repeat arm, with timestamped events, had neither. The cause was not found.
 - **The P4 → C6 direction lost 6 packets in the first 30 minutes and none in the 20 after.** Each
-  CRC failure at the C6 matched a sequence gap. 96:C4 had none over hours of `saturate`. Running a scan or not did not decide it, and the cause
-  was not found.
+  CRC failure at the C6 matched a sequence gap. 96:C4 had none over hours of `saturate`.
+  - All six came in arms with a scan running. The one arm without a scan ran after they had
+    stopped, so it cannot rule scanning, or the node bus's traffic, out.
+  - None came in the `saturate` arm, so Bluetooth load did not drive them. The cause was not
+    found.
   - A lost packet drops stream bytes. At `fleet20` rates a packet usually holds one whole frame,
     so it drops cleanly (inferred). The one record missing with no eviction in the `fleet20` arm
     fits that.
@@ -179,7 +189,7 @@ mid-burst.
 
 | Criterion | Result |
 | --- | --- |
-| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures with D0:1C's bus running; 0 on 96:C4, which has no bus |
+| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus |
 | 2. At least 16 KB/s | Met at 2M on every device and the stand-in, at MTU 247. Not met at 1M with a 30 ms interval, or at MTU 23 |
 | 3. Same data, in order, no gaps | Met on 96:C4. On D0:1C one record was lost to a P4 → C6 packet loss (inferred) |
 | 4. Commands work | Every device's writes reached the P4; p50 23.8 ms, p99 29.7 ms on the stand-in |
@@ -194,7 +204,7 @@ the recipe.
 | Workaround | Why | Where on `spike/c6-ble-host` | Drop it when |
 | --- | --- | --- | --- |
 | Cap TrouBLE's packet pool at 251 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "251"`, ATT MTU 247), and ask for data length 251 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start; any notification longer than one ACL packet is dropped by the central and the stream stalls | `8b40dd5`, `firmware/p4-radio/.cargo/config.toml` | esp-radio's `send_packet` (`ble/npl.rs`) stops zeroing the ACL header's high byte |
-| Leave `trouble-host`'s `connection-params-update` feature off | bt-hci 0.10.1 declares no return for LE Remote Connection Parameter Request Reply and Negative Reply; a central's LL_CONNECTION_PARAM_REQ (every Android phone tested) panics the C6 | `02b12ca` | bt-hci declares `Return = ConnHandle` for opcodes 0x2020 and 0x2021, in a release `trouble-host` accepts |
+| Leave `trouble-host`'s `connection-params-update` feature off | bt-hci 0.10.1 declares no return for LE Remote Connection Parameter Request Reply and Negative Reply; a central's LL_CONNECTION_PARAM_REQ panics the C6 (the Pixel 8 sent one on every connection; the Flip 8 ran only after the fix) | `02b12ca` | bt-hci declares `Return = ConnHandle` for opcodes 0x2020 and 0x2021, in a release `trouble-host` accepts |
 | Ask for a connection interval through `update_connection_params`, which goes out as an L2CAP request without that feature | the feature above is what TrouBLE would use for the link-layer procedure | `0473202` | as above |
 | A phone app requests an MTU after connecting | Android stays at MTU 23 until the app asks: 20 bytes a notification, ~6.8 KB/s on the Pixel 8 | — | never: it is how Android works |
 | A phone app starts each write to Down with a `0x00` | a frame that arrives without its terminator merges with the next, and both are lost; a leading `0x00` ends any partial frame first | — | never: it costs one byte |
@@ -215,19 +225,22 @@ Two design points the spike leaves for production:
 
 - A phone can be the wartui host through the C6 without touching the radio link's frozen core,
   and `flash-bridge` moves a board on and off such a build.
-- Throughput at 2M and MTU 247 is 38–90 KB/s on the four test devices: 2.4–5.6× the bar.
+- Throughput at 2M and MTU 247 cleared the bar on all four test devices: 38.3 KB/s measured on
+  the iPad, and ~48 to ~90 KB/s on the others, inferred from counters (the Flip's is an upper
+  bound). That is 2.4× the bar or more.
 - The P4's 240 KB ring evicts on a 500-batch burst at Bluetooth rates. A 4 MB PSRAM ring does not.
 - Bluetooth load does not starve the node bus.
 
 It does not settle:
 
-- **Why P4 → C6 packets fail on D0:1C.** Intermittent, and not tied to scanning in this data.
+- **Why P4 → C6 packets fail on D0:1C.** Intermittent. All six came with a scan running, but no
+  arm without a scan ran while they were occurring.
 - **Why the first D0:1C arm lost 16 batches** to 20 s pauses on every node at once.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
 - **Down-direction throughput,** which matters for updates from a phone. Only single frames were
-  written. A P4 image of about 431 KB would take about 9–18 s at the up rates measured here
-  (inferred, not measured).
+  written. A P4 image of about 431 KB would take about 5–18 s at the up rates seen here, from
+  24 KB/s on the stand-in to ~90 KB/s on the Flip (inferred, not measured).
 - **Pairing, bonding and encryption,** and a phone app of our own, which must ask for an MTU on
   Android.
