@@ -1,15 +1,19 @@
 //! The C6's end of the UART link to the P4: what each packet carries up, and what the C6
 //! does with what comes down.
 //!
-//! `wartui_proto::radio_link` has the framing. The link is two futures, and nothing ticks: the
-//! reader wakes when a DMA read ends, and the writer when [`Shared`]'s `wake` says there may be
+//! `wartui_proto::radio_link` has the framing. The link is two futures: the reader polls the
+//! receive DMA every [`RX_POLL`], and the writer wakes when [`Shared`]'s `wake` says there may be
 //! something to send. The writer loops until it has nothing left before it waits, so a record
 //! left held or queued never waits for a new signal. They share [`Link`] through a `RefCell`, with nothing borrowed across an `.await`.
 //!
-//! **A read ends at `RX_BUF_LEN` bytes or when the line goes idle.** The next read is armed
-//! before this one's bytes are looked at, which is why there are two buffers: DMA keeps
-//! landing while the C6 works, and a flash erase holds the CPU but not the DMA. Only the moment
-//! between two reads leans on the 128-byte FIFO, with RTS behind it.
+//! **The receive is one DMA transfer for the life of the link**, over a ring of descriptors
+//! ([`RX_STREAM_LEN`] bytes in [`RX_CHUNK`]-byte chunks). An idle line or `RX_BUF_LEN` bytes is a
+//! UHCI EOF, which closes the descriptor it lands in. Every [`RX_POLL`] the reader takes the
+//! closed descriptors and hands each straight back, so DMA keeps landing while the C6 works, and a
+//! flash erase holds the CPU but not the DMA. Only a DMA that runs out of descriptors stops; the
+//! reader restarts it, which can lose a byte. It is never re-armed between packets, because
+//! arming resets the receive channel: a terminator that arrives alone after an idle EOF is lost,
+//! and two packets merge and fail their CRC (`docs/c6-ble-host-findings.md`, runs 11 and 12).
 //!
 //! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
 //! the UART, and the flush ends in a spin that does not yield until the transmitter is idle, so a
@@ -44,7 +48,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_hal::Async;
-use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+use esp_hal::dma::{DmaRxStreamBuf, DmaTxBuf};
+use esp_hal::peripherals::{DMA, UART1};
 use esp_hal::time::Instant;
 use esp_hal::uart::uhci::{UhciRx, UhciTx};
 use wartui_firmware::ota::{Note, Ota};
@@ -77,6 +82,23 @@ const WRITE_POLL_HELD: Duration = Duration::from_millis(1);
 
 /// How often a C6 that has not heard the P4 looks again, with nothing else to wake it.
 const HELLO_EVERY: Duration = Duration::from_millis(HELLO_EVERY_MS);
+
+/// Bytes in the receive stream.
+pub const RX_STREAM_LEN: usize = 8192;
+
+/// Bytes in each of the receive stream's descriptors. Each EOF closes a descriptor however few
+/// bytes it holds, so the descriptor count, 32, bounds how many packets can land between two
+/// polls.
+pub const RX_CHUNK: usize = 256;
+
+/// How often the reader looks for closed receive descriptors.
+const RX_POLL: Duration = Duration::from_micros(250);
+
+/// The GDMA channel `main.rs` hands UHCI, `DMA_CH0`. The driver does not expose the number.
+const RX_DMA_CHANNEL: usize = 0;
+
+/// The least time between two lines telling the P4 the receive DMA restarted.
+const RX_RESTART_LOG_EVERY_MS: u64 = 60_000;
 
 /// The ring of encoded [`Up`] records waiting for a packet.
 pub type UpQueue = RefCell<FrameRing<UP_QUEUE_BYTES>>;
@@ -150,7 +172,7 @@ pub struct Updates {
 pub struct Bus<'d> {
     pub rx: UhciRx<'d, Async>,
     pub tx: UhciTx<'d, Async>,
-    pub rx_bufs: [DmaRxBuf; 2],
+    pub rx_buf: DmaRxStreamBuf,
     pub tx_buf: DmaTxBuf,
     pub reader: &'static mut PacketReader,
     /// Where a packet's body is built, before it is encoded into `tx_buf`.
@@ -180,6 +202,10 @@ pub struct Link {
     seq_gap: u32,
     /// Line errors on this end's UART.
     uart_errors: u32,
+    /// Times the receive DMA ran out of descriptors and was restarted, and when the P4 was last
+    /// told.
+    rx_restarts: u32,
+    rx_restarts_said: Option<Instant>,
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
@@ -211,6 +237,8 @@ impl Link {
             bad_magic: 0,
             seq_gap: 0,
             uart_errors: 0,
+            rx_restarts: 0,
+            rx_restarts_said: None,
             undecoded: 0,
             undecoded_said: 0,
             held,
@@ -280,6 +308,22 @@ impl Link {
         if self.undecoded != self.undecoded_said {
             self.undecoded_said = self.undecoded;
             shared.error(format_args!("a P4 command did not decode"));
+        }
+    }
+
+    /// Count a restart of the receive DMA. The P4 hears of the first, then of the count at most
+    /// once every [`RX_RESTART_LOG_EVERY_MS`].
+    fn note_rx_restart(&mut self, shared: &Shared) {
+        self.rx_restarts = self.rx_restarts.wrapping_add(1);
+        let due = self
+            .rx_restarts_said
+            .is_none_or(|said| said.elapsed().as_millis() >= RX_RESTART_LOG_EVERY_MS);
+        if due {
+            self.rx_restarts_said = Some(Instant::now());
+            shared.log(format_args!(
+                "receive DMA ran out of descriptors and restarted, {} times since boot",
+                self.rx_restarts
+            ));
         }
     }
 
@@ -399,43 +443,88 @@ impl Link {
 
 /// Run the link forever: the reader and the writer.
 pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> ! {
-    let Bus { rx, tx, rx_bufs, tx_buf, reader, body } = bus;
+    let Bus { rx, tx, rx_buf, tx_buf, reader, body } = bus;
     join(
-        read_packets(rx, rx_bufs, reader, link, shared),
+        read_packets(rx, rx_buf, reader, link, shared),
         write_packets(tx, tx_buf, body, link, shared),
     )
     .await
     .0
 }
 
-/// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.
+/// Read forever: arm the receive once, then every [`RX_POLL`] hand the link what has landed.
 async fn read_packets(
-    mut rx: UhciRx<'_, Async>,
-    [mut armed, mut last]: [DmaRxBuf; 2],
+    rx: UhciRx<'_, Async>,
+    buf: DmaRxStreamBuf,
     reader: &'static mut PacketReader,
     link: &RefCell<Link>,
     shared: &Shared,
 ) -> ! {
-    let mut last_len = 0;
+    let mut stream = rx.read(buf).map_err(|(err, ..)| err).expect("arm the UART receive");
     loop {
-        let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
-        mark(LoopPhase::RadioLink);
-        for &byte in &last.as_slice()[..last_len] {
-            if let Some(packet) = reader.push(byte) {
-                link.borrow_mut().take(packet, shared);
+        let mut found = false;
+        loop {
+            // Up to the next EOF, so a descriptor an EOF closed empty is handed back too.
+            let (bytes, eof) = stream.peek_until_eof();
+            if bytes.is_empty() && !eof {
+                break;
             }
+            if !found {
+                found = true;
+                mark(LoopPhase::RadioLink);
+            }
+            let len = bytes.len();
+            for &byte in bytes {
+                if let Some(packet) = reader.push(byte) {
+                    link.borrow_mut().take(packet, shared);
+                }
+            }
+            stream.consume(len);
         }
-        read.wait_for_done().await;
-        let (result, rx_back, done) = read.wait();
-        rx = rx_back;
-        armed = core::mem::replace(&mut last, done);
-        last_len = last.number_of_received_bytes();
-        // The UART keeps line errors until they are read, so any since the last read are here.
-        if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
+        if found && take_line_errors() {
             let mut link = link.borrow_mut();
             link.uart_errors = link.uart_errors.wrapping_add(1);
         }
+        // Everything landed has been taken, so a restart loses only what is in flight.
+        if rx_dma_stopped() {
+            let (rx, buf) = stream.cancel();
+            stream = rx.read(buf).map_err(|(err, ..)| err).expect("restart the UART receive");
+            link.borrow_mut().note_rx_restart(shared);
+        }
+        Timer::after(RX_POLL).await;
     }
+}
+
+/// Whether the receive DMA has stopped for want of a descriptor. Read from the channel's raw
+/// interrupt bits, which only arming a transfer clears: nothing here awaits the DMA's future,
+/// and the interrupt handler only wakes.
+fn rx_dma_stopped() -> bool {
+    DMA::regs().in_int_ch(RX_DMA_CHANNEL).raw().read().in_dscr_empty().bit_is_set()
+}
+
+/// Whether UART1 has seen a line error since the last call, as `UartRx::check_for_errors`
+/// reads them; the running transfer holds the `UartRx`. Clears only the bits it read: UHCI's
+/// DMA path uses no UART interrupts and nothing here awaits a UART future, so nothing else
+/// depends on them.
+fn take_line_errors() -> bool {
+    let uart = UART1::regs();
+    let raw = uart.int_raw().read();
+    let (ovf, glitch, frame, parity) = (
+        raw.rxfifo_ovf().bit_is_set(),
+        raw.glitch_det().bit_is_set(),
+        raw.frm_err().bit_is_set(),
+        raw.parity_err().bit_is_set(),
+    );
+    let any = ovf || glitch || frame || parity;
+    if any {
+        uart.int_clr().write(|w| {
+            w.rxfifo_ovf().bit(ovf);
+            w.glitch_det().bit(glitch);
+            w.frm_err().bit(frame);
+            w.parity_err().bit(parity)
+        });
+    }
+    any
 }
 
 /// Write forever: every packet the link has to send, then wait for a reason to look again.
@@ -465,7 +554,7 @@ async fn write_packets(
         let wire_time = Duration::from_micros(wire as u64 * 10 * 1_000_000 / BAUD_RATE as u64);
         Timer::after(wire_time).await;
         let mut waited = wire_time;
-        // Neither call reports a DMA error, so `uart_errors` holds only what a read finds.
+        // Neither call reports a DMA error, so `uart_errors` holds only what the reader finds.
         while !write.is_done() {
             let poll = if waited < wire_time * 2 { WRITE_POLL } else { WRITE_POLL_HELD };
             Timer::after(poll).await;
