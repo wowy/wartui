@@ -87,7 +87,7 @@ fn fix_lines(status: String, gps: Option<&GpsView>) -> Vec<Line<'static>> {
 
 /// The status row, and the receiver when it is being read so the other rows have something to
 /// show.
-fn status(snapshot: &Snapshot) -> (String, Option<&GpsView>) {
+pub(super) fn status(snapshot: &Snapshot) -> (String, Option<&GpsView>) {
     let Some(gps) = &snapshot.gps else { return ("off".to_owned(), None) };
     let text = match &gps.status {
         GpsStatus::Connecting => "connecting".to_owned(),

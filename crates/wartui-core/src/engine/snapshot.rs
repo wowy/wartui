@@ -168,6 +168,10 @@ pub struct Snapshot {
     /// The bridge's last answer to [`Command::PowerCycle`](super::Command::PowerCycle), for the
     /// view to show once.
     pub power_answer: Option<PowerAnswer>,
+    /// The run holds its scan for a GPS fix
+    /// ([`EngineConfig::wait_for_fix`](super::EngineConfig::wait_for_fix)): the view shows its
+    /// pop-up exactly while this holds.
+    pub awaiting_fix: bool,
 }
 
 /// The bridge's answer to a power-cycle, as the operator reads it.
@@ -342,6 +346,7 @@ impl FleetEngine {
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
             power_answer: self.power_answer.clone(),
+            awaiting_fix: self.fix_wait,
         }
     }
 

@@ -162,8 +162,8 @@ running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is 
 `crates/wartui-proto/tests/fleet.rs` tests it.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b`, `c` and `p` get that far, beside the `StopScan` a quit
-sends; channels are the P4's.
+ordered against each other. Only `b`, `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
+far, beside the `StopScan` a quit sends; channels are the P4's.
 
 ### Store is the system of record
 
@@ -435,9 +435,10 @@ edit stops; follow the pointer before changing the rule.
   queued ahead of it. → `firmware/p4-bridge/src/fleet.rs` `//!`
 - **A run stops a P4 found scanning before it starts the scan**, and starts only once the P4
   reports stopped, so each capture begins with every node's dedup ring empty: a start that reached
-  the P4 first would replace the `Stop`. After that the run restarts a P4 found stopped, which is
-  how a P4 that resets mid-run comes back. → `crates/wartui-core/src/engine/scan.rs` `//!`,
-  `Startup`
+  the P4 first would replace the `Stop`. A run that waits for a GPS fix still stops at once, and
+  holds only the start, until a receiver has held a fix for `FIX_WAIT` or the operator presses
+  `Enter`. After that the run restarts a P4 found stopped at once, which is how a P4 that resets
+  mid-run comes back. → `crates/wartui-core/src/engine/scan.rs` `//!`, `Startup`
 - **The node passes `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/node/src/main.rs`, `firmware/node/README.md`

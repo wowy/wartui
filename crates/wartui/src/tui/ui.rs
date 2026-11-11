@@ -8,7 +8,10 @@ use wartui_proto::mac::Mac;
 
 use super::Settings;
 use super::blocks::LOST_SLOT;
-use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_bridge};
+use super::gps;
+use super::settings::{
+    ConfigModal, ModalAction, apply, apply_excluded, save_bridge, save_fix_wait,
+};
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
@@ -234,6 +237,52 @@ impl Ui {
             "Its node goes off for a second, then boots again.".to_owned(),
             String::new(),
             "y power-cycle · any other key cancels".to_owned(),
+        ])
+    }
+
+    /// A key while the run waits for a GPS fix ([`Snapshot::awaiting_fix`]). `view` routes
+    /// every key but a quit here. `Space` ticks or unticks the box and saves it at once,
+    /// `Enter` starts this run's scan without a fix, `g` opens the GPS modal over the pop-up,
+    /// and every other key does nothing.
+    pub(super) fn on_fix_wait_key(
+        &mut self,
+        key: KeyEvent,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
+        match key.code {
+            KeyCode::Char(' ') => {
+                let wait = !self.settings.saved.gps.waits_for_fix();
+                // A failed save leaves the box as the file has it.
+                if let Err(why) = save_fix_wait(&mut self.settings, wait) {
+                    self.say(format!("not saved: {}", why.trim_start_matches("; ")), snapshot);
+                }
+            }
+            KeyCode::Enter => {
+                let sent = commands.try_send(Command::StartWithoutFix);
+                if sent.is_err() {
+                    self.say(ENGINE_BUSY.to_owned(), snapshot);
+                }
+            }
+            KeyCode::Char('g') => self.open_gps(),
+            _ => {}
+        }
+    }
+
+    /// The waiting-for-GPS pop-up's lines, while the run holds its scan for a fix. The box
+    /// is what the file holds.
+    pub(super) fn fix_wait_lines(&self, snapshot: &Snapshot) -> Option<Vec<String>> {
+        if !snapshot.awaiting_fix {
+            return None;
+        }
+        let tick = if self.settings.saved.gps.waits_for_fix() { ' ' } else { 'x' };
+        Some(vec![
+            "Waiting for a GPS fix before the scan starts.".to_owned(),
+            format!("gps: {}", gps::status(snapshot).0),
+            String::new(),
+            format!("[{tick}] skip this wait at every launch"),
+            String::new(),
+            "space tick · enter scan without a fix · g gps · q quit".to_owned(),
         ])
     }
 
@@ -625,6 +674,94 @@ mod tests {
         let mut ui = Ui { grid_cols: 5, selected: 3, ..Default::default() };
         ui.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.selected, 3);
+    }
+
+    #[test]
+    fn ui_saves_skip_box_that_reloads_when_space_pressed_while_waiting_for_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = awaiting_fix();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
+        assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
+        assert!(lines.contains(&"gps: searching".to_owned()), "{lines:?}");
+
+        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "the box sends nothing");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.gps.wait_for_fix, Some(false));
+        let lines = ui.fix_wait_lines(&snapshot).expect("still up");
+        assert!(lines.contains(&"[x] skip this wait at every launch".to_owned()), "{lines:?}");
+
+        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.gps.wait_for_fix, None, "unticked, the key drops out");
+    }
+
+    #[test]
+    fn ui_keeps_box_and_says_why_when_space_pressed_with_nowhere_to_save() {
+        let snapshot = awaiting_fix();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+
+        let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
+        assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("--config"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_start_without_fix_when_enter_pressed_while_waiting_for_fix() {
+        let snapshot = awaiting_fix();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::StartWithoutFix);
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_other_keys_pressed_while_waiting_for_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = awaiting_fix();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+
+        for key in ['b', 'c', 'p', 'u', 'x', 'j'] {
+            ui.on_fix_wait_key(press(key), &snapshot, &tx);
+        }
+        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err());
+        assert!(ui.modal().is_none() && !ui.gps_open());
+        assert!(!target.exists(), "nothing was written");
+        assert_eq!(ui.notice(snapshot.now_ms), None);
+    }
+
+    #[test]
+    fn ui_opens_gps_modal_when_g_pressed_while_waiting_for_fix() {
+        let snapshot = awaiting_fix();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_fix_wait_key(press('g'), &snapshot, &tx);
+
+        assert!(ui.gps_open());
+        assert!(rx.try_recv().is_err(), "nothing goes to the engine");
+        ui.on_gps_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!ui.gps_open());
+        assert!(ui.fix_wait_lines(&snapshot).is_some(), "the pop-up is there again");
+    }
+
+    #[test]
+    fn ui_shows_no_fix_wait_lines_when_not_waiting() {
+        assert_eq!(Ui::default().fix_wait_lines(&busy()), None);
     }
 
     #[test]

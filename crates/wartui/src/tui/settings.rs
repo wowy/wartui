@@ -12,6 +12,10 @@
 //! it. Neither is ever written to `wartui.toml`. The bridge picks the Bluetooth node too, and `b`
 //! rather than a row here asks for the scan.
 //!
+//! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
+//! decides at launch whether it waits, so the row applies from the next launch. The
+//! waiting-for-GPS pop-up's box writes the same key, through [`save_fix_wait`].
+//!
 //! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
 //! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
 //! the file's only writer within `run`, so the transport's thread never races it on a
@@ -66,13 +70,20 @@ enum Field {
     Pool,
     Fan,
     RememberBridge,
+    WaitForGps,
     ExcludedSsids,
     WdgwarsKey,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 5] =
-    [Field::Pool, Field::Fan, Field::RememberBridge, Field::ExcludedSsids, Field::WdgwarsKey];
+const FIELDS: [Field; 6] = [
+    Field::Pool,
+    Field::Fan,
+    Field::RememberBridge,
+    Field::WaitForGps,
+    Field::ExcludedSsids,
+    Field::WdgwarsKey,
+];
 
 impl Field {
     /// The row below. The last row stays put rather than wrapping.
@@ -107,6 +118,8 @@ pub(super) struct ConfigModal {
     bridge_up: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
+    /// Whether `run` holds the scan for a GPS fix, from the next launch.
+    wait_for_gps: bool,
     /// The WDGWars API key, typed or pasted. Empty means not set.
     wdgwars_key: String,
     /// The SSIDs never captured, edited on [`Page::Excluded`].
@@ -168,6 +181,7 @@ impl ConfigModal {
     /// | pool | one place in [`POOL_STEPS`]; none at `no bridge` |
     /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
     /// | remember | flips |
+    /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | key | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
@@ -177,6 +191,11 @@ impl ConfigModal {
             Field::RememberBridge => {
                 if delta != 0 {
                     self.remember_bridge = !self.remember_bridge;
+                }
+            }
+            Field::WaitForGps => {
+                if delta != 0 {
+                    self.wait_for_gps = !self.wait_for_gps;
                 }
             }
             // A text row, and a row that opens a page. `on_key` handles both.
@@ -220,6 +239,8 @@ impl ConfigModal {
             bridge_up,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
+            // The file's, since a run reads it only at launch.
+            wait_for_gps: settings.saved.gps.waits_for_fix(),
             // Nor this one. It is what the file holds, hand edits included.
             wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
             excluded: snapshot.excluded_ssids.clone(),
@@ -415,8 +436,32 @@ pub(super) fn apply(
             text.push_str("; bridge forgotten — each start scans for it");
         }
     }
-    text.push_str(&save_outcome(modal, settings));
+    // The row lives only in the file, so it changes nothing unless the save lands.
+    let wait_moved = modal.wait_for_gps != settings.saved.gps.waits_for_fix();
+    match save_outcome(modal, settings) {
+        Ok(path) => {
+            if wait_moved {
+                text.push_str("; gps wait from the next launch");
+            }
+            text.push_str(&format!("; saved to {}", path.display()));
+        }
+        Err(error) => text.push_str(&error),
+    }
     Ok(text)
+}
+
+/// `[gps] wait-for-fix` as written for `wait`: absent to wait, `false` to skip.
+const fn wait_for_fix_key(wait: bool) -> Option<bool> {
+    if wait { None } else { Some(false) }
+}
+
+/// Save whether `run` waits for a GPS fix at launch, over the file as last saved, for the
+/// waiting-for-GPS pop-up's box. Returns the path, or why nothing was written, as [`save`]
+/// does. Nothing else in the file changes.
+pub(super) fn save_fix_wait(settings: &mut Settings, wait: bool) -> Result<PathBuf, String> {
+    let mut written = settings.saved.clone();
+    written.gps.wait_for_fix = wait_for_fix_key(wait);
+    save(settings, written)
 }
 
 /// Send the modal's excluded SSIDs to the engine and save them to `wartui.toml`.
@@ -442,23 +487,31 @@ pub(super) fn apply_excluded(
     Ok(format!("excluded ssids: {}{saved}", excluded_count(&modal.excluded)))
 }
 
-/// Write every modal row to `wartui.toml`, and return the notice suffix: where it
-/// saved, or why it did not.
+/// Write every modal row to `wartui.toml`. Returns the path, or the notice suffix saying
+/// why nothing was written, as [`save`] does.
 ///
 /// Overwrites the whole file, hand edits included. The rows are already applied, so a
 /// failed save loses only the file. On success the written config becomes
 /// [`Settings::saved`].
-fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> String {
+fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf, String> {
+    // A row left where the file put it keeps the file's spelling, a hand-written `true`
+    // included; only a moved row is rewritten.
+    let wait_for_fix = if modal.wait_for_gps == settings.saved.gps.waits_for_fix() {
+        settings.saved.gps.wait_for_fix
+    } else {
+        wait_for_fix_key(modal.wait_for_gps)
+    };
     let written = config::Config {
         excluded_ssids: modal.excluded.clone(),
         bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None, serial: None },
-        // Not on the modal, so kept as the file last had it.
-        gps: settings.saved.gps.clone(),
+        gps: config::Gps {
+            // Not on the modal, so kept as the file last had it.
+            bridge_rate_hz: settings.saved.gps.bridge_rate_hz,
+            wait_for_fix,
+        },
         api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
     };
     save(settings, written)
-        .map(|path| format!("; saved to {}", path.display()))
-        .unwrap_or_else(|error| error)
 }
 
 /// Save the bridge the transport holds now, over the file as last saved. Returns the
@@ -490,7 +543,7 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 11, frame.area());
+    let area = centered_rect(48, 12, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -540,6 +593,7 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
             }
         },
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
+        row("wait for gps", &on_off(modal.wait_for_gps), Field::WaitForGps),
         Line::from(Span::styled(
             format!("{:<18}  {} ›", "excluded ssids", excluded_count(&modal.excluded)),
             styled(Field::ExcludedSsids),
@@ -817,7 +871,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let saved = config::Config {
-            gps: config::Gps { bridge_rate_hz: Some(2) },
+            gps: config::Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) },
             ..config::Config::default()
         };
         let snapshot = busy();
@@ -830,6 +884,88 @@ mod tests {
 
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.gps.bridge_rate_hz, Some(2));
+        assert_eq!(saved.gps.wait_for_fix, Some(false), "the row seeds from the file");
+    }
+
+    #[test]
+    fn ui_keeps_hand_written_wait_for_fix_when_modal_saves_without_moving_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[gps]\nwait-for-fix = true\n").unwrap();
+        let saved = config::load(Some(&target)).expect("a valid file");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui =
+            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        // An unrelated row moves.
+        while ui.modal().expect("open").selected != Field::RememberBridge {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        let text = std::fs::read_to_string(&target).expect("saved");
+        assert!(text.contains("wait-for-fix = true"), "{text}");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("gps wait"), "the row did not move: {notice}");
+    }
+
+    #[test]
+    fn ui_says_only_why_not_saved_when_wait_for_gps_moves_with_nowhere_to_save() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: None, ..Settings::default() });
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::WaitForGps {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("nowhere to save"), "{notice}");
+        assert!(!notice.contains("gps wait from the next launch"), "{notice}");
+    }
+
+    #[test]
+    fn ui_toggles_and_saves_wait_for_gps_when_row_stepped() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::WaitForGps {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        assert!(ui.modal().expect("open").wait_for_gps, "absent means wait");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("wait for gps      ◂ on ▸"), "{rendered}");
+
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing goes to the engine");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("gps wait from the next launch"), "{notice}");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.gps.wait_for_fix, Some(false));
+
+        // And back on: the key drops out of the file.
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::WaitForGps {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        assert!(!ui.modal().expect("open").wait_for_gps);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        let text = std::fs::read_to_string(&target).expect("saved");
+        assert!(!text.contains("wait-for-fix"), "{text}");
     }
 
     #[test]
@@ -1645,7 +1781,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = excluded_snapshot(&["HomeNet"]);
         let saved = config::Config {
-            gps: config::Gps { bridge_rate_hz: Some(2) },
+            gps: config::Gps { bridge_rate_hz: Some(2), wait_for_fix: None },
             ..config::Config::default()
         };
         let settings = Settings { config_path: Some(target.clone()), saved, ..Settings::default() };

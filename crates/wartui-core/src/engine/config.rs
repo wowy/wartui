@@ -24,6 +24,10 @@ pub struct EngineConfig {
     /// Start the P4's scan on this run's first connection ([`Command::SetBluetooth`] has the
     /// rule). Only a capture turns it on: a command that looks at the fleet leaves it as it is.
     pub auto_start: bool,
+    /// Hold that start until a receiver in [`Self::position`] has held a fix for
+    /// `engine::FIX_WAIT`, or until [`Command::StartWithoutFix`]. Read only with
+    /// [`Self::auto_start`].
+    pub wait_for_fix: bool,
     /// How often to ask the bridge for its counters.
     pub status_interval: Duration,
     /// How many recent observations the snapshot carries for the UI.
@@ -48,6 +52,7 @@ impl Default for EngineConfig {
         Self {
             topology_timeout: Duration::from_millis(fleet::HEARTBEAT_TIMEOUT_MS),
             auto_start: false,
+            wait_for_fix: false,
             status_interval: Duration::from_secs(5),
             tail_len: 200,
             record_raw: false,

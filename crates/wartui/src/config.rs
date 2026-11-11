@@ -17,7 +17,8 @@
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API key, so a first-time operator has a place to paste one. It
 //! never rewrites an existing file at startup. Its view does, through one save path: the
-//! settings modal, and a change to the bridge the transport remembers.
+//! settings modal, a change to the bridge the transport remembers, and the box on the
+//! waiting-for-GPS pop-up, which writes `[gps] wait-for-fix`.
 //! `flash-bridge` saves the board it found and flashed as the bridge, unless remembering
 //! is off, so `run` and the next `flash-bridge` open the new bridge first. A board named
 //! with `--bridge` is often some other device, and is not saved.
@@ -81,18 +82,28 @@ impl Bridge {
 }
 
 /// The `[gps]` table: how often a bridge's GPS receiver reports a fix, in whole hertz
-/// within [`GPS_RATE_HZ`]. Absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`].
+/// within [`GPS_RATE_HZ`], and whether `run` holds the scan until a receiver holds a fix.
+/// `bridge-rate-hz` absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`], and
+/// `wait-for-fix` absent means wait.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Gps {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge_rate_hz: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_fix: Option<bool>,
 }
 
 impl Gps {
-    /// Whether the key is unset, so `save` writes no `[gps]` table at all.
+    /// Whether `run` waits for a GPS fix before it starts the scan: absent means wait.
+    #[must_use]
+    pub fn waits_for_fix(&self) -> bool {
+        self.wait_for_fix.unwrap_or(true)
+    }
+
+    /// Whether no key is set, so `save` writes no `[gps]` table at all.
     fn is_empty(&self) -> bool {
-        self.bridge_rate_hz.is_none()
+        self.bridge_rate_hz.is_none() && self.wait_for_fix.is_none()
     }
 }
 
@@ -592,6 +603,28 @@ mod tests {
     }
 
     #[test]
+    fn config_loader_reads_wait_for_fix_when_gps_table_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[gps]\nwait-for-fix = false\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().gps.wait_for_fix, Some(false));
+    }
+
+    #[test]
+    fn config_save_writes_wait_for_fix_that_reloads_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let skip = Config {
+            gps: Gps { bridge_rate_hz: None, wait_for_fix: Some(false) },
+            ..Config::default()
+        };
+        save(&target, &skip).unwrap();
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("[gps]\nwait-for-fix = false"), "{text}");
+        assert_eq!(load(Some(&target)).unwrap().gps.wait_for_fix, Some(false));
+    }
+
+    #[test]
     fn config_save_omits_gps_table_when_rate_is_unset() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
@@ -652,7 +685,7 @@ mod tests {
                 mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]),
                 serial: Some("5CF7153520".to_owned()),
             },
-            gps: Gps { bridge_rate_hz: Some(2) },
+            gps: Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) },
             api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
         }
     }
@@ -662,7 +695,7 @@ mod tests {
         Config {
             excluded_ssids: Vec::new(),
             bridge: Bridge::default(),
-            gps: Gps { bridge_rate_hz: Some(rate) },
+            gps: Gps { bridge_rate_hz: Some(rate), wait_for_fix: None },
             api_keys: ApiKeys::default(),
         }
     }

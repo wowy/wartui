@@ -18,6 +18,7 @@
 //!
 //! [`Command::SetBluetooth`] asks the P4 to scan Wi-Fi, with or without Bluetooth, and the P4
 //! picks the node that scans it. [`Command::StopScan`] asks it to idle every node.
+//! [`Command::StartWithoutFix`] ends a run's wait for a GPS fix.
 //! [`Command::SetPool`] asks the bridge to hold a new pool, which its next `Status` brings back.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
@@ -53,6 +54,7 @@ use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
 pub use node::NodeState;
+pub use scan::FIX_WAIT;
 pub use snapshot::{
     BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, Snapshot, TailEntry,
     power_cycled_text,
@@ -124,6 +126,13 @@ pub struct FleetEngine {
     /// A `Status` has arrived on this connection. The first after a reconnect sets
     /// [`Self::wanted`] from the P4's mode rather than asking for it again.
     status_seen: bool,
+    /// The run holds its first start for a GPS fix ([`EngineConfig::wait_for_fix`]). Cleared once
+    /// a receiver has held one for [`FIX_WAIT`], on [`Command::StartWithoutFix`], and on
+    /// [`Command::StopScan`].
+    fix_wait: bool,
+    /// The receiver's run of fix reports the last tick saw ([`PositionChain::fix_run`]), and the
+    /// monotonic instant a tick first saw it. `None` while no receiver holds a fix.
+    fix_run: Option<(i64, Instant)>,
     /// The previous frame's bridge stamp and the host instant it was handled, to tell live reading
     /// from a backlog ([`Self::note_arrival`]). `None` until the first frame since start or the
     /// last connect or disconnect.
@@ -192,6 +201,8 @@ impl FleetEngine {
             },
             wanted: None,
             status_seen: false,
+            fix_wait: config.auto_start && config.wait_for_fix,
+            fix_run: None,
             last_arrival: None,
             // Caught up, as on `Connected`.
             backlog_lag_us: 0,
@@ -273,6 +284,7 @@ impl FleetEngine {
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
         self.note_departures(now);
+        self.check_fix_wait(now, batch);
         let due = self
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);

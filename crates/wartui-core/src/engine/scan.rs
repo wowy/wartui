@@ -18,6 +18,17 @@
 //! ([`EngineConfig::auto_start`](super::EngineConfig::auto_start)) does any of this: `status`,
 //! `sniff`, `pool` and `ota` look at a fleet without starting it.
 //!
+//! **A run can hold that start for a GPS fix**
+//! ([`EngineConfig::wait_for_fix`](super::EngineConfig::wait_for_fix)), so a capture's first
+//! rows carry a position. The P4 is still stopped at once; only the start waits
+//! ([`Startup::AwaitingFix`]). The gate opens once a receiver has held a fix for [`FIX_WAIT`],
+//! timed on the monotonic clock across ticks ([`FleetEngine::check_fix_wait`]), or on the
+//! operator's [`Command::StartWithoutFix`]. A held fix means unbroken fix reports, the latest
+//! within `gps::FIX_GAP`, rather than the chain's staleness limit: one fix from a receiver that
+//! then goes quiet would pass that limit for seconds and place nothing. A gate that opens while
+//! the link is down starts the scan on the next `Status` that reports the P4 stopped. The wait
+//! happens once: a P4 that resets later is restarted at once.
+//!
 //! **After that, the run keeps the scan it wants** (`FleetEngine::wanted`). The P4 boots stopped
 //! and keeps no mode, so a P4 that resets mid-run, often under a connection the CH343 holds up,
 //! reports stopped, and the run starts it again in the mode it wants. The first `Status` of a
@@ -31,12 +42,18 @@
 //! [`Command::StopScan`], which a clean quit sends too, clears what the run wants first, so
 //! nothing restarts a fleet the operator stopped.
 
+use std::time::Duration;
+
 use wartui_proto::bus::Slot;
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::HostToBridge;
 
 use super::{ActionBatch, Command, FleetEngine, Now};
 use crate::record::{Record, ShareChange};
+
+/// How long a receiver must hold a fix before a run waiting for one starts the scan. Long enough
+/// that a receiver's first fix, often a stray one ahead of a steady lock, does not open the gate.
+pub const FIX_WAIT: Duration = Duration::from_secs(2);
 
 /// What reported a scan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +81,12 @@ pub(super) enum Startup {
         /// The mode to start in.
         bluetooth: bool,
     },
+    /// The P4 reported stopped, and the run waits for a GPS fix to start it with Bluetooth when
+    /// `bluetooth` ([`FleetEngine::open_fix_gate`]).
+    AwaitingFix {
+        /// The mode to start in.
+        bluetooth: bool,
+    },
 }
 
 impl FleetEngine {
@@ -77,6 +100,7 @@ impl FleetEngine {
                     self.startup = Startup::AwaitingStatus { bluetooth: Some(bluetooth) };
                 }
                 Startup::Stopping { .. } => self.startup = Startup::Stopping { bluetooth },
+                Startup::AwaitingFix { .. } => self.startup = Startup::AwaitingFix { bluetooth },
                 // A fleet the operator stopped stays stopped.
                 Startup::Done if self.wanted.is_some() => self.start(bluetooth, batch),
                 Startup::Done => {}
@@ -85,8 +109,15 @@ impl FleetEngine {
                 // First, so the stopped mode the P4 reports next restarts nothing.
                 self.wanted = None;
                 self.startup = Startup::Done;
+                self.fix_wait = false;
                 batch.urgent.push(HostToBridge::StopScan);
                 batch.bulk.push(HostToBridge::GetStatus);
+            }
+            Command::StartWithoutFix => {
+                if self.fix_wait {
+                    tracing::info!("operator starts the scan without a GPS fix");
+                }
+                self.open_fix_gate(batch);
             }
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
@@ -98,6 +129,57 @@ impl FleetEngine {
                 batch.bulk.push(HostToBridge::SetPool { pool });
                 batch.bulk.push(HostToBridge::GetStatus);
             }
+        }
+    }
+
+    /// While the run waits for a GPS fix, open the gate once a receiver's run of fix reports has
+    /// lasted [`FIX_WAIT`]. The chain names the run by its first report's wall-clock stamp, which
+    /// serves only as its identity: a new stamp is a new run, and the count starts over. The
+    /// duration is measured on `now.mono` from the first tick that saw the run, so an NTP step
+    /// on a host with no real-time clock neither stalls nor hurries the gate. The count starts
+    /// at that tick rather than at the first report, which costs at most one tick.
+    pub(super) fn check_fix_wait(&mut self, now: Now, batch: &mut ActionBatch) {
+        if !self.fix_wait {
+            return;
+        }
+        let Some(run) = self.config.position.fix_run(now.unix_ms) else {
+            self.fix_run = None;
+            return;
+        };
+        let first_seen = match self.fix_run {
+            Some((seen, first_seen)) if seen == run => first_seen,
+            _ => {
+                self.fix_run = Some((run, now.mono));
+                now.mono
+            }
+        };
+        if now.mono.duration_since(first_seen) >= FIX_WAIT {
+            tracing::info!("gps fix held; the scan may start");
+            self.open_fix_gate(batch);
+        }
+    }
+
+    /// Stop waiting for a GPS fix, and start the scan if the P4 has reported stopped and the link
+    /// is up. With the link down, the next `Status` reporting stopped starts it.
+    pub(super) fn open_fix_gate(&mut self, batch: &mut ActionBatch) {
+        self.fix_wait = false;
+        self.fix_run = None;
+        if let Startup::AwaitingFix { bluetooth } = self.startup
+            && self.link_up
+        {
+            self.startup = Startup::Done;
+            self.start(bluetooth, batch);
+        }
+    }
+
+    /// Start the run's first scan, or hold it for a GPS fix ([`Startup::AwaitingFix`]).
+    fn start_or_await_fix(&mut self, bluetooth: bool, batch: &mut ActionBatch) {
+        if self.fix_wait {
+            tracing::info!("bridge stopped; waiting for a GPS fix to start the scan");
+            self.startup = Startup::AwaitingFix { bluetooth };
+        } else {
+            self.startup = Startup::Done;
+            self.start(bluetooth, batch);
         }
     }
 
@@ -136,8 +218,7 @@ impl FleetEngine {
                 }
             }
             (Startup::AwaitingStatus { bluetooth }, ScanMode::Stopped) => {
-                self.startup = Startup::Done;
-                self.start(bluetooth.unwrap_or(false), batch);
+                self.start_or_await_fix(bluetooth.unwrap_or(false), batch);
             }
             (Startup::AwaitingStatus { bluetooth }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {
                 let bluetooth = bluetooth.unwrap_or(mode == ScanMode::WifiBluetooth);
@@ -146,8 +227,7 @@ impl FleetEngine {
                 stop(batch);
             }
             (Startup::Stopping { bluetooth }, ScanMode::Stopped) => {
-                self.startup = Startup::Done;
-                self.start(bluetooth, batch);
+                self.start_or_await_fix(bluetooth, batch);
             }
             // The stop may have been lost on the link. The next poll's `Status` says whether it
             // landed, so no `GetStatus` goes with it.
@@ -155,6 +235,21 @@ impl FleetEngine {
                 batch.urgent.push(HostToBridge::StopScan);
             }
             (Startup::Stopping { .. }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {}
+            // The gate opened while the link was down. Like the first start, this one waits for a
+            // `Status`.
+            (Startup::AwaitingFix { bluetooth }, ScanMode::Stopped) if from_status => {
+                if !self.fix_wait {
+                    self.startup = Startup::Done;
+                    self.start(bluetooth, batch);
+                }
+            }
+            (Startup::AwaitingFix { .. }, ScanMode::Stopped) => {}
+            // Something started the P4 during the wait: the same rule as a P4 found scanning.
+            (Startup::AwaitingFix { bluetooth }, ScanMode::Wifi | ScanMode::WifiBluetooth) => {
+                tracing::info!(?mode, "bridge scanning while waiting for a GPS fix; stopping it");
+                self.startup = Startup::Stopping { bluetooth };
+                stop(batch);
+            }
         }
     }
 

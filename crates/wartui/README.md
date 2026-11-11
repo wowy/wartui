@@ -312,6 +312,7 @@ serial = "5CF7153520"
 
 [gps]
 bridge-rate-hz = 5
+wait-for-fix = false
 
 [api-keys]
 wdgwars = ""
@@ -324,6 +325,7 @@ wdgwars = ""
 | `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
 | `[bridge] serial`      | —       | The USB serial number of the CH343 that bridge answered on                     |
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
+| `[gps] wait-for-fix`   | on      | Whether `run` holds the scan until a receiver holds a fix; see "Positions"     |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 wartui refuses to start on an unknown key or table, naming the file and line. A `pool` key or a
@@ -335,6 +337,8 @@ entry that is empty, over 32 bytes, or listed twice is refused too, naming the f
 mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
+The waiting-for-GPS pop-up's box writes `[gps] wait-for-fix = false` when ticked, and drops the
+key when unticked.
 `run` writes `[bridge] mac` and `serial` when the bridge it remembers changes; see "Keyboard
 commands" and "When nothing arrives". `flash-bridge` writes both for a board it found and flashed;
 see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`,
@@ -741,8 +745,8 @@ prints. With one node that can scan, `bluetooth` reads `none yet: it needs two n
 and a lone node stays on wifi`; the bridge gives Bluetooth to a node once a second joins.
 
 `run` holds the bridge's port, so `wartui scan` reaches a bridge only while no `run` is attached.
-In `run`, the scan starts on connecting (§ "How channels are assigned"), `b` toggles Bluetooth, and
-quitting stops it.
+In `run`, the scan starts on connecting, once a GPS receiver holds a fix (§ "How channels are
+assigned"), `b` toggles Bluetooth, and quitting stops it.
 
 ## Keyboard commands
 
@@ -757,11 +761,27 @@ quitting stops it.
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
-Only `b`, `c`, and `p` reach the engine, and no key sets channels. `b` adds Bluetooth to the
-bridge's scan or takes it off; the bridge picks the node and authors every share. While the bridge
-reports the scan stopped, `b` sends nothing and says `scan stopped: this run starts it once the
-bridge answers`. Before the bridge has reported a scan, `b` asks for Bluetooth, and the run starts
-the scan with it.
+### While waiting for GPS
+
+| Key                    | What it does                                                     |
+|------------------------|------------------------------------------------------------------|
+| `Space`                | Tick or untick `skip this wait at every launch`; saved at once   |
+| `Enter`                | Start this run's scan without a fix                              |
+| `g`                    | Show GPS diagnostics: fix and satellites, as in the fleet view   |
+| `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch           |
+
+The waiting-for-GPS pop-up is up from launch until a receiver has held a fix for 2 s, or `Enter`;
+see "Positions". Keys other than those above do nothing. `g` opens the GPS modal over it, which
+takes every key until `Esc`, `q` or `g` closes it; the pop-up is then back if the run still waits.
+`Esc` quits from the pop-up, as in the fleet view, since there is nothing behind it to back out
+to. The box is the file's `[gps] wait-for-fix`: ticked, later launches skip the wait. `wait for
+gps` in settings turns it back on.
+
+Only `b`, `c`, `p` and the pop-up's `Enter` reach the engine, and no key sets channels. `b` adds
+Bluetooth to the bridge's scan or takes it off; the bridge picks the node and authors every share.
+While the bridge reports the scan stopped, `b` sends nothing and says `scan stopped: this run
+starts it once the bridge answers`. Before the bridge has reported a scan, `b` asks for Bluetooth,
+and the run starts the scan with it.
 
 `u` asks before it sends, sends only what is new since the last upload, and leaves the capture
 running; see "Uploading to WDGWars".
@@ -796,22 +816,22 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5;
-see "The lid fan"), `remember bridge` (`off`, `on`),
-`excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how many are
-listed, or `none`, and opens a page that lists them. While an SSID is being typed there, every
-letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already listed,
-and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the remembered
-bridge but none of the rows, and returns to the rows; edits to the rows stay pending.
+see "The lid fan"), `remember bridge` (`off`, `on`), `wait for gps` (`off`, `on`; from the next
+launch, see "Positions"), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how
+many are listed, or `none`, and opens a page that lists them. While an SSID is being typed there,
+every letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already
+listed, and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the
+remembered bridge but none of the rows, and returns to the rows; edits to the rows stay pending.
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
-the engine and writes every row shown but the pool and the fan to `excluded-ssids`, `[bridge]`, and
-`[api-keys]`, whatever was there, and settings closes. The pool and the fan go to
-the bridge, which keeps them, and only when their rows moved; neither is written to `wartui.toml`.
-If the engine is not accepting commands, nothing is sent or written, and settings stays open with
-its edits. The bridge re-cuts the fleet as soon as it takes a new pool, and sends each node its
-new share at once. A node empties its dedup ring when its share changes, and its next heartbeat
-shows the share held.
+the engine and writes every row shown but the pool and the fan to `excluded-ssids`, `[bridge]`,
+`[gps] wait-for-fix` and `[api-keys]`, whatever was there, and settings closes. The pool and the
+fan go to the bridge, which keeps them, and only when their rows moved; neither is written to
+`wartui.toml`. If the engine is not accepting commands, nothing is sent or written, and settings
+stays open with its edits. The bridge re-cuts the fleet as soon as it takes a new pool, and sends
+each node its new share at once. A node empties its dedup ring when its share changes, and its next
+heartbeat shows the share held.
 
 ## How channels are assigned
 
@@ -823,7 +843,8 @@ it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"),
 **`run` starts the scan, and a clean quit stops it.** A bridge found stopped starts on Wi-Fi. A
 `run` that is killed leaves the fleet scanning. One found scanning, left so by such a run or by
 `wartui scan start`, is stopped and started again in its mode, so every node's dedup ring starts
-empty. A reconnect later in the run leaves the
+empty. The start waits for a GPS fix (§ "Positions"); a bridge found scanning is still stopped at
+once. A reconnect later in the run leaves the
 scan alone and takes its mode as the run's. After that, a status naming another mode than the
 run's asks for the run's again, and a bridge that reboots mid-run, and so boots stopped, is started
 again. The bridge
@@ -943,7 +964,17 @@ nothing and says how many networks it left out.
   header says `gps fix is stale`. At driving speed a minute-old fix is another neighborhood, and
   falling back beats quietly claiming it. The reader logs that age limit too, even when the receiver
   is silent. The last fix is retained; a new fix logs recovery.
-- **The receiver runs on its own thread; nothing waits for it.** Capture starts at once, and the
+- **`run` holds the scan until a receiver has held a fix for 2 s**, so the capture's first rows
+  carry a position. Held means fix reports with no report of no fix between them, the latest less
+  than 1.5 s old: one fix from a receiver that then goes quiet does not count. Meanwhile a pop-up
+  shows the receiver's status, and `g` opens the GPS modal over it to show why a receiver will not
+  lock. `Enter` starts this run's scan without a fix. Ticking `skip this wait at every launch`
+  with `Space` writes `[gps] wait-for-fix = false`, and `wait for gps` in settings (`c`) turns the
+  wait back on from the next launch. The wait happens once: a
+  bridge that reboots later in the run is restarted at once. There is no wait with `--no-gps`,
+  with `--lat`/`--lon`, or under `--sim` unless `--gps PATH` names a port. A run whose receiver is
+  missing shows `no receiver found` in the pop-up until `Enter`.
+- **The receiver runs on its own thread; nothing blocks on it.** The view comes up at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
   `gps no receiver`, or the port's error. The search keeps running there, so a puck replugged into
   a *different* socket is found under its new name.
@@ -1060,7 +1091,7 @@ change of share or Bluetooth role, empties it.
 | Header says            | Meaning                                                                  |
 |------------------------|--------------------------------------------------------------------------|
 | `scan —`               | The bridge has not reported its scan yet                                 |
-| `scan stopped`         | Every node idles; the run starts the scan once the bridge answers        |
+| `scan stopped`         | Every node idles; the run starts the scan once a receiver holds a fix    |
 | `scan wifi`            | Every node in the plan sniffs Wi-Fi                                      |
 | `scan wifi +bt N3`     | And the bridge gave N3 the Bluetooth scan                                |
 | `scan wifi +bt waiting for a second node` | Bluetooth is asked for, and fewer than two nodes can scan |

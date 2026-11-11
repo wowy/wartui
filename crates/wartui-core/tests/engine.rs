@@ -3398,6 +3398,259 @@ fn engine_reads_live_when_link_reconnects_after_falling_behind() {
 }
 
 // ---------------------------------------------------------------------------
+// Waiting for a GPS fix: a run that waits holds its first start until a receiver has held a fix
+// for `FIX_WAIT`, or the operator starts without one.
+// ---------------------------------------------------------------------------
+
+/// A sentence from a receiver with no fix.
+const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76";
+
+/// [`capture`], waiting for a fix from `gps`.
+fn fix_capture(gps: &Gps, clock: &Clock) -> FleetEngine {
+    let config = EngineConfig {
+        auto_start: true,
+        wait_for_fix: true,
+        position: PositionChain::empty().with_gps(gps.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    engine.handle(connected(), clock.at(0));
+    engine
+}
+
+/// `gps` reporting a fix at each of `ms` on the test clock.
+fn fixes(gps: &Gps, clock: &Clock, ms: impl IntoIterator<Item = u64>) {
+    for ms in ms {
+        gps.feed(GGA, clock.at_ms(ms).unix_ms);
+    }
+}
+
+fn tick_at(engine: &mut FleetEngine, clock: &Clock, ms: u64) -> ActionBatch {
+    engine.handle(Event::Tick, clock.at_ms(ms))
+}
+
+/// A fix at each of `ms`, each followed by a tick, as a receiver reporting and the runtime's
+/// ticks interleave. The scan commands the ticks sent.
+fn fixes_ticked(
+    engine: &mut FleetEngine,
+    gps: &Gps,
+    clock: &Clock,
+    ms: impl IntoIterator<Item = u64>,
+) -> Vec<HostToBridge> {
+    let mut sent = Vec::new();
+    for ms in ms {
+        fixes(gps, clock, [ms]);
+        sent.extend(scans(&tick_at(engine, clock, ms)));
+    }
+    sent
+}
+
+fn awaiting_fix(engine: &FleetEngine, clock: &Clock) -> bool {
+    engine.snapshot(clock.at(0), StoreStats::default()).awaiting_fix
+}
+
+#[test]
+fn engine_holds_start_when_first_status_says_stopped_and_no_fix() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+    assert!(scans(&batch).is_empty(), "{batch:?}");
+    for ms in [1_250, 4_000, 60_000] {
+        assert!(scans(&tick_at(&mut engine, &clock, ms)).is_empty());
+    }
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(61));
+    assert!(scans(&batch).is_empty(), "a later Status starts nothing either");
+    assert!(awaiting_fix(&engine, &clock));
+}
+
+#[test]
+fn engine_starts_scan_when_fix_held_for_fix_wait() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [1_000, 2_000, 2_900]).is_empty(), "1.9 s");
+    let sent = fixes_ticked(&mut engine, &gps, &clock, [3_000]);
+    assert_eq!(sent, [HostToBridge::StartScan { bluetooth: false }]);
+    assert!(!awaiting_fix(&engine, &clock));
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [4_000, 5_000]).is_empty(), "started once");
+}
+
+#[test]
+fn engine_restarts_fix_count_when_no_fix_sentence_arrives_between_ticks() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [1_000, 2_000]).is_empty());
+    // A lost lock and a fix again, both before the next tick: the tick sees a new run.
+    gps.feed(GGA_NO_FIX, clock.at_ms(2_500).unix_ms);
+    let again = fixes_ticked(&mut engine, &gps, &clock, [3_000, 4_000, 4_900]);
+    assert!(again.is_empty(), "the count began at 3 s");
+    let sent = fixes_ticked(&mut engine, &gps, &clock, [5_000]);
+    assert_eq!(sent, [HostToBridge::StartScan { bluetooth: false }]);
+}
+
+#[test]
+fn engine_holds_start_when_one_fix_goes_quiet() {
+    // The chain would serve this fix for 5 s; a held fix needs reports within 1.5 s.
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [1_000]).is_empty());
+    for ms in [2_500, 3_000, 5_000] {
+        assert!(scans(&tick_at(&mut engine, &clock, ms)).is_empty(), "at {ms} ms");
+    }
+    assert!(awaiting_fix(&engine, &clock));
+}
+
+#[test]
+fn engine_starts_scan_when_wall_clock_steps_back_during_fix_wait() {
+    // A Pi with no real-time clock steps its wall clock when NTP answers. The hold is timed on
+    // the monotonic clock, so a step back neither stalls nor restarts it.
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+    let stepped = |ms: u64| {
+        let now = clock.at_ms(ms);
+        Now { unix_ms: now.unix_ms - 300_000, ..now }
+    };
+
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [1_000, 1_500]).is_empty());
+    for ms in [2_000, 2_500] {
+        gps.feed(GGA, stepped(ms).unix_ms);
+        assert!(scans(&engine.handle(Event::Tick, stepped(ms))).is_empty(), "at {ms} ms");
+    }
+    gps.feed(GGA, stepped(3_000).unix_ms);
+    let batch = engine.handle(Event::Tick, stepped(3_000));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+}
+
+#[test]
+fn engine_starts_scan_when_operator_starts_without_fix() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(2));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+    assert!(batch.bulk.contains(&HostToBridge::GetStatus));
+    assert!(!awaiting_fix(&engine, &clock));
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(3));
+    assert!(scans(&batch).is_empty(), "nothing once the wait is over");
+}
+
+#[test]
+fn engine_stops_scanning_bridge_at_once_and_starts_after_fix_when_waiting() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+
+    let batch = engine.handle(scan_status(ScanMode::WifiBluetooth), clock.at(1));
+    assert_eq!(scans(&batch), [HostToBridge::StopScan], "the stop does not wait");
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(2));
+    assert!(scans(&batch).is_empty(), "the start does");
+
+    let sent = fixes_ticked(&mut engine, &gps, &clock, [2_000, 3_000, 4_000]);
+    assert_eq!(sent, [HostToBridge::StartScan { bluetooth: true }], "in the mode held");
+}
+
+#[test]
+fn engine_starts_on_first_status_when_fix_held_before_connect() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+
+    let sent = fixes_ticked(&mut engine, &gps, &clock, [0, 1_000, 2_000]);
+    assert!(sent.is_empty(), "no Status yet");
+    assert!(!awaiting_fix(&engine, &clock));
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(3));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+}
+
+#[test]
+fn engine_keeps_bluetooth_choice_when_set_during_fix_wait() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    let batch = engine.handle(Event::Command(Command::SetBluetooth(true)), clock.at(2));
+    assert!(scans(&batch).is_empty(), "still waiting");
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(3));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: true }]);
+}
+
+#[test]
+fn engine_starts_nothing_when_operator_stops_during_fix_wait() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    engine.handle(Event::Command(Command::StopScan), clock.at(2));
+    assert!(!awaiting_fix(&engine, &clock));
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [2_000, 3_000, 4_000]).is_empty());
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(5));
+    assert!(scans(&batch).is_empty());
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(6));
+    assert!(scans(&batch).is_empty());
+}
+
+#[test]
+fn engine_starts_on_next_status_when_fix_gate_opens_while_link_down() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(2),
+    );
+
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(3));
+    assert!(scans(&batch).is_empty(), "no link to send it on");
+    engine.handle(connected(), clock.at(4));
+    let batch = engine.handle(fleet(ScanMode::Stopped, &[]), clock.at(5));
+    assert!(scans(&batch).is_empty(), "the start waits for a Status");
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(5));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+}
+
+#[test]
+fn engine_restarts_at_once_when_bridge_resets_after_fix_wait() {
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+    engine.handle(Event::Command(Command::StartWithoutFix), clock.at(2));
+    engine.handle(scan_status(ScanMode::Wifi), clock.at(3));
+
+    let batch = engine.handle(scan_status(ScanMode::Stopped), clock.at(4));
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }], "no second wait");
+}
+
+#[test]
+fn engine_reports_awaiting_fix_in_snapshot_when_waiting_from_start() {
+    let clock = Clock::new();
+    let waiting = EngineConfig { auto_start: true, wait_for_fix: true, ..EngineConfig::default() };
+    let engine = FleetEngine::new(waiting.clone(), clock.at(0));
+    assert!(awaiting_fix(&engine, &clock), "before any bridge connects");
+
+    let looking = FleetEngine::new(EngineConfig { auto_start: false, ..waiting }, clock.at(0));
+    assert!(!awaiting_fix(&looking, &clock), "an engine that starts nothing waits for nothing");
+    assert!(!awaiting_fix(&capture(&clock), &clock), "off by default");
+}
+
+// ---------------------------------------------------------------------------
 // Power cycles and fan duties: the bridge's to carry out, sent at once.
 // ---------------------------------------------------------------------------
 

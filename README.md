@@ -152,6 +152,18 @@ have no README; their `//!` module docs hold the detail.
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
+### While waiting for GPS
+
+| Key                    | What it does                                                     |
+|------------------------|------------------------------------------------------------------|
+| `Space`                | Tick or untick `skip this wait at every launch`; saved at once   |
+| `Enter`                | Start this run's scan without a fix                              |
+| `g`                    | Show GPS diagnostics: fix and satellites, as in the fleet view   |
+| `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch           |
+
+Every other key does nothing while the pop-up is up. `g` opens over it, and closing that shows
+the pop-up again if the run still waits.
+
 ### In settings (`c`)
 
 | Key                 | What it does                                                        |
@@ -177,10 +189,10 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The bridge splits the channel pool across its nodes, and re-splits it whenever a node joins or
-leaves. That split is what the fleet is for. `run` starts the bridge's scan and a clean quit stops
-it; a run that is killed leaves the fleet scanning, and the next `run` restarts it clean. No key or
-flag assigns channels to a node. `b` only adds Bluetooth to the scan or takes it off; the bridge
-picks the node and shares that node's channels among the rest.
+leaves. That split is what the fleet is for. `run` starts the bridge's scan once a GPS receiver
+holds a fix, and a clean quit stops it; a run that is killed leaves the fleet scanning, and the
+next `run` restarts it clean. No key or flag assigns channels to a node. `b` only adds Bluetooth to
+the scan or takes it off; the bridge picks the node and shares that node's channels among the rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
