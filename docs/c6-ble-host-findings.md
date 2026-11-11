@@ -222,14 +222,39 @@ Five 20-minute arms ran with nothing else touching the PC's serial ports:
     node bus's interrupts (inferred). More small packets, as idle nodes beating every second
     send, give it more chances.
   - The C6 ends each read on an idle line and arms the next. Arming resets the receive DMA channel
-    (esp-hal 1.2.2 `ChannelRx::do_prepare`). Whether that reset, or the one-byte read that should
-    follow, loses the byte is not settled.
+    (esp-hal 1.2.2 `ChannelRx::do_prepare`). Run 12 shows that dropping the re-arm stops the loss.
+
+## Run 12 — one receive transfer that never stops (D0:1C)
+
+The C6 was changed to receive through a `DmaRxStreamBuf` (`cd7d94d`): one UHCI transfer armed at
+boot and never stopped, 32 descriptors of 256 bytes, each closed by an idle EOF, polled every
+250 µs and handed back to the DMA as it is read. It would restart only if the DMA ran out of
+descriptors, and counts each restart. It costs 428 bytes of the C6's RAM. The change is inside
+the C6's own receive, so the link's frozen wire stays as it is.
+
+| Arm | Build | Failed P4 → C6 packets | Load records lost | Throughput |
+| --- | --- | --- | --- | --- |
+| `fleet20`, nodes idle, 20 min | stream | 0 | 0 of 30,000 | 2.9 KB/s |
+| `saturate`, nodes scanning, 10 min | stream | 0 | 0 of 65,059 | 113.7 KB/s |
+| `saturate`, nodes scanning, 10 min | previous (`6f4ce49`) | 6 reported | 21 of 21,175 | 36.4 KB/s |
+
+- **The loss is gone.** The same `fleet20` arm lost 24 and then 9 packets on the previous build.
+  The stream build never restarted its transfer, and saw no UART error.
+- **The previous build lost packets under `saturate` too,** this time as large merged frames: half
+  its reads, 10,627 of 21,002, ended mid-packet. Its C6 counters read 0 at the end of the arm
+  while it reported 6 failures; why was not found.
+- **The stream build carried 3.1× the previous build's throughput,** on the same PC, stand-in,
+  MTU 247, 2M and 30 ms interval, run back to back: about 14 notifications per connection event
+  against about 4.5. Why the old receive held Bluetooth back was not found. The stand-in figures in
+  runs 3 to 10 were all taken on the old receive, so they understate what the C6 can carry.
+- **`main`'s C6 receives the same way the previous build did,** re-arming after every read. Its
+  P4 → C6 traffic is small, apart from updates.
 
 ## Against the pass criteria
 
 | Criterion | Result |
 | --- | --- |
-| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus. Each is a packet terminator the C6 loses when the P4 pauses just before it (run 11) |
+| 1. Link clean for 10 minutes at full load with the buses running | **Not met.** 6 P4 → C6 CRC failures on D0:1C, in the no-load (1) and `fleet20` (5) arms; none in the 10-minute `saturate` arm. 0 on 96:C4, which has no bus. Each is a packet terminator the C6 loses when the P4 pauses just before it (run 11). The stream receive lost none (run 12) |
 | 2. At least 16 KB/s | Met at 2M on every device and the stand-in, at MTU 247. Not met at 1M with a 30 ms interval, or at MTU 23 |
 | 3. Same data, in order, no gaps | Met on 96:C4. On D0:1C one record was lost to a P4 → C6 packet loss (inferred) |
 | 4. Commands work | Every device's writes reached the P4; p50 23.8 ms, p99 29.7 ms on the stand-in |
@@ -251,8 +276,17 @@ the recipe.
 | Keep the C6's last panic text in persistent RTC memory and report it at the next boot | the panic handler only reboots, and nothing else on the board records why; without it the bt-hci panic needed a serial adapter on header H4 | `889585c`, `firmware/p4-radio/src/last_panic.rs` | never: it is cheap and the only record |
 | Run the C6 on `trouble-host` 0.8.0 directly over `BleConnector` | esp-radio already implements `bt-hci-transport` 0.1's `Transport`, which `bt-hci` 0.10 re-exports; no byte adapter, no patch | `f8994d9` | — |
 
-Three design points the spike leaves for production:
+Four design points the spike leaves for production:
 
+- **The C6 receives on one transfer that never stops.** `cd7d94d` is the recipe. The same
+  receive belongs on `main`'s C6, whose re-armed reads lose a terminator whenever the P4 pauses one
+  byte short of a packet's end.
+- **The P4's second core could serve the C6 link** (an option raised during the spike, not tried).
+  The P4 pauses mid-packet when it is late refilling the UART FIFO, as it is while also serving a
+  node bus. With the C6 fixed, pauses cost nothing but time, so this is about throughput under
+  load, not loss. The host queue and link state are shared through `RefCell` today, so the move
+  needs a critical-section mutex and an executor on core 1, and every P4 flash write parks
+  core 1, which would stall the link for that write.
 - **A lost P4 → C6 packet is not recovered.** `HostQueue::fill` splits frames across packets, so a
   lost `Down::HostBytes` garbles the frame it cuts, and its bytes are never credited, so the credit
   window shrinks by their size for the rest of the connection. Run 10 lost 6 such packets in 50
@@ -277,15 +311,14 @@ Three design points the spike leaves for production:
 - Bluetooth load does not starve the node bus.
 - The first D0:1C arm's lost batches came from a port probe aimed at the other bridge, not the bus.
 - Each P4 → C6 packet lost on D0:1C is a terminator the C6 drops when the P4 pauses one byte short
-  of a packet's end.
+  of a packet's end, and a C6 receive that never re-arms loses none.
 
 It does not settle:
 
-- **The fix for the lost terminator.** Run 11 found where the byte goes, not which part of the C6's
-  receive path drops it. Candidates: a C6 read that never stops (a streaming DMA buffer, if
-  esp-hal's UHCI accepts one), or a P4 that writes the whole of a short packet only when the FIFO
-  has room for it. The link is frozen and production's P4 → C6 traffic is small, but a Bluetooth
-  host stream would cross it.
+- **Which step of the re-arm drops the byte,** the channel reset or the one-byte read that should
+  follow. The stream receive avoids both, so it does not matter for the fix.
+- **Why the old receive held Bluetooth throughput at a third.**
+- **Phone throughput on the stream receive.** Runs 3 to 10 were all on the old one.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
