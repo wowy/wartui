@@ -41,8 +41,9 @@
 //! P4's hello arrives, so the P4 streams its host queue here; that measures the link's ceiling.
 //!
 //! **A P4 packet that fails its check is diagnosed** (`wartui_proto::spike::diagnose`): the reader
-//! keeps each frame's bytes as they arrived, and a frame that fails goes up as two `Error` lines,
-//! what went wrong and its first and last bytes. So does each break in the P4's seq.
+//! keeps each frame's bytes as they arrived, and a frame that fails goes up as three `Error` lines:
+//! what went wrong, its first and last bytes, and where DMA reads began inside it. So does each
+//! break in the P4's seq.
 
 use core::cell::RefCell;
 use core::fmt::{self, Write};
@@ -182,6 +183,34 @@ pub struct Bus<'d> {
     pub scratch: &'static mut [u8; WIRE_MAX],
 }
 
+/// Read starts a [`RawFrame`] keeps.
+const SPLITS_KEPT: usize = 4;
+
+/// How a DMA read with bytes in it ended: its length and its last byte.
+#[derive(Clone, Copy)]
+struct ReadEnd {
+    len: usize,
+    last: u8,
+}
+
+impl ReadEnd {
+    /// Before the first read: no bytes.
+    const NONE: Self = Self { len: 0, last: 0 };
+
+    /// How `bytes`, a read's, ended, or `None` when it is empty.
+    fn of(bytes: &[u8]) -> Option<Self> {
+        bytes.last().map(|&last| Self { len: bytes.len(), last })
+    }
+}
+
+/// Where a DMA read's bytes began inside a frame, and how the read before it ended.
+#[derive(Clone, Copy)]
+struct Split {
+    /// The frame's length when the read began; 0 is a frame that began with the read.
+    at: usize,
+    ended: ReadEnd,
+}
+
 /// The bytes of the frame the reader is part-way through, as they arrived, for diagnosing one
 /// that fails.
 pub struct RawFrame {
@@ -189,12 +218,30 @@ pub struct RawFrame {
     len: usize,
     /// More arrived than `bytes` holds, so only the first `WIRE_MAX` are kept.
     truncated: bool,
+    /// The first [`SPLITS_KEPT`] reads that began while this frame was in progress.
+    splits: [Split; SPLITS_KEPT],
+    /// How many reads began while this frame was in progress, saturating.
+    split_count: u8,
 }
 
 impl RawFrame {
     /// Empty. Const, so it is built in a static.
     pub const fn new() -> Self {
-        Self { bytes: [0; WIRE_MAX], len: 0, truncated: false }
+        Self {
+            bytes: [0; WIRE_MAX],
+            len: 0,
+            truncated: false,
+            splits: [Split { at: 0, ended: ReadEnd::NONE }; SPLITS_KEPT],
+            split_count: 0,
+        }
+    }
+
+    /// A read's bytes begin here, after a read that ended as `ended`.
+    fn split(&mut self, ended: ReadEnd) {
+        if let Some(slot) = self.splits.get_mut(usize::from(self.split_count)) {
+            *slot = Split { at: self.len, ended };
+        }
+        self.split_count = self.split_count.saturating_add(1);
     }
 
     fn push(&mut self, byte: u8) {
@@ -210,6 +257,7 @@ impl RawFrame {
     const fn clear(&mut self) {
         self.len = 0;
         self.truncated = false;
+        self.split_count = 0;
     }
 
     fn bytes(&self) -> &[u8] {
@@ -243,6 +291,10 @@ pub struct Link {
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
+    /// DMA reads with bytes in them, and of those the ones whose last byte was not `0x00`,
+    /// which ended part-way through a packet.
+    reads: u32,
+    mid_packet_ends: u32,
     /// A record from the ring that did not fit the last packet. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
     held: &'static mut Held,
@@ -273,6 +325,8 @@ impl Link {
             uart_errors: 0,
             undecoded: 0,
             undecoded_said: 0,
+            reads: 0,
+            mid_packet_ends: 0,
             held,
             updates,
         }
@@ -358,8 +412,9 @@ impl Link {
         }
     }
 
-    /// Send the P4 what `raw`, a frame that failed its check, says about how it went wrong, and
-    /// its first and last bytes.
+    /// Send the P4 what `raw`, a frame that failed its check, says about how it went wrong, its
+    /// first and last bytes, and where reads began inside it, with the boot's count of reads
+    /// that ended mid-packet.
     ///
     /// The search holds this task, the Bluetooth host's included, for an estimated second on a
     /// frame of `FLIP_SEARCH_MAX` bytes (unmeasured). A failed frame is rare, and meanwhile what
@@ -380,6 +435,7 @@ impl Link {
         let head = &bytes[..bytes.len().min(EDGE)];
         let tail = &bytes[bytes.len().saturating_sub(EDGE)..];
         shared.error(format_args!("head {} tail {}", Hex(head), Hex(tail)));
+        shared.error(format_args!("{}, mid {}/{}", Splits(raw), self.mid_packet_ends, self.reads));
     }
 
     /// End this image's trial, if it is on one. A failure leaves it on trial, and the P4's
@@ -561,9 +617,14 @@ async fn read_packets(
 ) -> ! {
     let Frames { reader, raw, scratch } = frames;
     let mut last_len = 0;
+    // How the last read with bytes in it before `last` ended.
+    let mut before = ReadEnd::NONE;
     loop {
         let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
         mark(LoopPhase::RadioLink);
+        if last_len > 0 {
+            raw.split(before);
+        }
         for &byte in &last.as_slice()[..last_len] {
             if byte != 0 {
                 raw.push(byte);
@@ -579,15 +640,24 @@ async fn read_packets(
                 raw.clear();
             }
         }
+        if let Some(end) = ReadEnd::of(&last.as_slice()[..last_len]) {
+            before = end;
+        }
         read.wait_for_done().await;
         let (result, rx_back, done) = read.wait();
         rx = rx_back;
         armed = core::mem::replace(&mut last, done);
         last_len = last.number_of_received_bytes();
+        let mut state = link.borrow_mut();
+        if let Some(end) = ReadEnd::of(&last.as_slice()[..last_len]) {
+            state.reads = state.reads.wrapping_add(1);
+            if end.last != 0 {
+                state.mid_packet_ends = state.mid_packet_ends.wrapping_add(1);
+            }
+        }
         // The UART keeps line errors until they are read, so any since the last read are here.
         if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
-            let mut link = link.borrow_mut();
-            link.uart_errors = link.uart_errors.wrapping_add(1);
+            state.uart_errors = state.uart_errors.wrapping_add(1);
         }
     }
 }
@@ -638,6 +708,28 @@ struct Uptime(u64);
 impl fmt::Display for Uptime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{:03} s", self.0 / 1000, self.0 % 1000)
+    }
+}
+
+/// Where reads began inside a frame: each kept one's offset, the length of the read that ended
+/// there and that read's last byte, as `60(60 B, 01)`, then how many more there were.
+struct Splits<'a>(&'a RawFrame);
+
+impl fmt::Display for Splits<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count = self.0.split_count;
+        if count == 0 {
+            return f.write_str("split: none");
+        }
+        f.write_str("split at")?;
+        let kept = usize::from(count).min(SPLITS_KEPT);
+        for split in &self.0.splits[..kept] {
+            write!(f, " {}({} B, {:02x})", split.at, split.ended.len, split.ended.last)?;
+        }
+        if usize::from(count) > kept {
+            write!(f, " +{}", usize::from(count) - kept)?;
+        }
+        Ok(())
     }
 }
 
