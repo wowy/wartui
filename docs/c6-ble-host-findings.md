@@ -338,6 +338,22 @@ the recipe.
 | Keep the C6's last panic text in persistent RTC memory and report it at the next boot | the panic handler only reboots, and nothing else on the board records why; without it the bt-hci panic needed a serial adapter on header H4 | `889585c`, `firmware/p4-radio/src/last_panic.rs` | never: it is cheap and the only record |
 | Run the C6 on `trouble-host` 0.8.0 directly over `BleConnector` | esp-radio already implements `bt-hci-transport` 0.1's `Transport`, which `bt-hci` 0.10 re-exports; no byte adapter, no patch | `f8994d9` | — |
 
+### Upstream status, checked 2026-11-12
+
+A production build needs the first three workarounds above. Neither bug's fix has a release that
+works with the held versions.
+
+| Bug | Newest releases | Upstream `main` | Until then |
+| --- | --- | --- | --- |
+| esp-radio marks every ACL fragment as a start | esp-radio 1.0.0-beta.1 (beta.2 was yanked) | `esp-radio/src/ble/npl/mod.rs` `send_packet` still zeroes the ACL header's high byte | cap the pool at 251 and the ATT MTU at 247 |
+| bt-hci declares no return for the parameter-request replies | bt-hci 0.11.0 (2026-10-08) declares `Return = ConnHandle` for both, but trouble-host 0.8.0, the newest, needs bt-hci ^0.10 | trouble's `main` is on bt-hci 0.11 | `connection-params-update` off, and the interval asked for over L2CAP |
+
+- **The bt-hci fix arrives with trouble-host's next release, or the one after.** bt-hci 0.11 still
+  takes its `Transport` from bt-hci-transport 0.1, which esp-radio 1.0.0-beta.1 implements, so
+  that release should run on the held esp-radio (inferred, not built).
+- **The esp-radio bug has no fix upstream to wait for.** No esp-hal issue or pull request names
+  it. The bt-hci one was fixed in embassy-rs/bt-hci#104.
+
 Four design points the spike leaves for production:
 
 - **The C6 receives on one transfer that never stops.** `cd7d94d` is the recipe. The same
