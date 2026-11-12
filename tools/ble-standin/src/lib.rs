@@ -3,10 +3,11 @@
 //!
 //! An [`Attachment`] is one subscription's view of the Up stream: what decoded, in what order,
 //! and what the load generator's seq and CRC say was lost or damaged. [`Rtt`] times `GetStatus`
-//! one at a time, [`Beats`] tallies node heartbeats per slot, and [`Batches`] sighting batches and
-//! their losses. [`Reconcile`] sets the run's seq gaps against what the P4 says it dropped, and
-//! [`bridge`] the P4's own counters across the run. [`events`] stamps what happened, as it
-//! happened. `main.rs` owns the radio.
+//! one at a time, [`Keepalive`] holds UART0's host gate open beside them, [`Beats`] tallies node
+//! heartbeats per slot, and [`Batches`] sighting batches and their losses. [`Reconcile`] sets the
+//! run's seq gaps against what the P4 says it dropped, and [`bridge`] the P4's own counters across
+//! the run. [`events`] stamps what happened, as it happened. `main.rs` owns the radio and the
+//! serial port.
 
 use wartui_proto::link::{HostToBridge, MAX_HOST_FRAME, encode_host_frame};
 
@@ -24,7 +25,7 @@ pub use beats::{BeatGap, Beats, SlotBeats};
 pub use bridge::{CounterDelta, FleetSummary};
 pub use events::{Event, EventKind};
 pub use reconcile::Reconcile;
-pub use rtt::{Rtt, RttSummary, StatusAsk};
+pub use rtt::{Keepalive, Rtt, RttSummary, StatusAsk};
 
 /// `msg` as the frame a central writes to Down.
 ///

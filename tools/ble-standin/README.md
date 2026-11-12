@@ -21,9 +21,15 @@ cargo build --release
 ./target/release/ble-standin run --name "wartui 96:C4" --profile fleet20 --secs 60 --rtt 100
 ./target/release/ble-standin run --name "wartui 96:C4" --profile burst --count 2000 \
     --reconnect 2 --start-scan --json run.json
+./target/release/ble-standin run --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00 \
+    --profile burst --count 500 --secs 60 --start-scan --json run.json
 ./target/release/ble-standin frame get-status        # hex for nRF Connect's Down write
 ./target/release/ble-standin frame spike-load --profile saturate
 ```
+
+`run --port` runs the same checks with a USB host, at UART0's rate. It never moves DTR or RTS,
+sends an untimed `GetStatus` after 5 s without a host frame to hold the P4's host gate open, and
+takes no `--reconnect`.
 
 `run` checks each attachment and prints every 2 s:
 

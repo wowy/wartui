@@ -4,6 +4,10 @@
 //! A `Status` is a priority frame, so the time measures the link both ways, not the bulk ring.
 //! A [`StatusAsk`], the bridge counters' snapshot, waits for a timed ask to finish and holds the
 //! next one back until its own is answered, so each `Status` answers the one ask out.
+//!
+//! Over UART0 the P4 closes its host gate 15 s after the last host frame, so a run that has
+//! written nothing for [`KEEPALIVE`] sends a [`Keepalive`] `GetStatus`. It goes only while no other
+//! ask is out and holds the others back until answered, so its `Status` is never timed.
 
 use std::time::{Duration, Instant};
 
@@ -13,6 +17,8 @@ use serde::Serialize;
 pub const RTT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The pause between an answer and the next `GetStatus`.
 pub const RTT_GAP: Duration = Duration::from_millis(250);
+/// The longest a UART0 run goes without writing: a third of the P4's 15 s host gate.
+pub const KEEPALIVE: Duration = Duration::from_secs(5);
 
 /// The round trips asked for, measured as they complete.
 #[derive(Debug, Clone)]
@@ -151,6 +157,44 @@ impl StatusAsk {
     }
 }
 
+/// A `GetStatus` that keeps the P4's host gate open, outside the timed round trips.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Keepalive {
+    out: Option<Instant>,
+}
+
+impl Keepalive {
+    /// Whether to send one at `now`, the last host frame having been written at `last_write`, with
+    /// `busy` saying whether another ask is wanted or out.
+    #[must_use]
+    pub fn due(&self, now: Instant, last_write: Instant, busy: bool) -> bool {
+        self.out.is_none() && !busy && now.saturating_duration_since(last_write) >= KEEPALIVE
+    }
+
+    /// It went out at `now`.
+    pub const fn sent(&mut self, now: Instant) {
+        self.out = Some(now);
+    }
+
+    /// Whether it is out, which holds the other asks back.
+    #[must_use]
+    pub const fn is_out(&self) -> bool {
+        self.out.is_some()
+    }
+
+    /// A `Status` arrived. Returns whether it answered this rather than another ask.
+    pub const fn answered(&mut self) -> bool {
+        self.out.take().is_some()
+    }
+
+    /// Give up on one out longer than [`RTT_TIMEOUT`] at `now`.
+    pub fn expire(&mut self, now: Instant) {
+        if self.out.is_some_and(|sent| now.saturating_duration_since(sent) >= RTT_TIMEOUT) {
+            self.out = None;
+        }
+    }
+}
+
 /// The `p`th percentile of `sorted` by nearest rank.
 fn nearest_rank(sorted: &[Duration], p: usize) -> Option<&Duration> {
     let rank = (p * sorted.len()).div_ceil(100).max(1);
@@ -243,5 +287,46 @@ mod tests {
         let summary = rtt.summary().unwrap();
         assert_eq!((summary.answered, summary.lost), (0, 1));
         assert!(rtt.due(now + RTT_TIMEOUT + RTT_GAP));
+    }
+
+    #[test]
+    fn keepalive_waits_when_written_within_interval() {
+        let now = Instant::now();
+        let keepalive = Keepalive::default();
+        assert!(!keepalive.due(now + KEEPALIVE - ms(1), now, false));
+        assert!(keepalive.due(now + KEEPALIVE, now, false));
+    }
+
+    #[test]
+    fn keepalive_waits_when_other_ask_busy() {
+        let now = Instant::now();
+        let keepalive = Keepalive::default();
+        assert!(!keepalive.due(now + KEEPALIVE, now, true));
+    }
+
+    #[test]
+    fn keepalive_answers_status_when_out_and_leaves_rtt_untimed() {
+        let now = Instant::now();
+        let mut rtt = Rtt::new(3);
+        let mut keepalive = Keepalive::default();
+        keepalive.sent(now);
+        assert!(keepalive.is_out(), "holds the timed asks back");
+        // The `Status` goes to the keepalive, so the timed asks never see it.
+        assert!(keepalive.answered());
+        assert!(!keepalive.answered());
+        assert_eq!(rtt.answered(now + ms(10)), None);
+        assert_eq!(rtt.summary(), None);
+    }
+
+    #[test]
+    fn keepalive_gives_up_when_answer_times_out() {
+        let now = Instant::now();
+        let mut keepalive = Keepalive::default();
+        keepalive.sent(now);
+        keepalive.expire(now + ms(100));
+        assert!(keepalive.is_out());
+        keepalive.expire(now + RTT_TIMEOUT);
+        assert!(!keepalive.is_out());
+        assert!(keepalive.due(now + RTT_TIMEOUT, now, false));
     }
 }

@@ -1,5 +1,12 @@
 //! Spike only: a PC standing in for a phone host on the wartui Bluetooth link, through BlueZ on
-//! the first adapter. The checks are the library's; this is the radio and the printing.
+//! the first adapter, or for a USB host on UART0. The checks are the library's; this is the radio,
+//! the serial port and the printing.
+//!
+//! UART0 runs the same checks at UART0's rate, so a loss seen over Bluetooth can be set against
+//! the same load with the C6 out of the path. Its port is opened as `wartui-bridge` opens one, and
+//! never moves DTR or RTS: one without the other resets the P4. The P4 writes nothing until a host
+//! frame arrives and closes after 15 s without one, so a UART0 run keeps a [`Keepalive`] going.
+//! A tty has no attachment to cycle, so `--reconnect` is Bluetooth's alone.
 //!
 //! Only the first attachment asks for load or a scan. The P4 keeps both across a reconnect, so a
 //! later attachment shows whether the queue really starts empty. The last attachment stops what
@@ -11,16 +18,20 @@
 //! Events are stamped here, as their notification arrives, because the wall clock is the radio's
 //! side of the run; the library hands them back untimed so its checks stay testable.
 
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::pin::pin;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ble_standin::events::clock;
 use ble_standin::rtt::RTT_TIMEOUT;
 use ble_standin::{
-    Attachment, AttachmentSummary, CounterDelta, Event, FleetSummary, Reconcile, Rtt, RttSummary,
-    Seen, StatusAsk, bridge, hex, host_frame,
+    Attachment, AttachmentSummary, CounterDelta, Event, FleetSummary, Keepalive, Reconcile, Rtt,
+    RttSummary, Seen, StatusAsk, bridge, hex, host_frame,
 };
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
@@ -28,12 +39,13 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use chrono::Local;
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use futures::{Stream, StreamExt};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use futures::channel::mpsc;
+use futures::{Stream, StreamExt, future};
 use serde::Serialize;
 use tokio::time::{interval, interval_at, sleep, sleep_until};
 use uuid::Uuid;
-use wartui_proto::link::HostToBridge;
+use wartui_proto::link::{HOST_BAUD, HostToBridge};
 use wartui_proto::spike::{DOWN_UUID, NAME_PREFIX, STATS_EVERY_MS, SpikeProfile, UP_UUID};
 
 /// How long `run` looks for the name before giving up.
@@ -45,6 +57,8 @@ const RECONNECT_AFTER: Duration = Duration::from_secs(3);
 const CLOSE_WAIT: Duration = Duration::from_secs(2 * RTT_TIMEOUT.as_secs());
 /// Gap ranges printed per attachment; the JSON has them all.
 const GAPS_SHOWN: usize = 20;
+/// How long a UART0 read or write waits: long enough not to spin, short enough to stop promptly.
+const UART_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Parser)]
 #[command(about = "Spike only: stand in for a phone host on the wartui Bluetooth link")]
@@ -61,7 +75,7 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         secs: u64,
     },
-    /// Connect, subscribe to Up and check what arrives.
+    /// Attach over Bluetooth or UART0 and check what arrives.
     Run(RunArgs),
     /// Print a host frame as hex, to write to Down by hand.
     #[command(subcommand)]
@@ -69,10 +83,14 @@ enum Command {
 }
 
 #[derive(Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["name", "port"])))]
 struct RunArgs {
     /// The advertised name, e.g. "wartui 96:C4".
     #[arg(long)]
-    name: String,
+    name: Option<String>,
+    /// The P4 board's tty, for UART0 instead of Bluetooth.
+    #[arg(long, value_name = "PATH", conflicts_with = "reconnect")]
+    port: Option<String>,
     /// Start the P4's load generator.
     #[arg(long)]
     profile: Option<Profile>,
@@ -82,7 +100,7 @@ struct RunArgs {
     /// How long the whole run lasts.
     #[arg(long, default_value_t = 30)]
     secs: u64,
-    /// Disconnect and reconnect this many times, splitting `--secs` evenly.
+    /// Disconnect and reconnect this many times, splitting `--secs` evenly. Bluetooth only.
     #[arg(long, default_value_t = 0)]
     reconnect: u32,
     /// Time this many `GetStatus` round trips, one at a time.
@@ -210,15 +228,74 @@ async fn find(adapter: &Adapter, name: &str) -> Result<Peripheral> {
     Ok(found)
 }
 
-/// A subscribed Up and the Down to write to.
-struct Link {
-    up: Characteristic,
-    down: Characteristic,
+/// The Up stream, as the chunks it arrived in: notifications, or reads from the tty.
+type Up = Pin<Box<dyn Stream<Item = Vec<u8>>>>;
+
+/// Where `run` reaches the P4.
+enum Transport {
+    /// The C6's GATT service, through BlueZ.
+    Bluetooth {
+        /// Held for the run, as the peripheral came from it.
+        _adapter: Adapter,
+        peripheral: Peripheral,
+    },
+    /// UART0, through the board's CH343.
+    Uart(String),
 }
 
-async fn attach(
-    peripheral: &Peripheral,
-) -> Result<(Link, impl Stream<Item = ValueNotification> + use<>)> {
+impl Transport {
+    async fn open(args: &RunArgs) -> Result<Self> {
+        if let Some(path) = &args.port {
+            return Ok(Self::Uart(path.clone()));
+        }
+        let name = args.name.as_deref().context("--name or --port is required")?;
+        let adapter = adapter().await?;
+        let peripheral = find(&adapter, name).await?;
+        Ok(Self::Bluetooth { _adapter: adapter, peripheral })
+    }
+
+    async fn attach(&self) -> Result<(Link<'_>, Up)> {
+        match self {
+            Self::Bluetooth { peripheral, .. } => attach(peripheral).await,
+            Self::Uart(path) => open_uart(path),
+        }
+    }
+
+    /// The peripheral's address, over Bluetooth.
+    fn address(&self) -> Option<String> {
+        match self {
+            Self::Bluetooth { peripheral, .. } => Some(peripheral.address().to_string()),
+            Self::Uart(_) => None,
+        }
+    }
+
+    const fn is_uart(&self) -> bool {
+        matches!(self, Self::Uart(_))
+    }
+}
+
+/// One attachment's Down, and what closing it takes.
+enum Link<'a> {
+    /// A subscribed Up and the Down to write to.
+    Bluetooth {
+        peripheral: &'a Peripheral,
+        up: Characteristic,
+        down: Characteristic,
+    },
+    Uart(UartLink),
+}
+
+/// The open tty's write half, and the thread reading the other.
+struct UartLink {
+    port: Box<dyn serialport::SerialPort>,
+    /// Whether the next write leads with a `0x00`, as the first does.
+    lead: bool,
+    last_write: Instant,
+    stop: Arc<AtomicBool>,
+    reader: JoinHandle<()>,
+}
+
+async fn attach(peripheral: &Peripheral) -> Result<(Link<'_>, Up)> {
     if !peripheral.is_connected().await? {
         peripheral.connect().await.context("connecting")?;
     }
@@ -231,33 +308,131 @@ async fn attach(
             .cloned()
             .with_context(|| format!("no {what} characteristic {}", Uuid::from_u128(uuid)))
     };
-    let link = Link { up: pick(UP_UUID, "Up")?, down: pick(DOWN_UUID, "Down")? };
+    let (up, down) = (pick(UP_UUID, "Up")?, pick(DOWN_UUID, "Down")?);
     let notes = peripheral.notifications().await?;
-    peripheral.subscribe(&link.up).await.context("subscribing to Up")?;
+    peripheral.subscribe(&up).await.context("subscribing to Up")?;
     println!(
         "# attached to {} ({}), mtu {}",
         peripheral.address(),
         peripheral.id(),
         peripheral.mtu()
     );
-    Ok((link, notes))
+    let up_uuid = Uuid::from_u128(UP_UUID);
+    let notes = notes.filter_map(move |note: ValueNotification| {
+        future::ready((note.uuid == up_uuid).then_some(note.value))
+    });
+    Ok((Link::Bluetooth { peripheral, up, down }, Box::pin(notes)))
 }
 
-/// Write `msg` to Down, split to the ATT payload a write without response carries.
-async fn send(peripheral: &Peripheral, link: &Link, msg: &HostToBridge) -> Result<()> {
-    let frame = host_frame(msg);
-    let size = usize::from(peripheral.mtu().saturating_sub(3)).max(20);
-    for chunk in frame.chunks(size) {
-        peripheral.write(&link.down, chunk, WriteType::WithoutResponse).await?;
+/// Open `path` at [`HOST_BAUD`], 8N1 by `serialport`'s defaults, and read it on a thread.
+fn open_uart<'a>(path: &str) -> Result<(Link<'a>, Up)> {
+    let port = serialport::new(path, HOST_BAUD)
+        .timeout(UART_TIMEOUT)
+        // As `wartui-bridge` opens a port: the setting that keeps the driver from moving RTS.
+        // Nothing here touches DTR or RTS.
+        .flow_control(serialport::FlowControl::None)
+        .open()
+        .with_context(|| format!("opening {path}"))?;
+    // Whatever the P4 wrote before this run is not this run's.
+    port.clear(serialport::ClearBuffer::Input).with_context(|| format!("clearing {path}"))?;
+    let mut rx = port.try_clone().with_context(|| format!("splitting {path}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, chunks) = mpsc::unbounded();
+    let reader = std::thread::Builder::new()
+        .name("ble-standin-uart-rx".to_owned())
+        .spawn({
+            let stop = Arc::clone(&stop);
+            move || read_uart(rx.as_mut(), &tx, &stop)
+        })
+        .context("starting the UART0 reader")?;
+    println!("# attached to {path} at {HOST_BAUD} baud");
+    let link = UartLink { port, lead: true, last_write: Instant::now(), stop, reader };
+    Ok((Link::Uart(link), Box::pin(chunks)))
+}
+
+/// Pass what the tty reads to `tx` until `stop` is set or a read fails. Returning drops `tx`,
+/// which ends the stream: `run` reads that as the link dropping.
+fn read_uart(rx: &mut dyn Read, tx: &mpsc::UnboundedSender<Vec<u8>>, stop: &AtomicBool) {
+    let mut buf = [0u8; 4096];
+    while !stop.load(Ordering::Relaxed) {
+        match rx.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) if tx.unbounded_send(buf[..n].to_vec()).is_err() => return,
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+            Err(e) => {
+                println!("# UART0 read failed: {e}");
+                return;
+            }
+        }
     }
-    Ok(())
+}
+
+impl Link<'_> {
+    /// Write `msg` to Down, split to the ATT payload a write without response carries, or to the
+    /// tty whole.
+    async fn send(&mut self, msg: &HostToBridge) -> Result<()> {
+        let frame = host_frame(msg);
+        match self {
+            Self::Bluetooth { peripheral, down, .. } => {
+                let size = usize::from(peripheral.mtu().saturating_sub(3)).max(20);
+                for chunk in frame.chunks(size) {
+                    peripheral.write(down, chunk, WriteType::WithoutResponse).await?;
+                }
+            }
+            Self::Uart(uart) => {
+                // The first frame leads with a `0x00`, as `wartui-bridge`'s does, so whatever the
+                // P4's receiver held before this run ends there and the frame decodes. A short
+                // blocking write: the CH343 always drains.
+                let mut bytes = Vec::with_capacity(frame.len() + 1);
+                if std::mem::take(&mut uart.lead) {
+                    bytes.push(0);
+                }
+                bytes.extend_from_slice(&frame);
+                uart.port.write_all(&bytes)?;
+                uart.last_write = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    /// When the last host frame went out, over UART0, where the P4's host gate needs one.
+    const fn last_write(&self) -> Option<Instant> {
+        match self {
+            Self::Bluetooth { .. } => None,
+            Self::Uart(uart) => Some(uart.last_write),
+        }
+    }
+
+    /// Unsubscribe, unless the link `dropped`, and disconnect; or drain and close the tty.
+    async fn close(self, dropped: bool) {
+        match self {
+            Self::Bluetooth { peripheral, up, .. } => {
+                if !dropped {
+                    peripheral.unsubscribe(&up).await.ok();
+                }
+                peripheral.disconnect().await.ok();
+            }
+            Self::Uart(mut uart) => {
+                // Drained rather than cleared, so the closing `SpikeLoad off` and `StopScan`
+                // reach the P4.
+                uart.port.flush().ok();
+                uart.stop.store(true, Ordering::Relaxed);
+                uart.reader.join().ok();
+            }
+        }
+    }
 }
 
 /// What the run came to, for `--json`.
 #[derive(Serialize)]
 struct RunSummary {
-    name: String,
-    address: String,
+    /// The advertised name, over Bluetooth.
+    name: Option<String>,
+    /// The tty, over UART0.
+    port: Option<String>,
+    /// The peripheral's address, over Bluetooth.
+    address: Option<String>,
     profile: Option<SpikeProfile>,
     count: u32,
     secs: u64,
@@ -274,11 +449,11 @@ struct RunSummary {
 }
 
 async fn run(args: RunArgs) -> Result<()> {
-    let adapter = adapter().await?;
-    let peripheral = find(&adapter, &args.name).await?;
+    let transport = Transport::open(&args).await?;
     let each = Duration::from_secs(args.secs) / (args.reconnect + 1);
     let mut rtt = Rtt::new(args.rtt);
     let mut ask = StatusAsk::default();
+    let mut keepalive = Keepalive::default();
     let mut attachments = Vec::new();
     let mut events = Vec::new();
     let mut ctrl_c = pin!(tokio::signal::ctrl_c());
@@ -291,23 +466,20 @@ async fn run(args: RunArgs) -> Result<()> {
         if index > 0 {
             sleep(RECONNECT_AFTER).await;
         }
-        let (link, notes) = attach(&peripheral).await?;
-        let mut notes = pin!(notes);
+        let (mut link, mut up) = transport.attach().await?;
         let start = Instant::now();
         let mut attachment = Attachment::new(start);
         if index == 0 {
             ask.want();
             ask.sent(Instant::now());
-            send(&peripheral, &link, &HostToBridge::GetStatus)
-                .await
-                .context("asking for status")?;
+            link.send(&HostToBridge::GetStatus).await.context("asking for status")?;
             if let Some(profile) = args.profile {
                 let msg = HostToBridge::SpikeLoad { profile: profile.into(), count: args.count };
-                send(&peripheral, &link, &msg).await.context("asking for load")?;
+                link.send(&msg).await.context("asking for load")?;
             }
             if args.start_scan {
                 let msg = HostToBridge::StartScan { bluetooth: false };
-                send(&peripheral, &link, &msg).await.context("starting the scan")?;
+                link.send(&msg).await.context("starting the scan")?;
             }
         }
         let every = Duration::from_millis(STATS_EVERY_MS);
@@ -318,13 +490,15 @@ async fn run(args: RunArgs) -> Result<()> {
         let mut closing = false;
         'attachment: loop {
             tokio::select! {
-                note = notes.next() => match note {
-                    Some(note) if note.uuid == Uuid::from_u128(UP_UUID) => {
-                        for seen in attachment.feed(&note.value) {
+                chunk = up.next() => match chunk {
+                    Some(chunk) => {
+                        for seen in attachment.feed(&chunk) {
                             match seen {
                                 // One ask is out at a time, so this answers it.
                                 Seen::Status => {
-                                    if !ask.answered() {
+                                    if keepalive.answered() {
+                                        // Not timed, and not the counters' snapshot.
+                                    } else if !ask.answered() {
                                         rtt.answered(Instant::now());
                                     } else if closing {
                                         break 'attachment;
@@ -344,28 +518,33 @@ async fn run(args: RunArgs) -> Result<()> {
                             }
                         }
                     }
-                    Some(_) => {}
                     None => {
                         println!("# the link dropped");
                         dropped = true;
                         break;
                     }
                 },
-                _ = tick.tick() => print_tick(&mut attachment),
+                _ = tick.tick() => print_tick(&mut attachment, transport.is_uart()),
                 _ = poll.tick() => {
                     let now = Instant::now();
                     rtt.expire(now);
                     ask.expire(now);
-                    if ask.due(rtt.is_out()) {
+                    keepalive.expire(now);
+                    let busy = rtt.is_out() || ask.pending();
+                    let send = if ask.due(rtt.is_out() || keepalive.is_out()) {
                         ask.sent(now);
-                        if let Err(e) = send(&peripheral, &link, &HostToBridge::GetStatus).await {
-                            println!("# GetStatus write failed: {e:#}");
-                        }
-                    } else if !ask.pending() && !closing && rtt.due(now) {
+                        true
+                    } else if !ask.pending() && !keepalive.is_out() && !closing && rtt.due(now) {
                         rtt.sent(now);
-                        if let Err(e) = send(&peripheral, &link, &HostToBridge::GetStatus).await {
-                            println!("# GetStatus write failed: {e:#}");
-                        }
+                        true
+                    } else if link.last_write().is_some_and(|at| keepalive.due(now, at, busy)) {
+                        keepalive.sent(now);
+                        true
+                    } else {
+                        false
+                    };
+                    if send && let Err(e) = link.send(&HostToBridge::GetStatus).await {
+                        println!("# GetStatus write failed: {e:#}");
                     }
                 }
                 () = &mut done => {
@@ -390,21 +569,20 @@ async fn run(args: RunArgs) -> Result<()> {
         rtt.drop_out(now);
         // An ask this attachment never heard answered is not the next one's.
         ask = StatusAsk::default();
+        keepalive = Keepalive::default();
         let summary = attachment.summary(now);
         print_attachment(index, args.reconnect, &summary);
         attachments.push(summary);
-        if !dropped {
-            if index == args.reconnect || stopped {
-                stop_what_was_started(&peripheral, &link, &args).await;
-            }
-            peripheral.unsubscribe(&link.up).await.ok();
+        if !dropped && (index == args.reconnect || stopped) {
+            stop_what_was_started(&mut link, &args).await;
         }
-        peripheral.disconnect().await.ok();
+        link.close(dropped).await;
     }
 
     let summary = RunSummary {
         name: args.name.clone(),
-        address: peripheral.address().to_string(),
+        port: args.port.clone(),
+        address: transport.address(),
         profile: args.profile.map(Into::into),
         count: args.count,
         secs: args.secs,
@@ -426,26 +604,27 @@ async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-async fn stop_what_was_started(peripheral: &Peripheral, link: &Link, args: &RunArgs) {
+async fn stop_what_was_started(link: &mut Link<'_>, args: &RunArgs) {
     if args.profile.is_some() {
         let msg = HostToBridge::SpikeLoad { profile: SpikeProfile::Off, count: 0 };
-        if let Err(e) = send(peripheral, link, &msg).await {
+        if let Err(e) = link.send(&msg).await {
             println!("# could not stop the load: {e:#}");
         }
     }
     if args.start_scan
-        && let Err(e) = send(peripheral, link, &HostToBridge::StopScan).await
+        && let Err(e) = link.send(&HostToBridge::StopScan).await
     {
         println!("# could not stop the scan: {e:#}");
     }
 }
 
-fn print_tick(attachment: &mut Attachment) {
+fn print_tick(attachment: &mut Attachment, uart: bool) {
     let now = Instant::now();
-    if let (_, Some(stats)) = attachment.stats() {
-        println!("{}", stats.text());
-    }
     let window = attachment.window(now);
+    if let (_, Some(stats)) = attachment.stats() {
+        let text = stats.text().to_string();
+        println!("{}", if uart { with_uart_rate(&text, window.bytes_per_s) } else { text });
+    }
     let overall = attachment.overall(now);
     let seq = attachment.seq();
     println!(
@@ -462,6 +641,15 @@ fn print_tick(attachment: &mut Attachment) {
         seq.crc_failures,
         attachment.garbled(),
     );
+}
+
+/// `SpikeStats` text with its rate, which counts only the time Bluetooth owned the queue, swapped
+/// for what the stand-in read over UART0.
+fn with_uart_rate(text: &str, bytes_per_s: f64) -> String {
+    let (head, rest) = text.split_once('\n').map_or((text, None), |(h, r)| (h, Some(r)));
+    let Some((fields, _)) = head.rsplit_once("; ") else { return text.to_owned() };
+    let head = format!("{fields}; {bytes_per_s:.0} B/s read by the stand-in over UART0");
+    rest.map_or_else(|| head.clone(), |rest| format!("{head}\n{rest}"))
 }
 
 fn yes(b: bool) -> &'static str {
@@ -571,5 +759,72 @@ fn print_run(summary: &RunSummary) {
     }
     if let Some(fleet) = &summary.fleet {
         println!("# last fleet report: {}", fleet.text());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+    use wartui_proto::spike::SpikeStats;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("ble-standin").chain(args.iter().copied()))
+    }
+
+    fn run_args(args: &[&str]) -> RunArgs {
+        match parse(args).unwrap().command {
+            Command::Run(run) => run,
+            _ => panic!("not a run"),
+        }
+    }
+
+    #[test]
+    fn cli_passes_debug_assert_when_built() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_takes_run_when_name_given() {
+        let run = run_args(&["run", "--name", "wartui 96:C4", "--reconnect", "2"]);
+        assert_eq!((run.name.as_deref(), run.port, run.reconnect), (Some("wartui 96:C4"), None, 2));
+    }
+
+    #[test]
+    fn cli_takes_run_when_port_given() {
+        let run = run_args(&["run", "--port", "/dev/ttyACM0", "--profile", "burst"]);
+        assert_eq!((run.name, run.port.as_deref()), (None, Some("/dev/ttyACM0")));
+    }
+
+    #[test]
+    fn cli_refuses_run_when_port_and_name_given() {
+        let err = parse(&["run", "--name", "wartui 96:C4", "--port", "/dev/ttyACM0"]);
+        assert_eq!(err.err().map(|e| e.kind()), Some(ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn cli_refuses_run_when_neither_port_nor_name_given() {
+        let err = parse(&["run", "--secs", "5"]);
+        assert_eq!(err.err().map(|e| e.kind()), Some(ErrorKind::MissingRequiredArgument));
+    }
+
+    #[test]
+    fn cli_refuses_run_when_port_and_reconnect_given() {
+        let err = parse(&["run", "--port", "/dev/ttyACM0", "--reconnect", "2"]);
+        assert_eq!(err.err().map(|e| e.kind()), Some(ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn tick_shows_standin_rate_when_over_uart() {
+        let text = SpikeStats::default().text().to_string();
+        let shown = with_uart_rate(&text, 123_456.4);
+        let (head, rest) = shown.split_once('\n').unwrap();
+        assert!(head.starts_with("# spike stats: up "), "{head}");
+        assert!(head.ends_with("; 123456 B/s read by the stand-in over UART0"), "{head}");
+        assert!(!head.contains("no Bluetooth time yet"), "{head}");
+        // Every other line, the Bluetooth fields among them, is the P4's as sent.
+        assert_eq!(Some(rest), text.split_once('\n').map(|(_, r)| r));
     }
 }
