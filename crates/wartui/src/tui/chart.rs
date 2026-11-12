@@ -140,7 +140,7 @@ pub(super) fn draw_chart(
 ///
 /// Three rows write every channel's number downward, hundreds to ones, in its bar's first
 /// column. One row names the first channel of each band under its first bar, and the last
-/// channel ending under the last bar.
+/// channel ending under the last bar where it has room beside the band's.
 fn labels(
     bars: &[Bar],
     first: &[usize],
@@ -287,6 +287,14 @@ mod tests {
         let labels = &rows[3];
         assert!(labels.starts_with("    1             36       100     140"), "{rows:#?}");
         assert!(!labels.contains("149"), "{rows:#?}");
+    }
+
+    #[test]
+    fn chart_omits_last_channel_label_when_it_would_touch_band_label() {
+        let rows = chart(&sample(), ChannelPool::Us, 56, 4);
+        let labels = &rows[3];
+        assert!(labels.starts_with("    1           36       100          149"), "{rows:#?}");
+        assert!(!labels.contains("165"), "{rows:#?}");
     }
 
     #[test]

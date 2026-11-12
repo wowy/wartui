@@ -33,6 +33,7 @@ use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::plan::ChannelPool;
 
 use blocks::draw_blocks;
 use chart::draw_chart;
@@ -221,18 +222,21 @@ fn draw_strip(
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // No pool arrives before the bridge's first `Status`; the chart then shows all of `All`, the
+    // pool a bridge with nothing stored holds.
+    let pool = snapshot.pool.unwrap_or(ChannelPool::All);
     if wide {
         let [left, chart] =
             Layout::horizontal([Constraint::Length(counts.wide_width()), Constraint::Min(0)])
                 .areas(inner);
         counts.draw(frame, left, true);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel, snapshot.pool.unwrap_or_default());
+        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
     } else {
         let band = counts.band_height(inner.width);
         let [top, chart] =
             Layout::vertical([Constraint::Length(band), Constraint::Min(0)]).areas(inner);
         counts.draw(frame, top, false);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel, snapshot.pool.unwrap_or_default());
+        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
     }
 }
 
@@ -252,7 +256,6 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use wartui_proto::plan::ChannelPool;
 
     use super::*;
     use crate::tui::fixtures::*;
