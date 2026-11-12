@@ -33,6 +33,7 @@ use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::plan::ChannelPool;
 
 use blocks::draw_blocks;
 use chart::draw_chart;
@@ -204,7 +205,7 @@ fn strip_min(counts: &counts::Counts, width: u16, wide: bool) -> u16 {
 }
 
 /// The strip under the header: the big unique counts, and the chart of Wi-Fi sightings per
-/// channel, under a title of every sighting this capture holds.
+/// channel of the bridge's pool, under a title of every sighting this capture holds.
 fn draw_strip(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -221,18 +222,21 @@ fn draw_strip(
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // No pool arrives before the bridge's first `Status`; the chart then shows all of `All`, the
+    // pool a bridge with nothing stored holds.
+    let pool = snapshot.pool.unwrap_or(ChannelPool::All);
     if wide {
         let [left, chart] =
             Layout::horizontal([Constraint::Length(counts.wide_width()), Constraint::Min(0)])
                 .areas(inner);
         counts.draw(frame, left, true);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel);
+        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
     } else {
         let band = counts.band_height(inner.width);
         let [top, chart] =
             Layout::vertical([Constraint::Length(band), Constraint::Min(0)]).areas(inner);
         counts.draw(frame, top, false);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel);
+        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
     }
 }
 
@@ -336,6 +340,18 @@ mod tests {
         assert!(rendered.contains("wifi sightings per channel"), "{rendered}");
         assert!(rendered.contains(" N7 "), "the blocks: {rendered}");
         assert!(rendered.contains("no heartbeat"), "the one node nothing can be sent to yet");
+    }
+
+    #[test]
+    fn view_charts_pool_channels_when_pool_is_us() {
+        let snapshot = Snapshot { pool: Some(ChannelPool::Us), ..busy() };
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("pool US"), "{rendered}");
+        assert!(!rendered.contains("1 2 3 4 5 6 7 8 9 0 1 2 3"), "no 12 or 13: {rendered}");
+        assert!(rendered.contains("1 2 3 4 5 6 7 8 9 0 1  6 0 4 8"), "1-11 then 36: {rendered}");
     }
 
     #[test]

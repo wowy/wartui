@@ -709,7 +709,8 @@ save.
 In `run`, settings' `pool` row shows the pool the bridge last reported. `Enter` sends it only when
 the row moved; `no bridge` means the link is down or no status has reported a pool yet, so there is
 nothing to send it to. The header shows the
-pool once the bridge has reported one, and `wartui status` prints a `pool` line too.
+pool once the bridge has reported one, and `wartui status` prints a `pool` line too. The strip's
+chart draws only that pool's channels.
 
 The bridge picks the node that scans Bluetooth; see "Bluetooth".
 
@@ -1047,10 +1048,13 @@ The strip above the grid is titled by every sighting the capture holds. At its l
 estimated unique access points and Bluetooth devices, in big digits at every screen size, each
 with its count of sightings (`1,204 wifi`, `318 bt`). Only a strip under four rows or 24 columns
 prints them as one line of text. At its right is the number of Wi-Fi sightings on each channel,
-one bar per channel in scan-table order, with a gap between the 2.4 GHz band and each 5 GHz run.
-Where there is room, each channel's number is written downward under its bar, hundreds to ones;
-on a narrow screen, one row names each band's first channel and the last. Channel 14 is not
-charted, since no pool holds it, and neither is Bluetooth, which has no channel.
+one bar per channel of the pool the bridge holds, in scan-table order, with a gap between the
+2.4 GHz band and each 5 GHz run the pool has. A sighting on a channel outside the pool counts in
+the title but has no bar. Before the bridge reports a pool, the chart shows all of `all`. Where
+there is room, each channel's number is written downward under its bar, hundreds to ones; on a
+narrow screen, one row names each band's first channel, and the last where its label has room
+beside the band's. Channel 14 is not charted, since no pool holds it, and neither is Bluetooth,
+which has no channel.
 
 The firmware is its version. A node on an older version than this build's adds an arrow and this
 build's version: `v0.1.2 ↑v0.1.3`. A different patch is still driven; an older major or minor is
