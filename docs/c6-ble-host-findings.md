@@ -1,12 +1,13 @@
 # C6 Bluetooth host link — a phone as the wartui host
 
-Measured on 2026-11-10. The question was whether a phone can stand in for the PC as the wartui
-host, over Bluetooth through the ESP32-P4-WIFI6's on-board C6, at the bar agreed on 2026-10-30:
-at least 16 KB/s of application throughput, about 10× the 20-node average
+Measured on 2026-11-10, with the phones measured again on 2026-11-12. The question was whether a
+phone can stand in for the PC as the wartui host, over Bluetooth through the ESP32-P4-WIFI6's
+on-board C6, at the bar agreed on 2026-10-30: at least 16 KB/s of application throughput, about
+10× the 20-node average
 ([`superpowers/plans/2026-10-30-p4-uart-hci-spike.md`](superpowers/plans/2026-10-30-p4-uart-hci-spike.md)
 has the bar and the load figures).
 
-The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `cd7d94d`.
+The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `04e3fa6`.
 
 ## The split moved to the C6
 
@@ -97,6 +98,8 @@ the C6 requested in run 3's 2M arm just before, not confirmed. Remove the device
 before comparing intervals.
 
 ## Run 4 — every device cleared the bar at MTU 247
+
+Run 14 has the same devices on the stream receive.
 
 `saturate`, 2 minutes or more each, default image, each device on its own choice of interval:
 
@@ -280,6 +283,35 @@ in two parts:
 - The P4 still loses host bytes while it erases or writes its own flash, as that bench found. That
   is interrupts held off, not the re-arm.
 
+## Run 14 — phones on the stream receive (96:C4, 2026-11-12)
+
+The four devices again, in nRF Connect, on spike `04e3fa6`: the stream receive of run 12, with
+the fixes from its port to `main` (#304). `saturate` for 8 to 10 minutes each, at MTU 247 and 2M.
+Once a minute the PC read the counters over UART0, which took the queue for about 20 s each time.
+Each rate is the bytes the C6 notified over the time the device held the queue, both from the
+P4's counters.
+
+| Device | OS | Interval | Stream receive | Old receive (run 4) |
+| --- | --- | --- | --- | --- |
+| iPhone 17 | iOS 27.2.1 | 30 ms | 108.3 KB/s | ~48 KB/s |
+| iPad mini (A17 Pro) | iPadOS 27.2.1 | 30 ms | 39.1 KB/s | 38.3 KB/s |
+| Pixel 8 | Android 17 | 48.75 ms | 66.5 KB/s | ~57 KB/s |
+| Galaxy Z Flip 8 | Android 17 | 30 ms | 117.9 KB/s | ~85–90 KB/s |
+
+- **The iPhone and the Flip gained the most,** the iPhone 2.3×. The iPad held a flat 1.74 MB a
+  minute on the same interval as the iPhone, and the Pixel gained a sixth on its longer interval,
+  so each of those two is now held back by the device, not the C6 (inferred).
+- **The link stayed clean:** no CRC, sequence or UART error at either end over the four runs, and
+  no record evicted.
+- **The Flip started at MTU 23,** since nRF Connect had not been asked for an MTU yet. It changed
+  to 247 inside the first minute, so no MTU-23 figure came out of it.
+- **96:C4 stopped reading UART0 once, and why was not found.** The board had sat idle for about
+  16 hours since its flash. With the Pixel 8 saturating, it answered no `Identify` and sent no
+  byte on UART0, while the Pixel kept receiving and its `off` write stopped the load. So the P4
+  still decoded Bluetooth frames but none from UART0, with or without load. The CH343 stayed
+  attached and D0:1C answered on the same PC. A hardware reset brought UART0 back, and it then
+  answered all 47 readouts that followed.
+
 ## Against the pass criteria
 
 | Criterion | Result |
@@ -331,9 +363,8 @@ Four design points the spike leaves for production:
 
 - A phone can be the wartui host through the C6 without touching the radio link's frozen core,
   and `flash-bridge` moves a board on and off such a build.
-- Throughput at 2M and MTU 247 cleared the bar on all four test devices: 38.3 KB/s measured on
-  the iPad, and ~48 to ~90 KB/s on the others, inferred from counters (the Flip's is an upper
-  bound). That is 2.4× the bar or more.
+- Throughput at 2M and MTU 247 cleared the bar on all four test devices. On the stream receive it
+  ran from 39.1 KB/s on the iPad to 117.9 KB/s on the Flip (run 14), 2.4× the bar or more.
 - On the old receive, draining at about 30 KB/s, the P4's 240 KB ring evicts on a 500-batch
   burst. A 4 MB PSRAM ring does not.
 - Bluetooth load does not starve the node bus.
@@ -349,7 +380,8 @@ It does not settle:
   follow, and why the P4 keeps it (run 13). The stream receive avoids both, so it does not matter
   for the fix.
 - **Why the old receive held Bluetooth throughput at a third.**
-- **Phone throughput on the stream receive.** Runs 3 to 10 were all on the old one.
+- **Why 96:C4 stopped reading UART0** after a long idle (run 14). It has not been seen again, and
+  whether the idle matters was not tested.
 - **Whether the internal ring still evicts on a 500-batch burst.** Run 8 drained on the old
   receive, and the stream receive carried 3.1× more in run 12, so it may drain the burst before
   the ring fills (inferred).
@@ -357,7 +389,7 @@ It does not settle:
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
 - **Down-direction throughput,** which matters for updates from a phone. Only single frames were
-  written. A P4 image of about 431 KB would take about 5–18 s at the up rates seen here, from
-  24 KB/s on the stand-in to ~90 KB/s on the Flip (inferred, not measured).
+  written. A P4 image of about 431 KB would take about 4–18 s at the up rates seen here, from
+  24 KB/s on the stand-in to 117.9 KB/s on the Flip (inferred, not measured).
 - **Pairing, bonding and encryption,** and a phone app of our own, which must ask for an MTU on
   Android.
