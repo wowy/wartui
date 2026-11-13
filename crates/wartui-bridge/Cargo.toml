@@ -19,10 +19,11 @@ tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros", "rt-mu
 tracing = "0.1.44"
 wartui-proto = { path = "../wartui-proto" }
 
-# btleplug's libdbus on Linux, vendored: built from source, so no dev machine or CI job needs the
-# system's libdbus headers or pkg-config, and the binary carries libdbus itself.
+# btleplug and the pairing code (`bluez`) link the system's libdbus, which every machine running
+# BlueZ already has at run time. Building needs its headers (`dbus-devel` on Fedora,
+# `libdbus-1-dev` on Debian and Ubuntu), as `serialport` needs libudev's.
 [target.'cfg(target_os = "linux")'.dependencies]
-dbus = { version = "0.9.12", features = ["vendored"] }
+dbus = "0.9.12"
 
 [dev-dependencies]
 sha2 = "0.11.1"
