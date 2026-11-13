@@ -52,11 +52,14 @@ embassy-time = "0.5.1"
 bt-hci = { version = "0.10.1", default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
+# `security` for LE Secure Connections pairing and bonds, with `legacy-pairing` left off so
+# nothing pairs below LE Secure Connections. It seeds its RNG from the controller's LeRand.
 trouble-host = { version = "0.8.0", default-features = false, features = [
   "default-packet-pool",
   "derive",
   "gatt",
   "peripheral",
+  "security",
 ] }
 static_cell = "2.1.1"
 # The last panic's text, kept across the reset: `esp-hal` marks only `portable-atomic`'s

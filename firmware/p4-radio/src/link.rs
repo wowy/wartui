@@ -38,7 +38,8 @@
 //! slots and reboots, and the P4 hears the new image's hello.
 //!
 //! **The host stream goes to a Bluetooth central** (`src/ble.rs`): `Down::HostBytes` is held for
-//! notifying, and the C6 sends its Bluetooth counters every [`BLE_STATS_EVERY`]. The
+//! notifying, the C6 sends its Bluetooth counters every [`BLE_STATS_EVERY`], and `Down::Bonds`
+//! gives it the bonds the P4 keeps. The
 //! `sink-discard` feature instead credits each one at once and claims a subscriber once the
 //! P4's hello arrives, so the P4 streams its host queue here; that measures the link's ceiling.
 //!
@@ -528,6 +529,7 @@ impl Link {
         match down {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared))),
             Down::HostBytes(bytes) => self.host_bytes(bytes, shared),
+            Down::Bonds { bonds, window_ms } => crate::ble::take_bonds(shared, bonds, window_ms),
         }
     }
 
@@ -597,13 +599,7 @@ impl Link {
 /// after the new life it saw in the hello.
 fn claim_subscriber(shared: &Shared) {
     if cfg!(feature = "sink-discard") {
-        shared.push(&Up::BleState(BleState {
-            subscribed: true,
-            mtu: 0,
-            phy: 0,
-            interval_us: 0,
-            conn: 0,
-        }));
+        shared.push(&Up::BleState(BleState { subscribed: true, ..BleState::default() }));
     }
 }
 

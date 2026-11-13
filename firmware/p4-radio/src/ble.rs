@@ -31,6 +31,29 @@
 //! **The PHY is the build's.** The C6 requests `WARTUI_RADIO_PHY` ([`PHY`]) once connected, 2M
 //! unless the build names another, and logs the request.
 //!
+//! **Only a bonded, encrypted central reaches the host stream**, by LE Secure Connections Just
+//! Works pairing (#309). Up's CCCD and Down's writes require encryption in the attribute table,
+//! which TrouBLE checks before a write reaches [`events`], and refuses with Insufficient
+//! Authentication, the answer that makes BlueZ, iOS and Android pair. Just Works gives an
+//! unbonded link the same level, so the C6 checks the bond itself too: a Down write is
+//! forwarded, and a subscription counts in `BleState`, only while the link is encrypted and the
+//! central holds a stored bond ([`authorized`]).
+//!
+//! **TrouBLE accepts every pairing, so the window is the C6's to enforce.** A connection is
+//! bondable only when it is made inside the P4's pairing window. These centrals are disconnected
+//! and counted in `unbonded_kicks`, so none holds the only connection without a bond:
+//!
+//! - one encrypted without a stored bond on a connection made outside the window;
+//! - one that lost its bond, outside the window;
+//! - one not bonded and encrypted [`PAIR_DEADLINE`] after connecting.
+//!
+//! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM.** It waits up to
+//! [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the resolving list
+//! holds them from the first advertisement, and applies each later one whenever no central is
+//! connected ([`sync_bonds`]). Removing the connected central's bond waits for it to go. A new
+//! bond goes up as `Up::BondAdded`, after an `Up::BondRemoved` when it replaces one a central
+//! lost. The window's end is tracked here from each `Down::Bonds`' `window_ms`.
+//!
 //! **Each await reports where it is.** The notifier, the event loop, the advertiser and the
 //! runner set a phase in `BleStats` around each await, and the transport counts its own
 //! ([`crate::hci::Watch`]), so the counters of a stalled stack name the future that waits.
@@ -40,8 +63,9 @@ use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 
 use bt_hci::cmd::info::ReadBdAddr;
-use embassy_futures::join::join3;
-use embassy_futures::select::select;
+use bt_hci::cmd::le::{LeRand, LeReadResolvingListSize};
+use embassy_futures::join::join4;
+use embassy_futures::select::select3;
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
@@ -50,6 +74,7 @@ use esp_hal::peripherals::BT;
 use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
+use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{BleState, BleStats, Up};
 use wartui_proto::spike::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
@@ -94,6 +119,27 @@ const CONNECTIONS: usize = 1;
 
 /// The L2CAP channels a connection uses: signaling and ATT.
 const L2CAP_CHANNELS: usize = 2;
+
+/// Advertising sets: the one advertisement.
+const ADV_SETS: usize = 1;
+
+/// Bonds TrouBLE holds: the P4's four, and room for a fifth pairing to land before the P4 evicts
+/// the oldest. A pairing also takes a slot while it runs, bonded or not, and fails when none is
+/// free.
+const BONDS: usize = wartui_proto::bonds::MAX_BONDS + 1;
+
+/// How long the C6 waits for the P4's first `Down::Bonds` before it advertises with none.
+const BONDS_WAIT: Duration = Duration::from_secs(2);
+
+/// How often that wait looks.
+const BONDS_POLL: Duration = Duration::from_millis(20);
+
+/// How long a changed bond list gives TrouBLE's runner to load the resolving list, while
+/// advertising is idle, before the next advertisement.
+const RESOLVING_SETTLE: Duration = Duration::from_millis(50);
+
+/// How long a central has to be bonded and encrypted before it is disconnected.
+const PAIR_DEADLINE: Duration = Duration::from_secs(10);
 
 /// `wartui XX:YY`.
 const NAME_MAX: usize = NAME_PREFIX.len() + 5;
@@ -140,11 +186,13 @@ struct Server {
 /// The "wartui link" service.
 #[gatt_service(uuid = SERVICE_UUID)]
 struct LinkService {
-    /// The bridge's frame stream, notified. Its stored value is never read.
-    #[characteristic(uuid = UP_UUID, notify)]
+    /// The bridge's frame stream, notified. Its stored value is never read. Subscribing needs
+    /// an encrypted link.
+    #[characteristic(uuid = UP_UUID, notify, permissions(encrypted))]
     up: u8,
-    /// The host's frames, written. Writes are taken unprocessed, so nothing is stored.
-    #[characteristic(uuid = DOWN_UUID, write, write_without_response)]
+    /// The host's frames, written. Writes are taken unprocessed, so nothing is stored. Writing
+    /// needs an encrypted link.
+    #[characteristic(uuid = DOWN_UUID, write, write_without_response, permissions(encrypted))]
     down: u8,
 }
 
@@ -169,6 +217,13 @@ pub struct Ble {
     counters: Cell<BleStats>,
     /// Raised when the buffer or the subscription changes, for the notifier.
     ready: Signal<NoopRawMutex, ()>,
+    /// The bonds the P4 last sent, oldest first, and whether any `Down::Bonds` has arrived.
+    bonds: RefCell<Bonds>,
+    bonds_heard: Cell<bool>,
+    /// Raised by each `Down::Bonds`, for [`follow_bonds`].
+    bonds_changed: Signal<NoopRawMutex, ()>,
+    /// When the P4's pairing window closes, or `None` while it is closed.
+    window_until: Cell<Option<Instant>>,
 }
 
 impl Ble {
@@ -185,6 +240,10 @@ impl Ble {
             credited_at: Cell::new(Instant::from_ticks(0)),
             counters: Cell::new(BleStats::default()),
             ready: Signal::new(),
+            bonds: RefCell::new(Bonds::new()),
+            bonds_heard: Cell::new(false),
+            bonds_changed: Signal::new(),
+            window_until: Cell::new(None),
         }
     }
 
@@ -197,6 +256,11 @@ impl Ble {
     /// Whether a central has subscribed to Up.
     fn subscribed(&self) -> bool {
         self.state.get().subscribed
+    }
+
+    /// Whether the P4's pairing window is open.
+    fn window_open(&self) -> bool {
+        self.window_until.get().is_some_and(|until| Instant::now() < until)
     }
 
     /// Set the notifier's phase, timing each stretch of waiting on TrouBLE.
@@ -227,6 +291,17 @@ pub fn take_stream(shared: &Shared, bytes: &[u8]) {
         credit(shared, lost, true);
     }
     ble.ready.signal(());
+}
+
+/// Take the P4's bonds and its pairing window's time left. [`follow_bonds`] gives TrouBLE the
+/// bonds once no central is connected.
+pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32) {
+    let ble = &shared.ble;
+    let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
+    ble.window_until.set(until);
+    ble.bonds.replace(bonds);
+    ble.bonds_heard.set(true);
+    ble.bonds_changed.signal(());
 }
 
 /// The counters `Up::BleStats` reports.
@@ -298,16 +373,25 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     };
     let controller: Controller<'_> =
         ExternalController::new(Counting::new(connector, &shared.ble.ledger, &shared.ble.hci));
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS, L2CAP_CHANNELS> =
-        HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).build();
+    let mut resources: HostResources<
+        DefaultPacketPool,
+        CONNECTIONS,
+        L2CAP_CHANNELS,
+        ADV_SETS,
+        BONDS,
+    > = HostResources::new();
+    // No display and no input: Just Works.
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_io_capabilities(IoCapabilities::NoInputNoOutput)
+        .build();
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    join3(
+    join4(
         run_host(&mut runner, shared),
         advertise(&stack, &mut peripheral, mac, shared),
         watch_stall(shared),
+        follow_bonds(&stack, shared),
     )
     .await
     .0
@@ -364,6 +448,7 @@ async fn advertise(
         }
         Err(err) => shared.error(format_args!("could not read the Bluetooth address: {err:?}")),
     }
+    probe_security(stack, shared).await;
 
     let mut adv_data = [0; 31];
     let mut scan_data = [0; 31];
@@ -391,6 +476,23 @@ async fn advertise(
         interval_max: ADVERTISE_EVERY,
         ..Default::default()
     };
+
+    let waited = Instant::now();
+    while !shared.ble.bonds_heard.get() && waited.elapsed() < BONDS_WAIT {
+        Timer::after(BONDS_POLL).await;
+    }
+    if !shared.ble.bonds_heard.get() {
+        shared.log(format_args!(
+            "Bluetooth heard no bonds from the P4 in {} ms: advertising with none",
+            BONDS_WAIT.as_millis()
+        ));
+    }
+    let held = shared.ble.bonds.borrow().len();
+    let window = if shared.ble.window_open() { "open" } else { "closed" };
+    shared.log(format_args!("Bluetooth starts with {held} bonds, pairing window {window}"));
+    if sync_bonds(stack, shared) {
+        Timer::after(RESOLVING_SETTLE).await;
+    }
 
     loop {
         let advertisement = Advertisement::ConnectableScannableUndirected {
@@ -423,7 +525,143 @@ async fn advertise(
         // `serve` drops a notifier mid-await, which would read as a stall.
         shared.ble.notify_phase(NOTIFY_READY);
         set_state(shared, |state| *state = BleState::default());
+        // The bonds `follow_bonds` held back while the central was connected.
+        if sync_bonds(stack, shared) {
+            Timer::after(RESOLVING_SETTLE).await;
+        }
     }
+}
+
+/// Log whether the controller answers the security commands that can be tried without a
+/// connection. TrouBLE's runner seeds its RNG from `LeRand` before anything else, and a failure
+/// there stops the runner, which [`run_host`] reports. The LTK reply and encryption commands are
+/// tried by the first pairing or resume.
+async fn probe_security(stack: &BleStack<'_>, shared: &Shared) {
+    let rand = stack.command(LeRand::new()).await;
+    let list = stack.command(LeReadResolvingListSize::new()).await;
+    match (rand, list) {
+        (Ok(_), Ok(size)) => shared.log(format_args!(
+            "Bluetooth security commands answer: LeRand ok, resolving list holds {size}"
+        )),
+        (rand, list) => shared.error(format_args!(
+            "Bluetooth security commands failed: LeRand {:?}, resolving list size {:?}",
+            rand.err(),
+            list.err()
+        )),
+    }
+}
+
+/// Give TrouBLE each bond the P4 sent whenever no central is connected. While one is, the
+/// advertiser applies them once it goes.
+async fn follow_bonds(stack: &BleStack<'_>, shared: &Shared) -> ! {
+    loop {
+        shared.ble.bonds_changed.wait().await;
+        if shared.ble.state.get().conn == 0 {
+            sync_bonds(stack, shared);
+        }
+    }
+}
+
+/// Make TrouBLE's bonds the P4's: drop each it holds that the P4 does not, and add each the P4
+/// holds that it lacks or holds with another key. Returns whether anything changed.
+fn sync_bonds(stack: &BleStack<'_>, shared: &Shared) -> bool {
+    let want = shared.ble.bonds.borrow().clone();
+    let mut gone: wartui_proto::heapless::Vec<Identity, BONDS> = wartui_proto::heapless::Vec::new();
+    stack.with_bond_information(|held| {
+        for bond in held.iter().filter(|bond| bond.is_bonded) {
+            let addr = bond_addr(&bond.identity);
+            if !want.iter().any(|kept| kept.addr == addr) {
+                let _ = gone.push(bond.identity);
+            }
+        }
+    });
+    let mut changed = !gone.is_empty();
+    for identity in gone {
+        let _ = stack.remove_bond_information(identity);
+    }
+    for record in &want {
+        let info = bond_information(record);
+        let held = stack.with_bond_information(|held| {
+            held.iter().any(|bond| {
+                bond.is_bonded && bond.identity.addr == info.identity.addr && bond.ltk == info.ltk
+            })
+        });
+        if held {
+            continue;
+        }
+        changed = true;
+        if let Err(err) = stack.add_bond_information(info) {
+            let addr = record.addr.mac();
+            shared.error(format_args!(
+                "Bluetooth could not hold bond {}: {err:?}",
+                mac::short(&addr)
+            ));
+        }
+    }
+    changed
+}
+
+/// A central's identity address, as the P4 stores it. The controller reports an address it
+/// resolved as type 2 or 3, the identity's 0 or 1 with the resolution flagged.
+fn bond_addr(identity: &Identity) -> BondAddr {
+    let mut addr = [0; 6];
+    addr.copy_from_slice(identity.addr.addr.raw());
+    BondAddr { kind: identity.addr.kind.into_inner() & 1, addr }
+}
+
+/// TrouBLE's bond as the P4 stores it.
+fn bond_record(bond: &BondInformation) -> BondRecord {
+    BondRecord {
+        addr: bond_addr(&bond.identity),
+        irk: bond.identity.irk.map(|irk| irk.0.get()),
+        ltk: bond.ltk.0,
+        level: match bond.security_level {
+            SecurityLevel::EncryptedAuthenticated => BondLevel::Authenticated,
+            SecurityLevel::Encrypted | SecurityLevel::NoEncryption => BondLevel::Encrypted,
+        },
+    }
+}
+
+/// A bond the P4 stores, as TrouBLE holds it.
+fn bond_information(record: &BondRecord) -> BondInformation {
+    let addr =
+        Address { kind: AddrKind::new(record.addr.kind), addr: BdAddr::new(record.addr.addr) };
+    let identity = Identity { addr, irk: record.irk.and_then(IdentityResolvingKey::new) };
+    let level = match record.level {
+        BondLevel::Encrypted => SecurityLevel::Encrypted,
+        BondLevel::Authenticated => SecurityLevel::EncryptedAuthenticated,
+    };
+    BondInformation::new(identity, LongTermKey::new(record.ltk), level, true)
+}
+
+/// What one connection's security handling remembers.
+struct Session {
+    /// When the central connected, for the time to pair or to resume.
+    connected_at: Instant,
+    /// The connection was made bondable: the pairing window was open as it connected.
+    bondable: bool,
+    /// The bond the central lost and is pairing again to replace, inside the window.
+    lost: Cell<Option<BondAddr>>,
+    /// The central's address, in display order, for the log.
+    peer: Mac,
+}
+
+/// Whether the link is encrypted and the central holds a stored bond: what the host stream needs.
+fn authorized(conn: &Conn<'_, '_>) -> bool {
+    let raw = conn.raw();
+    raw.security_level().is_ok_and(|level| level.encrypted()) && raw.is_bonded_peer()
+}
+
+/// Disconnect a central that holds no bond, and say why.
+fn kick(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
+    conn.raw().disconnect();
+    shared.ble.count(|c| c.unbonded_kicks = c.unbonded_kicks.wrapping_add(1));
+    shared.log(format_args!("Bluetooth disconnects {}: {why}", mac::short(&session.peer)));
+}
+
+/// Milliseconds since `at`, for `BleStats`.
+fn ms_since(at: Instant) -> u32 {
+    u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
 /// Serve one central until it disconnects.
@@ -436,8 +674,28 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
             phy: 1,
             interval_us: raw.params().conn_interval.as_micros() as u32,
             conn: 1,
+            encrypted: false,
+            bonded: false,
         }
     });
+    let session = Session {
+        connected_at: Instant::now(),
+        bondable: shared.ble.window_open(),
+        lost: Cell::new(None),
+        peer: bond_addr(&raw.peer_identity()).mac(),
+    };
+    let window = if session.bondable { "open" } else { "closed" };
+    shared.log(format_args!(
+        "Bluetooth connected {}, pairing window {window}",
+        mac::short(&session.peer)
+    ));
+    // Before pairing starts, which the Security Request below prompts.
+    if let Err(err) = raw.set_bondable(session.bondable) {
+        shared.error(format_args!("Bluetooth could not set bondable: {err:?}"));
+    }
+    if let Err(err) = raw.request_security() {
+        shared.log(format_args!("Bluetooth security not requested: {err:?}"));
+    }
     // Each answered by an event if the central agrees; a refusal leaves the link as it is.
     match PHY {
         None => shared.log(format_args!("Bluetooth PHY not requested: the build keeps 1M")),
@@ -464,11 +722,26 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
             Err(err) => shared.log(format_args!("Bluetooth interval not requested: {err:?}")),
         }
     }
-    select(events(conn, server, shared), notify(conn, server, shared)).await;
+    select3(
+        events(conn, server, &session, shared),
+        notify(conn, server, shared),
+        deadline(conn, &session, shared),
+    )
+    .await;
+}
+
+/// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] after it connected, so an
+/// idle or unbonded one cannot hold the only connection.
+async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
+    Timer::at(session.connected_at + PAIR_DEADLINE).await;
+    if !authorized(conn) {
+        kick(conn, session, shared, "not bonded and encrypted 10 s after connecting");
+    }
+    core::future::pending().await
 }
 
 /// Handle the connection's events until it ends.
-async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
+async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, shared: &Shared) {
     let ble = &shared.ble;
     loop {
         ble.count(|c| c.events_phase = EVENTS_NEXT);
@@ -507,6 +780,33 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
             // LE Remote Connection Parameter Request Reply declares no return, and the
             // controller returns the connection handle.
             GattConnectionEvent::RequestConnectionParams(_) => {}
+            GattConnectionEvent::PairingComplete { security_level, bond } => {
+                paired(conn, session, shared, security_level, bond.as_ref());
+            }
+            GattConnectionEvent::PairingFailed(err) => {
+                ble.count(|c| c.pairing_failures = c.pairing_failures.wrapping_add(1));
+                let peer = mac::short(&session.peer);
+                shared.log(format_args!("Bluetooth pairing with {peer} failed: {err:?}"));
+            }
+            GattConnectionEvent::BondLost => {
+                if session.bondable && ble.window_open() {
+                    session.lost.set(Some(bond_addr(&conn.raw().peer_identity())));
+                    let peer = mac::short(&session.peer);
+                    shared.log(format_args!("Bluetooth {peer} lost its bond and pairs again"));
+                } else {
+                    kick(conn, session, shared, "lost its bond outside the pairing window");
+                }
+            }
+            GattConnectionEvent::Encrypted { bond: Some(bond), .. } if bond.is_bonded => {
+                let ms = ms_since(session.connected_at);
+                ble.count(|c| c.last_resume_ms = ms);
+                let peer = mac::short(&session.peer);
+                shared.log(format_args!("Bluetooth resumed {peer}'s bond in {ms} ms"));
+            }
+            // A fresh pairing's: its `PairingComplete` says whether it bonded.
+            GattConnectionEvent::Encrypted { .. } if !session.bondable => {
+                kick(conn, session, shared, "encrypted without a bond outside the pairing window");
+            }
             GattConnectionEvent::Gatt { event } => {
                 let down = matches!(&event, GattEvent::Write(write)
                     if write.handle() == server.link.down.handle);
@@ -519,13 +819,26 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
                         c.last_gatt_handle = handle;
                     });
                 }
+                // The table refused these unencrypted already; an encrypted link without a bond
+                // is refused here.
+                let refused = AttErrorCode::INSUFFICIENT_AUTHENTICATION;
+                let up_cccd = server.link.up.cccd_handle;
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
                     GattEvent::Write(write) if write.handle() == server.link.down.handle => {
-                        ble.count(|c| c.events_phase = EVENTS_FORWARD);
-                        forward(shared, &write).await;
-                        ble.count(|c| c.events_phase = EVENTS_OTHER);
-                        write.accept_unprocessed()
+                        if authorized(conn) {
+                            ble.count(|c| c.events_phase = EVENTS_FORWARD);
+                            forward(shared, &write).await;
+                            ble.count(|c| c.events_phase = EVENTS_OTHER);
+                            write.accept_unprocessed()
+                        } else {
+                            write.reject(refused)
+                        }
+                    }
+                    GattEvent::Write(write)
+                        if Some(write.handle()) == up_cccd && !authorized(conn) =>
+                    {
+                        write.reject(refused)
                     }
                     event => event.accept(),
                 };
@@ -545,13 +858,49 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
             }
             _ => {}
         }
-        let subscribed = server.link.up.should_notify(conn);
-        let mtu = conn.raw().att_mtu();
+        // A bonded central's subscription outlives its connection in TrouBLE, so it is read
+        // only once the link is authorized again.
+        let raw = conn.raw();
+        let encrypted = raw.security_level().is_ok_and(|level| level.encrypted());
+        let bonded = raw.is_bonded_peer();
+        let subscribed = encrypted && bonded && server.link.up.should_notify(conn);
+        let mtu = raw.att_mtu();
         set_state(shared, |state| {
             state.subscribed = subscribed;
             state.mtu = mtu;
+            state.encrypted = encrypted;
+            state.bonded = bonded;
         });
     }
+}
+
+/// A pairing completed: report a bond to the P4, or disconnect a central that bonded nothing
+/// while the window is closed.
+fn paired(
+    conn: &Conn<'_, '_>,
+    session: &Session,
+    shared: &Shared,
+    level: SecurityLevel,
+    bond: Option<&BondInformation>,
+) {
+    let ms = ms_since(session.connected_at);
+    let peer = mac::short(&session.peer);
+    let Some(bond) = bond else {
+        shared.log(format_args!("Bluetooth paired {peer} without a bond in {ms} ms, {level:?}"));
+        if !shared.ble.window_open() {
+            kick(conn, session, shared, "paired without a bond outside the pairing window");
+        }
+        return;
+    };
+    shared.ble.count(|c| {
+        c.pairings = c.pairings.wrapping_add(1);
+        c.last_pair_ms = ms;
+    });
+    if let Some(old) = session.lost.take() {
+        shared.push(&Up::BondRemoved(old));
+    }
+    shared.push(&Up::BondAdded(bond_record(bond)));
+    shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
 }
 
 /// Send what a central wrote to the P4, waiting for room rather than evicting. The write is
@@ -639,6 +988,14 @@ fn event_kind(event: &GattConnectionEvent<'_, '_, DefaultPacketPool>, server: &S
             9
         }
         GattConnectionEvent::Gatt { .. } => 10,
+        GattConnectionEvent::PairingComplete { .. } => 11,
+        GattConnectionEvent::PairingFailed(_) => 12,
+        GattConnectionEvent::BondLost => 13,
+        GattConnectionEvent::Encrypted { .. } => 14,
+        GattConnectionEvent::PassKeyDisplay(_)
+        | GattConnectionEvent::PassKeyConfirm(_)
+        | GattConnectionEvent::PassKeyInput
+        | GattConnectionEvent::OobRequest => 15,
     }
 }
 

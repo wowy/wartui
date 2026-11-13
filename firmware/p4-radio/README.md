@@ -17,7 +17,12 @@ crediting it at once, and claims a subscriber after the hello exchange; Bluetoot
 The C6 advertises `wartui XX:YY` and serves the GATT service in `tools/ble-standin/README.md`,
 through TrouBLE 0.8 over `esp-radio`'s controller (`src/ble.rs`). It notifies the P4's host
 stream at up to an ATT MTU of 517, and counts link-layer delivery from the HCI traffic
-(`src/hci.rs`). It boots with one `Log` naming the controller's address.
+(`src/hci.rs`). It boots with one `Log` naming the controller's address, and one saying
+whether `LeRand` and the resolving list answer.
+
+The host stream reaches only a central that has paired and bonded, by LE Secure Connections
+Just Works, inside the P4's pairing window. The P4 keeps the bonds and sends them down after
+each hello; `src/ble.rs` has the rules.
 
 On this branch it links `esp-radio` with `ble`, and has a 96 KB heap: 64 KB of reclaimed
 bootloader RAM and 32 KB more. The Bluetooth controller is the only thing that allocates.

@@ -222,7 +222,7 @@ pub const EVENTS_PHASES: [&str; 4] = ["next", "forward", "reply send", "other"];
 pub const ADV_PHASES: [&str; 3] = ["advertise", "serve", "backoff"];
 
 /// [`BleStats::last_event`]'s values, by index.
-pub const EVENT_KINDS: [&str; 11] = [
+pub const EVENT_KINDS: [&str; 16] = [
     "none",
     "Disconnected",
     "PhyUpdated",
@@ -234,6 +234,11 @@ pub const EVENT_KINDS: [&str; 11] = [
     "ConnectionRateChanged",
     "Gatt Down write",
     "Gatt other",
+    "PairingComplete",
+    "PairingFailed",
+    "BondLost",
+    "Encrypted",
+    "pass key or OOB",
 ];
 
 /// [`BleStats::last_gatt_kind`]'s values, by index.
