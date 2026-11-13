@@ -477,6 +477,18 @@ pub enum HostOwner {
     Bluetooth,
 }
 
+impl HostOwner {
+    /// The owner's name, as `wartui status` prints it and a capture stores it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Usb => "usb",
+            Self::Bluetooth => "bluetooth",
+        }
+    }
+}
+
 /// The Bluetooth pairing window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum PairWindow {

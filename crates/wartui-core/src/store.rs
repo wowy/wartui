@@ -39,7 +39,7 @@ pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{HostOwner, PairWindow};
+use wartui_proto::link::PairWindow;
 use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
@@ -1054,15 +1054,6 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
     )
 }
 
-/// The `bridge_bluetooth.owner` token for `owner`.
-const fn owner_name(owner: HostOwner) -> &'static str {
-    match owner {
-        HostOwner::None => "none",
-        HostOwner::Usb => "usb",
-        HostOwner::Bluetooth => "bluetooth",
-    }
-}
-
 /// The `bridge_bluetooth.pair_window` token for `window`, and its seconds left when open.
 const fn window_columns(window: PairWindow) -> (&'static str, Option<u16>) {
     match window {
@@ -1348,7 +1339,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 )?
                 .execute(params![
                     status_id,
-                    owner_name(bluetooth.owner),
+                    bluetooth.owner.name(),
                     bluetooth.bonds,
                     window,
                     window_secs,

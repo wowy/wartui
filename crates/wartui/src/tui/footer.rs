@@ -94,12 +94,10 @@ pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
 }
 
 /// Why the link is down when a USB host took the bridge from this Bluetooth host, or `None`.
+/// The line is not wrapped, so it stays short of an 80-column terminal.
 pub(super) fn takeover_line(snapshot: &Snapshot) -> Option<String> {
-    taken_by_usb(snapshot).then(|| {
-        format!(
-            "  link down: {USB_TOOK_BRIDGE}; the bridge hands it back 15 s after USB goes quiet"
-        )
-    })
+    taken_by_usb(snapshot)
+        .then(|| format!("  link down: {USB_TOOK_BRIDGE}; back 15 s after USB goes quiet"))
 }
 
 /// Whether the link is down because a USB host took the bridge.
@@ -422,11 +420,9 @@ mod tests {
         assert!(!faults(&snapshot).iter().any(|fault| fault.contains("link down")));
         assert_eq!(
             takeover_line(&snapshot).as_deref(),
-            Some(
-                "  link down: the USB host took the bridge; the bridge hands it back 15 s after \
-                 USB goes quiet"
-            )
+            Some("  link down: the USB host took the bridge; back 15 s after USB goes quiet")
         );
+        assert!(takeover_line(&snapshot).is_some_and(|line| line.chars().count() <= 80));
         let screen = rendered(&snapshot);
         assert!(screen.contains("link down: the USB host took the bridge"), "{screen}");
 

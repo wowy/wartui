@@ -323,7 +323,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             dropped: 30,
             reboots: 0,
             host_read: 0,
-            usb_lost: 870,
+            link_lost: 870,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
@@ -350,7 +350,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             dropped: 27,
             reboots: 1,
             host_read: 0,
-            usb_lost: 673,
+            link_lost: 673,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
@@ -533,15 +533,16 @@ fn bluetooth_status(uptime_ms: u32, n: u32) -> Record {
 
 #[test]
 fn analyze_sums_bluetooth_faults_when_c6_restarts_on_its_own() {
-    // The C6 restarts itself when its Bluetooth host stops, and the P4 runs on: its uptime holds,
-    // and the counters fall.
+    // The C6 restarts itself when its Bluetooth host stops. A reply's uptime is the C6's, so it
+    // falls, and the counters count from 0 again: here past where the last life left them, which
+    // only the uptime gives away.
     let (_dir, conn) = capture(vec![
         bluetooth_status(60_000, 2),
         bluetooth_status(65_000, 5),
-        bluetooth_status(70_000, 1),
+        bluetooth_status(4_000, 7),
     ]);
     let bluetooth = losses(&conn).unwrap().bridge.unwrap().bluetooth;
-    let n = 3 + 1;
+    let n = 3 + 7;
     assert_eq!(
         bluetooth,
         BluetoothLoss {
@@ -787,7 +788,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             dropped: 0,
             reboots: 1,
             host_read: 670,
-            usb_lost: 30,
+            link_lost: 30,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
@@ -798,7 +799,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
 }
 
 #[test]
-fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
+fn analyze_excludes_bridge_drops_from_link_lost_when_bridge_dropped_frames() {
     // 1,000 received, 10 of them evicted from the bridge's host queue and never sent, and 985
     // read: 5 were lost on USB.
     let (_dir, conn) = capture(vec![
@@ -808,11 +809,11 @@ fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
     ]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
     assert_eq!((bridge.received, bridge.dropped, bridge.host_read), (1_000, 10, 985));
-    assert_eq!(bridge.usb_lost, 5);
+    assert_eq!(bridge.link_lost, 5);
 }
 
 #[test]
-fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
+fn analyze_saturates_link_lost_when_baseline_taken_mid_backlog() {
     // The first reply overtook 24 records still queued in the bridge, so the host had read
     // 24 fewer than `rx_count` says and reads them after the baseline: over the capture it
     // reads more than the bridge received.
@@ -822,7 +823,7 @@ fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
     ]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
     assert_eq!((bridge.received, bridge.host_read), (400, 424));
-    assert_eq!(bridge.usb_lost, 0);
+    assert_eq!(bridge.link_lost, 0);
 }
 
 #[test]

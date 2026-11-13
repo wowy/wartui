@@ -123,7 +123,8 @@ fn peaks_text(peak: &PeakSummary, names: &NodeNames) -> String {
 }
 
 /// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
-/// `lost on USB` is approximate to the bridge's queued frames.
+/// `lost on USB`, `lost on Bluetooth` in a capture over Bluetooth, is approximate to the bridge's
+/// queued frames.
 fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 
@@ -145,8 +146,10 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         if bridge.host_read > 0 {
             let _ = write!(line, "  host read {}", thousands(bridge.host_read));
         }
-        if bridge.usb_lost > 0 {
-            let _ = write!(line, "  {} lost on USB", thousands(bridge.usb_lost));
+        if bridge.link_lost > 0 {
+            // The host's link, which is USB in a capture that names none.
+            let on = if loss.link == Some(HostLink::Bluetooth) { "Bluetooth" } else { "USB" };
+            let _ = write!(line, "  {} lost on {on}", thousands(bridge.link_lost));
         }
         if bridge.oversize > 0 {
             let _ = write!(line, "  {} oversize (not a node's)", thousands(bridge.oversize));
@@ -163,10 +166,11 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
                 thousands(queue.dropped)
             );
         }
-        // Both are the P4's, and the host link's errors are said at 0 too: they answer whether
-        // the host's frames reached the P4.
         let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(&bridge.radio_link));
         let _ = writeln!(text, "  {:<11}{}", "host link", host_link_line(loss.link, bridge));
+    } else if let Some(link) = loss.link {
+        // No status reply at all, where the link is the first suspect.
+        let _ = writeln!(text, "  {:<11}{}  no status reply", "host link", link.name());
     }
     if let Some(host) = &loss.host {
         let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
@@ -208,26 +212,29 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     text
 }
 
-/// The link the host used, the P4's host UART errors, said at 0 too, then only the C6's Bluetooth
-/// host link faults that moved. Those are reported over USB too: a Bluetooth host waiting behind
-/// USB is still the C6's.
+/// The link the host used, the P4's host UART errors, then only the C6's Bluetooth host link
+/// faults that moved.
+///
+/// The UART errors are said at 0 over USB, where they answer whether the host's frames reached
+/// the P4. Over Bluetooth that UART is not the host's link, so they are a fault like the rest.
+/// The Bluetooth faults are reported over USB too: a Bluetooth host waiting behind USB is still
+/// the C6's.
 fn host_link_line(link: Option<HostLink>, bridge: &BridgeLoss) -> String {
-    use std::fmt::Write as _;
-
-    let mut line = link.map(|link| format!("{}  ", link.name())).unwrap_or_default();
-    let _ = write!(line, "{} host_uart_errors", thousands(bridge.host_uart_errors));
+    let over_bluetooth = link == Some(HostLink::Bluetooth);
+    let mut parts: Vec<String> = link.map(|link| link.name().to_owned()).into_iter().collect();
     let b = &bridge.bluetooth;
-    for (count, name) in [
-        (b.resynced_bytes, "resynced_bytes"),
-        (b.dropped_writes, "dropped_writes"),
-        (b.unbonded_kicks, "unbonded_kicks"),
-        (b.failed_pairings, "failed_pairings"),
+    for (count, name, at_zero) in [
+        (bridge.host_uart_errors, "host_uart_errors", !over_bluetooth),
+        (b.resynced_bytes, "resynced_bytes", false),
+        (b.dropped_writes, "dropped_writes", false),
+        (b.unbonded_kicks, "unbonded_kicks", false),
+        (b.failed_pairings, "failed_pairings", false),
     ] {
-        if count > 0 {
-            let _ = write!(line, "  {} {name}", thousands(count));
+        if count > 0 || at_zero {
+            parts.push(format!("{} {name}", thousands(count)));
         }
     }
-    line
+    parts.join("  ")
 }
 
 /// The UART link's packets, then only the error counters that moved.
@@ -395,7 +402,7 @@ mod tests {
                 dropped: 1_300,
                 reboots: 1,
                 host_read: 0,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
@@ -435,7 +442,7 @@ mod tests {
                 dropped: 0,
                 reboots: 0,
                 host_read: 31_821,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
@@ -552,7 +559,7 @@ mod tests {
             dropped: 0,
             reboots: 0,
             host_read: 0,
-            usb_lost: 0,
+            link_lost: 0,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
@@ -563,17 +570,22 @@ mod tests {
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
     }
 
-    /// A bridge line for `received`, `dropped` and `host_read`, `usb_lost` taken as
+    /// A bridge line for `received`, `dropped` and `host_read`, `link_lost` taken as
     /// analyze takes it.
     fn bridge_line(received: u64, dropped: u64, host_read: u64) -> String {
-        let usb_lost = received.saturating_sub(dropped).saturating_sub(host_read);
-        let loss = LossSummary {
+        first_line(&loss_text(&bridge_counts(received, dropped, host_read)))
+    }
+
+    /// A capture whose bridge reported `received`, `dropped` and `host_read`.
+    fn bridge_counts(received: u64, dropped: u64, host_read: u64) -> LossSummary {
+        let link_lost = received.saturating_sub(dropped).saturating_sub(host_read);
+        LossSummary {
             bridge: Some(BridgeLoss {
                 received,
                 dropped,
                 reboots: 0,
                 host_read,
-                usb_lost,
+                link_lost,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
@@ -581,8 +593,7 @@ mod tests {
                 bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
-        };
-        first_line(&loss_text(&loss))
+        }
     }
 
     /// The report's first line, the bridge's, with its newline.
@@ -598,7 +609,7 @@ mod tests {
                 dropped: 10,
                 reboots: 0,
                 host_read: 990,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 42,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
@@ -654,7 +665,7 @@ mod tests {
                 dropped: 0,
                 reboots: 0,
                 host_read: 1_000,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![
                     QueueLoss {
@@ -722,17 +733,35 @@ mod tests {
     fn analyze_report_names_link_and_bluetooth_faults_when_capture_has_them() {
         let mut loss = bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() });
         loss.link = Some(HostLink::Bluetooth);
-        assert!(loss_text(&loss).ends_with("  host link  bluetooth  0 host_uart_errors\n"));
+        // The P4's host UART is not this host's link, so its errors are not said at 0.
+        assert!(loss_text(&loss).ends_with("  host link  bluetooth\n"));
         loss.bridge.as_mut().unwrap().bluetooth =
             BluetoothLoss { resynced_bytes: 1_244, unbonded_kicks: 2, ..BluetoothLoss::default() };
+        loss.bridge.as_mut().unwrap().host_uart_errors = 3;
         let text = loss_text(&loss);
         assert!(
             text.ends_with(
-                "  host link  bluetooth  0 host_uart_errors  1,244 resynced_bytes  \
+                "  host link  bluetooth  3 host_uart_errors  1,244 resynced_bytes  \
                  2 unbonded_kicks\n"
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn analyze_report_names_lost_frames_by_link_when_capture_is_over_bluetooth() {
+        let mut loss = bridge_counts(1_000, 10, 985);
+        assert!(loss_text(&loss).contains("  5 lost on USB\n"));
+        loss.link = Some(HostLink::Bluetooth);
+        let text = loss_text(&loss);
+        assert!(text.contains("  5 lost on Bluetooth\n"), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_names_link_when_bridge_never_answered() {
+        let loss = LossSummary { link: Some(HostLink::Bluetooth), ..LossSummary::default() };
+        assert_eq!(loss_text(&loss), "  host link  bluetooth  no status reply\n");
+        assert_eq!(loss_text(&LossSummary::default()), "");
     }
 
     #[test]

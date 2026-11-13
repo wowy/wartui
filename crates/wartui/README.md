@@ -156,11 +156,11 @@ of its output, after the export summary:
   peak by node
     N3   120/s  2,310/min
     N11  1,790/s  39,880/min
-  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
+  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on Bluetooth
   queue      host-bulk  peak 245,760/245,760 bytes  1,300 dropped
   queue      node-down  peak 3,102/4,160 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
-  host link  bluetooth  0 host_uart_errors  1,244 resynced_bytes
+  host link  bluetooth  1,244 resynced_bytes
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
@@ -175,10 +175,10 @@ of its output, after the export summary:
 | `peak`         | The most sightings in any one second and any one minute, across the fleet       |
 | `peak wifi`    | The same for Wi-Fi sightings alone; `peak ble` for BLE                          |
 | `peak by node` | The same for each node, by slot label; see below                                |
-| `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
+| `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on the host's link: `lost on USB`, or `lost on Bluetooth` |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
 | `radio link`   | Packets on the P4–C6 link, and its link errors that are not zero                |
-| `host link`    | The link the host used, host-link reads on the P4 that saw line errors or overflows, and the C6's Bluetooth faults that rose: `resynced_bytes`, `dropped_writes`, `unbonded_kicks`, `failed_pairings` |
+| `host link`    | The link the host used, reads of the P4's host UART that saw line errors or overflows, and the C6's Bluetooth faults that rose: `resynced_bytes`, `dropped_writes`, `unbonded_kicks`, `failed_pairings`. A capture whose bridge never answered has only the link, and `no status reply` |
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the footer's `lost`                |
@@ -202,10 +202,10 @@ bridge replays after a reconnect counts as the burst it was on the link. Where t
 back, every window restarts and the `peak` line says how many times `wall clock reversed`; a peak
 around the step is a lower bound.
 
-Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
+Counts follow the assumptions below; `lost on USB` and `lost on Bluetooth` are approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
 is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
-`store dropped`, `queue` drops, `host link` and, on a Pi, the `health` counts. A `queue` peak is
+`store dropped`, `queue` drops, `host_uart_errors` over USB and, on a Pi, the `health` counts. A `queue` peak is
 the most the queue held since the bridge booted, so it can predate the capture. Left out:
 
 - the `peak` lines, when the capture holds no sighting
@@ -214,7 +214,8 @@ the most the queue held since the bridge booted, so it can predate the capture. 
 - `queue` lines, when the bridge reports no queues
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
-- the `lost on USB` clause, when it is zero
+- the `lost on USB` or `lost on Bluetooth` clause, when it is zero
+- `host_uart_errors` at zero in a capture over Bluetooth, where that UART is not the host's link
 - the `oversize (not a node's)` clause, when it is zero. It counts node records longer than any
   node of this build sends, which the bridge dropped and left out of `frames received`
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
@@ -223,7 +224,7 @@ the most the queue held since the bridge booted, so it can predate the capture. 
 
 The host records a `host_status` row when the capture starts, every 5 s, and at shutdown. Each
 `bridge_status` row records the frames the host had read when the reply arrived. `frames
-received` less `dropped` less `host read` is `lost on USB`, to within the frames queued in the
+received` less `dropped` less `host read` is the `lost on` figure, to within the frames queued in the
 bridge at the first and last reply, since a reply overtakes them. On the `host` line:
 
 | Clause                 | What it counts                                                                 |
@@ -1239,12 +1240,12 @@ open until a host pairs. `forget` saves nothing to `wartui.toml` either.
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
 latest status, and show only while the link is up:
 
-| Header                                                               | Meaning                                                              |
-|----------------------------------------------------------------------|----------------------------------------------------------------------|
-| `bridge 44:C0, fw v0.4.0 — host usb, link up`                        | The run reaches the bridge over USB                                  |
-| `… — host usb; a Bluetooth host waits, link up`                      | A Bluetooth host is connected to the C6 and waits while this run holds the bridge: why a phone goes unserved |
-| `… — host bluetooth, encrypted and bonded, MTU 247, link up`         | The run reaches the bridge over Bluetooth, and its link: below MTU 247 it is slower |
-| `waiting for bridge — host bluetooth`                                | No bridge has answered over Bluetooth yet                            |
+| Header                                        | Meaning                                                              |
+|-----------------------------------------------|----------------------------------------------------------------------|
+| `bridge 44:C0, fw v0.4.0 — host usb, link up` | The run reaches the bridge over USB                                  |
+| `… — host usb; Bluetooth waits, link up`      | A paired Bluetooth host is connected to the C6 and waits while this run holds the bridge: why a phone goes unserved |
+| `… — host bluetooth, MTU 247, link up`        | The run reaches the bridge over Bluetooth, and its link: below MTU 247 it is slower. The bridge serves only an encrypted, bonded host, so the header does not repeat it |
+| `waiting for bridge — host bluetooth`         | No bridge has answered over Bluetooth yet                            |
 
 **`status` shows the Bluetooth host link.** Its labels are apart from `bluetooth`, the node that
 scans Bluetooth:
@@ -1263,7 +1264,7 @@ after USB falls silent, and the view reconnects without being asked. Meanwhile t
 is red and its footer says, plain rather than in the fault box, since nothing is broken:
 
 ```
-  link down: the USB host took the bridge; the bridge hands it back 15 s after USB goes quiet
+  link down: the USB host took the bridge; back 15 s after USB goes quiet
 ```
 
 `sniff` prints `# link down: the USB host took the bridge`, then `# bridge …, firmware …` once the

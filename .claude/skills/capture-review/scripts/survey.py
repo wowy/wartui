@@ -735,7 +735,9 @@ def bridge(db, ctx):
     host_read = rows[-1][6] - rows[0][6]
     print(f"  rows {len(rows)}  reboots {len(reboots)}  received {received}  dropped {dropped} "
           f"({pct(dropped, received)})  host read {host_read}")
-    print(f"  ~lost on USB {max(0, received - dropped - host_read)} "
+    # The host's link, as analyze names it: USB in a capture that names none.
+    on = "Bluetooth" if ctx.get("link") == "bluetooth" else "USB"
+    print(f"  ~lost on {on} {max(0, received - dropped - host_read)} "
           "(inferred from counters; +/-24 frames at each end)")
     if oversize:
         print(f"  oversize {oversize} (node records over 1024 bytes; not in received)")
@@ -961,13 +963,16 @@ BLUETOOTH_COUNTERS = ("pairings", "failed_pairings", "unbonded_kicks", "resynced
 
 
 def bridge_bluetooth(db, ctx, lives):
-    """The Bluetooth host link, from `bridge_bluetooth`: who held the bridge, the central, and the
-    C6's counters over the capture.
+    """The Bluetooth host link, from `bridge_bluetooth`: the central and the C6's counters over
+    the capture.
 
-    The counters are the C6's since its boot. The C6 restarts with the P4 and on its own when its
-    Bluetooth host stops, which the P4's uptime does not show, so they rebase on a restart and
-    whenever they fall, as analyze's `BluetoothLoss` does. A reply's owner is who held the host
-    queue as it was sent, and each span between replies is put down to the later one's owner.
+    The counters are the C6's since its boot. The C6 restarts with the P4, and on its own when its
+    Bluetooth host stops. A reply's uptime is the C6's, so either shows as a restart, and the
+    counters rebase on one and whenever they fall, as analyze's `BluetoothLoss` does.
+
+    A reply's owner is who held the host queue as it was sent, and the bridge sends replies only to
+    that host. So every row names this capture's own link, and no row is written while another host
+    holds the bridge: a takeover is a gap in the replies, not a row.
     """
     cols = ", ".join(f"b.{c}" for c in BLUETOOTH_COUNTERS)
     rows = db.q(
@@ -977,12 +982,9 @@ def bridge_bluetooth(db, ctx, lives):
     )
     if not rows:
         return
-    owned = Counter()
-    for prev, cur in zip(rows, rows[1:]):
-        owned[cur[2]] += cur[1] - prev[1]
+    link = ctx.get("link")
     owners = Counter(r[2] for r in rows)
-    print("  bluetooth host  owner " + "  ".join(
-        f"{o} {dur(owned[o])} ({owners[o]} rows)" for o in sorted(owners)))
+    print("  bluetooth host  owner " + "  ".join(f"{o} ({owners[o]} rows)" for o in sorted(owners)))
     sums = dict.fromkeys(BLUETOOTH_COUNTERS, 0)
     for prev, cur in zip(rows, rows[1:]):
         restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
@@ -1008,22 +1010,35 @@ def bridge_bluetooth(db, ctx, lives):
              f"{sums['failed_pairings']}: a host with no bond tried to connect, or a pairing "
              "failed", sql)
 
-    # A takeover: no owner mid-run, or USB holding the bridge from a Bluetooth capture.
-    taken = {"none": owned["none"]}
-    if ctx.get("link") == "bluetooth":
-        taken["usb"] = owned["usb"]
-    taken = {o: ms for o, ms in taken.items() if ms or owners[o]}
-    if taken:
+    # The bridge answers only the host that holds it, so any other owner is a reply that reached
+    # the wrong host. A simulated capture names no link.
+    strays = {o: n for o, n in owners.items() if link and o != link}
+    if strays:
         flag("WARN", "bluetooth",
-             "the bridge was held by "
-             + ", ".join(f"{o} for {dur(ms)} ({owners[o]} rows)" for o, ms in taken.items())
-             + f" during a {ctx.get('link') or 'simulated'} capture: a takeover", sql)
+             "status replies name "
+             + ", ".join(f"{o} ({n} rows)" for o, n in sorted(strays.items()))
+             + f" as the bridge's host in a {link} capture: the bridge answers only the host that "
+             "holds it", sql)
 
-    codes = []  # (row, code) where last_disconnect changed to a code other than none
-    for prev, cur in zip([None] + rows, rows):
-        code = cur[4]
-        if code and (prev is None or prev[4] != code):
-            codes.append((cur, code))
+    # Over Bluetooth a gap in the replies is a lost link or a USB host's takeover. The host stays
+    # connected through a takeover, so the C6's latest disconnect reason tells them apart: it
+    # changes across a lost link, unless the link drops twice running for one reason.
+    if link == "bluetooth":
+        gaps = [(prev, cur) for prev, cur in zip(rows, rows[1:])
+                if cur[1] - prev[1] > 3 * STATUS_INTERVAL_MS]
+        for prev, cur in gaps[:8]:
+            if cur[4] == prev[4]:
+                why = ("last disconnect unchanged: the host stayed connected, as through a USB "
+                       "takeover, or the link dropped again for the same reason")
+            else:
+                why = (f"the link dropped: last disconnect 0x{cur[4]:02X} "
+                       f"({HCI_REASONS.get(cur[4], 'unnamed')})")
+            print(f"  bluetooth host  no reply for {dur(cur[1] - prev[1])} after {rel(prev[1])}; "
+                  + why)
+
+    # Where last_disconnect changed to a code other than none. The first row is only a baseline:
+    # its code can predate the capture.
+    codes = [(cur, cur[4]) for prev, cur in zip(rows, rows[1:]) if cur[4] and cur[4] != prev[4]]
     for r, code in codes[:8]:
         print(f"  bluetooth host  last disconnect 0x{code:02X} "
               f"({HCI_REASONS.get(code, 'unnamed')}) by {rel(r[1])}")

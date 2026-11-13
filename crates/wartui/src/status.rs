@@ -189,11 +189,7 @@ pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
 /// Who the bridge serves, and the Bluetooth host connected, if any: `bluetooth` when that host
 /// holds the bridge, or after a `;` when USB holds it or the host is not let in.
 pub(crate) fn host_text(status: &BluetoothStatus) -> String {
-    let owner = match status.owner {
-        HostOwner::None => "none",
-        HostOwner::Usb => "usb",
-        HostOwner::Bluetooth => "bluetooth",
-    };
+    let owner = status.owner.name();
     match (status.owner, &status.central) {
         (_, None) => owner.to_owned(),
         (HostOwner::Bluetooth, Some(central)) => format!("{owner}, {}", central_text(central)),
@@ -204,7 +200,7 @@ pub(crate) fn host_text(status: &BluetoothStatus) -> String {
 }
 
 /// Whether a connected Bluetooth host may be served: the bridge serves only one that is both.
-pub(crate) const fn trust_text(central: &Central) -> &'static str {
+const fn trust_text(central: &Central) -> &'static str {
     match (central.encrypted, central.bonded) {
         (true, true) => "encrypted and bonded",
         (true, false) => "encrypted, not bonded",

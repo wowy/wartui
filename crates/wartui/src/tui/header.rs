@@ -3,10 +3,12 @@
 //!
 //! The first line names the host link the run uses, `host usb` or `host bluetooth`, as `wartui
 //! status` names it: `bluetooth` alone is the node that scans Bluetooth. Over Bluetooth it adds
-//! what an operator needs of the link at a glance, from the bridge's latest `Status`: whether it
-//! is encrypted and bonded, which the bridge requires, and its MTU, since less than the C6's 247
-//! is a slower link. Over USB it adds a Bluetooth host connected to the C6, which waits while USB
-//! holds the bridge: that is why a phone goes unserved.
+//! the link's MTU from the bridge's latest `Status`, since less than the C6's 247 is a slower
+//! link. It does not say the link is encrypted and bonded: the bridge serves no other, so a
+//! `Status` that arrived says so. Over USB it adds a bonded Bluetooth host connected to the C6,
+//! which waits while USB holds the bridge: that is why a phone goes unserved.
+//!
+//! The line is not wrapped, so it stays short of an 80-column terminal's 78, fan reading included.
 //!
 //! The second line starts with what the bridge's planner scans, because the bridge decides it and
 //! keeps it with no host attached: the run asks for it, and only the bridge's report says it took.
@@ -24,7 +26,6 @@ use wartui_proto::mac;
 
 use super::format::elapsed;
 use crate::config::Link;
-use crate::status::trust_text;
 
 /// Draw the header box into `area`.
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, over: Link) {
@@ -80,21 +81,24 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 /// | Shown | Meaning |
 /// |---|---|
 /// | `host usb` | the run reaches the bridge over USB |
-/// | `host usb; a Bluetooth host waits` | a Bluetooth host is connected to the C6, and USB holds the bridge |
+/// | `host usb; Bluetooth waits` | a host the bridge would serve is connected to the C6, and USB holds the bridge |
 /// | `host bluetooth` | over Bluetooth, before the bridge has reported the link |
-/// | `host bluetooth, encrypted and bonded, MTU 247` | the link as the bridge last reported it |
+/// | `host bluetooth, MTU 247` | the link as the bridge last reported it |
+///
+/// A central the bridge would not serve, one with no bond or no encryption, is not waiting for
+/// USB: the C6 drops it. `wartui status` names it.
 fn host(snapshot: &Snapshot, link: Link) -> String {
     let central = snapshot
         .bridge_status
         .filter(|_| snapshot.link_up)
         .and_then(|status| status.bluetooth.central);
     match (link, central) {
-        (Link::Usb, None) => "host usb".to_owned(),
-        (Link::Usb, Some(_)) => "host usb; a Bluetooth host waits".to_owned(),
-        (Link::Bluetooth, None) => "host bluetooth".to_owned(),
-        (Link::Bluetooth, Some(central)) => {
-            format!("host bluetooth, {}, MTU {}", trust_text(&central), central.mtu)
+        (Link::Usb, Some(central)) if central.encrypted && central.bonded => {
+            "host usb; Bluetooth waits".to_owned()
         }
+        (Link::Usb, _) => "host usb".to_owned(),
+        (Link::Bluetooth, None) => "host bluetooth".to_owned(),
+        (Link::Bluetooth, Some(central)) => format!("host bluetooth, MTU {}", central.mtu),
     }
 }
 
@@ -528,10 +532,26 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(
-            screen.contains("— host bluetooth, encrypted and bonded, MTU 185, link up"),
-            "{screen}"
-        );
+        assert!(screen.contains("— host bluetooth, MTU 185, link up"), "{screen}");
+    }
+
+    #[test]
+    fn header_keeps_link_state_and_fan_when_terminal_is_80_columns() {
+        // The line is not wrapped, so each host text must leave the rest on screen.
+        let duty = FanDuty::new(40).expect("in range");
+        let mut snapshot = with_fan(Some(FanStats { duty, rpm: Some(1830) }));
+        for (link, owner) in [(Link::Bluetooth, HostOwner::Bluetooth), (Link::Usb, HostOwner::Usb)]
+        {
+            if let Some(status) = &mut snapshot.bridge_status {
+                status.bluetooth =
+                    BluetoothStatus { owner, central: Some(central(247)), ..Default::default() };
+            }
+            let settings = Settings { link: Some(link), ..Settings::default() };
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
+            terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
+            let screen = terminal.backend().to_string();
+            assert!(screen.contains(", link up  fan 40% 1830 rpm"), "{screen}");
+        }
     }
 
     #[test]
@@ -550,8 +570,19 @@ mod tests {
             central: Some(central(247)),
             ..BluetoothStatus::default()
         });
-        assert_eq!(host(&snapshot, Link::Usb), "host usb; a Bluetooth host waits");
-        assert!(rendered(&snapshot).contains("host usb; a Bluetooth host waits, link up"));
+        assert_eq!(host(&snapshot, Link::Usb), "host usb; Bluetooth waits");
+        assert!(rendered(&snapshot).contains("host usb; Bluetooth waits, link up"));
+    }
+
+    #[test]
+    fn header_omits_bluetooth_host_when_bridge_would_not_serve_it() {
+        // The C6 drops a central with no bond, so it is not waiting for USB.
+        let snapshot = with_bluetooth(BluetoothStatus {
+            owner: HostOwner::Usb,
+            central: Some(Central { bonded: false, ..central(247) }),
+            ..BluetoothStatus::default()
+        });
+        assert_eq!(host(&snapshot, Link::Usb), "host usb");
     }
 
     #[test]

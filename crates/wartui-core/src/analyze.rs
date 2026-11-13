@@ -114,7 +114,7 @@ impl LossSummary {
     }
 }
 
-/// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
+/// What the bridge received and dropped during the capture. Exact but for `link_lost`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
     /// Records the bridge received from its nodes.
@@ -129,7 +129,7 @@ pub struct BridgeLoss {
     /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
     /// `host_read`, saturating at 0. Approximate to the 24 frames the bulk ring can queue at each
     /// end, which a status reply overtakes.
-    pub usb_lost: u64,
+    pub link_lost: u64,
     /// Frames the bridge dropped for being longer than any node sends: somebody else's
     /// traffic, and not in `received`.
     pub oversize: u64,
@@ -159,18 +159,15 @@ pub struct BluetoothLoss {
 }
 
 impl BluetoothLoss {
-    /// A status row's counters, or `None` for a row with no `bridge_bluetooth` row.
-    fn read(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
-        let get = |name: &str| row.get::<_, Option<i64>>(name).map(|v| v.map(count));
-        let (Some(resynced_bytes), Some(dropped_writes), Some(unbonded_kicks), Some(failed)) = (
-            get("resynced_bytes")?,
-            get("dropped_writes")?,
-            get("unbonded_kicks")?,
-            get("failed_pairings")?,
-        ) else {
-            return Ok(None);
-        };
-        Ok(Some(Self { resynced_bytes, dropped_writes, unbonded_kicks, failed_pairings: failed }))
+    /// A status row's counters. The store writes one `bridge_bluetooth` row with every status row.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let get = |name: &str| row.get::<_, i64>(name).map(count);
+        Ok(Self {
+            resynced_bytes: get("resynced_bytes")?,
+            dropped_writes: get("dropped_writes")?,
+            unbonded_kicks: get("unbonded_kicks")?,
+            failed_pairings: get("failed_pairings")?,
+        })
     }
 
     /// Adds what each counter advanced from `before` to `now`, restarting with the C6.
@@ -349,7 +346,7 @@ pub struct NodePeak {
 }
 
 /// What the capture lost. Missed heartbeats follow the module's modulo assumptions;
-/// the bridge's `usb_lost` is approximate.
+/// the bridge's `link_lost` is approximate.
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let board = node_board(conn)?;
     let link = capture_link(conn)?;
@@ -486,7 +483,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
                 s.radio_link_radio_seq_gap, s.radio_link_radio_uart_errors, s.host_uart_errors,
                 b.resynced_bytes, b.dropped_writes, b.unbonded_kicks, b.failed_pairings,
                 q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
-         FROM bridge_status s LEFT JOIN bridge_bluetooth b ON b.status_id = s.id
+         FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id
          LEFT JOIN bridge_queue q ON q.status_id = s.id
          ORDER BY s.id, q.rowid",
     )?;
@@ -537,12 +534,11 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             }
             prev_radio_link = Some((now, loss.reboots));
 
-            if let Some(now) = BluetoothLoss::read(row)? {
-                if let Some((before, life)) = &prev_bluetooth {
-                    loss.bluetooth.advance(&now, before, *life != loss.reboots);
-                }
-                prev_bluetooth = Some((now, loss.reboots));
+            let now = BluetoothLoss::read(row)?;
+            if let Some((before, life)) = &prev_bluetooth {
+                loss.bluetooth.advance(&now, before, *life != loss.reboots);
             }
+            prev_bluetooth = Some((now, loss.reboots));
         }
 
         let Some(name) = row.get::<_, Option<String>>("queue")? else { continue };
@@ -572,7 +568,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     if let Some(dropped) = in_dropped_tx.map(|q| q.dropped).reduce(|sum, dropped| sum + dropped) {
         loss.dropped = dropped;
     }
-    loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
+    loss.link_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
     Ok(Some(loss))
 }
 
