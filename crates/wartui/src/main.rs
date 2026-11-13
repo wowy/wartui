@@ -448,9 +448,9 @@ async fn connect_one(
         }
         Link::Bluetooth => open(named, None, link, memory)?,
     };
-    match tokio::time::timeout(connect_wait(link), status::wait_for_ready(&mut handle)).await {
-        Ok(ready) => Ok((handle, ready?)),
-        Err(_) => anyhow::bail!("{}", no_bridge_notice(named, link)),
+    match status::wait_for_ready(&mut handle, link, connect_wait(link)).await? {
+        Some(info) => Ok((handle, info)),
+        None => anyhow::bail!("{}", no_bridge_notice(named, link)),
     }
 }
 
@@ -657,16 +657,19 @@ fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
 /// is paired with none of them. False when BlueZ does not answer or lists no such bridge.
 #[cfg(target_os = "linux")]
 fn unpaired_here(bridge: Option<&str>) -> bool {
-    let Ok(devices) = wartui_bridge::bluez::devices() else { return false };
-    let named = bridge.map(str::to_ascii_uppercase);
+    wartui_bridge::bluez::devices().is_ok_and(|devices| unpaired_among(&devices, bridge))
+}
+
+/// [`unpaired_here`], over the `devices` BlueZ lists. A path names no Bluetooth bridge, so it is
+/// read as none named.
+#[cfg(target_os = "linux")]
+fn unpaired_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>) -> bool {
+    let named = bridge.map(spec).filter(|named| !matches!(named, BridgeSpec::Path(_)));
     let mut bridges = devices
         .iter()
         .filter(|device| {
-            let octets = device
-                .name
-                .as_deref()
-                .and_then(|name| name.strip_prefix(wartui_proto::ble::NAME_PREFIX));
-            octets.is_some_and(|octets| named.as_deref().is_none_or(|n| n.ends_with(octets)))
+            let name = device.name.as_deref();
+            name.is_some_and(|name| wartui_bridge::ble::names_bridge(named.as_ref(), name))
         })
         .peekable();
     bridges.peek().is_some() && bridges.all(|device| !device.paired)
@@ -1088,6 +1091,29 @@ mod tests {
         let lines: Vec<&str> = notice.lines().collect();
         assert!(lines[2].contains("not paired") && lines[2].contains("wartui bluetooth pair"));
         assert!(lines[3].contains("a USB host holds the bridge"), "{notice}");
+    }
+
+    /// A device BlueZ lists, advertising `name`.
+    #[cfg(target_os = "linux")]
+    fn listed(name: &str, paired: bool) -> wartui_bridge::bluez::Device {
+        wartui_bridge::bluez::Device {
+            path: "/org/bluez/hci0/dev_02_00_5E_10_44_C0".to_owned(),
+            adapter: "/org/bluez/hci0".to_owned(),
+            address: "02:00:5E:10:44:C0".to_owned(),
+            name: Some(name.to_owned()),
+            paired,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_diagnostics_reads_bridge_as_unpaired_when_named_by_one_octet_or_a_path() {
+        let devices = [listed("wartui 44:C0", false)];
+        assert!(super::unpaired_among(&devices, Some("C0")), "one octet names it");
+        assert!(super::unpaired_among(&devices, Some("44:C0")));
+        assert!(super::unpaired_among(&devices, Some("/dev/ttyACM0")), "a path names none");
+        assert!(!super::unpaired_among(&devices, Some("C1")));
+        assert!(!super::unpaired_among(&[listed("wartui 44:C0", true)], Some("C0")));
     }
 
     #[test]

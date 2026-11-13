@@ -325,8 +325,9 @@ is here rather than only in a `//!`.
   because power cycles are routine on these nodes and RTC memory does not survive them. With no
   watchdog, those power cycles are also what rolls back a hung image. Every step's flash writes
   are ordered so a power cut cannot leave an image running untrialed. The P4 bridge's C6 shares
-  the trial: the P4's hello confirms its image, and the P4's resets count its boots. So does the
-  P4: the first host frame it decodes confirms its image, and a trial boot arms its RTC watchdog,
+  the trial: its image is confirmed once it has heard the P4's hello and its Bluetooth host has
+  started advertising, one that has not advertised 30 s after boot restarts itself, and that
+  restart and the P4's resets count its boots. So does the P4: the first host frame it decodes confirms its image, and a trial boot arms its RTC watchdog,
   whose resets count its boots, so a hung P4 image or one no host hears rolls back after three.
   → `firmware/common/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`

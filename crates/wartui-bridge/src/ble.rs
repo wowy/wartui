@@ -18,7 +18,10 @@
 //!
 //! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
-//! discovered or heard again, and once it has a name. An unnamed scan listens [`UNNAMED_LISTEN`]
+//! discovered or heard again: once it has a name, and at most [`NAME_READS`] times while it has
+//! none, since each read is a serial D-Bus round trip. A bridge is read again until it is heard
+//! advertising, because BlueZ first replays every device it knows as discovered, so a bonded
+//! bridge is read before the scan has heard it. An unnamed scan listens [`UNNAMED_LISTEN`]
 //! before choosing, so a second bridge advertising nearby is seen rather than passed over. At
 //! the end of that listen it reads the OS's listing once, for a bridge that raised no event: one
 //! BlueZ lists as bonded and has not heard, or one that was advertising before the scan began.
@@ -85,7 +88,8 @@
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
@@ -118,6 +122,12 @@ const UNNAMED_LISTEN: Duration = Duration::from_secs(2);
 
 /// How long a connect or a service discovery may take.
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long the disconnect that cancels a timed-out connect may take.
+const CANCEL_WITHIN: Duration = Duration::from_secs(2);
+
+/// How many times a scan reads a device that has no name before it reads it no more.
+const NAME_READS: u8 = 3;
 
 /// How long a subscription waits for its `Ready` before warning that a USB host may hold the
 /// bridge. Past the P4's 15 s handback, so a USB host that just let go is not reported.
@@ -685,27 +695,62 @@ async fn find(
     Ok((scan(adapter, spec, preferred.as_ref()).await?.1, false))
 }
 
-/// The bridges one scan has heard, by peripheral, with their names and whether each was
-/// advertising when read.
-struct Hearing<'a> {
+/// The bridges one scan has heard, by the OS's identifier `I` for each peripheral `P`, with their
+/// names and whether each has been heard advertising.
+struct Hearing<'a, I, P> {
     spec: Option<&'a BridgeSpec>,
-    bridges: Vec<(String, bool, Peripheral)>,
-    /// Peripherals whose name has been read, bridges or not, which are not read again.
-    named: HashSet<PeripheralId>,
+    bridges: Vec<(I, String, bool, P)>,
+    /// Peripherals not read again: named and not a bridge, or unnamed after [`NAME_READS`].
+    done: HashSet<I>,
+    /// How many times each peripheral still unnamed has been read.
+    unnamed: HashMap<I, u8>,
 }
 
-impl Hearing<'_> {
-    /// Read `peripheral`'s name once, and keep it when it is a bridge `spec` names.
-    async fn note(&mut self, peripheral: Peripheral) {
-        if self.named.contains(&peripheral.id()) {
+impl<'a, I: Clone + Eq + Hash, P> Hearing<'a, I, P> {
+    fn new(spec: Option<&'a BridgeSpec>) -> Self {
+        Self { spec, bridges: Vec::new(), done: HashSet::new(), unnamed: HashMap::new() }
+    }
+
+    /// Whether a hearing of `id` is worth reading its properties for: any device not done with,
+    /// except a bridge already heard advertising.
+    fn wants(&self, id: &I) -> bool {
+        match self.bridges.iter().find(|(heard, ..)| heard == id) {
+            Some((_, _, live, _)) => !live,
+            None => !self.done.contains(id),
+        }
+    }
+
+    /// Take what a read of `peripheral` found: its name and whether it is advertising, if it has
+    /// a name. A bridge `spec` names is kept, and one already kept is marked advertising once a
+    /// read says so.
+    fn noted(&mut self, id: I, peripheral: P, read: Option<(String, bool)>) {
+        if let Some((_, _, live, _)) = self.bridges.iter_mut().find(|(heard, ..)| *heard == id) {
+            *live |= read.is_some_and(|(_, now)| now);
             return;
         }
-        // A device with no name yet is read again on its next event.
-        let Some((name, live)) = name_of(&peripheral).await else { return };
-        self.named.insert(peripheral.id());
+        let Some((name, live)) = read else {
+            let reads = self.unnamed.entry(id.clone()).or_default();
+            *reads += 1;
+            if *reads >= NAME_READS {
+                self.unnamed.remove(&id);
+                self.done.insert(id);
+            }
+            return;
+        };
+        self.unnamed.remove(&id);
         if names_bridge(self.spec, &name) {
-            self.bridges.push((name, live, peripheral));
+            self.bridges.push((id, name, live, peripheral));
+        } else {
+            self.done.insert(id);
         }
+    }
+
+    /// The bridges heard, as [`choose`] takes them.
+    fn into_bridges(self) -> Vec<(String, bool, P)> {
+        self.bridges
+            .into_iter()
+            .map(|(_, name, live, peripheral)| (name, live, peripheral))
+            .collect()
     }
 }
 
@@ -725,6 +770,15 @@ async fn scan(
     choose(heard.collect(), preferred)
 }
 
+/// Read `peripheral`'s name, when `hearing` wants it, and note what the read found.
+async fn note(hearing: &mut Hearing<'_, PeripheralId, Peripheral>, peripheral: Peripheral) {
+    let id = peripheral.id();
+    if hearing.wants(&id) {
+        let read = name_of(&peripheral).await;
+        hearing.noted(id, peripheral, read);
+    }
+}
+
 /// Read the adapter's events until a bridge `spec` names is heard: at once when one is named, and
 /// once [`UNNAMED_LISTEN`] has passed when none is. At that point the OS's listing is read once,
 /// for a bridge that raised no event.
@@ -735,7 +789,7 @@ async fn listen(
 ) -> Result<Vec<(String, bool, Peripheral)>, TransportError> {
     let started = tokio::time::Instant::now();
     let (listened, give_up) = (started + UNNAMED_LISTEN, started + SCAN_FOR);
-    let mut hearing = Hearing { spec, bridges: Vec::new(), named: HashSet::new() };
+    let mut hearing = Hearing::new(spec);
     let mut listed = false;
     loop {
         if spec.is_some() && !hearing.bridges.is_empty() {
@@ -744,7 +798,7 @@ async fn listen(
         if !listed && tokio::time::Instant::now() >= listened {
             listed = true;
             for peripheral in adapter.peripherals().await.map_err(bluetooth)? {
-                hearing.note(peripheral).await;
+                note(&mut hearing, peripheral).await;
             }
         }
         if listed && !hearing.bridges.is_empty() {
@@ -767,10 +821,10 @@ async fn listen(
                     | CentralEvent::DeviceUpdated(id)
                     | CentralEvent::RssiUpdate { id, .. },
                 ) => {
-                    if !hearing.named.contains(&id)
+                    if hearing.wants(&id)
                         && let Ok(peripheral) = adapter.peripheral(&id).await
                     {
-                        hearing.note(peripheral).await;
+                        note(&mut hearing, peripheral).await;
                     }
                 }
                 Some(_) => {}
@@ -783,7 +837,7 @@ async fn listen(
             () = tokio::time::sleep_until(wake) => {}
         }
     }
-    Ok(hearing.bridges)
+    Ok(hearing.into_bridges())
 }
 
 /// The bridge as the operator names it, for the messages: its advertised octets.
@@ -831,6 +885,11 @@ async fn connect(
             Ok(Ok(())) => {}
             Ok(Err(e)) => return End::failed(format!("could not connect to {label}: {e}")),
             Err(_) => {
+                // Unlike a link that dropped, this one never came up: BlueZ's `Connect` is still
+                // pending, and could complete after this process has gone. `Disconnect` cancels
+                // it, and BlueZ arms its 2 s disconnect timer only for a connected device, so no
+                // later connection inherits it.
+                let _ = tokio::time::timeout(CANCEL_WITHIN, peripheral.disconnect()).await;
                 return End::failed(format!(
                     "could not connect to {label} in {}s",
                     CONNECT_WITHIN.as_secs()
@@ -1066,7 +1125,48 @@ fn refusal(label: &str, error: &btleplug::Error) -> Option<Failure> {
 mod tests {
     use tokio::time::Instant;
 
-    use super::{IDENTIFY_EVERY, asker};
+    use super::{BridgeSpec, Hearing, IDENTIFY_EVERY, NAME_READS, asker, choose};
+
+    const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+
+    /// A read that found `name`, advertising now or not.
+    fn read(name: &str, live: bool) -> Option<(String, bool)> {
+        Some((name.to_owned(), live))
+    }
+
+    #[test]
+    fn ble_hearing_marks_bridge_live_when_heard_again_after_a_listed_read() {
+        // BlueZ replays a bonded bridge as discovered before the scan has heard it.
+        let mut hearing = Hearing::new(None);
+        hearing.noted(1, "remembered", read("wartui 44:C0", false));
+        hearing.noted(2, "other", read("wartui A1:B0", true));
+        assert!(hearing.wants(&1), "a bridge not heard advertising is read again");
+        hearing.noted(1, "remembered", read("wartui 44:C0", true));
+        assert!(!hearing.wants(&1), "nor once it has been");
+        let chosen = choose(hearing.into_bridges(), Some(&BridgeSpec::Mac(BRIDGE)));
+        assert_eq!(chosen.expect("one bridge"), "remembered");
+    }
+
+    #[test]
+    fn ble_hearing_reads_device_no_more_when_named_or_unnamed_past_the_cap() {
+        let mut hearing: Hearing<'_, u8, ()> = Hearing::new(None);
+        hearing.noted(1, (), read("Pixel 8", true));
+        assert!(!hearing.wants(&1), "named and not a bridge");
+        for _ in 1..NAME_READS {
+            hearing.noted(2, (), None);
+            assert!(hearing.wants(&2));
+        }
+        hearing.noted(2, (), None);
+        assert!(!hearing.wants(&2), "unnamed after {NAME_READS} reads");
+    }
+
+    #[test]
+    fn ble_hearing_keeps_bridge_when_it_is_named_on_a_later_read() {
+        let mut hearing = Hearing::new(None);
+        hearing.noted(1, "late", None);
+        hearing.noted(1, "late", read("wartui 44:C0", true));
+        assert_eq!(hearing.into_bridges(), [("wartui 44:C0".to_owned(), true, "late")]);
+    }
 
     /// An hour with the arm off, as a stream announced that long leaves it.
     const ANNOUNCED_FOR: std::time::Duration = std::time::Duration::from_secs(3600);

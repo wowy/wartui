@@ -51,7 +51,7 @@ use wartui_proto::link::{
 use wartui_proto::mac::{self, Mac};
 
 use crate::config::Link;
-use crate::status::{pairing_text, wait_for_ready, wait_for_status};
+use crate::status::{bonds_text, pairing_text, wait_for_ready, wait_for_status};
 
 /// How long the bridge has to answer a status request.
 const REPLY_TIMEOUT: Duration = crate::CONNECT_NOTICE_AFTER;
@@ -265,31 +265,41 @@ async fn open_over_usb(path: &str) -> Result<(Mac, BluetoothStatus)> {
     let memory = wartui_bridge::remember::BridgeMemory::none();
     let mut link = crate::open(Some(path), None, Link::Usb, memory)?;
     let opened = async {
-        let info = tokio::time::timeout(crate::CONNECT_NOTICE_AFTER, wait_for_ready(&mut link))
-            .await
-            .context("the bridge did not announce itself")??;
+        let info = wait_for_ready(&mut link, Link::Usb, crate::CONNECT_NOTICE_AFTER)
+            .await?
+            .context("the bridge did not announce itself")?;
         link.send_bulk(HostToBridge::OpenPairing).context("queueing the request")?;
-        link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-        let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(&mut link))
-            .await
-            .context("the bridge did not answer a status request")??;
-        let BridgeToHost::Status { bluetooth, .. } = status else {
-            unreachable!("wait_for_status only returns Status")
-        };
-        Ok((info.mac, bluetooth))
+        Ok((info.mac, bluetooth_status(&mut link).await?))
     }
     .await;
     link.close().await;
     opened
 }
 
+/// Ask the bridge for its status, and return its Bluetooth host link.
+async fn bluetooth_status(link: &mut LinkHandle) -> Result<BluetoothStatus> {
+    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
+    let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(link))
+        .await
+        .context("the bridge did not answer a status request")??;
+    let BridgeToHost::Status { bluetooth, .. } = status else {
+        unreachable!("wait_for_status only returns Status")
+    };
+    Ok(bluetooth)
+}
+
 /// What `pair` says once the bridge keeps the bond.
 fn paired_line(name: &str, status: &BluetoothStatus) -> String {
-    let bonds = match status.bonds {
-        1 => "1 bond stored".to_owned(),
-        n => format!("{n} bonds stored"),
-    };
-    format!("{name} paired and bonded, {bonds}")
+    format!("{name} paired and bonded, {}", bonds_text(status.bonds))
+}
+
+/// Why a pairing BlueZ could not finish failed, and what to do: the bridge did not refuse it, so
+/// the next try may well succeed.
+fn pair_failed(name: &str, why: &str) -> String {
+    format!(
+        "could not pair with {name} (BlueZ: {why}). The bridge may be starting or out of range; \
+         run `wartui bluetooth pair` again"
+    )
 }
 
 /// Why the bridge did not keep a pairing, and what to do: with the window opened over USB, a
@@ -365,14 +375,13 @@ mod linux {
     use wartui_bridge::bluez::{self, BluezError, Device};
     use wartui_bridge::serial::BridgeSpec;
     use wartui_proto::ble::NAME_PREFIX;
-    use wartui_proto::link::{BluetoothStatus, BridgeToHost, HostToBridge};
+    use wartui_proto::link::BluetoothStatus;
     use wartui_proto::mac::Mac;
 
     use super::{
-        First, REPLY_TIMEOUT, Served, Window, first_step, not_kept, paired_line, served_by,
-        unserved,
+        First, Served, Window, bluetooth_status, first_step, not_kept, pair_failed, paired_line,
+        served_by, unserved,
     };
-    use crate::status::wait_for_status;
 
     /// How long the proof waits for the bridge to serve this PC: a connect, and the 15 s a USB
     /// host that just opened the window holds the bridge for, with room.
@@ -439,6 +448,7 @@ mod linux {
                 remove_quietly(device).await;
                 bail!("{}", not_kept(window, &why));
             }
+            Err(BluezError::Failed(why)) => bail!("{}", pair_failed(&found.name, &why)),
             Err(error) => bail!("{error}"),
         }
         match prove(&found, window).await? {
@@ -522,13 +532,7 @@ mod linux {
 
     /// What the bridge's `Status` says of this host.
     async fn bonded(link: &mut LinkHandle) -> Result<Proof> {
-        link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-        let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(link))
-            .await
-            .context("the bridge did not answer a status request")??;
-        let BridgeToHost::Status { bluetooth, .. } = status else {
-            unreachable!("wait_for_status only returns Status")
-        };
+        let bluetooth = bluetooth_status(link).await?;
         Ok(match bluetooth.central {
             Some(central) if central.encrypted && central.bonded => Proof::Bonded(bluetooth),
             _ => Proof::NotBonded,
@@ -650,13 +654,7 @@ async fn cleared(link: &mut LinkHandle, over: Link) -> Result<()> {
         }
     }
     crate::settle(link, SETTLE).await?;
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(link))
-        .await
-        .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { bluetooth, .. } = status else {
-        unreachable!("wait_for_status only returns Status")
-    };
+    let bluetooth = bluetooth_status(link).await?;
     println!("pairing    {}", pairing_text(&bluetooth));
     if bluetooth.bonds > 0 {
         bail!("the bridge did not clear its bonds");
@@ -686,8 +684,8 @@ mod tests {
     use wartui_proto::link::{BluetoothStatus, PairWindow};
 
     use super::{
-        First, OnUsb, Served, Window, first_step, is_this_bridge, not_kept, paired_line, served_by,
-        stranded_notice, unserved, usb_bridge,
+        First, OnUsb, Served, Window, first_step, is_this_bridge, not_kept, pair_failed,
+        paired_line, served_by, stranded_notice, unserved, usb_bridge,
     };
 
     const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
@@ -761,6 +759,14 @@ mod tests {
             paired_line("wartui 44:C0", &status),
             "wartui 44:C0 paired and bonded, 2 bonds stored"
         );
+    }
+
+    #[test]
+    fn bluetooth_pair_asks_for_another_try_when_bluez_could_not_reach_the_bridge() {
+        let text = pair_failed("wartui 44:C0", "ConnectionAttemptFailed: Page Timeout");
+        assert!(text.contains("(BlueZ: ConnectionAttemptFailed: Page Timeout)"), "{text}");
+        assert!(text.ends_with("run `wartui bluetooth pair` again"), "{text}");
+        assert!(!text.contains("power-cycle"), "{text}");
     }
 
     #[test]

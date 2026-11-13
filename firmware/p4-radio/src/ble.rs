@@ -9,7 +9,9 @@
 //! `Down::HostBytes`, cut at the ATT MTU less 3 wherever that falls. Down forwards each write
 //! to the P4 as `Up::HostBytes`, in order. A write waits for room in the queue to the P4 rather
 //! than evicting what it holds, and one that waits past [`FORWARD_WAIT`] is dropped and counted
-//! in `dropped_writes`, so the queue stays the only place a write is lost. A write request is
+//! in `dropped_writes`, so the queue stays the only place a write is lost. Every other record
+//! evicts the queue's oldest to make room, and the oldest can be a write already acknowledged, so
+//! a write is queued only while [`UP_RESERVE_BYTES`] stay free beside it. A write request is
 //! answered only once its write is forwarded, behind every write queued ahead of it, which is
 //! what paces a central that ends each frame with one (`wartui_bridge::ble`). A request whose
 //! write was dropped is refused with Insufficient Resources rather than acknowledged, so the
@@ -42,9 +44,12 @@
 //!   later.
 //!
 //! **A subscription is the CCCD on Up.** Every change of it, the encryption, the bond or the MTU
-//! sends a `BleState`; the P4 reads a subscribed one as Bluetooth taking the host queue. The ring
-//! is cleared on every change of subscription, which moves the credit past what it held, so a new
-//! central never reads the last one's stream.
+//! sends a `BleState`; the P4 reads a subscribed one as Bluetooth taking the host queue. The
+//! queue to the P4 evicts and the link does not resend, so one lost `BleState` would leave the P4
+//! never knowing a central subscribed: the current one is also repeated every [`STATE_EVERY`] once
+//! the P4 has said hello. The P4 acts only on a change of whether the central may hold the queue,
+//! so a repeat changes nothing there. The ring is cleared on every change of subscription, which
+//! moves the credit past what it held, so a new central never reads the last one's stream.
 //!
 //! **The C6 asks for the 2M PHY and data length 251 once connected, and an interval only when
 //! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
@@ -84,7 +89,8 @@
 //! resolving list holds them from the first advertisement, and applies each later one whenever
 //! no central is connected ([`sync_bonds`]). Removing the connected central's bond waits for it
 //! to go. A new bond goes up as `Up::BondAdded`, after an `Up::BondRemoved` when it replaces one a
-//! central lost. The window's end is tracked here from each `Down::Bonds`' `window_ms`.
+//! central lost. A bond whose `Up::BondAdded` is lost lasts until the C6 restarts, and the host
+//! pairs again. The window's end is tracked here from each `Down::Bonds`' `window_ms`.
 //!
 //! **The first advertisement ends the image's trial** with the P4's hello (`src/link.rs`):
 //! [`advertise`] raises `advertising_started` once the controller takes it.
@@ -109,7 +115,7 @@ use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, Up};
 
-use crate::config::CONN_INTERVAL_US;
+use crate::config::{CONN_INTERVAL_US, UP_QUEUE_MIN_BYTES};
 use crate::link::Shared;
 
 /// Resync `0x00`s the ring holds beside the window's stream bytes.
@@ -138,6 +144,18 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// What a write to the queue to the P4 costs beyond its bytes: the ring's length prefix, the
 /// record's variant and the bytes' length.
 const FORWARD_OVERHEAD: usize = 2 + 1 + 2;
+
+/// Bytes of the queue to the P4 a central's write leaves free for the C6's other records:
+/// credits, state, a status reply and a few log lines fit in it while the P4 is not reading.
+const UP_RESERVE_BYTES: usize = 1024;
+
+const _: () = assert!(
+    UP_RESERVE_BYTES + VALUE_MAX + FORWARD_OVERHEAD <= UP_QUEUE_MIN_BYTES,
+    "the smallest queue to the P4 holds no write beside the reserve"
+);
+
+/// How often the C6 repeats its `BleState` to the P4, changed or not.
+const STATE_EVERY: Duration = Duration::from_secs(1);
 
 /// The first wait of a notification the packet pool has no room for, doubled on each retry up
 /// to [`POOL_RETRY_MAX`].
@@ -284,9 +302,10 @@ pub struct Ble {
     outbox: &'static RefCell<Outbox>,
     /// The next stream offset expected from the P4.
     inflow: Cell<Inflow>,
-    /// The link as the C6 sees it, and as it last told the P4.
+    /// The link as the C6 sees it, as it last told the P4, and when.
     state: Cell<BleState>,
     said: Cell<Option<BleState>>,
+    said_at: Cell<Instant>,
     /// A central is connected.
     connected: Cell<bool>,
     /// The controller has taken an advertisement since boot.
@@ -316,6 +335,7 @@ impl Ble {
             inflow: Cell::new(Inflow::new()),
             state: Cell::new(BleState::default()),
             said: Cell::new(None),
+            said_at: Cell::new(Instant::from_ticks(0)),
             connected: Cell::new(false),
             advertising: Cell::new(false),
             advertising_started: Signal::new(),
@@ -446,9 +466,22 @@ fn set_state(shared: &Shared, change: impl FnOnce(&mut BleState)) {
         ble.ready.signal(());
     }
     if ble.said.get() != Some(state) {
-        ble.said.set(Some(state));
-        shared.push(&Up::BleState(state));
+        say_state(shared, state);
     }
+}
+
+/// Tell the P4 the link's state again once [`STATE_EVERY`] has passed since it was last told.
+pub fn repeat_state(shared: &Shared) {
+    if shared.ble.said_at.get().elapsed() >= STATE_EVERY {
+        say_state(shared, shared.ble.state.get());
+    }
+}
+
+fn say_state(shared: &Shared, state: BleState) {
+    let ble = &shared.ble;
+    ble.said.set(Some(state));
+    ble.said_at.set(Instant::now());
+    shared.push(&Up::BleState(state));
 }
 
 /// Run the Bluetooth peripheral forever. A controller that will not start leaves the link
@@ -906,16 +939,16 @@ fn paired(
     shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
 }
 
-/// Send what a central wrote to the P4, waiting for room rather than evicting, and return
-/// whether it went: `false` for a write dropped after [`FORWARD_WAIT`]. The write is held
-/// meanwhile, so the next waits behind it.
+/// Send what a central wrote to the P4, waiting for room beside [`UP_RESERVE_BYTES`] rather than
+/// evicting, and return whether it went: `false` for a write dropped after [`FORWARD_WAIT`]. The
+/// write is held meanwhile, so the next waits behind it.
 ///
 /// Only the link's writer makes room, by taking records off the queue for a packet, and it
 /// raises `up_freed` each time, so the wait is that signal rather than a poll.
 async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>) -> bool {
     let len = write.with_data(|_, data| data.len());
     let deadline = Instant::now() + FORWARD_WAIT;
-    while shared.up_room() < len + FORWARD_OVERHEAD {
+    while shared.up_room() < len + FORWARD_OVERHEAD + UP_RESERVE_BYTES {
         if let Either::Second(()) = select(shared.up_freed.wait(), Timer::at(deadline)).await {
             shared.ble.count(|c| c.dropped_writes = c.dropped_writes.wrapping_add(len as u32));
             return false;

@@ -1275,7 +1275,9 @@ bridge from a Bluetooth host.
 **A host other than wartui writes each frame's last piece as a write request**, and the rest
 without response: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
 
-**When the Bluetooth link does not come up**, the reason names the fix:
+**When the Bluetooth link does not come up**, the reason names the fix. A one-shot command such as
+`status` keeps waiting through a failed try, since the transport tries again a second later, and
+names the last one when its wait runs out:
 
 | Says                                                                  | Do                                                                   |
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|

@@ -142,7 +142,8 @@ pub fn own(shared: &Shared, input: Input) -> Effects {
     effects
 }
 
-/// The C6's Bluetooth link changed.
+/// The C6's Bluetooth link, sent on a change and repeated every second. Only a change of
+/// [`authorized`] reaches the owner, so a repeat changes nothing here.
 pub fn on_state(shared: &Shared, state: BleState) {
     let was = authorized(shared.ble.state.replace(state));
     match (was, authorized(state)) {

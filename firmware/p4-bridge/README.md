@@ -171,8 +171,10 @@ lets go of the queue.
 
 At boot the P4 compares the image digest in the C6's hello with the image it carries. When they
 differ, it sends the C6 its image over the UART link, once per boot. The C6 writes it, reboots
-into it and boots it on trial, and the P4's hello confirms it. The host sees the C6's reboot as a
-new bridge life, with a fresh `Ready`.
+into it and boots it on trial. The image is confirmed once it has heard the P4's hello and its
+Bluetooth host has started advertising, and one that has not advertised 30 s after boot restarts
+itself, which spends a trial boot ([`firmware/p4-radio/README.md`](../p4-radio/README.md)
+§ "Updates"). The host sees the C6's reboot as a new bridge life, with a fresh `Ready`.
 
 Meanwhile the bridge announces the C6's MAC. With a C6 image of about 570 KB, `flash-bridge`
 updated both chips in 11 s and 17 s on the bench

@@ -16,6 +16,15 @@ use wartui_proto::config::env_usize;
 /// small and few, so a backlog this deep means the link has stopped.
 pub const UP_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_RADIO_UP_QUEUE_BYTES"), 8 * 1024);
 
+/// The smallest [`UP_QUEUE_BYTES`] a build takes: room for the reserve a central's writes leave
+/// for the C6's own records (`src/ble.rs`, `UP_RESERVE_BYTES`), and a few writes beside it.
+pub const UP_QUEUE_MIN_BYTES: usize = 2 * 1024;
+
+const _: () = assert!(
+    UP_QUEUE_BYTES >= UP_QUEUE_MIN_BYTES,
+    "WARTUI_RADIO_UP_QUEUE_BYTES must be at least 2048"
+);
+
 /// The connection interval range, in microseconds, the C6 asks a central for once it connects;
 /// `None` takes the central's.
 ///

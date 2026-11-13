@@ -143,9 +143,9 @@ async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge)
     let memory = super::memory_of(remembered);
     let mut link = super::open(Some(&board), None, Link::Bluetooth, memory)?;
     let wait = super::connect_wait(Link::Bluetooth);
-    let before = match tokio::time::timeout(wait, crate::status::wait_for_ready(&mut link)).await {
-        Ok(ready) => ready?.uptime_ms,
-        Err(_) => bail!(
+    let before = match crate::status::wait_for_ready(&mut link, Link::Bluetooth, wait).await? {
+        Some(info) => info.uptime_ms,
+        None => bail!(
             "{}\nOver USB, `wartui reset` reaches a bridge that answers nothing.",
             super::no_bridge_notice(Some(&board), Link::Bluetooth)
         ),

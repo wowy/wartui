@@ -100,7 +100,7 @@ pub enum Up<'a> {
         /// notified, discarded or found missing ([`Inflow`](super::Inflow)).
         accounted: u32,
     },
-    /// The Bluetooth link changed. Sent on every change.
+    /// The Bluetooth link. Sent on every change, and repeated every second.
     BleState(BleState),
     /// A central paired and bonded: store it as the newest bond.
     BondAdded(BondRecord),

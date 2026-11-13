@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::LinkEvent;
+use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle};
 use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
@@ -84,11 +84,9 @@ pub async fn run(args: Args) -> Result<()> {
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an
     // answer: it names the port and what to do about each cause.
-    let info =
-        match tokio::time::timeout(super::connect_wait(over), wait_for_ready(&mut link)).await {
-            Ok(ready) => ready?,
-            Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), over)),
-        };
+    let Some(info) = wait_for_ready(&mut link, over, super::connect_wait(over)).await? else {
+        bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), over))
+    };
     println!("bridge     {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("board      {}", board_line(info.node_board));
     println!("{}", super::last_reset_line(&info));
@@ -238,12 +236,16 @@ pub(crate) fn pairing_text(status: &BluetoothStatus) -> String {
         PairWindow::Open { secs } => format!("open for {secs} s more"),
         PairWindow::UntilBonded => "open until a host pairs".to_owned(),
     };
-    let bonds = match status.bonds {
+    format!("{window}, {}", bonds_text(status.bonds))
+}
+
+/// The bonds the bridge keeps, counted.
+pub(crate) fn bonds_text(bonds: u8) -> String {
+    match bonds {
         0 => "no bond stored".to_owned(),
         1 => "1 bond stored".to_owned(),
         n => format!("{n} bonds stored"),
-    };
-    format!("{window}, {bonds}")
+    }
 }
 
 /// The C6's Bluetooth host counters, since it booted.
@@ -364,17 +366,66 @@ fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     Some(format!("{heard} Check the nodes are powered and wired to the bridge's node bus."))
 }
 
-/// The bridge's announcement, or why the link went down first.
+/// The bridge's announcement over `over` within `within`, or why the link went down first.
+/// `None` when the wait runs out with no failure to name ([`ReadyWait`]).
 pub(crate) async fn wait_for_ready(
-    link: &mut wartui_bridge::LinkHandle,
-) -> Result<wartui_bridge::BridgeInfo> {
+    link: &mut LinkHandle,
+    over: crate::config::Link,
+    within: Duration,
+) -> Result<Option<BridgeInfo>> {
+    let until = tokio::time::Instant::now() + within;
+    let mut wait = ReadyWait::new(over);
     loop {
-        match link.recv().await {
-            Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
+        let Ok(event) = tokio::time::timeout_at(until, link.recv()).await else {
+            return match wait.timed_out() {
+                Some(reason) => bail!("{reason}"),
+                None => Ok(None),
+            };
+        };
+        match wait.take(event) {
+            Some(Ok(info)) => return Ok(Some(info)),
+            Some(Err(reason)) => bail!("{reason}"),
+            None => {}
         }
+    }
+}
+
+/// A wait for the bridge's announcement, fed one link event at a time.
+///
+/// Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
+/// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
+/// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once.
+#[derive(Debug)]
+struct ReadyWait {
+    over: crate::config::Link,
+    /// The last failure the transport is retrying.
+    retried: Option<String>,
+}
+
+impl ReadyWait {
+    const fn new(over: crate::config::Link) -> Self {
+        Self { over, retried: None }
+    }
+
+    /// What `event` does to the wait: `Some` once it ends, with the announcement or the reason.
+    fn take(&mut self, event: Option<LinkEvent>) -> Option<Result<BridgeInfo, String>> {
+        match event {
+            Some(LinkEvent::Connected(info)) => Some(Ok(info)),
+            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::Other })
+                if self.over == crate::config::Link::Bluetooth =>
+            {
+                self.retried = Some(reason);
+                None
+            }
+            Some(LinkEvent::Disconnected { reason, .. }) => Some(Err(reason)),
+            Some(_) => None,
+            None => Some(Err("the link closed".to_owned())),
+        }
+    }
+
+    /// Why the wait ran out: the last failure the transport was retrying, if any.
+    fn timed_out(self) -> Option<String> {
+        self.retried
     }
 }
 
@@ -462,11 +513,12 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, Report, ScanMode, awaited, ble_text, board_line, counters_line, diagnostic_lines,
-        fan_text, host_text, human_uptime, pairing_text, plan_lines, radio_line, scan_text,
-        silence_note, slots_text,
+        Awaited, ReadyWait, Report, ScanMode, awaited, ble_text, board_line, counters_line,
+        diagnostic_lines, fan_text, host_text, human_uptime, pairing_text, plan_lines, radio_line,
+        scan_text, silence_note, slots_text,
     };
-    use wartui_bridge::LinkEvent;
+    use crate::config::Link;
+    use wartui_bridge::{DisconnectCause, LinkEvent};
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::fleet::Share;
@@ -782,5 +834,46 @@ mod tests {
     #[test]
     fn status_cmd_fails_when_link_closes_before_answer() {
         assert!(awaited(None).is_err());
+    }
+
+    fn down(reason: &str, cause: DisconnectCause) -> Option<LinkEvent> {
+        Some(LinkEvent::Disconnected { reason: reason.to_owned(), cause })
+    }
+
+    #[test]
+    fn ready_wait_ends_on_first_disconnect_when_over_usb() {
+        let mut wait = ReadyWait::new(Link::Usb);
+        let ended = wait.take(down("could not open", DisconnectCause::Other));
+        assert_eq!(ended, Some(Err("could not open".to_owned())));
+    }
+
+    #[test]
+    fn ready_wait_keeps_waiting_and_names_last_failure_when_bluetooth_retries() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), None);
+        assert_eq!(wait.take(down("not found", DisconnectCause::Other)), None);
+        assert_eq!(wait.timed_out(), Some("not found".to_owned()));
+    }
+
+    #[test]
+    fn ready_wait_ends_at_once_when_bridge_refuses_or_usb_takes_it_over_bluetooth() {
+        for cause in [
+            DisconnectCause::NotBonded,
+            DisconnectCause::MaybeNotBonded,
+            DisconnectCause::UsbTookBridge,
+        ] {
+            let mut wait = ReadyWait::new(Link::Bluetooth);
+            assert_eq!(wait.take(down("refused", cause)), Some(Err("refused".to_owned())));
+        }
+    }
+
+    #[test]
+    fn ready_wait_names_nothing_when_it_runs_out_with_no_failure() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        assert_eq!(
+            wait.take(Some(LinkEvent::Garbled(wartui_proto::link::LinkError::Corrupt))),
+            None
+        );
+        assert_eq!(wait.timed_out(), None);
     }
 }

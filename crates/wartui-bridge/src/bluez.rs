@@ -199,6 +199,10 @@ fn call_pair(conn: &Connection, device: &Device) -> Result<(), BluezError> {
 
 /// What a `Pair` that BlueZ answered with the error `name` and `text` comes to.
 ///
+/// A bridge whose pairing window is closed answers `AuthenticationCanceled`.
+/// `ConnectionAttemptFailed` is BlueZ never reaching the bridge, so it is a failure to retry,
+/// not a refusal.
+///
 /// # Errors
 /// [`BluezError::Rejected`] when the bridge ended the pairing, else [`BluezError::Failed`].
 pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
@@ -209,8 +213,7 @@ pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
         "AuthenticationFailed"
         | "AuthenticationRejected"
         | "AuthenticationCanceled"
-        | "AuthenticationTimeout"
-        | "ConnectionAttemptFailed" => Err(BluezError::Rejected(said)),
+        | "AuthenticationTimeout" => Err(BluezError::Rejected(said)),
         _ => Err(BluezError::Failed(said)),
     }
 }
@@ -268,10 +271,17 @@ mod tests {
 
     #[test]
     fn bluez_reads_pairing_as_rejected_when_bridge_ends_it() {
-        for name in ["AuthenticationFailed", "AuthenticationCanceled", "ConnectionAttemptFailed"] {
+        for name in ["AuthenticationFailed", "AuthenticationCanceled"] {
             let outcome = pair_outcome(&format!("org.bluez.Error.{name}"), "");
             assert_eq!(outcome, Err(BluezError::Rejected(name.to_owned())));
         }
+    }
+
+    #[test]
+    fn bluez_reads_pairing_as_failed_when_bluez_never_reached_the_bridge() {
+        let outcome = pair_outcome("org.bluez.Error.ConnectionAttemptFailed", "Page Timeout");
+        let said = "ConnectionAttemptFailed: Page Timeout".to_owned();
+        assert_eq!(outcome, Err(BluezError::Failed(said)));
     }
 
     #[test]

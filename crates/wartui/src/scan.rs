@@ -134,9 +134,9 @@ async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeIn
             .await;
     }
     let mut link = super::open(None, target.sim, crate::config::Link::Usb, super::memory(None))?;
-    let info = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_ready(&mut link))
-        .await
-        .context("the simulator did not announce itself")??;
+    let info = crate::status::wait_for_ready(&mut link, crate::config::Link::Usb, REPLY_TIMEOUT)
+        .await?
+        .context("the simulator did not announce itself")?;
     Ok((link, info))
 }
 
@@ -270,7 +270,12 @@ mod tests {
     async fn sim(nodes: u8) -> (LinkHandle, NodeBoard) {
         let config = SimConfig { node_count: nodes, speed: 20.0, ..SimConfig::default() };
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
-        let info = crate::status::wait_for_ready(&mut link).await.expect("the simulator connects");
+        let ready = crate::status::wait_for_ready(
+            &mut link,
+            crate::config::Link::Usb,
+            super::REPLY_TIMEOUT,
+        );
+        let info = ready.await.expect("the simulator connects").expect("in time");
         (link, info.node_board)
     }
 
