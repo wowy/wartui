@@ -11,7 +11,11 @@
 //! than evicting what it holds, and one that waits past [`FORWARD_WAIT`] is dropped and counted
 //! in `dropped_writes`, so the queue stays the only place a write is lost. A write request is
 //! answered only once its write is forwarded, behind every write queued ahead of it, which is
-//! what paces a central that ends each frame with one (`wartui_bridge::ble`).
+//! what paces a central that ends each frame with one (`wartui_bridge::ble`). A request whose
+//! write was dropped is refused with Insufficient Resources rather than acknowledged, so the
+//! central learns its frame is gone: wartui's transport ends the connection on a failed request,
+//! and its next connection leads with a `0x00`, which ends the torn frame on the P4. A write
+//! without response is answered by nothing either way.
 //!
 //! **The stream is credited by position** (`wartui_proto::radio_link::Inflow` has the design).
 //! `Up::Credit` carries `accounted`, the stream offset in the P4's offsets up to which the C6 is
@@ -26,7 +30,10 @@
 //! credited at once.
 //!
 //! - `Down::HostStart` begins an attachment: the ring is cleared and the position is `at`, so the
-//!   central reads only bytes from that offset on.
+//!   central reads only bytes from that offset on. One resync `0x00` goes in first. A
+//!   notification [`notify`] took from the ring before the clear is still sent, and its partial
+//!   frame would run into this attachment's `Ready`; the `0x00` ends it, so the `Ready` decodes
+//!   whole. It is not a stream byte either, and is never credited.
 //! - A gap before a `Down::HostBytes` is counted in `resynced_bytes`, and the position is past it.
 //!   One `0x00` goes into the ring ahead of the bytes, so the central's COBS reader drops the torn
 //!   frame rather than merging it with the next. That byte is not a stream byte, so the position
@@ -94,6 +101,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::peripherals::BT;
 use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
+use trouble_host::att::AttClient;
 use trouble_host::prelude::*;
 use wartui_proto::ble::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
@@ -344,15 +352,19 @@ impl Ble {
     }
 }
 
-/// A central took the host queue, and its first byte is at `at`: clear the ring, and credit up to
-/// `at`.
+/// A central took the host queue, and its first byte is at `at`: clear the ring, lead it with a
+/// resync `0x00`, and credit up to `at`.
 pub fn host_start(shared: &Shared, at: u32) {
     let ble = &shared.ble;
     let mut inflow = ble.inflow.get();
     // What never arrived before `at` is behind the position, which is all the credit needs.
     let _ = inflow.start(at);
     ble.inflow.set(inflow);
-    ble.outbox.borrow_mut().clear();
+    let mut outbox = ble.outbox.borrow_mut();
+    outbox.clear();
+    // A cleared ring has room for it.
+    outbox.push_resync();
+    drop(outbox);
     credit(shared, true);
     ble.ready.signal(());
 }
@@ -827,11 +839,15 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
                     GattEvent::Write(write) if write.handle() == server.link.down.handle => {
-                        if authorized(conn) {
-                            forward(shared, &write).await;
+                        // TrouBLE answers a rejected write without response too, so only a
+                        // request is ever rejected for a dropped write.
+                        let request = matches!(write.payload().incoming(), AttClient::Request(_));
+                        if !authorized(conn) {
+                            write.reject(refused)
+                        } else if forward(shared, &write).await || !request {
                             write.accept_unprocessed()
                         } else {
-                            write.reject(refused)
+                            write.reject(AttErrorCode::INSUFFICIENT_RESOURCES)
                         }
                     }
                     GattEvent::Write(write)
@@ -890,22 +906,24 @@ fn paired(
     shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
 }
 
-/// Send what a central wrote to the P4, waiting for room rather than evicting. The write is
-/// held meanwhile, so the next waits behind it.
+/// Send what a central wrote to the P4, waiting for room rather than evicting, and return
+/// whether it went: `false` for a write dropped after [`FORWARD_WAIT`]. The write is held
+/// meanwhile, so the next waits behind it.
 ///
 /// Only the link's writer makes room, by taking records off the queue for a packet, and it
 /// raises `up_freed` each time, so the wait is that signal rather than a poll.
-async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>) {
+async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>) -> bool {
     let len = write.with_data(|_, data| data.len());
     let deadline = Instant::now() + FORWARD_WAIT;
     while shared.up_room() < len + FORWARD_OVERHEAD {
         if let Either::Second(()) = select(shared.up_freed.wait(), Timer::at(deadline)).await {
             shared.ble.count(|c| c.dropped_writes = c.dropped_writes.wrapping_add(len as u32));
-            return;
+            return false;
         }
     }
     // A write is at most `VALUE_MAX`, well inside one record.
     write.with_data(|_, data| shared.push(&Up::HostBytes(data)));
+    true
 }
 
 /// Notify the ring to the central while it is subscribed, a notification at a time.

@@ -463,7 +463,7 @@ async fn settle(link: &mut LinkHandle, wait: Duration) -> Result<()> {
             Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
                 println!("fault      {message}");
             }
-            Ok(Some(LinkEvent::Disconnected { reason })) => anyhow::bail!("{reason}"),
+            Ok(Some(LinkEvent::Disconnected { reason, .. })) => anyhow::bail!("{reason}"),
             Ok(Some(_)) => {}
             Ok(None) => anyhow::bail!("the link closed"),
         }
@@ -485,7 +485,7 @@ fn describe(event: &LinkEvent) -> Option<String> {
         LinkEvent::Connected(info) => {
             Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
         }
-        LinkEvent::Disconnected { reason } => Some(format!("link down: {reason}")),
+        LinkEvent::Disconnected { reason, .. } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
     }
@@ -838,6 +838,13 @@ mod tests {
             let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
             assert!(matches!(cli.command, Some(Command::Bluetooth(_))), "{args:?}");
         }
+    }
+
+    #[test]
+    fn cli_parser_accepts_fresh_only_when_passed_to_bluetooth_pair() {
+        let fresh = ["wartui", "bluetooth", "pair", "--fresh", "--bridge", "44:C0"];
+        assert!(matches!(parse(fresh).map(|cli| cli.command), Ok(Some(Command::Bluetooth(_)))));
+        assert!(parse(["wartui", "bluetooth", "forget", "--fresh"]).is_err());
     }
 
     #[test]

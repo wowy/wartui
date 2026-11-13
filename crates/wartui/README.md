@@ -1179,14 +1179,19 @@ A Linux build links the system's libdbus, so building needs its headers: `dbus-d
 `libdbus-1-dev` on Debian and Ubuntu.
 
 **The bridge advertises `wartui XX:YY`, its last two octets.** `--bridge XX:YY`, or the whole
-address, names the same board over either link. Without one, wartui connects straight to the
-Bluetooth address it remembers, and otherwise scans for 10 s and takes the one bridge it hears;
-several are refused. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
+address, names the same board over either link, and no other bridge is taken. Without one, wartui
+connects straight to the Bluetooth address it remembers, and otherwise scans for 10 s and takes the
+one bridge it hears; several are refused. A remembered bridge that does not answer is tried once
+that way: after that wartui scans, takes the remembered bridge when it hears it, and another only
+while it does not. Once a bridge has answered, the run stays with it. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
 remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
 
 **The PC pairs with the bridge once, with `wartui bluetooth pair`.** The bridge serves only a
 paired, encrypted host. An unpaired PC is refused with `the bridge XX:YY refused this PC over
-Bluetooth because they are not paired`. BlueZ never pairs on its own, so on Linux `pair` does it:
+Bluetooth because they are not paired`, or, when the bridge only drops it about 10 s in, `the
+bridge XX:YY dropped this PC over Bluetooth before serving it`. A P4 reset or a weak signal at that
+moment reads the same, so the second is no proof. BlueZ never pairs on its own, so on Linux `pair`
+does it:
 
 ```sh
 wartui bluetooth pair                 # the bridge on USB, else the remembered one, else the one heard
@@ -1203,10 +1208,13 @@ wartui bluetooth pair --bridge 44:C0
    bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`. Over USB first, the
    bridge serves it 15 s after the USB link goes quiet.
 
-A PC BlueZ already lists as paired is checked first. When the bridge no longer holds that bond,
-`pair` removes it and pairs again, since BlueZ never does. A pairing the bridge did not keep is
+A PC BlueZ already lists as paired is checked first. When the bridge refuses it as not paired,
+`pair` removes the pairing and pairs again, since BlueZ never does. A pairing the bridge refuses is
 removed too, and the run fails: `its pairing window is most likely closed` names both fixes, the
-USB cable or a power cycle. `pair` saves nothing to `wartui.toml`; the next `run --link bluetooth`
+USB cable or a power cycle. A bridge that only drops this PC, or does not serve it within 40 s,
+proves nothing about the bond: `pair` removes nothing, says `A USB host may hold the bridge`, and
+asks for another try. When the bridge has forgotten this PC, `pair --fresh` removes this PC's
+pairing first and pairs again; on other OSes, remove it in the system's Bluetooth settings. `pair` saves nothing to `wartui.toml`; the next `run --link bluetooth`
 remembers the bridge. On other OSes `pair` opens the window and stops: the OS pairs on the first
 `--link bluetooth` connection inside it, which is untested.
 

@@ -42,7 +42,7 @@ macro_rules! over_each_backing {
 
 over_each_backing! {
     #[test]
-    fn host_queue_sends_priority_frame_before_queued_bulk() {
+    fn host_queue_sends_priority_frame_first_when_bulk_is_queued() {
         let mut queue = queue::<1024, 16384>();
         let bulk: Vec<u8> = (0..5000).map(|i| (i % 251) as u8 + 1).collect();
         let prio = [0xEEu8; 20];
@@ -88,7 +88,7 @@ over_each_backing! {
     }
 
     #[test]
-    fn host_queue_reports_bytes_and_drops_per_ring() {
+    fn host_queue_reports_bytes_and_drops_per_ring_when_a_frame_overflows_bulk() {
         let mut queue = queue::<16, 32>();
         assert!(queue.push(&[1u8; 5], true));
         assert!(queue.push(&[1u8; 5], false));
@@ -155,17 +155,6 @@ over_each_backing! {
         want.extend_from_slice(&[8u8; 30]);
         assert_eq!(got, want);
         assert_eq!(queue.fill(&mut []), 0);
-    }
-
-    #[test]
-    fn host_queue_reports_bulk_room_when_frames_wait() {
-        let mut queue = queue::<16, 64>();
-        assert_eq!(queue.bulk_room(), 64);
-        assert!(queue.push(&[1u8; 10], false));
-        // Each frame sits behind its two-byte length.
-        assert_eq!(queue.bulk_room(), 52);
-        assert!(queue.push(&[2u8; 5], true));
-        assert_eq!(queue.bulk_room(), 52);
     }
 }
 

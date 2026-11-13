@@ -89,7 +89,7 @@ async fn wait_for_answer(link: &mut LinkHandle, slot: Slot) -> Result<PowerOutco
             Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
                 println!("fault      {message}");
             }
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
             Some(_) => {}
             None => bail!("the link closed"),
         }

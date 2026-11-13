@@ -639,7 +639,7 @@ fn radio_link_revision_golden_bytes() {
 }
 
 #[test]
-fn radio_link_host_stream_golden_bytes() {
+fn radio_link_pins_host_stream_bytes_when_encoded() {
     const MSG: &str = "Up/Down encoding changed: re-pin these bytes";
     let mut out = [0u8; 128];
 
@@ -680,7 +680,7 @@ fn radio_link_host_stream_golden_bytes() {
 }
 
 #[test]
-fn radio_link_bonds_golden_bytes() {
+fn radio_link_pins_bond_bytes_when_encoded() {
     const MSG: &str = "Up/Down encoding changed: re-pin these bytes";
     let mut out = [0u8; 128];
     let bond = BondRecord {
@@ -866,7 +866,7 @@ fn host_window_closes_when_a_full_window_is_in_flight() {
 }
 
 #[test]
-fn host_window_counts_in_flight_across_the_u32_wrap() {
+fn host_window_counts_in_flight_when_offsets_wrap_past_u32() {
     assert_eq!(host_window(400, u32::MAX - 99), HOST_WINDOW_BYTES - 500);
 }
 

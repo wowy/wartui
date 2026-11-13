@@ -62,6 +62,9 @@ pub struct Settings {
     /// The link this run reaches its bridge over, saved as `[bridge] link` once it connects;
     /// `None` under the simulator, which saves no link.
     pub link: Option<config::Link>,
+    /// Whether a bridge has announced itself over [`Self::link`]. Until then a save keeps
+    /// `[bridge] link` as the file had it.
+    pub link_proved: bool,
     /// Where `u` uploads to.
     pub upload: UploadTarget,
 }
@@ -539,7 +542,7 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
     written.bridge.mac = settings.bridge_memory.recall();
     written.bridge.serial = settings.bridge_memory.recall_serial();
     written.bridge.bluetooth_address = settings.bridge_memory.recall_bluetooth();
-    if let Some(link) = settings.link {
+    if let Some(link) = settings.link.filter(|_| settings.link_proved) {
         written.bridge.link = link_written(link, written.bridge.link);
     }
     // The live switch, whatever an earlier failed save left in `saved`, so `remember` never
@@ -1290,6 +1293,27 @@ mod tests {
 
         assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Bluetooth));
         assert_eq!(ui.saved().bridge.link, Some(config::Link::Bluetooth));
+    }
+
+    #[test]
+    fn ui_keeps_link_as_file_had_it_when_settings_save_before_bridge_announces_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nlink = \"usb\"\n").unwrap();
+        let mut settings = Settings {
+            config_path: Some(path.clone()),
+            saved: config::load(Some(&path)).unwrap(),
+            link: Some(config::Link::Bluetooth),
+            ..Settings::default()
+        };
+
+        save_fix_wait(&mut settings, false).unwrap();
+        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Usb));
+
+        std::fs::write(&path, "").unwrap();
+        settings.saved = config::load(Some(&path)).unwrap();
+        save_fix_wait(&mut settings, true).unwrap();
+        assert_eq!(saved_bridge(dir.path()).link, None, "an absent key stays absent");
     }
 
     #[test]

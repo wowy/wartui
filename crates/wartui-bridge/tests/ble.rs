@@ -1,4 +1,5 @@
-//! The Bluetooth transport's pure parts: naming, writes, and what a subscription admits.
+//! The Bluetooth transport's pure parts: naming, where it looks, writes, and what a subscription
+//! admits.
 //!
 //! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
 //! are checked on the bench.
@@ -6,11 +7,11 @@
 use std::time::{Duration, Instant};
 
 use wartui_bridge::ble::{
-    DownWrite, DownWriter, Heard, Inbound, WriteKind, advertised_name, dropped_as_unbonded,
-    is_not_bonded, is_remembered, is_takeover, names_bridge, refused_for_bonding,
+    DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, advertised_name, choose,
+    dropped_as_unbonded, is_remembered, is_takeover, look, names_bridge, refused_for_bonding,
 };
 use wartui_bridge::serial::BridgeSpec;
-use wartui_bridge::{LinkEvent, TransportError};
+use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
@@ -240,7 +241,8 @@ fn ble_inbound_reports_disconnect_then_same_life_when_usb_takes_and_returns_brid
     inbound.feed(&frame(&ready(BRIDGE, 10_000)), t0);
 
     let gone = events(inbound.feed(&frame(&takeover()), t0 + Duration::from_secs(1)));
-    assert_eq!(gone, [LinkEvent::Disconnected { reason: USB_TOOK_BRIDGE.to_owned() }]);
+    let cause = DisconnectCause::UsbTookBridge;
+    assert_eq!(gone, [LinkEvent::Disconnected { reason: USB_TOOK_BRIDGE.to_owned(), cause }]);
     assert!(!inbound.announced(), "subscribed, waiting for the handback");
 
     // Anything ahead of the handback's `Ready` is not this stream's.
@@ -262,21 +264,34 @@ fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_name() {
 }
 
 #[test]
-fn ble_failure_reads_as_not_bonded_when_os_reports_att_security_error() {
+fn ble_failure_reads_as_not_bonded_when_os_words_att_authentication_or_encryption_refusal() {
     for error in [
-        "org.bluez.Error.NotPermitted: Write not permitted",
-        "org.bluez.Error.Failed: Operation failed with ATT error: 0x05",
-        "Insufficient Encryption",
-        "org.bluez.Error.NotAuthorized: Not Authorized",
+        // BlueZ, for 0x05, 0x0c and 0x0f, as btleplug passes it on.
+        "Not paired",
+        // CoreBluetooth's CBATTError texts.
+        "Authentication is insufficient.",
+        "Encryption is insufficient.",
     ] {
         assert!(refused_for_bonding(error), "{error}");
     }
-    assert!(!refused_for_bonding("org.bluez.Error.Failed: le-connection-abort-by-local"));
-    assert!(!refused_for_bonding("Timed out after 10s"));
 }
 
 #[test]
-fn ble_drop_reads_as_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_with_no_ready() {
+fn ble_failure_reads_as_other_when_os_error_is_no_bonding_refusal() {
+    for error in [
+        "Write not permitted",
+        "Operation failed with ATT error: 0x11",
+        "Operation Not Authorized",
+        "le-connection-abort-by-local",
+        "Not connected",
+        "Timed out after 10s",
+    ] {
+        assert!(!refused_for_bonding(error), "{error}");
+    }
+}
+
+#[test]
+fn ble_drop_reads_as_maybe_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_with_no_ready() {
     assert!(dropped_as_unbonded(Duration::from_secs(10), false));
     assert!(dropped_as_unbonded(Duration::from_secs(30), false), "inside the pairing window");
     assert!(!dropped_as_unbonded(Duration::from_secs(10), true), "a bridge that announced");
@@ -293,11 +308,58 @@ fn ble_remembered_matches_address_or_identifier_when_case_differs() {
 }
 
 #[test]
-fn ble_reason_reads_as_not_bonded_only_when_it_is_the_transports_refusal() {
-    // `wartui bluetooth pair` tells a stale bond from any other failure by this.
+fn ble_error_words_weak_case_apart_when_bridge_only_dropped_this_pc() {
     let refused = TransportError::NotBonded { bridge: "44:C0".to_owned() }.to_string();
     assert!(refused.contains("refused this PC over Bluetooth because they are not paired"));
-    assert!(is_not_bonded(&refused), "{refused}");
-    assert!(!is_not_bonded("the bridge disconnected"));
-    assert!(!is_not_bonded(&TransportError::NoAdapter.to_string()));
+    let dropped = TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() }.to_string();
+    assert!(dropped.contains("dropped this PC over Bluetooth before serving it"), "{dropped}");
+    assert!(dropped.contains("if they are not paired"), "{dropped}");
+}
+
+const OTHER: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0xA1, 0xB0];
+const ADDRESS: &str = "02:00:5E:10:44:C1";
+
+#[test]
+fn ble_look_connects_to_remembered_address_when_no_direct_connect_has_failed() {
+    let looked = look(None, Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    let want = Look { direct: Some(ADDRESS.to_owned()), preferred: Some(BridgeSpec::Mac(BRIDGE)) };
+    assert_eq!(looked, want);
+    let named = look(Some(&spec("44:C0")), Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    assert_eq!(named.direct.as_deref(), Some(ADDRESS), "the remembered bridge is the one named");
+}
+
+#[test]
+fn ble_look_scans_preferring_remembered_bridge_when_direct_connect_failed() {
+    // As the serial sweep moves on from the remembered CH343: another bridge advertising is
+    // taken only while the remembered one is not heard.
+    let looked = look(None, Some(BRIDGE), Some(ADDRESS.to_owned()), true);
+    assert_eq!(looked, Look { direct: None, preferred: Some(BridgeSpec::Mac(BRIDGE)) });
+}
+
+#[test]
+fn ble_look_scans_for_named_bridge_only_when_it_is_not_the_remembered_one() {
+    let named = spec("A1:B0");
+    let looked = look(Some(&named), Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    assert_eq!(looked, Look { direct: None, preferred: Some(named) });
+    assert_eq!(look(None, None, None, false), Look { direct: None, preferred: None });
+}
+
+fn heard(name: &str, live: bool) -> (String, bool, String) {
+    (name.to_owned(), live, name.to_owned())
+}
+
+#[test]
+fn ble_choose_takes_advertising_bridge_when_another_is_only_listed() {
+    // BlueZ lists a bonded bridge it has not heard.
+    let found = choose(vec![heard("wartui 44:C0", false), heard("wartui A1:B0", true)], None);
+    assert_eq!(found.unwrap(), "wartui A1:B0");
+}
+
+#[test]
+fn ble_choose_takes_preferred_bridge_when_several_advertise() {
+    let both = vec![heard("wartui 44:C0", true), heard("wartui A1:B0", true)];
+    let found = choose(both.clone(), Some(&BridgeSpec::Mac(OTHER)));
+    assert_eq!(found.unwrap(), "wartui A1:B0");
+    let refused = choose(both, None).unwrap_err().to_string();
+    assert!(refused.contains("wartui 44:C0, wartui A1:B0"), "{refused}");
 }

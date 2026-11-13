@@ -371,7 +371,7 @@ pub(crate) async fn wait_for_ready(
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
             Some(_) => {}
             None => bail!("the link closed"),
         }
@@ -443,7 +443,7 @@ fn awaited(event: Option<LinkEvent>) -> Result<Awaited> {
         Some(LinkEvent::Message(BridgeToHost::Fleet(report))) => {
             Ok(Awaited::Fleet(Box::new(report)))
         }
-        Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+        Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
         Some(_) => Ok(Awaited::Other),
         None => bail!("the link closed"),
     }

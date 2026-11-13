@@ -375,7 +375,7 @@ impl FleetEngine {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use wartui_bridge::{BridgeInfo, LinkEvent};
+    use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
     use wartui_proto::bus::NodeBoard;
     use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, NO_GPS_RECEIVER};
     use wartui_proto::reset::ResetCause;
@@ -441,7 +441,8 @@ mod tests {
         assert!(engine.bridge_lacks_gps);
         let now = Now { mono: start, unix_ms: 0 };
         let reason = "unplugged".to_owned();
-        engine.handle(Event::Link(LinkEvent::Disconnected { reason }), now);
+        let cause = DisconnectCause::Other;
+        engine.handle(Event::Link(LinkEvent::Disconnected { reason, cause }), now);
         assert!(!engine.bridge_lacks_gps);
     }
 }

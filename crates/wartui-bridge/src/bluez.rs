@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn bluez_agent_answers_only_calls_to_its_own_path() {
+    fn bluez_agent_answers_call_only_when_it_is_addressed_to_its_own_path() {
         let call = |path: &str, member: &str| {
             let mut call = Message::new_method_call(":1.7", path, AGENT, member).expect("valid");
             // As the bus numbers a call it delivers; a reply names it.

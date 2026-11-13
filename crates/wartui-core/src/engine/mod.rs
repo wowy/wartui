@@ -246,7 +246,7 @@ impl FleetEngine {
                 // forgotten its rate.
                 self.poll_bridge(now, &mut batch);
             }
-            Event::Link(LinkEvent::Disconnected { reason }) => {
+            Event::Link(LinkEvent::Disconnected { reason, .. }) => {
                 self.link_up = false;
                 self.bridge_lacks_gps = false;
                 self.link_up_since = None;

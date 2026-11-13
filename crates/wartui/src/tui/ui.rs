@@ -385,6 +385,7 @@ impl Ui {
         if self.link_tried || snapshot.bridge.is_none() {
             return;
         }
+        self.settings.link_proved = true;
         let saved = self.settings.saved.bridge.link;
         if link_written(link, saved) == saved {
             return;

@@ -24,7 +24,7 @@ use crate::gate::{Admitted, Gate};
 use crate::gate::is_a_new_life;
 use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
-use crate::{LinkEvent, LinkHandle, TransportError, link_pair};
+use crate::{DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair};
 
 /// Long enough not to spin, short enough that shutdown feels immediate.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
@@ -522,7 +522,8 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
             previous = Some(reason.clone());
             repeats = 0;
         }
-        if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+        let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+        if plumbing.events.send(down).await.is_err() {
             return;
         }
         tokio::time::sleep(delay).await;
@@ -653,7 +654,8 @@ async fn sweep(
                 // candidate: the sweep is over and what is left is a reconnection.
                 if let Some(mac) = announced {
                     tracing::warn!(reason = %reason, mac = %mac::full(&mac), "link down");
-                    if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+                    let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+                    if plumbing.events.send(down).await.is_err() {
                         return Pass::HandleDropped;
                     }
                     return Pass::Connected(Settled { mac, port: candidate.clone() });

@@ -145,12 +145,6 @@ impl<const P: usize, S: AsRef<[u8]> + AsMut<[u8]>> HostQueueIn<P, S> {
         filled
     }
 
-    /// Bytes free in the bulk ring, length prefixes included.
-    #[must_use]
-    pub fn bulk_room(&self) -> usize {
-        self.bulk.capacity() - self.bulk.len_bytes()
-    }
-
     /// Both rings' depth, deepest point and drops, priority first.
     #[must_use]
     pub fn stats(&self) -> [QueueStat; 2] {

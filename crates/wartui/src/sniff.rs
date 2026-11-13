@@ -473,7 +473,8 @@ mod tests {
 
     #[test]
     fn sniff_cmd_marks_bridge_heard_when_receiving_disconnected_event_with_reason() {
-        assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
+        let cause = wartui_bridge::DisconnectCause::Other;
+        assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned(), cause }));
     }
 
     /// Count one record the way `handle` does.

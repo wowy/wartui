@@ -14,8 +14,19 @@
 //! then drops the host as unbonded, so a pairing BlueZ reports done can be one the bridge did not
 //! keep. `pair` connects once over the transport and asks the bridge whether this host is
 //! encrypted and bonded. A PC BlueZ lists as paired is checked the same way first: a bond the
-//! bridge dropped is stale, and is removed and paired afresh, since BlueZ never pairs again on
+//! bridge refuses is stale, and is removed and paired afresh, since BlueZ never pairs again on
 //! its own. A pairing the bridge did not keep is removed too, so BlueZ holds no one-sided bond.
+//!
+//! **`--fresh` is the escape for a bond only this PC kept.** A bridge whose bonds were cleared
+//! drops a PC that still holds one, and that drop is weak evidence, so `pair` never removes the
+//! pairing on it. `--fresh` removes this PC's pairing first, on the operator's word, then pairs as
+//! usual.
+//!
+//! **Only the bridge's own word removes a pairing** ([`DisconnectCause::NotBonded`], or a status
+//! saying this host is not bonded). A link that only dropped before serving this PC, at the time
+//! the bridge drops an unbonded one, is no proof: a bonded PC waiting behind a USB host and then
+//! cut off by a P4 reset or range drops the same way, and removing its bond would strand it. Then
+//! `pair` removes nothing, says what it saw, and asks for another try.
 //!
 //! **`forget` clears every bond the bridge keeps**, over the chosen link, and removes the bridge
 //! from BlueZ on Linux. Every other host that paired keeps a bond the bridge dropped, and BlueZ
@@ -23,8 +34,9 @@
 //! strands every host"), so `forget` says each must forget the bridge too.
 //!
 //! **Neither saves `wartui.toml`.** Only `run` and `flash-bridge` save the bridge
-//! ([`crate::memory`]). The next `run --link bluetooth` finds a paired bridge and remembers it, and
-//! a remembered Bluetooth address that BlueZ no longer lists falls back to a scan.
+//! ([`crate::memory`]). The next `run --link bluetooth` finds a paired bridge and remembers it.
+//! A remembered Bluetooth address BlueZ does not list, or one that does not answer, is followed by
+//! a scan (`wartui_bridge::ble`).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -32,7 +44,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use wartui_bridge::serial::{self, BridgeSpec, Probed};
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_bridge::{DisconnectCause, LinkEvent, LinkHandle};
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, HostToBridge, PAIR_WINDOW_SECS, PairWindow,
 };
@@ -69,6 +81,11 @@ struct PairArgs {
     /// only one heard, when omitted.
     #[arg(long, value_name = "MAC")]
     bridge: Option<String>,
+
+    /// Remove this PC's pairing with the bridge first, then pair again: for a bridge that has
+    /// forgotten this PC.
+    #[arg(long)]
+    fresh: bool,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -193,7 +210,35 @@ async fn pair(args: PairArgs) -> Result<()> {
     println!("{}", window.line());
     let spec = window.mac().map(BridgeSpec::Mac).or(named);
     let preferred = spec.clone().or(remembered.mac.map(BridgeSpec::Mac));
-    pair_with(spec, preferred, &window).await
+    pair_with(spec, preferred, &window, args.fresh).await
+}
+
+/// What `pair` does first with a bridge this PC is `paired` with or not, given `--fresh`.
+#[derive(Debug, PartialEq, Eq)]
+enum First {
+    /// Check that the bridge keeps the pairing, and pair again only if it refuses it.
+    Check,
+    /// Remove the pairing, on `--fresh`, and pair again.
+    Remove,
+    /// Pair: there is no pairing to check or remove.
+    Pair,
+}
+
+fn first_step(paired: bool, fresh: bool) -> First {
+    match (paired, fresh) {
+        (true, false) => First::Check,
+        (true, true) => First::Remove,
+        (false, _) => First::Pair,
+    }
+}
+
+/// The line that ends a failure to prove a pairing BlueZ held: the escape when the bridge has
+/// forgotten this PC, with the bridge `name` advertises.
+fn fresh_hint(name: &str) -> String {
+    let octets = name.strip_prefix(wartui_proto::ble::NAME_PREFIX).unwrap_or("XX:YY");
+    format!(
+        "If the bridge has forgotten this PC, run `wartui bluetooth pair --fresh --bridge {octets}`"
+    )
 }
 
 /// Open the pairing window of the bridge on USB, if one answers there.
@@ -263,6 +308,50 @@ fn not_kept(window: &Window, why: &str) -> String {
     }
 }
 
+/// What one link event says while `pair` waits for the bridge to serve this PC.
+#[derive(Debug, PartialEq, Eq)]
+enum Served<'a> {
+    /// The bridge announced itself.
+    Yes,
+    /// The bridge refused this PC for holding no bond: proof enough to remove the pairing.
+    Refused,
+    /// The link dropped as the bridge drops an unbonded PC, which proves nothing.
+    Dropped,
+    /// The link failed some other way, for this reason.
+    Failed(&'a str),
+    /// Nothing yet.
+    Waiting,
+}
+
+/// What `event` says of the proof.
+fn served_by(event: &LinkEvent) -> Served<'_> {
+    match event {
+        LinkEvent::Connected(_) => Served::Yes,
+        LinkEvent::Disconnected { cause: DisconnectCause::NotBonded, .. } => Served::Refused,
+        LinkEvent::Disconnected { cause: DisconnectCause::MaybeNotBonded, .. } => Served::Dropped,
+        LinkEvent::Disconnected { reason, .. } => Served::Failed(reason),
+        LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
+    }
+}
+
+/// Why `pair` stops without removing anything, when the bridge `name` did not serve this PC: a
+/// USB host may hold it, and a link that `dropped` as the bridge drops an unbonded PC proves
+/// nothing either way.
+fn unserved(name: &str, dropped: bool) -> String {
+    let dropped = if dropped {
+        ", and dropped it before serving it as it drops a PC it holds no bond for, which a P4 \
+         reset or a weak signal does too"
+    } else {
+        ""
+    };
+    format!(
+        "{name} did not serve this PC over Bluetooth{dropped}. A USB host may hold the bridge: \
+         it serves this PC 15 s after its USB link goes quiet. Nothing was removed; run \
+         `wartui bluetooth pair` again.\n{}",
+        fresh_hint(name)
+    )
+}
+
 #[cfg(target_os = "linux")]
 use linux::pair_with;
 
@@ -271,15 +360,18 @@ mod linux {
     use std::time::Duration;
 
     use anyhow::{Context, Result, anyhow, bail};
-    use wartui_bridge::ble::{Advertiser, BleTransport, find_advertiser, is_not_bonded};
+    use wartui_bridge::LinkHandle;
+    use wartui_bridge::ble::{Advertiser, BleTransport, find_advertiser};
     use wartui_bridge::bluez::{self, BluezError, Device};
-    use wartui_bridge::remember::BridgeMemory;
     use wartui_bridge::serial::BridgeSpec;
-    use wartui_bridge::{LinkEvent, LinkHandle};
+    use wartui_proto::ble::NAME_PREFIX;
     use wartui_proto::link::{BluetoothStatus, BridgeToHost, HostToBridge};
     use wartui_proto::mac::Mac;
 
-    use super::{REPLY_TIMEOUT, Window, not_kept, paired_line};
+    use super::{
+        First, REPLY_TIMEOUT, Served, Window, first_step, not_kept, paired_line, served_by,
+        unserved,
+    };
     use crate::status::wait_for_status;
 
     /// How long the proof waits for the bridge to serve this PC: a connect, and the 15 s a USB
@@ -290,8 +382,11 @@ mod linux {
     enum Proof {
         /// Encrypted and bonded, beside these bonds.
         Bonded(BluetoothStatus),
-        /// Refused or reported as holding no bond.
+        /// Refused as holding no bond, in the bridge's own words.
         NotBonded,
+        /// Not served within [`PROVE_WITHIN`], and whether a link dropped as the bridge drops an
+        /// unbonded PC, which proves nothing.
+        Unserved { dropped: bool },
     }
 
     /// Find the bridge, pair through BlueZ unless a pairing it keeps is already there, and prove
@@ -300,12 +395,26 @@ mod linux {
         spec: Option<BridgeSpec>,
         preferred: Option<BridgeSpec>,
         window: &Window,
+        fresh: bool,
     ) -> Result<()> {
         let mut found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
         let mut device = listed(&found).await?;
-        if device.paired {
+        let first = first_step(device.paired, fresh);
+        match first {
+            First::Remove => {
+                println!("removing this PC's pairing with {}, as --fresh asks", found.name);
+                blocking(move || bluez::remove(&device)).await??;
+                found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
+                device = listed(&found).await?;
+            }
+            First::Pair if fresh => println!("this PC holds no pairing with {}", found.name),
+            First::Pair | First::Check => {}
+        }
+        if first == First::Check {
             println!("this PC is paired with {} already; checking the bridge keeps it", found.name);
-            match prove(&found, window).await? {
+            let proof =
+                prove(&found, window).await.with_context(|| super::fresh_hint(&found.name))?;
+            match proof {
                 Proof::Bonded(status) => {
                     println!("{}", paired_line(&found.name, &status));
                     return Ok(());
@@ -316,6 +425,7 @@ mod linux {
                     found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
                     device = listed(&found).await?;
                 }
+                Proof::Unserved { dropped } => bail!("{}", unserved(&found.name, dropped)),
             }
         }
         println!("pairing with {}", found.name);
@@ -338,8 +448,9 @@ mod linux {
             }
             Proof::NotBonded => {
                 remove_quietly(device).await;
-                bail!("{}", not_kept(window, "it dropped this PC as unbonded"))
+                bail!("{}", not_kept(window, "it refused this PC as unbonded"))
             }
+            Proof::Unserved { dropped } => bail!("{}", unserved(&found.name, dropped)),
         }
     }
 
@@ -364,21 +475,22 @@ mod linux {
         }
     }
 
-    /// Connect once to the bridge `found` names, and ask whether this PC is encrypted and bonded.
+    /// Connect to the bridge `found` names, and ask whether this PC is encrypted and bonded.
+    ///
+    /// Named by its advertised octets, so a retry that scans reaches that bridge and no other.
     async fn prove(found: &Advertiser, window: &Window) -> Result<Proof> {
-        let memory = BridgeMemory::none().on_bluetooth(Some(found.address.clone()));
-        let mut link = BleTransport::new().remember_in(memory).start()?;
+        let octets = found.name.strip_prefix(NAME_PREFIX).unwrap_or(&found.name);
+        let spec = octets.parse::<BridgeSpec>().unwrap_or_else(|never| match never {});
+        let mut link = BleTransport::with_spec(spec).start()?;
         if matches!(window, Window::Opened { .. }) {
             println!(
                 "waiting for the bridge to serve this PC, up to 15 s after its USB link went quiet"
             );
         }
-        let proof = match tokio::time::timeout(PROVE_WITHIN, served(&mut link)).await {
-            Err(_) => Err(anyhow!(
-                "{} did not serve this PC over Bluetooth within {} s",
-                found.name,
-                PROVE_WITHIN.as_secs()
-            )),
+        let mut dropped = false;
+        let proof = match tokio::time::timeout(PROVE_WITHIN, served(&mut link, &mut dropped)).await
+        {
+            Err(_) => Ok(Proof::Unserved { dropped }),
             Ok(Err(error)) => Err(error),
             Ok(Ok(false)) => Ok(Proof::NotBonded),
             Ok(Ok(true)) => bonded(&mut link).await,
@@ -388,19 +500,22 @@ mod linux {
     }
 
     /// Wait for the bridge's `Ready`: `true`, or `false` when it refuses this PC as unbonded.
-    /// Other failures are retried by the transport.
-    async fn served(link: &mut LinkHandle) -> Result<bool> {
+    /// Other failures are retried by the transport, and a drop that only may mean no bond sets
+    /// `dropped`.
+    async fn served(link: &mut LinkHandle, dropped: &mut bool) -> Result<bool> {
         loop {
-            match link.recv().await {
-                Some(LinkEvent::Connected(_)) => return Ok(true),
-                Some(LinkEvent::Disconnected { reason }) if is_not_bonded(&reason) => {
-                    return Ok(false);
+            let Some(event) = link.recv().await else { bail!("the link closed") };
+            match served_by(&event) {
+                Served::Yes => return Ok(true),
+                Served::Refused => return Ok(false),
+                Served::Dropped => {
+                    *dropped = true;
+                    tracing::info!("the bridge dropped the proof's connection; retrying");
                 }
-                Some(LinkEvent::Disconnected { reason }) => {
+                Served::Failed(reason) => {
                     tracing::info!(%reason, "the proof's connection failed; retrying");
                 }
-                Some(_) => {}
-                None => bail!("the link closed"),
+                Served::Waiting => {}
             }
         }
     }
@@ -476,7 +591,13 @@ async fn pair_with(
     _spec: Option<BridgeSpec>,
     _preferred: Option<BridgeSpec>,
     _window: &Window,
+    fresh: bool,
 ) -> Result<()> {
+    if fresh {
+        println!(
+            "On this OS, remove the bridge's pairing in the system's Bluetooth settings first."
+        );
+    }
     println!("{OS_PAIRS}");
     Ok(())
 }
@@ -561,10 +682,12 @@ fn stranded_notice(name: &str) -> String {
 mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate};
     use wartui_bridge::serial::{BridgeSpec, Probed};
+    use wartui_bridge::{DisconnectCause, LinkEvent};
     use wartui_proto::link::{BluetoothStatus, PairWindow};
 
     use super::{
-        OnUsb, Window, is_this_bridge, not_kept, paired_line, stranded_notice, usb_bridge,
+        First, OnUsb, Served, Window, first_step, is_this_bridge, not_kept, paired_line, served_by,
+        stranded_notice, unserved, usb_bridge,
     };
 
     const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
@@ -617,7 +740,7 @@ mod tests {
 
     #[test]
     fn bluetooth_pair_names_closed_window_and_both_fixes_when_not_opened_over_usb() {
-        let text = not_kept(&Window::NotOnUsb, "it dropped this PC as unbonded");
+        let text = not_kept(&Window::NotOnUsb, "it refused this PC as unbonded");
         assert!(text.contains("pairing window is most likely closed"), "{text}");
         assert!(text.contains("Plug in its USB cable"), "{text}");
         assert!(text.contains("power-cycle the bridge and pair within 120 s"), "{text}");
@@ -641,11 +764,52 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_forget_matches_device_by_name_or_remembered_address() {
+    fn bluetooth_forget_matches_device_when_name_or_remembered_address_agrees() {
         let name = "wartui 44:C0";
         assert!(is_this_bridge(Some(name), "02:00:5E:10:44:C2", name, None));
         assert!(is_this_bridge(None, "02:00:5E:10:44:C2", name, Some("02:00:5e:10:44:c2")));
         assert!(!is_this_bridge(Some("wartui A1:B0"), "02:00:5E:10:A1:B2", name, None));
+    }
+
+    fn down(cause: DisconnectCause) -> LinkEvent {
+        LinkEvent::Disconnected { reason: "gone".to_owned(), cause }
+    }
+
+    #[test]
+    fn bluetooth_pair_reads_refusal_only_when_bridge_refused_this_pc_itself() {
+        assert_eq!(served_by(&down(DisconnectCause::NotBonded)), Served::Refused);
+        // A drop at the time the bridge drops an unbonded PC proves nothing.
+        assert_eq!(served_by(&down(DisconnectCause::MaybeNotBonded)), Served::Dropped);
+        assert_eq!(served_by(&down(DisconnectCause::Other)), Served::Failed("gone"));
+        assert_eq!(served_by(&down(DisconnectCause::UsbTookBridge)), Served::Failed("gone"));
+    }
+
+    #[test]
+    fn bluetooth_pair_removes_pairing_first_only_when_fresh_and_paired() {
+        assert_eq!(first_step(true, false), First::Check);
+        assert_eq!(first_step(true, true), First::Remove);
+        assert_eq!(first_step(false, true), First::Pair);
+        assert_eq!(first_step(false, false), First::Pair);
+    }
+
+    #[test]
+    fn bluetooth_pair_names_fresh_escape_when_bridge_did_not_serve_this_pc() {
+        let text = unserved("wartui 44:C0", false);
+        let last = text.lines().last().unwrap_or_default();
+        assert_eq!(
+            last,
+            "If the bridge has forgotten this PC, run `wartui bluetooth pair --fresh --bridge 44:C0`"
+        );
+    }
+
+    #[test]
+    fn bluetooth_pair_removes_nothing_and_asks_again_when_bridge_did_not_serve_this_pc() {
+        let text = unserved("wartui 44:C0", true);
+        assert!(text.contains("wartui 44:C0 did not serve this PC over Bluetooth"), "{text}");
+        assert!(text.contains("as it drops a PC it holds no bond for"), "{text}");
+        assert!(text.contains("A USB host may hold the bridge"), "{text}");
+        assert!(text.contains("Nothing was removed"), "{text}");
+        assert!(!unserved("wartui 44:C0", false).contains("dropped"));
     }
 
     #[test]

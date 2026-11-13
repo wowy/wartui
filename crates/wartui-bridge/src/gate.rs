@@ -26,12 +26,12 @@ use crate::BridgeInfo;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Admitted {
-    /// A `Ready`. `first` is this connection's first; `fresh` is a new life, which is reported.
+    /// A `Ready`. `fresh` is a new life, which is reported. Which `Ready` proves the board is
+    /// each transport's to say: the first on its connection, which a restart of the gate does not
+    /// move.
     Ready {
         /// The bridge as it announced itself.
         info: BridgeInfo,
-        /// This connection's first `Ready`, which proves the board.
-        first: bool,
         /// A life this connection has not reported yet.
         fresh: bool,
     },
@@ -87,9 +87,8 @@ impl Gate {
                 radio,
                 image,
             } => {
-                let first = self.last_ready.is_none();
                 let fresh = is_a_new_life(uptime_ms, now, self.last_ready);
-                if first && self.skipped > 0 {
+                if self.last_ready.is_none() && self.skipped > 0 {
                     tracing::debug!("skipped {} frames from before this connection", self.skipped);
                 }
                 self.last_ready = Some((uptime_ms, now));
@@ -117,7 +116,7 @@ impl Gate {
                     radio,
                     image,
                 };
-                Admitted::Ready { info, first, fresh }
+                Admitted::Ready { info, fresh }
             }
             msg => {
                 // A rebooted bridge's `Ready` on a connection already announced changes nothing
@@ -214,10 +213,7 @@ mod tests {
         assert_eq!(gate.admit(rx(), now), Admitted::Stale);
         assert_eq!(gate.skipped(), 2);
         assert!(!gate.announced());
-        assert!(matches!(
-            gate.admit(ready(500), now),
-            Admitted::Ready { first: true, fresh: true, .. }
-        ));
+        assert!(matches!(gate.admit(ready(500), now), Admitted::Ready { fresh: true, .. }));
         assert_eq!(gate.admit(rx(), now), Admitted::Message(rx()));
     }
 
@@ -227,7 +223,7 @@ mod tests {
         let t0 = Instant::now();
         gate.admit(ready(1_200), t0);
         let again = gate.admit(ready(1_202), t0 + Duration::from_millis(2));
-        assert!(matches!(again, Admitted::Ready { first: false, fresh: false, .. }));
+        assert!(matches!(again, Admitted::Ready { fresh: false, .. }));
     }
 
     #[test]
@@ -236,7 +232,7 @@ mod tests {
         let t0 = Instant::now();
         gate.admit(ready(50_000), t0);
         let next = gate.admit(ready(120), t0 + Duration::from_secs(1));
-        assert!(matches!(next, Admitted::Ready { first: false, fresh: true, .. }));
+        assert!(matches!(next, Admitted::Ready { fresh: true, .. }));
     }
 
     #[test]
@@ -249,6 +245,6 @@ mod tests {
         gate.restart();
         assert_eq!(gate.admit(rx(), t0), Admitted::Stale);
         let back = gate.admit(ready(30_000), t0 + Duration::from_secs(20));
-        assert!(matches!(back, Admitted::Ready { first: true, fresh: true, .. }));
+        assert!(matches!(back, Admitted::Ready { fresh: true, .. }));
     }
 }

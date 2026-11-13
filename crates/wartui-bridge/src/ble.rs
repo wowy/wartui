@@ -2,11 +2,26 @@
 //! (`wartui_proto::ble`), with `btleplug` on the tokio runtime the crate already runs.
 //!
 //! **Finding the bridge.** The C6 advertises `wartui XX:YY`, the bridge's last two octets, so a
-//! bridge named with `--bridge` is found by scanning for that name, for at most [`SCAN_FOR`]. A
-//! remembered Bluetooth address is connected to without a scan, when the OS lists it: BlueZ lists
-//! every bonded device, and CoreBluetooth only what it has seen, so macOS falls back to the scan.
-//! The name carries two octets, so the first `Ready` is checked against the whole spec, and a
-//! bridge that only shares the name is refused.
+//! bridge is found by scanning for that name, for at most [`SCAN_FOR`]. The name carries two
+//! octets, so the first `Ready` is checked against the whole spec, and a bridge that only shares
+//! the name is refused. The rule is the serial transport's ([`look`]):
+//!
+//! - **A bridge named with `--bridge` is the only one taken**, remembered or not.
+//! - **A remembered bridge is tried first**, as the serial sweep opens its CH343 first: its
+//!   Bluetooth address is connected to without a scan when it stands for a bridge the spec names
+//!   and the OS lists it. BlueZ lists every bonded device, and CoreBluetooth only what it has
+//!   seen, so macOS scans instead.
+//! - **Once a connection straight to it has failed, every later try scans**, as the sweep moves
+//!   on to the other CH343s. The scan still prefers the remembered bridge while it advertises, so
+//!   one that is off or out of range blocks no other bridge, and one that answers is taken back.
+//! - **A connection that announced a bridge settles the run on it**, and no other is looked for.
+//!
+//! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
+//! hundreds of devices, so it reads the properties of a device only when the adapter reports it
+//! discovered or heard again, and once it has a name. An unnamed scan listens [`UNNAMED_LISTEN`]
+//! before choosing, so a second bridge advertising nearby is seen rather than passed over. At
+//! the end of that listen it reads the OS's listing once, for a bridge that raised no event: one
+//! BlueZ lists as bonded and has not heard, or one that was advertising before the scan began.
 //!
 //! **The P4 serves a central only once it owns the host queue**, which it takes on a subscription
 //! to Up from a bonded, encrypted link (`wartui_proto::host_owner`). The stream starts with a
@@ -20,15 +35,17 @@
 //! notifications, and the transport then waited for a `Ready` that had gone by (D0:1C,
 //! 2026-11-13). So once the notifications are open it asks, every [`IDENTIFY_EVERY`] until a
 //! `Ready` answers, as the USB transport does. The P4 answers a central that holds the queue and
-//! drops the frame from one that does not. The Bluetooth gate never closes on silence, so there
-//! is nothing to hold open. A USB host that holds the queue keeps a subscribed central waiting
-//! until 15 s after its last frame, so a subscription with no `Ready` after [`READY_WARN_AFTER`]
-//! logs one warning and keeps waiting.
+//! drops the frame from one that does not. The asking resumes after a USB takeover one period
+//! later, never as a burst of the ticks missed while the stream was announced ([`asker`]). The
+//! Bluetooth gate never closes on silence, so there is nothing to hold open. A USB host that holds
+//! the queue keeps a subscribed central waiting until 15 s after its last frame, so a subscription
+//! with no `Ready` after [`READY_WARN_AFTER`] logs one warning and keeps waiting.
 //!
 //! **A USB takeover is a link going down, not a fault.** The P4 sends the central one
 //! `BridgeToHost::Error` with [`USB_TOOK_BRIDGE`] ahead of releasing it. The transport reports
-//! [`LinkEvent::Disconnected`], stays subscribed, and reports `Connected` on the `Ready` that
-//! hands the queue back, though it is the same life, since the stream starts afresh there.
+//! [`LinkEvent::Disconnected`] with [`DisconnectCause::UsbTookBridge`], stays subscribed, and
+//! reports `Connected` on the `Ready` that hands the queue back, though it is the same life, since
+//! the stream starts afresh there.
 //!
 //! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`) and cut into pieces
 //! of the ATT MTU less its 3-byte header: 244 bytes at the C6's MTU of 247. A write is a stream
@@ -45,9 +62,17 @@
 //! too, at about 3.4 KB/s on a 30 ms interval. A request the C6 answers with an ATT error fails as
 //! any write does, and ends the connection.
 //!
-//! **Not bonded.** The C6 refuses an unbonded central's subscription, and disconnects one that has
-//! not paired 10 s after it connected. Either is [`TransportError::NotBonded`], since BlueZ never
-//! starts a first pairing on its own (`docs/c6-ble-pairing-findings.md`).
+//! **Not bonded, and maybe not bonded, are two causes.** BlueZ never starts a first pairing on its
+//! own (`docs/c6-ble-pairing-findings.md`), so the transport says when the bridge will not serve
+//! this host for want of a bond, and how sure it is:
+//!
+//! - **[`DisconnectCause::NotBonded`]** is the C6's own answer: an ATT authentication or encryption
+//!   error on the subscription to Up or on a write request to Down ([`refused_for_bonding`]).
+//! - **[`DisconnectCause::MaybeNotBonded`]** is timing: a link that drops before any `Ready`, 8 to
+//!   35 s after connecting, which is when the C6 disconnects a central that has not bonded
+//!   ([`dropped_as_unbonded`]). A bonded host waiting behind a USB host and then losing the link
+//!   to a P4 reset or to range drops the same way, so `wartui bluetooth pair` acts only on the
+//!   first.
 //!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that peripheral. A P4 reboot resets its
@@ -60,14 +85,16 @@
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
     BDAddr, Central as _, CentralEvent, Characteristic, Manager as _, Peripheral as _, ScanFilter,
     WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures_util::StreamExt;
+use tokio::time::{Interval, MissedTickBehavior};
 use wartui_proto::ble::{DOWN_UUID, NAME_PREFIX, UP_UUID};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
@@ -78,13 +105,12 @@ use wartui_proto::mac::{self, Mac};
 use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
 use crate::serial::{BridgeSpec, encode_for_wire};
-use crate::{LinkEvent, LinkHandle, LinkPlumbing, TransportError, link_pair_awaited};
+use crate::{
+    DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError, link_pair_awaited,
+};
 
 /// How long a scan looks for the bridge's name before giving up.
 pub const SCAN_FOR: Duration = Duration::from_secs(10);
-
-/// How often a scan reads what it has heard.
-const SCAN_POLL: Duration = Duration::from_millis(250);
 
 /// How long an unnamed scan listens before taking the bridges it has heard, so a second one
 /// advertising nearby is seen rather than passed over.
@@ -227,13 +253,6 @@ pub fn names_bridge(spec: Option<&BridgeSpec>, name: &str) -> bool {
     }
 }
 
-/// Whether a [`LinkEvent::Disconnected`] reason is the bridge refusing this host for holding no
-/// bond it keeps ([`TransportError::NotBonded`]).
-#[must_use]
-pub fn is_not_bonded(reason: &str) -> bool {
-    reason.contains(crate::NOT_PAIRED)
-}
-
 /// A bridge a scan heard: the name it advertises, and the address the OS knows it by, or on
 /// macOS the identifier CoreBluetooth gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,8 +274,7 @@ pub async fn find_advertiser(
     preferred: Option<&BridgeSpec>,
 ) -> Result<Advertiser, TransportError> {
     let adapter = open_adapter().await?;
-    let peripheral = scan(&adapter, spec, preferred).await?;
-    let name = name_of(&peripheral).await.map(|(name, _)| name).unwrap_or_default();
+    let (name, peripheral) = scan(&adapter, spec, preferred).await?;
     Ok(Advertiser { name, address: address_of(&peripheral) })
 }
 
@@ -266,27 +284,22 @@ pub fn is_takeover(msg: &BridgeToHost) -> bool {
     matches!(msg, BridgeToHost::Error { message } if message.as_str() == USB_TOOK_BRIDGE)
 }
 
-/// Whether an OS error from a connect or a subscription is the bridge refusing a link that is
-/// not encrypted or bonded: an ATT Insufficient Authentication (`0x05`), Authorization (`0x08`)
-/// or Encryption (`0x0f`), however the OS words it.
+/// Whether an OS error from a subscription or a write request is the C6's ATT refusal of a
+/// link that is not encrypted with a bond it holds. The C6 answers both with Insufficient
+/// Authentication (`0x05`), and each sign is how an OS words that:
+///
+/// - `not paired`: BlueZ's text for an ATT Insufficient Authentication, Encryption or Encryption
+///   Key Size error (`org.bluez.Error.NotPermitted`), and the text btleplug passes on.
+/// - `insufficient` beside `authentication` or `encryption`: CoreBluetooth's for
+///   `CBATTError.insufficientAuthentication` and `.insufficientEncryption`.
+///
+/// Windows reports any ATT error as a bare protocol error, so it gives no sign.
 #[must_use]
 pub fn refused_for_bonding(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    [
-        "authentication",
-        "authorization",
-        "encryption",
-        "not permitted",
-        "notpermitted",
-        "not authorized",
-        "notauthorized",
-        "insufficient",
-        "0x05",
-        "0x08",
-        "0x0f",
-    ]
-    .iter()
-    .any(|sign| error.contains(sign))
+    error.contains("not paired")
+        || (error.contains("insufficient")
+            && (error.contains("authentication") || error.contains("encryption")))
 }
 
 /// Whether a link that dropped `after` connecting, with no `Ready` heard, reads as the C6
@@ -294,6 +307,64 @@ pub fn refused_for_bonding(error: &str) -> bool {
 #[must_use]
 pub fn dropped_as_unbonded(after: Duration, announced: bool) -> bool {
     !announced && UNBONDED_DROP.contains(&after)
+}
+
+/// Where a connection looks for its bridge ([`look`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Look {
+    /// The remembered Bluetooth address to connect to without a scan, when the OS lists it.
+    pub direct: Option<String>,
+    /// The bridge a scan prefers among those it hears.
+    pub preferred: Option<BridgeSpec>,
+}
+
+/// Where a connection looks for the bridge `spec` names, any without one, given the bridge
+/// `remembered` with its Bluetooth `address`, and whether a connection straight to that address
+/// has `failed`.
+///
+/// The address is tried first while it stands for a bridge `spec` names and no connection
+/// straight to it has failed. After that a scan looks, preferring the bridge `spec` names, or
+/// unnamed the remembered one, and taking another only in its absence.
+#[must_use]
+pub fn look(
+    spec: Option<&BridgeSpec>,
+    remembered: Option<Mac>,
+    address: Option<String>,
+    failed: bool,
+) -> Look {
+    // The remembered address stands for the remembered bridge, so only when that is the one
+    // wanted.
+    let wanted = spec.is_none_or(|spec| remembered.is_some_and(|mac| spec.matches_address(&mac)));
+    let direct = address.filter(|_| wanted && !failed);
+    let preferred = match spec {
+        Some(spec) => Some(spec.clone()),
+        None => remembered.map(BridgeSpec::Mac),
+    };
+    Look { direct, preferred }
+}
+
+/// The one bridge among those `heard`, which holds at least one, each with its advertised name
+/// and whether it is advertising now: those advertising when any is, since BlueZ also lists the
+/// bridges it has bonded, heard or not; then those `preferred` names when any is.
+///
+/// # Errors
+/// [`TransportError::SeveralAdvertising`] when that leaves more than one.
+pub fn choose<P>(
+    mut heard: Vec<(String, bool, P)>,
+    preferred: Option<&BridgeSpec>,
+) -> Result<P, TransportError> {
+    if heard.iter().any(|(_, live, _)| *live) {
+        heard.retain(|(_, live, _)| *live);
+    }
+    if heard.iter().any(|(name, _, _)| names_bridge(preferred, name)) {
+        heard.retain(|(name, _, _)| names_bridge(preferred, name));
+    }
+    if let [_] = heard.as_slice() {
+        return Ok(heard.remove(0).2);
+    }
+    let mut names: Vec<String> = heard.into_iter().map(|(name, _, _)| name).collect();
+    names.sort();
+    Err(TransportError::SeveralAdvertising { names: names.join(", ") })
 }
 
 /// Whether a peripheral at `address`, with the OS identifier `id`, is the `remembered` one.
@@ -409,6 +480,7 @@ impl Inbound {
                     self.gate.restart();
                     heard.push(Heard::Event(LinkEvent::Disconnected {
                         reason: USB_TOOK_BRIDGE.to_owned(),
+                        cause: DisconnectCause::UsbTookBridge,
                     }));
                 }
                 Ok(msg) => match self.gate.admit(msg, now) {
@@ -444,13 +516,25 @@ impl Inbound {
 enum End {
     /// The engine dropped its handle.
     HandleDropped,
-    /// It ended, for this reason, after announcing a bridge or before.
-    Over { reason: String, announced: bool },
+    /// It ended, for this reason and cause, after announcing a bridge or before.
+    Over { reason: String, cause: DisconnectCause, announced: bool },
 }
 
 impl End {
     fn failed(reason: impl Into<String>) -> Self {
-        Self::Over { reason: reason.into(), announced: false }
+        Self::Over { reason: reason.into(), cause: DisconnectCause::Other, announced: false }
+    }
+}
+
+/// Why a connection's write or subscription failed.
+struct Failure {
+    reason: String,
+    cause: DisconnectCause,
+}
+
+impl Failure {
+    fn other(reason: String) -> Self {
+        Self { reason, cause: DisconnectCause::Other }
     }
 }
 
@@ -461,16 +545,25 @@ async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
     let mut adapter: Option<Adapter> = None;
     // The peripheral this run settled on, once it announced a bridge; never another after.
     let mut settled: Option<Peripheral> = None;
+    // A connection straight to the remembered address failed, so every later try scans.
+    let mut direct_failed = false;
     loop {
         let unreported = previous.is_none();
-        let end = attempt(&transport, &mut plumbing, &mut adapter, &mut settled, unreported);
-        let reason = match end.await {
+        let end = attempt(
+            &transport,
+            &mut plumbing,
+            &mut adapter,
+            (&mut settled, &mut direct_failed),
+            unreported,
+        );
+        let (reason, cause) = match end.await {
             End::HandleDropped => return,
-            End::Over { reason, announced: true } => {
+            End::Over { reason, cause, announced: true } => {
                 tracing::warn!(reason = %reason, "Bluetooth link down");
                 previous = None;
                 delay = transport.reconnect_delay;
-                if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+                let down = LinkEvent::Disconnected { reason, cause };
+                if plumbing.events.send(down).await.is_err() {
                     return;
                 }
                 if !wait_unless_closed(&plumbing, delay).await {
@@ -478,7 +571,7 @@ async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
                 }
                 continue;
             }
-            End::Over { reason, announced: false } => reason,
+            End::Over { reason, cause, announced: false } => (reason, cause),
         };
         if previous.as_deref() == Some(reason.as_str()) {
             tracing::debug!(reason = %reason, "Bluetooth link still down");
@@ -486,7 +579,7 @@ async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
             tracing::warn!(reason = %reason, retry_in = ?delay, "Bluetooth link down");
             previous = Some(reason.clone());
         }
-        if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+        if plumbing.events.send(LinkEvent::Disconnected { reason, cause }).await.is_err() {
             return;
         }
         if !wait_unless_closed(&plumbing, delay).await {
@@ -504,12 +597,14 @@ async fn wait_unless_closed(plumbing: &LinkPlumbing, delay: Duration) -> bool {
     }
 }
 
-/// One try: the adapter, the peripheral, then the connection.
+/// One try: the adapter, the peripheral, then the connection. A try that connects straight to
+/// the remembered address sets `direct_failed`, which only a connection that announces a bridge
+/// makes moot, since it settles the run.
 async fn attempt(
     transport: &BleTransport,
     plumbing: &mut LinkPlumbing,
     adapter: &mut Option<Adapter>,
-    settled: &mut Option<Peripheral>,
+    (settled, direct_failed): (&mut Option<Peripheral>, &mut bool),
     unreported: bool,
 ) -> End {
     let central = match adapter {
@@ -523,14 +618,17 @@ async fn attempt(
         Some(peripheral) => peripheral.clone(),
         None => {
             let found = tokio::select! {
-                found = find(&central, transport) => found,
+                found = find(&central, transport, *direct_failed) => found,
                 () = plumbing.events.closed() => {
                     let _ = central.stop_scan().await;
                     return End::HandleDropped;
                 }
             };
             match found {
-                Ok(peripheral) => peripheral,
+                Ok((peripheral, direct)) => {
+                    *direct_failed |= direct;
+                    peripheral
+                }
                 Err(e) => return End::failed(e.to_string()),
             }
         }
@@ -564,62 +662,95 @@ fn address_of(peripheral: &Peripheral) -> String {
     if address == BDAddr::default() { peripheral.id().to_string() } else { address.to_string() }
 }
 
-/// The peripheral to connect to: the remembered one when the OS lists it, else the one a scan
-/// hears advertising the name.
-async fn find(adapter: &Adapter, transport: &BleTransport) -> Result<Peripheral, TransportError> {
+/// The peripheral to connect to, by [`look`]: the remembered one when the OS lists it and no
+/// connection straight to it has failed, else the one a scan hears advertising the name. `true`
+/// beside it when it is the remembered one, reached without a scan.
+async fn find(
+    adapter: &Adapter,
+    transport: &BleTransport,
+    direct_failed: bool,
+) -> Result<(Peripheral, bool), TransportError> {
     let spec = transport.spec.as_ref();
-    let remembered_mac = transport.memory.recall();
-    // The remembered address stands for the remembered bridge, so only when that is the one
-    // wanted.
-    let wanted_remembered =
-        spec.is_none_or(|spec| remembered_mac.is_some_and(|mac| spec.matches_address(&mac)));
-    if let Some(remembered) = transport.memory.recall_bluetooth()
-        && wanted_remembered
-    {
+    let Look { direct, preferred } =
+        look(spec, transport.memory.recall(), transport.memory.recall_bluetooth(), direct_failed);
+    if let Some(remembered) = direct {
         let listed = adapter.peripherals().await.map_err(bluetooth)?;
         if let Some(known) = listed
             .into_iter()
             .find(|p| is_remembered(&remembered, &p.address().to_string(), &p.id().to_string()))
         {
-            return Ok(known);
+            return Ok((known, true));
         }
     }
-    // Unnamed, the remembered bridge is the one to look for, and any other only in its absence.
-    let preferred = match spec {
-        Some(spec) => Some(spec.clone()),
-        None => remembered_mac.map(BridgeSpec::Mac),
-    };
-    scan(adapter, spec, preferred.as_ref()).await
+    Ok((scan(adapter, spec, preferred.as_ref()).await?.1, false))
 }
 
-/// Scan for up to [`SCAN_FOR`] for a bridge `spec` names, preferring one `preferred` names.
+/// The bridges one scan has heard, by peripheral, with their names and whether each was
+/// advertising when read.
+struct Hearing<'a> {
+    spec: Option<&'a BridgeSpec>,
+    bridges: Vec<(String, bool, Peripheral)>,
+    /// Peripherals whose name has been read, bridges or not, which are not read again.
+    named: HashSet<PeripheralId>,
+}
+
+impl Hearing<'_> {
+    /// Read `peripheral`'s name once, and keep it when it is a bridge `spec` names.
+    async fn note(&mut self, peripheral: Peripheral) {
+        if self.named.contains(&peripheral.id()) {
+            return;
+        }
+        // A device with no name yet is read again on its next event.
+        let Some((name, live)) = name_of(&peripheral).await else { return };
+        self.named.insert(peripheral.id());
+        if names_bridge(self.spec, &name) {
+            self.bridges.push((name, live, peripheral));
+        }
+    }
+}
+
+/// Scan for up to [`SCAN_FOR`] for a bridge `spec` names, preferring one `preferred` names, and
+/// return its advertised name beside it.
 async fn scan(
     adapter: &Adapter,
     spec: Option<&BridgeSpec>,
     preferred: Option<&BridgeSpec>,
-) -> Result<Peripheral, TransportError> {
+) -> Result<(String, Peripheral), TransportError> {
+    // Opened before the scan starts, so nothing it hears goes by unreported.
+    let mut events = adapter.events().await.map_err(bluetooth)?;
     adapter.start_scan(ScanFilter::default()).await.map_err(bluetooth)?;
-    let started = Instant::now();
-    let found = loop {
-        let mut heard = Vec::new();
-        for peripheral in adapter.peripherals().await.map_err(bluetooth)? {
-            if let Some((name, live)) = name_of(&peripheral).await
-                && names_bridge(spec, &name)
-            {
-                heard.push((name, live, peripheral));
+    let heard = listen(adapter, &mut events, spec).await;
+    let _ = adapter.stop_scan().await;
+    let heard = heard?.into_iter().map(|(name, live, p)| (name.clone(), live, (name, p)));
+    choose(heard.collect(), preferred)
+}
+
+/// Read the adapter's events until a bridge `spec` names is heard: at once when one is named, and
+/// once [`UNNAMED_LISTEN`] has passed when none is. At that point the OS's listing is read once,
+/// for a bridge that raised no event.
+async fn listen(
+    adapter: &Adapter,
+    events: &mut Events,
+    spec: Option<&BridgeSpec>,
+) -> Result<Vec<(String, bool, Peripheral)>, TransportError> {
+    let started = tokio::time::Instant::now();
+    let (listened, give_up) = (started + UNNAMED_LISTEN, started + SCAN_FOR);
+    let mut hearing = Hearing { spec, bridges: Vec::new(), named: HashSet::new() };
+    let mut listed = false;
+    loop {
+        if spec.is_some() && !hearing.bridges.is_empty() {
+            break;
+        }
+        if !listed && tokio::time::Instant::now() >= listened {
+            listed = true;
+            for peripheral in adapter.peripherals().await.map_err(bluetooth)? {
+                hearing.note(peripheral).await;
             }
         }
-        // Advertising now, when anything is: BlueZ also lists the bridges it has bonded, heard
-        // or not.
-        if heard.iter().any(|(_, live, _)| *live) {
-            heard.retain(|(_, live, _)| *live);
+        if listed && !hearing.bridges.is_empty() {
+            break;
         }
-        let listened = started.elapsed() >= UNNAMED_LISTEN || spec.is_some();
-        if !heard.is_empty() && listened {
-            break heard;
-        }
-        if started.elapsed() >= SCAN_FOR {
-            let _ = adapter.stop_scan().await;
+        if tokio::time::Instant::now() >= give_up {
             return Err(TransportError::NotFound {
                 name: spec
                     .and_then(advertised_name)
@@ -627,26 +758,32 @@ async fn scan(
                 secs: SCAN_FOR.as_secs(),
             });
         }
-        tokio::time::sleep(SCAN_POLL).await;
-    };
-    let _ = adapter.stop_scan().await;
-    pick(found, preferred)
-}
-
-/// The one bridge among those heard, preferring those `preferred` names.
-fn pick(
-    mut heard: Vec<(String, bool, Peripheral)>,
-    preferred: Option<&BridgeSpec>,
-) -> Result<Peripheral, TransportError> {
-    if heard.iter().any(|(name, _, _)| names_bridge(preferred, name)) {
-        heard.retain(|(name, _, _)| names_bridge(preferred, name));
+        let wake = if listed { give_up } else { listened };
+        tokio::select! {
+            event = events.next() => match event {
+                // BlueZ reports a device it already knew, heard again, as an RSSI change.
+                Some(
+                    CentralEvent::DeviceDiscovered(id)
+                    | CentralEvent::DeviceUpdated(id)
+                    | CentralEvent::RssiUpdate { id, .. },
+                ) => {
+                    if !hearing.named.contains(&id)
+                        && let Ok(peripheral) = adapter.peripheral(&id).await
+                    {
+                        hearing.note(peripheral).await;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    return Err(TransportError::Bluetooth(
+                        "the Bluetooth adapter stopped reporting".to_owned(),
+                    ));
+                }
+            },
+            () = tokio::time::sleep_until(wake) => {}
+        }
     }
-    if heard.len() == 1 {
-        return Ok(heard.remove(0).2);
-    }
-    let mut names: Vec<String> = heard.into_iter().map(|(name, _, _)| name).collect();
-    names.sort();
-    Err(TransportError::SeveralAdvertising { names: names.join(", ") })
+    Ok(hearing.bridges)
 }
 
 /// The bridge as the operator names it, for the messages: its advertised octets.
@@ -679,7 +816,6 @@ async fn connect(
         };
     }
     let label = label_of(peripheral, transport).await;
-    let not_bonded = || TransportError::NotBonded { bridge: label.clone() }.to_string();
     progress!(bridge = %label, "connecting to the bridge over Bluetooth");
 
     let connected_at = Instant::now();
@@ -693,7 +829,6 @@ async fn connect(
         };
         match connecting {
             Ok(Ok(())) => {}
-            Ok(Err(e)) if refused_for_bonding(&e.to_string()) => return End::failed(not_bonded()),
             Ok(Err(e)) => return End::failed(format!("could not connect to {label}: {e}")),
             Err(_) => {
                 return End::failed(format!(
@@ -705,15 +840,17 @@ async fn connect(
     }
     let end = serve(adapter, peripheral, transport, plumbing, settled, &label).await;
     let end = match end {
-        // The C6 drops an unbonded central about 10 s after it connects.
-        End::Over { announced: false, .. }
+        // The C6 drops an unbonded central about 10 s after it connects, and the timing is all
+        // that says so.
+        End::Over { announced: false, cause: DisconnectCause::Other, .. }
             if dropped_as_unbonded(connected_at.elapsed(), false)
                 && !peripheral.is_connected().await.unwrap_or(false) =>
         {
-            End::failed(not_bonded())
-        }
-        End::Over { reason, announced } if refused_for_bonding(&reason) && !announced => {
-            End::Over { reason: not_bonded(), announced }
+            End::Over {
+                reason: TransportError::MaybeNotBonded { bridge: label.clone() }.to_string(),
+                cause: DisconnectCause::MaybeNotBonded,
+                announced: false,
+            }
         }
         end => end,
     };
@@ -753,13 +890,21 @@ async fn serve(
         Err(e) => return End::failed(bluetooth(e).to_string()),
     };
     if let Err(e) = peripheral.subscribe(&up).await {
-        return End::failed(format!("could not subscribe to {label}: {e}"));
+        let Failure { reason, cause } = refusal(label, &e)
+            .unwrap_or_else(|| Failure::other(format!("could not subscribe to {label}: {e}")));
+        return End::Over { reason, cause, announced: false };
     }
     let mtu = peripheral.mtu();
     tracing::info!(bridge = %label, mtu, "subscribed to the bridge over Bluetooth");
 
-    let end =
-        pump(peripheral, transport, plumbing, settled, (&up, &down), (&mut notes, &mut events));
+    let end = pump(
+        peripheral,
+        (transport, label),
+        plumbing,
+        settled,
+        (&up, &down),
+        (&mut notes, &mut events),
+    );
     let end = end.await;
     if matches!(end, End::HandleDropped) {
         let _ = peripheral.unsubscribe(&up).await;
@@ -772,10 +917,23 @@ type Notes =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = btleplug::api::ValueNotification> + Send>>;
 type Events = std::pin::Pin<Box<dyn futures_util::Stream<Item = CentralEvent> + Send>>;
 
+/// The timer that asks for a `Ready` with `Identify`. Its first tick is at once.
+///
+/// Its arm is off while the stream is announced, which can be hours, and a takeover turns it back
+/// on. Tokio's default `Burst` would then fire every tick missed meanwhile back to back, each a
+/// write request ahead of the engine's commands, so a late tick fires once and the next is a
+/// period after it. `pump` also resets it when the gate restarts, so the first `Identify` after
+/// a takeover goes out a period later.
+fn asker() -> Interval {
+    let mut ask = tokio::time::interval(IDENTIFY_EVERY);
+    ask.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ask
+}
+
 /// Pump a subscribed connection: notifications up, commands down, until either side ends.
 async fn pump(
     peripheral: &Peripheral,
-    transport: &BleTransport,
+    (transport, label): (&BleTransport, &str),
     plumbing: &mut LinkPlumbing,
     settled: &mut Option<Peripheral>,
     (up, down): (&Characteristic, &Characteristic),
@@ -787,12 +945,13 @@ async fn pump(
     let mut alive = tokio::time::interval(ALIVE_EVERY);
     alive.reset();
     // Its first tick is immediate: the notifications are open, so the `Ready` it brings is heard.
-    let mut ask = tokio::time::interval(IDENTIFY_EVERY);
+    let mut ask = asker();
     let ready_warn = tokio::time::sleep(READY_WARN_AFTER);
     tokio::pin!(ready_warn);
     let mut warned = false;
     let mut ever_announced = false;
-    let over = |reason: &str, announced| End::Over { reason: reason.to_owned(), announced };
+    let failed = |Failure { reason, cause }, announced| End::Over { reason, cause, announced };
+    let over = |reason: &str, announced| failed(Failure::other(reason.to_owned()), announced);
 
     loop {
         tokio::select! {
@@ -818,10 +977,12 @@ async fn pump(
                             ));
                         }
                         Heard::Event(event) => {
-                            if let LinkEvent::Disconnected { reason } = &event {
+                            if let LinkEvent::Disconnected { reason, .. } = &event {
                                 tracing::warn!(reason = %reason, "the bridge let this host go");
                                 // The handback is expected, and is no reason to warn again.
                                 warned = true;
+                                // The gate restarted: ask again a period from now.
+                                ask.reset();
                             }
                             if plumbing.events.send(event).await.is_err() {
                                 return End::HandleDropped;
@@ -851,14 +1012,15 @@ async fn pump(
                 );
             }
             _ = ask.tick(), if !inbound.announced() => {
-                if let Err(reason) = send(peripheral, down, &mut writer, &HostToBridge::Identify).await {
-                    return over(&reason, ever_announced);
+                let identify = &HostToBridge::Identify;
+                if let Err(failure) = send(peripheral, down, &mut writer, identify, label).await {
+                    return failed(failure, ever_announced);
                 }
             }
             cmd = plumbing.commands.recv() => {
                 let Some(cmd) = cmd else { return End::HandleDropped };
-                if let Err(reason) = send(peripheral, down, &mut writer, &cmd).await {
-                    return over(&reason, ever_announced);
+                if let Err(failure) = send(peripheral, down, &mut writer, &cmd, label).await {
+                    return failed(failure, ever_announced);
                 }
             }
         }
@@ -871,7 +1033,8 @@ async fn send(
     down: &Characteristic,
     writer: &mut DownWriter,
     cmd: &HostToBridge,
-) -> Result<(), String> {
+    label: &str,
+) -> Result<(), Failure> {
     let Ok(writes) = writer.writes(cmd) else {
         // Only reachable if a command outgrew MAX_HOST_FRAME.
         tracing::error!("command did not fit in a frame; dropping it");
@@ -883,8 +1046,52 @@ async fn send(
             WriteKind::Request => WriteType::WithResponse,
         };
         if let Err(e) = peripheral.write(down, &write.bytes, kind).await {
-            return Err(format!("write failed: {e}"));
+            // Only a request carries the C6's answer; a write without response fails locally.
+            let refused = (write.kind == WriteKind::Request).then(|| refusal(label, &e)).flatten();
+            return Err(refused.unwrap_or_else(|| Failure::other(format!("write failed: {e}"))));
         }
     }
     Ok(())
+}
+
+/// The C6's refusal of this host for want of a bond, when `error` is one ([`refused_for_bonding`]).
+fn refusal(label: &str, error: &btleplug::Error) -> Option<Failure> {
+    refused_for_bonding(&error.to_string()).then(|| Failure {
+        reason: TransportError::NotBonded { bridge: label.to_owned() }.to_string(),
+        cause: DisconnectCause::NotBonded,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::Instant;
+
+    use super::{IDENTIFY_EVERY, asker};
+
+    /// An hour with the arm off, as a stream announced that long leaves it.
+    const ANNOUNCED_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_asker_fires_once_then_a_period_later_when_ticks_were_missed() {
+        let mut ask = asker();
+        ask.tick().await;
+        tokio::time::advance(ANNOUNCED_FOR).await;
+        let start = Instant::now();
+        ask.tick().await;
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO, "the one late tick");
+        ask.tick().await;
+        assert_eq!(start.elapsed(), IDENTIFY_EVERY, "not a burst of the missed ones");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_asker_waits_a_period_when_reset_after_ticks_were_missed() {
+        // What `pump` does when a takeover restarts the gate.
+        let mut ask = asker();
+        ask.tick().await;
+        tokio::time::advance(ANNOUNCED_FOR).await;
+        ask.reset();
+        let start = Instant::now();
+        ask.tick().await;
+        assert_eq!(start.elapsed(), IDENTIFY_EVERY);
+    }
 }

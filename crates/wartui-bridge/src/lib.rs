@@ -10,9 +10,10 @@
 //! starts at its first `Ready` (`gate`). They differ where the links do. Both ask with `Identify`
 //! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
 //! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
-//! so Bluetooth sends none. A Bluetooth write is a fragment of the ATT MTU, so each connection's first leads with
-//! a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a USB host took the
-//! bridge reads as the link going down, with the central still subscribed for the handback.
+//! so Bluetooth sends none. A Bluetooth write is a fragment of the ATT MTU, so each connection's
+//! first leads with a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a
+//! USB host took the bridge reads as the link going down, with the central still subscribed for
+//! the handback.
 //!
 //! **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
 //! long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
@@ -20,7 +21,7 @@
 //! async calls, which a runtime shutting down never finishes. So every Bluetooth transport counts
 //! itself running until its supervisor returns, [`LinkHandle::close`] waits for its own, and
 //! [`close_all`] waits for every one before `main` returns, so no command path has to remember
-//! to. Serial and the simulator close at once, as they always have.
+//! to. Serial and the simulator close at once.
 //!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
@@ -114,6 +115,9 @@ pub enum LinkEvent {
     Disconnected {
         /// Why, in terms fit to show a user.
         reason: String,
+        /// What the transport knows of why, for a caller that acts on it. Nothing reads
+        /// `reason`'s words for this.
+        cause: DisconnectCause,
     },
     /// A decoded message from the bridge.
     Message(BridgeToHost),
@@ -122,15 +126,30 @@ pub enum LinkEvent {
     Garbled(LinkError),
 }
 
+/// Why a link went down, as far as the transport can tell. Only the Bluetooth transport names a
+/// cause other than [`DisconnectCause::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectCause {
+    /// Nothing the transport can name: a cable, range, a port or a connect that failed, a reset.
+    Other,
+    /// A USB host took the bridge from this Bluetooth central, which stays subscribed for the
+    /// handback.
+    UsbTookBridge,
+    /// The bridge refused this host's subscription or write request with an ATT authentication or
+    /// encryption error: it holds no bond for this host. [`TransportError::NotBonded`] words it.
+    NotBonded,
+    /// The bridge dropped this host before any `Ready`, when the C6 drops a central it holds no
+    /// bond for. A P4 reset or range lost at that moment looks the same, so it proves nothing.
+    /// [`TransportError::MaybeNotBonded`] words it.
+    MaybeNotBonded,
+}
+
 /// What the host sees of a P4 with no firmware, and where its first flash is described.
 ///
 /// Here rather than in `wartui` because [`TransportError::NoBridgeFound`] says it too, and this
 /// crate sits below that one.
 pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware is a CH343 that does not answer; see \
      firmware/p4-bridge/README.md § \"First flash\".";
-
-/// What [`TransportError::NotBonded`] says, and `ble::is_not_bonded` reads.
-const NOT_PAIRED: &str = "because they are not paired";
 
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
@@ -215,10 +234,20 @@ pub enum TransportError {
     },
     /// The bridge refused this host's link, which is not encrypted with a bond it holds.
     #[error(
-        "the bridge {bridge} refused this PC over Bluetooth {NOT_PAIRED}; pair once with \
-         `wartui bluetooth pair --bridge {bridge}`"
+        "the bridge {bridge} refused this PC over Bluetooth because they are not paired; pair \
+         once with `wartui bluetooth pair --bridge {bridge}`"
     )]
     NotBonded {
+        /// The bridge, as its last two octets.
+        bridge: String,
+    },
+    /// The bridge dropped this host before serving it, when it drops a host it holds no bond for.
+    #[error(
+        "the bridge {bridge} dropped this PC over Bluetooth before serving it, as it drops a PC \
+         it is not paired with; if they are not paired, pair once with \
+         `wartui bluetooth pair --bridge {bridge}`"
+    )]
+    MaybeNotBonded {
         /// The bridge, as its last two octets.
         bridge: String,
     },

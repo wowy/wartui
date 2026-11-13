@@ -381,7 +381,7 @@ async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
             Some(_) => {}
             None => bail!("the link closed"),
         }

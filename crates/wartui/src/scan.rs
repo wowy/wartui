@@ -250,7 +250,7 @@ async fn watch(
                 println!("fault      {message}");
             }
             Some(LinkEvent::Message(message)) => seen.note(&message),
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
             Some(_) => {}
             None => bail!("the link closed"),
         }

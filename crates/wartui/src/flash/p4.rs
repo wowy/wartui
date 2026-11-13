@@ -202,7 +202,7 @@ async fn wait_for_ready(link: &mut LinkHandle, garbled: &mut bool) -> Result<Bri
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason }) => return Err(reason),
+            Some(LinkEvent::Disconnected { reason, .. }) => return Err(reason),
             Some(LinkEvent::Garbled(_)) => *garbled = true,
             Some(LinkEvent::Message(_)) => {}
             None => return Err("the link closed".to_owned()),
@@ -300,7 +300,7 @@ impl<'a> Update<'a> {
                 _ = tick.tick() => {}
                 event = link.recv() => match event {
                     Some(LinkEvent::Message(message)) => self.take(message, progress),
-                    Some(LinkEvent::Disconnected { reason }) => bail!(
+                    Some(LinkEvent::Disconnected { reason, .. }) => bail!(
                         "the link dropped before the update finished ({reason}); the bridge \
                          keeps its image, and flash-bridge can be run again"
                     ),

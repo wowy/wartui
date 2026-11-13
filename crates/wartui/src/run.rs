@@ -238,6 +238,7 @@ pub async fn run(args: Args) -> Result<()> {
         simulated: args.sim.is_some(),
         // The simulator's link is no link to save.
         link: args.sim.is_none().then_some(over),
+        link_proved: false,
         upload,
     };
     let config = EngineConfig {
