@@ -55,7 +55,7 @@ pub(crate) fn capture_simulated(
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { notes: None, simulated };
+    let info = CaptureInfo { notes: None, simulated, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();

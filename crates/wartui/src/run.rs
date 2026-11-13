@@ -222,7 +222,11 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
     let started = now();
-    let info = CaptureInfo { notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
+    let info = CaptureInfo {
+        notes: args.notes.clone(),
+        simulated: test_data(args.sim, args.lat),
+        link: args.sim.is_none().then_some(over.into()),
+    };
     let store_config = StoreConfig::new(&db);
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);

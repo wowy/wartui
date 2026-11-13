@@ -5,8 +5,8 @@ Guidance for coding agents working in this repository.
 ## What this is
 
 A terminal fleet controller for ESP32-C5 wardriving nodes, wired over SPI to an ESP32-P4 bridge
-(the node bus), reached over USB through the board's CH343. The board's C6 holds a UART link the P4
-updates and reports on. `README.md`
+(the node bus), reached over USB through the board's CH343, or over Bluetooth through the board's
+C6. The C6 sits on a UART link to the P4, which updates it and reports on it. `README.md`
 introduces it and says which chip goes where.
 
 Where the prose lives:
@@ -116,9 +116,12 @@ own.
   rather than a reflash, and the P4's planner testable without one.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
   and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`, btleplug), from the fake
-  fleet (`sim`). `wartui`'s `main.rs::open` is the one place a link is picked. It also owns the host's
-  serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
-  that opens a device shares one enumeration.
+  fleet (`sim`). The two transports differ only where their links do; what a connection admits
+  from the bridge's stream is one rule both read through (`gate`), and `bluez` is the Linux
+  pairing `wartui bluetooth pair` drives (`src/lib.rs` `//!`). `wartui`'s `main.rs::open` is the
+  one place a link is picked. It also owns the host's serial ports generally (`ports`): what is
+  attached and what the OS says it is, so anything else that opens a device shares one
+  enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/`bluetooth`) and the
@@ -178,8 +181,12 @@ far, beside the `StopScan` a quit sends; channels are the P4's.
 **drops rather than blocks** (a stalled engine misses everything, the bridge's reports and every
 node's heartbeats included). A capture file holds one run: `Store::create` refuses a path that
 exists. `export` (WiGLE CSV) is a view over the store, re-runnable against a finished or
-still-running capture. `SCHEMA` changes shape as freely as the work needs. Each change bumps
-`store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather than migrated.
+still-running capture. Each bridge status is a `bridge_status` row, with a `bridge_queue` row per
+queue and a `bridge_bluetooth` row for its Bluetooth host link: owner, bonds, pairing window,
+central and the C6's counters, kept over either link. `capture.link` is the link the host used,
+written once at creation (`store.rs` `//!`). `SCHEMA` changes shape as freely as the work needs.
+Each change bumps `store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather
+than migrated.
 
 Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
 bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) → a host GPS found by
@@ -359,14 +366,20 @@ edit stops; follow the pointer before changing the rule.
   sweep, the probe and `reset` read.
   → `crates/wartui-bridge/src/ports.rs` `//!`, `serial::probe` /
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks a CH343 every 500 ms, and any other port once, until a `Ready` proves the
-  board.** A CH343 drains its UART, and a P4 booting behind it loses the first `Identify`. A path
-  named with `--bridge` that is not a listed CH343 may be a node, and a node that is not reading
-  its USB endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output
-  queue through a `close` that no signal can interrupt — 30 s measured against a node, during
-  which the process cannot exit. Once proven, a connection that has written nothing for 10 s
-  sends a `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s.
-  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm and `KEEPALIVE`
+- **A connection starts at its first `Ready`, on both links, and asks with `Identify` until one
+  answers.** What decodes ahead of it was written before the connection and is dropped
+  (`gate`). Over USB a connection asks a CH343 every 500 ms, and any other port once. A CH343
+  drains its UART, and a P4 booting behind it loses the first `Identify`. A path named with
+  `--bridge` that is not a listed CH343 may be a node, and a node that is not reading its USB
+  endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output queue
+  through a `close` that no signal can interrupt — 30 s measured against a node, during which the
+  process cannot exit. Once proven, a USB connection that has written nothing for 10 s sends a
+  `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s. Over Bluetooth
+  a connection asks every second once its notifications are open, because a bonded central's
+  subscription outlives its connection and the bridge's `Ready` can go by before the transport
+  listens, and it sends no keepalive, since that gate never closes on silence.
+  → `crates/wartui-bridge/src/lib.rs` `//!`, `src/gate.rs` `//!`; `src/serial.rs`, `connect`'s
+  `identify` arm and `KEEPALIVE`; `src/ble.rs` `//!`, `IDENTIFY_EVERY`
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
   real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one
@@ -415,9 +428,11 @@ edit stops; follow the pointer before changing the rule.
 - **The P4's I2C0 is shared** by the GPS reader and the carrier's I/O expander, behind one mutex.
   Lock it per transaction, never across an await on anything but the bus, or one stalls the
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
-- **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
-  stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
-  P4 resets at its own boot. → `crates/wartui-bridge/src/gate.rs`, `is_a_new_life`
+- **Over USB, a restart of either chip is invisible unless the host compares uptimes**, because
+  the CH343 stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the
+  C6's, which the P4 resets at its own boot. Both transports read each `Ready` through the same
+  gate, so a new life under a held connection is reported on either; over Bluetooth a restart of
+  either chip also drops the link. → `crates/wartui-bridge/src/gate.rs` `//!`, `is_a_new_life`
 - **The P4 writes nothing to a host until one attaches, and queues nothing until then.** A USB
   host attaches with a decoded frame, since the P4 cannot see the CH343's DTR, and its gate closes
   15 s after the last one: three of the engine's 5 s status polls. A Bluetooth central attaches by
@@ -438,6 +453,36 @@ edit stops; follow the pointer before changing the rule.
   each dropped what was queued for the central. Once UART0 falls silent for 15 s, a central still
   subscribed takes the queue back.
   → `crates/wartui-proto/src/host_owner.rs` `//!`, `firmware/p4-bridge/src/ble.rs`
+- **Only an encrypted central holding a stored bond subscribes or writes.** The attribute table
+  requires encryption, but Just Works gives an unbonded link the same level, so the C6 checks the
+  bond itself before a write is forwarded or a subscription counts, and drops a central that
+  cannot bond. → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`
+- **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
+  the P4's own offsets, up to which the C6 is done, so every `HostStart` and `HostBytes`
+  resynchronizes it and a restart of either chip cannot skew it. A sum kept from the C6's boot
+  would leave the P4 holding more credit than it sent after a restart, and it would never send
+  again. A lost packet is credited as though sent, and costs the central its frame
+  (`resynced_bytes`).
+  → `crates/wartui-proto/src/radio_link/inflow.rs` `//!`
+- **A frame from a central ends with a write request**, and its earlier pieces are writes without
+  response. TrouBLE queues 8 writes per connection and drops the rest, and the C6 answers the
+  request only once it has forwarded that piece, so a central has one frame outstanding at most. A
+  request whose write the C6 dropped is refused, and the transport ends the connection.
+  → `crates/wartui-bridge/src/ble.rs` `//!` § "Writes", `firmware/p4-radio/src/ble.rs` `//!`
+- **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
+  long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
+  to it. `close_all` waits for every Bluetooth transport before `main` returns, so no command path
+  has to remember to. → `crates/wartui-bridge/src/lib.rs` `//!`, `close_all`
+- **The C6 restarts itself when its Bluetooth host stops, and the P4 keeps its last panic line.**
+  A stopped TrouBLE host cannot be started again in place: that resets the controller with no
+  disconnection event, and the C6 never advertises again. The C6 panics, and its panic handler
+  keeps the reason for the next boot to report. That report reaches a host that has usually gone,
+  so the P4 keeps the line and repeats it to every host that attaches.
+  → `firmware/p4-radio/src/ble.rs`, `run_host`; `firmware/p4-radio/src/last_panic.rs`;
+  `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
+- **Updates use the USB cable.** `flash-bridge` and `ota` take no `--link`, refuse one with the
+  reason, and ignore `[bridge] link`; updating over Bluetooth is issue #314.
+  → `crates/wartui/src/main.rs`, `UPDATES`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A
   `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and

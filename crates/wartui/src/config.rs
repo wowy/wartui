@@ -106,6 +106,15 @@ pub enum Link {
     Bluetooth,
 }
 
+impl From<Link> for wartui_core::store::HostLink {
+    fn from(link: Link) -> Self {
+        match link {
+            Link::Usb => Self::Usb,
+            Link::Bluetooth => Self::Bluetooth,
+        }
+    }
+}
+
 /// The `[gps]` table: how often a bridge's GPS receiver reports a fix, in whole hertz
 /// within [`GPS_RATE_HZ`], and whether `run` holds the scan until a receiver holds a fix.
 /// `bridge-rate-hz` absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`], and

@@ -14,7 +14,7 @@ use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::LoopPhase;
+use wartui_proto::link::{BluetoothStatus, HostOwner, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -135,6 +135,7 @@ pub(super) fn busy() -> Snapshot {
         }),
         link_up: true,
         link_error: None,
+        link_cause: None,
         // What a bridge with none stored reports.
         pool: Some(ChannelPool::All),
         scan: Some(ScanMode::Wifi),
@@ -196,6 +197,8 @@ pub(super) fn busy() -> Snapshot {
             dropped_since_attach: 0,
             uptime_ms: 60_000,
             fan: None,
+            // What a bridge on USB with no Bluetooth host reports.
+            bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
         }),
         started_at_ms: EPOCH_MS,
         now_ms: EPOCH_MS + 60_000,

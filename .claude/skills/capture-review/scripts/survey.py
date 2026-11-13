@@ -32,7 +32,7 @@ NOT_FAULTS = ("power_on", "external")
 
 # Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
 # only, as the store does.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
@@ -50,6 +50,18 @@ BOARD_PER_BUS = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}
 
 # Mirrors EngineConfig::status_interval in crates/wartui-core/src/engine/config.rs.
 STATUS_INTERVAL_MS = 5000
+
+# The HCI disconnect reasons a C6 reports in `bridge_bluetooth.last_disconnect`, from the Bluetooth
+# Core specification (Vol 1, Part F), as the C6 sees them: "local" is the C6, "remote" the central.
+HCI_REASONS = {
+    0x08: "supervision timeout",
+    0x13: "remote terminated",
+    0x16: "local terminated",
+    0x3D: "MIC failure",
+}
+
+# Mirrors ATT_MTU_MAX in firmware/p4-radio/src/ble.rs: the largest ATT MTU the C6 takes.
+WANTED_MTU = 247
 
 # Mirrors plan::SCAN_CHANNELS in crates/wartui-proto/src/plan/channels.rs.
 SCAN_CHANNELS = [
@@ -236,7 +248,7 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS, BOARD
     section("capture")
-    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "notes",
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "link", "notes",
             "simulated")
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
@@ -270,6 +282,14 @@ def provenance(db, ctx):
         flag("WARN", "capture",
              "node_board='no carrier': the P4 found no wartui-carrier at boot and drove no node",
              "SELECT node_board FROM capture")
+    link = row.get("link")
+    ctx["link"] = link
+    print(f"  link      {link or 'NULL (--sim)'}")
+    if link == "bluetooth":
+        flag("INFO", "capture",
+             "link=bluetooth: the host reached the bridge through its C6, so every host frame "
+             "crossed the C6's UART and its Bluetooth link (see the bluetooth host lines)",
+             "SELECT link FROM capture")
     print(f"  simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")
@@ -760,6 +780,7 @@ def bridge(db, ctx):
     bridge_host_uart(db)
     bridge_fan(db)
     bridge_slots(db)
+    bridge_bluetooth(db, ctx, lives)
 
 
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
@@ -933,6 +954,93 @@ def bridge_slots(db):
     for i in sorted(restart_spells):
         print(f"  bridge restart at {rel(rows[i][0])}: all slots absent until their nodes "
               "answered")
+
+
+BLUETOOTH_COUNTERS = ("pairings", "failed_pairings", "unbonded_kicks", "resynced_bytes",
+                      "dropped_writes")
+
+
+def bridge_bluetooth(db, ctx, lives):
+    """The Bluetooth host link, from `bridge_bluetooth`: who held the bridge, the central, and the
+    C6's counters over the capture.
+
+    The counters are the C6's since its boot. The C6 restarts with the P4 and on its own when its
+    Bluetooth host stops, which the P4's uptime does not show, so they rebase on a restart and
+    whenever they fall, as analyze's `BluetoothLoss` does. A reply's owner is who held the host
+    queue as it was sent, and each span between replies is put down to the later one's owner.
+    """
+    cols = ", ".join(f"b.{c}" for c in BLUETOOTH_COUNTERS)
+    rows = db.q(
+        "SELECT s.id, s.rx_at, b.owner, b.central_mtu, b.last_disconnect, "
+        f"{cols} FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id "
+        "ORDER BY s.id"
+    )
+    if not rows:
+        return
+    owned = Counter()
+    for prev, cur in zip(rows, rows[1:]):
+        owned[cur[2]] += cur[1] - prev[1]
+    owners = Counter(r[2] for r in rows)
+    print("  bluetooth host  owner " + "  ".join(
+        f"{o} {dur(owned[o])} ({owners[o]} rows)" for o in sorted(owners)))
+    sums = dict.fromkeys(BLUETOOTH_COUNTERS, 0)
+    for prev, cur in zip(rows, rows[1:]):
+        restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
+        for i, c in enumerate(BLUETOOTH_COUNTERS, start=5):
+            sums[c] += since_boot_delta(cur[i], prev[i], restarted)
+    print("  bluetooth host  " + "  ".join(f"{c} {sums[c]}" for c in BLUETOOTH_COUNTERS))
+    mtus = sorted({r[3] for r in rows if r[3] is not None})
+    print(f"  bluetooth host  central MTU {', '.join(map(str, mtus)) or 'none connected'}")
+    sql = (f"SELECT s.id, s.rx_at, s.uptime_ms, b.owner, b.central_mtu, b.last_disconnect, {cols} "
+           "FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id ORDER BY s.id")
+
+    if sums["resynced_bytes"]:
+        flag("WARN", "bluetooth",
+             f"resynced_bytes {sums['resynced_bytes']}: P4 to C6 packets of the host stream were "
+             "lost, and each loss cost the frame it was in", sql)
+    if sums["dropped_writes"]:
+        flag("WARN", "bluetooth",
+             f"dropped_writes {sums['dropped_writes']}: bytes a host wrote were lost on the C6, "
+             "whose queue to the P4 stayed full", sql)
+    if sums["unbonded_kicks"] or sums["failed_pairings"]:
+        flag("INFO", "bluetooth",
+             f"unbonded_kicks {sums['unbonded_kicks']}, failed_pairings "
+             f"{sums['failed_pairings']}: a host with no bond tried to connect, or a pairing "
+             "failed", sql)
+
+    # A takeover: no owner mid-run, or USB holding the bridge from a Bluetooth capture.
+    taken = {"none": owned["none"]}
+    if ctx.get("link") == "bluetooth":
+        taken["usb"] = owned["usb"]
+    taken = {o: ms for o, ms in taken.items() if ms or owners[o]}
+    if taken:
+        flag("WARN", "bluetooth",
+             "the bridge was held by "
+             + ", ".join(f"{o} for {dur(ms)} ({owners[o]} rows)" for o, ms in taken.items())
+             + f" during a {ctx.get('link') or 'simulated'} capture: a takeover", sql)
+
+    codes = []  # (row, code) where last_disconnect changed to a code other than none
+    for prev, cur in zip([None] + rows, rows):
+        code = cur[4]
+        if code and (prev is None or prev[4] != code):
+            codes.append((cur, code))
+    for r, code in codes[:8]:
+        print(f"  bluetooth host  last disconnect 0x{code:02X} "
+              f"({HCI_REASONS.get(code, 'unnamed')}) by {rel(r[1])}")
+    if codes:
+        seen = sorted({code for _, code in codes})
+        worst = any(code in (0x08, 0x3D) for code in seen)
+        flag("WARN" if worst else "INFO", "bluetooth",
+             "last disconnect reason(s) "
+             + ", ".join(f"0x{c:02X} {HCI_REASONS.get(c, 'unnamed')}" for c in seen), sql)
+
+    slow = [m for m in mtus if m < WANTED_MTU]
+    if slow:
+        flag("WARN", "bluetooth",
+             f"a central at MTU {', '.join(map(str, slow))}, below the {WANTED_MTU} the C6 "
+             "takes: smaller writes and notifications, so a slower link",
+             "SELECT s.id, s.rx_at, b.central_mtu FROM bridge_status s JOIN bridge_bluetooth b "
+             f"ON b.status_id = s.id WHERE b.central_mtu < {WANTED_MTU} ORDER BY s.id")
 
 
 def host(db, ctx):

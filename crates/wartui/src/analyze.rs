@@ -14,10 +14,10 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{
-    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
+    BridgeLoss, HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
 use wartui_core::export::wigle_csv;
-use wartui_core::store::open_readonly;
+use wartui_core::store::{HostLink, open_readonly};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::mac::{self, Mac};
 
@@ -166,12 +166,7 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         // Both are the P4's, and the host link's errors are said at 0 too: they answer whether
         // the host's frames reached the P4.
         let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(&bridge.radio_link));
-        let _ = writeln!(
-            text,
-            "  {:<11}{} host_uart_errors",
-            "host link",
-            thousands(bridge.host_uart_errors)
-        );
+        let _ = writeln!(text, "  {:<11}{}", "host link", host_link_line(loss.link, bridge));
     }
     if let Some(host) = &loss.host {
         let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
@@ -211,6 +206,28 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         let _ = writeln!(text, "{line}");
     }
     text
+}
+
+/// The link the host used, the P4's host UART errors, said at 0 too, then only the C6's Bluetooth
+/// host link faults that moved. Those are reported over USB too: a Bluetooth host waiting behind
+/// USB is still the C6's.
+fn host_link_line(link: Option<HostLink>, bridge: &BridgeLoss) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = link.map(|link| format!("{}  ", link.name())).unwrap_or_default();
+    let _ = write!(line, "{} host_uart_errors", thousands(bridge.host_uart_errors));
+    let b = &bridge.bluetooth;
+    for (count, name) in [
+        (b.resynced_bytes, "resynced_bytes"),
+        (b.dropped_writes, "dropped_writes"),
+        (b.unbonded_kicks, "unbonded_kicks"),
+        (b.failed_pairings, "failed_pairings"),
+    ] {
+        if count > 0 {
+            let _ = write!(line, "  {} {name}", thousands(count));
+        }
+    }
+    line
 }
 
 /// The UART link's packets, then only the error counters that moved.
@@ -318,9 +335,10 @@ fn percent(part: u64, whole: u64) -> String {
 #[cfg(test)]
 mod tests {
     use wartui_core::analyze::{
-        BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary, QueueLoss,
-        RadioLinkLoss,
+        BluetoothLoss, BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
+        QueueLoss, RadioLinkLoss,
     };
+    use wartui_core::store::HostLink;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::QueueId;
     use wartui_proto::mac::Mac;
@@ -382,6 +400,7 @@ mod tests {
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             nodes: vec![
                 NodeLoss {
@@ -421,6 +440,7 @@ mod tests {
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
@@ -537,6 +557,7 @@ mod tests {
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         });
         let text = loss_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
@@ -557,6 +578,7 @@ mod tests {
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
         };
@@ -581,6 +603,7 @@ mod tests {
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
         };
@@ -644,6 +667,7 @@ mod tests {
                 ],
                 radio_link,
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
         }
@@ -692,6 +716,23 @@ mod tests {
         loss.bridge.as_mut().unwrap().host_uart_errors = 1_204;
         let text = loss_text(&loss);
         assert!(text.ends_with("  host link  1,204 host_uart_errors\n"), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_names_link_and_bluetooth_faults_when_capture_has_them() {
+        let mut loss = bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() });
+        loss.link = Some(HostLink::Bluetooth);
+        assert!(loss_text(&loss).ends_with("  host link  bluetooth  0 host_uart_errors\n"));
+        loss.bridge.as_mut().unwrap().bluetooth =
+            BluetoothLoss { resynced_bytes: 1_244, unbonded_kicks: 2, ..BluetoothLoss::default() };
+        let text = loss_text(&loss);
+        assert!(
+            text.ends_with(
+                "  host link  bluetooth  0 host_uart_errors  1,244 resynced_bytes  \
+                 2 unbonded_kicks\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

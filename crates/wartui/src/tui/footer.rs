@@ -1,16 +1,21 @@
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
 //! as refused sightings and duplicate batches, sit outside it, so a clean run looks
 //! clean.
+//!
+//! A Bluetooth link the bridge let go because a USB host took it is down, but nothing is broken:
+//! the bridge serves one host, USB first, and hands the link back once USB goes quiet. So its
+//! reason is a plain line of its own ([`takeover_line`]) rather than a fault.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use wartui_bridge::BridgeInfo;
+use wartui_bridge::{BridgeInfo, DisconnectCause};
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
 use wartui_proto::fan::FanDuty;
+use wartui_proto::link::USB_TOOK_BRIDGE;
 use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
@@ -62,6 +67,11 @@ pub(super) fn draw_footer(
         lines.push(Line::from(buffer_full));
     }
 
+    // Its own line, plain, since the bridge serving another host is no fault.
+    if let Some(takeover) = takeover_line(snapshot) {
+        lines.push(Line::from(takeover));
+    }
+
     // Its own line for the same reason. It stays after the upload ends, until the
     // next `u`.
     if let Some(status) = ui.upload().status() {
@@ -83,13 +93,29 @@ pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
     crate::text::buffer_full(c.wifi_refused, c.ble_refused).map(|line| format!("  {line}"))
 }
 
+/// Why the link is down when a USB host took the bridge from this Bluetooth host, or `None`.
+pub(super) fn takeover_line(snapshot: &Snapshot) -> Option<String> {
+    taken_by_usb(snapshot).then(|| {
+        format!(
+            "  link down: {USB_TOOK_BRIDGE}; the bridge hands it back 15 s after USB goes quiet"
+        )
+    })
+}
+
+/// Whether the link is down because a USB host took the bridge.
+fn taken_by_usb(snapshot: &Snapshot) -> bool {
+    !snapshot.link_up && snapshot.link_cause == Some(DisconnectCause::UsbTookBridge)
+}
+
 /// Every fault so far, most urgent first. Empty on a clean run.
 pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     let c = snapshot.counters;
     let mut faults = Vec::new();
     // First, because with the link down nothing else here updates.
+    // A takeover is the bridge serving USB, said by `takeover_line`.
     if let Some(error) = &snapshot.link_error
         && !snapshot.link_up
+        && !taken_by_usb(snapshot)
     {
         faults.push(format!("link down: {error}"));
     }
@@ -385,6 +411,29 @@ mod tests {
         assert!(screen.contains("link down"), "{screen}");
         // The tail of the reason names the fix.
         assert!(screen.contains("busy"), "{screen}");
+    }
+
+    #[test]
+    fn view_shows_takeover_as_link_down_reason_not_fault_when_usb_takes_bridge() {
+        let mut snapshot = busy();
+        snapshot.link_up = false;
+        snapshot.link_error = Some(USB_TOOK_BRIDGE.to_owned());
+        snapshot.link_cause = Some(DisconnectCause::UsbTookBridge);
+        assert!(!faults(&snapshot).iter().any(|fault| fault.contains("link down")));
+        assert_eq!(
+            takeover_line(&snapshot).as_deref(),
+            Some(
+                "  link down: the USB host took the bridge; the bridge hands it back 15 s after \
+                 USB goes quiet"
+            )
+        );
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("link down: the USB host took the bridge"), "{screen}");
+
+        // Any other cause is a fault.
+        snapshot.link_cause = Some(DisconnectCause::Other);
+        assert_eq!(takeover_line(&snapshot), None);
+        assert!(faults(&snapshot)[0].starts_with("link down: "));
     }
 
     #[test]

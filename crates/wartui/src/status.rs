@@ -203,15 +203,19 @@ pub(crate) fn host_text(status: &BluetoothStatus) -> String {
     }
 }
 
-/// A connected Bluetooth host: whether it may be served, and its link.
-fn central_text(central: &Central) -> String {
-    let trust = match (central.encrypted, central.bonded) {
+/// Whether a connected Bluetooth host may be served: the bridge serves only one that is both.
+pub(crate) const fn trust_text(central: &Central) -> &'static str {
+    match (central.encrypted, central.bonded) {
         (true, true) => "encrypted and bonded",
         (true, false) => "encrypted, not bonded",
         (false, true) => "bonded, not encrypted",
         (false, false) => "not encrypted or bonded",
-    };
-    let mut text = format!("{trust}, MTU {}", central.mtu);
+    }
+}
+
+/// A connected Bluetooth host: whether it may be served, and its link.
+fn central_text(central: &Central) -> String {
+    let mut text = format!("{}, MTU {}", trust_text(central), central.mtu);
     match central.phy {
         0 => {}
         1 => text.push_str(", 1M PHY"),

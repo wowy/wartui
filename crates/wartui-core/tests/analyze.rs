@@ -5,16 +5,18 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use wartui_core::analyze::{
-    BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss, losses, peaks,
+    BluetoothLoss, BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
+    losses, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{
     BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record,
 };
-use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{CaptureInfo, HostLink, Store, StoreConfig, open_readonly};
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
-use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -29,7 +31,7 @@ fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();
@@ -60,6 +62,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         host_uart_errors: 0,
         fan: None,
         slots_present: 0,
+        bluetooth: BluetoothStatus::default(),
     })
 }
 
@@ -325,6 +328,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }
@@ -351,6 +355,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }
@@ -507,6 +512,58 @@ fn analyze_sums_radio_link_errors_when_p4_reboots() {
             radio_uart_errors: 8 * n,
         }
     );
+}
+
+/// A status reply carrying the C6's Bluetooth fault counters: resynced bytes `n`, then `2n`, `3n`
+/// and `4n` in [`BluetoothLoss`]'s field order, so no two counters match.
+fn bluetooth_status(uptime_ms: u32, n: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
+    let counters = BleCounters {
+        resynced_bytes: n,
+        dropped_writes: 2 * n,
+        unbonded_kicks: 3 * n,
+        failed_pairings: 4 * n,
+        ..BleCounters::default()
+    };
+    Record::BridgeStatus(BridgeStatusSeen {
+        bluetooth: BluetoothStatus { counters, ..BluetoothStatus::default() },
+        ..seen
+    })
+}
+
+#[test]
+fn analyze_sums_bluetooth_faults_when_c6_restarts_on_its_own() {
+    // The C6 restarts itself when its Bluetooth host stops, and the P4 runs on: its uptime holds,
+    // and the counters fall.
+    let (_dir, conn) = capture(vec![
+        bluetooth_status(60_000, 2),
+        bluetooth_status(65_000, 5),
+        bluetooth_status(70_000, 1),
+    ]);
+    let bluetooth = losses(&conn).unwrap().bridge.unwrap().bluetooth;
+    let n = 3 + 1;
+    assert_eq!(
+        bluetooth,
+        BluetoothLoss {
+            resynced_bytes: n,
+            dropped_writes: 2 * n,
+            unbonded_kicks: 3 * n,
+            failed_pairings: 4 * n,
+        }
+    );
+}
+
+#[test]
+fn analyze_reads_capture_link_when_capture_names_one() {
+    let (_dir, conn) = capture(vec![]);
+    assert_eq!(losses(&conn).unwrap().link, None, "the fixture is a capture with no link");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let info = CaptureInfo { notes: None, simulated: false, link: Some(HostLink::Bluetooth) };
+    Store::create(&StoreConfig::new(&path), &info, EPOCH_MS).expect("creating").close();
+    let conn = open_readonly(&path).expect("reopening");
+    assert_eq!(losses(&conn).unwrap().link, Some(HostLink::Bluetooth));
 }
 
 /// A status reply carrying the P4's host UART errors.
@@ -735,6 +792,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }

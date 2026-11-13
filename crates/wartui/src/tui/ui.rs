@@ -13,7 +13,6 @@ use super::settings::{
     ConfigModal, ModalAction, apply, apply_excluded, link_written, save_bridge, save_fix_wait,
 };
 use super::upload::Upload;
-#[cfg(test)]
 use crate::config;
 use crate::text::node_name;
 
@@ -72,6 +71,12 @@ impl Ui {
     /// A fresh view that saves through `settings`.
     pub(super) fn new(settings: Settings) -> Self {
         Self { settings, ..Self::default() }
+    }
+
+    /// The link this run reaches its bridge over. The simulator stands in for a bridge on USB, and
+    /// reports USB as the bridge's host.
+    pub(super) fn link(&self) -> config::Link {
+        self.settings.link.unwrap_or_default()
     }
 
     /// The block under the cursor, and the grid's scroll and blocks per row, for

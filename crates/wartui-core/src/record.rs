@@ -11,7 +11,7 @@ use wartui_proto::beacon::visible_ssid;
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -114,6 +114,9 @@ pub struct BridgeStatusSeen {
     pub fan: Option<FanStats>,
     /// The slots it counted present, bit n for `Slot` byte n.
     pub slots_present: u32,
+    /// Its Bluetooth host link: who held the host queue, the bonds and pairing window, the
+    /// connected central and the C6's counters since the C6 booted.
+    pub bluetooth: BluetoothStatus,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

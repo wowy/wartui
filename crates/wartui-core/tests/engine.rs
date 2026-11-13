@@ -29,13 +29,14 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, HostToBridge, LinkError,
-    LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats,
-    RadioLinkStats,
+    BluetoothStatus, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED,
+    HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER, PairWindow,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -2242,6 +2243,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan,
             slots_present: ALL_PRESENT,
+            bluetooth: BluetoothStatus::default(),
         }]
     );
     assert_eq!(
@@ -2258,10 +2260,90 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan: None,
             slots_present: ALL_PRESENT,
+            bluetooth: BluetoothStatus::default(),
         }]
     );
     let shown = engine.snapshot(clock.at(7), StoreStats::default()).bridge_status;
     assert_eq!(shown.and_then(|status| status.fan), None, "the latest reply's fan");
+}
+
+#[test]
+fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
+    // The engine reads nothing in it: the store keeps it and the view shows the host link.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let bluetooth = BluetoothStatus {
+        owner: HostOwner::Bluetooth,
+        bonds: 2,
+        window: PairWindow::Open { secs: 87 },
+        central: Some(Central {
+            encrypted: true,
+            bonded: true,
+            mtu: 247,
+            phy: 2,
+            interval_us: 30_000,
+        }),
+        counters: BleCounters {
+            pairings: 1,
+            resynced_bytes: 244,
+            last_disconnect: 0x13,
+            ..BleCounters::default()
+        },
+    };
+    engine.handle(connected(), clock.at(1));
+    let batch = engine.handle(
+        Event::Link(LinkEvent::Message(BridgeToHost::Status {
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 9_000,
+            rx_oversize: 0,
+            queues: QueueStats::new(),
+            radio_link: RadioLinkStats::default(),
+            host_uart_errors: 0,
+            fan: None,
+            pool: ChannelPool::All,
+            scan: ScanMode::Stopped,
+            ble: None,
+            present: ALL_PRESENT,
+            members: Default::default(),
+            bluetooth,
+        })),
+        clock.at(2),
+    );
+    let recorded: Vec<BluetoothStatus> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::BridgeStatus(s) => Some(s.bluetooth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, [bluetooth]);
+    let shown = engine.snapshot(clock.at(2), StoreStats::default()).bridge_status;
+    assert_eq!(shown.map(|status| status.bluetooth), Some(bluetooth));
+}
+
+#[test]
+fn engine_keeps_disconnect_cause_until_link_returns_when_usb_takes_bridge() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let cause =
+        |engine: &FleetEngine| engine.snapshot(clock.at(9), StoreStats::default()).link_cause;
+    engine.handle(connected(), clock.at(1));
+    assert_eq!(cause(&engine), None);
+
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected {
+            reason: USB_TOOK_BRIDGE.to_owned(),
+            cause: DisconnectCause::UsbTookBridge,
+        }),
+        clock.at(2),
+    );
+    assert_eq!(cause(&engine), Some(DisconnectCause::UsbTookBridge));
+
+    // The handback's `Ready`.
+    engine.handle(connected(), clock.at(3));
+    assert_eq!(cause(&engine), None);
 }
 
 #[test]

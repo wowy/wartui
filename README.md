@@ -130,6 +130,9 @@ wartui scan start # set the bridge scanning with no host attached; `scan stop` i
 The nodes connect by SPI to a USB-attached ESP32-P4 board, the bridge, on two buses
 ([`docs/node-bus.md`](docs/node-bus.md)). The bridge assigns their channels. wartui reaches them
 through it: it starts and stops the scan, shows the fleet, and stores everything the nodes see.
+wartui reaches the bridge over USB, or over Bluetooth through its C6 once paired (`--link
+bluetooth`; [The Bluetooth link](crates/wartui/README.md#the-bluetooth-link)). Updates use the USB
+cable.
 
 The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firmware/p4-radio`, all
 in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4-WIFI6:

@@ -54,6 +54,18 @@ reasoning.
 | `undecodable` | Records whose body would not parse for their type: always our bug. | `crates/wartui-core/src/engine/rx.rs`, `crates/wartui-proto/src/bus/` |
 | `incompatible` | Records whose body is not their type's length, or sightings from a node whose heartbeat named another major or minor: a node on another build. The fix is to update the fleet together with `wartui ota`. | `crates/wartui-proto/src/bus/mod.rs` `BUS_VERSION`, `NODE_VERSION` |
 
+## Bluetooth host link
+
+| Symptom | Usual meaning | Read |
+|---|---|---|
+| `capture.link` (survey prints `link …`, and flags `bluetooth`) | The link the host reached the bridge over, written once when the capture was made: `usb`, `bluetooth`, or NULL under `--sim`. Over Bluetooth every host frame also crossed the C6's UART and its radio link, so bridge and host figures carry the C6's losses too. Every capture keeps `bridge_bluetooth`, over USB as well. | `crates/wartui-core/src/store.rs` `//!`, `crates/wartui-bridge/src/ble.rs` `//!` |
+| `resynced_bytes` > 0 | Host stream bytes lost between the P4 and the C6, P4→C6 packets that never arrived. The C6 credits the gap and puts a `0x00` ahead of the next bytes, so each loss costs the frame it was in. Pair it with the `radio_*` link counters. | `crates/wartui-proto/src/radio_link/` `Inflow`, `firmware/p4-radio/src/ble.rs` `//!` |
+| `dropped_writes` > 0 | Bytes a host wrote that the C6 dropped after waiting for room in its queue to the P4. A write request whose write was dropped is refused, so wartui's transport ends the connection and resynchronizes; expect a reconnect in the log. | `firmware/p4-radio/src/ble.rs` `//!` (`FORWARD_WAIT`), `crates/wartui-bridge/src/ble.rs` § "Writes" |
+| `unbonded_kicks` or `failed_pairings` > 0 | A central with no bond connected and was dropped, or a pairing failed. A phone or another PC near the bridge inside its pairing window, or this PC after the bridge forgot it (`wartui bluetooth pair --fresh`). | `crates/wartui/README.md` § "The Bluetooth link", `docs/c6-ble-pairing-findings.md` |
+| `owner` `none` mid-run, or `usb` in a Bluetooth capture (survey flags "a takeover") | Another host held the bridge: a USB frame takes it from a Bluetooth host, which gets it back 15 s after USB goes quiet. A host hears no status while another holds the bridge, so a takeover shows mostly as a gap in `bridge_status` replies, and these rows are its edges. | `crates/wartui-proto/src/host_owner.rs` `//!`, `firmware/p4-bridge/src/ble.rs` |
+| `last_disconnect` other than 0 (survey names the HCI code) | The C6's latest disconnection. `0x08` supervision timeout: the link was lost, to range, RF or a stalled C6. `0x13` remote terminated: the central closed it, as every wartui command does at exit. `0x16` local terminated: the C6 closed it, as when it drops an unbonded central. `0x3D` MIC failure: the encryption failed, a bond out of step. The column holds only the latest, so a change between rows is one disconnection at least. | `firmware/p4-radio/src/ble.rs`, `crates/wartui-proto/src/radio_link/message.rs` `BleCounters` |
+| A central's `central_mtu` below 247 (survey flags it) | The central took a smaller ATT MTU than the 247 the C6 offers, so every write and notification carries less and the link is slower. A host other than wartui, usually. | `firmware/p4-radio/src/ble.rs` `ATT_MTU_MAX`, `crates/wartui-bridge/src/ble.rs` § "Writes" |
+
 ## Sightings and decode
 
 | Symptom | Usual meaning | Read |

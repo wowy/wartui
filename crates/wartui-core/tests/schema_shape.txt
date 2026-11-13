@@ -1,4 +1,4 @@
-SCHEMA_VERSION 3
+SCHEMA_VERSION 4
 
 CREATE TABLE assignment (
   id INTEGER PRIMARY KEY,
@@ -16,6 +16,28 @@ CREATE TABLE batch_gap (
   after_seq INTEGER NOT NULL,
   seq INTEGER NOT NULL,
   lost INTEGER NOT NULL
+)
+
+CREATE TABLE bridge_bluetooth (
+  status_id INTEGER PRIMARY KEY REFERENCES bridge_status(id),
+  owner TEXT NOT NULL,
+  bonds INTEGER NOT NULL,
+  pair_window TEXT NOT NULL,
+  pair_window_secs INTEGER,
+  central_encrypted INTEGER,
+  central_bonded INTEGER,
+  central_mtu INTEGER,
+  central_phy INTEGER,
+  central_interval_us INTEGER,
+  pairings INTEGER NOT NULL,
+  failed_pairings INTEGER NOT NULL,
+  unbonded_kicks INTEGER NOT NULL,
+  last_disconnect INTEGER NOT NULL,
+  resynced_bytes INTEGER NOT NULL,
+  dropped_writes INTEGER NOT NULL,
+  phy INTEGER NOT NULL,
+  interval_us INTEGER NOT NULL,
+  heap_high_water INTEGER NOT NULL
 )
 
 CREATE TABLE bridge_queue (
@@ -56,6 +78,7 @@ CREATE TABLE capture (
   bridge_mac BLOB,
   bridge_fw TEXT,
   node_board TEXT,
+  link TEXT,
   notes TEXT,
   simulated INTEGER NOT NULL
 )
