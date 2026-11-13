@@ -6,10 +6,11 @@ use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
-    BridgeToHost, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats,
+    BluetoothStatus, BridgeToHost, HostOwner, LoopPhase, QueueId, QueueStat, RADIO_UPDATING,
+    RadioLinkStats,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
-use wartui_proto::radio_link::{Chip, Hello, LINK_REVISION, RadioStatus};
+use wartui_proto::radio_link::{BleCounters, Chip, Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{
     INSTALL_WAIT_MS, P4Counters, Pair, PairEvent, RADIO_SILENT_MS, RADIO_WAIT_MS, RadioState,
@@ -155,6 +156,7 @@ fn pair_status_sums_host_and_radio_drops() {
         bad_magic: 12,
         seq_gap: 13,
         uart_errors: 14,
+        ble: BleCounters { pairings: 2, resynced_bytes: 300, ..BleCounters::default() },
     });
     let radio_link = RadioLinkStats {
         packets: 100,
@@ -187,6 +189,7 @@ fn pair_status_sums_host_and_radio_drops() {
         ]
         .into_iter()
         .collect(),
+        bluetooth: usb_bluetooth(),
     };
     let sent = p4.members.clone();
     match pair.status(3_000, p4) {
@@ -204,8 +207,12 @@ fn pair_status_sums_host_and_radio_drops() {
             ble,
             present,
             members,
+            bluetooth,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
+            assert_eq!(bluetooth.owner, HostOwner::Usb, "passed through");
+            // The counters are the C6's.
+            assert_eq!((bluetooth.counters.pairings, bluetooth.counters.resynced_bytes), (2, 300));
             assert_eq!(present, 0b101, "passed through");
             assert_eq!(members, sent, "passed through");
             assert_eq!(host_uart_errors, 9);
@@ -365,7 +372,19 @@ fn pair_announces_new_life_when_link_revision_changes() {
 }
 
 fn radio_status() -> RadioStatus {
-    RadioStatus { queues: Vec::new(), crc_fail: 3, bad_magic: 0, seq_gap: 0, uart_errors: 0 }
+    RadioStatus {
+        queues: Vec::new(),
+        crc_fail: 3,
+        bad_magic: 0,
+        seq_gap: 0,
+        uart_errors: 0,
+        ble: BleCounters::default(),
+    }
+}
+
+/// A P4 serving a host on USB, with no Bluetooth link.
+fn usb_bluetooth() -> BluetoothStatus {
+    BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() }
 }
 
 fn p4_zero() -> P4Counters {
@@ -384,6 +403,7 @@ fn p4_zero() -> P4Counters {
         ble: None,
         present: 0,
         members: Vec::new(),
+        bluetooth: usb_bluetooth(),
     }
 }
 

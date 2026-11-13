@@ -102,8 +102,8 @@ use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, HOST_BAUD, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
-    ShortStr, encode_frame,
+    BluetoothStatus, BridgeToHost, HOST_BAUD, HostOwner, LogStr, LoopPhase, MAX_FRAME, QueueId,
+    QueueStat, RadioLinkStats, ShortStr, encode_frame,
 };
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::ota::SECTOR;
@@ -331,7 +331,7 @@ impl Shared {
     /// Refused rather than evicting the oldest: an evicted record is lost with nothing to say
     /// so.
     #[inline(never)]
-    fn push_down(&self, down: &Down) -> bool {
+    fn push_down(&self, down: &Down<'_>) -> bool {
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
@@ -463,6 +463,11 @@ impl Shared {
             ble: fleet.bluetooth(),
             present: self.nodes.present(),
             members: fleet.members(),
+            // No Bluetooth host link in this build: the USB host is the only one.
+            bluetooth: BluetoothStatus {
+                owner: if self.presence.is_open() { HostOwner::Usb } else { HostOwner::None },
+                ..BluetoothStatus::default()
+            },
         };
         drop(fleet);
         let status = self.pair.borrow().status(now, counters);

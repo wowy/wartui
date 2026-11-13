@@ -63,9 +63,9 @@ use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, Dedup
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, NodeImageCache,
-    PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
-    cache_chunk_body,
+    BluetoothStatus, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr, LoopPhase,
+    NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX,
+    Undelivered, UpdateStatusBytes, cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
@@ -555,6 +555,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 ble: core.bluetooth(),
                 present: present.load(Ordering::Relaxed),
                 members: core.members(),
+                // A host on USB, and no Bluetooth link to report.
+                bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
             };
             if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
                 || fleet.say(Some(core.report())).await.is_err()
@@ -574,6 +576,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
             | HostToBridge::StartScan { .. }
             | HostToBridge::StopScan
             | HostToBridge::SetPool { .. } => None,
+            // It has no Bluetooth link to pair or bonds to clear.
+            HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
             }),

@@ -101,10 +101,11 @@ own.
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
-  `settings` (the records the P4 keeps its fan duty and channel pool in), `beacon`, `hci`,
-  `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and their frozen
-  core), `mac` (the `Mac` type and its text form), `plan` (channel pools and the round-robin deal
-  that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
+  `settings` (the records the P4 keeps its fan duty and channel pool in), `bonds` (the Bluetooth
+  bonds the P4 keeps for its C6, and their records), `crc`, `beacon`, `hci`, `dedup`, `link`,
+  `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
+  GATT identity of the C6's Bluetooth host link), `mac` (the `Mac` type and its text form), `plan`
+  (channel pools and the round-robin deal that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
   records that tell each node), `node` (a node's timings and sweep cursor), `pending` (the buffers
   sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the

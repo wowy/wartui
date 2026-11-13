@@ -104,6 +104,8 @@ pub async fn run(args: Args) -> Result<()> {
         present,
         // The plan below names each share's slot; the members' MACs are the engine's.
         members: _,
+        // Not printed yet.
+        bluetooth: _,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -582,6 +584,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            bluetooth: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

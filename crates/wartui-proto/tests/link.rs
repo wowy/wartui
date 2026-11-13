@@ -14,13 +14,14 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
-    GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LoopPhase, MAX_FRAME,
-    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PowerOutcome, QueueId, QueueStat, QueueStats,
-    RadioInfo, RadioLinkStats, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
-    UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
-    image_tag,
+    BluetoothStatus, BridgeToHost, Central, FrameAccumulator, FromNodeBody, GPS_FRAME,
+    GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION, LinkError,
+    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, ToNodeBody,
+    UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes, cache_chunk_body, crc16,
+    decode_frame, encode_frame, encode_host_frame, image_tag,
 };
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
@@ -59,6 +60,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::SetPool { pool: ChannelPool::Eu }).expect("sample_commands has room");
     v.push(HostToBridge::StartScan { bluetooth: true }).expect("sample_commands has room");
     v.push(HostToBridge::StopScan).expect("sample_commands has room");
+    v.push(HostToBridge::OpenPairing).expect("sample_commands has room");
+    v.push(HostToBridge::ClearBonds).expect("sample_commands has room");
     v
 }
 
@@ -181,6 +184,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         ble: Slot::new(1, 0),
         present: 0b11_1111,
         members: full_members(),
+        bluetooth: usb_bluetooth(),
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -209,6 +213,28 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
     .expect("sample_events has room");
     v.push(BridgeToHost::Fleet(full_report())).expect("sample_events has room");
     v
+}
+
+/// A P4 serving a host on USB, with no Bluetooth link.
+fn usb_bluetooth() -> BluetoothStatus {
+    BluetoothStatus {
+        owner: HostOwner::Usb,
+        bonds: 0,
+        window: PairWindow::Closed,
+        central: None,
+        counters: BleCounters::default(),
+    }
+}
+
+/// [`usb_bluetooth`]'s bytes: `owner`, `bonds`, `window`, `central`'s tag, then nine counters.
+const USB_BLUETOOTH_BYTES: [u8; 13] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// A Status body with [`usb_bluetooth`] taken off its end.
+fn without_bluetooth(mut body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
+    let at = body.len() - USB_BLUETOOTH_BYTES.len();
+    assert_eq!(body[at..], USB_BLUETOOTH_BYTES, "the Status ends in usb_bluetooth");
+    body.truncate(at);
+    body
 }
 
 /// A member in every slot, the most a [`BridgeToHost::Status`] carries.
@@ -615,7 +641,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 13, "one of each");
+    assert_eq!(commands.len(), 15, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -687,6 +713,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         ble: None,
         present: 0,
         members: Vec::new(),
+        bluetooth: usb_bluetooth(),
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -769,6 +796,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         ble: None,
         present: u32::MAX,
         members: Vec::new(),
+        bluetooth: usb_bluetooth(),
     };
     assert_eq!(round_trip(&status), status);
 }
@@ -805,6 +833,29 @@ fn link_fits_status_in_one_frame_when_every_field_is_largest() {
         ble: Slot::from_u8(13),
         present: u32::MAX,
         members: full_members(),
+        bluetooth: BluetoothStatus {
+            owner: HostOwner::Bluetooth,
+            bonds: u8::MAX,
+            window: PairWindow::Open { secs: u16::MAX },
+            central: Some(Central {
+                encrypted: true,
+                bonded: true,
+                mtu: u16::MAX,
+                phy: u8::MAX,
+                interval_us: u32::MAX,
+            }),
+            counters: BleCounters {
+                pairings: u32::MAX,
+                failed_pairings: u32::MAX,
+                unbonded_kicks: u32::MAX,
+                last_disconnect: u8::MAX,
+                resynced_bytes: u32::MAX,
+                dropped_writes: u32::MAX,
+                phy: u8::MAX,
+                interval_us: u32::MAX,
+                heap_high_water: u32::MAX,
+            },
+        },
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("fits one frame");
@@ -903,9 +954,11 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
         ble: None,
         present: 0,
         members: Vec::new(),
+        bluetooth: usb_bluetooth(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
-    let none = frame_body(&out[..n]);
+    // `bluetooth` follows `members`, pinned in its own test.
+    let none = without_bluetooth(frame_body(&out[..n]));
     assert_eq!(none[none.len() - 6..], [0, 2, 0, 0, 0, 0]);
     if let BridgeToHost::Status { fan, pool, scan, ble, present, members, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
@@ -924,7 +977,7 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
             .collect();
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
-    let some = frame_body(&out[..n]);
+    let some = without_bluetooth(frame_body(&out[..n]));
     assert_eq!(some[..none.len() - 6], none[..none.len() - 6]);
     assert_eq!(
         some[none.len() - 6..],
@@ -933,6 +986,91 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
             0, 0, 0, 0x0B
         ]
     );
+    assert_eq!(round_trip(&status), status);
+}
+
+#[test]
+fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_central() {
+    // `owner` and `window`: postcard's variant indices, `Open` then its seconds as a varint.
+    // `central`: an option's tag, then its fields. `counters`: their fields in order.
+    let mut out = [0u8; MAX_FRAME];
+    let mut status = BridgeToHost::Status {
+        rx_count: 0,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: QueueStats::new(),
+        radio_link: RadioLinkStats::default(),
+        host_uart_errors: 0,
+        fan: None,
+        pool: ChannelPool::All,
+        scan: ScanMode::Stopped,
+        ble: None,
+        present: 0,
+        members: Vec::new(),
+        bluetooth: usb_bluetooth(),
+    };
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let head = without_bluetooth(frame_body(&out[..n]));
+    let bluetooth = BluetoothStatus {
+        owner: HostOwner::Bluetooth,
+        bonds: 3,
+        window: PairWindow::Open { secs: 300 },
+        central: Some(Central {
+            encrypted: true,
+            bonded: false,
+            mtu: 247,
+            phy: 2,
+            interval_us: 7_500,
+        }),
+        counters: BleCounters {
+            pairings: 1,
+            failed_pairings: 2,
+            unbonded_kicks: 3,
+            last_disconnect: 0x13,
+            resynced_bytes: 300,
+            dropped_writes: 4,
+            phy: 2,
+            interval_us: 7_500,
+            heap_high_water: 5,
+        },
+    };
+    if let BridgeToHost::Status { bluetooth: field, .. } = &mut status {
+        *field = bluetooth;
+    }
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let body = frame_body(&out[..n]);
+    assert_eq!(body[..head.len()], head[..]);
+    #[rustfmt::skip]
+    let expected = [
+        2,                      // HostOwner::Bluetooth
+        3,                      // bonds
+        1, 0xAC, 0x02,          // PairWindow::Open, secs 300
+        1, 1, 0,                // central: Some, encrypted, bonded
+        0xF7, 0x01,             // mtu 247
+        2,                      // phy
+        0xCC, 0x3A,             // interval_us 7500
+        1, 2, 3, 0x13,          // pairings, failed_pairings, unbonded_kicks, last_disconnect
+        0xAC, 0x02,             // resynced_bytes 300
+        4, 2,                   // dropped_writes, phy
+        0xCC, 0x3A,             // interval_us 7500
+        5,                      // heap_high_water
+    ];
+    assert_eq!(body[head.len()..], expected);
+    assert_eq!(round_trip(&status), status);
+
+    // The other owners and windows: their variant indices alone.
+    if let BridgeToHost::Status { bluetooth, .. } = &mut status {
+        *bluetooth = BluetoothStatus {
+            owner: HostOwner::None,
+            window: PairWindow::UntilBonded,
+            central: None,
+            ..usb_bluetooth()
+        };
+    }
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let body = frame_body(&out[..n]);
+    assert_eq!(body[head.len()..head.len() + 4], [0, 0, 2, 0]);
     assert_eq!(round_trip(&status), status);
 }
 

@@ -182,6 +182,9 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
         HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
         HostToBridge::StopScan => crate::fleet::stop(shared),
+        HostToBridge::OpenPairing | HostToBridge::ClearBonds => {
+            shared.push_error("this bridge has no Bluetooth host link yet");
+        }
     }
 }
 

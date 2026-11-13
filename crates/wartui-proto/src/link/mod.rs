@@ -35,6 +35,7 @@ use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
+use crate::radio_link::BleCounters;
 use crate::radio_link::update::OP_MAX;
 use crate::reset::ResetCause;
 use heapless::{String, Vec};
@@ -278,7 +279,17 @@ pub enum HostToBridge {
     /// Idle every node ([`crate::fleet::Fleet::stop`]). No answer, as for
     /// [`HostToBridge::StartScan`].
     StopScan,
+    /// Open the Bluetooth pairing window for [`PAIR_WINDOW_SECS`], so a new central can pair and
+    /// bond ([`crate::bonds`]). No answer: the next [`BridgeToHost::Status`] shows the window.
+    OpenPairing,
+    /// Drop every stored Bluetooth bond, which opens the pairing window until a central bonds.
+    /// No answer, as for [`HostToBridge::OpenPairing`]; a failed erase answers
+    /// [`BridgeToHost::Error`].
+    ClearBonds,
 }
+
+/// How long [`HostToBridge::OpenPairing`] opens the pairing window.
+pub const PAIR_WINDOW_SECS: u16 = 120;
 
 /// Events and replies the bridge sends to the host.
 // Unboxed for the reason `HostToBridge` gives.
@@ -357,6 +368,9 @@ pub enum BridgeToHost {
         /// overtake batches queued before it, so it fills only a slot nothing has named; a
         /// heartbeat, which travels in order with the batches, stays the authority.
         members: Vec<Member, MAX_SLOTS>,
+        /// The Bluetooth host link: who holds the host queue, the bonds and pairing window, the
+        /// connected central and the C6's counters.
+        bluetooth: BluetoothStatus,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -422,6 +436,64 @@ pub enum BridgeToHost {
     /// [`BridgeToHost::Status`], and when a host attaches. A priority frame, so it reaches the
     /// host ahead of the heartbeats that show nodes adopting it.
     Fleet(Report),
+}
+
+/// The Bluetooth host link, as a [`BridgeToHost::Status`] reports it. The default is no host,
+/// no bond, the window closed and no central.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BluetoothStatus {
+    /// Which host the P4's host queue serves.
+    pub owner: HostOwner,
+    /// Bonds the P4 holds ([`crate::bonds::MAX_BONDS`] at most).
+    pub bonds: u8,
+    /// Whether a central that holds no bond may pair.
+    pub window: PairWindow,
+    /// The connected central, or `None` with none.
+    pub central: Option<Central>,
+    /// The C6's counters, totals since it booted.
+    pub counters: BleCounters,
+}
+
+/// Which host the P4's host queue serves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum HostOwner {
+    /// No host: the P4 queues nothing.
+    #[default]
+    None,
+    /// A host on USB, through the CH343.
+    Usb,
+    /// A bonded central over Bluetooth, through the C6.
+    Bluetooth,
+}
+
+/// The Bluetooth pairing window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum PairWindow {
+    /// Only a bonded central is served.
+    #[default]
+    Closed,
+    /// A new central may pair for `secs` more seconds.
+    Open {
+        /// Seconds left.
+        secs: u16,
+    },
+    /// No bond is stored, so the window stays open until a central bonds.
+    UntilBonded,
+}
+
+/// The central connected to the C6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Central {
+    /// The link is encrypted.
+    pub encrypted: bool,
+    /// The central holds a stored bond.
+    pub bonded: bool,
+    /// The ATT MTU.
+    pub mtu: u16,
+    /// The PHY: 1 for 1M, 2 for 2M, 3 for Coded.
+    pub phy: u8,
+    /// The connection interval, in microseconds.
+    pub interval_us: u32,
 }
 
 /// How a [`HostToBridge::PowerCycle`] went.

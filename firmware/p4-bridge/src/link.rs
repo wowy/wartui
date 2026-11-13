@@ -221,6 +221,14 @@ impl Link {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());
             }
+            // No Bluetooth host link in this build.
+            Ok(
+                Up::HostBytes(_)
+                | Up::Credit { .. }
+                | Up::BleState(_)
+                | Up::BondAdded(_)
+                | Up::BondRemoved(_),
+            ) => {}
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

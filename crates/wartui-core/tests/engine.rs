@@ -122,6 +122,7 @@ fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
         ble: BRIDGE_BLE.get(),
         present,
         members: members.iter().copied().collect(),
+        bluetooth: Default::default(),
     }))
 }
 
@@ -2153,6 +2154,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         }))
     };
 
@@ -2210,6 +2212,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2289,6 +2292,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         })),
         clock.at(4),
     );

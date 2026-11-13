@@ -65,9 +65,9 @@ use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
-    PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
-    VerifyError, decode_down, encode_packet, encode_up, records, seal,
+    BAUD_RATE, BODY_MAX, BleCounters, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind,
+    LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck,
+    SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -123,7 +123,7 @@ impl Shared {
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
-    pub fn push(&self, msg: &Up) {
+    pub fn push(&self, msg: &Up<'_>) {
         let mut record = [0; RECORD_MAX];
         // Only a record longer than any `Up` fails, and the ring counts its own drops.
         if let Ok(len) = encode_up(msg, &mut record) {
@@ -387,6 +387,8 @@ impl Link {
         };
         match down {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared))),
+            // No Bluetooth host link in this build.
+            Down::HostStart { .. } | Down::HostBytes { .. } | Down::Bonds { .. } => {}
         }
     }
 
@@ -406,6 +408,7 @@ impl Link {
             bad_magic: self.bad_magic,
             seq_gap: self.seq_gap,
             uart_errors: self.uart_errors,
+            ble: BleCounters::default(),
         }
     }
 

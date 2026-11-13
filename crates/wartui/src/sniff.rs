@@ -441,6 +441,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            bluetooth: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
     }

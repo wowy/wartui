@@ -409,6 +409,7 @@ impl FleetEngine {
                 ble,
                 present,
                 members,
+                bluetooth: _,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
