@@ -127,6 +127,18 @@ Why the spike saw none is not known. The likely difference is which agent was re
 (inferred, not tested). `wartui bluetooth pair` registers its own agent and needs
 no prompt.
 
+## After the review fixes
+
+`867de99` changes the C6: it repeats its `BleState` every second, and a central's write leaves
+1 KiB of the queue to the P4 free. Part of the bench ran again on it, the load checks from
+`bench/ble-load` at `797882a`.
+
+| Check | Result |
+| --- | --- |
+| A run through a forced disconnect and a USB takeover | Served again 2.1 s after the disconnect, and 15.06 s after the takeover. No batch lost |
+| `saturate`, 30 s | 126.6 KB/s read by the host, 128.4 KB/s credited. Nothing evicted or lost |
+| 500-record burst | Drained in 4.7 s, at the lower of the two rate levels. Nothing evicted or lost |
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
