@@ -9,16 +9,19 @@
 //! silence, since a subscription is the sign that someone reads. While it owns the queue the UART0
 //! writer sends nothing from it.
 //!
-//! **The stream's offsets never rewind.** `sent` is the wrapping offset of the next stream byte.
-//! Each attachment starts with a `Down::HostStart` at `sent`, and each `Down::HostBytes` carries
-//! the offset of its first byte, so the C6 (`wartui_proto::radio_link::Inflow`) credits bytes lost
-//! on the link and drops an earlier attachment's. Both counters restart at 0 with a new C6 life,
-//! since a fresh C6 counts its credit from 0 and adopts the first offset it sees.
+//! **The stream's offsets never rewind**, across C6 lives too. `sent` is the wrapping offset of the
+//! next stream byte. Each attachment starts with a `Down::HostStart` at `sent`, and each
+//! `Down::HostBytes` carries the offset of its first byte, so the C6
+//! (`wartui_proto::radio_link::Inflow`) adopts the P4's offsets, moves past bytes lost on the link
+//! and drops an earlier attachment's.
 //!
-//! **The stream is credited.** The link's writer packs `Down::HostBytes` only while
-//! `sent.wrapping_sub(accounted)` stays under `HOST_WINDOW_BYTES`, where `accounted` is the C6's
-//! latest `Up::Credit`. A slow central backs the stream up in the host queue, where the bulk ring
-//! evicts, and never holds the C6 link behind RTS/CTS.
+//! **The stream is credited by position.** `accounted` is the C6's latest `Up::Credit`: the offset,
+//! in the P4's offsets, up to which the C6 is done. The link's writer packs `Down::HostBytes` only
+//! inside `host_window(sent, accounted)`, so a slow central backs the stream up in the host queue,
+//! where the bulk ring evicts, and never holds the C6 link behind RTS/CTS. A new C6 life sets
+//! `accounted` to `sent`: the bytes in flight died with the old C6, and the new one credits in the
+//! same offsets from the first it sees. More than a window in flight means the two disagree, and
+//! `host_window` opens the window, since only a send resynchronizes them.
 //!
 //! **A central that loses the queue to USB is told why**: one `BridgeToHost::Error` goes down its
 //! stream ahead of anything else, from its own buffer, after the queue has moved. It waits for
@@ -36,7 +39,7 @@ use wartui_proto::link::{
     encode_frame,
 };
 use wartui_proto::radio_link::{
-    BleState, Down, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Packer, encode_down, host_bytes_fit,
+    BleState, Down, HOST_BYTES_MAX, Packer, encode_down, host_bytes_fit, host_window,
 };
 
 use crate::Shared;
@@ -83,9 +86,9 @@ impl Notice {
 pub struct Ble {
     /// The C6's latest `BleState`.
     state: Cell<BleState>,
-    /// The wrapping stream offset of the next byte sent.
+    /// The wrapping stream offset of the next byte sent. It never rewinds.
     sent: Cell<u32>,
-    /// The C6's latest `Up::Credit`: stream bytes it is done with.
+    /// The C6's latest `Up::Credit`: the stream offset it is done up to.
     accounted: Cell<u32>,
     notice: RefCell<Notice>,
     /// Static, since it holds a whole host frame.
@@ -108,10 +111,9 @@ impl Ble {
         self.state.get()
     }
 
-    /// Stream bytes the window still allows: none while more than the window is in flight.
+    /// Stream bytes the window still allows (`host_window`).
     fn window(&self) -> usize {
-        let in_flight = self.sent.get().wrapping_sub(self.accounted.get());
-        HOST_WINDOW_BYTES.saturating_sub(in_flight) as usize
+        host_window(self.sent.get(), self.accounted.get()) as usize
     }
 }
 
@@ -160,15 +162,15 @@ pub fn on_credit(shared: &Shared, accounted: u32) {
     shared.wake_link.signal(());
 }
 
-/// A new C6 life: its central is gone, and it counts the stream from 0.
+/// A new C6 life: its central is gone, and the bytes in flight died with the old C6. `sent` keeps
+/// counting, so nothing is in flight from here.
 pub fn on_new_life(shared: &Shared) {
     let ble = &shared.ble;
     if authorized(ble.state.replace(BleState::default())) {
         let _ = own(shared, Input::Unsubscribed);
     }
     ble.notice.borrow_mut().drop_it();
-    ble.sent.set(0);
-    ble.accounted.set(0);
+    ble.accounted.set(ble.sent.get());
 }
 
 /// Make Bluetooth the host: mark where its stream starts, clear the queue, and announce.

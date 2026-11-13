@@ -2,7 +2,7 @@
 //!
 //! Over Bluetooth the C6 offers one GATT service, [`SERVICE_UUID`]. [`UP_UUID`] notifies the host
 //! stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host
-//! frames written without response, framed as on USB. The identity lives here so the C6 and every
+//! frames, framed as on USB, in writes without response that end in a write request. The identity lives here so the C6 and every
 //! host read the same one; a change strands whichever end was not rebuilt.
 //!
 //! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
@@ -16,7 +16,7 @@
 pub const SERVICE_UUID: u128 = 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877;
 /// The service's Up characteristic, notify: the bridge's frame stream.
 pub const UP_UUID: u128 = 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877;
-/// The service's Down characteristic, write without response: the host's frames.
+/// The service's Down characteristic, written with or without response: the host's frames.
 pub const DOWN_UUID: u128 = 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877;
 /// What the C6 advertises ahead of the bridge's last two octets: `wartui 96:C4`.
 pub const NAME_PREFIX: &str = "wartui ";

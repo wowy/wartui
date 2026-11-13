@@ -13,11 +13,12 @@
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while its bytes in
 //! flight, `sent.wrapping_sub(accounted)`, stay under
-//! [`HOST_WINDOW_BYTES`](super::HOST_WINDOW_BYTES), so a slow central backs the stream up in the
-//! P4's host queue rather than holding the whole link behind RTS/CTS. Both counters are totals
-//! that wrap, so a lost credit costs nothing once the next arrives. A lost `Down::HostBytes`
-//! costs its bytes and no credit: the C6 accounts for them on the next offset it sees
-//! ([`Inflow`](super::Inflow)).
+//! [`HOST_WINDOW_BYTES`](super::HOST_WINDOW_BYTES) ([`host_window`](super::host_window)), so a
+//! slow central backs the stream up in the P4's host queue rather than holding the whole link
+//! behind RTS/CTS. `sent` is the P4's stream offset and `accounted` the C6's position in those
+//! same offsets, so a lost credit costs nothing once the next arrives, and a restart of either
+//! chip cannot skew them. A lost `Down::HostBytes` costs its bytes and no credit: the next offset
+//! the C6 sees moves its position past them ([`Inflow`](super::Inflow)).
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
 //! payload's end. A record never spans packets: the largest message fits one, so the
@@ -92,10 +93,11 @@ pub enum Up<'a> {
     /// Bytes of the `HostToBridge` stream a central wrote, in order, cut wherever a write ended.
     /// At most [`HOST_BYTES_MAX`].
     HostBytes(#[serde(serialize_with = "byte_string", borrow)] &'a [u8]),
-    /// The C6 is done with more of the host stream.
+    /// How far the C6 is through the host stream.
     Credit {
-        /// Stream bytes the C6 is done with since it booted, wrapping: notified, discarded, or
-        /// found missing ([`Inflow`](super::Inflow)).
+        /// The stream offset, in the P4's offsets, up to which the C6 is done: the next offset
+        /// it expects, less the stream bytes its notify ring holds. Everything before it was
+        /// notified, discarded or found missing ([`Inflow`](super::Inflow)).
         accounted: u32,
     },
     /// The Bluetooth link changed. Sent on every change.

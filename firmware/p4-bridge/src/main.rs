@@ -244,6 +244,11 @@ pub struct Shared {
     /// Why no GPS receiver is being read. Sent with every announcement, because a host
     /// usually attaches after boot, and cleared when the receiver answers again.
     gps_fault: Cell<Option<&'static str>>,
+    /// The first line of the C6's report of its last panic, kept to repeat to every host that
+    /// attaches. The C6 reports once, at its boot, and the host it restarted under has usually
+    /// gone by then, so without this nobody reads why. A later panic replaces it, and a P4 reset
+    /// forgets it.
+    radio_panic: RefCell<Option<LogStr>>,
     /// The GPS reader's write channel, once its bus is up.
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
@@ -313,6 +318,7 @@ impl Shared {
             radio_status: Signal::new(),
             deadline_set: Signal::new(),
             gps_fault: Cell::new(None),
+            radio_panic: RefCell::new(None),
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
             cache: RefCell::new(cache),
@@ -394,8 +400,8 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, what the carrier and the node image cache have to say, and what
-    /// the P4's own image has to say.
+    /// GPS fault if there is one, the C6's last panic if it reported one, what the carrier and the
+    /// node image cache have to say, and what the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -407,6 +413,10 @@ impl Shared {
         self.push_fault();
         if let Some(why) = self.gps_fault.get() {
             self.push_error(why);
+        }
+        let radio_panic = self.radio_panic.borrow().clone();
+        if let Some(line) = radio_panic {
+            self.push_error(&line);
         }
         carrier::say(self);
         cache::say(self);

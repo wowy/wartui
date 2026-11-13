@@ -147,6 +147,12 @@ pub const RADIO_UPDATING: &str = "updating the radio";
 /// fault: the central stays subscribed, and the queue comes back to it with a fresh `Ready`.
 pub const USB_TOOK_BRIDGE: &str = "the USB host took the bridge";
 
+/// What the first line of the C6's report of its last panic starts with
+/// (`firmware/p4-radio/src/last_panic.rs`). The P4 keeps that line and repeats it to every host
+/// that attaches: the C6 reports once, at its boot, when the host it restarted under has
+/// usually gone.
+pub const RADIO_PANICKED: &str = "C6 panicked: ";
+
 /// What a bridge chip's firmware last marked before it reset.
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],

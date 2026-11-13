@@ -57,7 +57,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::Async;
 use esp_hal::uart::{UartRx, UartTx};
 use wartui_firmware::phase::mark;
-use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, ShortStr};
+use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, RADIO_PANICKED, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
@@ -232,7 +232,12 @@ impl Link {
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
             Ok(Up::Log { message }) => shared.push_log(&message),
-            Ok(Up::Error { message }) => shared.push_error(&message),
+            Ok(Up::Error { message }) => {
+                if message.starts_with(RADIO_PANICKED) {
+                    shared.radio_panic.replace(Some(message.clone()));
+                }
+                shared.push_error(&message);
+            }
             Ok(Up::RadioStatus(status)) => {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());

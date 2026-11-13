@@ -51,7 +51,7 @@ const MAGIC: u32 = 0x7061_6e31;
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
 /// What the first line to the P4 starts with, and every line after it.
-const FIRST: &str = "C6 panicked: ";
+const FIRST: &str = wartui_proto::link::RADIO_PANICKED;
 const MORE: &str = "C6 panicked, cont.: ";
 
 /// Record `info` as `{location}: {message}`, cut at [`CAPACITY`] bytes. Never allocates,

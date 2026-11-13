@@ -9,28 +9,35 @@
 //! `Down::HostBytes`, cut at the ATT MTU less 3 wherever that falls. Down forwards each write
 //! to the P4 as `Up::HostBytes`, in order. A write waits for room in the queue to the P4 rather
 //! than evicting what it holds, and one that waits past [`FORWARD_WAIT`] is dropped and counted
-//! in `dropped_writes`, so the queue stays the only place a write is lost.
+//! in `dropped_writes`, so the queue stays the only place a write is lost. A write request is
+//! answered only once its write is forwarded, behind every write queued ahead of it, which is
+//! what paces a central that ends each frame with one (`wartui_bridge::ble`).
 //!
-//! **The stream is credited, and the credit resynchronizes** (`wartui_proto::radio_link::Inflow`
-//! has the design). `Up::Credit` carries `accounted`, the stream bytes the C6 is done with:
-//! handed to TrouBLE, discarded, or found missing. Credit follows the hand-off, not delivery:
-//! the window keeps the C6 link from stalling behind RTS/CTS, and bytes TrouBLE holds are off
-//! that link. It is coalesced to one `Up::Credit` per [`CREDIT_EVERY_BYTES`], per
-//! [`CREDIT_EVERY`], or when the ring empties, whichever comes first. With no subscribed central
-//! the stream is discarded and credited at once.
+//! **The stream is credited by position** (`wartui_proto::radio_link::Inflow` has the design).
+//! `Up::Credit` carries `accounted`, the stream offset in the P4's offsets up to which the C6 is
+//! done: the next offset it expects, less the stream bytes the [`Outbox`] holds. Everything before
+//! it was handed to TrouBLE, discarded, or found missing. Credit follows the hand-off, not
+//! delivery: the window keeps the C6 link from stalling behind RTS/CTS, and bytes TrouBLE holds
+//! are off that link. The position is recomputed whenever it may have moved: after each
+//! `Down::HostStart` and `Down::HostBytes`, after each notification, and when a change of
+//! subscription clears the ring. It is coalesced to one `Up::Credit` per [`CREDIT_EVERY_BYTES`],
+//! per [`CREDIT_EVERY`], or when the ring empties, whichever comes first, and nothing is sent
+//! before the P4 has named a first offset. With no subscribed central the stream is discarded and
+//! credited at once.
 //!
-//! - `Down::HostStart` begins an attachment: the ring is cleared, and what it held and what never
-//!   arrived are credited, so the central reads only bytes from that offset on.
-//! - A gap before a `Down::HostBytes` is credited and counted in `resynced_bytes`, and one `0x00`
-//!   goes into the ring ahead of the bytes, so the central's COBS reader drops the torn frame
-//!   rather than merging it with the next. That byte is not a stream byte and is never credited.
-//!   The ring holds [`HOST_WINDOW_BYTES`] and [`RESYNC_MAX`] of them; a gap with no room left gets
-//!   none, and the central resynchronizes at the next terminator, one frame later.
+//! - `Down::HostStart` begins an attachment: the ring is cleared and the position is `at`, so the
+//!   central reads only bytes from that offset on.
+//! - A gap before a `Down::HostBytes` is counted in `resynced_bytes`, and the position is past it.
+//!   One `0x00` goes into the ring ahead of the bytes, so the central's COBS reader drops the torn
+//!   frame rather than merging it with the next. That byte is not a stream byte, so the position
+//!   never counts it. The ring holds [`HOST_WINDOW_BYTES`] and [`RESYNC_MAX`] of them; a gap with
+//!   no room left gets none, and the central resynchronizes at the next terminator, one frame
+//!   later.
 //!
 //! **A subscription is the CCCD on Up.** Every change of it, the encryption, the bond or the MTU
 //! sends a `BleState`; the P4 reads a subscribed one as Bluetooth taking the host queue. The ring
-//! is cleared, and credited, on every change of subscription, so a new central never reads the
-//! last one's stream.
+//! is cleared on every change of subscription, which moves the credit past what it held, so a new
+//! central never reads the last one's stream.
 //!
 //! **The C6 asks for the 2M PHY and data length 251 once connected, and an interval only when
 //! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
@@ -180,9 +187,6 @@ const NAME_MAX: usize = NAME_PREFIX.len() + 5;
 /// How long one advertising interval is.
 const ADVERTISE_EVERY: Duration = Duration::from_millis(100);
 
-/// How long `run_host` waits before starting a stopped host again.
-const HOST_RESTART: Duration = Duration::from_secs(1);
-
 type Controller<'a> = ExternalController<BleConnector<'a>, COMMAND_SLOTS>;
 type BleStack<'a> = Stack<'a, Controller<'a>, DefaultPacketPool>;
 type Conn<'a, 'b> = GattConnection<'a, 'b, DefaultPacketPool>;
@@ -205,8 +209,8 @@ struct LinkService {
     down: u8,
 }
 
-/// The host stream waiting to be notified, and where the resync `0x00`s in it sit, so a
-/// notification credits only its stream bytes.
+/// The host stream waiting to be notified, and where the resync `0x00`s in it sit, so the credit
+/// counts only its stream bytes.
 pub struct Outbox {
     ring: ByteRing<OUTBOX_BYTES>,
     /// Each resync `0x00` the ring holds, oldest first, as the count of bytes pushed before it.
@@ -240,26 +244,26 @@ impl Outbox {
         true
     }
 
-    /// Move the oldest bytes into `out`. Returns how many, and how many of those are stream
-    /// bytes.
-    fn take(&mut self, out: &mut [u8]) -> (usize, usize) {
+    /// Move the oldest bytes into `out`, and return how many.
+    fn take(&mut self, out: &mut [u8]) -> usize {
         let n = self.ring.take(out);
-        let mut resyncs = 0;
         while self.resyncs.front().is_some_and(|at| at.wrapping_sub(self.taken) < n as u32) {
             self.resyncs.pop_front();
-            resyncs += 1;
         }
         self.taken = self.taken.wrapping_add(n as u32);
-        (n, n - resyncs)
+        n
     }
 
-    /// Discard everything held, and return how many stream bytes that was.
-    fn clear(&mut self) -> usize {
-        let stream = self.ring.len() - self.resyncs.len();
+    /// Discard everything held.
+    fn clear(&mut self) {
         self.ring.clear();
         self.resyncs.clear();
         self.taken = self.pushed;
-        stream
+    }
+
+    /// The stream bytes held: every byte but the resync `0x00`s.
+    fn stream_held(&self) -> usize {
+        self.ring.len() - self.resyncs.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -281,10 +285,8 @@ pub struct Ble {
     advertising: Cell<bool>,
     /// Raised when `advertising` first holds, for the link's trial.
     pub advertising_started: Signal<NoopRawMutex, ()>,
-    /// Stream bytes the C6 is done with since boot, wrapping: what `Up::Credit` reports.
-    accounted: Cell<u32>,
-    /// The `accounted` last sent, and when.
-    credited: Cell<u32>,
+    /// The `Up::Credit` last sent, or `None` before the first, and when.
+    credited: Cell<Option<u32>>,
     credited_at: Cell<Instant>,
     /// The counters kept here; [`counters`] adds the heap's.
     counters: Cell<BleCounters>,
@@ -309,8 +311,7 @@ impl Ble {
             connected: Cell::new(false),
             advertising: Cell::new(false),
             advertising_started: Signal::new(),
-            accounted: Cell::new(0),
-            credited: Cell::new(0),
+            credited: Cell::new(None),
             credited_at: Cell::new(Instant::from_ticks(0)),
             counters: Cell::new(BleCounters::default()),
             ready: Signal::new(),
@@ -343,15 +344,16 @@ impl Ble {
     }
 }
 
-/// A central took the host queue, and its first byte is at `at`: clear the ring, and credit what
-/// it held and what never arrived.
+/// A central took the host queue, and its first byte is at `at`: clear the ring, and credit up to
+/// `at`.
 pub fn host_start(shared: &Shared, at: u32) {
     let ble = &shared.ble;
     let mut inflow = ble.inflow.get();
-    let lost = inflow.start(at);
+    // What never arrived before `at` is behind the position, which is all the credit needs.
+    let _ = inflow.start(at);
     ble.inflow.set(inflow);
-    let held = ble.outbox.borrow_mut().clear();
-    credit(shared, lost.wrapping_add(held as u32), true);
+    ble.outbox.borrow_mut().clear();
+    credit(shared, true);
     ble.ready.signal(());
 }
 
@@ -368,7 +370,8 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
         ble.count(|c| c.resynced_bytes = c.resynced_bytes.wrapping_add(gap));
     }
     if !ble.subscribed() {
-        credit(shared, gap.wrapping_add(bytes.len() as u32), true);
+        // Nothing is held, so the credit is the expected offset.
+        credit(shared, true);
         return;
     }
     let mut outbox = ble.outbox.borrow_mut();
@@ -378,8 +381,8 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     }
     let lost = bytes.len() - outbox.push(bytes);
     drop(outbox);
-    // The notifier credits the gap with the bytes it notifies, unless some were lost here.
-    credit(shared, gap.wrapping_add(lost as u32), lost > 0);
+    // Bytes with no room are behind the position, done with: credit them at once.
+    credit(shared, lost > 0);
     ble.ready.signal(());
 }
 
@@ -401,15 +404,17 @@ pub fn counters(shared: &Shared) -> BleCounters {
     counters
 }
 
-/// Count `n` more stream bytes accounted for, and send the credit when it is due or `now`.
-fn credit(shared: &Shared, n: u32, now: bool) {
+/// Send the credit, the expected offset less the stream bytes held, when it has moved and is due
+/// or `now`. Nothing goes before the P4 has named a first offset.
+fn credit(shared: &Shared, now: bool) {
     let ble = &shared.ble;
-    let accounted = ble.accounted.get().wrapping_add(n);
-    ble.accounted.set(accounted);
-    let owed = accounted.wrapping_sub(ble.credited.get());
+    let Some(expected) = ble.inflow.get().expected() else { return };
+    let accounted = expected.wrapping_sub(ble.outbox.borrow().stream_held() as u32);
+    // A position the P4 has never heard is owed in full.
+    let owed = ble.credited.get().map_or(u32::MAX, |credited| accounted.wrapping_sub(credited));
     let due = now || owed >= CREDIT_EVERY_BYTES || ble.credited_at.get().elapsed() >= CREDIT_EVERY;
     if owed > 0 && due {
-        ble.credited.set(accounted);
+        ble.credited.set(Some(accounted));
         ble.credited_at.set(Instant::now());
         shared.push(&Up::Credit { accounted });
     }
@@ -424,8 +429,8 @@ fn set_state(shared: &Shared, change: impl FnOnce(&mut BleState)) {
     change(&mut state);
     ble.state.set(state);
     if state.subscribed != was {
-        let held = ble.outbox.borrow_mut().clear();
-        credit(shared, held as u32, true);
+        ble.outbox.borrow_mut().clear();
+        credit(shared, true);
         ble.ready.signal(());
     }
     if ble.said.get() != Some(state) {
@@ -461,7 +466,7 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     let mut peripheral = stack.peripheral();
 
     join3(
-        run_host(&mut runner, shared),
+        run_host(&mut runner),
         advertise(&stack, &mut peripheral, mac, shared),
         follow_bonds(&stack, shared),
     )
@@ -469,17 +474,17 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     .0
 }
 
-/// Run TrouBLE's host forever, starting it again [`HOST_RESTART`] after it stops.
-async fn run_host(
-    runner: &mut Runner<'_, Controller<'_>, DefaultPacketPool>,
-    shared: &Shared,
-) -> ! {
-    loop {
-        if let Err(err) = runner.run().await {
-            shared.error(format_args!("the Bluetooth host stopped: {err:?}"));
-        }
-        Timer::after(HOST_RESTART).await;
-    }
+/// Run TrouBLE's host, and restart the C6 if it ever stops.
+///
+/// A stopped host cannot be started again in place. Starting it resets the controller, which
+/// drops the connection without a disconnection event, so TrouBLE keeps a central that is gone
+/// and the C6 never advertises again: on D0:1C a host that stopped under a flood of writes left
+/// the bridge unreachable over Bluetooth until its P4 was reset. A restart clears all of it, the
+/// P4 resynchronizes on the C6's new life, and the panic handler keeps the reason for the next
+/// boot's report (`src/last_panic.rs`).
+async fn run_host(runner: &mut Runner<'_, Controller<'_>, DefaultPacketPool>) -> ! {
+    let end = runner.run().await;
+    panic!("the Bluetooth host stopped: {end:?}");
 }
 
 /// Advertise, serve the central that connects until it goes, and advertise again.
@@ -916,7 +921,7 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
         let mtu = conn.raw().att_mtu();
         set_state(shared, |state| state.mtu = mtu);
         let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
-        let (n, stream) = ble.outbox.borrow_mut().take(&mut chunk[..room]);
+        let n = ble.outbox.borrow_mut().take(&mut chunk[..room]);
         // TrouBLE frees its packets inside its runner and offers nothing to wait on, so a full
         // pool is waited out with a back-off.
         let mut wait = POOL_RETRY;
@@ -928,7 +933,7 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
         }
         // Bytes a failed notification carried are credited too: they are off the link either way.
         let empty = ble.outbox.borrow().is_empty();
-        credit(shared, stream as u32, empty);
+        credit(shared, empty);
         // A send TrouBLE's queue had room for never waited, so the link gets its turn here.
         yield_now().await;
     }

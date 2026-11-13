@@ -9,7 +9,7 @@ use wartui_proto::radio_link::{
     HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, MAGIC, PAYLOAD_MAX,
     Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
     WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up,
-    host_bytes_fit, records, seal, verify,
+    host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -734,7 +734,7 @@ fn inflow_takes_everything_when_bytes_arrive_in_order() {
 
 #[test]
 fn inflow_adopts_first_offset_when_nothing_was_expected() {
-    // A C6 fresh from boot has no base; the P4 resynchronizes its own count on the new life.
+    // A C6 fresh from boot has no base, and adopts the P4's offsets from the first it sees.
     let mut inflow = Inflow::new();
     assert_eq!(inflow.accept(5_000, 10), Accept::Take { skip: 0, gap: 0 });
     assert_eq!(inflow.accept(5_010, 10), Accept::Take { skip: 0, gap: 0 });
@@ -804,6 +804,78 @@ fn inflow_counts_lost_bytes_when_start_jumps_past_expected() {
     // The earlier attachment's last packet, 100..180, was lost.
     assert_eq!(inflow.start(180), 80);
     assert_eq!(inflow.accept(180, 20), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_expects_nothing_when_new() {
+    assert_eq!(Inflow::new().expected(), None);
+}
+
+#[test]
+fn inflow_expects_start_offset_when_started() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(7_000);
+    assert_eq!(inflow.expected(), Some(7_000));
+    // A start behind the expected offset moves it back: the P4 names where the attachment begins.
+    let _ = inflow.start(6_000);
+    assert_eq!(inflow.expected(), Some(6_000));
+}
+
+#[test]
+fn inflow_expects_end_of_bytes_when_bytes_arrive_in_order() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.accept(5_000, 10);
+    assert_eq!(inflow.expected(), Some(5_010), "the first offset seen is the base");
+    let _ = inflow.accept(5_010, 30);
+    assert_eq!(inflow.expected(), Some(5_040));
+}
+
+#[test]
+fn inflow_expects_past_the_gap_when_a_packet_was_lost() {
+    // The credit is read from the position, so it covers the lost bytes with nothing added.
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(0);
+    let _ = inflow.accept(0, 100);
+    assert_eq!(inflow.accept(300, 50), Accept::Take { skip: 0, gap: 200 });
+    assert_eq!(inflow.expected(), Some(350));
+}
+
+#[test]
+fn inflow_keeps_expected_when_bytes_are_a_duplicate() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(0);
+    let _ = inflow.accept(0, 100);
+    assert_eq!(inflow.accept(40, 60), Accept::Duplicate);
+    assert_eq!(inflow.expected(), Some(100));
+}
+
+#[test]
+fn host_window_opens_fully_when_nothing_is_in_flight() {
+    assert_eq!(host_window(0, 0), HOST_WINDOW_BYTES);
+    assert_eq!(host_window(123_456, 123_456), HOST_WINDOW_BYTES);
+}
+
+#[test]
+fn host_window_shrinks_by_bytes_in_flight_when_part_is_uncredited() {
+    assert_eq!(host_window(11_000, 10_000), HOST_WINDOW_BYTES - 1_000);
+}
+
+#[test]
+fn host_window_closes_when_a_full_window_is_in_flight() {
+    assert_eq!(host_window(10_000 + HOST_WINDOW_BYTES, 10_000), 0);
+}
+
+#[test]
+fn host_window_counts_in_flight_across_the_u32_wrap() {
+    assert_eq!(host_window(400, u32::MAX - 99), HOST_WINDOW_BYTES - 500);
+}
+
+#[test]
+fn host_window_opens_fully_when_counters_disagree() {
+    // A credit ahead of `sent`, or more than a window behind it, cannot happen while the two
+    // agree. A closed window would never reopen; an open one lets the next send resynchronize.
+    assert_eq!(host_window(10_000, 10_001), HOST_WINDOW_BYTES);
+    assert_eq!(host_window(10_000 + HOST_WINDOW_BYTES + 1, 10_000), HOST_WINDOW_BYTES);
 }
 
 #[test]

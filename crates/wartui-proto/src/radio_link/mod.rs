@@ -71,6 +71,20 @@ pub const HELLO_EVERY_MS: u64 = 100;
 /// [`Up::Credit`]. Both firmwares read it, the P4 to hold its sends and the C6 to size the
 /// notify ring that holds them.
 pub const HOST_WINDOW_BYTES: u32 = 16 * 1024;
+
+/// The host stream bytes the P4 may still send: [`HOST_WINDOW_BYTES`] less those in flight,
+/// `sent.wrapping_sub(accounted)`, where `sent` is the offset of its next byte and `accounted`
+/// the C6's latest [`Up::Credit`].
+///
+/// More than a window in flight cannot happen while the two agree, so it means they disagree, and
+/// it reads as nothing in flight: the window is open. Sending is what resynchronizes them, since
+/// the next `Down::HostBytes` carries its offset and the C6's credit answers in the same offsets.
+/// A closed window in that state would never reopen, and the stream would stop for good.
+#[must_use]
+pub const fn host_window(sent: u32, accounted: u32) -> u32 {
+    let in_flight = sent.wrapping_sub(accounted);
+    if in_flight > HOST_WINDOW_BYTES { HOST_WINDOW_BYTES } else { HOST_WINDOW_BYTES - in_flight }
+}
 /// How often a P4 that is updating the C6 asks its [`update::Sender`] whether it is due to send,
 /// with no status to prompt it.
 pub const SENDER_POLL_MS: u64 = 50;
