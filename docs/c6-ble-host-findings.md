@@ -1,13 +1,13 @@
 # C6 Bluetooth host link — a phone as the wartui host
 
-Measured on 2026-11-10, with the phones measured again on 2026-11-12. The question was whether a
-phone can stand in for the PC as the wartui host, over Bluetooth through the ESP32-P4-WIFI6's
-on-board C6, at the bar agreed on 2026-10-30: at least 16 KB/s of application throughput, about
-10× the 20-node average
+Measured on 2026-11-10, with the phones and the bursts measured again on 2026-11-12. The
+question was whether a phone can stand in for the PC as the wartui host, over Bluetooth through
+the ESP32-P4-WIFI6's on-board C6, at the bar agreed on 2026-10-30: at least 16 KB/s of
+application throughput, about 10× the 20-node average
 ([`superpowers/plans/2026-10-30-p4-uart-hci-spike.md`](superpowers/plans/2026-10-30-p4-uart-hci-spike.md)
 has the bar and the load figures).
 
-The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `04e3fa6`.
+The code is on the branch `spike/c6-ble-host`, which is never merged: `9b23c96` to `7670856`.
 
 ## The split moved to the C6
 
@@ -312,6 +312,75 @@ P4's counters.
   attached and D0:1C answered on the same PC. A hardware reset brought UART0 back, and it then
   answered all 47 readouts that followed.
 
+## Run 15 — bursts on the stream receive, PSRAM ring at 1 MB (D0:1C, 2026-11-12)
+
+Issue #310's checks, on the `psram-ring` build with `WARTUI_P4_PSRAM_BULK_BYTES=1048576`. D0:1C's
+ten nodes stayed on the bus, idle on the Bluetooth arms and scanning on the UART0 arms. The
+stand-in's `--port` mode (`7670856`) ran the UART0 arms with the same checks. The 15 ms arms
+asked for the interval from the C6 (`WARTUI_RADIO_CONN_INTERVAL_MS=15-15`), and the others left
+it to the central. The internal-ring arms were not run, since production takes the PSRAM ring
+(below).
+
+**What a 500-batch burst is.** A burst record is a full 1,024-byte batch body, about 1,044 bytes
+in the ring with its framing, sent at 700 a second.
+
+- A Wi-Fi record averages ~20.5 bytes on the wire, over the 63,007 sightings of D0:1C's
+  2026-11-10 captures. A full batch therefore holds ~50 Wi-Fi sightings: 16 if every SSID and RCOI
+  trailer is the longest, and 85 if every record is the bare 12 bytes.
+- 500 batches are **~25,000 Wi-Fi sightings, ~520 KB, in 0.71 s.**
+- A real batch in those captures averages a 38-byte body and 1.7 sightings. The drives' busiest
+  second is 91–105 sightings, about 3.4 KB/s on the stream (inferred,
+  [`arrival-rate-findings.md`](arrival-rate-findings.md)).
+- So a 500-batch burst is about 2.5 minutes of a fleet's busiest second, delivered in under one.
+  Its 730 KB/s is more than UART0 carries, so no fleet produces it. It is a stress test.
+
+| Host | Interval | Burst | Peak backlog | Evicted | Back to steady | Drain |
+| --- | --- | --- | --- | --- | --- | --- |
+| stand-in | 30 ms | 132 | ~108 KB | 0 | ≤2 s | ~110 KB/s |
+| stand-in | 30 ms | 264 | ~223 KB | 0 | ≤4 s | |
+| stand-in | 30 ms | 500 | ~422 KB | 0 | ≤6 s | |
+| stand-in | 15 ms | 132 | ~98 KB | 0 | ≤2 s | ~110 KB/s |
+| stand-in | 15 ms | 264 | ~213 KB | 0 | ≤4 s | |
+| stand-in | 15 ms | 500 | ~425 KB | 0 | ≤6 s | |
+| iPad mini | 30 ms | 132 | ~108 KB | 0 | ~3 s (inferred) | 39.1 KB/s (run 14) |
+| iPad mini | 30 ms | 264 | ~238 KB | 0 | ~6 s (inferred) | |
+| iPad mini | 30 ms | 500 | ~471 KB | 0 | ~12 s (inferred) | |
+| UART0 | — | 500, scanning | not read | 0 | ≤2 s | ≥262 KB/s |
+| UART0 | — | `saturate`, scanning | full | 18, `saturate`'s own | — | 391 KB/s |
+
+- **How the figures were reached:**
+  - Stats arrive every 2 s, so stand-in times are to the nearest sample.
+  - The peak is the ring's high-water mark since boot, so each host's bursts ran smallest first.
+    The UART0 burst's peak fell under an earlier arm's mark and could not be read.
+  - Every stand-in and UART0 arm reconciled: no load record missing that the eviction counter did
+    not explain.
+  - The iPad's counters were read over UART0 after each burst drained, and its times are its peak
+    over run 14's rate.
+- **The 1 MB ring held every burst on every host.** The largest peak was 471 KB, on the iPad.
+- **The internal 240 KB ring would still evict a 500-batch burst on any host (inferred).** The
+  burst arrives in 0.71 s, so even at ~110 KB/s its peak passes 420 KB. The iPad's 264 peak, 238 KB,
+  sits just under 240 KB.
+- **The PSRAM ring costs the USB host nothing.** `saturate` over UART0 carried 391 KB/s of 4 Mbaud's
+  400 KB/s, as fast as the internal ring.
+- **The bus kept its pace through every arm.** Every beat arrived on time and no node batch was
+  lost. `saturate`'s 18 evictions are the ones run 10 explains: the generator holds the ring
+  within two frames of full, and real frames arriving on top evict.
+- **The drain on this PC first read ~24 KB/s.** The adapter held two other LE links, a mouse and
+  another device. With both disconnected, it carried ~110 KB/s, as in run 12. Clear the adapter
+  before a Bluetooth measurement.
+- **One UART0 attachment did not start with `Ready`.** Its first frames were a log from the
+  Bluetooth attachment before it, and two that did not decode. Three later attachments, one
+  straight after a Bluetooth run, started with `Ready`. The cause was not found. `wartui` drops
+  every frame ahead of a connection's first `Ready`, so a capture would not have stored them.
+
+**Production holds the host bulk ring in PSRAM, at 1 MB.**
+
+- It frees the internal ring's 240 KB.
+- It holds two 500-batch bursts.
+- It bounds the lag. A sighting is positioned when it reaches the host, and a ring that drains
+  slowly delivers it late, so the ring's size is the worst lag: ~27 s at the iPad's 39.1 KB/s.
+  4 MB would be ~107 s, about 1.5 km at 50 km/h (inferred).
+
 ## Against the pass criteria
 
 | Criterion | Result |
@@ -381,8 +450,9 @@ Four design points the spike leaves for production:
   and `flash-bridge` moves a board on and off such a build.
 - Throughput at 2M and MTU 247 cleared the bar on all four test devices. On the stream receive it
   ran from 39.1 KB/s on the iPad to 117.9 KB/s on the Flip (run 14), 2.4× the bar or more.
-- On the old receive, draining at about 30 KB/s, the P4's 240 KB ring evicts on a 500-batch
-  burst. A 4 MB PSRAM ring does not.
+- A 1 MB PSRAM ring holds a 500-batch burst on every host tested, the iPad included, and carries
+  UART0 at its full rate (run 15). The internal 240 KB ring cannot hold that burst on any host,
+  since it arrives faster than any drain (inferred).
 - Bluetooth load does not starve the node bus.
 - The first D0:1C arm's lost batches came from a port probe aimed at the other bridge, not the bus.
 - Each P4 → C6 packet lost on D0:1C is a terminator the C6 drops when the P4 pauses one byte short
@@ -398,9 +468,7 @@ It does not settle:
 - **Why the old receive held Bluetooth throughput at a third.**
 - **Why 96:C4 stopped reading UART0** after a long idle (run 14). It has not been seen again, and
   whether the idle matters was not tested.
-- **Whether the internal ring still evicts on a 500-batch burst.** Run 8 drained on the old
-  receive, and the stream receive carried 3.1× more in run 12, so it may drain the burst before
-  the ring fills (inferred).
+- **Why one UART0 attachment began before `Ready`** (run 15). It was seen once.
 - **The stall after a broken session.** Before the MTU cap, the C6 stopped advertising after the
   fragmented session ended, while a clean session's end always re-advertised. It was not seen
   again once nothing fragmented.
