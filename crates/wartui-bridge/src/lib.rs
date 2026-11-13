@@ -7,12 +7,20 @@
 //!
 //! A real bridge is reached two ways: over USB through its CH343 ([`serial`]), or over Bluetooth
 //! through its C6 ([`ble`]). Both admit what the bridge sends through one rule, that a connection
-//! starts at its first `Ready` (`gate`). They differ where the links do. USB asks with `Identify`
-//! and sends a keepalive, since the P4's USB gate closes after 15 s of silence; a Bluetooth
-//! subscription is the attachment and that gate never closes on silence, so Bluetooth sends
-//! neither. A Bluetooth write is a fragment of the ATT MTU, so each connection's first leads with
+//! starts at its first `Ready` (`gate`). They differ where the links do. Both ask with `Identify`
+//! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
+//! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
+//! so Bluetooth sends none. A Bluetooth write is a fragment of the ATT MTU, so each connection's first leads with
 //! a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a USB host took the
 //! bridge reads as the link going down, with the central still subscribed for the handback.
+//!
+//! **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
+//! long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
+//! to it, so the bridge keeps serving a host that is gone. Unsubscribing and disconnecting are
+//! async calls, which a runtime shutting down never finishes. So every Bluetooth transport counts
+//! itself running until its supervisor returns, [`LinkHandle::close`] waits for its own, and
+//! [`close_all`] waits for every one before `main` returns, so no command path has to remember
+//! to. Serial and the simulator close at once, as they always have.
 //!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
@@ -20,14 +28,19 @@
 //! the enumeration rather than write a second one.
 
 pub mod ble;
+#[cfg(target_os = "linux")]
+pub mod bluez;
 mod gate;
 pub mod ports;
 pub mod remember;
 pub mod serial;
 pub mod sim;
 
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
+
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
@@ -48,6 +61,14 @@ pub const URGENT_CAPACITY: usize = 64;
 
 /// Depth of the bulk command queue: status polls, update records, resets.
 pub const BULK_CAPACITY: usize = 512;
+
+/// The longest [`LinkHandle::close`] and [`close_all`] wait for a Bluetooth link to unsubscribe
+/// and disconnect. The unsubscribe takes milliseconds, and frees the bridge for another host.
+/// The disconnect takes BlueZ 2 s, the timer its `Device1.Disconnect` runs before it drops a
+/// link, and BlueZ abandons it if the caller exits first: on D0:1C a 2 s wait left the PC
+/// connected after five of six `status` runs. A transport still connecting takes longer, and is
+/// left to the runtime's shutdown.
+pub const CLOSE_WITHIN: Duration = Duration::from_secs(4);
 
 /// What the bridge announced about itself when it came up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +128,9 @@ pub enum LinkEvent {
 /// crate sits below that one.
 pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware is a CH343 that does not answer; see \
      firmware/p4-bridge/README.md § \"First flash\".";
+
+/// What [`TransportError::NotBonded`] says, and `ble::is_not_bonded` reads.
+const NOT_PAIRED: &str = "because they are not paired";
 
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
@@ -191,8 +215,8 @@ pub enum TransportError {
     },
     /// The bridge refused this host's link, which is not encrypted with a bond it holds.
     #[error(
-        "the bridge {bridge} refused this PC over Bluetooth because they are not paired; pair \
-         once with `wartui bluetooth pair --bridge {bridge}`"
+        "the bridge {bridge} refused this PC over Bluetooth {NOT_PAIRED}; pair once with \
+         `wartui bluetooth pair --bridge {bridge}`"
     )]
     NotBonded {
         /// The bridge, as its last two octets.
@@ -222,9 +246,22 @@ pub struct LinkHandle {
     events: mpsc::Receiver<LinkEvent>,
     urgent: mpsc::Sender<HostToBridge>,
     bulk: mpsc::Sender<HostToBridge>,
+    /// Ends when a transport that must finish before exit has finished; `None` for the rest.
+    running: Option<Finished>,
 }
 
 impl LinkHandle {
+    /// Close the link, and wait up to [`CLOSE_WITHIN`] for the transport to let the bridge go.
+    /// Over Bluetooth that is the unsubscribe and the disconnect; over USB and in the simulator
+    /// it is at once.
+    pub async fn close(self) {
+        let Self { events, urgent, bulk, running } = self;
+        drop((events, urgent, bulk));
+        if let Some(running) = running {
+            let _ = tokio::time::timeout(CLOSE_WITHIN, running.wait()).await;
+        }
+    }
+
     /// Wait for the next event, or `None` once the transport has stopped.
     pub async fn recv(&mut self) -> Option<LinkEvent> {
         self.events.recv().await
@@ -262,6 +299,8 @@ impl LinkHandle {
 pub(crate) struct LinkPlumbing {
     pub events: mpsc::Sender<LinkEvent>,
     pub commands: CommandRx,
+    /// Held while a transport that must finish before exit runs; dropped with it.
+    _running: Option<watch::Sender<()>>,
 }
 
 /// Build a connected pair of endpoints.
@@ -270,9 +309,50 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
     let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel(BULK_CAPACITY);
     (
-        LinkHandle { events: event_rx, urgent: urgent_tx, bulk: bulk_tx },
-        LinkPlumbing { events: event_tx, commands: CommandRx { urgent: urgent_rx, bulk: bulk_rx } },
+        LinkHandle { events: event_rx, urgent: urgent_tx, bulk: bulk_tx, running: None },
+        LinkPlumbing {
+            events: event_tx,
+            commands: CommandRx { urgent: urgent_rx, bulk: bulk_rx },
+            _running: None,
+        },
     )
+}
+
+/// [`link_pair`] for a transport that must finish before the process exits: the handle's
+/// [`LinkHandle::close`] and [`close_all`] wait until the plumbing is dropped.
+pub(crate) fn link_pair_awaited() -> (LinkHandle, LinkPlumbing) {
+    let (mut handle, mut plumbing) = link_pair();
+    let (tx, rx) = watch::channel(());
+    running().push(Finished(rx.clone()));
+    handle.running = Some(Finished(rx));
+    plumbing._running = Some(tx);
+    (handle, plumbing)
+}
+
+/// Ends once its transport has finished: the sender in its plumbing is dropped.
+#[derive(Debug, Clone)]
+struct Finished(watch::Receiver<()>);
+
+impl Finished {
+    async fn wait(mut self) {
+        while self.0.changed().await.is_ok() {}
+    }
+}
+
+/// Every transport this process started that must finish before it exits.
+static RUNNING: Mutex<Vec<Finished>> = Mutex::new(Vec::new());
+
+fn running() -> std::sync::MutexGuard<'static, Vec<Finished>> {
+    RUNNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Wait up to `within` for every Bluetooth transport this process started to let its bridge
+/// go. Each finishes once its [`LinkHandle`] is dropped or closed, so `main` calls this after the
+/// command has returned, on every path.
+pub async fn close_all(within: Duration) {
+    let all = std::mem::take(&mut *running());
+    let waits = futures_util::future::join_all(all.into_iter().map(Finished::wait));
+    let _ = tokio::time::timeout(within, waits).await;
 }
 
 /// Receives commands, always preferring urgent ones.
@@ -341,6 +421,56 @@ mod tests {
             handle.send_urgent(HostToBridge::Reset).expect("queued");
         }
         assert_eq!(handle.send_urgent(HostToBridge::Reset), Err(SendError::Full));
+    }
+
+    /// A transport that lets its bridge go once the handle is gone, after `takes`.
+    fn transport(
+        mut plumbing: LinkPlumbing,
+        takes: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while plumbing.commands.recv().await.is_some() {}
+            tokio::time::sleep(takes).await;
+            drop(plumbing);
+        })
+    }
+
+    #[tokio::test]
+    async fn link_handle_waits_for_transport_when_closed() {
+        let (handle, plumbing) = link_pair_awaited();
+        let task = transport(plumbing, std::time::Duration::from_millis(50));
+        handle.close().await;
+        assert!(task.is_finished(), "close returned before the transport let go");
+    }
+
+    #[tokio::test]
+    async fn close_all_waits_for_transport_when_its_handle_was_dropped() {
+        // The path every command takes: the handle goes with the command's future, and `main`
+        // waits.
+        let (handle, plumbing) = link_pair_awaited();
+        let task = transport(plumbing, std::time::Duration::from_millis(50));
+        drop(handle);
+        close_all(CLOSE_WITHIN).await;
+        assert!(task.is_finished(), "close_all returned before the transport let go");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_handle_gives_up_on_transport_when_it_outlasts_the_bound() {
+        let (handle, plumbing) = link_pair_awaited();
+        let task = transport(plumbing, CLOSE_WITHIN * 10);
+        let started = tokio::time::Instant::now();
+        handle.close().await;
+        assert_eq!(started.elapsed(), CLOSE_WITHIN);
+        assert!(!task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn link_handle_closes_at_once_when_transport_is_not_awaited() {
+        // Serial and the simulator: nothing to wait for.
+        let (handle, _plumbing) = link_pair();
+        tokio::time::timeout(std::time::Duration::from_millis(100), handle.close())
+            .await
+            .expect("closed at once");
     }
 
     #[tokio::test]

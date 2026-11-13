@@ -24,8 +24,9 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
+| `flash-bridge` | Update the P4 bridge's firmware over USB; see "Flashing the bridge"                 |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
+| `bluetooth`    | `pair` this PC with the bridge, or `forget` it; see "The Bluetooth link"            |
 
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
@@ -338,10 +339,11 @@ wartui refuses to start on an unknown key or table, naming the file and line. A 
 `wartui scan start --bluetooth`, since the bridge keeps the pool and picks the Bluetooth node. An out-of-range value,
 a malformed `[bridge] mac`, a `mac`, `serial` or `bluetooth-address` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
-`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `ota` read only `[bridge]`,
-and treat a broken file as no bridge remembered, so it cannot stop them. `ota` ignores `link`.
-`flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
-gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read
+only `[bridge]`, and treat a broken file as no bridge remembered, so it cannot stop them. `ota`
+ignores `link`, and so does `bluetooth pair`. `flash-bridge` reads only `[bridge]`, ignores
+`link`, and refuses a broken file, since it decides which board gets firmware. `flash-fleet` never
+reads the file. Settings (`c`) rewrites the whole file on save.
 The waiting-for-GPS pop-up's box writes `[gps] wait-for-fix = false` when ticked, and drops the
 key when unticked.
 `run` writes `[bridge] mac`, `serial` and `bluetooth-address` when the bridge it remembers
@@ -365,7 +367,7 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `scan`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing
+`pool`, `scan`, `ota`, `flash-bridge` and `bluetooth`. A named file that is missing is refused; a missing
 default file silently means the built-in defaults.
 
 ### Benchmarking the store
@@ -451,6 +453,7 @@ candidate once, since `board-info` does.
 
 `flash-bridge` updates the P4 bridge over the link it bridges on: the Type-C cable to its CH343,
 the one its first flash used (`firmware/p4-bridge/README.md` § "First flash").
+`[bridge] link = "bluetooth"` does not change that, and `--link` is refused.
 
 ```sh
 wartui flash-bridge --dry-run                       # which board, and the image's source
@@ -531,7 +534,8 @@ again, or any `wartui` command that opens the bridge.
 
 ### Updating over the air
 
-`ota` updates the nodes' firmware through the bridge, with no USB cable to them. It listens for
+`ota` updates the nodes' firmware through the bridge, with no USB cable to them. It reaches the
+bridge over USB whatever `[bridge] link` says. It listens for
 heartbeats, shows what it would do with each node, asks, then updates every chosen node at once
 while it uploads the image into the bridge's node image cache. Nothing else may hold the bridge
 meanwhile, so stop `run` first.
@@ -1163,10 +1167,16 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## The Bluetooth link
 
 **`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
-`sniff`, `reset`, `power-cycle`, `fan`, `pool` and `scan` take it. `[bridge] link = "bluetooth"`
-makes it the default, and `run` saves the link it connected over there. A `--bridge` path is
-always USB, and `--link bluetooth` refuses one. `flash-bridge` and `ota` use USB whatever the file
-says. Nothing scans for Bluetooth unless the link is Bluetooth.
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth forget` take it.
+`[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected over
+there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. **Updates use the USB
+cable**: `flash-bridge` and `ota` take no `--link`, refuse one with `updates use the USB cable`,
+and ignore `[bridge] link`. Nothing scans for Bluetooth unless the link is Bluetooth. Every
+command lets the bridge go before it exits, ctrl-c included, so the bridge never keeps serving a
+PC that has gone.
+
+A Linux build links the system's libdbus, so building needs its headers: `dbus-devel` on Fedora,
+`libdbus-1-dev` on Debian and Ubuntu.
 
 **The bridge advertises `wartui XX:YY`, its last two octets.** `--bridge XX:YY`, or the whole
 address, names the same board over either link. Without one, wartui connects straight to the
@@ -1174,9 +1184,48 @@ Bluetooth address it remembers, and otherwise scans for 10 s and takes the one b
 several are refused. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
 remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
 
-**The PC pairs with the bridge once.** The bridge serves only a paired, encrypted host. An unpaired
-PC is refused with `the bridge XX:YY refused this PC over Bluetooth because they are not paired`,
-and the command that pairs it is `wartui bluetooth pair --bridge XX:YY`.
+**The PC pairs with the bridge once, with `wartui bluetooth pair`.** The bridge serves only a
+paired, encrypted host. An unpaired PC is refused with `the bridge XX:YY refused this PC over
+Bluetooth because they are not paired`. BlueZ never pairs on its own, so on Linux `pair` does it:
+
+```sh
+wartui bluetooth pair                 # the bridge on USB, else the remembered one, else the one heard
+wartui bluetooth pair --bridge 44:C0
+```
+
+1. **It opens the pairing window.** A bridge lets a new host pair only inside its window: 120 s
+   after it powers up, while it holds no bond, and 120 s after a host on USB opens it. When the
+   bridge answers on USB, `pair` opens it there. Otherwise, pair within 120 s of powering the
+   bridge up.
+2. **It scans for `wartui XX:YY` and pairs through BlueZ.** The pairing is Just Works: nothing to
+   type, nothing to confirm.
+3. **It proves the bond.** It connects once and asks the bridge whether this PC is encrypted and
+   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`. Over USB first, the
+   bridge serves it 15 s after the USB link goes quiet.
+
+A PC BlueZ already lists as paired is checked first. When the bridge no longer holds that bond,
+`pair` removes it and pairs again, since BlueZ never does. A pairing the bridge did not keep is
+removed too, and the run fails: `its pairing window is most likely closed` names both fixes, the
+USB cable or a power cycle. `pair` saves nothing to `wartui.toml`; the next `run --link bluetooth`
+remembers the bridge. On other OSes `pair` opens the window and stops: the OS pairs on the first
+`--link bluetooth` connection inside it, which is untested.
+
+**`wartui bluetooth forget` clears every bond the bridge keeps.** It sends that over `--link`, USB
+by default, removes the bridge from BlueZ on Linux, and says what it costs: every other host that
+paired with the bridge keeps a bond the bridge dropped, and cannot connect until it forgets the
+bridge too, in its own Bluetooth settings, and pairs again. With no bond, the bridge's window stays
+open until a host pairs. `forget` saves nothing to `wartui.toml` either.
+
+**`status` shows the Bluetooth host link.** Its labels are apart from `bluetooth`, the node that
+scans Bluetooth:
+
+| Line                                                                     | Meaning                                                         |
+|--------------------------------------------------------------------------|-----------------------------------------------------------------|
+| `host  usb`                                                              | Who the bridge serves: `none`, `usb` or `bluetooth`             |
+| `host  bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
+| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
+| `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
+| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond, the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
 `flash-bridge` does. The Bluetooth host shows `link down: the USB host took the bridge` and stays
@@ -1184,6 +1233,9 @@ connected. The bridge hands it back 15 s after USB falls silent, and the view re
 being asked. A Bluetooth connection with no answer after 20 s logs that a USB host may hold the
 bridge, and keeps waiting. `wartui ports` and `--bridge` lookups over USB never take the bridge
 from a Bluetooth host.
+
+**A host other than wartui writes each frame's last piece as a write request**, and the rest
+without response: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
 
 ## When nothing arrives
 
@@ -1250,6 +1302,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
+- **`host  …`** and **`pairing  …`**, and the **`bluetooth host  …`** counters: the Bluetooth host
+  link; see "The Bluetooth link".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
 - **`share  N1   21 channels  1,3,5,…`**: one line per node holding a share of the bridge's plan,

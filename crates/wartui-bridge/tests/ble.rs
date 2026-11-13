@@ -5,12 +5,12 @@
 
 use std::time::{Duration, Instant};
 
-use wartui_bridge::LinkEvent;
 use wartui_bridge::ble::{
-    DownWriter, Heard, Inbound, advertised_name, dropped_as_unbonded, is_remembered, is_takeover,
-    names_bridge, refused_for_bonding,
+    DownWrite, DownWriter, Heard, Inbound, WriteKind, advertised_name, dropped_as_unbonded,
+    is_not_bonded, is_remembered, is_takeover, names_bridge, refused_for_bonding,
 };
 use wartui_bridge::serial::BridgeSpec;
+use wartui_bridge::{LinkEvent, TransportError};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
@@ -100,15 +100,32 @@ fn ble_name_refuses_bridge_when_octets_differ_or_name_is_not_a_bridge() {
     assert!(!names_bridge(Some(&spec("/dev/ttyACM0")), "wartui 44:C0"));
 }
 
+/// A `ToNode` whose body is `len` bytes.
+fn to_node(len: usize) -> HostToBridge {
+    let body = ToNodeBody::from_slice(&vec![0x5A; len]).unwrap();
+    HostToBridge::ToNode { slot: Slot::new(0, 0).unwrap(), id: 1, kind: 2, body }
+}
+
+/// The writes' values, end to end.
+fn bytes(writes: &[DownWrite]) -> Vec<u8> {
+    writes.iter().flat_map(|w| w.bytes.iter().copied()).collect()
+}
+
+/// How many of `writes` are requests.
+fn requests(writes: &[DownWrite]) -> usize {
+    writes.iter().filter(|w| w.kind == WriteKind::Request).count()
+}
+
 #[test]
 fn ble_writer_leads_first_frame_with_terminator_when_connection_is_new() {
     let mut writer = DownWriter::new(247);
-    let first: Vec<u8> = writer.writes(&HostToBridge::GetStatus).unwrap().concat();
+    let first = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(first[0].bytes, [0x00], "a write of its own");
     let mut want = vec![0x00];
     want.extend(host_frame(&HostToBridge::GetStatus));
-    assert_eq!(first, want);
-    let again: Vec<u8> = writer.writes(&HostToBridge::GetStatus).unwrap().concat();
-    assert_eq!(again, host_frame(&HostToBridge::GetStatus), "only the first");
+    assert_eq!(bytes(&first), want);
+    let again = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(bytes(&again), host_frame(&HostToBridge::GetStatus), "only the first");
 }
 
 #[test]
@@ -116,22 +133,22 @@ fn ble_writer_leads_again_when_a_new_connection_starts() {
     let mut writer = DownWriter::new(247);
     writer.writes(&HostToBridge::GetStatus).unwrap();
     let mut reconnected = DownWriter::new(247);
-    assert_eq!(reconnected.writes(&HostToBridge::GetStatus).unwrap()[0][0], 0x00);
+    assert_eq!(reconnected.writes(&HostToBridge::GetStatus).unwrap()[0].bytes, [0x00]);
 }
 
 #[test]
 fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
-    let body = ToNodeBody::from_slice(&[0x5A; 1000]).unwrap();
-    let cmd = HostToBridge::ToNode { slot: Slot::new(0, 0).unwrap(), id: 1, kind: 2, body };
+    let cmd = to_node(1000);
     let mut writer = DownWriter::new(247);
     let writes = writer.writes(&cmd).unwrap();
-    assert!(writes.len() > 1);
-    assert!(writes.iter().all(|w| w.len() <= 244), "ATT MTU 247 less its 3-byte header");
-    assert!(writes[..writes.len() - 1].iter().all(|w| w.len() == 244));
+    let pieces = &writes[1..];
+    assert!(pieces.len() > 1);
+    assert!(pieces.iter().all(|w| w.bytes.len() <= 244), "ATT MTU 247 less its 3-byte header");
+    assert!(pieces[..pieces.len() - 1].iter().all(|w| w.bytes.len() == 244));
     // Reassembled as the P4 does, the writes are one frame.
     let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
     let mut decoded = None;
-    for byte in writes.concat() {
+    for byte in bytes(&writes) {
         if let Some(frame) = acc.push(byte) {
             decoded = Some(decode_frame::<HostToBridge>(frame));
         }
@@ -141,11 +158,46 @@ fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
 
 #[test]
 fn ble_writer_writes_twenty_bytes_when_mtu_is_the_default() {
-    let body = ToNodeBody::from_slice(&[1; 64]).unwrap();
-    let cmd = HostToBridge::ToNode { slot: Slot::new(0, 0).unwrap(), id: 1, kind: 2, body };
+    let cmd = to_node(64);
     let writes = DownWriter::new(23).writes(&cmd).unwrap();
-    assert!(writes.iter().all(|w| w.len() <= 20));
-    assert!(DownWriter::new(0).writes(&cmd).unwrap().iter().all(|w| w.len() <= 20));
+    assert!(writes.iter().all(|w| w.bytes.len() <= 20));
+    assert!(DownWriter::new(0).writes(&cmd).unwrap().iter().all(|w| w.bytes.len() <= 20));
+}
+
+#[test]
+fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
+    let mut writer = DownWriter::new(247);
+    writer.writes(&HostToBridge::GetStatus).unwrap();
+    let writes = writer.writes(&to_node(1000)).unwrap();
+    assert!(writes.len() > 1);
+    assert_eq!(requests(&writes), 1);
+    assert_eq!(writes.last().unwrap().kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_sends_request_when_frame_takes_one_piece() {
+    let mut writer = DownWriter::new(247);
+    writer.writes(&HostToBridge::GetStatus).unwrap();
+    let writes = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_sends_lead_without_response_when_connection_is_new() {
+    // The request answers for a frame the C6 has forwarded, so it is the frame's last piece.
+    let writes = DownWriter::new(247).writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command });
+    assert_eq!(writes[1].kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_fits_the_c6_write_queue_when_frame_is_largest() {
+    // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest.
+    let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
+    let writes = DownWriter::new(247).writes(&largest).unwrap();
+    assert!(writes.len() <= 8, "{} writes", writes.len());
 }
 
 #[test]
@@ -238,4 +290,14 @@ fn ble_remembered_matches_address_or_identifier_when_case_differs() {
     let mac_id = "5c3e1a2b-0000-4000-8000-00805f9b34fb";
     assert!(is_remembered(mac_id, "00:00:00:00:00:00", mac_id), "macOS hides the address");
     assert!(!is_remembered("02:00:5E:10:44:C1", "02:00:5E:10:44:C2", "hci0/dev_02_00_5E_10_44_C2"));
+}
+
+#[test]
+fn ble_reason_reads_as_not_bonded_only_when_it_is_the_transports_refusal() {
+    // `wartui bluetooth pair` tells a stale bond from any other failure by this.
+    let refused = TransportError::NotBonded { bridge: "44:C0".to_owned() }.to_string();
+    assert!(refused.contains("refused this PC over Bluetooth because they are not paired"));
+    assert!(is_not_bonded(&refused), "{refused}");
+    assert!(!is_not_bonded("the bridge disconnected"));
+    assert!(!is_not_bonded(&TransportError::NoAdapter.to_string()));
 }

@@ -6,6 +6,13 @@
 //! § "When nothing arrives" has which to reach for.
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
+//!
+//! **Every Bluetooth link is closed before the process exits.** `main` waits for each to
+//! unsubscribe and disconnect once the command returns, by any route, so the bridge never keeps
+//! serving a host that has gone (`wartui_bridge::close_all`). A ctrl-c reaches that wait too:
+//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth` stop at one, `sniff`
+//! watches for one itself, and `run`'s view reads it as a key. `flash-bridge` and `ota` use the USB
+//! cable and open no Bluetooth link.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,6 +33,7 @@ use crate::config::Link;
 
 mod analyze;
 mod bench;
+mod bluetooth;
 mod capture;
 mod config;
 mod export;
@@ -96,6 +104,8 @@ enum Command {
     FlashBridge(flash::bridge::Args),
     /// Update nodes' firmware through the bridge.
     Ota(ota::Args),
+    /// Pair this PC with the bridge over Bluetooth, or forget it.
+    Bluetooth(bluetooth::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
     #[command(hide = true)]
@@ -107,28 +117,60 @@ async fn main() -> Result<()> {
     let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
     // Held for the whole process: dropping the guard stops the writer thread,
     // and the last thing logged before an exit is usually the interesting one.
-    let _log = logging(cli.log_file.as_deref())?;
-    match cli.command {
+    let log = logging(cli.log_file.as_deref())?;
+    let outcome = match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
-        // `power-cycle`, `fan`, `pool`, `scan` and `ota` read a broken one as no bridge
-        // remembered, and `ports` and `flash-fleet` never read it.
+        // `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read a broken one as no
+        // bridge remembered, and `ports` and `flash-fleet` never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
         Some(Command::Analyze(args)) => analyze::run(args),
         Some(Command::Upload(args)) => upload::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
-        Some(Command::Status(args)) => status::run(args).await,
-        Some(Command::Reset(args)) => reset::run(args).await,
-        Some(Command::PowerCycle(args)) => power_cycle::run(args).await,
-        Some(Command::Fan(args)) => fan::run(args).await,
-        Some(Command::Pool(args)) => pool::run(args).await,
-        Some(Command::Scan(args)) => scan::run(args).await,
+        Some(Command::Status(args)) => interruptible(status::run(args)).await,
+        Some(Command::Reset(args)) => interruptible(reset::run(args)).await,
+        Some(Command::PowerCycle(args)) => interruptible(power_cycle::run(args)).await,
+        Some(Command::Fan(args)) => interruptible(fan::run(args)).await,
+        Some(Command::Pool(args)) => interruptible(pool::run(args)).await,
+        Some(Command::Scan(args)) => interruptible(scan::run(args)).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
         Some(Command::Ota(args)) => ota::run(args).await,
+        Some(Command::Bluetooth(args)) => interruptible(bluetooth::run(args)).await,
         Some(Command::Bench(args)) => bench::run(args).await,
+    };
+    // The command's links went with it; a Bluetooth one is let go of here.
+    wartui_bridge::close_all(wartui_bridge::CLOSE_WITHIN).await;
+    if outcome.as_ref().is_err_and(|error| error.is::<Interrupted>()) {
+        drop(log);
+        std::process::exit(INTERRUPTED_EXIT);
+    }
+    outcome
+}
+
+/// The exit status after a ctrl-c: 128 plus `SIGINT`, as a shell reports one.
+const INTERRUPTED_EXIT: i32 = 130;
+
+/// A command stopped by ctrl-c.
+#[derive(Debug)]
+struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// Run `command`, or stop it at a ctrl-c, dropping its link so `main` can close it.
+async fn interruptible(command: impl Future<Output = Result<()>>) -> Result<()> {
+    tokio::select! {
+        outcome = command => outcome,
+        // A handler that would not install is no ctrl-c: the arm is disabled, not fired.
+        Ok(()) = tokio::signal::ctrl_c() => Err(Interrupted.into()),
     }
 }
 
@@ -140,6 +182,9 @@ async fn main() -> Result<()> {
 /// no bridge was there. An argument that silently does nothing is worse than an error,
 /// so one typed there is refused. `--log-file` is global and means the same in either
 /// place.
+///
+/// `--link` on an update is refused with the reason, since it reads as a flag clap forgot:
+/// updates use the USB cable.
 fn parse<I, T>(args: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -147,8 +192,12 @@ where
 {
     use clap::{CommandFactory, FromArgMatches, error::ErrorKind, parser::ValueSource};
 
+    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let mut command = Cli::command();
-    let matches = command.try_get_matches_from_mut(args)?;
+    let matches = match command.try_get_matches_from_mut(args.clone()) {
+        Ok(matches) => matches,
+        Err(error) => return Err(link_on_update(&mut command, &args, &error).unwrap_or(error)),
+    };
     if let Some((name, _)) = matches.subcommand() {
         let misplaced = command.get_arguments().find(|arg| {
             !arg.is_global_set()
@@ -161,6 +210,8 @@ where
                 .is_some_and(|sub| sub.get_arguments().any(|a| a.get_long() == Some(flag)));
             let advice = if takes_it {
                 format!("put it after the subcommand: wartui {name} --{flag} ...")
+            } else if flag == "link" && UPDATES.contains(&name) {
+                format!("'{name}' does not take it: {UPDATES_USE_USB}")
             } else {
                 format!("'{name}' does not take it")
             };
@@ -171,6 +222,47 @@ where
         }
     }
     Cli::from_arg_matches(&matches)
+}
+
+/// The commands that update firmware. They use the USB cable whatever `[bridge] link` says.
+const UPDATES: [&str; 2] = ["flash-bridge", "ota"];
+
+/// Why an update takes no `--link`.
+const UPDATES_USE_USB: &str = "updates use the USB cable";
+
+/// clap's refusal of `--link` after an update's name, with the reason in its place.
+fn link_on_update(
+    command: &mut clap::Command,
+    args: &[std::ffi::OsString],
+    error: &clap::Error,
+) -> Option<clap::Error> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    if error.kind() != ErrorKind::UnknownArgument {
+        return None;
+    }
+    let Some(ContextValue::String(arg)) = error.get(ContextKind::InvalidArg) else {
+        return None;
+    };
+    if arg != "--link" && !arg.starts_with("--link=") {
+        return None;
+    }
+    let name = args
+        .iter()
+        .skip(1)
+        .filter_map(|arg| arg.to_str())
+        .find(|arg| command.find_subcommand(arg).is_some())?;
+    if !UPDATES.contains(&name) {
+        return None;
+    }
+    // The subcommand's own error, so the usage line is the update's.
+    let update = command.find_subcommand_mut(name)?;
+    Some(
+        update.error(
+            ErrorKind::UnknownArgument,
+            format!("'--link' does not apply: {UPDATES_USE_USB}"),
+        ),
+    )
 }
 
 /// Send `tracing` output to `path`, if one was given.
@@ -727,9 +819,31 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_refuses_bluetooth_when_given_as_a_command() {
+    fn cli_parser_refuses_bluetooth_when_given_a_slot() {
         // The bridge picks the node that scans Bluetooth; `scan start --bluetooth` asks for it.
+        // `bluetooth` pairs this PC with the bridge, and names no node.
         assert!(parse(["wartui", "bluetooth", "N3"]).is_err());
+        assert!(parse(["wartui", "bluetooth"]).is_err(), "an action is required");
+    }
+
+    #[test]
+    fn cli_parser_accepts_bluetooth_pair_and_forget_when_given_their_flags() {
+        for args in [
+            ["wartui", "bluetooth", "pair"].as_slice(),
+            &["wartui", "bluetooth", "pair", "--bridge", "44:C0", "--config", "w.toml"],
+            &["wartui", "bluetooth", "forget"],
+            &["wartui", "bluetooth", "forget", "--bridge", "44:C0", "--link", "bluetooth"],
+            &["wartui", "bluetooth", "forget", "--link", "usb", "--config", "w.toml"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Bluetooth(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_link_when_passed_to_bluetooth_pair() {
+        // Pairing opens the window over USB and pairs over Bluetooth; no link is chosen.
+        assert!(parse(["wartui", "bluetooth", "pair", "--link", "usb"]).is_err());
     }
 
     #[test]
@@ -853,6 +967,29 @@ mod tests {
             }
         }
         assert!(parse(["wartui", "--link", "bluetooth"]).is_ok(), "a bare run");
+    }
+
+    #[test]
+    fn cli_parser_refuses_link_with_the_reason_when_passed_to_an_update() {
+        for args in [
+            ["wartui", "flash-bridge", "--link", "bluetooth"].as_slice(),
+            &["wartui", "flash-bridge", "--bridge", "44:C0", "--link", "usb"],
+            &["wartui", "flash-bridge", "--link=bluetooth"],
+            &["wartui", "ota", "--link", "bluetooth"],
+            &["wartui", "--log-file", "w.log", "ota", "--node", "N3", "--link", "bluetooth"],
+            &["wartui", "--link", "bluetooth", "flash-bridge"],
+        ] {
+            let Err(error) = parse(args) else { panic!("{args:?} parsed") };
+            assert!(error.to_string().contains("updates use the USB cable"), "{args:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_link_without_the_update_reason_when_command_is_not_an_update() {
+        let Err(error) = parse(["wartui", "ports", "--link", "bluetooth"]) else {
+            panic!("parsed")
+        };
+        assert!(!error.to_string().contains("USB cable"), "{error}");
     }
 
     #[test]

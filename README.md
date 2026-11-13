@@ -109,6 +109,7 @@ wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
 wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware through the bridge
+wartui bluetooth pair # pair this PC with the bridge, for `--link bluetooth`
 wartui scan start # set the bridge scanning with no host attached; `scan stop` idles it
 ```
 

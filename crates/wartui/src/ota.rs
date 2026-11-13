@@ -372,7 +372,7 @@ fn open(args: &Args) -> Result<LinkHandle> {
         };
         return SimTransport::new(config).start().context("starting the simulator");
     }
-    // USB whatever `[bridge] link` says, until the update is carried over Bluetooth too.
+    // USB whatever `[bridge] link` says: updates use the cable.
     let bridge = args.bridge.as_deref();
     super::open(bridge, None, Link::Usb, super::memory(args.config.as_deref()))
 }

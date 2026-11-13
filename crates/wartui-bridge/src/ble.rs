@@ -12,20 +12,38 @@
 //! to Up from a bonded, encrypted link (`wartui_proto::host_owner`). The stream starts with a
 //! `Ready`, and what decodes ahead of it is dropped, as on USB (`crate::gate`).
 //!
-//! **No `Identify` and no keepalive.** A subscription is the attachment, so there is nothing to
-//! ask, and the Bluetooth gate never closes on silence, so there is nothing to hold open. A USB
-//! host that holds the queue keeps a subscribed central waiting until 15 s after its last frame,
-//! so a subscription with no `Ready` after [`READY_WARN_AFTER`] logs one warning and keeps waiting.
+//! **`Identify` until a `Ready`, and no keepalive.** A subscription is the attachment, and the
+//! bridge announces itself when it attaches one. But a bonded central's subscription outlives its
+//! connection, in BlueZ and in the C6 alike, so after a link that dropped without an unsubscribe
+//! the next connection is subscribed the moment it is encrypted: the bridge attached it and sent
+//! its `Ready` about a second before this transport had found the service and opened its
+//! notifications, and the transport then waited for a `Ready` that had gone by (D0:1C,
+//! 2026-11-13). So once the notifications are open it asks, every [`IDENTIFY_EVERY`] until a
+//! `Ready` answers, as the USB transport does. The P4 answers a central that holds the queue and
+//! drops the frame from one that does not. The Bluetooth gate never closes on silence, so there
+//! is nothing to hold open. A USB host that holds the queue keeps a subscribed central waiting
+//! until 15 s after its last frame, so a subscription with no `Ready` after [`READY_WARN_AFTER`]
+//! logs one warning and keeps waiting.
 //!
 //! **A USB takeover is a link going down, not a fault.** The P4 sends the central one
 //! `BridgeToHost::Error` with [`USB_TOOK_BRIDGE`] ahead of releasing it. The transport reports
 //! [`LinkEvent::Disconnected`], stays subscribed, and reports `Connected` on the `Ready` that
 //! hands the queue back, though it is the same life, since the stream starts afresh there.
 //!
-//! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`) and written
-//! without response in pieces of the ATT MTU less its 3-byte header: 244 bytes at the C6's MTU of
-//! 247. A write is a stream fragment, so the first after every connect leads with a `0x00`, which
-//! ends whatever partial frame the P4's accumulator held from an earlier attachment.
+//! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`) and cut into pieces
+//! of the ATT MTU less its 3-byte header: 244 bytes at the C6's MTU of 247. A write is a stream
+//! fragment, so the first frame after every connect follows a one-byte `0x00` write, which ends
+//! whatever partial frame the P4's accumulator held from an earlier attachment.
+//!
+//! **Each frame ends with a write request**, and every piece before it is a write without
+//! response. TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and silently drops the rest,
+//! and a write without response gives the central nothing to wait on: a burst of full writes lost
+//! some whenever the C6's forwarding to the P4 slowed, and a sustained flood stopped the C6's
+//! Bluetooth host. The C6 answers the request only once it has forwarded that piece, behind every
+//! piece queued ahead of it, so the central never has more than one frame outstanding: 5 pieces of
+//! the largest frame at MTU 247, and the leading `0x00`. Every write as a request held the link
+//! too, at about 3.4 KB/s on a 30 ms interval. A request the C6 answers with an ATT error fails as
+//! any write does, and ends the connection.
 //!
 //! **Not bonded.** The C6 refuses an unbonded central's subscription, and disconnects one that has
 //! not paired 10 s after it connected. Either is [`TransportError::NotBonded`], since BlueZ never
@@ -34,6 +52,13 @@
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that peripheral. A P4 reboot resets its
 //! C6 and drops the link, which is an ordinary reconnect.
+//!
+//! **Closing.** Once the handle is gone the connection unsubscribes from Up and disconnects, and a
+//! scan or a connect under way stops, so the bridge never serves a process that has exited. The
+//! transport counts as running until then, which `crate::close_all` waits for.
+//!
+//! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
+//! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
 
 use std::time::{Duration, Instant};
 
@@ -53,7 +78,7 @@ use wartui_proto::mac::{self, Mac};
 use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
 use crate::serial::{BridgeSpec, encode_for_wire};
-use crate::{LinkEvent, LinkHandle, LinkPlumbing, TransportError, link_pair};
+use crate::{LinkEvent, LinkHandle, LinkPlumbing, TransportError, link_pair_awaited};
 
 /// How long a scan looks for the bridge's name before giving up.
 pub const SCAN_FOR: Duration = Duration::from_secs(10);
@@ -72,6 +97,9 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 /// bridge. Past the P4's 15 s handback, so a USB host that just let go is not reported.
 pub const READY_WARN_AFTER: Duration = Duration::from_secs(20);
 
+/// How often a subscription without a `Ready` asks for one with `Identify`.
+const IDENTIFY_EVERY: Duration = Duration::from_secs(1);
+
 /// How often a connection asks the OS whether it is still connected, behind the disconnect
 /// event that usually says so first.
 const ALIVE_EVERY: Duration = Duration::from_secs(2);
@@ -84,11 +112,26 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 const UNBONDED_DROP: std::ops::RangeInclusive<Duration> =
     Duration::from_secs(8)..=Duration::from_secs(35);
 
-/// The ATT header a write without response carries ahead of its value.
+/// The ATT header a write carries ahead of its value.
 const ATT_HEADER: u16 = 3;
 
 /// The smallest write value, at the default ATT MTU of 23.
 const MIN_WRITE: usize = 20;
+
+/// The ATT PDUs TrouBLE 0.8 queues per connection on the C6 (`L2CAP_RX_QUEUE_SIZE`). It drops the
+/// rest silently.
+const C6_WRITE_QUEUE: usize = 8;
+
+/// The ATT MTU the C6 asks for, the smallest the bridge serves well.
+const SERVED_MTU: u16 = 247;
+
+// The largest frame's pieces, with the leading `0x00` write beside them, fit the C6's queue at
+// the MTU it asks for. At the default MTU of 23 a frame takes far more, up to 58 pieces; a central
+// stuck there is slow anyway.
+const _: () = assert!(
+    MAX_HOST_FRAME.div_ceil((SERVED_MTU - ATT_HEADER) as usize) < C6_WRITE_QUEUE,
+    "the largest frame overflows the C6's write queue"
+);
 
 /// A link to a real bridge over Bluetooth, reconnecting on its own.
 #[derive(Debug, Clone)]
@@ -145,7 +188,7 @@ impl BleTransport {
                  --bridge XX:YY"
             )));
         }
-        let (handle, plumbing) = link_pair();
+        let (handle, plumbing) = link_pair_awaited();
         tokio::spawn(supervise(self, plumbing));
         Ok(handle)
     }
@@ -182,6 +225,39 @@ pub fn names_bridge(spec: Option<&BridgeSpec>, name: &str) -> bool {
             wanted[wanted.len() - n..] == tail[2 - n..]
         }
     }
+}
+
+/// Whether a [`LinkEvent::Disconnected`] reason is the bridge refusing this host for holding no
+/// bond it keeps ([`TransportError::NotBonded`]).
+#[must_use]
+pub fn is_not_bonded(reason: &str) -> bool {
+    reason.contains(crate::NOT_PAIRED)
+}
+
+/// A bridge a scan heard: the name it advertises, and the address the OS knows it by, or on
+/// macOS the identifier CoreBluetooth gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advertiser {
+    /// Its advertised `wartui XX:YY`.
+    pub name: String,
+    /// Its address, as [`crate::remember::BridgeMemory::on_bluetooth`] takes it.
+    pub address: String,
+}
+
+/// Scan for up to [`SCAN_FOR`] for the bridge `spec` names, preferring one `preferred` names,
+/// as a connection's scan does, and connect to nothing.
+///
+/// # Errors
+/// [`TransportError::NoAdapter`], [`TransportError::NotFound`],
+/// [`TransportError::SeveralAdvertising`], or the stack's own failure.
+pub async fn find_advertiser(
+    spec: Option<&BridgeSpec>,
+    preferred: Option<&BridgeSpec>,
+) -> Result<Advertiser, TransportError> {
+    let adapter = open_adapter().await?;
+    let peripheral = scan(&adapter, spec, preferred).await?;
+    let name = name_of(&peripheral).await.map(|(name, _)| name).unwrap_or_default();
+    Ok(Advertiser { name, address: address_of(&peripheral) })
 }
 
 /// Whether `msg` is the P4's notice that a USB host took the queue from this central.
@@ -226,7 +302,25 @@ pub fn is_remembered(remembered: &str, address: &str, id: &str) -> bool {
     remembered.eq_ignore_ascii_case(address) || remembered.eq_ignore_ascii_case(id)
 }
 
-/// The bytes of one host frame for each write to Down.
+/// How a write to Down goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteKind {
+    /// A write without response: the central waits on nothing.
+    Command,
+    /// A write request, which the C6 answers once it has forwarded it.
+    Request,
+}
+
+/// One write to Down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownWrite {
+    /// The write's value.
+    pub bytes: Vec<u8>,
+    /// How it goes.
+    pub kind: WriteKind,
+}
+
+/// The writes to Down that carry each host frame.
 #[derive(Debug)]
 pub struct DownWriter {
     /// The next frame leads with a `0x00`: the first since this connect.
@@ -243,16 +337,26 @@ impl DownWriter {
         Self { lead: true, chunk }
     }
 
-    /// `cmd` encoded as on USB and cut into writes, the first behind a `0x00` when it is the
-    /// first since the connect.
+    /// `cmd` encoded as on USB and cut into writes without response, the last a request, behind
+    /// a one-byte `0x00` write when it is the first since the connect.
     ///
     /// # Errors
     /// [`LinkError`] if `cmd` does not fit a frame.
-    pub fn writes(&mut self, cmd: &HostToBridge) -> Result<Vec<Vec<u8>>, LinkError> {
-        let mut buf = [0u8; MAX_HOST_FRAME + 1];
-        let len = encode_for_wire(cmd, self.lead, &mut buf)?;
-        self.lead = false;
-        Ok(buf[..len].chunks(self.chunk).map(<[u8]>::to_vec).collect())
+    pub fn writes(&mut self, cmd: &HostToBridge) -> Result<Vec<DownWrite>, LinkError> {
+        let mut buf = [0u8; MAX_HOST_FRAME];
+        let len = encode_for_wire(cmd, false, &mut buf)?;
+        let lead = std::mem::take(&mut self.lead).then(|| vec![0x00]);
+        let pieces = buf[..len].chunks(self.chunk).map(<[u8]>::to_vec);
+        let mut writes: Vec<DownWrite> = lead
+            .into_iter()
+            .chain(pieces)
+            .map(|bytes| DownWrite { bytes, kind: WriteKind::Command })
+            .collect();
+        // A frame is never empty, so its last piece is not the lead.
+        if let Some(last) = writes.last_mut() {
+            last.kind = WriteKind::Request;
+        }
+        Ok(writes)
     }
 }
 
@@ -369,7 +473,9 @@ async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
                 if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
                     return;
                 }
-                tokio::time::sleep(delay).await;
+                if !wait_unless_closed(&plumbing, delay).await {
+                    return;
+                }
                 continue;
             }
             End::Over { reason, announced: false } => reason,
@@ -383,8 +489,18 @@ async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
         if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
             return;
         }
-        tokio::time::sleep(delay).await;
+        if !wait_unless_closed(&plumbing, delay).await {
+            return;
+        }
         delay = (delay * 2).min(MAX_RETRY_DELAY);
+    }
+}
+
+/// Sleep `delay`, unless the handle goes first: `false` then.
+async fn wait_unless_closed(plumbing: &LinkPlumbing, delay: Duration) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => true,
+        () = plumbing.events.closed() => false,
     }
 }
 
@@ -405,10 +521,19 @@ async fn attempt(
     };
     let peripheral = match settled {
         Some(peripheral) => peripheral.clone(),
-        None => match find(&central, transport).await {
-            Ok(peripheral) => peripheral,
-            Err(e) => return End::failed(e.to_string()),
-        },
+        None => {
+            let found = tokio::select! {
+                found = find(&central, transport) => found,
+                () = plumbing.events.closed() => {
+                    let _ = central.stop_scan().await;
+                    return End::HandleDropped;
+                }
+            };
+            match found {
+                Ok(peripheral) => peripheral,
+                Err(e) => return End::failed(e.to_string()),
+            }
+        }
     };
     connect(&central, &peripheral, transport, plumbing, settled, unreported).await
 }
@@ -559,7 +684,14 @@ async fn connect(
 
     let connected_at = Instant::now();
     if !peripheral.is_connected().await.unwrap_or(false) {
-        match tokio::time::timeout(CONNECT_WITHIN, peripheral.connect()).await {
+        let connecting = tokio::select! {
+            connecting = tokio::time::timeout(CONNECT_WITHIN, peripheral.connect()) => connecting,
+            () = plumbing.events.closed() => {
+                let _ = peripheral.disconnect().await;
+                return End::HandleDropped;
+            }
+        };
+        match connecting {
             Ok(Ok(())) => {}
             Ok(Err(e)) if refused_for_bonding(&e.to_string()) => return End::failed(not_bonded()),
             Ok(Err(e)) => return End::failed(format!("could not connect to {label}: {e}")),
@@ -585,7 +717,11 @@ async fn connect(
         }
         end => end,
     };
-    let _ = peripheral.disconnect().await;
+    // A link that already dropped is not disconnected again: BlueZ runs the request on its 2 s
+    // timer, where it lands on the connection the next try makes, and ends it.
+    if peripheral.is_connected().await.unwrap_or(false) {
+        let _ = peripheral.disconnect().await;
+    }
     end
 }
 
@@ -650,6 +786,8 @@ async fn pump(
     let mut writer = DownWriter::new(peripheral.mtu());
     let mut alive = tokio::time::interval(ALIVE_EVERY);
     alive.reset();
+    // Its first tick is immediate: the notifications are open, so the `Ready` it brings is heard.
+    let mut ask = tokio::time::interval(IDENTIFY_EVERY);
     let ready_warn = tokio::time::sleep(READY_WARN_AFTER);
     tokio::pin!(ready_warn);
     let mut warned = false;
@@ -712,19 +850,41 @@ async fn pump(
                     READY_WARN_AFTER.as_secs()
                 );
             }
+            _ = ask.tick(), if !inbound.announced() => {
+                if let Err(reason) = send(peripheral, down, &mut writer, &HostToBridge::Identify).await {
+                    return over(&reason, ever_announced);
+                }
+            }
             cmd = plumbing.commands.recv() => {
                 let Some(cmd) = cmd else { return End::HandleDropped };
-                let Ok(writes) = writer.writes(&cmd) else {
-                    // Only reachable if a command outgrew MAX_HOST_FRAME.
-                    tracing::error!("command did not fit in a frame; dropping it");
-                    continue;
-                };
-                for write in writes {
-                    if let Err(e) = peripheral.write(down, &write, WriteType::WithoutResponse).await {
-                        return over(&format!("write failed: {e}"), ever_announced);
-                    }
+                if let Err(reason) = send(peripheral, down, &mut writer, &cmd).await {
+                    return over(&reason, ever_announced);
                 }
             }
         }
     }
+}
+
+/// Write one command's frame to Down, a piece at a time.
+async fn send(
+    peripheral: &Peripheral,
+    down: &Characteristic,
+    writer: &mut DownWriter,
+    cmd: &HostToBridge,
+) -> Result<(), String> {
+    let Ok(writes) = writer.writes(cmd) else {
+        // Only reachable if a command outgrew MAX_HOST_FRAME.
+        tracing::error!("command did not fit in a frame; dropping it");
+        return Ok(());
+    };
+    for write in writes {
+        let kind = match write.kind {
+            WriteKind::Command => WriteType::WithoutResponse,
+            WriteKind::Request => WriteType::WithResponse,
+        };
+        if let Err(e) = peripheral.write(down, &write.bytes, kind).await {
+            return Err(format!("write failed: {e}"));
+        }
+    }
+    Ok(())
 }

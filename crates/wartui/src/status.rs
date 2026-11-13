@@ -17,6 +17,11 @@
 //! bridge counts a node in, as the operator reads them on its board. `scan`, `bluetooth` and the
 //! `share` lines are the planner's: its mode, the node it picked for Bluetooth, and each node's
 //! share, from the `Fleet` report the bridge sends behind every `Status`.
+//!
+//! `host` and `pairing` are the Bluetooth host link, labeled apart from `bluetooth`, which is the
+//! node scanning Bluetooth. `host` is who the bridge serves, USB or a Bluetooth host, and the
+//! Bluetooth host connected, if any. `pairing` is the pairing window and the bonds the bridge
+//! keeps. The C6's pairing counters go with the other diagnostics.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,9 +33,11 @@ use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
-    BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
+    BluetoothStatus, BridgeToHost, Central, HostOwner, HostToBridge, PairWindow, QueueStat,
+    QueueStats, RadioInfo, RadioLinkStats,
 };
 use wartui_proto::mac;
+use wartui_proto::radio_link::BleCounters;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the
@@ -111,8 +118,7 @@ pub async fn run(args: Args) -> Result<()> {
         present,
         // The plan below names each share's slot; the members' MACs are the engine's.
         members: _,
-        // Not printed yet.
-        bluetooth: _,
+        bluetooth,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -126,6 +132,8 @@ pub async fn run(args: Args) -> Result<()> {
     println!("pool       {pool}");
     println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));
+    println!("host       {}", host_text(&bluetooth));
+    println!("pairing    {}", pairing_text(&bluetooth));
     println!("slots      {}", slots_text(info.node_board, present));
     for line in plan_lines(info.node_board, plan.as_ref()) {
         println!("{line}");
@@ -133,6 +141,7 @@ pub async fn run(args: Args) -> Result<()> {
     for line in diagnostic_lines(&queues, &radio_link, host_uart_errors) {
         println!("{line}");
     }
+    println!("{}", counters_line(&bluetooth.counters));
 
     if dropped_tx > 0 {
         // Cumulative since the bridge booted, and one left powered with nothing
@@ -175,6 +184,79 @@ pub(crate) const fn scan_text(scan: ScanMode) -> &'static str {
 /// The slot the bridge's planner gave the Bluetooth scan, by its label, or `none`.
 pub(crate) fn ble_text(board: NodeBoard, ble: Option<Slot>) -> String {
     ble.map_or_else(|| "none".to_owned(), |slot| board.label(slot).to_string())
+}
+
+/// Who the bridge serves, and the Bluetooth host connected, if any: `bluetooth` when that host
+/// holds the bridge, or after a `;` when USB holds it or the host is not let in.
+pub(crate) fn host_text(status: &BluetoothStatus) -> String {
+    let owner = match status.owner {
+        HostOwner::None => "none",
+        HostOwner::Usb => "usb",
+        HostOwner::Bluetooth => "bluetooth",
+    };
+    match (status.owner, &status.central) {
+        (_, None) => owner.to_owned(),
+        (HostOwner::Bluetooth, Some(central)) => format!("{owner}, {}", central_text(central)),
+        (_, Some(central)) => {
+            format!("{owner}; a Bluetooth host is connected, {}", central_text(central))
+        }
+    }
+}
+
+/// A connected Bluetooth host: whether it may be served, and its link.
+fn central_text(central: &Central) -> String {
+    let trust = match (central.encrypted, central.bonded) {
+        (true, true) => "encrypted and bonded",
+        (true, false) => "encrypted, not bonded",
+        (false, true) => "bonded, not encrypted",
+        (false, false) => "not encrypted or bonded",
+    };
+    let mut text = format!("{trust}, MTU {}", central.mtu);
+    match central.phy {
+        0 => {}
+        1 => text.push_str(", 1M PHY"),
+        2 => text.push_str(", 2M PHY"),
+        3 => text.push_str(", Coded PHY"),
+        other => text.push_str(&format!(", PHY {other}")),
+    }
+    if central.interval_us > 0 {
+        text.push_str(&format!(", {} ms interval", millis(central.interval_us)));
+    }
+    text
+}
+
+/// Microseconds as milliseconds, with a decimal only when it carries one: `7.5`, `30`.
+fn millis(us: u32) -> String {
+    let text = format!("{:.2}", f64::from(us) / 1000.0);
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// The pairing window, then the bonds the bridge keeps.
+pub(crate) fn pairing_text(status: &BluetoothStatus) -> String {
+    let window = match status.window {
+        PairWindow::Closed => "closed".to_owned(),
+        PairWindow::Open { secs } => format!("open for {secs} s more"),
+        PairWindow::UntilBonded => "open until a host pairs".to_owned(),
+    };
+    let bonds = match status.bonds {
+        0 => "no bond stored".to_owned(),
+        1 => "1 bond stored".to_owned(),
+        n => format!("{n} bonds stored"),
+    };
+    format!("{window}, {bonds}")
+}
+
+/// The C6's Bluetooth host counters, since it booted.
+fn counters_line(c: &BleCounters) -> String {
+    let last = match c.last_disconnect {
+        0 => "none".to_owned(),
+        code => format!("0x{code:02x}"),
+    };
+    format!(
+        "  bluetooth host  pairings {}  failed_pairings {}  unbonded_kicks {}  \
+         last_disconnect {last}  resynced_bytes {}  dropped_writes {}",
+        c.pairings, c.failed_pairings, c.unbonded_kicks, c.resynced_bytes, c.dropped_writes
+    )
 }
 
 /// The bridge's plan, a line per share by `board`'s slot labels, then the channels of the pool
@@ -380,17 +462,20 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, Report, ScanMode, awaited, ble_text, board_line, diagnostic_lines, fan_text,
-        human_uptime, plan_lines, radio_line, scan_text, silence_note, slots_text,
+        Awaited, Report, ScanMode, awaited, ble_text, board_line, counters_line, diagnostic_lines,
+        fan_text, host_text, human_uptime, pairing_text, plan_lines, radio_line, scan_text,
+        silence_note, slots_text,
     };
     use wartui_bridge::LinkEvent;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::fleet::Share;
+    use wartui_proto::link::{BluetoothStatus, Central, HostOwner, PairWindow};
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+    use wartui_proto::radio_link::BleCounters;
     use wartui_proto::reset::ResetCause;
 
     #[test]
@@ -620,6 +705,78 @@ mod tests {
     #[test]
     fn status_prints_no_carrier_when_bridge_reports_no_fan() {
         assert_eq!(fan_text(None), "no carrier, so no fan");
+    }
+
+    /// A bonded host on an encrypted 2M link at a 30 ms interval.
+    const CENTRAL: Central =
+        Central { encrypted: true, bonded: true, mtu: 247, phy: 2, interval_us: 30_000 };
+
+    #[test]
+    fn status_prints_host_as_owner_alone_when_no_bluetooth_host_is_connected() {
+        for (owner, text) in [
+            (HostOwner::None, "none"),
+            (HostOwner::Usb, "usb"),
+            (HostOwner::Bluetooth, "bluetooth"),
+        ] {
+            let status = BluetoothStatus { owner, ..BluetoothStatus::default() };
+            assert_eq!(host_text(&status), text);
+        }
+    }
+
+    #[test]
+    fn status_prints_bluetooth_host_link_when_it_holds_the_bridge() {
+        let status = BluetoothStatus {
+            owner: HostOwner::Bluetooth,
+            central: Some(CENTRAL),
+            ..BluetoothStatus::default()
+        };
+        assert_eq!(
+            host_text(&status),
+            "bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval"
+        );
+    }
+
+    #[test]
+    fn status_prints_waiting_bluetooth_host_when_usb_holds_the_bridge() {
+        let central = Central { bonded: false, phy: 0, interval_us: 7_500, ..CENTRAL };
+        let status = BluetoothStatus {
+            owner: HostOwner::Usb,
+            central: Some(central),
+            ..BluetoothStatus::default()
+        };
+        assert_eq!(
+            host_text(&status),
+            "usb; a Bluetooth host is connected, encrypted, not bonded, MTU 247, 7.5 ms interval"
+        );
+    }
+
+    #[test]
+    fn status_prints_pairing_window_and_bonds_when_bridge_reports_them() {
+        let pairing = |window, bonds| {
+            pairing_text(&BluetoothStatus { window, bonds, ..BluetoothStatus::default() })
+        };
+        assert_eq!(pairing(PairWindow::Closed, 2), "closed, 2 bonds stored");
+        assert_eq!(pairing(PairWindow::Open { secs: 87 }, 1), "open for 87 s more, 1 bond stored");
+        assert_eq!(pairing(PairWindow::UntilBonded, 0), "open until a host pairs, no bond stored");
+    }
+
+    #[test]
+    fn status_prints_bluetooth_host_counters_when_bridge_reports_them() {
+        let counters = BleCounters {
+            pairings: 2,
+            failed_pairings: 1,
+            unbonded_kicks: 3,
+            last_disconnect: 0x13,
+            resynced_bytes: 40,
+            dropped_writes: 0,
+            ..BleCounters::default()
+        };
+        assert_eq!(
+            counters_line(&counters),
+            "  bluetooth host  pairings 2  failed_pairings 1  unbonded_kicks 3  \
+             last_disconnect 0x13  resynced_bytes 40  dropped_writes 0"
+        );
+        assert!(counters_line(&BleCounters::default()).contains("last_disconnect none"));
     }
 
     #[test]

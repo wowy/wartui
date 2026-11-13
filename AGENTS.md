@@ -121,7 +121,8 @@ own.
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `power-cycle`/`fan`/`pool`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
+  `power-cycle`/`fan`/`pool`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/`bluetooth`) and the
+  ratatui view.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It plans the fleet, so a board scans with no host attached: it
