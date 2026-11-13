@@ -34,6 +34,8 @@ use wartui_bridge::{BridgeInfo, LinkEvent, TransportError};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 
+use crate::config::Link;
+
 /// How long to keep asking before giving up on the board entirely.
 ///
 /// Longer than [`super::CONNECT_NOTICE_AFTER`] on purpose: a few seconds of silence
@@ -65,6 +67,11 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK")]
+    link: Option<crate::config::Link>,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -80,12 +87,15 @@ pub async fn run(args: Args) -> Result<()> {
     // board by path: the reboot leaves its CH343 where it was.
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
     let named = args.bridge.as_deref();
+    if super::link_for(args.link, named, remembered.link)? == Link::Bluetooth {
+        return over_bluetooth(named, &remembered).await;
+    }
     let board = board_to_reset(named, &remembered, discover_bridges, |found| async move {
         probe_all(&found).await
     })
     .await?;
     let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
-    let mut link = super::open(Some(&board), None, memory)?;
+    let mut link = super::open(Some(&board), None, Link::Usb, memory)?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the
@@ -93,13 +103,63 @@ pub async fn run(args: Args) -> Result<()> {
     link.send_urgent(HostToBridge::Reset).context("queueing the reset")?;
     println!("reset sent to {board}");
 
-    match tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_reboot(&mut link)).await {
+    match tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_reboot(&mut link, None)).await {
         Ok(Ok((info, uptime_ms))) => {
             report(info.as_ref(), uptime_ms);
             Ok(())
         }
         Ok(Err(err)) => Err(err),
-        Err(_) => bail!("{}", unreachable_notice(&board)),
+        Err(_) => bail!("{}", unreachable_notice(&board, RECOVERY_TIMEOUT)),
+    }
+}
+
+/// How long a reset over Bluetooth waits for the bridge to come back: the P4's reboot resets its
+/// C6 and drops the link, and the transport reconnects once the C6 advertises again.
+const BLUETOOTH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The bridge a reset over Bluetooth is for: the one named, else the one remembered with its
+/// Bluetooth address. Never one a scan finds unnamed: a `Reset` sent to the wrong bridge
+/// reboots another fleet's.
+fn bluetooth_target(
+    named: Option<&str>,
+    remembered: &crate::config::Bridge,
+) -> Result<BridgeSpec, &'static str> {
+    if let Some(named) = named {
+        return Ok(super::spec(named));
+    }
+    match (remembered.mac, &remembered.bluetooth_address) {
+        (Some(mac), Some(_)) => Ok(BridgeSpec::Mac(mac)),
+        _ => Err("over --link bluetooth, `wartui reset` reboots only a bridge it is told or \
+                  remembers over Bluetooth, never one a scan finds: name it with --bridge XX:YY"),
+    }
+}
+
+/// Reset the bridge over Bluetooth. Unlike USB, the `Reset` waits for the `Ready`: the P4 takes
+/// a central's writes only once it serves it, and a P4 that serves no one cannot be reached this
+/// way at all.
+async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge) -> Result<()> {
+    let target = bluetooth_target(named, remembered).map_err(anyhow::Error::msg)?;
+    let board = target.to_string();
+    let memory = super::memory_of(remembered);
+    let mut link = super::open(Some(&board), None, Link::Bluetooth, memory)?;
+    let wait = super::connect_wait(Link::Bluetooth);
+    let before = match tokio::time::timeout(wait, crate::status::wait_for_ready(&mut link)).await {
+        Ok(ready) => ready?.uptime_ms,
+        Err(_) => bail!(
+            "{}\nOver USB, `wartui reset` reaches a bridge that answers nothing.",
+            super::no_bridge_notice(Some(&board), Link::Bluetooth)
+        ),
+    };
+    link.send_urgent(HostToBridge::Reset).context("queueing the reset")?;
+    println!("reset sent to {board} over Bluetooth");
+    let recovery = BLUETOOTH_RECOVERY_TIMEOUT;
+    match tokio::time::timeout(recovery, wait_for_reboot(&mut link, Some(before))).await {
+        Ok(Ok((info, uptime_ms))) => {
+            report(info.as_ref(), uptime_ms);
+            Ok(())
+        }
+        Ok(Err(err)) => Err(err),
+        Err(_) => bail!("{}", unreachable_notice(&board, recovery)),
     }
 }
 
@@ -151,13 +211,16 @@ where
 /// not kept: it carries the old life's reset cause, and printing that under
 /// "back up" would answer the question this command exists to ask with the
 /// answer to the previous one.
+///
+/// `before` is the uptime of the life being replaced, when it was heard before the reset.
 async fn wait_for_reboot(
     link: &mut wartui_bridge::LinkHandle,
+    before: Option<u32>,
 ) -> Result<(Option<BridgeInfo>, u32)> {
     let mut seen: Option<BridgeInfo> = None;
     let mut proof: Option<u32> = None;
     // The highest uptime seen from the life that is being replaced.
-    let mut before: Option<u32> = None;
+    let mut before = before;
     let mut poll = tokio::time::interval(POLL);
     let grace = tokio::time::sleep(Duration::MAX);
     tokio::pin!(grace);
@@ -234,8 +297,8 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
 }
 
 /// What to say when even a reset frame goes unanswered, given the address or path it went to.
-fn unreachable_notice(board: &str) -> String {
-    let seconds = RECOVERY_TIMEOUT.as_secs();
+fn unreachable_notice(board: &str, waited: Duration) -> String {
+    let seconds = waited.as_secs();
     [
         format!("the bridge {board} did not come back within {seconds}s."),
         "A reset frame reaches the bridge through its receive path, so this means that".to_owned(),
@@ -251,10 +314,10 @@ fn unreachable_notice(board: &str) -> String {
 mod tests {
     use wartui_bridge::TransportError;
     use wartui_bridge::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
-    use wartui_bridge::serial::Probed;
+    use wartui_bridge::serial::{BridgeSpec, Probed};
     use wartui_proto::mac;
 
-    use super::{FRESH_UPTIME_MS, board_to_reset, rebooted, unreachable_notice};
+    use super::{FRESH_UPTIME_MS, bluetooth_target, board_to_reset, rebooted, unreachable_notice};
     use crate::config::Bridge;
 
     const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
@@ -299,7 +362,7 @@ mod tests {
     }
 
     fn remembered(mac: &str, serial: &str) -> Bridge {
-        Bridge { remember: None, mac: mac::parse(mac), serial: Some(serial.to_owned()) }
+        Bridge { mac: mac::parse(mac), serial: Some(serial.to_owned()), ..Bridge::default() }
     }
 
     #[tokio::test]
@@ -415,8 +478,28 @@ mod tests {
 
     #[test]
     fn reset_cmd_formats_unreachable_notice_with_board_when_board_goes_silent() {
-        let notice = unreachable_notice("/dev/ttyACM0");
+        let notice = unreachable_notice("/dev/ttyACM0", super::RECOVERY_TIMEOUT);
         assert!(notice.contains("/dev/ttyACM0 did not come back within 10s"), "{notice}");
         assert!(notice.contains("Power-cycle"), "{notice}");
+    }
+
+    #[test]
+    fn reset_cmd_targets_named_or_remembered_bridge_when_over_bluetooth() {
+        let named = bluetooth_target(Some("44:C0"), &Bridge::default()).unwrap();
+        assert!(matches!(named, BridgeSpec::Tail(_)));
+        let mut known = remembered("02:00:5E:10:44:C0", "5CF7153520");
+        known.bluetooth_address = Some("02:00:5E:10:44:C1".to_owned());
+        let remembered_one = bluetooth_target(None, &known).unwrap();
+        assert_eq!(remembered_one, BridgeSpec::Mac(mac::parse("02:00:5E:10:44:C0").unwrap()));
+    }
+
+    #[test]
+    fn reset_cmd_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
+        // Remembered over USB only: a scan would be the only way to find it, and a scan may
+        // find another fleet's bridge.
+        let usb_only = remembered("02:00:5E:10:44:C0", "5CF7153520");
+        let refused = bluetooth_target(None, &usb_only).unwrap_err();
+        assert!(refused.contains("--bridge XX:YY"), "{refused}");
+        assert!(bluetooth_target(None, &Bridge::default()).is_err());
     }
 }

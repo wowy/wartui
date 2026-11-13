@@ -74,6 +74,11 @@ struct Target {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
+    link: Option<crate::config::Link>,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -125,9 +130,10 @@ pub async fn run(args: Args) -> Result<()> {
 /// The bridge `target` names, connected and announced.
 async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeInfo)> {
     if target.sim.is_none() {
-        return super::connect_one(target.bridge.as_deref(), target.config.as_deref()).await;
+        return super::connect_one(target.bridge.as_deref(), target.link, target.config.as_deref())
+            .await;
     }
-    let mut link = super::open(None, target.sim, super::memory(None))?;
+    let mut link = super::open(None, target.sim, crate::config::Link::Usb, super::memory(None))?;
     let info = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_ready(&mut link))
         .await
         .context("the simulator did not announce itself")??;

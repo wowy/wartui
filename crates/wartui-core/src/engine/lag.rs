@@ -49,7 +49,7 @@ impl FleetEngine {
     /// A connection starts caught up, and its first frame counts as live. Nothing older can reach
     /// it: the bridge queues nothing for an absent host and clears its queue when one connects, and
     /// the transport drops whatever decodes ahead of the connection's first `Ready`
-    /// (`wartui_bridge::serial`, `read_loop`), which is what was already past that queue.
+    /// (`wartui_bridge`'s `gate`), which is what was already past that queue.
     ///
     /// This is an estimate, not clock synchronization. Its jobs:
     ///

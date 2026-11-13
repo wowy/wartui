@@ -26,7 +26,6 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
-use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
@@ -40,6 +39,11 @@ pub struct Args {
     /// if omitted. A board named here that answers is remembered as the bridge.
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
+
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB. The link a run connects over is saved there.
+    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
+    pub(crate) link: Option<crate::config::Link>,
 
     /// Read settings from this file instead of the default location
     /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
@@ -212,9 +216,10 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
-    let memory = BridgeMemory::holding(config.bridge.mac).on_port(config.bridge.serial.clone());
+    let memory = crate::memory_of(&config.bridge);
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
-    let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
+    let over = crate::link_for(args.link, args.bridge.as_deref(), config.bridge.link)?;
+    let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
     let started = now();
     let info = CaptureInfo { notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
@@ -231,6 +236,8 @@ pub async fn run(args: Args) -> Result<()> {
         saved: config,
         bridge_memory: memory,
         simulated: args.sim.is_some(),
+        // The simulator's link is no link to save.
+        link: args.sim.is_none().then_some(over),
         upload,
     };
     let config = EngineConfig {

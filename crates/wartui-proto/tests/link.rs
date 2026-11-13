@@ -1316,3 +1316,20 @@ fn cache_chunk_body_refuses_zero_and_oversize_len() {
     assert_eq!(cache_chunk_body(&image, 1, 0, oversize, &mut out), None);
     assert_eq!(out, [0; UPDATE_CHUNK_MAX], "nothing written");
 }
+
+#[test]
+fn usb_took_bridge_keeps_its_text_when_read_by_host_and_bridge() {
+    // The P4 sends it and the host transport matches it, so a change strands whichever end was
+    // not rebuilt.
+    assert_eq!(wartui_proto::link::USB_TOOK_BRIDGE, "the USB host took the bridge");
+}
+
+#[test]
+fn usb_took_bridge_fits_the_p4s_notice_buffer_when_encoded() {
+    // `firmware/p4-bridge/src/ble.rs` encodes it into 64 bytes, one of them the leading `0x00`.
+    let message = wartui_proto::link::LogStr::try_from(wartui_proto::link::USB_TOOK_BRIDGE)
+        .expect("fits a LogStr");
+    let mut buf = [0u8; 63];
+    let len = encode_frame(&BridgeToHost::Error { message }, &mut buf).expect("fits");
+    assert!(len <= 63, "{len}");
+}

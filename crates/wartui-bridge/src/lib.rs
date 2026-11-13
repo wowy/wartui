@@ -5,11 +5,22 @@
 //! lets the fleet engine and the TUI be built and tested with nothing plugged
 //! in.
 //!
+//! A real bridge is reached two ways: over USB through its CH343 ([`serial`]), or over Bluetooth
+//! through its C6 ([`ble`]). Both admit what the bridge sends through one rule, that a connection
+//! starts at its first `Ready` (`gate`). They differ where the links do. USB asks with `Identify`
+//! and sends a keepalive, since the P4's USB gate closes after 15 s of silence; a Bluetooth
+//! subscription is the attachment and that gate never closes on silence, so Bluetooth sends
+//! neither. A Bluetooth write is a fragment of the ATT MTU, so each connection's first leads with
+//! a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a USB host took the
+//! bridge reads as the link going down, with the central still subscribed for the handback.
+//!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
 //! Keeping that in one place is what lets anything else that opens a device share
 //! the enumeration rather than write a second one.
 
+pub mod ble;
+mod gate;
 pub mod ports;
 pub mod remember;
 pub mod serial;
@@ -54,7 +65,7 @@ pub struct BridgeInfo {
     /// How long the bridge had been up when it announced itself.
     ///
     /// Small means this connection is talking to a bridge that has just restarted;
-    /// see `serial::is_a_new_life`.
+    /// see `gate::is_a_new_life`.
     pub uptime_ms: u32,
     /// What carries the nodes, which names their slots for the operator.
     pub node_board: NodeBoard,
@@ -155,6 +166,41 @@ pub enum TransportError {
     /// The bridge speaks a different revision of the link protocol.
     #[error("{0}")]
     Protocol(LinkError),
+    /// The OS has no Bluetooth adapter to use.
+    #[error(
+        "no Bluetooth adapter is available: check this PC has one, that it is on, and that its \
+         Bluetooth service is running"
+    )]
+    NoAdapter,
+    /// Nothing advertised the bridge's name within the scan.
+    #[error(
+        "nothing advertised as `{name}` over Bluetooth in {secs}s; check the bridge is powered \
+         and in range"
+    )]
+    NotFound {
+        /// The name scanned for.
+        name: String,
+        /// How long the scan ran.
+        secs: u64,
+    },
+    /// Several bridges advertise, and nothing says which is meant.
+    #[error("several bridges advertise over Bluetooth ({names}); name one with --bridge XX:YY")]
+    SeveralAdvertising {
+        /// Their advertised names.
+        names: String,
+    },
+    /// The bridge refused this host's link, which is not encrypted with a bond it holds.
+    #[error(
+        "the bridge {bridge} refused this PC over Bluetooth because they are not paired; pair \
+         once with `wartui bluetooth pair --bridge {bridge}`"
+    )]
+    NotBonded {
+        /// The bridge, as its last two octets.
+        bridge: String,
+    },
+    /// The Bluetooth stack failed, in its own words.
+    #[error("Bluetooth: {0}")]
+    Bluetooth(String),
 }
 
 /// Why a command could not be queued.

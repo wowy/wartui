@@ -47,6 +47,11 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
+    link: Option<crate::config::Link>,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -65,16 +70,18 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link =
-        super::open(args.bridge.as_deref(), args.sim, super::memory(args.config.as_deref()))?;
+    let saved = crate::config::remembered_bridge(args.config.as_deref());
+    let over = super::link_for(args.link, args.bridge.as_deref(), saved.link)?;
+    let mut link = super::open(args.bridge.as_deref(), args.sim, over, super::memory_of(&saved))?;
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an
     // answer: it names the port and what to do about each cause.
-    let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
-        Ok(ready) => ready?,
-        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
-    };
+    let info =
+        match tokio::time::timeout(super::connect_wait(over), wait_for_ready(&mut link)).await {
+            Ok(ready) => ready?,
+            Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), over)),
+        };
     println!("bridge     {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("board      {}", board_line(info.node_board));
     println!("{}", super::last_reset_line(&info));

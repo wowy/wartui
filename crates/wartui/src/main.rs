@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wartui_bridge::ble::{BleTransport, SCAN_FOR};
 use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
@@ -20,6 +21,8 @@ use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
 use wartui_proto::link::{BridgeToHost, LoopPhase};
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
+
+use crate::config::Link;
 
 mod analyze;
 mod bench;
@@ -255,8 +258,41 @@ fn no_boards_notice() -> String {
 /// What the transport remembers into it is dropped at exit. Only `run` and `flash-bridge` save
 /// the bridge, so a one-off `wartui status --bridge X` never decides what every later run opens.
 fn memory(explicit: Option<&Path>) -> BridgeMemory {
-    let bridge = config::remembered_bridge(explicit);
-    BridgeMemory::holding(bridge.mac).on_port(bridge.serial)
+    memory_of(&config::remembered_bridge(explicit))
+}
+
+/// A handle holding the bridge `saved` remembers.
+fn memory_of(saved: &config::Bridge) -> BridgeMemory {
+    BridgeMemory::holding(saved.mac)
+        .on_port(saved.serial.clone())
+        .on_bluetooth(saved.bluetooth_address.clone())
+}
+
+/// The link a command reaches the bridge over: `--link`, else what a `--bridge` path says, since
+/// a path is a USB port, else `[bridge] link` as `saved`, else USB.
+///
+/// # Errors
+/// When `--link bluetooth` is given with a `--bridge` path.
+fn link_for(flag: Option<Link>, bridge: Option<&str>, saved: Option<Link>) -> Result<Link> {
+    let by_path = bridge.filter(|bridge| matches!(spec(bridge), BridgeSpec::Path(_)));
+    match (flag, by_path) {
+        (Some(Link::Bluetooth), Some(path)) => anyhow::bail!(
+            "--bridge {path} is a USB port; over --link bluetooth, name the bridge by its \
+             address: --bridge XX:YY"
+        ),
+        (Some(link), _) => Ok(link),
+        (None, Some(_)) => Ok(Link::Usb),
+        (None, None) => Ok(saved.unwrap_or_default()),
+    }
+}
+
+/// How long a command waits for the bridge to announce itself over `link`: over Bluetooth, the
+/// scan that finds it comes first.
+fn connect_wait(link: Link) -> Duration {
+    match link {
+        Link::Usb => CONNECT_NOTICE_AFTER,
+        Link::Bluetooth => SCAN_FOR + CONNECT_NOTICE_AFTER,
+    }
 }
 
 /// `--sim`'s node count: at most one node per node-bus slot, as on a real bridge.
@@ -264,39 +300,65 @@ fn sim_nodes() -> clap::builder::RangedI64ValueParser<u8> {
     clap::value_parser!(u8).range(0..=wartui_proto::plan::MAX_NODES as i64)
 }
 
-/// Open whichever transport the arguments called for.
-fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<LinkHandle> {
+/// Open whichever transport the arguments called for: the simulator, or the bridge over `link`.
+/// The one place a transport is picked.
+fn open(
+    bridge: Option<&str>,
+    sim: Option<u8>,
+    link: Link,
+    memory: BridgeMemory,
+) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
         let config = SimConfig { node_count, ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
-    match bridge.map(spec) {
-        Some(spec) => SerialTransport::with_spec(spec),
-        None => SerialTransport::new(),
+    match link {
+        Link::Usb => match bridge.map(spec) {
+            Some(spec) => SerialTransport::with_spec(spec),
+            None => SerialTransport::new(),
+        }
+        .remember_in(memory)
+        .start(),
+        Link::Bluetooth => match bridge.map(spec) {
+            Some(spec) => BleTransport::with_spec(spec),
+            None => BleTransport::new(),
+        }
+        .remember_in(memory)
+        .start(),
     }
-    .remember_in(memory)
-    .start()
     .context("opening the link")
 }
 
-/// Open the one bridge `named` resolves to, as `wartui reset` resolves it
-/// ([`reset::board_to_reset`]), with the remembered bridge read from `config`, and wait for its
-/// `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
+/// Open the one bridge `named` resolves to, with the remembered bridge read from `config`, and
+/// wait for its `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
+///
+/// Over USB it resolves as `wartui reset` does ([`reset::board_to_reset`]). Over Bluetooth the
+/// transport refuses a name several bridges advertise, and the `Ready` names the board before
+/// anything is sent.
 async fn connect_one(
     named: Option<&str>,
+    flag: Option<Link>,
     config: Option<&Path>,
 ) -> Result<(LinkHandle, BridgeInfo)> {
     let remembered = crate::config::remembered_bridge(config);
-    let port =
-        reset::board_to_reset(named, &remembered, serial::discover_bridges, |found| async move {
-            serial::probe_all(&found).await
-        })
-        .await?;
-    let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
-    let mut link = open(Some(&port), None, memory)?;
-    match tokio::time::timeout(CONNECT_NOTICE_AFTER, status::wait_for_ready(&mut link)).await {
-        Ok(ready) => Ok((link, ready?)),
-        Err(_) => anyhow::bail!("{}", no_bridge_notice(named)),
+    let link = link_for(flag, named, remembered.link)?;
+    let memory = memory_of(&remembered);
+    let mut handle = match link {
+        Link::Usb => {
+            let port = reset::board_to_reset(
+                named,
+                &remembered,
+                serial::discover_bridges,
+                |found| async move { serial::probe_all(&found).await },
+            )
+            .await?;
+            open(Some(&port), None, link, memory)?
+        }
+        Link::Bluetooth => open(named, None, link, memory)?,
+    };
+    match tokio::time::timeout(connect_wait(link), status::wait_for_ready(&mut handle)).await {
+        Ok(ready) => Ok((handle, ready?)),
+        Err(_) => anyhow::bail!("{}", no_bridge_notice(named, link)),
     }
 }
 
@@ -454,10 +516,33 @@ impl Default for Terminate {
 /// up is not accused of being wedged.
 pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 
-/// What to say when no bridge has answered: [`silence_notice`] over the CH343s attached now.
-/// A listing that fails reads as none attached, and the transport names that failure.
-pub fn no_bridge_notice(bridge: Option<&str>) -> String {
-    silence_notice(bridge, &serial::discover_bridges().unwrap_or_default())
+/// What to say when no bridge has answered over `link`: over USB, [`silence_notice`] over the
+/// CH343s attached now, where a listing that fails reads as none attached, and the transport
+/// names that failure; over Bluetooth, [`bluetooth_silence_notice`].
+pub fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
+    match link {
+        Link::Usb => silence_notice(bridge, &serial::discover_bridges().unwrap_or_default()),
+        Link::Bluetooth => bluetooth_silence_notice(bridge),
+    }
+}
+
+/// What to say about a silence over Bluetooth. A scan that found nothing, or a PC that is not
+/// paired, arrives as the transport's own reason instead; this is a subscription the bridge has
+/// not served.
+fn bluetooth_silence_notice(bridge: Option<&str>) -> String {
+    let seconds = connect_wait(Link::Bluetooth).as_secs();
+    let where_ = bridge.map_or_else(String::new, |name| format!(" as {name}"));
+    [
+        format!(
+            "nothing has identified itself as a bridge{where_} over Bluetooth after {seconds}s."
+        ),
+        "Usually one of:".to_owned(),
+        "  - a USB host holds the bridge, which serves Bluetooth again 15s after USB falls silent"
+            .to_owned(),
+        "  - the bridge is starting, or out of range".to_owned(),
+        "`--log-file` records what the transport tried.".to_owned(),
+    ]
+    .join("\n")
 }
 
 /// What to say about a silence, given the CH343s attached.
@@ -531,8 +616,8 @@ mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
     use super::{
-        BridgeInfo, BridgeSpec, Command, last_reset_line, no_boards_notice, parse, silence_notice,
-        spec,
+        BridgeInfo, BridgeSpec, Command, Link, bluetooth_silence_notice, last_reset_line, link_for,
+        no_boards_notice, parse, silence_notice, spec,
     };
     use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
@@ -746,6 +831,69 @@ mod tests {
     fn cli_parser_refuses_flash_bridge_when_given_features() {
         // The P4 bridge firmware has no features to select.
         assert!(parse(["wartui", "flash-bridge", "--features", "gps"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_link_when_passed_to_a_command_that_opens_a_bridge() {
+        for command in [
+            ["wartui", "run"].as_slice(),
+            &["wartui", "status"],
+            &["wartui", "sniff"],
+            &["wartui", "reset"],
+            &["wartui", "power-cycle", "--slot", "N3"],
+            &["wartui", "fan"],
+            &["wartui", "pool"],
+            &["wartui", "scan"],
+            &["wartui", "scan", "start", "--bluetooth"],
+            &["wartui", "scan", "stop"],
+        ] {
+            for link in ["usb", "bluetooth"] {
+                let args: Vec<&str> = command.iter().copied().chain(["--link", link]).collect();
+                assert!(parse(args.as_slice()).is_ok(), "{args:?}");
+            }
+        }
+        assert!(parse(["wartui", "--link", "bluetooth"]).is_ok(), "a bare run");
+    }
+
+    #[test]
+    fn cli_parser_refuses_link_when_value_or_command_does_not_take_it() {
+        for args in [
+            ["wartui", "status", "--link", "wifi"].as_slice(),
+            &["wartui", "status", "--link", "bluetooth", "--sim"],
+            &["wartui", "flash-bridge", "--link", "bluetooth"],
+            &["wartui", "ota", "--link", "bluetooth"],
+            &["wartui", "ports", "--link", "bluetooth"],
+            &["wartui", "--link", "bluetooth", "status"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn link_choice_takes_flag_then_path_then_config_when_resolving() {
+        let bt = Some(Link::Bluetooth);
+        assert_eq!(link_for(bt, None, None).unwrap(), Link::Bluetooth);
+        assert_eq!(link_for(Some(Link::Usb), Some("44:C0"), bt).unwrap(), Link::Usb);
+        assert_eq!(link_for(None, Some("/dev/ttyACM0"), bt).unwrap(), Link::Usb, "a path is USB");
+        assert_eq!(link_for(None, Some("44:C0"), bt).unwrap(), Link::Bluetooth);
+        assert_eq!(link_for(None, None, None).unwrap(), Link::Usb);
+    }
+
+    #[test]
+    fn link_choice_refuses_bluetooth_when_bridge_is_a_path() {
+        let error = link_for(Some(Link::Bluetooth), Some("/dev/ttyACM0"), None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("--bridge XX:YY"), "{message}");
+        assert!(message.contains("--link bluetooth"), "{message}");
+    }
+
+    #[test]
+    fn cli_diagnostics_names_usb_holder_when_bluetooth_bridge_is_silent() {
+        let notice = bluetooth_silence_notice(Some("44:C0"));
+        assert!(notice.contains("as 44:C0 over Bluetooth after 15s"), "{notice}");
+        assert!(notice.contains("a USB host holds the bridge"), "{notice}");
+        // Nothing about ports: none was opened.
+        assert!(!notice.contains("CH343"), "{notice}");
     }
 
     #[test]

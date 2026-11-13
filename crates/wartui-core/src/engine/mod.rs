@@ -237,7 +237,7 @@ impl FleetEngine {
                 // Start caught up. Every record from here on was produced after this connection
                 // began: the bridge queues nothing for an absent host and clears its queue when one
                 // connects, and the transport drops what was already past that queue, which
-                // decodes ahead of `Ready` (`wartui_bridge::serial`, `read_loop`).
+                // decodes ahead of `Ready` (`wartui_bridge`'s `gate`).
                 self.reset_arrivals();
                 // A new connection means a new baseline, whether or not the bridge rebooted.
                 self.dropped_baseline = None;

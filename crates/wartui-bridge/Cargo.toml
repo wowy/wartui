@@ -10,11 +10,19 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# BlueZ over D-Bus on Linux, which links libdbus; CoreBluetooth on macOS.
+btleplug = "0.13.5"
+futures-util = "0.3.34"
 serialport = "4.10.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros", "rt-multi-thread"] }
 tracing = "0.1.44"
 wartui-proto = { path = "../wartui-proto" }
+
+# btleplug's libdbus on Linux, vendored: built from source, so no dev machine or CI job needs the
+# system's libdbus headers or pkg-config, and the binary carries libdbus itself.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9.12", features = ["vendored"] }
 
 [dev-dependencies]
 sha2 = "0.11.1"

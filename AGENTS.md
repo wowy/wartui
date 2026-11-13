@@ -115,7 +115,8 @@ own.
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash, and the P4's planner testable without one.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
-  and cannot tell a real bridge (`serial`) from the fake fleet (`sim`). It also owns the host's
+  and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`, btleplug), from the fake
+  fleet (`sim`). `wartui`'s `main.rs::open` is the one place a link is picked. It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
   that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
@@ -398,8 +399,8 @@ edit stops; follow the pointer before changing the rule.
   engine: a bridge clears its queue when a host connects, and the transport drops what decodes
   ahead of a connection's first `Ready`.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `BEHIND_US`;
-  `crates/wartui-core/src/engine/rx.rs`, `on_heartbeat`; `crates/wartui-bridge/src/serial.rs`,
-  `read_loop`
+  `crates/wartui-core/src/engine/rx.rs`, `on_heartbeat`; `crates/wartui-bridge/src/gate.rs`,
+  which both transports read through
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
   `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
@@ -415,7 +416,7 @@ edit stops; follow the pointer before changing the rule.
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
 - **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
   stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
-  P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
+  P4 resets at its own boot. → `crates/wartui-bridge/src/gate.rs`, `is_a_new_life`
 - **The P4 writes nothing to a host until one attaches, and queues nothing until then.** A USB
   host attaches with a decoded frame, since the P4 cannot see the CH343's DTR, and its gate closes
   15 s after the last one: three of the engine's 5 s status polls. A Bluetooth central attaches by

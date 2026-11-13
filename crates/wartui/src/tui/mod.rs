@@ -95,6 +95,7 @@ async fn view(
         ui.poll_upload(&current);
         ui.poll_power(&current);
         ui.poll_bridge();
+        ui.poll_link(&current);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }

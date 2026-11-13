@@ -59,6 +59,9 @@ pub struct Settings {
     pub bridge_memory: BridgeMemory,
     /// Whether the link is the simulator, whose bridge is not a board to remember.
     pub simulated: bool,
+    /// The link this run reaches its bridge over, saved as `[bridge] link` once it connects;
+    /// `None` under the simulator, which saves no link.
+    pub link: Option<config::Link>,
     /// Where `u` uploads to.
     pub upload: UploadTarget,
 }
@@ -503,7 +506,12 @@ fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf,
     };
     let written = config::Config {
         excluded_ssids: modal.excluded.clone(),
-        bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None, serial: None },
+        bridge: config::Bridge {
+            // Not on the modal, so kept as the file last had it, unless the run saves its own.
+            link: settings.saved.bridge.link,
+            remember: Some(modal.remember_bridge),
+            ..config::Bridge::default()
+        },
         gps: config::Gps {
             // Not on the modal, so kept as the file last had it.
             bridge_rate_hz: settings.saved.gps.bridge_rate_hz,
@@ -530,6 +538,10 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
     // Nothing while remembering is off, so the keys drop out beside `remember = false`.
     written.bridge.mac = settings.bridge_memory.recall();
     written.bridge.serial = settings.bridge_memory.recall_serial();
+    written.bridge.bluetooth_address = settings.bridge_memory.recall_bluetooth();
+    if let Some(link) = settings.link {
+        written.bridge.link = link_written(link, written.bridge.link);
+    }
     // The live switch, whatever an earlier failed save left in `saved`, so `remember` never
     // contradicts `mac`. An absent key stays absent while on, since absent means on.
     written.bridge.remember = match (settings.bridge_memory.is_enabled(), written.bridge.remember) {
@@ -539,6 +551,18 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
     config::save(&path, &written).map_err(|error| format!("; could not save: {error}"))?;
     settings.saved = written;
     Ok(path)
+}
+
+/// What `[bridge] link` says once `link` is saved over `saved`: absent stays absent for USB,
+/// since absent means USB.
+pub(super) fn link_written(
+    link: config::Link,
+    saved: Option<config::Link>,
+) -> Option<config::Link> {
+    match (link, saved) {
+        (config::Link::Usb, None) => None,
+        (link, _) => Some(link),
+    }
 }
 
 /// The settings modal, centered over the live view behind it.
@@ -1244,6 +1268,78 @@ mod tests {
         assert!(!notice.contains("bridge remembered"), "{notice}");
     }
 
+    /// A view saving to `dir/wartui.toml` for a run over `link`.
+    fn ui_over(dir: &std::path::Path, link: Option<config::Link>) -> Ui {
+        Ui::new(Settings {
+            config_path: Some(dir.join("wartui.toml")),
+            link,
+            ..Settings::default()
+        })
+    }
+
+    #[test]
+    fn ui_saves_link_when_bridge_announces_itself_over_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = ui_over(dir.path(), Some(config::Link::Bluetooth));
+        let mut waiting = busy();
+        waiting.bridge = None;
+        ui.poll_link(&waiting);
+        assert!(!dir.path().join("wartui.toml").exists(), "not before it connects");
+
+        ui.poll_link(&busy());
+
+        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Bluetooth));
+        assert_eq!(ui.saved().bridge.link, Some(config::Link::Bluetooth));
+    }
+
+    #[test]
+    fn ui_writes_nothing_when_run_is_over_usb_and_file_names_no_link() {
+        // Absent means USB, so there is nothing to change.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = ui_over(dir.path(), Some(config::Link::Usb));
+        ui.poll_link(&busy());
+        assert!(!dir.path().join("wartui.toml").exists());
+    }
+
+    #[test]
+    fn ui_saves_usb_when_file_names_bluetooth_and_run_is_over_usb() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nlink = \"bluetooth\"\n").unwrap();
+        let mut ui = Ui::new(Settings {
+            config_path: Some(path),
+            saved: config::load(Some(&dir.path().join("wartui.toml"))).unwrap(),
+            link: Some(config::Link::Usb),
+            ..Settings::default()
+        });
+
+        ui.poll_link(&busy());
+
+        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Usb));
+    }
+
+    #[test]
+    fn ui_saves_no_link_when_link_is_the_simulator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = ui_over(dir.path(), None);
+        ui.poll_link(&busy());
+        assert!(!dir.path().join("wartui.toml").exists());
+    }
+
+    #[test]
+    fn ui_saves_bluetooth_address_when_transport_remembers_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        memory.remember_bluetooth(OTHER_BRIDGE, "02:00:5E:10:44:C1".to_owned());
+
+        ui.poll_bridge();
+
+        let saved = saved_bridge(dir.path());
+        assert_eq!(saved.mac, Some(OTHER_BRIDGE));
+        assert_eq!(saved.bluetooth_address.as_deref(), Some("02:00:5E:10:44:C1"));
+    }
+
     #[test]
     fn ui_saves_bridge_when_transport_remembers_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -1280,7 +1376,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = BridgeMemory::none();
         let saved = config::Config {
-            bridge: config::Bridge { remember: Some(false), mac: None, serial: None },
+            bridge: config::Bridge { remember: Some(false), ..config::Bridge::default() },
             ..config::Config::default()
         };
         let mut ui = Ui::new(Settings {
@@ -1304,7 +1400,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
         let saved = config::Config {
-            bridge: config::Bridge { remember: Some(true), mac: Some(OTHER_BRIDGE), serial: None },
+            bridge: config::Bridge {
+                remember: Some(true),
+                mac: Some(OTHER_BRIDGE),
+                ..config::Bridge::default()
+            },
             ..config::Config::default()
         };
         let mut ui = Ui::new(Settings {

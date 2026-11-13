@@ -142,6 +142,11 @@ pub const GPS_RECEIVER_ANSWERED: &str = "the GPS receiver answered on the I2C bu
 /// (`split::Pair::fault`). `wartui flash-bridge` follows the C6's update by it.
 pub const RADIO_UPDATING: &str = "updating the radio";
 
+/// The P4's [`BridgeToHost::Error`] to a Bluetooth central when a USB host takes the host queue
+/// from it (`crate::host_owner`). The host transport reads it as the link going down, not as a
+/// fault: the central stays subscribed, and the queue comes back to it with a fresh `Ready`.
+pub const USB_TOOK_BRIDGE: &str = "the USB host took the bridge";
+
 /// What a bridge chip's firmware last marked before it reset.
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],

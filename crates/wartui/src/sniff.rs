@@ -26,6 +26,11 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
+    link: Option<crate::config::Link>,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -52,8 +57,9 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link =
-        super::open(args.bridge.as_deref(), args.sim, super::memory(args.config.as_deref()))?;
+    let saved = crate::config::remembered_bridge(args.config.as_deref());
+    let over = super::link_for(args.link, args.bridge.as_deref(), saved.link)?;
+    let mut link = super::open(args.bridge.as_deref(), args.sim, over, super::memory_of(&saved))?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();
@@ -63,7 +69,7 @@ pub async fn run(args: Args) -> Result<()> {
     let mut spoken = false;
     // Built before the loop, not inside the arm below: see `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
-    let notice = tokio::time::sleep(super::CONNECT_NOTICE_AFTER);
+    let notice = tokio::time::sleep(super::connect_wait(over));
     tokio::pin!(notice);
 
     loop {
@@ -75,7 +81,7 @@ pub async fn run(args: Args) -> Result<()> {
             () = &mut notice, if !spoken => {
                 spoken = true;
                 if !counts.heard_a_bridge {
-                    eprintln!("\n{}\n", super::no_bridge_notice(args.bridge.as_deref()));
+                    eprintln!("\n{}\n", super::no_bridge_notice(args.bridge.as_deref(), over));
                 }
             }
             event = link.recv() => match event {
@@ -406,7 +412,7 @@ mod tests {
     use wartui_proto::link::LinkError;
 
     fn args() -> Args {
-        Args { bridge: None, config: None, sim: None, raw: false, verbose: false }
+        Args { bridge: None, link: None, config: None, sim: None, raw: false, verbose: false }
     }
 
     fn heard(event: LinkEvent) -> bool {

@@ -39,6 +39,7 @@ another slot leaves the plan at the old one and joins it at the new one on its n
 |-------------------------|-------------|--------------------------------------------------------|
 | `--db PATH`             | dated       | New file for the capture; an existing one is refused   |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
+| `--link usb\|bluetooth` | `usb`       | How to reach it; see "The Bluetooth link"              |
 | `--lat` `--lon` `--alt` | —           | A fixed test position; the capture is never uploaded   |
 | `--gps PATH\|bridge`    | detected    | An NMEA port, or `bridge` for the bridge's alone       |
 | `--no-gps`              | off         | Read no receiver, the bridge's included                |
@@ -309,6 +310,8 @@ excluded-ssids = ["HomeNet", "Pixel 9"]
 remember = true
 mac = "AA:BB:CC:DD:EE:FF"
 serial = "5CF7153520"
+bluetooth-address = "AA:BB:CC:DD:EE:00"
+link = "bluetooth"
 
 [gps]
 bridge-rate-hz = 5
@@ -324,6 +327,8 @@ wdgwars = ""
 | `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
 | `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
 | `[bridge] serial`      | —       | The USB serial number of the CH343 that bridge answered on                     |
+| `[bridge] bluetooth-address` | — | Its C6's Bluetooth address, or on macOS the identifier CoreBluetooth gives it    |
+| `[bridge] link`        | `usb`   | `usb` or `bluetooth`: how commands reach the bridge; see "The Bluetooth link"  |
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[gps] wait-for-fix`   | on      | Whether `run` holds the scan until a receiver holds a fix; see "Positions"     |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
@@ -331,16 +336,17 @@ wdgwars = ""
 wartui refuses to start on an unknown key or table, naming the file and line. A `pool` key or a
 `[bluetooth]` table is refused with the command that sets it instead: `wartui pool`, or
 `wartui scan start --bluetooth`, since the bridge keeps the pool and picks the Bluetooth node. An out-of-range value,
-a malformed `[bridge] mac`, a `mac` or `serial` beside `remember = false`, or an `excluded-ssids`
+a malformed `[bridge] mac`, a `mac`, `serial` or `bluetooth-address` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
-`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `ota` read only `[bridge]
-mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `ota` read only `[bridge]`,
+and treat a broken file as no bridge remembered, so it cannot stop them. `ota` ignores `link`.
 `flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
 gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
 The waiting-for-GPS pop-up's box writes `[gps] wait-for-fix = false` when ticked, and drops the
 key when unticked.
-`run` writes `[bridge] mac` and `serial` when the bridge it remembers changes; see "Keyboard
-commands" and "When nothing arrives". `flash-bridge` writes both for a board it found and flashed;
+`run` writes `[bridge] mac`, `serial` and `bluetooth-address` when the bridge it remembers
+changes, and `link` once the bridge answers over it; see "Keyboard commands", "When nothing
+arrives" and "The Bluetooth link". `flash-bridge` writes both for a board it found and flashed;
 see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`,
 except under `--sim`. A new file is readable only by its owner.
 
@@ -1153,6 +1159,31 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   octets. `brownout` means check that node's supply; `software`, `watchdog` or `lockup` is the
   firmware; `unknown` is a cause this build cannot name. A power-on or a reset over USB is not
   shown.
+
+## The Bluetooth link
+
+**`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
+`sniff`, `reset`, `power-cycle`, `fan`, `pool` and `scan` take it. `[bridge] link = "bluetooth"`
+makes it the default, and `run` saves the link it connected over there. A `--bridge` path is
+always USB, and `--link bluetooth` refuses one. `flash-bridge` and `ota` use USB whatever the file
+says. Nothing scans for Bluetooth unless the link is Bluetooth.
+
+**The bridge advertises `wartui XX:YY`, its last two octets.** `--bridge XX:YY`, or the whole
+address, names the same board over either link. Without one, wartui connects straight to the
+Bluetooth address it remembers, and otherwise scans for 10 s and takes the one bridge it hears;
+several are refused. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
+remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
+
+**The PC pairs with the bridge once.** The bridge serves only a paired, encrypted host. An unpaired
+PC is refused with `the bridge XX:YY refused this PC over Bluetooth because they are not paired`,
+and the command that pairs it is `wartui bluetooth pair --bridge XX:YY`.
+
+**One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
+`flash-bridge` does. The Bluetooth host shows `link down: the USB host took the bridge` and stays
+connected. The bridge hands it back 15 s after USB falls silent, and the view reconnects without
+being asked. A Bluetooth connection with no answer after 20 s logs that a USB host may hold the
+bridge, and keeps waiting. `wartui ports` and `--bridge` lookups over USB never take the bridge
+from a Bluetooth host.
 
 ## When nothing arrives
 

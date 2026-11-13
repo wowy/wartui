@@ -32,7 +32,8 @@ use core::cell::{Cell, RefCell};
 use embassy_time::{Duration, Instant};
 use wartui_proto::host_owner::{Effect, Effects, Input};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostOwner, LogStr, MAX_HOST_FRAME, encode_frame,
+    BridgeToHost, FrameAccumulator, HostOwner, LogStr, MAX_HOST_FRAME, USB_TOOK_BRIDGE,
+    encode_frame,
 };
 use wartui_proto::radio_link::{
     BleState, Down, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Packer, encode_down, host_bytes_fit,
@@ -45,8 +46,8 @@ use crate::host::Source;
 pub type BleFrames = FrameAccumulator<MAX_HOST_FRAME>;
 
 /// What a central that loses the queue to USB is told. The host transport reads it as the reason
-/// its link ended.
-const NOTICE: &str = "the USB host took the bridge";
+/// its link ended, so both ends take the text from `wartui-proto`.
+const NOTICE: &str = USB_TOOK_BRIDGE;
 
 /// Bytes the notice's frame takes, with the `0x00` ahead of it.
 const NOTICE_MAX: usize = 64;

@@ -49,6 +49,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
 use wartui_bridge::{LinkEvent, LinkHandle};
+
+use crate::config::Link;
 use wartui_core::ota::{Failure, Ids, OtaImage, OtaSession, Outcome, Phase, Progress};
 use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now, stop_scan};
 use wartui_proto::bus::{
@@ -175,7 +177,7 @@ pub async fn run(args: Args) -> Result<()> {
     let mut link = open(&args)?;
     let info = match tokio::time::timeout(super::CONNECT_NOTICE_AFTER, connected(&mut link)).await {
         Ok(info) => info?,
-        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
+        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), Link::Usb)),
     };
     let board = info.node_board;
     let named = slots_named(board, &args.nodes).map_err(anyhow::Error::msg)?;
@@ -370,8 +372,9 @@ fn open(args: &Args) -> Result<LinkHandle> {
         };
         return SimTransport::new(config).start().context("starting the simulator");
     }
+    // USB whatever `[bridge] link` says, until the update is carried over Bluetooth too.
     let bridge = args.bridge.as_deref();
-    super::open(bridge, None, super::memory(args.config.as_deref()))
+    super::open(bridge, None, Link::Usb, super::memory(args.config.as_deref()))
 }
 
 async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {

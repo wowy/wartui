@@ -1,14 +1,19 @@
 //! Which board answered the link protocol last time, and on which port.
 //!
-//! **Two values: the bridge's address and its CH343's serial number.** The address is the
-//! bridge's identity, which `Ready` carries. The serial number is how the port is found again
-//! without asking every CH343, since the OS reports it before anything is opened.
+//! **Three values: the bridge's address, its CH343's serial number and its Bluetooth address.**
+//! The address is the bridge's identity, which `Ready` carries. The serial number is how the port
+//! is found again without asking every CH343, since the OS reports it before anything is opened.
+//! The Bluetooth address is how the Bluetooth link reaches the bridge again without a scan: the
+//! address the OS reports for its C6, or on macOS, which hides addresses, the identifier
+//! CoreBluetooth gives it. Each link learns its own value when a connection's first `Ready` proves
+//! the board, and keeps the other's while the address stays the same.
 //!
-//! **Held in memory, kept by the caller.** The transport reads the serial number to
-//! order its first sweep, writes both on every connection and clears them when the
+//! **Held in memory, kept by the caller.** The serial transport reads the serial number to
+//! order its first sweep, and the Bluetooth transport the Bluetooth address to connect without a
+//! scan. Each writes the address and its own value on every connection and clears them when the
 //! remembered board goes quiet, but it touches no file. Whoever seeds the handle
 //! decides whether the values outlive the process: `wartui run` keeps them in
-//! `wartui.toml` as `[bridge] mac` and `serial`, and every other command lets them go at exit.
+//! `wartui.toml` as `[bridge] mac`, `serial` and `bluetooth-address`, and every other command lets them go at exit.
 //! `wartui flash-bridge` writes that key too, for the board it flashed, but opens
 //! no link and holds no handle. One owner for the file within a process is what
 //! keeps two threads from racing on whole-file saves.
@@ -45,7 +50,7 @@ impl BridgeMemory {
     /// A handle holding `mac`, with remembering on.
     #[must_use]
     pub fn holding(mac: Option<Mac>) -> Self {
-        let slot = Slot { mac, serial: None };
+        let slot = Slot { mac, serial: None, bluetooth: None };
         Self { slot: Arc::new(Mutex::new(slot)), enabled: Arc::new(AtomicBool::new(true)) }
     }
 
@@ -53,6 +58,13 @@ impl BridgeMemory {
     #[must_use]
     pub fn on_port(self, serial: Option<String>) -> Self {
         self.slot().serial = serial;
+        self
+    }
+
+    /// The same handle, holding `address` as the remembered bridge's Bluetooth address.
+    #[must_use]
+    pub fn on_bluetooth(self, address: Option<String>) -> Self {
+        self.slot().bluetooth = address;
         self
     }
 
@@ -95,15 +107,27 @@ impl BridgeMemory {
         self.slot().serial.clone()
     }
 
-    /// Whether this handle recalls exactly `mac` and `serial`, compared under the lock rather
-    /// than cloned out. Nothing held while remembering is off, as [`Self::recall`] says.
+    /// The Bluetooth address held. Nothing while remembering is off.
     #[must_use]
-    pub fn matches(&self, mac: Option<Mac>, serial: Option<&str>) -> bool {
+    pub fn recall_bluetooth(&self) -> Option<String> {
         if !self.is_enabled() {
-            return mac.is_none() && serial.is_none();
+            return None;
+        }
+        self.slot().bluetooth.clone()
+    }
+
+    /// Whether this handle recalls exactly `mac`, `serial` and `bluetooth`, compared under the
+    /// lock rather than cloned out. Nothing held while remembering is off, as [`Self::recall`]
+    /// says.
+    #[must_use]
+    pub fn matches(&self, mac: Option<Mac>, serial: Option<&str>, bluetooth: Option<&str>) -> bool {
+        if !self.is_enabled() {
+            return mac.is_none() && serial.is_none() && bluetooth.is_none();
         }
         let slot = self.slot();
-        slot.mac == mac && slot.serial.as_deref() == serial
+        slot.mac == mac
+            && slot.serial.as_deref() == serial
+            && slot.bluetooth.as_deref() == bluetooth
     }
 
     /// Hold `mac`, answering on the CH343 with `serial`, in place of whatever was there.
@@ -111,17 +135,32 @@ impl BridgeMemory {
     ///
     /// No `serial` for the address already held keeps the port held with it: a caller that
     /// does not know the port has not learned it moved. For another address it holds no port,
-    /// since the old one would put the wrong board first.
+    /// since the old one would put the wrong board first. The Bluetooth address follows the same
+    /// rule: kept for the same address, dropped for another.
     pub fn remember_on(&self, mac: Mac, serial: Option<String>) {
         if !self.is_enabled() {
             return;
         }
         let mut slot = self.slot();
+        let same = slot.mac == Some(mac);
         let serial = match serial {
-            None if slot.mac == Some(mac) => slot.serial.take(),
+            None if same => slot.serial.take(),
             serial => serial,
         };
-        *slot = Slot { mac: Some(mac), serial };
+        let bluetooth = if same { slot.bluetooth.take() } else { None };
+        *slot = Slot { mac: Some(mac), serial, bluetooth };
+    }
+
+    /// Hold `mac`, reached over Bluetooth at `address`, in place of whatever was there. Nothing
+    /// changes while remembering is off. The CH343 serial number is kept for the same address
+    /// and dropped for another, as [`Self::remember_on`] keeps the Bluetooth address.
+    pub fn remember_bluetooth(&self, mac: Mac, address: String) {
+        if !self.is_enabled() {
+            return;
+        }
+        let mut slot = self.slot();
+        let serial = if slot.mac == Some(mac) { slot.serial.take() } else { None };
+        *slot = Slot { mac: Some(mac), serial, bluetooth: Some(address) };
     }
 
     /// Forget whatever was there, so the next connection sweeps instead.
@@ -141,4 +180,5 @@ impl BridgeMemory {
 struct Slot {
     mac: Option<Mac>,
     serial: Option<String>,
+    bluetooth: Option<String>,
 }

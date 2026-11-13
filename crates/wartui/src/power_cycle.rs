@@ -38,6 +38,11 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK")]
+    link: Option<crate::config::Link>,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -47,7 +52,7 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     let (mut link, info) =
-        super::connect_one(args.bridge.as_deref(), args.config.as_deref()).await?;
+        super::connect_one(args.bridge.as_deref(), args.link, args.config.as_deref()).await?;
     let board = info.node_board;
     let slot = slot_for(board, &args.slot).map_err(anyhow::Error::msg)?;
 
