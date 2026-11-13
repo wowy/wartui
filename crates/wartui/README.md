@@ -1284,7 +1284,7 @@ without response: the C6 queues 8 writes and silently drops the rest, and its an
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
 | `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |
-| `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet |
+| `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair` |
 | `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
 | A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
 
