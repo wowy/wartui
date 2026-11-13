@@ -133,7 +133,8 @@ own.
   settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
   nowhere, so it boots stopped.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
-  It holds the link for a future Bluetooth host link, and runs no radio today.
+  It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
+  (`src/ble.rs`).
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   and owns the channel (`firmware/node/README.md` § "What it does differently"). Hops from one
   assigned channel to the next, reporting each dwell over the node bus, and idles servicing the
@@ -448,8 +449,8 @@ edit stops; follow the pointer before changing the rule.
   outright. The others — `esp-alloc`, `esp-sync`, `esp-storage`, `esp-wifi-sys-*` — go higher
   perfectly happily, and a higher one is a *second copy* rather than an upgrade: a duplicate
   `__esp_radio_printf` that fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills,
-  which builds and then panics on the first task the radio spawns. The node is the firmware that
-  links `esp-radio`; Dependabot ignores them and each firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
+  which builds and then panics on the first task the radio spawns. The node and the C6 are the firmwares
+  that link `esp-radio`; Dependabot ignores them and each firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/p4-radio/README.md` § "Dependency versions"
 - **`colorgrad` is held at the version `tui-bar-graph` resolves.** `BarGraph::with_gradient` takes
   that copy's `Gradient` trait, so a higher `colorgrad` is a second copy whose gradients do not

@@ -51,15 +51,15 @@ jobs:
           cargo fmt --all -- --check
           popd
 
-      # The check `firmware-node.yml` makes, for the crates this firmware links: it has no
-      # radio and no allocator, and is held to the set the node's `esp-radio` fixes.
+      # The check `firmware-node.yml` makes, for the crates this firmware links: it links the
+      # node's `esp-radio` for Bluetooth, and its heap, and is held to the set that fixes.
       # `README.md` § "Dependency versions" has the reasoning.
       - name: One copy of each pinned crate
         run: |
           pushd firmware/p4-radio
           resolved=$(cargo tree --locked -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-hal esp-rtos esp-storage esp-sync; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-esp32c6; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true

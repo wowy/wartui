@@ -22,16 +22,26 @@
 //! needs the FIFO drained between packets: the link never turns the line around, and the next
 //! write resets only the DMA channel. `firmware/p4-bridge/src/link.rs` has the rest.
 //!
-//! Records go up through [`Shared`]'s byte ring: the C6's lines and its status. A full ring
-//! evicts its oldest record, so a stalled link keeps the newest.
+//! Records go up through [`Shared`]'s byte ring: the C6's lines, its status, and the Bluetooth
+//! host link's messages. A full ring evicts its oldest record, so a stalled link keeps the
+//! newest. A central's writes wait for room instead (`src/ble.rs`), woken by `up_freed`, which
+//! the writer raises whenever it takes records off the ring.
+//!
+//! **The host stream goes to a Bluetooth central** (`src/ble.rs`): `Down::HostStart` and
+//! `Down::HostBytes` feed the notify ring, `Down::Bonds` gives the C6 the bonds the P4 keeps, and
+//! the C6's Bluetooth counters ride on each `RadioStatus`.
 //!
 //! The C6 sends a hello every [`HELLO_EVERY_MS`] until it hears the P4's. The P4 tells a repeat
 //! from a new life by the packet seq, which starts at 0 on every boot
 //! (`wartui_proto::split`, `Pair::on_hello`). The hello carries the booted image's digest,
 //! which is how the P4 decides to send its bundled image.
 //!
-//! **The P4's hello confirms an image on trial.** Hearing the P4 is the test, as hearing the
-//! host is a node's; `firmware/common/src/ota.rs` has the trial.
+//! **An image on trial is confirmed once it has heard the P4's hello and its Bluetooth host has
+//! started advertising**, whichever comes second. A C6 update reaches a Bluetooth-only host
+//! through Bluetooth, so an image whose Bluetooth never comes up would strand that host: hearing
+//! the P4 alone is not the test. Such an image restarts itself after [`TRIAL_ADVERTISE_WAIT`],
+//! and its third boot rolls it back to the image before it. A failed confirm leaves the image on trial, and the P4's next hello
+//! tries again. `firmware/common/src/ota.rs` has the trial.
 //!
 //! **An update arrives as [`Kind::Update`] packets** (`wartui_proto::radio_link::update`), which
 //! drive [`wartui_proto::ota::Receiver`] over [`wartui_firmware::ota`], as a node's update
@@ -43,8 +53,8 @@
 use core::cell::RefCell;
 use core::fmt::{self, Write};
 
-use embassy_futures::join::join;
-use embassy_futures::select::select;
+use embassy_futures::join::join3;
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -65,12 +75,13 @@ use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, BleCounters, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind,
-    LINK_REVISION, PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck,
-    SeqNote, Up, VerifyError, decode_down, encode_packet, encode_up, records, seal,
+    BAUD_RATE, BODY_MAX, Chip, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
+    PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
+    VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 
+use crate::ble::Ble;
 use crate::config::UP_QUEUE_BYTES;
 
 /// How often a write looks for its end once its wire time has passed;
@@ -111,12 +122,22 @@ pub struct Shared {
     /// Raised by whatever may have given the writer something to send, so a waiting writer
     /// looks again.
     wake: Signal<NoopRawMutex, ()>,
+    /// Raised by the writer when it takes records off `up`, for a central's write waiting for
+    /// room.
+    pub up_freed: Signal<NoopRawMutex, ()>,
+    /// The Bluetooth side.
+    pub ble: Ble,
 }
 
 impl Shared {
     /// Nothing queued yet. The ring is static, so it is never on the stack.
-    pub fn new(up: &'static UpQueue) -> Self {
-        Self { up, wake: Signal::new() }
+    pub fn new(up: &'static UpQueue, ble: Ble) -> Self {
+        Self { up, wake: Signal::new(), up_freed: Signal::new(), ble }
+    }
+
+    /// Bytes the ring has free. The writer reads a record whole, so none is pinned.
+    pub fn up_room(&self) -> usize {
+        UP_QUEUE_BYTES - self.up.borrow().len_bytes()
     }
 
     /// Queue `msg` for the P4, evicting the ring's oldest records if it is full.
@@ -161,7 +182,8 @@ pub struct Updates {
     pub ota: Ota,
     /// Static, since it holds a sector of buffer.
     pub receiver: &'static mut Receiver,
-    /// The booted image is on trial until the P4's hello confirms it.
+    /// The booted image is on trial until the P4's hello and Bluetooth's first advertisement
+    /// confirm it.
     pub trial: bool,
     /// The booted image's digest, for the hello, or zeros when it could not be read.
     pub image: [u8; DIGEST_LEN],
@@ -284,6 +306,10 @@ impl Link {
         match packet.kind {
             Kind::Hello => {
                 if Hello::decode(packet.payload).is_some() {
+                    if !self.heard_p4 {
+                        // The last life's panic is queued, and the P4 is there to read it.
+                        crate::last_panic::clear();
+                    }
                     self.heard_p4 = true;
                     // What queued behind the hello exchange can go now.
                     shared.wake.signal(());
@@ -327,16 +353,16 @@ impl Link {
         }
     }
 
-    /// End this image's trial, if it is on one. A failure leaves it on trial, and the P4's
-    /// next hello tries again.
+    /// End this image's trial, if it is on one, once the P4's hello has arrived and Bluetooth
+    /// advertises. A failure leaves it on trial, and the P4's next hello tries again.
     fn confirm(&mut self, shared: &Shared) {
-        if !self.updates.trial {
+        if !self.updates.trial || !self.heard_p4 || !shared.ble.advertising() {
             return;
         }
         match self.updates.ota.confirm() {
             Ok(()) => {
                 self.updates.trial = false;
-                shared.log(format_args!("image confirmed by the P4"));
+                shared.log(format_args!("image confirmed by the P4's hello and Bluetooth"));
             }
             Err(err) => shared.error(format_args!("could not confirm the image: {err}")),
         }
@@ -387,8 +413,9 @@ impl Link {
         };
         match down {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared))),
-            // No Bluetooth host link in this build.
-            Down::HostStart { .. } | Down::HostBytes { .. } | Down::Bonds { .. } => {}
+            Down::HostStart { at } => crate::ble::host_start(shared, at),
+            Down::HostBytes { at, bytes } => crate::ble::host_bytes(shared, at, bytes),
+            Down::Bonds { bonds, window_ms } => crate::ble::take_bonds(shared, bonds, window_ms),
         }
     }
 
@@ -408,7 +435,7 @@ impl Link {
             bad_magic: self.bad_magic,
             seq_gap: self.seq_gap,
             uart_errors: self.uart_errors,
-            ble: BleCounters::default(),
+            ble: crate::ble::counters(shared),
         }
     }
 
@@ -439,20 +466,53 @@ impl Link {
         }
         let mut packer = Packer::new(payload);
         let mut up = shared.up.borrow_mut();
+        let queued = up.len_bytes();
         self.held.pack(&mut packer, |out| up.read(out).0);
+        if up.len_bytes() < queued {
+            shared.up_freed.signal(());
+        }
         (!packer.is_empty()).then(|| (Kind::Messages, packer.len()))
     }
 }
 
-/// Run the link forever: the reader and the writer.
+/// Run the link forever: the reader, the writer, and the confirm that waits on Bluetooth.
 pub async fn link_loop(bus: Bus<'_>, link: &RefCell<Link>, shared: &Shared) -> ! {
     let Bus { rx, tx, rx_buf, tx_buf, reader, body } = bus;
-    join(
+    join3(
         read_packets(rx, rx_buf, reader, link, shared),
         write_packets(tx, tx_buf, body, link, shared),
+        confirm_on_advertising(link, shared),
     )
     .await
     .0
+}
+
+/// How long an image on trial waits for its Bluetooth host to advertise before it restarts.
+/// Advertising starts within a few seconds of boot (`BONDS_WAIT` is the longest step), so this
+/// is far past a healthy start.
+const TRIAL_ADVERTISE_WAIT: Duration = Duration::from_secs(30);
+
+/// Try the trial's confirm when Bluetooth first advertises, for a P4 hello that came before it.
+///
+/// An image on trial whose Bluetooth has not advertised by [`TRIAL_ADVERTISE_WAIT`] restarts
+/// itself. It still says hello, so the P4 never resets it, and without this it would sit on trial
+/// until the P4 restarted three times. Each restart spends a trial boot, so a third rolls it back.
+async fn confirm_on_advertising(link: &RefCell<Link>, shared: &Shared) -> ! {
+    let waited = select(shared.ble.advertising_started.wait(), Timer::after(TRIAL_ADVERTISE_WAIT));
+    if let Either::Second(()) = waited.await
+        && link.borrow().updates.trial
+        && !shared.ble.advertising()
+    {
+        shared.error(format_args!("Bluetooth did not start on this image's trial; restarting"));
+        // Give the writer a moment to send the line before the reset drops it.
+        Timer::after(Duration::from_millis(200)).await;
+        reboot();
+    }
+    link.borrow_mut().confirm(shared);
+    loop {
+        shared.ble.advertising_started.wait().await;
+        link.borrow_mut().confirm(shared);
+    }
 }
 
 /// Read forever: arm the receive once, then every [`RX_POLL`] hand the link what has landed.

@@ -1,15 +1,51 @@
 # wartui P4 radio firmware
 
 The C6 half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the on-board ESP32-C6 runs this
-firmware: it holds the UART link to the P4 for a future Bluetooth host link, answers the P4's
-status poll, sends its lines and takes its own updates. It talks to the P4 over UART1, with DMA and
-hardware flow control, on the board's SDIO traces
-([wiring](../p4-bridge/README.md#the-link-to-the-c6)). It never talks USB; the P4 owns the host
-link and the node buses. The queue size is in `src/config.rs`.
+firmware: it carries the host link to a Bluetooth central ([below](#bluetooth-host-link)), and
+holds the UART link to the P4, answers the P4's status poll, sends its lines and takes its own
+updates. It talks to the P4 over UART1, with DMA and hardware flow control, on the board's SDIO
+traces ([wiring](../p4-bridge/README.md#the-link-to-the-c6)). It never talks USB; the P4 owns the
+host link and the node buses. The build-time settings are in `src/config.rs`.
 
 ```sh
 cargo build --release
 ```
+
+## Bluetooth host link
+
+The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src/ble.rs`). It
+advertises `wartui XX:YY`, the bridge's last two octets, with the `wartui_proto::ble` service in its
+scan response. It notifies the P4's host stream on Up and forwards what a central writes on Down.
+
+- **Only a bonded, encrypted central reaches the stream.** It pairs by LE Secure Connections Just
+  Works, inside the P4's pairing window. The P4 keeps the bonds and sends them down after each
+  hello; the C6 keeps no flash state. `src/ble.rs` has the rules.
+- **The C6 asks for the 2M PHY and data length 251** once a central connects.
+- **The stream is credited.** The C6 holds up to `HOST_WINDOW_BYTES` of it and credits what it
+  notifies, discards and finds missing, so a lost P4 packet costs its frames and not the window
+  (`wartui_proto::radio_link::Inflow`).
+- **Its counters ride on each `RadioStatus`:** pairings, failed pairings, unbonded centrals
+  disconnected, the last disconnect reason, resynced and dropped bytes, the PHY, the interval and
+  the heap's high-water mark.
+- **The heap is 96 KB:** 64 KB of reclaimed bootloader RAM and 32 KB more. The Bluetooth controller
+  and the scheduler under it are all that allocate.
+
+Two upstream bugs shape the build, each worked around without a patch
+([`c6-ble-host-findings.md`](../../docs/c6-ble-host-findings.md#workarounds-a-production-build-needs)):
+
+| Workaround | Why |
+| --- | --- |
+| TrouBLE's packet pool is 251 bytes (`default-packet-pool-mtu-251`), so the ATT MTU is 247 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
+| `trouble-host`'s `connection-params-update` stays off | bt-hci 0.10.1 panics on the reply to a central's connection parameter request; off, the controller answers it itself |
+
+The central picks the connection interval unless the build names one.
+`WARTUI_RADIO_CONN_INTERVAL_MS=7.5-15 cargo build --release` asks for 7.5 to 15 ms, with
+latency 0 and a 4 s supervision timeout, over L2CAP. Each bound is a multiple of 1.25 ms from
+7.5 ms, under 2 s. A central that refuses changes nothing. An iOS central wants a minimum of at
+least 15 ms (`src/config.rs`).
+
+The C6 keeps its last panic's text in RTC memory across the reset, and sends it to the P4 as
+`Error` lines once the link is up (`src/last_panic.rs`).
 
 ## Boards
 
@@ -45,9 +81,11 @@ sector. The flash half is the node's too (`firmware/common/src/ota.rs`).
 1. Every hello carries the SHA-256 digest espflash appends to the booted image.
 2. When it differs from the image the P4 carries, the P4 sends that image over the UART link. The
    C6 writes it into the slot it is not running, checks its hash, switches slots and reboots.
-3. The new image boots on trial. The P4's hello confirms it, as hearing the host confirms a
-   node's.
-4. A trial image that never hears the P4 is rolled back on its third boot. Without a watchdog, a
+3. The new image boots on trial. It is confirmed once it has heard the P4's hello and its
+   Bluetooth host has started advertising. A C6 update reaches a Bluetooth-only host through
+   Bluetooth, so an image whose Bluetooth never comes up must not strand that host. Such an
+   image restarts itself when it has not advertised 30 s after boot.
+4. A trial image that is never confirmed is rolled back on its third boot. Without a watchdog, a
    hung image counts boots through the P4, which resets the C6 when no hello follows the
    install.
 
@@ -56,16 +94,17 @@ It also names the flash mode, frequency and size (DIO, 40 MHz, 4 MB), as the P4'
 when it saves the bundled image. They sit in the header the digest covers, so a C6 flashed by
 wire from the same tree carries the bundled digest and is not reflashed.
 
-## Queue sizes
+## Build-time settings
 
-The C6 has one queue. Its size is read at build time from an environment variable, so a bench
-run resizes it with a rebuild, for example
-`WARTUI_RADIO_UP_QUEUE_BYTES=16384 cargo build --release`. `wartui status` reports its high-water
-mark as `radio-up`.
+Each is read at build time from an environment variable, so a bench run changes it with a
+rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=16384 cargo build --release`. The P4's build
+passes both through to the image it bundles. `wartui status` reports the queue's high-water mark
+as `radio-up`.
 
-| Variable | Default | Holds |
+| Variable | Default | Sets |
 | --- | --- | --- |
-| `WARTUI_RADIO_UP_QUEUE_BYTES` | 8192 | the C6's lines and status waiting for a packet to the P4; a full queue evicts the oldest |
+| `WARTUI_RADIO_UP_QUEUE_BYTES` | 8192 | the C6's lines, status and Bluetooth messages waiting for a packet to the P4; a full queue evicts the oldest |
+| `WARTUI_RADIO_CONN_INTERVAL_MS` | unset: the central's | the connection interval the C6 asks a central for, `MIN-MAX` in ms ([above](#bluetooth-host-link)) |
 
 ## Dependency versions
 
@@ -76,16 +115,24 @@ fixes the whole family. It holds the family in two ways:
 - **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, `esp-sync`, and
   `esp-storage`.
 
-This firmware and the P4's have no `esp-radio` of their own, and link the same `esp-hal`,
-`esp-rtos`, `esp-storage` and `esp-sync` as the node. Keep that true: the three share
-`wartui-proto` and `firmware/common`, which states the same `esp-hal` requirement.
+This firmware links the node's `esp-radio`, with `ble` alone, and the node's `esp-alloc`. The P4's
+has no `esp-radio` of its own. All three link the same `esp-hal`, `esp-rtos`, `esp-storage` and
+`esp-sync`. Keep that true: the three share `wartui-proto` and `firmware/common`, which states the
+same `esp-hal` requirement.
 
 `embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are
 held the same way, through `esp-rtos` and `esp-hal`.
 
 The C5's PAC resolves twice in the node, and that is known: `esp-hal 1.2.2` builds against
 `esp32c5 0.3`, `esp-radio 1.0.0-beta.1` against `esp32c5 0.4`. Both build and link. A later
-`esp-hal` release on the newer PAC lines them up.
+`esp-hal` release on the newer PAC lines them up. The C6's does the same here, `esp32c6` 0.24
+and 0.25.
+
+`trouble-host` 0.8.0 is the newest release, and is outside the family: nothing in `esp-radio`
+depends on it. It builds on `bt-hci` 0.10, and `esp-radio` on 0.9, so `bt-hci` resolves twice.
+Both are plain types with no global symbols, and the controller plugs in through
+`bt-hci-transport` 0.1, which both share. `Cargo.toml` names its two workaround features
+([above](#bluetooth-host-link)).
 
 ### Crates that double
 
@@ -125,8 +172,9 @@ cargo tree --locked -e normal --prefix none --format '{p}' \
   | grep -E '^esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56]) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-alloc` is the node's because the node owns the heap and declares its regions. This firmware
-and the P4's allocate nothing and have no heap.
+They are direct dependencies for reasons that do not go away. `esp-alloc` is the node's and this
+firmware's because each owns its heap and declares its regions. The P4's allocates nothing and has
+no heap.
 
 `esp-storage` is a direct dependency of `firmware/common` alone, for the over-the-air updates
 every firmware takes. It is held at the version `esp-bootloader-esp-idf` resolves, and brings no

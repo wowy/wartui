@@ -40,8 +40,8 @@ const RADIO_INPUTS: &[&str] = &[
     "../../crates/wartui-proto/Cargo.toml",
 ];
 
-/// The C6's build-time queue size (`firmware/p4-radio/src/config.rs`), passed through.
-const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES"];
+/// The C6's build-time settings (`firmware/p4-radio/src/config.rs`), passed through.
+const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES", "WARTUI_RADIO_CONN_INTERVAL_MS"];
 
 /// Variables the outer cargo sets for a build script that would steer the C6's build, beside
 /// every `CARGO_*` but `CARGO_HOME`.
