@@ -15,6 +15,10 @@
 //! The first attachment asks for a `Status` before anything else, and the last asks for one when
 //! its time is up and waits for it before stopping anything, so the bridge counters span the run.
 //!
+//! With `--expect-encrypted`, an attachment sends nothing until the P4 reports the link encrypted
+//! and bonded ([`SecureWait`]), and the run fails if it does not in time. `send` gives the P4 the
+//! pairing spike's commands over UART0, the path that works with no bond.
+//!
 //! Events are stamped here, as their notification arrives, because the wall clock is the radio's
 //! side of the run; the library hands them back untimed so its checks stay testable.
 
@@ -31,7 +35,7 @@ use ble_standin::events::clock;
 use ble_standin::rtt::RTT_TIMEOUT;
 use ble_standin::{
     Attachment, AttachmentSummary, CounterDelta, Event, FleetSummary, Keepalive, Reconcile, Rtt,
-    RttSummary, Seen, StatusAsk, bridge, hex, host_frame,
+    RttSummary, Secure, SecureWait, Seen, StatusAsk, bridge, hex, host_frame,
 };
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, ValueNotification,
@@ -59,6 +63,8 @@ const CLOSE_WAIT: Duration = Duration::from_secs(2 * RTT_TIMEOUT.as_secs());
 const GAPS_SHOWN: usize = 20;
 /// How long a UART0 read or write waits: long enough not to spin, short enough to stop promptly.
 const UART_TIMEOUT: Duration = Duration::from_millis(50);
+/// How long `send` prints what the P4 answers.
+const ANSWER_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
 #[command(about = "Spike only: stand in for a phone host on the wartui Bluetooth link")]
@@ -77,6 +83,14 @@ enum Command {
     },
     /// Attach over Bluetooth or UART0 and check what arrives.
     Run(RunArgs),
+    /// Send the P4 a pairing spike command over UART0, and print what it answers.
+    Send {
+        /// The P4 board's tty.
+        #[arg(long, value_name = "PATH")]
+        port: String,
+        /// What to ask.
+        command: SpikeCommand,
+    },
     /// Print a host frame as hex, to write to Down by hand.
     #[command(subcommand)]
     Frame(Frame),
@@ -109,6 +123,10 @@ struct RunArgs {
     /// Start the fleet scanning Wi-Fi, and tally node heartbeats per slot.
     #[arg(long)]
     start_scan: bool,
+    /// Fail unless the bridge reports the link encrypted and bonded before anything is sent.
+    /// Bluetooth only.
+    #[arg(long, conflicts_with = "port")]
+    expect_encrypted: bool,
     /// Write the summary here as JSON.
     #[arg(long)]
     json: Option<PathBuf>,
@@ -125,6 +143,33 @@ enum Frame {
         #[arg(long, default_value_t = 0)]
         count: u32,
     },
+    /// `SpikeOpenPairWindow`.
+    OpenPairWindow,
+    /// `SpikeClearBonds`.
+    ClearBonds,
+    /// `SpikeResetRadio`.
+    ResetRadio,
+}
+
+/// The pairing spike's host commands.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SpikeCommand {
+    /// Open the pairing window for 120 s.
+    OpenPairWindow,
+    /// Drop every bond, which opens the window until one is stored.
+    ClearBonds,
+    /// Reset the C6 through its enable pin.
+    ResetRadio,
+}
+
+impl SpikeCommand {
+    const fn message(self) -> HostToBridge {
+        match self {
+            Self::OpenPairWindow => HostToBridge::SpikeOpenPairWindow,
+            Self::ClearBonds => HostToBridge::SpikeClearBonds,
+            Self::ResetRadio => HostToBridge::SpikeResetRadio,
+        }
+    }
 }
 
 /// [`SpikeProfile`], as the command line names it.
@@ -154,12 +199,16 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Scan { secs } => scan(Duration::from_secs(secs)).await,
         Command::Run(args) => run(args).await,
+        Command::Send { port, command } => send(&port, command).await,
         Command::Frame(frame) => {
             let msg = match frame {
                 Frame::GetStatus => HostToBridge::GetStatus,
                 Frame::SpikeLoad { profile, count } => {
                     HostToBridge::SpikeLoad { profile: profile.into(), count }
                 }
+                Frame::OpenPairWindow => SpikeCommand::OpenPairWindow.message(),
+                Frame::ClearBonds => SpikeCommand::ClearBonds.message(),
+                Frame::ResetRadio => SpikeCommand::ResetRadio.message(),
             };
             println!("{}", hex(&host_frame(&msg)));
             Ok(())
@@ -437,6 +486,10 @@ struct RunSummary {
     count: u32,
     secs: u64,
     reconnect: u32,
+    expect_encrypted: bool,
+    /// With `--expect-encrypted`, seconds from each attachment to the bridge reporting the link
+    /// encrypted and bonded.
+    secured_after_s: Vec<f64>,
     attachments: Vec<AttachmentSummary>,
     rtt: Option<RttSummary>,
     reconcile: Reconcile,
@@ -458,6 +511,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut events = Vec::new();
     let mut ctrl_c = pin!(tokio::signal::ctrl_c());
     let mut stopped = false;
+    let mut secured_after_s = Vec::new();
 
     for index in 0..=args.reconnect {
         if stopped {
@@ -469,18 +523,13 @@ async fn run(args: RunArgs) -> Result<()> {
         let (mut link, mut up) = transport.attach().await?;
         let start = Instant::now();
         let mut attachment = Attachment::new(start);
-        if index == 0 {
-            ask.want();
-            ask.sent(Instant::now());
-            link.send(&HostToBridge::GetStatus).await.context("asking for status")?;
-            if let Some(profile) = args.profile {
-                let msg = HostToBridge::SpikeLoad { profile: profile.into(), count: args.count };
-                link.send(&msg).await.context("asking for load")?;
-            }
-            if args.start_scan {
-                let msg = HostToBridge::StartScan { bluetooth: false };
-                link.send(&msg).await.context("starting the scan")?;
-            }
+        // The C6 refuses every write until the link is encrypted and bonded, so with
+        // `--expect-encrypted` the opening waits for the bridge to say it is.
+        let wait = args.expect_encrypted.then(|| SecureWait::new(start));
+        let mut secured = wait.is_none();
+        let mut failed = None;
+        if secured && index == 0 {
+            open_run(&mut link, &args, &mut ask).await?;
         }
         let every = Duration::from_millis(STATS_EVERY_MS);
         let mut tick = interval_at((start + every).into(), every);
@@ -534,7 +583,12 @@ async fn run(args: RunArgs) -> Result<()> {
                     let send = if ask.due(rtt.is_out() || keepalive.is_out()) {
                         ask.sent(now);
                         true
-                    } else if !ask.pending() && !keepalive.is_out() && !closing && rtt.due(now) {
+                    } else if secured
+                        && !ask.pending()
+                        && !keepalive.is_out()
+                        && !closing
+                        && rtt.due(now)
+                    {
                         rtt.sent(now);
                         true
                     } else if link.last_write().is_some_and(|at| keepalive.due(now, at, busy)) {
@@ -564,6 +618,28 @@ async fn run(args: RunArgs) -> Result<()> {
                     }
                 }
             }
+            if !secured && let Some(wait) = &wait {
+                match wait.check(attachment.stats().1.as_ref(), Instant::now()) {
+                    Secure::Waiting => {}
+                    Secure::Secured => {
+                        secured = true;
+                        let after = start.elapsed().as_secs_f64();
+                        println!("# link encrypted and bonded {after:.1} s after attaching");
+                        secured_after_s.push(after);
+                        if index == 0 {
+                            open_run(&mut link, &args, &mut ask).await?;
+                        }
+                    }
+                    Secure::Failed(why) => {
+                        failed = Some(why);
+                        break 'attachment;
+                    }
+                }
+            }
+        }
+        if let Some(why) = failed {
+            link.close(dropped).await;
+            bail!("--expect-encrypted, attachment {}: {why}", index + 1);
         }
         let now = Instant::now();
         rtt.drop_out(now);
@@ -587,6 +663,8 @@ async fn run(args: RunArgs) -> Result<()> {
         count: args.count,
         secs: args.secs,
         reconnect: args.reconnect,
+        expect_encrypted: args.expect_encrypted,
+        secured_after_s,
         rtt: rtt.summary(),
         reconcile: Reconcile::of(&attachments),
         bridge: bridge::over_run(&attachments),
@@ -601,6 +679,48 @@ async fn run(args: RunArgs) -> Result<()> {
         serde_json::to_writer_pretty(file, &summary)?;
         println!("# summary written to {}", path.display());
     }
+    Ok(())
+}
+
+/// The run's opening, on its first attachment: a `Status` for the counters' first snapshot, then
+/// the load and the scan asked for.
+async fn open_run(link: &mut Link<'_>, args: &RunArgs, ask: &mut StatusAsk) -> Result<()> {
+    ask.want();
+    ask.sent(Instant::now());
+    link.send(&HostToBridge::GetStatus).await.context("asking for status")?;
+    if let Some(profile) = args.profile {
+        let msg = HostToBridge::SpikeLoad { profile: profile.into(), count: args.count };
+        link.send(&msg).await.context("asking for load")?;
+    }
+    if args.start_scan {
+        let msg = HostToBridge::StartScan { bluetooth: false };
+        link.send(&msg).await.context("starting the scan")?;
+    }
+    Ok(())
+}
+
+/// Send `command` over UART0, then print each `Log` and `Error` the P4 sends for
+/// [`ANSWER_WAIT`].
+async fn send(port: &str, command: SpikeCommand) -> Result<()> {
+    let (mut link, mut up) = open_uart(port)?;
+    link.send(&command.message()).await.context("sending the command")?;
+    let start = Instant::now();
+    let mut attachment = Attachment::new(start);
+    let mut done = pin!(sleep(ANSWER_WAIT));
+    loop {
+        tokio::select! {
+            chunk = up.next() => {
+                let Some(chunk) = chunk else { break };
+                for seen in attachment.feed(&chunk) {
+                    if let Seen::Event { kind, .. } = seen {
+                        println!("# {}", kind.text());
+                    }
+                }
+            }
+            () = &mut done => break,
+        }
+    }
+    link.close(false).await;
     Ok(())
 }
 
@@ -814,6 +934,26 @@ mod tests {
     fn cli_refuses_run_when_port_and_reconnect_given() {
         let err = parse(&["run", "--port", "/dev/ttyACM0", "--reconnect", "2"]);
         assert_eq!(err.err().map(|e| e.kind()), Some(ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn cli_takes_expect_encrypted_when_name_given() {
+        let run = run_args(&["run", "--name", "wartui 96:C4", "--expect-encrypted"]);
+        assert!(run.expect_encrypted);
+    }
+
+    #[test]
+    fn cli_refuses_run_when_port_and_expect_encrypted_given() {
+        let err = parse(&["run", "--port", "/dev/ttyACM0", "--expect-encrypted"]);
+        assert_eq!(err.err().map(|e| e.kind()), Some(ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn cli_takes_send_when_port_and_command_given() {
+        let cli = parse(&["send", "--port", "/dev/ttyACM0", "open-pair-window"]).unwrap();
+        let Command::Send { port, command } = cli.command else { panic!("not a send") };
+        assert_eq!(port, "/dev/ttyACM0");
+        assert!(matches!(command.message(), HostToBridge::SpikeOpenPairWindow));
     }
 
     #[test]

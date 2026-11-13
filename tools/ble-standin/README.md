@@ -11,6 +11,22 @@ The C6 advertises `wartui XX:YY`, the last two octets of its MAC, with one GATT 
 | Up | `f2410002-d870-4eb6-a5a0-ed645732a877` | notify: the `BridgeToHost` frame stream a USB host reads, split anywhere |
 | Down | `f2410003-d870-4eb6-a5a0-ed645732a877` | write without response: `HostToBridge` frames |
 
+Both need an encrypted, bonded link. The C6 pairs by LE Secure Connections Just Works, and bonds
+only inside the P4's pairing window: while no bond is stored, for 120 s after the P4 boots, and
+for 120 s after `send open-pair-window`. An unencrypted subscribe or write is refused with
+Insufficient Authentication, which makes BlueZ pair through its default agent. If btleplug's path
+does not pair, pair once by hand inside the window, with the address the C6 logs at boot, then
+run as usual:
+
+```sh
+bluetoothctl
+[bluetooth]# agent NoInputNoOutput
+[bluetooth]# default-agent
+[bluetooth]# scan le
+[bluetooth]# pair 02:3A:7F:1C:5D:E8
+[bluetooth]# trust 02:3A:7F:1C:5D:E8
+```
+
 It runs on BlueZ through the first adapter, and is its own workspace. libdbus is vendored, so
 the build needs a C compiler and no `dbus-devel`.
 
@@ -23,9 +39,29 @@ cargo build --release
     --reconnect 2 --start-scan --json run.json
 ./target/release/ble-standin run --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00 \
     --profile burst --count 500 --secs 60 --start-scan --json run.json
+./target/release/ble-standin run --name "wartui 96:C4" --profile fleet20 --secs 60 \
+    --expect-encrypted --reconnect 2
+./target/release/ble-standin send --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00 \
+    open-pair-window                                 # or clear-bonds, reset-radio
 ./target/release/ble-standin frame get-status        # hex for nRF Connect's Down write
 ./target/release/ble-standin frame spike-load --profile saturate
+./target/release/ble-standin frame open-pair-window  # or clear-bonds, reset-radio
 ```
+
+`run --expect-encrypted` holds each attachment's writes until the P4's `SpikeStats` reports
+the link encrypted and bonded, and fails the run if that takes past 15 s or the report says
+otherwise. An unbonded link gets no `SpikeStats` at all, since the C6 forwards nothing to it, so
+it fails on the timeout. `--json` records the seconds each attachment took under
+`secured_after_s`.
+
+`send` writes one pairing spike command to UART0, which works with no bond, and prints each `Log`
+and `Error` the P4 sends in the next 2 s:
+
+| Command | What the P4 does |
+|---|---|
+| `open-pair-window` | opens the pairing window for 120 s |
+| `clear-bonds` | drops every bond, which opens the window until one is stored |
+| `reset-radio` | resets the C6 through its enable pin, as at boot |
 
 `run --port` runs the same checks with a USB host, at UART0's rate. It never moves DTR or RTS,
 sends an untimed `GetStatus` after 5 s without a host frame to hold the P4's host gate open, and

@@ -6,8 +6,8 @@
 //! one at a time, [`Keepalive`] holds UART0's host gate open beside them, [`Beats`] tallies node
 //! heartbeats per slot, and [`Batches`] sighting batches and their losses. [`Reconcile`] sets the
 //! run's seq gaps against what the P4 says it dropped, and [`bridge`] the P4's own counters across
-//! the run. [`events`] stamps what happened, as it happened. `main.rs` owns the radio and the
-//! serial port.
+//! the run. [`events`] stamps what happened, as it happened, and [`secure`] holds a run to an
+//! encrypted, bonded link. `main.rs` owns the radio and the serial port.
 
 use wartui_proto::link::{HostToBridge, MAX_HOST_FRAME, encode_host_frame};
 
@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod events;
 pub mod reconcile;
 pub mod rtt;
+pub mod secure;
 
 pub use attachment::{Attachment, AttachmentSummary, Rates, Seen, SeqCheck, SeqGap};
 pub use batches::{BatchGap, Batches, SlotBatches};
@@ -26,6 +27,7 @@ pub use bridge::{CounterDelta, FleetSummary};
 pub use events::{Event, EventKind};
 pub use reconcile::Reconcile;
 pub use rtt::{Keepalive, Rtt, RttSummary, StatusAsk};
+pub use secure::{Secure, SecureWait};
 
 /// `msg` as the frame a central writes to Down.
 ///
