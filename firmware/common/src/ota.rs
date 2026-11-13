@@ -50,10 +50,10 @@
 //! have one core.
 //!
 //! **The P4's settings live here too** ([`SettingsSector`]), the lid fan's duty and the channel
-//! pool, in the first sector of the `nvs` partition, since this module owns the flash. No
-//! ESP-IDF NVS reads that partition, so its layout is `wartui_proto::settings`'s own. A USB flash
-//! erases only `otadata`, and an update writes only an app slot, `otadata` and `trial`, so the
-//! settings survive both.
+//! pool, in the first sector of the `nvs` partition, since this module owns the flash, and the
+//! Bluetooth bonds it keeps for its C6 in the second. No ESP-IDF NVS reads that partition, so its
+//! layout is `wartui_proto::settings`'s and `wartui_proto::bonds`' own. A USB flash erases only
+//! `otadata`, and an update writes only an app slot, `otadata` and `trial`, so both survive.
 //!
 //! **Nothing here logs.** Each step returns what happened, as [`Note`]s or a [`Fault`], and
 //! the caller says it its own way and reboots where a step says to: a node prints to its USB
@@ -179,6 +179,8 @@ struct Layout {
     trial: Option<u32>,
     /// Absolute offset of the `nvs` partition's first sector.
     settings: Option<u32>,
+    /// Absolute offset of the `nvs` partition's second sector.
+    bonds: Option<u32>,
 }
 
 /// The slot an image is written into, as the receiver sees it.
@@ -216,7 +218,8 @@ impl SectorSink for Slot<'_> {
     }
 }
 
-/// The first sector of the `nvs` partition, where the P4 keeps its settings.
+/// A sector of the `nvs` partition: the first, where the P4 keeps its settings, or the second,
+/// where it keeps its Bluetooth bonds.
 pub struct SettingsSector<'a> {
     flash: &'a mut FlashStorage<'static>,
     base: u32,
@@ -323,6 +326,13 @@ impl Ota {
     /// one sector or more, or did not read.
     pub fn settings(&mut self) -> Option<SettingsSector<'_>> {
         let base = self.layout.settings?;
+        Some(SettingsSector { flash: &mut self.flash, base })
+    }
+
+    /// The `nvs` partition's second sector, or `None` when the table has no `nvs` partition of
+    /// two sectors or more, or did not read.
+    pub fn bonds(&mut self) -> Option<SettingsSector<'_>> {
+        let base = self.layout.bonds?;
         Some(SettingsSector { flash: &mut self.flash, base })
     }
 
@@ -512,7 +522,8 @@ fn note(notes: &mut Notes, item: Note) {
     let _ = notes.push(item);
 }
 
-/// Find the booted slot, the other app slot, the `trial` sector and the settings sector.
+/// Find the booted slot, the other app slot, the `trial` sector, the settings sector and the
+/// bonds sector.
 fn locate(
     flash: &mut FlashStorage<'static>,
     table: &mut [u8; PARTITION_TABLE_MAX_LEN],
@@ -537,11 +548,13 @@ fn locate(
         .filter(|entry| entry.len() >= SECTOR_U32)
         .map(|entry| entry.offset());
     // A lookup that fails is no settings sector, so the settings never cost an update.
-    let settings = pt
+    let nvs = pt
         .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
         .ok()
         .flatten()
-        .filter(|entry| entry.label_as_str() == "nvs" && entry.len() >= SECTOR_U32)
-        .map(|entry| entry.offset());
-    Ok(Layout { booted: booted_slot, target, trial, settings })
+        .filter(|entry| entry.label_as_str() == "nvs");
+    let settings = nvs.filter(|entry| entry.len() >= SECTOR_U32).map(|entry| entry.offset());
+    let bonds =
+        nvs.filter(|entry| entry.len() >= 2 * SECTOR_U32).map(|entry| entry.offset() + SECTOR_U32);
+    Ok(Layout { booted: booted_slot, target, trial, settings, bonds })
 }

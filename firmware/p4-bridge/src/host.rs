@@ -28,15 +28,24 @@
 //! `Status.host_uart_errors` counts the reads that saw one or more line errors or overflows, not
 //! the errors themselves.
 //!
-//! **The gate opens on any host frame that decodes and closes after [`HOST_SILENCE`] without
+//! **The gate opens on a host frame that decodes and closes after [`HOST_SILENCE`] without
 //! one.** The P4 cannot see the CH343's DTR, so a frame is the only sign that someone reads.
-//! Opening clears both host queues, so a host never reads a backlog from before it attached,
-//! and announces this life. While the gate is closed nothing queues (`Shared::push_host`), and
+//! Opening makes USB the owner of the host queue (`wartui_proto::host_owner`, `src/ble.rs`): it
+//! clears both host queues, so a host never reads a backlog from before it attached, and
+//! announces this life. While no host owns the queue nothing queues (`Shared::push_host`), and
 //! closing drops any update session and the cached node image (`update::host_gone`,
 //! `cache::host_gone`). The engine polls every 5 s, so three
 //! polls go missing before the gate closes on a running host. The fleet planner runs whatever
-//! the gate does: its reports are dropped while it is closed, and the announcement that opens it
-//! carries the current plan.
+//! the gate does: its reports are dropped while no host owns the queue, and the announcement that
+//! opens it carries the current plan.
+//!
+//! **A central subscribed over Bluetooth can own the queue instead** (`src/ble.rs`). Its frames
+//! take [`take_frame`] too, from their own accumulator, and while it owns the queue this writer
+//! sends nothing from it. Any UART0 frame but `Identify` takes the queue from the central, so
+//! `wartui flash-bridge` always gets in. An `Identify` leaves it with the central and is answered
+//! with one `Ready` written straight to UART0 ([`owe_ready`]), so a port probe on the PC the
+//! bridge is plugged into costs the central nothing. Once UART0's gate closes on silence, a
+//! central still subscribed takes the queue back.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
 //! reads garbage after every reset. The host's framing resynchronizes on the next `0x00`.
@@ -53,13 +62,15 @@ use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
 use esp_hal::uart::uhci::{UhciRx, UhciTx};
 use wartui_firmware::phase::mark;
 use wartui_firmware::reboot;
+use wartui_proto::host_owner::{Effect, Input};
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    FrameAccumulator, HOST_BAUD, HostToBridge, LoopPhase, MAX_HOST_FRAME, decode_frame,
+    FrameAccumulator, HOST_BAUD, HostOwner, HostToBridge, LoopPhase, MAX_HOST_FRAME, decode_frame,
+    encode_frame,
 };
 use wartui_proto::radio_link::Down;
 
-use crate::Shared;
+use crate::{Shared, now_ms};
 
 /// Bytes in each receive DMA buffer. The hardware's limit is 4095; this is a multiple of the
 /// P4's 64-byte cache line, and lasts about 10 ms at [`HOST_BAUD`].
@@ -82,20 +93,17 @@ pub struct Bus {
     pub tx_buf: DmaTxBuf,
 }
 
-/// The gate: whether a host is present, and when it last sent a frame.
+/// UART0's side of the gate: when its host last sent a frame, and a `Ready` owed to it while a
+/// central owns the queue. Whether the gate is open is the owner's (`Shared::owner`).
 pub struct Presence {
-    present: Cell<bool>,
     heard: Cell<Instant>,
+    /// An `Identify` arrived while Bluetooth owns the queue: the writer sends one `Ready`.
+    ready_owed: Cell<bool>,
 }
 
 impl Presence {
     pub const fn new() -> Self {
-        Self { present: Cell::new(false), heard: Cell::new(Instant::from_ticks(0)) }
-    }
-
-    /// Whether a host has sent a frame within [`HOST_SILENCE`].
-    pub fn is_open(&self) -> bool {
-        self.present.get()
+        Self { heard: Cell::new(Instant::from_ticks(0)), ready_owed: Cell::new(false) }
     }
 }
 
@@ -125,7 +133,7 @@ async fn read_host(
         mark(LoopPhase::DrainLink);
         for &byte in &last.as_slice()[..last_len] {
             if let Some(frame) = frames.push(byte) {
-                take_frame(frame, shared);
+                take_frame(frame, Source::Uart, shared);
             }
         }
         read.wait_for_done().await;
@@ -141,18 +149,47 @@ async fn read_host(
     }
 }
 
-/// Decode one host frame, open the gate, and carry out the command: on the P4, by queueing
-/// a record for a node, by passing a power-cycle to the carrier, or by telling the fleet planner,
-/// which sends what it owes before the next frame is read (`src/fleet.rs`).
+/// Where a host frame came from.
+#[derive(Clone, Copy)]
+pub enum Source {
+    /// UART0, whose frames feed the queue's owner.
+    Uart,
+    /// A central over Bluetooth, through the C6, which owns the queue: its subscription made it
+    /// the owner.
+    Bluetooth,
+}
+
+/// Decode one host frame, give the queue's owner a UART0 frame, and carry out the command: on
+/// the P4, by queueing a record for a node, by passing a power-cycle to the carrier, or by
+/// telling the fleet planner, which sends what it owes before the next frame is read
+/// (`src/fleet.rs`).
 ///
 /// Out of line: a decoded command is over 1 KB.
 #[inline(never)]
-fn take_frame(frame: &mut [u8], shared: &Shared) {
+pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
     let Some(cmd) = &decoded else { return };
-    let opened = open(shared);
+    let mut opened = false;
+    let mut answered = false;
+    if let Source::Uart = source {
+        shared.presence.heard.set(Instant::now());
+        let input = match cmd {
+            HostToBridge::Identify => Input::UartIdentify,
+            _ => Input::UartFrame,
+        };
+        let effects = crate::ble::own(shared, input);
+        opened = effects.contains(&Effect::AttachUsb);
+        answered = effects.contains(&Effect::ReadyOnUart);
+    }
     let confirmed = crate::update::note_host_frame(shared);
+    // The central keeps the queue, so the confirm's line goes to it.
+    if answered {
+        if confirmed {
+            shared.flush_update_lines();
+        }
+        return;
+    }
     // An `Identify` announces below, and the announcement carries the confirm's line. Any other
     // frame announces a host's arrival here, and says the line to a host already announced to.
     if !matches!(cmd, HostToBridge::Identify) {
@@ -182,24 +219,28 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
         HostToBridge::SetPool { pool } => crate::settings::set_pool(shared, *pool),
         HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
         HostToBridge::StopScan => crate::fleet::stop(shared),
-        HostToBridge::OpenPairing | HostToBridge::ClearBonds => {
-            shared.push_error("this bridge has no Bluetooth host link yet");
-        }
+        HostToBridge::OpenPairing => crate::bonds::open_window(shared),
+        HostToBridge::ClearBonds => crate::bonds::clear(shared),
     }
 }
 
-/// Note a host frame, and open the gate if it was closed. Returns whether it opened.
-fn open(shared: &Shared) -> bool {
-    let presence = &shared.presence;
-    presence.heard.set(Instant::now());
-    if presence.present.get() {
-        return false;
-    }
-    // A new host: whatever is queued was for one that has gone.
-    shared.host.borrow_mut().clear();
-    presence.present.set(true);
+/// USB took the queue: clear what was queued for another host, and start the silence timer.
+pub fn open(shared: &Shared) {
+    shared.host_attached();
     shared.host_arrived.signal(());
-    true
+}
+
+/// UART0's gate closed: drop any update session and the cached node image.
+pub fn close(shared: &Shared) {
+    crate::update::host_gone(shared);
+    crate::cache::host_gone(shared);
+}
+
+/// Owe UART0 one `Ready` while a central owns the queue, which the writer sends without touching
+/// the queue.
+pub fn owe_ready(shared: &Shared) {
+    shared.presence.ready_owed.set(true);
+    shared.pushed.signal(());
 }
 
 #[inline(never)]
@@ -213,7 +254,14 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
         buf.set_length(HOST_CHUNK);
         let chunk: &mut [u8; HOST_CHUNK] =
             buf.as_mut_slice().try_into().expect("the buffer holds a chunk");
-        let n = shared.host.borrow_mut().next_chunk(chunk);
+        let n = if shared.presence.ready_owed.replace(false) {
+            ready_frame(shared, chunk)
+        } else if shared.owner.get().owner() == HostOwner::Bluetooth {
+            // A central that owns the queue reads it through the C6 (`src/ble.rs`).
+            0
+        } else {
+            shared.host.borrow_mut().next_chunk(chunk)
+        };
         if n == 0 {
             shared.pushed.wait().await;
             continue;
@@ -230,11 +278,25 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
     }
 }
 
-/// Close the gate once [`HOST_SILENCE`] passes without a host frame.
+/// Encode a `Ready` into `out` behind a `0x00`, which ends any frame a chunk left UART0's host
+/// part-way through when the central took the queue. Returns its length, or 0 while the pair has
+/// no `Ready` to give.
+///
+/// Out of line, for the encode buffer.
+#[inline(never)]
+fn ready_frame(shared: &Shared, out: &mut [u8; HOST_CHUNK]) -> usize {
+    let ready = shared.pair.borrow().ready(now_ms());
+    let Some(ready) = ready else { return 0 };
+    out[0] = 0x00;
+    encode_frame(&ready, &mut out[1..]).map_or(0, |len| 1 + len)
+}
+
+/// Tell the queue's owner once [`HOST_SILENCE`] passes without a UART0 frame while USB owns
+/// it: UART0's gate closes, and a central still subscribed takes the queue back.
 async fn close_on_silence(shared: &Shared) -> ! {
     let presence = &shared.presence;
     loop {
-        if !presence.present.get() {
+        if shared.owner.get().owner() != HostOwner::Usb {
             shared.host_arrived.wait().await;
             continue;
         }
@@ -244,9 +306,7 @@ async fn close_on_silence(shared: &Shared) -> ! {
             Timer::at(deadline).await;
             continue;
         }
-        presence.present.set(false);
-        crate::update::host_gone(shared);
-        crate::cache::host_gone(shared);
+        let _ = crate::ble::own(shared, Input::UartSilent);
     }
 }
 

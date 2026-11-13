@@ -22,8 +22,8 @@
 //! **Flash work holds the executor.** Erasing and writing a sector takes tens of
 //! milliseconds, well inside the host's reply wait, and both UART links wait behind it. Host
 //! bytes that arrive meanwhile are lost (`src/host.rs`), which the sender's wait per sector
-//! absorbs. The receiver is reset when the host gate closes, so a cable pulled mid-transfer
-//! leaves no session for the next host to trip over.
+//! absorbs. The receiver is reset when a host lets go of the queue, so a cable pulled or a
+//! central lost mid-transfer leaves no session for the next host to trip over.
 
 use core::fmt::{self, Write};
 
@@ -149,6 +149,12 @@ impl Updates {
         self.ota.settings()
     }
 
+    /// The sector the Bluetooth bonds are stored in (`src/bonds.rs`), through the flash this
+    /// owns.
+    pub fn bonds(&mut self) -> Option<SettingsSector<'_>> {
+        self.ota.bonds()
+    }
+
     /// End this image's trial, if it is on one, and disarm the watchdog. A failure leaves it
     /// on trial and is said once; the next host connection tries again. Retrying on every frame
     /// would repeat the flash write and fill [`Lines`] with the same error.
@@ -260,7 +266,7 @@ pub fn say_lines(shared: &Shared) {
     }
 }
 
-/// The host gate closed: drop any session, so a transfer cut short leaves nothing behind, and
+/// A host let go of the queue, on UART0 or over Bluetooth: drop any session, so a transfer cut short leaves nothing behind, and
 /// let the next host retry a confirm that failed.
 pub fn host_gone(shared: &Shared) {
     let mut updates = shared.updates.borrow_mut();

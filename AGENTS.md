@@ -102,7 +102,8 @@ own.
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
   `settings` (the records the P4 keeps its fan duty and channel pool in), `bonds` (the Bluetooth
-  bonds the P4 keeps for its C6, and their records), `crc`, `beacon`, `hci`, `dedup`, `link`,
+  bonds the P4 keeps for its C6, and their records), `host_owner` (who owns the P4's host queue:
+  USB, a Bluetooth central or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
   GATT identity of the C6's Bluetooth host link), `mac` (the `Mac` type and its text form), `plan`
   (channel pools and the round-robin deal that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
@@ -131,7 +132,9 @@ own.
   a layout in the bus's frozen core (`src/cache.rs`). On a carrier it drives the lid fan
   (`src/fan.rs`). It keeps the fan's duty and the channel pool in the `nvs` partition, the
   settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
-  nowhere, so it boots stopped.
+  nowhere, so it boots stopped. A bonded central over Bluetooth, through the C6, can be its host
+  instead of USB (`src/ble.rs`): it keeps the C6's bonds in `nvs` too (`src/bonds.rs`), and the host
+  bulk ring in PSRAM, past the node image cache.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`).
@@ -413,15 +416,26 @@ edit stops; follow the pointer before changing the rule.
 - **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
   stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
   P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
-- **The P4 writes nothing to the host until a host frame arrives, and queues nothing until then.**
-  It cannot see the CH343's DTR, so a decoded frame is the sign that someone is reading, and the
-  gate closes 15 s after the last one: three of the engine's 5 s status polls. Frames produced while
-  it is closed are dropped, and opening clears whatever is queued before it is served, so a host
-  never reads a backlog from before it attached. Bytes already past the queue still reach the port,
-  and the host drops every frame that decodes ahead of the connection's first `Ready`. The fleet
-  planner runs regardless: a P4 with no host keeps scanning, its reports are dropped, and the
-  announcement that opens the gate carries the current plan.
-  → `firmware/p4-bridge/src/host.rs` `//!`, and `src/main.rs`, `Shared::push_host`
+- **The P4 writes nothing to a host until one attaches, and queues nothing until then.** A USB
+  host attaches with a decoded frame, since the P4 cannot see the CH343's DTR, and its gate closes
+  15 s after the last one: three of the engine's 5 s status polls. A Bluetooth central attaches by
+  subscribing on an encrypted, bonded link, and lets go when it unsubscribes, disconnects or the C6
+  restarts, never on silence. Frames produced while no host is attached are dropped, and attaching
+  clears whatever is queued before it is served, so a host never reads a backlog from before it
+  attached. Bytes already past the queue still reach the port, and the host drops every frame that
+  decodes ahead of the connection's first `Ready`. The fleet planner runs regardless: a P4 with no
+  host keeps scanning, its reports are dropped, and the announcement that attaches a host carries
+  the current plan.
+  → `firmware/p4-bridge/src/host.rs` `//!`, `src/ble.rs` `//!`, and `src/main.rs`,
+  `Shared::push_host`
+- **One host owns the P4's host queue, and an `Identify` never takes it from a Bluetooth host.**
+  There is one stream and one credit window, so the queue goes to USB or to a central, never both.
+  Any other UART0 frame takes it, so `flash-bridge` over USB always gets in, and the central is
+  told why. An `Identify` while a central owns it gets a `Ready` written straight to UART0: `wartui
+  ports`, `--bridge` lookups and a probe from another PC all send one, and taking the queue for
+  each dropped what was queued for the central. Once UART0 falls silent for 15 s, a central still
+  subscribed takes the queue back.
+  → `crates/wartui-proto/src/host_owner.rs` `//!`, `firmware/p4-bridge/src/ble.rs`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A
   `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and

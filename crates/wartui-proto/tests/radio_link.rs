@@ -859,6 +859,7 @@ fn radio_link_held_holds_nothing_when_ring_empties_mid_packet() {
     );
 
     // The ring ran dry with room to spare, so nothing is held over.
+    assert!(held.is_empty());
     assert!(pack_packet(&mut held, &mut ring).is_empty());
 
     assert!(ring.push(&[3; 5]));
@@ -881,5 +882,6 @@ fn radio_link_held_fills_packet_exactly_when_record_is_record_max() {
     assert!(ring.push(&[1; 10]));
     assert!(ring.push(&[8; RECORD_MAX]));
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![1; 10]]);
+    assert!(!held.is_empty(), "the record that did not fit is held");
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![8; RECORD_MAX]]);
 }

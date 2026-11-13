@@ -9,7 +9,8 @@
 //! firmware runs lives here too, such as [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
-//! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
+//! ring, and [`host_queue`] queues link frames for the P4's host link, which [`host_owner`] says
+//! whose it is: USB's, a Bluetooth central's or no one's. [`radio_link`] is the
 //! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
 //! decisions about that C6. [`ble`] is the GATT identity of the C6's Bluetooth host link.
 //! [`bus`] frames the SPI transfers between a P4 bridge and its nodes, and holds the messages a
@@ -34,6 +35,7 @@ pub mod fan;
 pub mod fleet;
 pub mod frame_ring;
 pub mod hci;
+pub mod host_owner;
 pub mod host_queue;
 pub mod link;
 pub mod mac;

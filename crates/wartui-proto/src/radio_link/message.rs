@@ -278,6 +278,12 @@ impl Held {
         Self { buf: [0; RECORD_MAX], len: 0 }
     }
 
+    /// Whether no record is held, so the last [`Held::pack`] emptied its queue.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Packs the held record, then records from `next`, until one does not fit — it is then
     /// held for the next packet — or `next` has none.
     ///
