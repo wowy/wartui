@@ -484,5 +484,7 @@ It does not settle:
 - **Down-direction throughput,** which matters for updates from a phone. Only single frames were
   written. A P4 image of about 431 KB would take about 4–11 s at the up rates seen on the
   stream receive, from 39.1 KB/s on the iPad to 117.9 KB/s on the Flip (inferred, not measured).
+  On 2026-11-13 sustained writes stopped TrouBLE's host, so updates stay on USB (issue #314,
+  [`ble-host-link-findings.md`](ble-host-link-findings.md)).
 - **A phone app of our own,** which must ask for an MTU on Android. Pairing, bonding and
   encryption are in [`c6-ble-pairing-findings.md`](c6-ble-pairing-findings.md).
