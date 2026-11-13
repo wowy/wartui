@@ -484,5 +484,5 @@ It does not settle:
 - **Down-direction throughput,** which matters for updates from a phone. Only single frames were
   written. A P4 image of about 431 KB would take about 4–11 s at the up rates seen on the
   stream receive, from 39.1 KB/s on the iPad to 117.9 KB/s on the Flip (inferred, not measured).
-- **Pairing, bonding and encryption,** and a phone app of our own, which must ask for an MTU on
-  Android.
+- **A phone app of our own,** which must ask for an MTU on Android. Pairing, bonding and
+  encryption are in [`c6-ble-pairing-findings.md`](c6-ble-pairing-findings.md).
