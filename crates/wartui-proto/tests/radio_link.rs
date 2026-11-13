@@ -1,6 +1,7 @@
 //! The P4–C6 UART link: its framing, its frozen hello, and the messages it carries.
 
 use heapless::Vec;
+use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, MAX_BONDS};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
@@ -511,6 +512,11 @@ fn radio_link_largest_messages_fit_one_packet() {
         last_gatt_kind: u8::MAX,
         last_gatt_handle: u16::MAX,
         mtu_changes: u32::MAX,
+        pairings: u32::MAX,
+        pairing_failures: u32::MAX,
+        unbonded_kicks: u32::MAX,
+        last_pair_ms: u32::MAX,
+        last_resume_ms: u32::MAX,
     });
     let state = Up::BleState(BleState {
         subscribed: true,
@@ -518,13 +524,27 @@ fn radio_link_largest_messages_fit_one_packet() {
         phy: u8::MAX,
         interval_us: u32::MAX,
         conn: u8::MAX,
+        encrypted: true,
+        bonded: true,
     });
-    for up in [status, line, Up::HostBytes(&stream), stats, state] {
+    let bond = BondRecord {
+        addr: BondAddr { kind: u8::MAX, addr: [0xFF; 6] },
+        irk: Some(u128::MAX),
+        ltk: u128::MAX,
+        level: BondLevel::Authenticated,
+    };
+    let added = Up::BondAdded(bond);
+    let removed = Up::BondRemoved(bond.addr);
+    for up in [status, line, Up::HostBytes(&stream), stats, state, added, removed] {
         let len = encode_up(&up, &mut out).unwrap();
         assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
     }
     let len = encode_down(&Down::HostBytes(&stream), &mut out).unwrap();
     assert_eq!(len, RECORD_MAX);
+    let bonds =
+        Down::Bonds { bonds: Vec::from_slice(&[bond; MAX_BONDS]).unwrap(), window_ms: u32::MAX };
+    let len = encode_down(&bonds, &mut out).unwrap();
+    assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
 }
 
 #[test]
@@ -637,8 +657,15 @@ fn radio_link_revision_golden_bytes() {
     assert_eq!(out[..len], [4, 0xAC, 0x02], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), credit);
 
-    let state =
-        Up::BleState(BleState { subscribed: true, mtu: 247, phy: 2, interval_us: 7_500, conn: 1 });
+    let state = Up::BleState(BleState {
+        subscribed: true,
+        mtu: 247,
+        phy: 2,
+        interval_us: 7_500,
+        conn: 1,
+        encrypted: true,
+        bonded: false,
+    });
     let len = encode_up(&state, &mut out).unwrap();
     #[rustfmt::skip]
     let expected = [
@@ -648,6 +675,7 @@ fn radio_link_revision_golden_bytes() {
         2,          // phy
         0xCC, 0x3A, // interval_us 7500, varint
         1,          // conn
+        1, 0,       // encrypted, bonded
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), state);
@@ -692,6 +720,11 @@ fn radio_link_revision_golden_bytes() {
         last_gatt_kind: 2,
         last_gatt_handle: 300,
         mtu_changes: 35,
+        pairings: 36,
+        pairing_failures: 37,
+        unbonded_kicks: 38,
+        last_pair_ms: 300,
+        last_resume_ms: 39,
     });
     let len = encode_up(&stats, &mut out).unwrap();
     #[rustfmt::skip]
@@ -704,6 +737,9 @@ fn radio_link_revision_golden_bytes() {
         33, 34, 2,                                                 // gatt_requests to last_gatt_kind
         0xAC, 0x02,                                                // last_gatt_handle 300, varint
         35,                                                        // mtu_changes
+        36, 37, 38,                                                // pairings to unbonded_kicks
+        0xAC, 0x02,                                                // last_pair_ms 300, varint
+        39,                                                        // last_resume_ms
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), stats);
@@ -795,4 +831,22 @@ fn radio_link_held_fills_packet_exactly_when_record_is_record_max() {
     assert!(ring.push(&[8; RECORD_MAX]));
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![1; 10]]);
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![8; RECORD_MAX]]);
+}
+
+#[test]
+fn radio_link_round_trips_bonds_when_either_end_sends_them() {
+    let mut out = [0u8; RECORD_MAX];
+    let bond = BondRecord {
+        addr: BondAddr { kind: 1, addr: [0x5A, 0x11, 0x22, 0x33, 0x44, 0xC2] },
+        irk: None,
+        ltk: 0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0,
+        level: BondLevel::Encrypted,
+    };
+    let down = Down::Bonds { bonds: Vec::from_slice(&[bond]).unwrap(), window_ms: 120_000 };
+    let len = encode_down(&down, &mut out).unwrap();
+    assert_eq!(decode_down(&out[..len]).unwrap(), down);
+    for up in [Up::BondAdded(bond), Up::BondRemoved(bond.addr)] {
+        let len = encode_up(&up, &mut out).unwrap();
+        assert_eq!(decode_up(&out[..len]).unwrap(), up);
+    }
 }

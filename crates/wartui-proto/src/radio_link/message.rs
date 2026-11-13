@@ -7,7 +7,9 @@
 //!
 //! They carry the P4's poll for the C6's counters, the counters, the C6's lines for the host,
 //! and the host link over Bluetooth: the host stream each way ([`Down::HostBytes`],
-//! [`Up::HostBytes`]), the C6's credit for what it took, and its Bluetooth state and counters.
+//! [`Up::HostBytes`]), the C6's credit for what it took, its Bluetooth state and counters, and
+//! its bonds ([`Down::Bonds`], [`Up::BondAdded`], [`Up::BondRemoved`]), which the P4 keeps
+//! (`crate::bonds`).
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while the bytes it has
 //! sent, less [`Up::BleCredit`]'s `drained`, stay under a window, so a slow central backs the
@@ -23,6 +25,7 @@
 use heapless::Vec;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::bonds::{BondAddr, BondRecord, MAX_BONDS};
 use crate::link::{LogStr, QueueStat};
 
 /// The revision of the [`Up`] and [`Down`] encoding, which [`Hello`](super::Hello)
@@ -34,6 +37,8 @@ use crate::link::{LogStr, QueueStat};
 pub const LINK_REVISION: u16 = 1;
 
 /// P4 to C6.
+// Unboxed for the reason `crate::link::HostToBridge` gives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Down<'a> {
     /// Ask for an [`Up::RadioStatus`].
@@ -41,7 +46,19 @@ pub enum Down<'a> {
     /// The next bytes of the host stream: COBS-framed `BridgeToHost` frames, as UART0 carries
     /// them, cut wherever a packet ended. At most [`HOST_BYTES_MAX`].
     HostBytes(#[serde(serialize_with = "byte_string", borrow)] &'a [u8]),
+    /// Every bond the P4 holds, oldest first, and the pairing window's time left. Sent after each
+    /// hello answer, and whenever the bonds or the window change.
+    Bonds {
+        /// The bonds.
+        bonds: Vec<BondRecord, MAX_BONDS>,
+        /// Milliseconds the pairing window stays open from now: 0 while it is closed,
+        /// [`WINDOW_UNTIL_BONDED`] while no bond is stored.
+        window_ms: u32,
+    },
 }
+
+/// [`Down::Bonds`]'s `window_ms` while no bond is stored: open until one is.
+pub const WINDOW_UNTIL_BONDED: u32 = u32::MAX;
 
 /// C6 to P4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +88,10 @@ pub enum Up<'a> {
     BleState(BleState),
     /// The C6's Bluetooth counters, every 2 s.
     BleStats(BleStats),
+    /// A central paired and bonded: store it as the newest bond.
+    BondAdded(BondRecord),
+    /// A bonded central paired again: drop its old bond. A [`Up::BondAdded`] follows.
+    BondRemoved(BondAddr),
 }
 
 /// The C6's Bluetooth link, as [`Up::BleState`] reports it.
@@ -87,6 +108,11 @@ pub struct BleState {
     pub interval_us: u32,
     /// Centrals connected.
     pub conn: u8,
+    /// The link is encrypted.
+    pub encrypted: bool,
+    /// The central holds a stored bond. The host stream flows only while this and `encrypted`
+    /// both hold.
+    pub bonded: bool,
 }
 
 /// The C6's Bluetooth counters since it booted, as [`Up::BleStats`] reports them. Each wraps.
@@ -171,6 +197,19 @@ pub struct BleStats {
     pub last_gatt_handle: u16,
     /// Changes of ATT MTU the notifier saw.
     pub mtu_changes: u32,
+    /// Pairings that ended in a bond.
+    pub pairings: u32,
+    /// Pairings that failed.
+    pub pairing_failures: u32,
+    /// Centrals disconnected for not holding a bond: encrypted without one while the pairing
+    /// window was closed, or not bonded and encrypted 10 s after connecting.
+    pub unbonded_kicks: u32,
+    /// Milliseconds from the latest bonded pairing's connection to its `PairingComplete`, or 0
+    /// before the first.
+    pub last_pair_ms: u32,
+    /// Milliseconds from the latest bonded resume's connection to its encryption, or 0 before the
+    /// first.
+    pub last_resume_ms: u32,
 }
 
 /// [`BleStats::notify_phase`]'s values, by index.

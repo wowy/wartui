@@ -290,6 +290,15 @@ pub enum HostToBridge {
         /// Records in a [`SpikeProfile::Burst`]'s burst; the other profiles ignore it.
         count: u32,
     },
+    /// Open the Bluetooth pairing window for 120 s ([`crate::bonds`]). Answered by a
+    /// [`BridgeToHost::Log`].
+    SpikeOpenPairWindow,
+    /// Drop every stored Bluetooth bond, which opens the pairing window until one is stored.
+    /// Answered by a [`BridgeToHost::Log`], or an [`BridgeToHost::Error`] when the erase failed.
+    SpikeClearBonds,
+    /// Reset the C6 through its enable pin, as the P4 does at boot. Answered by a
+    /// [`BridgeToHost::Log`].
+    SpikeResetRadio,
 }
 
 /// Events and replies the bridge sends to the host.

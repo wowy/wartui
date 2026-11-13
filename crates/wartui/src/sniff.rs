@@ -648,6 +648,10 @@ mod tests {
                 last_gatt_kind: 1,
                 last_gatt_handle: 12,
                 mtu_changes: 1,
+                pairings: 2,
+                unbonded_kicks: 1,
+                last_pair_ms: 2_480,
+                last_resume_ms: 190,
                 ..Default::default()
             },
             ble_stats_age_ms: 1_200,
@@ -664,6 +668,10 @@ mod tests {
                 radio_crc_fail: 2,
                 ..Default::default()
             },
+            encrypted: true,
+            bonded: true,
+            bonds: 2,
+            pair_window_ms: 87_300,
         };
         assert_eq!(
             spike_stats_text(&stats),
@@ -681,8 +689,22 @@ mod tests {
              connections, 0 disconnects; HCI 900 reads, 800 writes, in flight 1 read 0 write, \
              200 NOCP, 24 ACL outstanding, 0 disconnections; runner 1, 0 restarts\n\
              #   C6 link: disconnects reason last 0x13 (history 0x13 0x08 0x00 0x00), gatt 3 \
-             req / 2 replied, last kind 1 (read) handle 12, mtu changes 1"
+             req / 2 replied, last kind 1 (read) handle 12, mtu changes 1\n\
+             #   security: encrypted yes, bonded yes; 2 bonds stored, pair window open 87.3 s \
+             more; 2 pairings, 0 failed, 1 unbonded kicks; last pair 2480 ms, last resume 190 ms"
         );
+    }
+
+    #[test]
+    fn sniff_cmd_prints_pair_window_state_when_closed_or_waiting_for_a_bond() {
+        let text = spike_stats_text(&SpikeStats::default());
+        assert!(text.contains("encrypted no, bonded no; 0 bonds stored, pair window closed;"));
+        let waiting = SpikeStats {
+            pair_window_ms: wartui_proto::radio_link::WINDOW_UNTIL_BONDED,
+            ..SpikeStats::default()
+        };
+        let text = spike_stats_text(&waiting);
+        assert!(text.contains("pair window open until a bond is stored;"), "{text}");
     }
 
     #[test]

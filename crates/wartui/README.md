@@ -33,7 +33,10 @@ for one, since the P4 stops writing to a host it has not heard from in 15 s.
 With `--verbose`, a bridge built from the Bluetooth host spike also prints its `# spike stats`
 every 2 s: uptime, the time Bluetooth owned the host queue, the bytes sent to the C6 over that
 time, the C6 link's counters, and the C6's Bluetooth counters (notified, delivered at the link
-layer, dropped, heap, disconnect reasons, GATT requests answered, MTU changes).
+layer, dropped, heap, disconnect reasons, GATT requests answered, MTU changes). Its last line
+is the link's security: whether it is encrypted and bonded, the bonds the P4 stores, the
+pairing window, and the C6's pairings, failures, unbonded centrals it disconnected, and its
+latest times to pair and to resume a bond.
 A node is known by its address wherever it sits, and the bridge plans by slot: a node moved to
 another slot leaves the plan at the old one and joins it at the new one on its next heartbeat.
 

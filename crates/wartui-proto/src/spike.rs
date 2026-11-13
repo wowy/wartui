@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::link::{MAX_NODE_PAYLOAD, RadioLinkStats};
 use crate::radio_link::{
     ADV_PHASES, BleStats, CRC_LEN, EVENT_KINDS, EVENTS_PHASES, GATT_KINDS, HEADER_LEN, MAGIC,
-    NOTIFY_PHASES, verify,
+    NOTIFY_PHASES, WINDOW_UNTIL_BONDED, verify,
 };
 
 /// A sighting batch's typical body, the size the rate profiles send.
@@ -124,10 +124,19 @@ pub struct SpikeStats {
     pub interval_us: u32,
     /// The P4–C6 link's counters.
     pub radio_link: RadioLinkStats,
+    /// The link is encrypted, from the C6's latest `BleState`.
+    pub encrypted: bool,
+    /// The central holds a stored bond, from the C6's latest `BleState`.
+    pub bonded: bool,
+    /// Bonds the P4 stores ([`crate::bonds`]).
+    pub bonds: u8,
+    /// Milliseconds the pairing window stays open: 0 while it is closed,
+    /// [`WINDOW_UNTIL_BONDED`] while no bond is stored.
+    pub pair_window_ms: u32,
 }
 
 impl SpikeStats {
-    /// The counters as six `#` lines, with the rate the C6 link carried while Bluetooth
+    /// The counters as seven `#` lines, with the rate the C6 link carried while Bluetooth
     /// owned the queue: the bytes sent to the C6 over the time it owned it.
     #[must_use]
     pub const fn text(&self) -> StatsText<'_> {
@@ -248,7 +257,37 @@ impl fmt::Display for StatsText<'_> {
             Named(&GATT_KINDS, ble.last_gatt_kind),
             ble.last_gatt_handle,
             ble.mtu_changes,
+        )?;
+        write!(
+            f,
+            "\n#   security: encrypted {}, bonded {}; {} bonds stored, pair window ",
+            YesNo(stats.encrypted),
+            YesNo(stats.bonded),
+            stats.bonds,
+        )?;
+        match stats.pair_window_ms {
+            0 => f.write_str("closed")?,
+            WINDOW_UNTIL_BONDED => f.write_str("open until a bond is stored")?,
+            left => write!(f, "open {} more", Seconds(left))?,
+        }
+        write!(
+            f,
+            "; {} pairings, {} failed, {} unbonded kicks; last pair {} ms, last resume {} ms",
+            ble.pairings,
+            ble.pairing_failures,
+            ble.unbonded_kicks,
+            ble.last_pair_ms,
+            ble.last_resume_ms,
         )
+    }
+}
+
+/// `yes` or `no`.
+struct YesNo(bool);
+
+impl fmt::Display for YesNo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0 { "yes" } else { "no" })
     }
 }
 

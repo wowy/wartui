@@ -270,6 +270,11 @@ fn full_spike_stats() -> SpikeStats {
             last_gatt_kind: u8::MAX,
             last_gatt_handle: u16::MAX,
             mtu_changes: u32::MAX,
+            pairings: u32::MAX,
+            pairing_failures: u32::MAX,
+            unbonded_kicks: u32::MAX,
+            last_pair_ms: u32::MAX,
+            last_resume_ms: u32::MAX,
         },
         ble_stats_age_ms: u32::MAX - 11,
         bulk_high_water: u32::MAX - 5,
@@ -290,6 +295,10 @@ fn full_spike_stats() -> SpikeStats {
             radio_seq_gap: u32::MAX,
             radio_uart_errors: u32::MAX,
         },
+        encrypted: true,
+        bonded: true,
+        bonds: u8::MAX,
+        pair_window_ms: u32::MAX,
     }
 }
 
@@ -1315,6 +1324,10 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         phy: 10,
         interval_us: 11,
         radio_link: RadioLinkStats { packets: 12, ..RadioLinkStats::default() },
+        encrypted: true,
+        bonded: false,
+        bonds: 2,
+        pair_window_ms: 15,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&BridgeToHost::SpikeStats(stats), &mut out).expect("encodes");
@@ -1332,10 +1345,12 @@ fn link_codec_pins_spike_stats_bytes_when_bridge_reports_them() {
         0, 0, 0,                    // ble: disconnection_events to runner_restarts
         0, 0, 0, 0, 0,              // ble: last_disconnect_reason, disconnect_reasons
         0, 0, 0, 0, 0,              // ble: gatt_requests to mtu_changes
+        0, 0, 0, 0, 0,              // ble: pairings to last_resume_ms
         13,                         // ble_stats_age_ms
         6, 14, 7, 8,                // bulk_high_water, bulk_capacity, refused, evicted
         9, 10, 11,                  // mtu, phy, interval_us
         12, 0, 0, 0, 0, 0, 0, 0, 0, // radio_link
+        1, 0, 2, 15,                // encrypted, bonded, bonds, pair_window_ms
     ];
     assert_eq!(frame_body(&out[..n]), expected);
 }
