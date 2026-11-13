@@ -204,6 +204,12 @@ whatever the C6 says; once UART0 falls silent for 15 s, a central still subscrib
 fleet's, saturation, or a burst. `SpikeStats` reports the P4's counters every 2 s while a profile
 runs or a central owns the queue, with the C6's latest `BleStats` beside them.
 
+The C6 serves only a central that has bonded (`firmware/p4-radio/src/ble.rs`). The P4 keeps up to
+four bonds in the second sector of its `nvs` partition and sends them to the C6 after each hello
+(`src/bonds.rs`). The pairing window is open while none is stored, for 120 s after the P4 boots,
+and for 120 s after a host's `SpikeOpenPairWindow`. `SpikeClearBonds` drops every bond, and
+`SpikeResetRadio` resets the C6 through its enable pin, as boot does.
+
 `cargo build --release --features sink-discard` bundles a C6 image that claims a subscriber at
 boot and credits every byte at once, which measures the P4→C6 link's ceiling with no Bluetooth.
 

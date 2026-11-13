@@ -41,7 +41,8 @@
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
 //! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
-//! change there. The scan mode is not stored.
+//! change there. The scan mode is not stored. The C6's Bluetooth bonds are read from flash at
+//! boot too, and go down to it after each hello (`src/bonds.rs`).
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -64,6 +65,7 @@
 #![deny(clippy::large_stack_frames)]
 
 mod ble;
+mod bonds;
 mod cache;
 mod carrier;
 mod config;
@@ -80,7 +82,7 @@ mod update;
 use core::cell::{Cell, RefCell};
 
 use embassy_futures::join::{join, join3, join4};
-use embassy_futures::select::select;
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
@@ -266,8 +268,13 @@ pub struct Shared {
     power: Power,
     /// The carrier's lid fan, or `None` with no carrier.
     fan: Option<&'static fan::Fan>,
-    /// The settings sector's image, read before each write (`src/settings.rs`).
+    /// The settings sector's image, read before each write (`src/settings.rs`), and the bonds
+    /// sector's (`src/bonds.rs`).
     sector: RefCell<&'static mut [u8; SECTOR]>,
+    /// The C6's Bluetooth bonds and the pairing window (`src/bonds.rs`).
+    bonds: bonds::Bonds,
+    /// Raised by a host's `SpikeResetRadio`, for the radio clock.
+    reset_radio: Signal<NoopRawMutex, ()>,
     /// The fleet planner's core: the mode, the pool in force and the Bluetooth pick, which
     /// `Status` reports, and every slot's share (`src/fleet.rs`).
     fleet: RefCell<&'static mut Fleet>,
@@ -288,6 +295,7 @@ impl Shared {
     ) -> Self {
         // The stored settings, read before any future runs.
         let (sector, stored) = settings::boot(updates);
+        let bonds = bonds::boot(updates, sector);
         let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
         let fleet = FLEET.take();
         fleet.set_pool(stored.pool.unwrap_or_default(), now_ms());
@@ -326,6 +334,8 @@ impl Shared {
             power: Power::new(carrier),
             fan,
             sector: RefCell::new(sector),
+            bonds,
+            reset_radio: Signal::new(),
             fleet: RefCell::new(fleet),
             fleet_wake: Signal::new(),
             fleet_sleep: Cell::new(None),
@@ -732,26 +742,32 @@ fn i2c0(
 
 /// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6
 /// stays silent, reset the C6 through `c6_en` when it asks, and tell the host when a poll went
-/// unanswered.
+/// unanswered. A host's `SpikeResetRadio` resets the C6 the same way.
 async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
     loop {
         let deadline = shared.pair.borrow().next_deadline_ms();
-        match deadline {
-            Some(ms) => {
-                select(Timer::at(Instant::from_millis(ms)), shared.deadline_set.wait()).await;
-            }
-            None => shared.deadline_set.wait().await,
+        let tick = match deadline {
+            Some(ms) => select(Timer::at(Instant::from_millis(ms)), shared.deadline_set.wait()),
+            None => select(Timer::at(Instant::MAX), shared.deadline_set.wait()),
+        };
+        if let Either::Second(()) = select(tick, shared.reset_radio.wait()).await {
+            reset_c6(&mut c6_en).await;
+            shared.push_log("the radio was reset through its enable pin, as a host asked");
+            continue;
         }
         let event = shared.pair.borrow_mut().on_tick(now_ms());
         match event {
             PairEvent::None => {}
             PairEvent::NewLife => shared.new_life(),
-            PairEvent::ResetRadio => {
-                c6_en.set_low();
-                Timer::after(C6_RESET_HOLD).await;
-                c6_en.set_high();
-            }
+            PairEvent::ResetRadio => reset_c6(&mut c6_en).await,
             PairEvent::RadioSilent => shared.push_fault(),
         }
     }
+}
+
+/// Hold the C6 in reset through its enable pin, then release it.
+async fn reset_c6(c6_en: &mut Output<'static>) {
+    c6_en.set_low();
+    Timer::after(C6_RESET_HOLD).await;
+    c6_en.set_high();
 }

@@ -27,7 +27,8 @@
 //! the next packet's bytes land behind those still in the FIFO.
 //!
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
-//! under a running P4 as well as the first exchange. The pair hears the seq of every C6
+//! under a running P4 as well as the first exchange. The C6's Bluetooth bonds follow each answer
+//! to a C6 that bridges (`src/bonds.rs`). The pair hears the seq of every C6
 //! packet, since a hello whose seq is not past the last is a restart.
 //!
 //! While a central over Bluetooth owns the host queue, each packet's room behind the queued records
@@ -189,6 +190,11 @@ impl Link {
                     if event == PairEvent::NewLife {
                         shared.new_life();
                     }
+                    // Behind the hello answer, which the writer sends first. Only to a C6 that
+                    // bridges, which reads them; another hears them after its update.
+                    if radio_up(shared) {
+                        crate::bonds::send(shared);
+                    }
                 }
             }
             Kind::Messages => {
@@ -235,6 +241,8 @@ impl Link {
             Ok(Up::BleState(state)) if radio_up(shared) => crate::ble::on_state(shared, state),
             Ok(Up::BleState(_)) => {}
             Ok(Up::BleStats(stats)) => crate::ble::on_stats(shared, stats),
+            Ok(Up::BondAdded(bond)) => crate::bonds::on_added(shared, bond),
+            Ok(Up::BondRemoved(addr)) => crate::bonds::on_removed(shared, addr),
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

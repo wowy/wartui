@@ -249,6 +249,10 @@ fn push_stats(shared: &Shared) {
         phy: state.phy,
         interval_us: state.interval_us,
         radio_link: shared.radio_link.get(),
+        encrypted: state.encrypted,
+        bonded: state.bonded,
+        bonds: shared.bonds.count(),
+        pair_window_ms: shared.bonds.window_ms(crate::now_ms()),
     };
     shared.push_host(&BridgeToHost::SpikeStats(stats));
 }

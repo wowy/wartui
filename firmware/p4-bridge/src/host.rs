@@ -197,6 +197,9 @@ pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
         HostToBridge::StartScan { bluetooth } => crate::fleet::start(shared, *bluetooth),
         HostToBridge::StopScan => crate::fleet::stop(shared),
         HostToBridge::SpikeLoad { profile, count } => crate::spike::take(shared, *profile, *count),
+        HostToBridge::SpikeOpenPairWindow => crate::bonds::open_window(shared),
+        HostToBridge::SpikeClearBonds => crate::bonds::clear(shared),
+        HostToBridge::SpikeResetRadio => shared.reset_radio.signal(()),
     }
 }
 

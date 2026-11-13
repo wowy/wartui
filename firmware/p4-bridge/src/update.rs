@@ -149,6 +149,12 @@ impl Updates {
         self.ota.settings()
     }
 
+    /// The sector the Bluetooth bonds are stored in (`src/bonds.rs`), through the flash this
+    /// owns.
+    pub fn bonds(&mut self) -> Option<SettingsSector<'_>> {
+        self.ota.bonds()
+    }
+
     /// End this image's trial, if it is on one, and disarm the watchdog. A failure leaves it
     /// on trial and is said once; the next host connection tries again. Retrying on every frame
     /// would repeat the flash write and fill [`Lines`] with the same error.
