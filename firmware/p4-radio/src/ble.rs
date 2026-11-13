@@ -521,6 +521,14 @@ async fn advertise(
             c.adv_phase = ADV_SERVE;
         });
         serve(stack, &conn, server, shared).await;
+        let hci = &shared.ble.hci;
+        shared.log(format_args!(
+            "Bluetooth link security so far: {} LTK requests, last encryption change {:04x}, \
+             last LTK reply {:04x}",
+            hci.ltk_requests.get(),
+            hci.enc_change.get(),
+            hci.ltk_reply.get()
+        ));
         shared.ble.count(|c| c.disconnects = c.disconnects.wrapping_add(1));
         // `serve` drops a notifier mid-await, which would read as a stall.
         shared.ble.notify_phase(NOTIFY_READY);
@@ -685,15 +693,21 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         peer: bond_addr(&raw.peer_identity()).mac(),
     };
     let window = if session.bondable { "open" } else { "closed" };
+    let bonded = if raw.is_bonded_peer() { "bonded" } else { "not bonded" };
     shared.log(format_args!(
-        "Bluetooth connected {}, pairing window {window}",
+        "Bluetooth connected {}, {bonded}, pairing window {window}",
         mac::short(&session.peer)
     ));
     // Before pairing starts, which the Security Request below prompts.
     if let Err(err) = raw.set_bondable(session.bondable) {
         shared.error(format_args!("Bluetooth could not set bondable: {err:?}"));
     }
-    if let Err(err) = raw.request_security() {
+    // A bonded central gets no Security Request: outside the window it would say no bonding,
+    // and BlueZ 5.88 answers that by pairing again rather than encrypting with the key it holds.
+    // The central encrypts on its own, or on the Insufficient Authentication answer.
+    if !raw.is_bonded_peer()
+        && let Err(err) = raw.request_security()
+    {
         shared.log(format_args!("Bluetooth security not requested: {err:?}"));
     }
     // Each answered by an event if the central agrees; a refusal leaves the link as it is.

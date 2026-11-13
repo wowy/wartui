@@ -14,9 +14,9 @@ The C6 advertises `wartui XX:YY`, the last two octets of its MAC, with one GATT 
 Both need an encrypted, bonded link. The C6 pairs by LE Secure Connections Just Works, and bonds
 only inside the P4's pairing window: while no bond is stored, for 120 s after the P4 boots, and
 for 120 s after `send open-pair-window`. An unencrypted subscribe or write is refused with
-Insufficient Authentication, which makes BlueZ pair through its default agent. If btleplug's path
-does not pair, pair once by hand inside the window, with the address the C6 logs at boot, then
-run as usual:
+Insufficient Authentication. BlueZ 5.88 did not pair on that alone, nor on the C6's Security
+Request, so pair once by hand inside the window, with the address the C6 logs at boot, then run
+as usual:
 
 ```sh
 bluetoothctl

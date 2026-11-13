@@ -47,6 +47,11 @@ pub struct Watch {
     pub disconnection_events: Cell<u32>,
     /// When the latest read completed.
     pub read_done_at: Cell<Instant>,
+    /// Diagnostic (#309): LTK requests, the last Encryption Change as status << 8 | enabled,
+    /// and the last LTK reply's Command Complete status, or 0xFFFF before any.
+    pub ltk_requests: Cell<u32>,
+    pub enc_change: Cell<u16>,
+    pub ltk_reply: Cell<u16>,
 }
 
 impl Watch {
@@ -59,6 +64,9 @@ impl Watch {
             nocp_events: Cell::new(0),
             disconnection_events: Cell::new(0),
             read_done_at: Cell::new(Instant::from_ticks(0)),
+            ltk_requests: Cell::new(0),
+            enc_change: Cell::new(0xFFFF),
+            ltk_reply: Cell::new(0xFFFF),
         }
     }
 }
@@ -125,6 +133,15 @@ where
         match (kind as u8, raw.first()) {
             (H4_EVENT, Some(&NUMBER_OF_COMPLETED_PACKETS)) => bump(&watch.nocp_events),
             (H4_EVENT, Some(&DISCONNECTION_COMPLETE)) => bump(&watch.disconnection_events),
+            (H4_EVENT, Some(&0x08)) if len >= 6 => {
+                watch.enc_change.set(u16::from(raw[2]) << 8 | u16::from(raw[5]));
+            }
+            (H4_EVENT, Some(&0x3E)) if len >= 3 && raw[2] == 0x05 => bump(&watch.ltk_requests),
+            (H4_EVENT, Some(&0x0E))
+                if len >= 6 && matches!((raw[3], raw[4]), (0x1A | 0x1B, 0x20)) =>
+            {
+                watch.ltk_reply.set(u16::from(raw[3]) << 8 | u16::from(raw[5]));
+            }
             _ => {}
         }
         self.ledger.borrow_mut().on_controller_packet(kind as u8, &raw[..len]);
