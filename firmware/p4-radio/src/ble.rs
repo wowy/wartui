@@ -45,7 +45,8 @@
 //!
 //! - one encrypted without a stored bond on a connection made outside the window;
 //! - one that lost its bond, outside the window;
-//! - one not bonded and encrypted [`PAIR_DEADLINE`] after connecting.
+//! - one not bonded and encrypted [`PAIR_DEADLINE`] after connecting inside the window, or
+//!   [`UNBONDABLE_DEADLINE`] after connecting outside it.
 //!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM.** It waits up to
 //! [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the resolving list
@@ -138,8 +139,14 @@ const BONDS_POLL: Duration = Duration::from_millis(20);
 /// advertising is idle, before the next advertisement.
 const RESOLVING_SETTLE: Duration = Duration::from_millis(50);
 
-/// How long a central has to be bonded and encrypted before it is disconnected.
-const PAIR_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a central that connected inside the pairing window has to be bonded and encrypted
+/// before it is disconnected. Pairing waits on a person tapping the phone's prompt, which took
+/// more than 10 s on the Pixel 8 (inferred); 30 s is the pairing protocol's own timeout.
+const PAIR_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The same, for a central that connected outside the window: it can only resume a bond, which
+/// took under 0.7 s on every host, so it gets no time to wait on a person.
+const UNBONDABLE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// `wartui XX:YY`.
 const NAME_MAX: usize = NAME_PREFIX.len() + 5;
@@ -744,12 +751,13 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
     .await;
 }
 
-/// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] after it connected, so an
-/// idle or unbonded one cannot hold the only connection.
+/// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`]
+/// after it connected, so an idle or unbonded one cannot hold the only connection.
 async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
-    Timer::at(session.connected_at + PAIR_DEADLINE).await;
+    let limit = if session.bondable { PAIR_DEADLINE } else { UNBONDABLE_DEADLINE };
+    Timer::at(session.connected_at + limit).await;
     if !authorized(conn) {
-        kick(conn, session, shared, "not bonded and encrypted 10 s after connecting");
+        kick(conn, session, shared, "not bonded and encrypted in time after connecting");
     }
     core::future::pending().await
 }
