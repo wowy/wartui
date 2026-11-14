@@ -19,17 +19,20 @@ scan response. It notifies the P4's host stream on Up and forwards what a centra
 
 - **Only a bonded, encrypted central reaches the stream.** It pairs by LE Secure Connections Just
   Works, inside the P4's pairing window. The P4 keeps the bonds and sends them down after each
-  hello; the C6 keeps no flash state. `src/ble.rs` has the rules.
+  hello; the C6 keeps no flash state. A change to them stops the advertisement while TrouBLE
+  loads them, and a connected central whose bond the P4 dropped is disconnected. `src/ble.rs` has
+  the rules.
 - **The C6 asks for the 2M PHY and data length 251** once a central connects.
 - **The stream is credited by position.** The C6 holds up to `HOST_WINDOW_BYTES` of it, and its
   credit is the stream offset it is done up to, in the P4's offsets. A lost P4 packet costs its
   frames and not the window, and a restart of either chip cannot skew it
-  (`wartui_proto::radio_link::Inflow`).
+  (`wartui_proto::radio_link::Inflow`). The credit is repeated every second while a central is
+  subscribed, so a lost one never shuts the window.
 - **A central ends each frame with a write request**, which the C6 answers once it has forwarded
   the write, so a central never overruns TrouBLE's queue of 8.
 - **A Bluetooth host that stops restarts the C6**, and the next boot reports the reason.
-- **Its counters ride on each `RadioStatus`:** pairings, failed pairings, unbonded centrals
-  disconnected, the last disconnect reason, resynced and dropped bytes, the PHY, the interval and
+- **Its counters ride on each `RadioStatus`:** pairings, failed pairings, centrals disconnected
+  for holding no bond (a cleared one included), the last disconnect reason, resynced and dropped bytes, the PHY, the interval and
   the heap's high-water mark.
 - **The heap is 96 KB:** 64 KB of reclaimed bootloader RAM and 32 KB more. The Bluetooth controller
   and the scheduler under it are all that allocate.

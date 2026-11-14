@@ -1008,8 +1008,8 @@ def bridge_bluetooth(db, ctx, lives):
     if sums["unbonded_kicks"] or sums["failed_pairings"]:
         flag("INFO", "bluetooth",
              f"unbonded_kicks {sums['unbonded_kicks']}, failed_pairings "
-             f"{sums['failed_pairings']}: a host with no bond tried to connect, or a pairing "
-             "failed", sql)
+             f"{sums['failed_pairings']}: a host with no bond tried to connect or had its bond "
+             "cleared while connected, or a pairing failed", sql)
 
     # The bridge answers only the host that holds it, so any other owner is a reply that reached
     # the wrong host. A simulated capture names no link.

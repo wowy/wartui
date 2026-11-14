@@ -21,10 +21,14 @@
 //! discovered or heard again: once it has a name, and at most [`NAME_READS`] times while it has
 //! none, since each read is a serial D-Bus round trip. A bridge is read again until it is heard
 //! advertising, because BlueZ first replays every device it knows as discovered, so a bonded
-//! bridge is read before the scan has heard it. An unnamed scan listens [`UNNAMED_LISTEN`]
-//! before choosing, so a second bridge advertising nearby is seen rather than passed over. At
-//! the end of that listen it reads the OS's listing once, for a bridge that raised no event: one
-//! BlueZ lists as bonded and has not heard, or one that was advertising before the scan began.
+//! bridge is read before the scan has heard it. A scan ends at once only on a bridge heard
+//! advertising whose whole advertised name the spec gives. Any other listens [`UNNAMED_LISTEN`]
+//! and lets [`choose`] decide, so a second bridge advertising nearby is seen rather than passed
+//! over, and a bonded bridge that is off is not taken while one that answers advertises. At the
+//! end of that listen it reads the OS's listing once, for a bridge that raised no event: one BlueZ
+//! lists as bonded and has not heard, or one that was advertising before the scan began. A bridge
+//! listed and never heard is still tried when it is the only one, since one BlueZ still holds a
+//! connection to does not advertise.
 //!
 //! **The P4 serves a central only once it owns the host queue**, which it takes on a subscription
 //! to Up from a bonded, encrypted link (`wartui_proto::host_owner`). The stream starts with a
@@ -82,8 +86,10 @@
 //! C6 and drops the link, which is an ordinary reconnect.
 //!
 //! **Closing.** Once the handle is gone the connection unsubscribes from Up and disconnects, and a
-//! scan or a connect under way stops, so the bridge never serves a process that has exited. The
-//! transport counts as running until then, which `crate::close_all` waits for.
+//! scan, a connect or a write under way stops, so the bridge never serves a process that has
+//! exited. The transport counts as running until then, which `crate::close_all` waits for. A
+//! write the C6 does not answer within [`WRITE_WITHIN`] ends the connection, so it never waits out
+//! BlueZ's 30 s ATT timeout.
 //!
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
@@ -125,6 +131,11 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 
 /// How long the disconnect that cancels a timed-out connect may take.
 const CANCEL_WITHIN: Duration = Duration::from_secs(2);
+
+/// How long one write to Down may take. A write request is answered within a few connection
+/// intervals. The C6 holds its answer only while its queue to the P4 is full, and refuses each
+/// write that waits there past a second.
+const WRITE_WITHIN: Duration = Duration::from_secs(5);
 
 /// How many times a scan reads a device that has no name before it reads it no more.
 const NAME_READS: u8 = 3;
@@ -316,10 +327,11 @@ pub fn refused_for_bonding(error: &str) -> bool {
 }
 
 /// Whether a link that dropped `after` connecting, with no `Ready` heard, reads as the C6
-/// dropping a central that holds no bond.
+/// dropping a central that holds no bond. `None` when the link was up before this connection
+/// tried, so nothing says when the C6's deadline started, and the timing proves nothing.
 #[must_use]
-pub fn dropped_as_unbonded(after: Duration, announced: bool) -> bool {
-    !announced && UNBONDED_DROP.contains(&after)
+pub fn dropped_as_unbonded(after: Option<Duration>, announced: bool) -> bool {
+    !announced && after.is_some_and(|after| UNBONDED_DROP.contains(&after))
 }
 
 /// Where a connection looks for its bridge ([`look`]).
@@ -714,6 +726,13 @@ impl<'a, I: Clone + Eq + Hash, P> Hearing<'a, I, P> {
         Self { spec, bridges: Vec::new(), done: HashSet::new(), unnamed: HashMap::new() }
     }
 
+    /// Whether the scan can end before [`UNNAMED_LISTEN`]: the spec gives a whole advertised name,
+    /// so it names one bridge, and that bridge has been heard advertising.
+    fn settled(&self) -> bool {
+        self.spec.and_then(advertised_name).is_some()
+            && self.bridges.iter().any(|(_, _, live, _)| *live)
+    }
+
     /// Whether a hearing of `id` is worth reading its properties for: any device not done with,
     /// except a bridge already heard advertising.
     fn wants(&self, id: &I) -> bool {
@@ -782,9 +801,10 @@ async fn note(hearing: &mut Hearing<'_, PeripheralId, Peripheral>, peripheral: P
     }
 }
 
-/// Read the adapter's events until a bridge `spec` names is heard: at once when one is named, and
-/// once [`UNNAMED_LISTEN`] has passed when none is. At that point the OS's listing is read once,
-/// for a bridge that raised no event.
+/// Read the adapter's events until a bridge `spec` names is heard: at once when the spec gives its
+/// whole advertised name and it is heard advertising ([`Hearing::settled`]), else once
+/// [`UNNAMED_LISTEN`] has passed. At that point the OS's listing is read once, for a bridge that
+/// raised no event.
 async fn listen(
     adapter: &Adapter,
     events: &mut Events,
@@ -795,7 +815,7 @@ async fn listen(
     let mut hearing = Hearing::new(spec);
     let mut listed = false;
     loop {
-        if spec.is_some() && !hearing.bridges.is_empty() {
+        if hearing.settled() {
             break;
         }
         if !listed && tokio::time::Instant::now() >= listened {
@@ -875,6 +895,8 @@ async fn connect(
     let label = label_of(peripheral, transport).await;
     progress!(bridge = %label, "connecting to the bridge over Bluetooth");
 
+    // When this try made the link, since the C6's unbonded deadline runs from the link coming up.
+    let mut connected_at = None;
     if !peripheral.is_connected().await.unwrap_or(false) {
         let connecting = tokio::select! {
             connecting = tokio::time::timeout(CONNECT_WITHIN, peripheral.connect()) => connecting,
@@ -884,7 +906,7 @@ async fn connect(
             }
         };
         match connecting {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => connected_at = Some(Instant::now()),
             Ok(Err(e)) => return End::failed(format!("could not connect to {label}: {e}")),
             Err(_) => {
                 // Unlike a link that dropped, this one never came up: BlueZ's `Connect` is still
@@ -893,20 +915,18 @@ async fn connect(
                 // later connection inherits it.
                 let _ = tokio::time::timeout(CANCEL_WITHIN, peripheral.disconnect()).await;
                 return End::failed(format!(
-                    "could not connect to {label} in {}s",
+                    "could not connect to {label} in {}s; check the bridge is powered and in range",
                     CONNECT_WITHIN.as_secs()
                 ));
             }
         }
     }
-    // After the connect, since the C6's unbonded deadline runs from the link coming up.
-    let connected_at = Instant::now();
     let end = serve(adapter, peripheral, transport, plumbing, settled, &label).await;
     let end = match end {
         // The C6 drops an unbonded central about 10 s after it connects, and the timing is all
         // that says so.
         End::Over { announced: false, cause: DisconnectCause::Other, .. }
-            if dropped_as_unbonded(connected_at.elapsed(), false)
+            if dropped_as_unbonded(connected_at.map(|at| at.elapsed()), false)
                 && !peripheral.is_connected().await.unwrap_or(false) =>
         {
             End::Over {
@@ -1075,22 +1095,37 @@ async fn pump(
                 );
             }
             _ = ask.tick(), if !inbound.announced() => {
-                let identify = &HostToBridge::Identify;
-                if let Err(failure) = send(peripheral, down, &mut writer, identify, label).await {
-                    return failed(failure, ever_announced);
+                let sent = send(peripheral, down, &mut writer, &HostToBridge::Identify, label);
+                if let Some(end) = unless_closed(sent, plumbing, ever_announced).await {
+                    return end;
                 }
             }
             cmd = plumbing.commands.recv() => {
                 let Some(cmd) = cmd else { return End::HandleDropped };
-                if let Err(failure) = send(peripheral, down, &mut writer, &cmd, label).await {
-                    return failed(failure, ever_announced);
+                let sent = send(peripheral, down, &mut writer, &cmd, label);
+                if let Some(end) = unless_closed(sent, plumbing, ever_announced).await {
+                    return end;
                 }
             }
         }
     }
 }
 
-/// Write one command's frame to Down, a piece at a time.
+/// Wait for `sent` unless the handle goes first: the connection's end when either ends it, after
+/// announcing a bridge or before.
+async fn unless_closed(
+    sent: impl Future<Output = Result<(), Failure>>,
+    plumbing: &LinkPlumbing,
+    announced: bool,
+) -> Option<End> {
+    let sent = tokio::select! {
+        sent = sent => sent,
+        () = plumbing.events.closed() => return Some(End::HandleDropped),
+    };
+    sent.err().map(|Failure { reason, cause }| End::Over { reason, cause, announced })
+}
+
+/// Write one command's frame to Down, a piece at a time, each within [`WRITE_WITHIN`].
 async fn send(
     peripheral: &Peripheral,
     down: &Characteristic,
@@ -1108,10 +1143,22 @@ async fn send(
             WriteKind::Command => WriteType::WithoutResponse,
             WriteKind::Request => WriteType::WithResponse,
         };
-        if let Err(e) = peripheral.write(down, &write.bytes, kind).await {
-            // Only a request carries the C6's answer; a write without response fails locally.
-            let refused = (write.kind == WriteKind::Request).then(|| refusal(label, &e)).flatten();
-            return Err(refused.unwrap_or_else(|| Failure::other(format!("write failed: {e}"))));
+        let written =
+            tokio::time::timeout(WRITE_WITHIN, peripheral.write(down, &write.bytes, kind));
+        match written.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // Only a request carries the C6's answer; a write without response fails locally.
+                let refused =
+                    (write.kind == WriteKind::Request).then(|| refusal(label, &e)).flatten();
+                return Err(refused.unwrap_or_else(|| Failure::other(format!("write failed: {e}"))));
+            }
+            Err(_) => {
+                return Err(Failure::other(format!(
+                    "a write to the bridge was not answered in {}s",
+                    WRITE_WITHIN.as_secs()
+                )));
+            }
         }
     }
     Ok(())
@@ -1130,6 +1177,10 @@ mod tests {
     use tokio::time::Instant;
 
     use super::{BridgeSpec, Hearing, IDENTIFY_EVERY, NAME_READS, asker, choose};
+
+    fn spec(text: &str) -> BridgeSpec {
+        text.parse().unwrap_or_else(|never| match never {})
+    }
 
     const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
 
@@ -1170,6 +1221,32 @@ mod tests {
         hearing.noted(1, "late", None);
         hearing.noted(1, "late", read("wartui 44:C0", true));
         assert_eq!(hearing.into_bridges(), [("wartui 44:C0".to_owned(), true, "late")]);
+    }
+
+    #[test]
+    fn ble_hearing_settles_when_bridge_named_in_full_is_heard_advertising() {
+        let named = spec("44:C0");
+        let mut hearing = Hearing::new(Some(&named));
+        hearing.noted(1, (), read("wartui 44:C0", true));
+        assert!(hearing.settled());
+    }
+
+    #[test]
+    fn ble_hearing_waits_for_listing_when_bridge_named_in_full_is_only_listed() {
+        // BlueZ replays a bonded bridge that is off as discovered, with no RSSI.
+        let named = spec("02:00:5E:10:44:C0");
+        let mut hearing = Hearing::new(Some(&named));
+        hearing.noted(1, (), read("wartui 44:C0", false));
+        assert!(!hearing.settled());
+    }
+
+    #[test]
+    fn ble_hearing_waits_for_listing_when_partial_name_matches_one_live_bridge() {
+        // `C0` names every bridge ending in it, so `choose` has to see them all.
+        let named = spec("C0");
+        let mut hearing = Hearing::new(Some(&named));
+        hearing.noted(1, (), read("wartui 44:C0", true));
+        assert!(!hearing.settled());
     }
 
     /// An hour with the arm off, as a stream announced that long leaves it.

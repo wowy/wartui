@@ -29,7 +29,8 @@
 //! `pair` removes nothing, says what it saw, and asks for another try.
 //!
 //! **`forget` clears every bond the bridge keeps**, over the chosen link, and removes the bridge
-//! from BlueZ on Linux. Every other host that paired keeps a bond the bridge dropped, and BlueZ
+//! from BlueZ on Linux. The bridge disconnects a host connected on a bond it cleared, this PC
+//! too over Bluetooth. Every other host that paired keeps a bond the bridge dropped, and BlueZ
 //! cannot reconnect on one (`docs/c6-ble-pairing-findings.md`, "Clearing the bridge's bonds
 //! strands every host"), so `forget` says each must forget the bridge too.
 //!
@@ -420,15 +421,13 @@ mod linux {
         window: &Window,
         fresh: bool,
     ) -> Result<()> {
-        let mut found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
-        let mut device = listed(&found).await?;
+        let (spec, preferred) = (spec.as_ref(), preferred.as_ref());
+        let (mut found, mut device) = find_listed(spec, preferred).await?;
         let first = first_step(device.paired, fresh);
         match first {
             First::Remove => {
                 println!("removing this PC's pairing with {}, as --fresh asks", found.name);
-                blocking(move || bluez::remove(&device)).await??;
-                found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
-                device = listed(&found).await?;
+                (found, device) = remove_and_find(device, spec, preferred).await?;
             }
             First::Pair if fresh => println!("this PC holds no pairing with {}", found.name),
             First::Pair | First::Check => {}
@@ -444,9 +443,7 @@ mod linux {
                 }
                 Proof::NotBonded => {
                     println!("the bridge holds no bond for this PC; removing it and pairing again");
-                    blocking(move || bluez::remove(&device)).await??;
-                    found = find_advertiser(spec.as_ref(), preferred.as_ref()).await?;
-                    device = listed(&found).await?;
+                    (found, device) = remove_and_find(device, spec, preferred).await?;
                 }
                 Proof::Unserved { dropped } => bail!("{}", unserved(&found.name, dropped)),
             }
@@ -478,16 +475,32 @@ mod linux {
         }
     }
 
-    /// The device BlueZ lists for what the scan heard.
-    async fn listed(found: &Advertiser) -> Result<Device> {
+    /// Scan for the bridge `spec` names, preferring one `preferred` names, and the device BlueZ
+    /// lists for what the scan heard.
+    async fn find_listed(
+        spec: Option<&BridgeSpec>,
+        preferred: Option<&BridgeSpec>,
+    ) -> Result<(Advertiser, Device)> {
+        let found = find_advertiser(spec, preferred).await?;
         let address = found.address.clone();
-        blocking(move || bluez::device_at(&address)).await??.ok_or_else(|| {
+        let device = blocking(move || bluez::device_at(&address)).await??.ok_or_else(|| {
             anyhow!(
                 "BlueZ does not list {} at {}, which a scan just heard",
                 found.name,
                 found.address
             )
-        })
+        })?;
+        Ok((found, device))
+    }
+
+    /// Remove `device`'s pairing from BlueZ, then find the bridge again ([`find_listed`]).
+    async fn remove_and_find(
+        device: Device,
+        spec: Option<&BridgeSpec>,
+        preferred: Option<&BridgeSpec>,
+    ) -> Result<(Advertiser, Device)> {
+        blocking(move || bluez::remove(&device)).await??;
+        find_listed(spec, preferred).await
     }
 
     /// Remove a pairing the bridge did not keep, so BlueZ holds no one-sided bond.
@@ -655,8 +668,8 @@ async fn forget(args: ForgetArgs) -> Result<()> {
 }
 
 /// Wait for the bonds to clear. Over USB a status shows them gone. Over Bluetooth this PC's bond
-/// went with them, so the bridge may stop serving it before it answers, and only a fault is
-/// listened for.
+/// went with them and the bridge disconnects it, so that disconnect is the expected end, and only
+/// a fault is listened for until it, or for [`SETTLE`].
 async fn cleared(link: &mut LinkHandle, over: Link) -> Result<()> {
     if over == Link::Bluetooth {
         let until = tokio::time::Instant::now() + SETTLE;

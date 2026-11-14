@@ -292,11 +292,18 @@ fn ble_failure_reads_as_other_when_os_error_is_no_bonding_refusal() {
 
 #[test]
 fn ble_drop_reads_as_maybe_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_with_no_ready() {
-    assert!(dropped_as_unbonded(Duration::from_secs(10), false));
-    assert!(dropped_as_unbonded(Duration::from_secs(30), false), "inside the pairing window");
-    assert!(!dropped_as_unbonded(Duration::from_secs(10), true), "a bridge that announced");
-    assert!(!dropped_as_unbonded(Duration::from_secs(1), false), "a connect that failed");
-    assert!(!dropped_as_unbonded(Duration::from_secs(120), false));
+    let after = |secs| Some(Duration::from_secs(secs));
+    assert!(dropped_as_unbonded(after(10), false));
+    assert!(dropped_as_unbonded(after(30), false), "inside the pairing window");
+    assert!(!dropped_as_unbonded(after(10), true), "a bridge that announced");
+    assert!(!dropped_as_unbonded(after(1), false), "a connect that failed");
+    assert!(!dropped_as_unbonded(after(120), false));
+}
+
+#[test]
+fn ble_drop_proves_nothing_when_link_was_up_before_this_connect() {
+    // BlueZ held the link already, so nothing says when the C6's deadline started.
+    assert!(!dropped_as_unbonded(None, false));
 }
 
 #[test]

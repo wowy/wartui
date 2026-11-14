@@ -16,7 +16,9 @@
 //! and drops an earlier attachment's.
 //!
 //! **The stream is credited by position.** `accounted` is the C6's latest `Up::Credit`: the offset,
-//! in the P4's offsets, up to which the C6 is done. The link's writer packs `Down::HostBytes` only
+//! in the P4's offsets, up to which the C6 is done. The C6 repeats it every second while a central
+//! is subscribed, so a credit lost on the link never leaves the window shut, and a repeat sets the
+//! position the P4 already holds. The link's writer packs `Down::HostBytes` only
 //! inside `host_window(sent, accounted)`, so a slow central backs the stream up in the host queue,
 //! where the bulk ring evicts, and never holds the C6 link behind RTS/CTS. A new C6 life sets
 //! `accounted` to `sent`: the bytes in flight died with the old C6, and the new one credits in the
@@ -157,7 +159,8 @@ pub fn on_state(shared: &Shared, state: BleState) {
     }
 }
 
-/// The C6 is done with the stream up to `accounted`.
+/// The C6 is done with the stream up to `accounted`. A repeat of the last changes nothing but a
+/// wake of the writer.
 pub fn on_credit(shared: &Shared, accounted: u32) {
     shared.ble.accounted.set(accounted);
     shared.wake_link.signal(());

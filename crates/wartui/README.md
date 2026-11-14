@@ -1235,8 +1235,9 @@ pair` needs no click.
 **`wartui bluetooth forget` clears every bond the bridge keeps.** It sends that over `--link`, USB
 by default, removes the bridge from BlueZ on Linux, and says what it costs: every other host that
 paired with the bridge keeps a bond the bridge dropped, and cannot connect until it forgets the
-bridge too, in its own Bluetooth settings, and pairs again. With no bond, the bridge's window stays
-open until a host pairs. `forget` saves nothing to `wartui.toml` either.
+bridge too, in its own Bluetooth settings, and pairs again. A Bluetooth host connected when the
+bonds clear is disconnected, this PC too when `forget` runs over Bluetooth. With no bond, the
+bridge's window stays open until a host pairs. `forget` saves nothing to `wartui.toml` either.
 
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
@@ -1258,7 +1259,7 @@ scans Bluetooth:
 | `host  bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
 | `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
-| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond, the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
+| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
 `flash-bridge` does. The Bluetooth host stays connected and waits. The bridge hands it back 15 s
@@ -1285,6 +1286,7 @@ names the last one when its wait runs out:
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
 | `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer                                    |
+| `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
 | `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |

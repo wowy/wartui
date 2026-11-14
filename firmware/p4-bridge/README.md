@@ -222,7 +222,8 @@ holding the C6 link.
 keeps up to four bonds in the second sector of its `nvs` partition and sends them to the C6 after
 each hello (`src/bonds.rs`). The pairing window, when a new central may pair, is open while no
 bond is stored, for 120 s after the P4 boots, and for 120 s after a host's `OpenPairing`, from USB
-or a bonded central. `ClearBonds` drops every bond, which opens the window until a central bonds.
+or a bonded central. `ClearBonds` drops every bond, which opens the window until a central bonds,
+and the C6 disconnects a central connected on one of them.
 A host that held a bond then fails every connect until it forgets the bridge and pairs again
 ([`docs/c6-ble-pairing-findings.md`](../../docs/c6-ble-pairing-findings.md)). `Status` reports
 the owner, the bonds, the window, the connected central and the C6's Bluetooth counters.

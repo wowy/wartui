@@ -17,7 +17,8 @@
 //! slow central backs the stream up in the P4's host queue rather than holding the whole link
 //! behind RTS/CTS. `sent` is the P4's stream offset and `accounted` the C6's position in those
 //! same offsets, so a lost credit costs nothing once the next arrives, and a restart of either
-//! chip cannot skew them. A lost `Down::HostBytes` costs its bytes and no credit: the next offset
+//! chip cannot skew them. The C6 repeats its credit every second while a central is subscribed, so
+//! a next always arrives. A lost `Down::HostBytes` costs its bytes and no credit: the next offset
 //! the C6 sees moves its position past them ([`Inflow`](super::Inflow)).
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
@@ -130,7 +131,8 @@ pub struct BleCounters {
     pub pairings: u32,
     /// Pairings that failed.
     pub failed_pairings: u32,
-    /// Centrals disconnected for not holding a bond.
+    /// Centrals disconnected for not holding a bond: never bonded, out of time, or holding one the
+    /// P4 dropped while they were connected.
     pub unbonded_kicks: u32,
     /// The latest disconnection's HCI reason code, or 0 before the first.
     pub last_disconnect: u8,

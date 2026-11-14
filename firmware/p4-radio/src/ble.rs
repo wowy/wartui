@@ -29,7 +29,10 @@
 //! subscription clears the ring. It is coalesced to one `Up::Credit` per [`CREDIT_EVERY_BYTES`],
 //! per [`CREDIT_EVERY`], or when the ring empties, whichever comes first, and nothing is sent
 //! before the P4 has named a first offset. With no subscribed central the stream is discarded and
-//! credited at once.
+//! credited at once. While a central is subscribed the current position is also repeated every
+//! [`STATE_EVERY`] ([`repeat_credit`]): the queue to the P4 evicts, and losing the last credit
+//! before the window fills would leave the P4's window shut with nothing left to move it. The
+//! position is absolute, so the P4 takes a repeat as changing nothing.
 //!
 //! - `Down::HostStart` begins an attachment: the ring is cleared and the position is `at`, so the
 //!   central reads only bytes from that offset on. One resync `0x00` goes in first. A
@@ -82,24 +85,30 @@
 //! - one encrypted without a stored bond on a connection made outside the window;
 //! - one that lost its bond, outside the window;
 //! - one not bonded and encrypted [`PAIR_DEADLINE`] after connecting inside the window, or
-//!   [`UNBONDABLE_DEADLINE`] after connecting outside it.
+//!   [`UNBONDABLE_DEADLINE`] after connecting outside it;
+//! - one whose bond the P4 dropped, as `ClearBonds` does, while it was connected.
 //!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM** (`wartui_proto::bonds`). It
 //! waits up to [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the
-//! resolving list holds them from the first advertisement, and applies each later one whenever
-//! no central is connected ([`sync_bonds`]). Removing the connected central's bond waits for it
-//! to go. A new bond goes up as `Up::BondAdded`, after an `Up::BondRemoved` when it replaces one a
-//! central lost. A bond whose `Up::BondAdded` is lost lasts until the C6 restarts, and the host
-//! pairs again. The window's end is tracked here from each `Down::Bonds`' `window_ms`.
+//! resolving list holds them from the first advertisement. TrouBLE loads its resolving list only
+//! while it is not advertising, so a `Down::Bonds` that differs from TrouBLE's bonds stops the
+//! advertisement, is applied, and advertising starts again ([`accept`], [`sync_bonds`]); one
+//! that differs in nothing, as after every hello, leaves the advertisement running. While a
+//! central is connected the bonds are applied once it goes, and a central whose bond the P4 has
+//! dropped is disconnected first ([`revoke`]). A new bond goes up as `Up::BondAdded`, after an
+//! `Up::BondRemoved` when it replaces one a central lost. A bond whose `Up::BondAdded` is lost
+//! lasts until the C6 restarts, and the host pairs again. The window's end is tracked here from
+//! each `Down::Bonds`' `window_ms`.
 //!
 //! **The first advertisement ends the image's trial** with the P4's hello (`src/link.rs`):
 //! [`advertise`] raises `advertising_started` once the controller takes it.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
+use core::pin::pin;
 
-use embassy_futures::join::join3;
-use embassy_futures::select::{Either, select, select3};
+use embassy_futures::join::join;
+use embassy_futures::select::{Either, select, select4};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
@@ -194,8 +203,10 @@ const BONDS_WAIT: Duration = Duration::from_secs(2);
 /// How often that wait looks.
 const BONDS_POLL: Duration = Duration::from_millis(20);
 
-/// How long a changed bond list gives TrouBLE's runner to load the resolving list, while
-/// advertising is idle, before the next advertisement.
+/// How long TrouBLE's runner is given to stop an advertisement, and then to load a changed bond
+/// list into the resolving list, before the next advertisement. It loads the list only while
+/// advertising is idle, so an update made while advertising waits for the next idle moment, a
+/// connection, by when the controller has already failed to resolve that central's address.
 const RESOLVING_SETTLE: Duration = Duration::from_millis(50);
 
 /// How long a central that connected inside the pairing window has to be bonded and encrypted
@@ -306,13 +317,11 @@ pub struct Ble {
     state: Cell<BleState>,
     said: Cell<Option<BleState>>,
     said_at: Cell<Instant>,
-    /// A central is connected.
-    connected: Cell<bool>,
     /// The controller has taken an advertisement since boot.
     advertising: Cell<bool>,
     /// Raised when `advertising` first holds, for the link's trial.
     pub advertising_started: Signal<NoopRawMutex, ()>,
-    /// The `Up::Credit` last sent, or `None` before the first, and when.
+    /// The `Up::Credit` last sent or repeated, or `None` before the first, and when.
     credited: Cell<Option<u32>>,
     credited_at: Cell<Instant>,
     /// The counters kept here; [`counters`] adds the heap's.
@@ -322,7 +331,8 @@ pub struct Ble {
     /// The bonds the P4 last sent, oldest first, and whether any `Down::Bonds` has arrived.
     bonds: RefCell<Bonds>,
     bonds_heard: Cell<bool>,
-    /// Raised by each `Down::Bonds`, for [`follow_bonds`].
+    /// Raised by each `Down::Bonds`. One waiter at a time: [`accept`] while advertising,
+    /// [`revoke`] while a central is connected.
     bonds_changed: Signal<NoopRawMutex, ()>,
     /// When the P4's pairing window closes, or `None` while it is closed.
     window_until: Cell<Option<Instant>>,
@@ -336,7 +346,6 @@ impl Ble {
             state: Cell::new(BleState::default()),
             said: Cell::new(None),
             said_at: Cell::new(Instant::from_ticks(0)),
-            connected: Cell::new(false),
             advertising: Cell::new(false),
             advertising_started: Signal::new(),
             credited: Cell::new(None),
@@ -418,8 +427,9 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     ble.ready.signal(());
 }
 
-/// Take the P4's bonds and its pairing window's time left. [`follow_bonds`] gives TrouBLE the
-/// bonds once no central is connected.
+/// Take the P4's bonds and its pairing window's time left. [`advertise`] gives them to TrouBLE,
+/// at once while it advertises ([`accept`]) and else once the central goes, and [`revoke`]
+/// disconnects a central whose bond they dropped.
 pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32) {
     let ble = &shared.ble;
     let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
@@ -436,20 +446,45 @@ pub fn counters(shared: &Shared) -> BleCounters {
     counters
 }
 
-/// Send the credit, the expected offset less the stream bytes held, when it has moved and is due
-/// or `now`. Nothing goes before the P4 has named a first offset.
+/// Send the credit when it has moved and is due or `now`. Nothing goes before the P4 has named a
+/// first offset.
 fn credit(shared: &Shared, now: bool) {
     let ble = &shared.ble;
-    let Some(expected) = ble.inflow.get().expected() else { return };
-    let accounted = expected.wrapping_sub(ble.outbox.borrow().stream_held() as u32);
+    let Some(accounted) = accounted(ble) else { return };
     // A position the P4 has never heard is owed in full.
     let owed = ble.credited.get().map_or(u32::MAX, |credited| accounted.wrapping_sub(credited));
     let due = now || owed >= CREDIT_EVERY_BYTES || ble.credited_at.get().elapsed() >= CREDIT_EVERY;
     if owed > 0 && due {
-        ble.credited.set(Some(accounted));
-        ble.credited_at.set(Instant::now());
-        shared.push(&Up::Credit { accounted });
+        send_credit(shared, accounted);
     }
+}
+
+/// Send the credit again once [`STATE_EVERY`] has passed since the last, while a central is
+/// subscribed and the P4 has named a first offset, so a lost credit cannot leave the P4's window
+/// shut. The P4's `on_credit` sets the position it already holds and wakes its writer, so a
+/// repeat changes nothing there.
+pub fn repeat_credit(shared: &Shared) {
+    let ble = &shared.ble;
+    if !ble.subscribed() || ble.credited_at.get().elapsed() < STATE_EVERY {
+        return;
+    }
+    if let Some(accounted) = accounted(ble) {
+        send_credit(shared, accounted);
+    }
+}
+
+/// The credit: the expected offset less the stream bytes held, or `None` before the P4 has named
+/// a first offset.
+fn accounted(ble: &Ble) -> Option<u32> {
+    let expected = ble.inflow.get().expected()?;
+    Some(expected.wrapping_sub(ble.outbox.borrow().stream_held() as u32))
+}
+
+fn send_credit(shared: &Shared, accounted: u32) {
+    let ble = &shared.ble;
+    ble.credited.set(Some(accounted));
+    ble.credited_at.set(Instant::now());
+    shared.push(&Up::Credit { accounted });
 }
 
 /// Set the link's state, and tell the P4 if it changed. A change of subscription clears the
@@ -510,13 +545,7 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    join3(
-        run_host(&mut runner),
-        advertise(&stack, &mut peripheral, mac, shared),
-        follow_bonds(&stack, shared),
-    )
-    .await
-    .0
+    join(run_host(&mut runner), advertise(&stack, &mut peripheral, mac, shared)).await.0
 }
 
 /// Run TrouBLE's host, and restart the C6 if it ever stops.
@@ -580,7 +609,7 @@ async fn advertise(
         ..Default::default()
     };
 
-    // Polled: `bonds_changed` is `follow_bonds`' to wait on, and this runs once, at boot.
+    // Polled: `bonds_changed` is `accept`'s to wait on, and this runs once, at boot.
     let waited = Instant::now();
     while !shared.ble.bonds_heard.get() && waited.elapsed() < BONDS_WAIT {
         Timer::after(BONDS_POLL).await;
@@ -610,7 +639,18 @@ async fn advertise(
                 if !shared.ble.advertising.replace(true) {
                     shared.ble.advertising_started.signal(());
                 }
-                advertiser.accept().await.map_err(BleHostError::BleHost)
+                let Some(accepted) = accept(advertiser, stack, shared).await else {
+                    // The advertisement is dropped, and TrouBLE's runner stops it.
+                    let held = shared.ble.bonds.borrow().len();
+                    shared.log(format_args!(
+                        "Bluetooth stops advertising to load {held} bonds from the P4"
+                    ));
+                    Timer::after(RESOLVING_SETTLE).await;
+                    sync_bonds(stack, shared);
+                    Timer::after(RESOLVING_SETTLE).await;
+                    continue;
+                };
+                accepted.map_err(BleHostError::BleHost)
             }
             Err(err) => Err(err),
         };
@@ -622,43 +662,69 @@ async fn advertise(
                 continue;
             }
         };
-        shared.ble.connected.set(true);
         serve(stack, &conn, server, shared).await;
-        shared.ble.connected.set(false);
         shared.ble.count(|c| {
             c.phy = 0;
             c.interval_us = 0;
         });
         set_state(shared, |state| *state = BleState::default());
-        // The bonds `follow_bonds` held back while the central was connected.
+        // The bonds held back while the central was connected.
         if sync_bonds(stack, shared) {
             Timer::after(RESOLVING_SETTLE).await;
         }
     }
 }
 
-/// Give TrouBLE each bond the P4 sent whenever no central is connected. While one is, the
-/// advertiser applies them once it goes.
-async fn follow_bonds(stack: &BleStack<'_>, shared: &Shared) -> ! {
+/// Wait for a central to connect to `advertiser`'s advertisement, through every `Down::Bonds`
+/// that leaves the P4's bonds as TrouBLE holds them. `None` once one does not: the advertisement
+/// is dropped on return, so TrouBLE stops it and can load its resolving list ([`RESOLVING_SETTLE`]).
+async fn accept<'d>(
+    advertiser: Advertiser<'d, Controller<'_>, DefaultPacketPool>,
+    stack: &BleStack<'_>,
+    shared: &Shared,
+) -> Option<Result<Connection<'d, DefaultPacketPool>, Error>> {
+    // Pinned here, so the same advertisement runs through a `Down::Bonds` that changes nothing.
+    let mut accepting = pin!(advertiser.accept());
     loop {
-        shared.ble.bonds_changed.wait().await;
-        if !shared.ble.connected.get() {
-            sync_bonds(stack, shared);
+        match select(accepting.as_mut(), shared.ble.bonds_changed.wait()).await {
+            Either::First(conn) => return Some(conn),
+            Either::Second(()) if bonds_differ(stack, shared) => return None,
+            Either::Second(()) => {}
         }
     }
 }
 
+/// Whether TrouBLE's bonds differ from the P4's.
+fn bonds_differ(stack: &BleStack<'_>, shared: &Shared) -> bool {
+    let want = shared.ble.bonds.borrow();
+    stack.with_bond_information(|held| {
+        held.iter().any(|bond| unwanted(bond, &want))
+            || want.iter().any(|record| lacks(held, &bond_information(record)))
+    })
+}
+
+/// Whether TrouBLE's `bond` is one the P4's `want` does not hold.
+fn unwanted(bond: &BondInformation, want: &Bonds) -> bool {
+    let addr = bond_addr(&bond.identity);
+    bond.is_bonded && !want.iter().any(|kept| kept.addr == addr)
+}
+
+/// Whether TrouBLE's `held` bonds lack `info`, or hold it with another key.
+fn lacks(held: &[BondInformation], info: &BondInformation) -> bool {
+    !held.iter().any(|bond| {
+        bond.is_bonded && bond.identity.addr == info.identity.addr && bond.ltk == info.ltk
+    })
+}
+
 /// Make TrouBLE's bonds the P4's: drop each it holds that the P4 does not, and add each the P4
-/// holds that it lacks or holds with another key. Returns whether anything changed.
+/// holds that it lacks or holds with another key. Returns whether anything changed. Called only
+/// while TrouBLE is not advertising ([`RESOLVING_SETTLE`]).
 fn sync_bonds(stack: &BleStack<'_>, shared: &Shared) -> bool {
     let want = shared.ble.bonds.borrow().clone();
     let mut gone: wartui_proto::heapless::Vec<Identity, BONDS> = wartui_proto::heapless::Vec::new();
     stack.with_bond_information(|held| {
-        for bond in held.iter().filter(|bond| bond.is_bonded) {
-            let addr = bond_addr(&bond.identity);
-            if !want.iter().any(|kept| kept.addr == addr) {
-                let _ = gone.push(bond.identity);
-            }
+        for bond in held.iter().filter(|bond| unwanted(bond, &want)) {
+            let _ = gone.push(bond.identity);
         }
     });
     let mut changed = !gone.is_empty();
@@ -667,12 +733,7 @@ fn sync_bonds(stack: &BleStack<'_>, shared: &Shared) -> bool {
     }
     for record in &want {
         let info = bond_information(record);
-        let held = stack.with_bond_information(|held| {
-            held.iter().any(|bond| {
-                bond.is_bonded && bond.identity.addr == info.identity.addr && bond.ltk == info.ltk
-            })
-        });
-        if held {
+        if !stack.with_bond_information(|held| lacks(held, &info)) {
             continue;
         }
         changed = true;
@@ -728,6 +789,8 @@ struct Session {
     bondable: bool,
     /// The bond the central lost and is pairing again to replace, inside the window.
     lost: Cell<Option<BondAddr>>,
+    /// The P4's bonds have held the central's since it connected or last paired ([`revoke`]).
+    listed: Cell<bool>,
     /// The central's address, in display order, for the log.
     peer: Mac,
 }
@@ -760,6 +823,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         connected_at: Instant::now(),
         bondable: shared.ble.window_open(),
         lost: Cell::new(None),
+        listed: Cell::new(false),
         peer: bond_addr(&raw.peer_identity()).mac(),
     };
     let window = if session.bondable { "open" } else { "closed" };
@@ -797,12 +861,31 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
             shared.log(format_args!("Bluetooth interval {min}-{max} us not requested: {err:?}"));
         }
     }
-    select3(
+    select4(
         events(conn, server, &session, shared),
         notify(conn, server, shared),
         deadline(conn, &session, shared),
+        revoke(conn, &session, shared),
     )
     .await;
+}
+
+/// Disconnect the central once the P4's bonds stop holding its bond, as after a `ClearBonds`, so
+/// a host that forgot the bridge is not served on the bond TrouBLE still holds. The bond counts
+/// only once the P4's list has held it ([`Session`]'s `listed`): a central that has just paired
+/// holds its bond in TrouBLE before the P4 echoes it back, and a `Down::Bonds` sent in that gap
+/// lacks it. A central whose identity matches no record is never disconnected here.
+async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
+    loop {
+        let addr = bond_addr(&conn.raw().peer_identity());
+        if shared.ble.bonds.borrow().iter().any(|kept| kept.addr == addr) {
+            session.listed.set(true);
+        } else if session.listed.get() {
+            kick(conn, session, shared, "its bond was cleared");
+            core::future::pending::<()>().await;
+        }
+        shared.ble.bonds_changed.wait().await;
+    }
 }
 
 /// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`]
@@ -932,6 +1015,8 @@ fn paired(
         return;
     };
     shared.ble.count(|c| c.pairings = c.pairings.wrapping_add(1));
+    // A new bond, which the P4's list holds only once it echoes it back.
+    session.listed.set(false);
     if let Some(old) = session.lost.take() {
         shared.push(&Up::BondRemoved(old));
     }
