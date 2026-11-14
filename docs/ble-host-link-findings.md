@@ -139,6 +139,33 @@ no prompt.
 | `saturate`, 30 s | 126.6 KB/s read by the host, 128.4 KB/s credited. Nothing evicted or lost |
 | 500-record burst | Drained in 4.7 s, at the lower of the two rate levels. Nothing evicted or lost |
 
+## After a third review's fixes
+
+`38e896d` changes the P4's host bulk ring: it copies a frame in two pieces, where it divided once
+for every byte. The bench image with the change (`bench/ble-load` at `e89e843`) and the one before
+it (`797882a`) ran in turn on D0:1C, `saturate` for 60 s over Bluetooth and 20 s over USB each
+time. Three Bluetooth runs on the image with the change came first, at 144.5, 144.2 and
+143.7 KB/s.
+
+| Image | Bluetooth, read by the host | USB, read by the host |
+| --- | --- | --- |
+| Before | 144.3 KB/s | 389.1 KB/s |
+| After | 144.2 KB/s | 392.3 KB/s |
+| Before | 144.3 KB/s | 389.1 KB/s |
+| After | 144.3 KB/s | 392.2 KB/s |
+
+- **The change costs nothing and gains 0.8% over USB.** Bluetooth is bound by the radio, not by
+  the P4.
+- **Every run here held the upper of the two rate levels,** on both images: 144 KB/s
+  throughout, and no 2 s window under 131 KB/s in seven Bluetooth runs. The first bench's
+  127 KB/s runs mixed both levels. So the level lasts across runs and does not follow the build.
+- **Every missing record was again one the P4 evicted.** The image after the change evicted 1 to 8
+  records in five of its seven runs, and the one before it none in four. The first bench's runs
+  of the earlier image evicted 2, 10 and 2.
+- A run through a forced disconnect and a USB takeover on the image after the change was served
+  again 2.1 s after the disconnect and 15.06 s after the takeover. It lost the 33 frames the nodes
+  sent during the takeover, one sighting batch among them (inferred from when its gap showed).
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -155,6 +182,7 @@ no prompt.
   dropped its own bond.
 - **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
   stops under sustained writes toward the bridge.
-- **Why the saturated rate moves between two levels.**
+- **Why the saturated rate moves between two levels.** It is not the build: both images held the
+  upper level through a later session of runs.
 - **Why a first connection sometimes times out.**
 - **macOS.** The transport builds there and is untested.
