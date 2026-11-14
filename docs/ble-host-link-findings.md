@@ -166,6 +166,27 @@ time. Three Bluetooth runs on the image with the change came first, at 144.5, 14
   again 2.1 s after the disconnect and 15.06 s after the takeover. It lost the 33 frames the nodes
   sent during the takeover, one sighting batch among them (inferred from when its gap showed).
 
+## After a fourth review's fixes
+
+`b25d52d` changes the C6 three ways: it stops its advertisement to apply a bond change, it
+disconnects a connected central whose bond the P4 dropped, and it repeats its credit every second.
+The checks ran on `bench/ble-load` on top of it.
+
+| Check | Result |
+| --- | --- |
+| `wartui bluetooth forget --link usb` while the PC is connected over Bluetooth | The C6 disconnected the PC as the P4 cleared the bonds, reason `0x16`, and counted one `unbonded_kicks` |
+| `wartui bluetooth forget --link usb` with no central connected | The C6 stopped advertising, loaded the empty list, and advertised again |
+| `wartui bluetooth pair` after each | Paired and bonded in 18 s both times. The new bond's echo from the P4 disconnected nothing |
+| `wartui status --link bluetooth`, by the remembered address and by a scan for `D0:1C` | 3.0 s each |
+| C6 reset alone, then `wartui status --link bluetooth` | Answered in 3.0 s, bonded |
+| `saturate`, 30 s | 143.1 KB/s read by the host, 145.0 KB/s credited. The 4 missing records were 4 evictions |
+| A run through a forced disconnect and a USB takeover | Served again 2.1 s after the disconnect and 15.05 s after the takeover |
+
+The bond change that matters most did not run: a bond that reaches the C6 while it advertises, for
+a central on a resolvable private address. This PC uses a fixed address, so the resolving list
+plays no part in recognizing it. That case rests on reading TrouBLE 0.8.0, which loads its
+resolving list only while not advertising.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -180,6 +201,8 @@ time. Three Bluetooth runs on the image with the change came first, at 144.5, 14
   spike, which the bridge no longer has, so each must forget the bridge and pair again.
 - **A central the bridge holds no bond for, other than this PC.** The check above is a PC that
   dropped its own bond.
+- **A bond that reaches the C6 while it advertises, for a central on a resolvable private
+  address.** It needs a phone and a bench build that delays the P4's bonds.
 - **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
   stops under sustained writes toward the bridge.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
