@@ -124,7 +124,7 @@ fn peaks_text(peak: &PeakSummary, names: &NodeNames) -> String {
 
 /// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
 /// `lost on USB`, `lost on Bluetooth` in a capture over Bluetooth, is approximate to the bridge's
-/// queued frames.
+/// queued frames, and includes what the bridge received while it did not serve this host.
 fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 

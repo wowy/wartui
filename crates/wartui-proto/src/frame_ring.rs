@@ -151,9 +151,10 @@ impl<S: AsRef<[u8]> + AsMut<[u8]>> FrameRingIn<S> {
         let frame_len = self.head_len();
         let n = out.len().min(frame_len - self.read_off);
         let from = self.wrap(self.head + PREFIX + self.read_off);
-        for (i, byte) in out[..n].iter_mut().enumerate() {
-            *byte = self.buf.as_ref()[self.wrap(from + i)];
-        }
+        let buf = self.buf.as_ref();
+        let first = n.min(buf.len() - from);
+        out[..first].copy_from_slice(&buf[from..from + first]);
+        out[first..n].copy_from_slice(&buf[..n - first]);
         self.read_off += n;
         let finished = self.read_off == frame_len;
         if finished {
@@ -168,15 +169,20 @@ impl<S: AsRef<[u8]> + AsMut<[u8]>> FrameRingIn<S> {
         (self.len > 0).then(|| self.head_len())
     }
 
+    /// `index` folded into the ring. Every caller passes one below twice the capacity, so one
+    /// subtraction folds it. Never called on a ring of no bytes, which holds no frame.
     fn wrap(&self, index: usize) -> usize {
-        index % self.capacity()
+        let capacity = self.capacity();
+        debug_assert!(index < 2 * capacity, "ring index {index} past twice {capacity}");
+        if index >= capacity { index - capacity } else { index }
     }
 
+    /// Copy `bytes` in at `at`, below the capacity, in two pieces when they cross the end.
     fn write(&mut self, at: usize, bytes: &[u8]) {
-        for (i, &byte) in bytes.iter().enumerate() {
-            let slot = self.wrap(at + i);
-            self.buf.as_mut()[slot] = byte;
-        }
+        let buf = self.buf.as_mut();
+        let first = bytes.len().min(buf.len() - at);
+        buf[at..at + first].copy_from_slice(&bytes[..first]);
+        buf[..bytes.len() - first].copy_from_slice(&bytes[first..]);
     }
 
     /// The oldest frame's body length.

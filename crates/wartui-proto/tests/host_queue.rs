@@ -166,3 +166,12 @@ fn host_queue_classifies_message_when_deciding_priority() {
     let err = BridgeToHost::Error { message: Default::default() };
     assert!(is_priority(&err));
 }
+
+#[test]
+fn host_queue_reports_bulk_capacity_when_bulk_is_set() {
+    let mut queue = HostQueueIn::<16, &'static mut [u8]>::with_bulk(&mut [][..]);
+    assert_eq!(queue.bulk_capacity(), 0);
+    assert!(!queue.push(&[1u8; 5], false));
+    queue.set_bulk(vec![0; 64].leak());
+    assert_eq!(queue.bulk_capacity(), 64);
+}

@@ -106,6 +106,15 @@ pub enum Link {
     Bluetooth,
 }
 
+/// The `--link` flag, flattened into every command that reaches the bridge.
+#[derive(Debug, Clone, Copy, Default, clap::Args)]
+pub struct LinkFlag {
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK")]
+    pub link: Option<Link>,
+}
+
 impl From<Link> for wartui_core::store::HostLink {
     fn from(link: Link) -> Self {
         match link {

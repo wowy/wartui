@@ -43,15 +43,21 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
+#[cfg(any(target_os = "linux", test))]
+use wartui_bridge::DisconnectCause;
 use wartui_bridge::serial::{self, BridgeSpec, Probed};
-use wartui_bridge::{DisconnectCause, LinkEvent, LinkHandle};
+use wartui_bridge::{LinkEvent, LinkHandle};
+#[cfg(any(target_os = "linux", test))]
+use wartui_proto::link::HOST_SILENCE_SECS;
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, HostToBridge, PAIR_WINDOW_SECS, PairWindow,
 };
 use wartui_proto::mac::{self, Mac};
 
 use crate::config::Link;
-use crate::status::{bonds_text, pairing_text, wait_for_ready, wait_for_status};
+#[cfg(any(target_os = "linux", test))]
+use crate::status::bonds_text;
+use crate::status::{pairing_text, wait_for_ready, wait_for_status};
 
 /// How long the bridge has to answer a status request.
 const REPLY_TIMEOUT: Duration = crate::CONNECT_NOTICE_AFTER;
@@ -101,10 +107,8 @@ struct ForgetArgs {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
-    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
-    /// `usb`. A `--bridge` path is always USB.
-    #[arg(long, value_name = "LINK")]
-    link: Option<Link>,
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -214,6 +218,7 @@ async fn pair(args: PairArgs) -> Result<()> {
 }
 
 /// What `pair` does first with a bridge this PC is `paired` with or not, given `--fresh`.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum First {
     /// Check that the bridge keeps the pairing, and pair again only if it refuses it.
@@ -224,6 +229,7 @@ enum First {
     Pair,
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn first_step(paired: bool, fresh: bool) -> First {
     match (paired, fresh) {
         (true, false) => First::Check,
@@ -234,6 +240,7 @@ fn first_step(paired: bool, fresh: bool) -> First {
 
 /// The line that ends a failure to prove a pairing BlueZ held: the escape when the bridge has
 /// forgotten this PC, with the bridge `name` advertises.
+#[cfg(any(target_os = "linux", test))]
 fn fresh_hint(name: &str) -> String {
     let octets = name.strip_prefix(wartui_proto::ble::NAME_PREFIX).unwrap_or("XX:YY");
     format!(
@@ -289,12 +296,14 @@ async fn bluetooth_status(link: &mut LinkHandle) -> Result<BluetoothStatus> {
 }
 
 /// What `pair` says once the bridge keeps the bond.
+#[cfg(any(target_os = "linux", test))]
 fn paired_line(name: &str, status: &BluetoothStatus) -> String {
     format!("{name} paired and bonded, {}", bonds_text(status.bonds))
 }
 
 /// Why a pairing BlueZ could not finish failed, and what to do: the bridge did not refuse it, so
 /// the next try may well succeed.
+#[cfg(any(target_os = "linux", test))]
 fn pair_failed(name: &str, why: &str) -> String {
     format!(
         "could not pair with {name} (BlueZ: {why}). The bridge may be starting or out of range; \
@@ -304,6 +313,7 @@ fn pair_failed(name: &str, why: &str) -> String {
 
 /// Why the bridge did not keep a pairing, and what to do: with the window opened over USB, a
 /// rejection; without, most likely a closed window.
+#[cfg(any(target_os = "linux", test))]
 fn not_kept(window: &Window, why: &str) -> String {
     match window {
         Window::Opened { .. } => format!(
@@ -319,6 +329,7 @@ fn not_kept(window: &Window, why: &str) -> String {
 }
 
 /// What one link event says while `pair` waits for the bridge to serve this PC.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum Served<'a> {
     /// The bridge announced itself.
@@ -334,6 +345,7 @@ enum Served<'a> {
 }
 
 /// What `event` says of the proof.
+#[cfg(any(target_os = "linux", test))]
 fn served_by(event: &LinkEvent) -> Served<'_> {
     match event {
         LinkEvent::Connected(_) => Served::Yes,
@@ -347,6 +359,7 @@ fn served_by(event: &LinkEvent) -> Served<'_> {
 /// Why `pair` stops without removing anything, when the bridge `name` did not serve this PC: a
 /// USB host may hold it, and a link that `dropped` as the bridge drops an unbonded PC proves
 /// nothing either way.
+#[cfg(any(target_os = "linux", test))]
 fn unserved(name: &str, dropped: bool) -> String {
     let dropped = if dropped {
         ", and dropped it before serving it as it drops a PC it holds no bond for, which a P4 \
@@ -356,8 +369,8 @@ fn unserved(name: &str, dropped: bool) -> String {
     };
     format!(
         "{name} did not serve this PC over Bluetooth{dropped}. A USB host may hold the bridge: \
-         it serves this PC 15 s after its USB link goes quiet. Nothing was removed; run \
-         `wartui bluetooth pair` again.\n{}",
+         it serves this PC {HOST_SILENCE_SECS} s after its USB link goes quiet. Nothing was \
+         removed; run `wartui bluetooth pair` again.\n{}",
         fresh_hint(name)
     )
 }
@@ -375,7 +388,7 @@ mod linux {
     use wartui_bridge::bluez::{self, BluezError, Device};
     use wartui_bridge::serial::BridgeSpec;
     use wartui_proto::ble::NAME_PREFIX;
-    use wartui_proto::link::BluetoothStatus;
+    use wartui_proto::link::{BluetoothStatus, HOST_SILENCE_SECS};
     use wartui_proto::mac::Mac;
 
     use super::{
@@ -383,8 +396,9 @@ mod linux {
         served_by, unserved,
     };
 
-    /// How long the proof waits for the bridge to serve this PC: a connect, and the 15 s a USB
-    /// host that just opened the window holds the bridge for, with room.
+    /// How long the proof waits for the bridge to serve this PC: a connect, and the
+    /// [`HOST_SILENCE_SECS`] a USB host that just opened the window holds the bridge for, with
+    /// room.
     const PROVE_WITHIN: Duration = Duration::from_secs(40);
 
     /// What the bridge said of this PC once connected.
@@ -494,7 +508,8 @@ mod linux {
         let mut link = BleTransport::with_spec(spec).start()?;
         if matches!(window, Window::Opened { .. }) {
             println!(
-                "waiting for the bridge to serve this PC, up to 15 s after its USB link went quiet"
+                "waiting for the bridge to serve this PC, up to {HOST_SILENCE_SECS} s after its \
+                 USB link went quiet"
             );
         }
         let mut dropped = false;
@@ -608,6 +623,7 @@ async fn pair_with(
 
 /// Whether a device the OS lists, named `listed_name` at `listed_address`, is the bridge that
 /// advertises `name`, or sits at the Bluetooth address remembered for it.
+#[cfg(any(target_os = "linux", test))]
 fn is_this_bridge(
     listed_name: Option<&str>,
     listed_address: &str,
@@ -619,9 +635,10 @@ fn is_this_bridge(
 
 async fn forget(args: ForgetArgs) -> Result<()> {
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
-    let over = crate::link_for(args.link, args.bridge.as_deref(), remembered.link)?;
+    let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), remembered.link)?;
     let (mut link, info) =
-        crate::connect_one(args.bridge.as_deref(), args.link, args.config.as_deref()).await?;
+        crate::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
+            .await?;
     let name = wartui_bridge::ble::advertised_name(&BridgeSpec::Mac(info.mac)).unwrap_or_default();
     link.send_bulk(HostToBridge::ClearBonds).context("queueing the request")?;
     println!("clearing every Bluetooth bond on bridge {}", mac::full(&info.mac));

@@ -39,7 +39,7 @@ pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::PairWindow;
+use wartui_proto::link::{HostOwner, PairWindow};
 use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
@@ -491,7 +491,9 @@ pub struct CaptureInfo {
     pub link: Option<HostLink>,
 }
 
-/// The link a host reaches its bridge over, as `capture.link` stores it.
+/// The link a host reaches its bridge over, as `capture.link` stores it. Its tokens are its
+/// [`HostOwner`]'s, so `capture.link` and `bridge_bluetooth.owner` compare equal for the same
+/// host; it has no `none`, since a capture's host always had a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostLink {
     /// The board's CH343, over USB.
@@ -501,23 +503,25 @@ pub enum HostLink {
 }
 
 impl HostLink {
-    /// The `capture.link` token.
+    /// The owner of the P4's host queue while this link's host holds it.
+    #[must_use]
+    pub const fn owner(self) -> HostOwner {
+        match self {
+            Self::Usb => HostOwner::Usb,
+            Self::Bluetooth => HostOwner::Bluetooth,
+        }
+    }
+
+    /// The `capture.link` token: [`HostOwner::name`].
     #[must_use]
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::Usb => "usb",
-            Self::Bluetooth => "bluetooth",
-        }
+        self.owner().name()
     }
 
     /// The link a `capture.link` token names, or `None` for a token [`Self::name`] never writes.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "usb" => Some(Self::Usb),
-            "bluetooth" => Some(Self::Bluetooth),
-            _ => None,
-        }
+        [Self::Usb, Self::Bluetooth].into_iter().find(|link| link.name() == name)
     }
 }
 

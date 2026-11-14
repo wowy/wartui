@@ -67,10 +67,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
-    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
-    /// `usb`. A `--bridge` path is always USB.
-    #[arg(long, value_name = "LINK")]
-    link: Option<crate::config::Link>,
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -87,7 +85,7 @@ pub async fn run(args: Args) -> Result<()> {
     // board by path: the reboot leaves its CH343 where it was.
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
     let named = args.bridge.as_deref();
-    if super::link_for(args.link, named, remembered.link)? == Link::Bluetooth {
+    if super::link_for(args.link_flag.link, named, remembered.link)? == Link::Bluetooth {
         return over_bluetooth(named, &remembered).await;
     }
     let board = board_to_reset(named, &remembered, discover_bridges, |found| async move {
@@ -147,7 +145,7 @@ async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge)
         Some(info) => info.uptime_ms,
         None => bail!(
             "{}\nOver USB, `wartui reset` reaches a bridge that answers nothing.",
-            super::no_bridge_notice(Some(&board), Link::Bluetooth)
+            super::no_bridge_notice(Some(&board), Link::Bluetooth).await
         ),
     };
     link.send_urgent(HostToBridge::Reset).context("queueing the reset")?;

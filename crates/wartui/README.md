@@ -202,7 +202,9 @@ bridge replays after a reconnect counts as the burst it was on the link. Where t
 back, every window restarts and the `peak` line says how many times `wall clock reversed`; a peak
 around the step is a lower bound.
 
-Counts follow the assumptions below; `lost on USB` and `lost on Bluetooth` are approximate. The capture's first bridge
+Counts follow the assumptions below; `lost on USB` and `lost on Bluetooth` are approximate, and
+include what the bridge received while it did not serve this host: a link that was down, or over
+Bluetooth a USB host holding the bridge. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
 is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
 `store dropped`, `queue` drops, `host_uart_errors` over USB and, on a Pi, the `health` counts. A `queue` peak is

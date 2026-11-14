@@ -34,16 +34,19 @@ use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, Sto
 use wartui_core::ubx;
 
 #[derive(ClapArgs, Debug)]
+// `run` adds a sentence to the shared `--link` help, which clap holds without its final period.
+#[command(mut_arg("link", |arg| {
+    let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+    arg.help(format!("{help}. The link a run connects over is saved there"))
+}))]
 pub struct Args {
     /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
     /// if omitted. A board named here that answers is remembered as the bridge.
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
-    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
-    /// `usb`. A `--bridge` path is always USB. The link a run connects over is saved there.
-    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
-    pub(crate) link: Option<crate::config::Link>,
+    #[command(flatten)]
+    pub(crate) link_flag: crate::config::LinkFlag,
 
     /// Read settings from this file instead of the default location
     /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
@@ -57,7 +60,8 @@ pub struct Args {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 
@@ -218,7 +222,7 @@ pub async fn run(args: Args) -> Result<()> {
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
     let memory = crate::memory_of(&config.bridge);
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
-    let over = crate::link_for(args.link, args.bridge.as_deref(), config.bridge.link)?;
+    let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), config.bridge.link)?;
     let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
     let started = now();

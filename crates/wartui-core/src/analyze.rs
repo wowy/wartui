@@ -16,8 +16,14 @@
 //! `received` less the bridge's drops less `host_read` is the frames lost between the bridge's
 //! queue and the host. It is approximate: a status reply is a priority frame and overtakes the
 //! frames queued in the bulk ring, which `rx_count` counts and `host_frames` does not yet. So it is
-//! off by up to the ring's 24 frames at each end, and saturates at 0 when a baseline taken
-//! mid-backlog shows the host reading more than the bridge passed on.
+//! off by the ring's backlog at each end: a few frames on a link that keeps up, and up to the
+//! whole ring behind a burst. It saturates at 0 when a baseline taken mid-backlog shows the host
+//! reading more than the bridge passed on.
+//!
+//! The figure also counts every frame the bridge received while it did not serve this host: a
+//! link that was down, or, over Bluetooth, a USB host holding the bridge. Those frames went to the
+//! other host or to nobody, and the link itself lost none of them. A gap in the status replies
+//! marks such a stretch.
 //!
 //! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and its radio
 //! link's counters. A queue's `peak` is the largest `high_water` any row
@@ -127,8 +133,9 @@ pub struct BridgeLoss {
     /// Frames the host read off the link between the first status reply and the last.
     pub host_read: u64,
     /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
-    /// `host_read`, saturating at 0. Approximate to the 24 frames the bulk ring can queue at each
-    /// end, which a status reply overtakes.
+    /// `host_read`, saturating at 0. Approximate to the bulk ring's backlog at each end, which a
+    /// status reply overtakes, and it includes what the bridge received while it did not serve
+    /// this host. The module documentation has both.
     pub link_lost: u64,
     /// Frames the bridge dropped for being longer than any node sends: somebody else's
     /// traffic, and not in `received`.

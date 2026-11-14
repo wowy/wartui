@@ -130,7 +130,10 @@ const CANCEL_WITHIN: Duration = Duration::from_secs(2);
 const NAME_READS: u8 = 3;
 
 /// How long a subscription waits for its `Ready` before warning that a USB host may hold the
-/// bridge. Past the P4's 15 s handback, so a USB host that just let go is not reported.
+/// bridge. Past the P4's handback ([`HOST_SILENCE_SECS`]), so a USB host that just let go is not
+/// reported.
+///
+/// [`HOST_SILENCE_SECS`]: wartui_proto::link::HOST_SILENCE_SECS
 pub const READY_WARN_AFTER: Duration = Duration::from_secs(20);
 
 /// How often a subscription without a `Ready` asks for one with `Identify`.
@@ -872,7 +875,6 @@ async fn connect(
     let label = label_of(peripheral, transport).await;
     progress!(bridge = %label, "connecting to the bridge over Bluetooth");
 
-    let connected_at = Instant::now();
     if !peripheral.is_connected().await.unwrap_or(false) {
         let connecting = tokio::select! {
             connecting = tokio::time::timeout(CONNECT_WITHIN, peripheral.connect()) => connecting,
@@ -897,6 +899,8 @@ async fn connect(
             }
         }
     }
+    // After the connect, since the C6's unbonded deadline runs from the link coming up.
+    let connected_at = Instant::now();
     let end = serve(adapter, peripheral, transport, plumbing, settled, &label).await;
     let end = match end {
         // The C6 drops an unbonded central about 10 s after it connects, and the timing is all

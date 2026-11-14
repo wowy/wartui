@@ -738,7 +738,8 @@ def bridge(db, ctx):
     # The host's link, as analyze names it: USB in a capture that names none.
     on = "Bluetooth" if ctx.get("link") == "bluetooth" else "USB"
     print(f"  ~lost on {on} {max(0, received - dropped - host_read)} "
-          "(inferred from counters; +/-24 frames at each end)")
+          "(inferred from counters; off by the host-bulk backlog at each end, and it counts "
+          "what the bridge received during any gap in status replies)")
     if oversize:
         print(f"  oversize {oversize} (node records over 1024 bytes; not in received)")
         flag("WARN", "bridge",

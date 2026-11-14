@@ -177,7 +177,7 @@ pub async fn run(args: Args) -> Result<()> {
     let mut link = open(&args)?;
     let info = match tokio::time::timeout(super::CONNECT_NOTICE_AFTER, connected(&mut link)).await {
         Ok(info) => info?,
-        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), Link::Usb)),
+        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), Link::Usb).await),
     };
     let board = info.node_board;
     let named = slots_named(board, &args.nodes).map_err(anyhow::Error::msg)?;

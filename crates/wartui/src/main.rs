@@ -421,6 +421,19 @@ fn open(
     .context("opening the link")
 }
 
+/// Open the simulator, or the bridge `bridge` names over the link [`link_for`] picks, with the
+/// remembered bridge read from `config`. Returns the handle and that link.
+fn open_remembered(
+    bridge: Option<&str>,
+    sim: Option<u8>,
+    flag: Option<Link>,
+    config: Option<&Path>,
+) -> Result<(LinkHandle, Link)> {
+    let saved = config::remembered_bridge(config);
+    let over = link_for(flag, bridge, saved.link)?;
+    Ok((open(bridge, sim, over, memory_of(&saved))?, over))
+}
+
 /// Open the one bridge `named` resolves to, with the remembered bridge read from `config`, and
 /// wait for its `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
 ///
@@ -450,7 +463,7 @@ async fn connect_one(
     };
     match status::wait_for_ready(&mut handle, link, connect_wait(link)).await? {
         Some(info) => Ok((handle, info)),
-        None => anyhow::bail!("{}", no_bridge_notice(named, link)),
+        None => anyhow::bail!("{}", no_bridge_notice(named, link).await),
     }
 }
 
@@ -610,24 +623,20 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 
 /// What to say when no bridge has answered over `link`: over USB, [`silence_notice`] over the
 /// CH343s attached now, where a listing that fails reads as none attached, and the transport
-/// names that failure; over Bluetooth, [`bluetooth_silence_notice`].
-pub fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
+/// names that failure; over Bluetooth, [`bluetooth_silence_text`], asking BlueZ off the runtime
+/// whether this PC is paired ([`unpaired_here`]).
+pub async fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
     match link {
         Link::Usb => silence_notice(bridge, &serial::discover_bridges().unwrap_or_default()),
-        Link::Bluetooth => bluetooth_silence_notice(bridge),
+        Link::Bluetooth => bluetooth_silence_text(bridge, unpaired_here(bridge).await),
     }
 }
 
-/// What to say about a silence over Bluetooth. A scan that found nothing, or a bridge's refusal
-/// of a PC it is not paired with, arrives as the transport's own reason instead; this is a
-/// subscription the bridge has not served.
-fn bluetooth_silence_notice(bridge: Option<&str>) -> String {
-    bluetooth_silence_text(bridge, unpaired_here(bridge))
-}
-
-/// [`bluetooth_silence_notice`], given whether this PC lists the bridge and is not paired with
-/// it. That is then the likeliest cause, and goes first: the bridge drops such a PC about 10 s
-/// after it connects, which can be after this notice.
+/// What to say about a silence over Bluetooth, given whether this PC lists the bridge and is not
+/// paired with it. That is then the likeliest cause, and goes first: the bridge drops such a PC
+/// about 10 s after it connects, which can be after this notice. A scan that found nothing, or a
+/// bridge's refusal of a PC it is not paired with, arrives as the transport's own reason instead;
+/// this is a subscription the bridge has not served.
 fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
     let seconds = connect_wait(Link::Bluetooth).as_secs();
     let where_ = bridge.map_or_else(String::new, |name| format!(" as {name}"));
@@ -645,8 +654,11 @@ fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
         );
     }
     lines.extend([
-        "  - a USB host holds the bridge, which serves Bluetooth again 15s after USB falls silent"
-            .to_owned(),
+        format!(
+            "  - a USB host holds the bridge, which serves Bluetooth again {}s after USB falls \
+             silent",
+            wartui_proto::link::HOST_SILENCE_SECS
+        ),
         "  - the bridge is starting, or out of range".to_owned(),
         "`--log-file` records what the transport tried.".to_owned(),
     ]);
@@ -654,10 +666,17 @@ fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
 }
 
 /// Whether BlueZ lists a bridge `bridge` could name, or any bridge with none named, and this PC
-/// is paired with none of them. False when BlueZ does not answer or lists no such bridge.
+/// is paired with none of them. False when BlueZ does not answer or lists no such bridge. The
+/// read blocks on D-Bus, so it runs off the runtime.
 #[cfg(target_os = "linux")]
-fn unpaired_here(bridge: Option<&str>) -> bool {
-    wartui_bridge::bluez::devices().is_ok_and(|devices| unpaired_among(&devices, bridge))
+async fn unpaired_here(bridge: Option<&str>) -> bool {
+    let bridge = bridge.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        wartui_bridge::bluez::devices()
+            .is_ok_and(|devices| unpaired_among(&devices, bridge.as_deref()))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// [`unpaired_here`], over the `devices` BlueZ lists. A path names no Bluetooth bridge, so it is
@@ -677,7 +696,7 @@ fn unpaired_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>
 
 /// Only BlueZ is asked: elsewhere the OS pairs on the first connection.
 #[cfg(not(target_os = "linux"))]
-fn unpaired_here(_bridge: Option<&str>) -> bool {
+async fn unpaired_here(_bridge: Option<&str>) -> bool {
     false
 }
 
@@ -1018,6 +1037,27 @@ mod tests {
             }
         }
         assert!(parse(["wartui", "--link", "bluetooth"]).is_ok(), "a bare run");
+    }
+
+    #[test]
+    fn cli_parser_refuses_link_when_passed_with_sim() {
+        for command in [
+            ["wartui"].as_slice(),
+            &["wartui", "run"],
+            &["wartui", "status"],
+            &["wartui", "sniff"],
+            &["wartui", "scan"],
+            &["wartui", "scan", "start"],
+            &["wartui", "scan", "stop"],
+        ] {
+            for flags in
+                [["--link", "bluetooth", "--sim"].as_slice(), &["--sim", "2", "--link", "usb"]]
+            {
+                let args: Vec<&str> = command.iter().chain(flags).copied().collect();
+                let Err(error) = parse(args.as_slice()) else { panic!("{args:?} parsed") };
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{args:?}");
+            }
+        }
     }
 
     #[test]

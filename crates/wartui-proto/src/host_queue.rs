@@ -145,6 +145,12 @@ impl<const P: usize, S: AsRef<[u8]> + AsMut<[u8]>> HostQueueIn<P, S> {
         filled
     }
 
+    /// How many bytes the bulk ring holds: 0 over an empty slice, which refuses every bulk frame.
+    #[must_use]
+    pub fn bulk_capacity(&self) -> usize {
+        self.bulk.capacity()
+    }
+
     /// Both rings' depth, deepest point and drops, priority first.
     #[must_use]
     pub fn stats(&self) -> [QueueStat; 2] {

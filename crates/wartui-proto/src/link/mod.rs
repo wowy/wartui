@@ -302,6 +302,10 @@ pub enum HostToBridge {
 /// How long [`HostToBridge::OpenPairing`] opens the pairing window.
 pub const PAIR_WINDOW_SECS: u16 = 120;
 
+/// How long after the last USB frame the P4 stops serving USB and hands the queue back to a
+/// waiting Bluetooth host: three of the engine's 5 s status polls.
+pub const HOST_SILENCE_SECS: u16 = 15;
+
 /// Events and replies the bridge sends to the host.
 // Unboxed for the reason `HostToBridge` gives.
 #[allow(clippy::large_enum_variant)]

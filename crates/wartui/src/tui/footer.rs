@@ -15,7 +15,7 @@ use wartui_bridge::{BridgeInfo, DisconnectCause};
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::link::USB_TOOK_BRIDGE;
+use wartui_proto::link::{HOST_SILENCE_SECS, USB_TOOK_BRIDGE};
 use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
@@ -96,8 +96,9 @@ pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
 /// Why the link is down when a USB host took the bridge from this Bluetooth host, or `None`.
 /// The line is not wrapped, so it stays short of an 80-column terminal.
 pub(super) fn takeover_line(snapshot: &Snapshot) -> Option<String> {
-    taken_by_usb(snapshot)
-        .then(|| format!("  link down: {USB_TOOK_BRIDGE}; back 15 s after USB goes quiet"))
+    taken_by_usb(snapshot).then(|| {
+        format!("  link down: {USB_TOOK_BRIDGE}; back {HOST_SILENCE_SECS} s after USB goes quiet")
+    })
 }
 
 /// Whether the link is down because a USB host took the bridge.

@@ -163,9 +163,10 @@ another image or runs past its end, the P4 answers `Undelivered` `NoImage`.
 
 The cache takes up to 2 MB, a node's app slot, of the board's 32 MB of PSRAM, and the host bulk
 ring the next 1 MB (§ "Queue sizes"). A P4 whose PSRAM does not map refuses every upload, runs its
-bulk ring over no bytes, and logs `no PSRAM: no node image cache, and the host bulk ring holds
-nothing` to the first host it announces to; everything else runs. The cache is dropped when a host
-lets go of the queue.
+bulk ring over no bytes, and reports the error `no PSRAM: no node image cache, and the host bulk
+ring holds nothing` to the first host it announces to; everything else runs. One whose PSRAM the
+cache takes whole reports `too little PSRAM: the host bulk ring holds nothing` instead. The cache is
+dropped when a host lets go of the queue.
 
 ## The bundled radio image
 

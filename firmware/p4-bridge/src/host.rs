@@ -65,8 +65,8 @@ use wartui_firmware::reboot;
 use wartui_proto::host_owner::{Effect, Input};
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    FrameAccumulator, HOST_BAUD, HostOwner, HostToBridge, LoopPhase, MAX_HOST_FRAME, decode_frame,
-    encode_frame,
+    FrameAccumulator, HOST_BAUD, HOST_SILENCE_SECS, HostOwner, HostToBridge, LoopPhase,
+    MAX_HOST_FRAME, decode_frame, encode_frame,
 };
 use wartui_proto::radio_link::Down;
 
@@ -77,7 +77,7 @@ use crate::{Shared, now_ms};
 pub const RX_LEN: usize = 4032;
 
 /// How long the gate stays open without a host frame: three of the engine's 5 s status polls.
-pub const HOST_SILENCE: Duration = Duration::from_secs(15);
+pub const HOST_SILENCE: Duration = Duration::from_secs(HOST_SILENCE_SECS as u64);
 
 /// How long a `GetStatus` waits for the C6's counters before answering without fresh ones.
 const STATUS_WAIT: Duration = Duration::from_millis(50);

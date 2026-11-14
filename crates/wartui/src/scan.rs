@@ -74,10 +74,8 @@ struct Target {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
-    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
-    /// `usb`. A `--bridge` path is always USB.
-    #[arg(long, value_name = "LINK", conflicts_with = "sim")]
-    link: Option<crate::config::Link>,
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -91,7 +89,8 @@ struct Target {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 }
@@ -130,8 +129,12 @@ pub async fn run(args: Args) -> Result<()> {
 /// The bridge `target` names, connected and announced.
 async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeInfo)> {
     if target.sim.is_none() {
-        return super::connect_one(target.bridge.as_deref(), target.link, target.config.as_deref())
-            .await;
+        return super::connect_one(
+            target.bridge.as_deref(),
+            target.link_flag.link,
+            target.config.as_deref(),
+        )
+        .await;
     }
     let mut link = super::open(None, target.sim, crate::config::Link::Usb, super::memory(None))?;
     let info = crate::status::wait_for_ready(&mut link, crate::config::Link::Usb, REPLY_TIMEOUT)

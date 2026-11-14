@@ -40,10 +40,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
-    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
-    /// `usb`. A `--bridge` path is always USB.
-    #[arg(long, value_name = "LINK")]
-    link: Option<crate::config::Link>,
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -54,7 +52,8 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     let (mut link, info) =
-        super::connect_one(args.bridge.as_deref(), args.link, args.config.as_deref()).await?;
+        super::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
+            .await?;
     has_fan(info.node_board).map_err(anyhow::Error::msg)?;
 
     let duty = args.duty.and_then(FanDuty::new);

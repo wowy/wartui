@@ -118,7 +118,9 @@ pub fn on_removed(shared: &Shared, addr: BondAddr) {
 pub fn open_window(shared: &Shared) {
     shared.bonds.opened_at.set(Some(now_ms()));
     send(shared);
-    shared.push_log("Bluetooth pairing window open for 120 s");
+    let mut line = LogStr::new();
+    let _ = write!(line, "Bluetooth pairing window open for {} s", WINDOW_MS / 1000);
+    shared.push_log(&line);
 }
 
 /// A host's `ClearBonds`: drop every bond, which opens the window until one is stored.
