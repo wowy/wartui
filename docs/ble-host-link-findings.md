@@ -13,8 +13,7 @@ generator to the P4, a `wartui ble-bench` command that reads the load through th
 transport, a command that resets the C6 alone, and a C6 build setting that discards every Nth
 `Down::HostBytes`.
 
-No phone ran. The iPad and the Pixel are listed under
-[What this does not settle](#what-this-does-not-settle).
+No phone ran that day. The Pixel and the iPad ran on 2026-11-15: see [The phones](#the-phones).
 
 ## Results
 
@@ -187,9 +186,49 @@ a central on a resolvable private address. This PC uses a fixed address, so the 
 plays no part in recognizing it. That case rests on reading TrouBLE 0.8.0, which loads its
 resolving list only while not advertising.
 
+## The phones
+
+Measured on 2026-11-15 on D0:1C, on `bench/ble-load` at `368d1af`, which sits on `b25d52d`. A
+Pixel 8 and an iPad mini each ran nRF Connect. Each forgot the bridge first, since its bond dated
+from the spike and the bridge no longer held it. A reset over USB opened the pairing window. The
+bridge held the PC's bond throughout.
+
+| Check | Pixel 8 | iPad mini |
+| --- | --- | --- |
+| Pairing in the window | Bonded. The phone asked twice | Bonded on the first tap |
+| Link | MTU 247, 2M PHY, 48.75 ms | MTU 247, 2M PHY, 30 ms |
+| `saturate`, two 75 s intervals | 73.8 and 75.8 KB/s | 38.7 and 38.9 KB/s |
+| The spike's rate, encrypted | 67.9 KB/s | 38.2 KB/s |
+| Lost on the link | 0 resynced bytes, 0 dropped writes | 0 resynced bytes, 0 dropped writes |
+| Evicted from the full ring | 2 records | none |
+| No bond, window closed | | Dropped. It never held the bridge |
+
+Each rate is the credit's advance between two `ble-bench stats` reads over USB in mid-run, over
+the time the phone held the bridge. A read takes the bridge for 15 s, so each run passed through
+several takeovers. The phone was served again after each one between the reads, with no prompt.
+
+- **The Pixel drains 9 to 12% more than on the spike, and the iPad what it drained there.** Each
+  phone chose the interval it chose on the spike.
+- **The Pixel's two prompts were one pairing.** The bridge counted 1 pairing, none failed, no
+  unbonded kick and no disconnect. [`c6-ble-pairing-findings.md`](c6-ble-pairing-findings.md) put
+  its two taps down to the 10 s deadline. The deadline is 30 s here and nothing failed, so the
+  second prompt is the phone's own.
+- **The iPad with no bond and the window closed** raised its own pairing prompt, and the link
+  dropped as the prompt was accepted. The bridge counted one `unbonded_kicks`, reason `0x16`, and
+  no failed pairing. It stored no bond, and the iPad never held the bridge.
+- **An idle phone receives 2.3 KB/s.** ~1.7 KB/s of it is the bridge's GPS receiver's bytes (from
+  a 20 s sniff over USB), and the rest the ten nodes' heartbeats, their scan stopped. The stream
+  starts at the subscription: the bridge queues nothing while no host holds it.
+- **The iPad's first write of the load command started nothing,** and no counter on the bridge
+  says why. The same bytes written again started the load. The likely cause is the write's type
+  in nRF Connect, or a write ahead of the subscription (inferred, not tested).
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
+- The Pixel and the iPad pair from their own prompt in the window, and drain at the spike's rates
+  or above.
+- The bridge drops a central it holds no bond for outside the window, a phone as well as the PC.
 - A lost P4→C6 packet costs the frames it cut and nothing else.
 - One host at a time holds: a port probe takes nothing, a USB command takes the bridge, and the
   Bluetooth host gets it back.
@@ -197,10 +236,10 @@ resolving list only while not advertising.
 
 ## What this does not settle
 
-- **The iPad and the Pixel.** Neither ran against the production link. Each holds a bond from the
-  spike, which the bridge no longer has, so each must forget the bridge and pair again.
-- **A central the bridge holds no bond for, other than this PC.** The check above is a PC that
-  dropped its own bond.
+- **A phone through a disconnect, a bridge reset and a C6 reset.** Each phone ran only the
+  pairing, the load and the USB takeovers.
+- **A Down write that starts nothing.** The P4 ignores a frame that does not decode, and a write
+  from a central that does not hold the bridge. It counts neither, so the host gets no sign of it.
 - **A bond that reaches the C6 while it advertises, for a central on a resolvable private
   address.** It needs a phone and a bench build that delays the P4's bonds.
 - **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
