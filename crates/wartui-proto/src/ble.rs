@@ -8,6 +8,11 @@
 //! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
 //! `--bridge` takes, so an operator picks the bridge by the same name over either link.
 //!
+//! **A write to Down carries at most [`DOWN_VALUE_MAX`] value bytes**, whatever the MTU allows.
+//! The cap is every central's to respect: wartui's transport does, and a phone app must. The C6
+//! cannot enforce it, since the packet is cut short below ATT. A central that writes more can
+//! restart the C6, which comes back by itself.
+//!
 //! The C6 holds the stream it has yet to notify in a [`ByteRing`] of
 //! [`HOST_WINDOW_BYTES`](crate::radio_link::HOST_WINDOW_BYTES), which the P4's credit window
 //! never overfills.
@@ -20,6 +25,16 @@ pub const UP_UUID: u128 = 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877;
 pub const DOWN_UUID: u128 = 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877;
 /// What the C6 advertises ahead of the bridge's last two octets: `wartui 96:C4`.
 pub const NAME_PREFIX: &str = "wartui ";
+
+/// The most value bytes one write to Down carries.
+///
+/// A write of N value bytes is an ATT PDU of N+3 bytes and an L2CAP PDU of N+7, so at 179 no
+/// ACL packet, nor any fragment a central's controller cuts from one, exceeds 190 bytes with its
+/// 4-byte header. The C6's controller hands over a packet of 193 to 198 bytes as a chain of two
+/// buffers, 190 bytes in the first, and esp-radio 1.0.0-beta.1 copies only that first buffer. The
+/// short packet stops the C6's Bluetooth host (`docs/ble-host-link-findings.md`, "The host stop,
+/// found").
+pub const DOWN_VALUE_MAX: usize = 179;
 
 /// The host stream bytes the C6 holds until it notifies them: a byte ring, oldest first.
 #[derive(Debug)]

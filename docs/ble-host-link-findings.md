@@ -341,8 +341,10 @@ Each run sent three floods of 1.5 MB, in 244-byte writes, each frame ending with
 - **ATT error 0x0E is BlueZ's answer to a write pending when the link drops.** The issue saw it, and
   the cut-link run below saw it again.
 
-Not tested: other LE devices sharing the PC's adapter during an update, and centrals other than
-the bench PC, such as a Pi at 1M and 48.75 ms, or a phone.
+Not tested in these runs: other LE devices sharing the PC's adapter during an update, and
+centrals other than the bench PC, such as a Pi at 1M and 48.75 ms, or a phone. Floods beside two
+other LE devices found the host stop later the same day ([The host stop,
+found](#the-host-stop-found)).
 
 ### `flash-bridge --link bluetooth`
 
@@ -412,6 +414,61 @@ re-check ran the same day on D0:1C, with the fixes on the host:
 - **The production image went back on both chips over Bluetooth,** and `flash-bridge` over USB
   reported `already runs this image`.
 
+### The host stop, found
+
+Measured on 2026-11-15 on D0:1C with its ten nodes, from the bench PC with a Bluetooth mouse and
+one other LE device connected to its adapter: MTU 247, 2M PHY, a 30 ms interval. The C6 ran a
+throwaway instrumented build, with counters in a private copy of esp-radio's receive path. Its
+stock variant copies only the first buffer of a chain, as esp-radio does; the other copies every
+buffer. The floods are the throwaway command above, into the P4's update receiver.
+
+| Run | The C6's receive path | Write value | Result |
+| --- | --- | --- | --- |
+| 3 floods of 1.5 MB, fleet scanning | Stock: the first buffer only | 244 bytes | 2 floods verified, at 10.1 and 10.2 KB/s. The host stopped 11 s into the third, 308 s in, and the PC saw `write failed: Operation failed with ATT error: 0x0e` |
+| Sweep, 500 KB | Copies every buffer | 170 to 200 bytes, in steps of 1 | Verified, no failed read. 463 packets arrived chained, every one 193 to 198 bytes with its ACL header, and 190 bytes in the first buffer. Packets of 181 to 192 and 199 to 211 bytes did not chain |
+| Soak, 4 floods of 1.5 MB, 9 min | Copies every buffer | 179 bytes | All verified, 11.1 KB/s, no link drop. 36,731 packets, none chained |
+| Contrast, about 6 min | Copies every buffer | 244 bytes | 4 packets chained in about 22,400, at 126, 178, 193 and 247 s. None failed, since this build copies the chain |
+
+- **The stop is a chained packet cut short.** The C6's kept panic line names one failed read: an
+  ACL packet (kind `0x02`) queued as 191 bytes, with the header `02 00 20 be 00 f7 00 04 00 52 0c
+  00`, so ACL data length 190, L2CAP length 247, CID 4, an ATT Write Command. The counters give
+  one chained packet: 194 bytes in all, 4 of ACL header and 190 of data, in 2 buffers from the
+  pool whose blocks hold 240 bytes, 190 of them in the first. The packet reached bt-hci short of
+  the length its header gives, the read failed, esp-radio mapped that to `Controller(Unknown)`,
+  TrouBLE's host ended, and the C6 restarted. This is the host stop of issue #314.
+- **A packet of 193 to 198 bytes chains, its 4-byte ACL header included:** 189 to 194 bytes of ACL
+  data. A write of N value bytes is an ATT PDU of N+3 bytes and an L2CAP PDU of N+7, so an
+  unfragmented write of 182 to 187 value bytes chains by itself, on any adapter. A write group's
+  last piece can be any length, so the transport could send one with nothing else on the adapter.
+- **A full 244-byte write chains only when the central fragments it.** Its L2CAP PDU of 251 bytes
+  normally arrives as one 255-byte packet, from the larger pool, and does not chain. A central
+  whose controller shares air time with other connections sometimes sends it as a fragment of 190
+  bytes of data and a remainder, and that fragment chains.
+
+**The fix caps every write toward the bridge at 179 value bytes**
+(`wartui_proto::ble::DOWN_VALUE_MAX`), in the host transport. The L2CAP PDU is then at most 186
+bytes, so no packet, and no fragment of one, passes 190 bytes with its ACL header, whatever the
+central's controller does. The first group's leading `0x00` rides in its first piece, so the
+largest host frame and that byte fit the group's 7 writes. No dependency is patched. A lower ATT
+MTU would also cut the stream toward the host, which this bug does not touch. The C6 cannot
+refuse a long write, since the packet is cut short below ATT.
+
+The same two devices stayed on the PC's adapter for the runs with the cap:
+
+| Run | C6 receive path | Result |
+| --- | --- | --- |
+| Soak, 4 x 1.5 MB into the P4's update receiver, fleet scanning, 179-byte writes | Stock | All verified, 10.2 KB/s, no link drop in 587 s. 36,614 packets, none chained, the largest 190 bytes |
+| `flash-bridge --link bluetooth`, both chips changed, host with the cap | Stock, then the production image it installed | Installed and confirmed: 93.3 s sending, 13.7 s from the install |
+| `ota --link bluetooth`, ten nodes, forced, host with the cap | Production | The cache upload took 81.4 s (10.9 KB/s), all ten ended `done 0.5.2 (confirmed)`, 140 s in all, and the run's log holds no warning |
+
+- **The stock path died at 308 s with 244-byte writes and ran 587 s clean with the cap,** under the
+  same load beside the same devices.
+- **The cap costs no speed there:** 10.2 KB/s against 10.1 and 10.2 KB/s uncapped.
+- **A shared adapter is slower.** The update sent at about 10.8 KB/s beside the two devices, against
+  15.3 KB/s alone.
+- `flash-bridge` over USB then reported `already runs this image`, and the bridge held no panic
+  line.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -430,6 +487,9 @@ re-check ran the same day on D0:1C, with the fixes on the host:
   update takes about 75 to 81 s, against 18 to 20 s over USB.
 - `flash-bridge` over Bluetooth reports a rollback and a cut link, and the bridge keeps a working
   image through both.
+- What stopped TrouBLE's host: an ACL packet of 193 to 198 bytes reaches the C6 as a chain, and
+  esp-radio passes on only its first buffer. Every write toward the bridge is capped at 179 value
+  bytes, so no packet a central sends reaches that size.
 
 ## What this does not settle
 
@@ -444,10 +504,8 @@ re-check ran the same day on D0:1C, with the fixes on the host:
   sends under 3 KB/s, and no run measured one beside a mouse.
 - **Saturated USB through two hubs at 12 Mbit/s** loses records on every image. A real fleet
   sends under 3 KB/s.
-- **What stopped TrouBLE's host on 2026-11-13.** The 2026-11-15 floods did not reproduce it, and
-  no change since is known to have removed it.
-- **Updates beside other LE devices on the PC's adapter, or from another central.** Only the bench
-  PC, alone on its adapter, ran them.
+- **Updates from another central,** a phone or the Pi. Only the bench PC ran them. Each must keep
+  its writes to Down to 179 value bytes.
 - **A node rollback over Bluetooth.** It was not run.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
   upper level through a later session of runs.

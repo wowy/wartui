@@ -474,6 +474,10 @@ edit stops; follow the pointer before changing the rule.
   a write short of that queue. A group carries the frames queued together, since Down is a byte
   stream. A request whose write the C6 dropped is refused, and the transport ends the connection.
   → `crates/wartui-bridge/src/ble.rs` `//!` § "Writes", `firmware/p4-radio/src/ble.rs` `//!`
+- **A write toward the bridge carries at most `ble::DOWN_VALUE_MAX` (179) value bytes**, whatever
+  the MTU allows. esp-radio truncates a packet its controller hands over as a chain, a longer
+  write can arrive as one, and the truncation stops the C6's Bluetooth host. The C6 cannot refuse
+  it, so every central keeps to the cap. → `crates/wartui-proto/src/ble.rs`, `DOWN_VALUE_MAX`
 - **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
   long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
   to it. `close_all` waits for every Bluetooth transport before `main` returns, so no command path

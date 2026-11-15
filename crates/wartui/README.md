@@ -1323,7 +1323,9 @@ bridge from a Bluetooth host.
 
 **A host other than wartui ends each write group with a write request**, and writes the rest
 without response. A group is the frames the host has queued together, cut into writes, at most 7
-of them: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
+of them: the C6 queues 8 writes and silently drops the rest, and its answer paces the host. **No
+write carries more than 179 bytes**, whatever the MTU allows: a longer one can restart the C6,
+which drops the link until it comes back by itself.
 
 **A paired host that connects and does not subscribe is dropped after 30 s**, so a phone's
 background link cannot hold the bridge's one connection. wartui subscribes within a second or two.

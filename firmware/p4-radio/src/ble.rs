@@ -58,11 +58,15 @@
 //! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
 //! an accepted one shows in `BleCounters`' `phy` and `interval_us`, and a refusal as no change.
 //!
-//! **Two upstream bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
+//! **Three upstream bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
 //! production build needs"). The packet pool is capped at 251 bytes, so the ATT MTU is
 //! [`ATT_MTU_MAX`] and no notification fragments (`Cargo.toml`). `trouble-host`'s
 //! `connection-params-update` stays off, so a central's parameter request never reaches the
-//! host, and the interval request goes out over L2CAP.
+//! host, and the interval request goes out over L2CAP. esp-radio copies only the first buffer of
+//! a received packet that arrives as a chain, and the short packet stops the host; the C6 cannot
+//! see it above the controller, so the workaround is the central's: each write to Down carries at
+//! most `wartui_proto::ble::DOWN_VALUE_MAX` bytes (`docs/ble-host-link-findings.md`, "The host
+//! stop, found").
 //!
 //! **Only a bonded, encrypted central reaches the host stream**, by LE Secure Connections Just
 //! Works pairing (`docs/c6-ble-pairing-findings.md`). Up's CCCD and Down's writes require

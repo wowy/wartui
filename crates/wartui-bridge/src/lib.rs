@@ -10,8 +10,8 @@
 //! starts at its first `Ready` (`gate`). They differ where the links do. Both ask with `Identify`
 //! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
 //! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
-//! so Bluetooth sends none. A Bluetooth write is a fragment of the ATT MTU, so each connection's
-//! first leads with a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a
+//! so Bluetooth sends none. A Bluetooth write is a fragment of the stream, so each connection's
+//! first starts with a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a
 //! USB host took the bridge reads as the link going down, with the central still subscribed for
 //! the handback.
 //!

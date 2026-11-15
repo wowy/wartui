@@ -4,6 +4,7 @@
 //! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
 //! are checked on the bench.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use wartui_bridge::ble::{
@@ -12,6 +13,7 @@ use wartui_bridge::ble::{
 };
 use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
+use wartui_proto::ble::DOWN_VALUE_MAX;
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
@@ -132,14 +134,21 @@ fn requests(writes: &[DownWrite]) -> usize {
     writes.iter().filter(|w| w.kind == WriteKind::Request).count()
 }
 
+/// The bytes of `cmd`'s frame behind the first group's leading `0x00`.
+fn led(cmd: &HostToBridge) -> Vec<u8> {
+    let mut want = vec![0x00];
+    want.extend(host_frame(cmd));
+    want
+}
+
 #[test]
-fn ble_writer_leads_first_frame_with_terminator_when_connection_is_new() {
+fn ble_writer_leads_first_group_with_zero_byte_when_connection_is_new() {
     let mut writer = DownWriter::new(247);
     let first = alone(&mut writer, &HostToBridge::GetStatus);
-    assert_eq!(first[0].bytes, [0x00], "a write of its own");
-    let mut want = vec![0x00];
-    want.extend(host_frame(&HostToBridge::GetStatus));
-    assert_eq!(bytes(&first), want);
+    // The `0x00` is the first byte of the first piece, and costs no write of its own.
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].kind, WriteKind::Request);
+    assert_eq!(bytes(&first), led(&HostToBridge::GetStatus));
     let again = alone(&mut writer, &HostToBridge::GetStatus);
     assert_eq!(bytes(&again), host_frame(&HostToBridge::GetStatus), "only the first");
 }
@@ -149,18 +158,52 @@ fn ble_writer_leads_again_when_a_new_connection_starts() {
     let mut writer = DownWriter::new(247);
     alone(&mut writer, &HostToBridge::GetStatus);
     let mut reconnected = DownWriter::new(247);
-    assert_eq!(alone(&mut reconnected, &HostToBridge::GetStatus)[0].bytes, [0x00]);
+    let first = alone(&mut reconnected, &HostToBridge::GetStatus);
+    assert_eq!(bytes(&first), led(&HostToBridge::GetStatus));
+}
+
+#[test]
+fn ble_writer_keeps_lead_when_nothing_was_offered() {
+    let mut writer = DownWriter::new(247);
+    assert!(writer.take().is_empty());
+    assert_eq!(bytes(&alone(&mut writer, &HostToBridge::GetStatus)), led(&HostToBridge::GetStatus));
+}
+
+#[test]
+fn ble_writer_caps_piece_when_mtu_allows_more() {
+    // A write of more than 179 value bytes can reach the C6's host cut short (`wartui_proto::ble`).
+    for mtu in [247, 517] {
+        let mut writer = DownWriter::new(mtu);
+        let writes = alone(&mut writer, &to_node(1000));
+        assert!(writes.len() > 1);
+        assert!(writes.iter().all(|w| w.bytes.len() <= DOWN_VALUE_MAX), "MTU {mtu}");
+        assert!(writes[..writes.len() - 1].iter().all(|w| w.bytes.len() == DOWN_VALUE_MAX));
+    }
+}
+
+#[test]
+fn ble_writer_keeps_every_write_under_the_cap_when_group_ends_on_any_length() {
+    // A group's last piece is whatever the run leaves; a 182- to 187-byte write chains on the C6
+    // by itself, so no remainder may pass the cap.
+    let mut lasts = HashSet::new();
+    let mut writer = DownWriter::new(517);
+    for len in 0..=wartui_proto::link::MAX_NODE_DOWN {
+        let writes = alone(&mut writer, &to_node(len));
+        assert!(writes.iter().all(|w| w.bytes.len() <= DOWN_VALUE_MAX), "body of {len}");
+        lasts.insert(writes.last().unwrap().bytes.len());
+    }
+    assert_eq!(lasts, (1..=DOWN_VALUE_MAX).collect(), "the sweep reaches every remainder");
 }
 
 #[test]
 fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
     let cmd = to_node(1000);
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(100);
+    alone(&mut writer, &HostToBridge::GetStatus);
     let writes = alone(&mut writer, &cmd);
-    let pieces = &writes[1..];
-    assert!(pieces.len() > 1);
-    assert!(pieces.iter().all(|w| w.bytes.len() <= 244), "ATT MTU 247 less its 3-byte header");
-    assert!(pieces[..pieces.len() - 1].iter().all(|w| w.bytes.len() == 244));
+    assert!(writes.len() > 1);
+    assert!(writes.iter().all(|w| w.bytes.len() <= 97), "ATT MTU 100 less its 3-byte header");
+    assert!(writes[..writes.len() - 1].iter().all(|w| w.bytes.len() == 97));
     // Reassembled as the P4 does, the writes are one frame.
     let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
     let mut decoded = None;
@@ -200,20 +243,13 @@ fn ble_writer_sends_request_when_frame_takes_one_piece() {
 }
 
 #[test]
-fn ble_writer_sends_lead_without_response_when_connection_is_new() {
-    // The request answers for a frame the C6 has forwarded, so it is the frame's last piece.
-    let writes = alone(&mut DownWriter::new(247), &HostToBridge::GetStatus);
-    assert_eq!(writes.len(), 2);
-    assert_eq!(writes[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command });
-    assert_eq!(writes[1].kind, WriteKind::Request);
-}
-
-#[test]
 fn ble_writer_fits_the_c6_write_queue_when_frame_is_largest() {
-    // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest.
+    // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest; a group stays a
+    // write short of that, the first group's lead included.
     let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
     let writes = alone(&mut DownWriter::new(247), &largest);
-    assert!(writes.len() <= 8, "{} writes", writes.len());
+    assert!(writes.len() < 8, "{} writes", writes.len());
+    assert_eq!(frames(&writes), [largest]);
 }
 
 #[test]
@@ -228,7 +264,7 @@ fn ble_writer_packs_frames_into_one_group_when_they_fit() {
     assert_eq!(frames(&group), sent);
     // The run is cut at the piece, not at each frame.
     let total: usize = sent.iter().map(|cmd| host_frame(cmd).len()).sum();
-    assert_eq!(group.len(), total.div_ceil(244));
+    assert_eq!(group.len(), total.div_ceil(DOWN_VALUE_MAX));
 }
 
 #[test]
@@ -240,7 +276,8 @@ fn ble_writer_ends_group_with_one_request_when_it_holds_several_frames() {
     let group = writer.take();
     assert_eq!(requests(&group), 1);
     assert_eq!(group.last().unwrap().kind, WriteKind::Request);
-    assert_eq!(group[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command }, "the lead");
+    assert_eq!(group[0].bytes[0], 0x00, "the lead");
+    assert_eq!(group[0].kind, WriteKind::Command);
 }
 
 #[test]
