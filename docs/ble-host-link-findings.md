@@ -14,7 +14,8 @@ transport, a command that resets the C6 alone, and a C6 build setting that disca
 `Down::HostBytes`.
 
 No phone ran that day. The Pixel and the iPad ran on 2026-11-15: see [The phones](#the-phones).
-A drive from a HackberryPi followed the same day: see [A first drive](#a-first-drive).
+A drive from a HackberryPi followed the same day: see [A first drive](#a-first-drive). Updates
+over Bluetooth ran the same day too: see [Updates over Bluetooth](#updates-over-bluetooth).
 
 ## Results
 
@@ -298,6 +299,103 @@ bridge's own GPS receiver, so its sentences cross the link too.
   powered on as it began, and went stale once, for 13 s, in its first minute: 20 sightings have
   no position.
 
+## Updates over Bluetooth
+
+Measured on 2026-11-15 on D0:1C with its ten nodes, from the bench PC: BlueZ 5.88, MTU 247, 2M
+PHY, a 30 ms interval, encrypted and bonded, and no other LE device on the adapter. The updates'
+host is built from `746c919`, and the floods' from `main` with the throwaway command below. The
+firmware is `main` at `fc359ed`, with throwaway instrumentation on the C6
+that is never committed:
+
+- counters in a private copy of esp-radio's receive path: ACL packets received, packets that
+  arrived as a chain of buffers, and controller reads that failed, with the failing packet;
+- TrouBLE's log;
+- a throwaway `wartui` command that floods the bridge with update ops.
+
+On 2026-11-13 every update over Bluetooth died at 0 to 21% (issue #314). TrouBLE's host on the C6
+stopped with `Controller(Unknown)`, and the update's sender overran the link. `fdde94e` paces the
+sender to the link. `746c919` lets `flash-bridge` and `ota` take it, and `flash-bridge` reads its
+outcome across the reconnects.
+
+### The host stop was not reproduced
+
+Each run sent three floods of 1.5 MB, in 244-byte writes, each frame ending with a write request.
+
+| Run | Target | Fleet | Result | Rate |
+| --- | --- | --- | --- | --- |
+| 1 | The P4's node image cache (PSRAM) | Idle | 3 of 3 verified | 17.1 KB/s |
+| 2 | The P4's node image cache | Scanning | 3 of 3 verified | 17.1 KB/s |
+| 3 | The P4's update receiver (flash, never installed) | Scanning | 3 of 3 verified | 15.3 KB/s |
+| 4 | The P4's update receiver, ops back to back with no wait for a sector's status | Scanning | 3 of 3 verified | 16.6 KB/s |
+
+- **18 MB crossed the link with nothing lost.** No link drop and no failed controller read, and
+  TrouBLE's `rx_errors` stayed 0. Every flood's digest verified with no rewind, so the C6 dropped
+  no write.
+- **The controller never chained a packet.** Every ACL packet arrived in one buffer, up to the full
+  255 bytes: 93,498 packets in one C6 life. The issue's lead holds in the source: esp-radio
+  1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer of a chain, so a chained packet
+  would reach TrouBLE truncated. This bench never exercised it.
+- **What stopped the host on 2026-11-13 was not found.** Those builds, `ff6e654` and `fa2fa6b`, ran
+  at ~6 KB/s (inferred from timing) with ~1.2 s stalls. Which change since removed the stop was not
+  identified.
+- **ATT error 0x0E is BlueZ's answer to a write pending when the link drops.** The issue saw it, and
+  the cut-link run below saw it again.
+
+Not tested: other LE devices sharing the PC's adapter during an update, and centrals other than
+the bench PC, such as a Pi at 1M and 48.75 ms, or a phone.
+
+### `flash-bridge --link bluetooth`
+
+The image is 1,009,696 bytes, the instrumented build. The times come from the command's own lines.
+
+| Case | Runs | Sending | Install to `installed and confirmed` | Whole command | Result |
+| --- | --- | --- | --- | --- | --- |
+| P4 image changed, C6 unchanged | 4 | 66.0–66.2 s (15.3 KB/s) | 8.0–8.4 s | 75.3–76.1 s | All installed and confirmed |
+| Both chips changed | 5 (4 timed) | 66.2–66.5 s | 13.0–13.3 s | 80.4–81.0 s | All installed and confirmed |
+| Over USB, P4 only | 1 | 12.8 s (79 KB/s) | — | 18.4 s | Installed and confirmed |
+| Over USB, both chips | 1 | 12.9 s | — | 19.8 s | Installed and confirmed |
+
+- **The install-to-confirmed time includes the command's 5 s wait** for the link to stay quiet.
+- **The link dropped once per update.** With both chips changed, the central's first reconnect,
+  7.3 to 8.3 s after the install, already found the updated C6. So the C6's update had ended before
+  any host frame could confirm the P4.
+- **Every image was confirmed on its first trial boot,** well inside the 30 s trial watchdog
+  (inferred from the single reconnect and the times; the trial sector was not read). The watchdog
+  stays as it is.
+- **A last update over Bluetooth put the production image of `746c919` on both chips:** 62.7 s
+  sending, 13.2 s to confirmed. `flash-bridge` over USB then reported `already runs this image`.
+- **A forced rollback was reported.** A P4 image built to panic right after its boot check ended
+  the command with `D0:1C did not boot the new image; rolled back`, 6.8 s after the install.
+  `wartui status --link bluetooth` answered afterwards, and no USB was used.
+- **A cut link was reported.** The PC's adapter was powered off 30 s into a send, at 43%. The
+  command ended with `the link dropped before the update finished (write failed: Operation failed
+  with ATT error: 0x0e); the bridge keeps its image, and flash-bridge can be run again`. The rerun
+  installed and confirmed.
+
+### `ota --link bluetooth`
+
+Ten nodes, forced, to node image 0.5.2 (888 KB).
+
+- **The cache upload to the bridge took 52.4 s,** 16.9 KB/s.
+- **The ten nodes then took 29 s,** each at about 35 KB/s as the command reports it. That is the
+  node bus's rate, not the link's (inferred): the chunk requests are small frames the transport
+  packs into write groups.
+- **All ten ended `done 0.5.2 (confirmed)`.** The whole command took 92 s, the 6 s listen and a 3 s
+  build included. No update record was dropped, and the run's log holds no warning.
+
+Not run: a node rollback over Bluetooth. A node's session is the same over either link; the USB
+runs are in [`ota-findings.md`](ota-findings.md#failures).
+
+### Seen, not explained
+
+Neither is specific to Bluetooth.
+
+- **While the P4 writes flash, its log alternates** `no GPS receiver answered on the I2C bus` and
+  `the GPS receiver answered`, about once a second: 68 lines in a 66 s send over Bluetooth, 5 in a
+  13 s send over USB.
+- **After one of the ten updates over Bluetooth, the P4 found every node slot off.** Its boot line
+  read `at boot 10 powered, 0 already on`. Every other boot read `0 powered, 10 already on`.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -312,6 +410,10 @@ bridge's own GPS receiver, so its sentences cross the link too.
 - The C6 does not ask for a connection interval by default.
 - A two-hour drive from a Pi on the 1M PHY loses nothing, with the bridge's GPS feeding the
   positions over the same link.
+- Updates run over Bluetooth from the bench PC, at about 15 to 17 KB/s toward the bridge. A bridge
+  update takes about 75 to 81 s, against 18 to 20 s over USB.
+- `flash-bridge` over Bluetooth reports a rollback and a cut link, and the bridge keeps a working
+  image through both.
 
 ## What this does not settle
 
@@ -326,8 +428,11 @@ bridge's own GPS receiver, so its sentences cross the link too.
   sends under 3 KB/s, and no run measured one beside a mouse.
 - **Saturated USB through two hubs at 12 Mbit/s** loses records on every image. A real fleet
   sends under 3 KB/s.
-- **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
-  stops under sustained writes toward the bridge.
+- **What stopped TrouBLE's host on 2026-11-13.** The 2026-11-15 floods did not reproduce it, and
+  no change since is known to have removed it.
+- **Updates beside other LE devices on the PC's adapter, or from another central.** Only the bench
+  PC, alone on its adapter, ran them.
+- **A node rollback over Bluetooth.** It was not run.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
   upper level through a later session of runs.
 - **The saturated rate on the 1M PHY.** The drive needed a few KB/s of it.

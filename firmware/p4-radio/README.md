@@ -46,6 +46,12 @@ Two upstream bugs shape the build, each worked around without a patch
 | TrouBLE's packet pool is 251 bytes (`default-packet-pool-mtu-251`), so the ATT MTU is 247 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
 | `trouble-host`'s `connection-params-update` stays off | bt-hci 0.10.1 panics on the reply to a central's connection parameter request; off, the controller answers it itself |
 
+A third has no workaround. esp-radio 1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer
+of a received ACL packet that arrives as a chain, so a chained packet would reach TrouBLE
+truncated. The controller has not been seen to chain: 93,498 packets each arrived in one buffer
+([`ble-host-link-findings.md`](../../docs/ble-host-link-findings.md#updates-over-bluetooth),
+2026-11-15).
+
 The central picks the connection interval unless the build names one.
 `WARTUI_RADIO_CONN_INTERVAL_MS=7.5-15 cargo build --release` asks for 7.5 to 15 ms, with
 latency 0 and a 4 s supervision timeout, over L2CAP. Each bound is a multiple of 1.25 ms from

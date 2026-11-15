@@ -556,7 +556,9 @@ The P4's reboot resets its C6, which drops the link, and when the new image carr
 the C6's update drops it again. The transport reconnects each time, and the run reads the outcome
 across the reconnects: it waits up to 180 s for the bridge to come back, then up to 150 s more, long
 enough for three trial boots to end in a rollback. It ends once the new image is confirmed and the
-link has stayed up 5 s with no line about the C6's update. Besides the lines above, the board prints:
+link has stayed up 5 s with no line about the C6's update. An update takes about 80 s over
+Bluetooth, against about 20 s over USB, from a PC at a 30 ms connection interval. Besides the lines
+above, the board prints:
 
 | Line                                                        | Meaning                                                       |
 |-------------------------------------------------------------|---------------------------------------------------------------|
@@ -659,8 +661,9 @@ or by not hearing the host for 15 s. With `--log-file` and `RUST_LOG=wartui_core
 holds every frame sent, every send result, every status from a node and every phase change, as
 `key=value` fields.
 
-**How long it takes.** The upload to the bridge is bounded by its link, about 386 KB/s, so it takes
-a few seconds.
+**How long it takes.** The upload to the bridge is bounded by its link, about 386 KB/s over
+USB, so it takes a few seconds. Over Bluetooth it runs at about 17 KB/s from a PC at a 30 ms
+connection interval, so an update of ten nodes takes about a minute and a half in all.
 `ota` stops the bridge's scan before it sends anything, so the nodes idle through the update and
 stay idle afterwards until a `run` or `wartui scan start` starts it again. Each node's first frame
 goes at once to the slot the listen heard it in, and one that has moved since waits for its next
