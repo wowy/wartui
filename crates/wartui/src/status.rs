@@ -398,19 +398,19 @@ pub(crate) async fn wait_for_ready(
 /// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
 /// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once.
 #[derive(Debug)]
-struct ReadyWait {
+pub(crate) struct ReadyWait {
     over: crate::config::Link,
     /// The last failure the transport is retrying.
     retried: Option<String>,
 }
 
 impl ReadyWait {
-    const fn new(over: crate::config::Link) -> Self {
+    pub(crate) const fn new(over: crate::config::Link) -> Self {
         Self { over, retried: None }
     }
 
     /// What `event` does to the wait: `Some` once it ends, with the announcement or the reason.
-    fn take(&mut self, event: Option<LinkEvent>) -> Option<Result<BridgeInfo, String>> {
+    pub(crate) fn take(&mut self, event: Option<LinkEvent>) -> Option<Result<BridgeInfo, String>> {
         match event {
             Some(LinkEvent::Connected(info)) => Some(Ok(info)),
             Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::Other })
@@ -426,7 +426,7 @@ impl ReadyWait {
     }
 
     /// Why the wait ran out: the last failure the transport was retrying, if any.
-    fn timed_out(self) -> Option<String> {
+    pub(crate) fn timed_out(self) -> Option<String> {
         self.retried
     }
 }

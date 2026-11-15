@@ -14,9 +14,10 @@
 //! remembered board goes quiet, but it touches no file. Whoever seeds the handle
 //! decides whether the values outlive the process: `wartui run` keeps them in
 //! `wartui.toml` as `[bridge] mac`, `serial` and `bluetooth-address`, and every other command lets them go at exit.
-//! `wartui flash-bridge` writes that key too, for the board it flashed, but opens
-//! no link and holds no handle. One owner for the file within a process is what
-//! keeps two threads from racing on whole-file saves.
+//! `wartui flash-bridge` writes that key too, for the board it found and flashed over USB, from
+//! its own probe rather than a handle; the link it updates over remembers into a handle it lets
+//! go. One owner for the file within a process is what keeps two threads from racing on
+//! whole-file saves.
 //!
 //! **Whether to remember at all is the operator's decision**, made in
 //! `wartui.toml` as `[bridge] remember` or from the settings modal. Off holds

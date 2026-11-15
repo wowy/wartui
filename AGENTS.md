@@ -485,9 +485,11 @@ edit stops; follow the pointer before changing the rule.
   so the P4 keeps the line and repeats it to every host that attaches.
   → `firmware/p4-radio/src/ble.rs`, `run_host`; `firmware/p4-radio/src/last_panic.rs`;
   `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
-- **Updates use the USB cable.** `flash-bridge` and `ota` take no `--link`, refuse one with the
-  reason, and ignore `[bridge] link`; updating over Bluetooth is issue #314.
-  → `crates/wartui/src/main.rs`, `UPDATES`
+- **Updates follow the link, and a failed one over Bluetooth is recovered over USB.**
+  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's
+  reboot and its C6's update each drop the link, so `flash-bridge` reads its outcome across the
+  reconnects, and nothing resumes a partly sent image.
+  → `crates/wartui/src/flash/p4.rs` `//!`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A
   `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and

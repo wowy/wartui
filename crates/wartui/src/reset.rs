@@ -115,20 +115,23 @@ pub async fn run(args: Args) -> Result<()> {
 /// C6 and drops the link, and the transport reconnects once the C6 advertises again.
 const BLUETOOTH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The bridge a reset over Bluetooth is for: the one named, else the one remembered with its
-/// Bluetooth address. Never one a scan finds unnamed: a `Reset` sent to the wrong bridge
-/// reboots another fleet's.
-fn bluetooth_target(
+/// The bridge `wartui {command}` reaches over Bluetooth: the one named, else the one remembered
+/// with its Bluetooth address. Never one a scan finds unnamed: a `Reset` or an update sent to the
+/// wrong bridge reaches another fleet's. `flash-bridge` resolves its bridge here too.
+pub(crate) fn bluetooth_target(
     named: Option<&str>,
     remembered: &crate::config::Bridge,
-) -> Result<BridgeSpec, &'static str> {
+    command: &str,
+) -> Result<BridgeSpec, String> {
     if let Some(named) = named {
         return Ok(super::spec(named));
     }
     match (remembered.mac, &remembered.bluetooth_address) {
         (Some(mac), Some(_)) => Ok(BridgeSpec::Mac(mac)),
-        _ => Err("over --link bluetooth, `wartui reset` reboots only a bridge it is told or \
-                  remembers over Bluetooth, never one a scan finds: name it with --bridge XX:YY"),
+        _ => Err(format!(
+            "over Bluetooth, `wartui {command}` reaches only a bridge it is told or remembers \
+             over Bluetooth, never one a scan finds: name it with --bridge XX:YY"
+        )),
     }
 }
 
@@ -136,7 +139,7 @@ fn bluetooth_target(
 /// a central's writes only once it serves it, and a P4 that serves no one cannot be reached this
 /// way at all.
 async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge) -> Result<()> {
-    let target = bluetooth_target(named, remembered).map_err(anyhow::Error::msg)?;
+    let target = bluetooth_target(named, remembered, "reset").map_err(anyhow::Error::msg)?;
     let board = target.to_string();
     let memory = super::memory_of(remembered);
     let mut link = super::open(Some(&board), None, Link::Bluetooth, memory)?;
@@ -483,11 +486,11 @@ mod tests {
 
     #[test]
     fn reset_cmd_targets_named_or_remembered_bridge_when_over_bluetooth() {
-        let named = bluetooth_target(Some("44:C0"), &Bridge::default()).unwrap();
+        let named = bluetooth_target(Some("44:C0"), &Bridge::default(), "reset").unwrap();
         assert!(matches!(named, BridgeSpec::Tail(_)));
         let mut known = remembered("02:00:5E:10:44:C0", "5CF7153520");
         known.bluetooth_address = Some("02:00:5E:10:44:C1".to_owned());
-        let remembered_one = bluetooth_target(None, &known).unwrap();
+        let remembered_one = bluetooth_target(None, &known, "reset").unwrap();
         assert_eq!(remembered_one, BridgeSpec::Mac(mac::parse("02:00:5E:10:44:C0").unwrap()));
     }
 
@@ -496,8 +499,9 @@ mod tests {
         // Remembered over USB only: a scan would be the only way to find it, and a scan may
         // find another fleet's bridge.
         let usb_only = remembered("02:00:5E:10:44:C0", "5CF7153520");
-        let refused = bluetooth_target(None, &usb_only).unwrap_err();
+        let refused = bluetooth_target(None, &usb_only, "reset").unwrap_err();
+        assert!(refused.contains("`wartui reset`"), "{refused}");
         assert!(refused.contains("--bridge XX:YY"), "{refused}");
-        assert!(bluetooth_target(None, &Bridge::default()).is_err());
+        assert!(bluetooth_target(None, &Bridge::default(), "reset").is_err());
     }
 }

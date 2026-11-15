@@ -22,10 +22,10 @@
 //! share one cache directory per tag. A build without the tag is a checkout, and builds the
 //! firmware beside it.
 //!
-//! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware
-//! from `[bridge] mac`, so a `wartui.toml` that does not load stops it ([`remembered_bridge`]),
-//! where `status` and the like read it as no bridge remembered. `flash-fleet` never reads the
-//! file: a P4 bridge's CH343 is told apart by its USB IDs.
+//! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware,
+//! and over which link, from `[bridge]`, so a `wartui.toml` that does not load stops it
+//! ([`remembered_bridge`]), where `status` and the like read it as no bridge remembered.
+//! `flash-fleet` never reads the file: a P4 bridge's CH343 is told apart by its USB IDs.
 //!
 //! **espflash flashes every node, and resets each one on purpose.** The one port opened here is a
 //! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
@@ -66,10 +66,10 @@ const CHIP_ID_AT: usize = 12;
 /// The whole header, common and extended, which a file must hold to be read at all.
 const HEADER_LEN: usize = 24;
 
-/// The bridge saved in `wartui.toml`, from `explicit` (`--config`) or the default file. A
-/// missing default file is none remembered; a file that does not load is an error naming it.
-fn remembered_bridge(explicit: Option<&Path>) -> Result<Option<Mac>> {
-    Ok(crate::config::load(explicit)?.bridge.mac)
+/// The `[bridge]` table saved in `wartui.toml`, from `explicit` (`--config`) or the default file.
+/// A missing default file is none remembered; a file that does not load is an error naming it.
+fn remembered_bridge(explicit: Option<&Path>) -> Result<crate::config::Bridge> {
+    Ok(crate::config::load(explicit)?.bridge)
 }
 
 /// One firmware this checkout builds and a release publishes.
@@ -707,7 +707,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, format!("[bridge]\nmac = \"{}\"\n", mac::full(&BRIDGE_MAC))).unwrap();
-        assert_eq!(remembered_bridge(Some(&path)).unwrap(), Some(BRIDGE_MAC));
+        assert_eq!(remembered_bridge(Some(&path)).unwrap().mac, Some(BRIDGE_MAC));
     }
 
     #[test]

@@ -10,12 +10,11 @@
 //! **The remembered bridge is the one value other commands read.** `status`, `sniff`,
 //! `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` take `[bridge] mac`,
 //! `serial` and `bluetooth-address` through [`remembered_bridge`] to pick or order boards, and all
-//! but `ota` and `bluetooth pair` take `link` to pick the link, and a missing or broken file is no
-//! bridge remembered there, so a bad `wartui.toml` cannot stop a command that checks the link.
+//! but `bluetooth pair` take `link` to pick the link, and a missing or broken file is no bridge
+//! remembered there, so a bad `wartui.toml` cannot stop a command that checks the link.
 //! `flash-bridge` takes it through [`load`] and refuses a broken file: which board it writes
-//! firmware over depends on it. It ignores `link`, as `ota` does: updates use the USB cable.
-//! `flash-fleet` never reads the file. Neither `bluetooth pair` nor
-//! `bluetooth forget` writes it.
+//! firmware over depends on it. It takes `link` as the others do. `flash-fleet` never reads the
+//! file. Neither `bluetooth pair` nor `bluetooth forget` writes it.
 //!
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API key, so a first-time operator has a place to paste one. It

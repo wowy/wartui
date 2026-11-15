@@ -135,10 +135,14 @@ every `Ready`. Flash it by hand once more, with this table.
 
 ## Updates over the host link
 
-After the first flash, `wartui flash-bridge` sends the P4 its app image over the link it bridges
-on, the same Type-C cable (`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the
-update receiver the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on
-trial. The new image's bundled C6 image then reaches the C6 as below.
+After the first flash, `wartui flash-bridge` sends the P4 its app image over its host link: the
+same Type-C cable, or a bonded central through the C6 (§ "Bluetooth hosts"), more slowly
+(`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the update receiver
+the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on trial. The new
+image's bundled C6 image then reaches the C6 as below. The P4 drops an update session when its
+host lets go, so a Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets
+the C6, which drops a Bluetooth link too, and `flash-bridge` reads the outcome across the
+reconnects.
 
 **The first host frame after the C6's hello confirms the image.** `flash-bridge` polls every
 second while the P4 reboots, so a P4 that comes back and hears `wartui` keeps its image.
@@ -260,8 +264,8 @@ for each sector's status and rewinds over the loss.
 garbage: a reset under a held connection costs a few undecodable frames, and the framing resyncs.
 
 The serial number is the CH343's own, so `wartui ports` asks each CH343 which bridge it is.
-`wartui flash-bridge` updates the bridge over this link and `wartui flash-fleet` skips every
-CH343. The MX1.25 high-speed port `P1` is unused.
+`wartui flash-bridge` updates the bridge over this link, or over Bluetooth, and `wartui flash-fleet`
+skips every CH343. The MX1.25 high-speed port `P1` is unused.
 
 **The board's Type-A port always drives 5 V**, since it is wired as a host port. A cable from it to
 a PC must leave VBUS unconnected, or it back-feeds the PC whenever the Type-C is also connected

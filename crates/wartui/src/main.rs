@@ -10,9 +10,8 @@
 //! **Every Bluetooth link is closed before the process exits.** `main` waits for each to
 //! unsubscribe and disconnect once the command returns, by any route, so the bridge never keeps
 //! serving a host that has gone (`wartui_bridge::close_all`). A ctrl-c reaches that wait too:
-//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth` stop at one, `sniff`
-//! watches for one itself, and `run`'s view reads it as a key. `flash-bridge` and `ota` use the USB
-//! cable and open no Bluetooth link.
+//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge` and `bluetooth` stop at
+//! one, `sniff` and `ota` watch for one themselves, and `run`'s view reads it as a key.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -136,7 +135,7 @@ async fn main() -> Result<()> {
         Some(Command::Scan(args)) => interruptible(scan::run(args)).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
-        Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
+        Some(Command::FlashBridge(args)) => interruptible(flash::bridge::run(args)).await,
         Some(Command::Ota(args)) => ota::run(args).await,
         Some(Command::Bluetooth(args)) => interruptible(bluetooth::run(args)).await,
         Some(Command::Bench(args)) => bench::run(args).await,
@@ -182,9 +181,6 @@ async fn interruptible(command: impl Future<Output = Result<()>>) -> Result<()> 
 /// no bridge was there. An argument that silently does nothing is worse than an error,
 /// so one typed there is refused. `--log-file` is global and means the same in either
 /// place.
-///
-/// `--link` on an update is refused with the reason, since it reads as a flag clap forgot:
-/// updates use the USB cable.
 fn parse<I, T>(args: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -192,12 +188,8 @@ where
 {
     use clap::{CommandFactory, FromArgMatches, error::ErrorKind, parser::ValueSource};
 
-    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let mut command = Cli::command();
-    let matches = match command.try_get_matches_from_mut(args.clone()) {
-        Ok(matches) => matches,
-        Err(error) => return Err(link_on_update(&mut command, &args, &error).unwrap_or(error)),
-    };
+    let matches = command.try_get_matches_from_mut(args)?;
     if let Some((name, _)) = matches.subcommand() {
         let misplaced = command.get_arguments().find(|arg| {
             !arg.is_global_set()
@@ -210,8 +202,6 @@ where
                 .is_some_and(|sub| sub.get_arguments().any(|a| a.get_long() == Some(flag)));
             let advice = if takes_it {
                 format!("put it after the subcommand: wartui {name} --{flag} ...")
-            } else if flag == "link" && UPDATES.contains(&name) {
-                format!("'{name}' does not take it: {UPDATES_USE_USB}")
             } else {
                 format!("'{name}' does not take it")
             };
@@ -222,47 +212,6 @@ where
         }
     }
     Cli::from_arg_matches(&matches)
-}
-
-/// The commands that update firmware. They use the USB cable whatever `[bridge] link` says.
-const UPDATES: [&str; 2] = ["flash-bridge", "ota"];
-
-/// Why an update takes no `--link`.
-const UPDATES_USE_USB: &str = "updates use the USB cable";
-
-/// clap's refusal of `--link` after an update's name, with the reason in its place.
-fn link_on_update(
-    command: &mut clap::Command,
-    args: &[std::ffi::OsString],
-    error: &clap::Error,
-) -> Option<clap::Error> {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
-
-    if error.kind() != ErrorKind::UnknownArgument {
-        return None;
-    }
-    let Some(ContextValue::String(arg)) = error.get(ContextKind::InvalidArg) else {
-        return None;
-    };
-    if arg != "--link" && !arg.starts_with("--link=") {
-        return None;
-    }
-    let name = args
-        .iter()
-        .skip(1)
-        .filter_map(|arg| arg.to_str())
-        .find(|arg| command.find_subcommand(arg).is_some())?;
-    if !UPDATES.contains(&name) {
-        return None;
-    }
-    // The subcommand's own error, so the usage line is the update's.
-    let update = command.find_subcommand_mut(name)?;
-    Some(
-        update.error(
-            ErrorKind::UnknownArgument,
-            format!("'--link' does not apply: {UPDATES_USE_USB}"),
-        ),
-    )
 }
 
 /// Send `tracing` output to `path`, if one was given.
@@ -1075,6 +1024,7 @@ mod tests {
             &["wartui", "scan"],
             &["wartui", "scan", "start"],
             &["wartui", "scan", "stop"],
+            &["wartui", "ota"],
         ] {
             for flags in
                 [["--link", "bluetooth", "--sim"].as_slice(), &["--sim", "2", "--link", "usb"]]
@@ -1087,26 +1037,26 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_refuses_link_with_the_reason_when_passed_to_an_update() {
-        for args in [
-            ["wartui", "flash-bridge", "--link", "bluetooth"].as_slice(),
-            &["wartui", "flash-bridge", "--bridge", "44:C0", "--link", "usb"],
-            &["wartui", "flash-bridge", "--link=bluetooth"],
-            &["wartui", "ota", "--link", "bluetooth"],
-            &["wartui", "--log-file", "w.log", "ota", "--node", "N3", "--link", "bluetooth"],
-            &["wartui", "--link", "bluetooth", "flash-bridge"],
+    fn cli_parser_takes_link_when_passed_to_an_update() {
+        for (args, link) in [
+            (["wartui", "flash-bridge", "--link", "bluetooth"].as_slice(), Link::Bluetooth),
+            (&["wartui", "flash-bridge", "--bridge", "44:C0", "--link", "usb"], Link::Usb),
+            (&["wartui", "flash-bridge", "--link=bluetooth", "--dry-run"], Link::Bluetooth),
         ] {
-            let Err(error) = parse(args) else { panic!("{args:?} parsed") };
-            assert!(error.to_string().contains("updates use the USB cable"), "{args:?}: {error}");
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
+            assert_eq!(args.link, Some(link));
         }
-    }
-
-    #[test]
-    fn cli_parser_refuses_link_without_the_update_reason_when_command_is_not_an_update() {
-        let Err(error) = parse(["wartui", "ports", "--link", "bluetooth"]) else {
-            panic!("parsed")
-        };
-        assert!(!error.to_string().contains("USB cable"), "{error}");
+        for args in [
+            ["wartui", "ota", "--link", "bluetooth"].as_slice(),
+            &["wartui", "--log-file", "w.log", "ota", "--node", "N3", "--link", "usb"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Ota(_))), "{args:?}");
+        }
+        // Before the subcommand it is `run`'s, and refused there as any other.
+        let error = parse(["wartui", "--link", "bluetooth", "flash-bridge"]).err().unwrap();
+        assert!(error.to_string().contains("wartui flash-bridge --link"), "{error}");
     }
 
     #[test]
@@ -1114,8 +1064,6 @@ mod tests {
         for args in [
             ["wartui", "status", "--link", "wifi"].as_slice(),
             &["wartui", "status", "--link", "bluetooth", "--sim"],
-            &["wartui", "flash-bridge", "--link", "bluetooth"],
-            &["wartui", "ota", "--link", "bluetooth"],
             &["wartui", "ports", "--link", "bluetooth"],
             &["wartui", "--link", "bluetooth", "status"],
         ] {
@@ -1131,6 +1079,13 @@ mod tests {
         assert_eq!(link_for(None, Some("/dev/ttyACM0"), bt).unwrap(), Link::Usb, "a path is USB");
         assert_eq!(link_for(None, Some("44:C0"), bt).unwrap(), Link::Bluetooth);
         assert_eq!(link_for(None, None, None).unwrap(), Link::Usb);
+    }
+
+    #[test]
+    fn link_choice_follows_file_when_no_flag_is_given() {
+        // An update resolves its link as every other command does.
+        assert_eq!(link_for(None, None, Some(Link::Bluetooth)).unwrap(), Link::Bluetooth);
+        assert_eq!(link_for(None, None, Some(Link::Usb)).unwrap(), Link::Usb);
     }
 
     #[test]
