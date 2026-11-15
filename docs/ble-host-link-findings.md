@@ -204,9 +204,9 @@ the load on `bench/ble-load` on top of it (`e59424a`).
 | C6 reset alone, then `wartui status --link bluetooth` | 3.5 s by the remembered address, 3.0 s by a scan |
 | A run through a forced disconnect | Served again 2.1 s after the link dropped |
 
-**The saturated load did not get a clean run.** The PC's adapter held a second connection, to a
-mouse, and the board sat behind two USB hubs at 12 Mbit/s. So the image with the change and the
-one from before the third review's (`797882a`) ran in turn.
+**The saturated load first ran on a shared adapter.** The PC's adapter held a second connection,
+to a mouse, and the board sat behind two USB hubs at 12 Mbit/s. So the image with the change and
+the one from before the third review's (`797882a`) ran in turn.
 
 | Image | Bluetooth, read by the host | USB, read by the host |
 | --- | --- | --- |
@@ -221,6 +221,14 @@ one from before the third review's (`797882a`) ran in turn.
 - **Over USB, each run but one lost 4 to 13 records that the ring did not evict,** a few KB at a
   time, on both images.
 - The repeats ran, but no run lost a bond message, so no run shows one recovering a loss.
+
+**With the mouse off, the image with the change holds the earlier rate.** Two 60 s runs over
+Bluetooth, the adapter to itself:
+
+| Run | Read by the host | Credited by the C6 | Missing |
+| --- | --- | --- | --- |
+| 1 | 142.9 KB/s | 144.9 KB/s | 1 record, 1 eviction |
+| 2 | 141.5 KB/s | 143.6 KB/s | 1 record, 1 eviction |
 
 ## The phones
 
@@ -280,8 +288,9 @@ several takeovers. The phone was served again after each one between the reads, 
   from a central that does not hold the bridge. It counts neither, so the host gets no sign of it.
 - **A bond that reaches the C6 while it advertises, for a central on a resolvable private
   address.** It needs a phone and a bench build that delays the P4's bonds.
-- **The saturated rate on `a54025e` with the adapter to itself,** and a lost bond message
-  recovered by its repeat. The second needs a bench build that discards one.
+- **A lost bond message recovered by its repeat.** It needs a bench build that discards one.
+- **A second connection on the PC's adapter** cut the saturated rate to 16 KB/s. A real fleet
+  sends under 3 KB/s, and no run measured one beside a mouse.
 - **Saturated USB through two hubs at 12 Mbit/s** loses records on every image. A real fleet
   sends under 3 KB/s.
 - **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
