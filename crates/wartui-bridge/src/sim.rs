@@ -138,6 +138,10 @@ pub struct SimConfig {
     /// The channel pool the bridge holds when the simulator starts, which `Status` reports until
     /// a `SetPool` changes it. [`ChannelPool::All`] by default, as a P4 with none stored.
     pub pool: ChannelPool,
+    /// How long the bridge takes over each command before handling it, on the bridge's clock, as
+    /// a slow link writes one command at a time. Zero by default. A test knob, for a sender's
+    /// pacing over Bluetooth.
+    pub command_latency: Duration,
 }
 
 impl Default for SimConfig {
@@ -157,6 +161,7 @@ impl Default for SimConfig {
             no_image_answers: None,
             drop_cache_after: None,
             pool: ChannelPool::All,
+            command_latency: Duration::ZERO,
         }
     }
 }
@@ -315,11 +320,18 @@ impl SimTransport {
         });
         let no_image = self.config.no_image_answers.clone();
         let drop_cache_after = self.config.drop_cache_after;
+        let command_latency = self.config.command_latency;
         tokio::spawn(run_uplink(up_rx, Arc::clone(&planner)));
         tokio::spawn(run_clock(Arc::clone(&planner)));
         tokio::spawn(run_bridge(
             plumbing,
-            Bridge { fleet: planner, attached: attached_tx, no_image, drop_cache_after },
+            Bridge {
+                fleet: planner,
+                attached: attached_tx,
+                no_image,
+                drop_cache_after,
+                command_latency,
+            },
         ));
         for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
@@ -464,11 +476,13 @@ struct Bridge {
     attached: tokio::sync::watch::Sender<bool>,
     no_image: Option<Arc<AtomicU32>>,
     drop_cache_after: Option<u32>,
+    command_latency: Duration,
 }
 
 /// The dongle half: announces itself, routes records to nodes, plans the fleet, answers status.
+/// Each command counts done once handled.
 async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
-    let Bridge { fleet, attached, no_image, mut drop_cache_after } = bridge;
+    let Bridge { fleet, attached, no_image, mut drop_cache_after, command_latency } = bridge;
     let (routes, present, started) = (&fleet.routes, &*fleet.present, fleet.started);
     let info = BridgeInfo {
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
@@ -517,141 +531,150 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     let mut fan_duty = FanDuty::FULL;
 
     while let Some(cmd) = plumbing.commands.recv().await {
-        // The planner's commands are answered by the report they produce, sent with the core held.
-        let planned = match &cmd {
-            HostToBridge::StartScan { bluetooth } => Some(Plan::Start(*bluetooth)),
-            HostToBridge::StopScan => Some(Plan::Stop),
-            HostToBridge::SetPool { pool } => Some(Plan::Pool(*pool)),
-            _ => None,
-        };
-        if let Some(plan) = planned {
-            let mut core = fleet.core.lock().await;
-            let now = fleet.now_ms();
-            match plan {
-                Plan::Start(bluetooth) => core.start(bluetooth, now),
-                Plan::Stop => core.stop(now),
-                Plan::Pool(pool) => core.set_pool(pool, now),
-            }
-            let report = fleet.after_input(&mut core);
-            if fleet.say(report).await.is_err() {
-                return;
-            }
-            continue;
+        if !command_latency.is_zero() {
+            tokio::time::sleep(command_latency).await;
         }
-        if let HostToBridge::GetStatus = cmd {
-            // The status, then the plan, with the core held so nothing it reads comes between.
-            let core = fleet.core.lock().await;
-            let status = BridgeToHost::Status {
-                rx_count: 0,
-                dropped_tx: 0,
-                uptime_ms: elapsed_ms(started),
-                rx_oversize: 0,
-                queues: wartui_proto::link::QueueStats::new(),
-                radio_link: RadioLinkStats::default(),
-                host_uart_errors: 0,
-                fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
-                pool: core.pool(),
-                scan: core.mode(),
-                ble: core.bluetooth(),
-                present: present.load(Ordering::Relaxed),
-                members: core.members(),
-                // A host on USB, and no Bluetooth link to report.
-                bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
+        'handled: {
+            // The planner's commands are answered by the report they produce, sent with the core held.
+            let planned = match &cmd {
+                HostToBridge::StartScan { bluetooth } => Some(Plan::Start(*bluetooth)),
+                HostToBridge::StopScan => Some(Plan::Stop),
+                HostToBridge::SetPool { pool } => Some(Plan::Pool(*pool)),
+                _ => None,
             };
-            if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
-                || fleet.say(Some(core.report())).await.is_err()
+            if let Some(plan) = planned {
+                let mut core = fleet.core.lock().await;
+                let now = fleet.now_ms();
+                match plan {
+                    Plan::Start(bluetooth) => core.start(bluetooth, now),
+                    Plan::Stop => core.stop(now),
+                    Plan::Pool(pool) => core.set_pool(pool, now),
+                }
+                let report = fleet.after_input(&mut core);
+                if fleet.say(report).await.is_err() {
+                    return;
+                }
+                break 'handled;
+            }
+            if let HostToBridge::GetStatus = cmd {
+                // The status, then the plan, with the core held so nothing it reads comes between.
+                let core = fleet.core.lock().await;
+                let status = BridgeToHost::Status {
+                    rx_count: 0,
+                    dropped_tx: 0,
+                    uptime_ms: elapsed_ms(started),
+                    rx_oversize: 0,
+                    queues: wartui_proto::link::QueueStats::new(),
+                    radio_link: RadioLinkStats::default(),
+                    host_uart_errors: 0,
+                    fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
+                    pool: core.pool(),
+                    scan: core.mode(),
+                    ble: core.bluetooth(),
+                    present: present.load(Ordering::Relaxed),
+                    members: core.members(),
+                    // A host on USB, and no Bluetooth link to report.
+                    bluetooth: BluetoothStatus {
+                        owner: HostOwner::Usb,
+                        ..BluetoothStatus::default()
+                    },
+                };
+                if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
+                    || fleet.say(Some(core.report())).await.is_err()
+                {
+                    return;
+                }
+                break 'handled;
+            }
+            let reply = match cmd {
+                // The real bridge replies with `Ready`, but `Connected` has already
+                // gone out above and a host counting connections would be confused.
+                HostToBridge::Identify => None,
+                // No receiver on its GPS port to write to.
+                HostToBridge::GpsWrite { .. } => None,
+                // Answered above.
+                HostToBridge::GetStatus
+                | HostToBridge::StartScan { .. }
+                | HostToBridge::StopScan
+                | HostToBridge::SetPool { .. } => None,
+                // It has no Bluetooth link to pair or bonds to clear.
+                HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
+                HostToBridge::Reset => Some(BridgeToHost::Log {
+                    message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
+                }),
+                // It holds no image to update.
+                HostToBridge::Update(_) => Some(BridgeToHost::Error {
+                    message: LogStr::try_from("this bridge takes no update over its link")
+                        .unwrap_or_default(),
+                }),
+                HostToBridge::ToNode { slot, id, kind, body } => {
+                    Some(match deliver(routes, present, slot, kind, &body, &mut rng).await {
+                        Ok(()) => BridgeToHost::Delivered { id },
+                        Err(reason) => BridgeToHost::Undelivered { id, reason },
+                    })
+                }
+                // An empty socket is switched off and on as well, so it is `Done` too.
+                HostToBridge::PowerCycle { slot } => {
+                    if let Some(route) = routes.iter().find(|route| route.slot == slot) {
+                        present.fetch_and(!slot.bit(), Ordering::Relaxed);
+                        let mut core = fleet.core.lock().await;
+                        core.on_presence(present.load(Ordering::Relaxed), fleet.now_ms());
+                        let report = fleet.after_input(&mut core);
+                        if fleet.say(report).await.is_err() {
+                            return;
+                        }
+                        drop(core);
+                        let _ = route.tx.send(SimCommand::PowerCycle).await;
+                    }
+                    Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
+                }
+                // Answered by the next `Status`, as the P4's is.
+                HostToBridge::SetFan { duty } => {
+                    fan_duty = duty;
+                    None
+                }
+                HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
+                    Some(op) => cache.take(op).map(cache_status),
+                    None => Some(BridgeToHost::Error {
+                        message: LogStr::try_from("a cache op did not decode").unwrap_or_default(),
+                    }),
+                },
+                HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
+                    if drop_cache_after == Some(0) {
+                        cache.reset();
+                    }
+                    let mut body = [0u8; UPDATE_CHUNK_MAX];
+                    let built = cache
+                        .image(image)
+                        .and_then(|bytes| cache_chunk_body(bytes, session, offset, len, &mut body));
+                    let kind = DownType::UpdateChunk.as_u8();
+                    let delivered = match built {
+                        Some(n) => {
+                            if let Some(left) = &mut drop_cache_after {
+                                *left = left.saturating_sub(1);
+                            }
+                            deliver(routes, present, slot, kind, &body[..n], &mut rng).await
+                        }
+                        None => {
+                            if let Some(count) = &no_image {
+                                count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(Undelivered::NoImage)
+                        }
+                    };
+                    Some(match delivered {
+                        Ok(()) => BridgeToHost::Delivered { id },
+                        Err(reason) => BridgeToHost::Undelivered { id, reason },
+                    })
+                }
+            };
+            if let Some(msg) = reply
+                && plumbing.events.send(LinkEvent::Message(msg)).await.is_err()
             {
                 return;
             }
-            continue;
         }
-        let reply = match cmd {
-            // The real bridge replies with `Ready`, but `Connected` has already
-            // gone out above and a host counting connections would be confused.
-            HostToBridge::Identify => None,
-            // No receiver on its GPS port to write to.
-            HostToBridge::GpsWrite { .. } => None,
-            // Answered above.
-            HostToBridge::GetStatus
-            | HostToBridge::StartScan { .. }
-            | HostToBridge::StopScan
-            | HostToBridge::SetPool { .. } => None,
-            // It has no Bluetooth link to pair or bonds to clear.
-            HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
-            HostToBridge::Reset => Some(BridgeToHost::Log {
-                message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
-            }),
-            // It holds no image to update.
-            HostToBridge::Update(_) => Some(BridgeToHost::Error {
-                message: LogStr::try_from("this bridge takes no update over its link")
-                    .unwrap_or_default(),
-            }),
-            HostToBridge::ToNode { slot, id, kind, body } => {
-                Some(match deliver(routes, present, slot, kind, &body, &mut rng).await {
-                    Ok(()) => BridgeToHost::Delivered { id },
-                    Err(reason) => BridgeToHost::Undelivered { id, reason },
-                })
-            }
-            // An empty socket is switched off and on as well, so it is `Done` too.
-            HostToBridge::PowerCycle { slot } => {
-                if let Some(route) = routes.iter().find(|route| route.slot == slot) {
-                    present.fetch_and(!slot.bit(), Ordering::Relaxed);
-                    let mut core = fleet.core.lock().await;
-                    core.on_presence(present.load(Ordering::Relaxed), fleet.now_ms());
-                    let report = fleet.after_input(&mut core);
-                    if fleet.say(report).await.is_err() {
-                        return;
-                    }
-                    drop(core);
-                    let _ = route.tx.send(SimCommand::PowerCycle).await;
-                }
-                Some(BridgeToHost::PowerCycled { slot, outcome: PowerOutcome::Done })
-            }
-            // Answered by the next `Status`, as the P4's is.
-            HostToBridge::SetFan { duty } => {
-                fan_duty = duty;
-                None
-            }
-            HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
-                Some(op) => cache.take(op).map(cache_status),
-                None => Some(BridgeToHost::Error {
-                    message: LogStr::try_from("a cache op did not decode").unwrap_or_default(),
-                }),
-            },
-            HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
-                if drop_cache_after == Some(0) {
-                    cache.reset();
-                }
-                let mut body = [0u8; UPDATE_CHUNK_MAX];
-                let built = cache
-                    .image(image)
-                    .and_then(|bytes| cache_chunk_body(bytes, session, offset, len, &mut body));
-                let kind = DownType::UpdateChunk.as_u8();
-                let delivered = match built {
-                    Some(n) => {
-                        if let Some(left) = &mut drop_cache_after {
-                            *left = left.saturating_sub(1);
-                        }
-                        deliver(routes, present, slot, kind, &body[..n], &mut rng).await
-                    }
-                    None => {
-                        if let Some(count) = &no_image {
-                            count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(Undelivered::NoImage)
-                    }
-                };
-                Some(match delivered {
-                    Ok(()) => BridgeToHost::Delivered { id },
-                    Err(reason) => BridgeToHost::Undelivered { id, reason },
-                })
-            }
-        };
-        if let Some(msg) = reply
-            && plumbing.events.send(LinkEvent::Message(msg)).await.is_err()
-        {
-            return;
-        }
+        plumbing.commands.done(1);
     }
 }
 

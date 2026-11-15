@@ -468,10 +468,11 @@ edit stops; follow the pointer before changing the rule.
   again. A lost packet is credited as though sent, and costs the central its frame
   (`resynced_bytes`).
   → `crates/wartui-proto/src/radio_link/inflow.rs` `//!`
-- **A frame from a central ends with a write request**, and its earlier pieces are writes without
+- **A central's write group ends with a write request**, and its earlier pieces are writes without
   response. TrouBLE queues 8 writes per connection and drops the rest, and the C6 answers the
-  request only once it has forwarded that piece, so a central has one frame outstanding at most. A
-  request whose write the C6 dropped is refused, and the transport ends the connection.
+  request only once it has forwarded that piece, so a central has one group outstanding at most,
+  a write short of that queue. A group carries the frames queued together, since Down is a byte
+  stream. A request whose write the C6 dropped is refused, and the transport ends the connection.
   → `crates/wartui-bridge/src/ble.rs` `//!` § "Writes", `firmware/p4-radio/src/ble.rs` `//!`
 - **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
   long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected

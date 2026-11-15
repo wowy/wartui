@@ -29,8 +29,8 @@ scan response. It notifies the P4's host stream on Up and forwards what a centra
   frames and not the window, and a restart of either chip cannot skew it
   (`wartui_proto::radio_link::Inflow`). The credit is repeated every second while a central is
   subscribed, so a lost one never shuts the window.
-- **A central ends each frame with a write request**, which the C6 answers once it has forwarded
-  the write, so a central never overruns TrouBLE's queue of 8.
+- **A central ends each write group with a write request**, which the C6 answers once it has
+  forwarded the write, so a central never overruns TrouBLE's queue of 8.
 - **A Bluetooth host that stops restarts the C6**, and the next boot reports the reason.
 - **Its counters ride on each `RadioStatus`:** pairings, failed pairings, centrals disconnected
   for holding no bond (a cleared one included), the last disconnect reason, resynced and dropped bytes, the PHY, the interval and

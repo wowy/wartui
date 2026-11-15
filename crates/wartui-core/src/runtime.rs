@@ -22,12 +22,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
+use wartui_bridge::pace::PacedSender;
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{BridgeToHost, HostToBridge, Undelivered, UpdateOp};
+use wartui_proto::link::{BridgeToHost, HostToBridge, Undelivered};
 use wartui_proto::mac;
-use wartui_proto::radio_link::update::{self, OP_MAX, Op, Sender, Stage};
+use wartui_proto::radio_link::update::{self, Op, Sender, Stage};
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
 use crate::ota::{Failure, OtaEvent, OtaImage, OtaSession, Outcome, Progress};
@@ -297,7 +298,9 @@ pub enum FleetError {
 /// `image`, when given, is uploaded into the P4's node image cache beside the sessions' `begin`s,
 /// and the sessions are told once the P4 has checked it ([`OtaEvent::Cached`]); none sends a
 /// chunk before. Without one, nothing is uploaded and no session is told, so pass it whenever a
-/// session streams. An upload the P4 refuses or loses cancels every session, which sends each its
+/// session streams. The upload is paced to the link (`wartui_bridge::pace`), and polled again as
+/// soon as the link has written its last op; the sessions' records go out as they are due. An
+/// upload the P4 refuses or loses cancels every session, which sends each its
 /// abort, and is the error. So is the first chunk answered `NoImage` once the image is checked
 /// ([`Failure::CacheLost`]), since every session's next chunk meets the same answer. The sessions
 /// keep their outcomes then. A `Begin` for the image the cache already holds is answered
@@ -324,7 +327,9 @@ pub async fn drive_fleet(
 ) -> Result<Vec<Outcome>, FleetError> {
     tokio::pin!(stop);
     let started = tokio::time::Instant::now();
-    let mut cache = image.map(|image| Sender::new(&image.bytes, image.sha256, &image.sha256));
+    let mut cache =
+        image.map(|image| PacedSender::new(Sender::new(&image.bytes, image.sha256, &image.sha256)));
+    let mut written = link.written();
     let mut failed = None;
     let mut ticker = tokio::time::interval(OTA_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -345,6 +350,8 @@ pub async fn drive_fleet(
                 }
             }
             _ = ticker.tick() => feed(sessions, OtaEvent::Tick, &mut sends),
+            // The link wrote what was queued, so the upload's next ops may go.
+            () = written.changed(), if cache.is_some() => {}
             event = link.recv() => match event {
                 Some(LinkEvent::Message(BridgeToHost::Delivered { id })) => {
                     tracing::debug!(id, status = "delivered", "ota send result");
@@ -417,19 +424,18 @@ pub async fn drive_fleet(
                 sends.extend(session.cancel(now));
             }
         }
-        // Polled after every event, so the next op goes as soon as a status allows it.
-        if let Some(sender) = &mut cache {
-            let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let mut buf = [0u8; OP_MAX];
-            while let Some(len) = sender.next(now, &mut buf) {
-                let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
-                sends.push(HostToBridge::CacheImage(op));
-            }
-        }
         for cmd in sends {
             log_send(&cmd);
             if let Err(e) = link.send_urgent(cmd) {
-                // The session's own timeouts resend it, and the upload's.
+                // The session's own timeouts resend it.
+                tracing::warn!("dropping an update record: {e}");
+            }
+        }
+        // Polled after every event, so the next op goes as soon as a status allows it.
+        if let Some(sender) = &mut cache {
+            let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            if let Err(e) = sender.pump(link, now, HostToBridge::CacheImage) {
+                // The upload's silence resends it.
                 tracing::warn!("dropping an update record: {e}");
             }
         }

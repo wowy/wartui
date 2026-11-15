@@ -4,8 +4,10 @@
 //! UART0 through a CH343, the port the first flash also uses
 //! (`firmware/p4-bridge/README.md` § "First flash"). After that the P4 takes its app image as
 //! `HostToBridge::Update` ops: the `radio_link::update` layout it sends its own C6, driven by the
-//! same `Sender`, on a [`TICK`] and on each status. Host bytes the P4 loses while it writes a
-//! sector cost nothing: the sender waits for each sector's status and rewinds on what it says.
+//! same `Sender`, on a [`TICK`], on each status and as the link writes what it queued. Host bytes
+//! the P4 loses while it writes a sector cost nothing: the sender waits for each sector's status
+//! and rewinds on what it says. The sender is paced to the link (`wartui_bridge::pace`), so at
+//! most a sector's ops are queued, and a full queue is an error.
 //!
 //! **The image is checked before it is sent**: the P4's chip, an app-only layout, the
 //! descriptor's project name ([`PROJECT`]), the segment checksum and appended SHA-256
@@ -50,17 +52,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
+use wartui_bridge::pace::PacedSender;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, SerialTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::bus::UpdateState;
 use wartui_proto::link::{
-    BridgeToHost, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, RADIO_UPDATING, UpdateOp,
+    BridgeToHost, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, RADIO_UPDATING,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
-use wartui_proto::radio_link::update::{Failure, OP_MAX, Op, Sender, Stage};
+use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
 
 use super::bridge::Args;
 use super::{
@@ -264,7 +267,7 @@ fn on_ready(
 
 /// One image on its way to the P4.
 struct Update<'a> {
-    sender: Sender<'a>,
+    sender: PacedSender<'a>,
     start: Instant,
     /// The image the P4's `Ready` named before the update, if it named one. Naming one says
     /// its firmware takes updates.
@@ -278,7 +281,8 @@ impl<'a> Update<'a> {
         digest: &[u8; DIGEST_LEN],
         before: Option<[u8; DIGEST_LEN]>,
     ) -> Self {
-        Self { sender: Sender::new(image, sha256, digest), start: Instant::now(), before }
+        let sender = PacedSender::new(Sender::new(image, sha256, digest));
+        Self { sender, start: Instant::now(), before }
     }
 
     /// Why the update stopped, and what fixes it.
@@ -289,6 +293,7 @@ impl<'a> Update<'a> {
     /// Send the image until the P4 is told to install.
     async fn send(&mut self, link: &mut LinkHandle, progress: &mut ProgressLine) -> Result<()> {
         let mut tick = tokio::time::interval(TICK);
+        let mut written = link.written();
         loop {
             self.pump(link)?;
             match self.sender.stage() {
@@ -298,6 +303,7 @@ impl<'a> Update<'a> {
             }
             tokio::select! {
                 _ = tick.tick() => {}
+                () = written.changed() => {}
                 event = link.recv() => match event {
                     Some(LinkEvent::Message(message)) => self.take(message, progress),
                     Some(LinkEvent::Disconnected { reason, .. }) => bail!(
@@ -329,6 +335,7 @@ impl<'a> Update<'a> {
         let wait = async {
             let mut tick = tokio::time::interval(TICK);
             let mut poll = tokio::time::interval(POLL);
+            let mut written = link.written();
             loop {
                 self.pump(link)?;
                 if let Stage::Failed(failure) = self.sender.stage() {
@@ -336,6 +343,7 @@ impl<'a> Update<'a> {
                 }
                 tokio::select! {
                     _ = tick.tick() => {}
+                    () = written.changed() => {}
                     _ = poll.tick() => poll_status(link),
                     event = link.recv() => match event {
                         Some(LinkEvent::Connected(info)) => {
@@ -362,15 +370,10 @@ impl<'a> Update<'a> {
         }
     }
 
-    /// Queue every op the sender has for now.
+    /// Queue every op the sender has for now, once the link has written the last.
     fn pump(&mut self, link: &LinkHandle) -> Result<()> {
         let now = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let mut buf = [0u8; OP_MAX];
-        while let Some(len) = self.sender.next(now, &mut buf) {
-            let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
-            link.send_urgent(HostToBridge::Update(op)).context("queueing an update op")?;
-        }
-        Ok(())
+        self.sender.pump(link, now, HostToBridge::Update).context("queueing an update op")
     }
 
     /// A message from the P4: a status for the sender, or a line to print.

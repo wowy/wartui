@@ -112,6 +112,21 @@ fn bytes(writes: &[DownWrite]) -> Vec<u8> {
     writes.iter().flat_map(|w| w.bytes.iter().copied()).collect()
 }
 
+/// The writes that carry `cmd` alone.
+fn alone(writer: &mut DownWriter, cmd: &HostToBridge) -> Vec<DownWrite> {
+    assert!(writer.offer(cmd).unwrap(), "an empty group takes any frame");
+    writer.take()
+}
+
+/// The frames `writes` carry, reassembled as the P4 does.
+fn frames(writes: &[DownWrite]) -> Vec<HostToBridge> {
+    let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
+    bytes(writes)
+        .into_iter()
+        .filter_map(|byte| acc.push(byte).map(|f| decode_frame(f).unwrap()))
+        .collect()
+}
+
 /// How many of `writes` are requests.
 fn requests(writes: &[DownWrite]) -> usize {
     writes.iter().filter(|w| w.kind == WriteKind::Request).count()
@@ -120,28 +135,28 @@ fn requests(writes: &[DownWrite]) -> usize {
 #[test]
 fn ble_writer_leads_first_frame_with_terminator_when_connection_is_new() {
     let mut writer = DownWriter::new(247);
-    let first = writer.writes(&HostToBridge::GetStatus).unwrap();
+    let first = alone(&mut writer, &HostToBridge::GetStatus);
     assert_eq!(first[0].bytes, [0x00], "a write of its own");
     let mut want = vec![0x00];
     want.extend(host_frame(&HostToBridge::GetStatus));
     assert_eq!(bytes(&first), want);
-    let again = writer.writes(&HostToBridge::GetStatus).unwrap();
+    let again = alone(&mut writer, &HostToBridge::GetStatus);
     assert_eq!(bytes(&again), host_frame(&HostToBridge::GetStatus), "only the first");
 }
 
 #[test]
 fn ble_writer_leads_again_when_a_new_connection_starts() {
     let mut writer = DownWriter::new(247);
-    writer.writes(&HostToBridge::GetStatus).unwrap();
+    alone(&mut writer, &HostToBridge::GetStatus);
     let mut reconnected = DownWriter::new(247);
-    assert_eq!(reconnected.writes(&HostToBridge::GetStatus).unwrap()[0].bytes, [0x00]);
+    assert_eq!(alone(&mut reconnected, &HostToBridge::GetStatus)[0].bytes, [0x00]);
 }
 
 #[test]
 fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
     let cmd = to_node(1000);
     let mut writer = DownWriter::new(247);
-    let writes = writer.writes(&cmd).unwrap();
+    let writes = alone(&mut writer, &cmd);
     let pieces = &writes[1..];
     assert!(pieces.len() > 1);
     assert!(pieces.iter().all(|w| w.bytes.len() <= 244), "ATT MTU 247 less its 3-byte header");
@@ -160,16 +175,16 @@ fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
 #[test]
 fn ble_writer_writes_twenty_bytes_when_mtu_is_the_default() {
     let cmd = to_node(64);
-    let writes = DownWriter::new(23).writes(&cmd).unwrap();
+    let writes = alone(&mut DownWriter::new(23), &cmd);
     assert!(writes.iter().all(|w| w.bytes.len() <= 20));
-    assert!(DownWriter::new(0).writes(&cmd).unwrap().iter().all(|w| w.bytes.len() <= 20));
+    assert!(alone(&mut DownWriter::new(0), &cmd).iter().all(|w| w.bytes.len() <= 20));
 }
 
 #[test]
 fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
     let mut writer = DownWriter::new(247);
-    writer.writes(&HostToBridge::GetStatus).unwrap();
-    let writes = writer.writes(&to_node(1000)).unwrap();
+    alone(&mut writer, &HostToBridge::GetStatus);
+    let writes = alone(&mut writer, &to_node(1000));
     assert!(writes.len() > 1);
     assert_eq!(requests(&writes), 1);
     assert_eq!(writes.last().unwrap().kind, WriteKind::Request);
@@ -178,8 +193,8 @@ fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
 #[test]
 fn ble_writer_sends_request_when_frame_takes_one_piece() {
     let mut writer = DownWriter::new(247);
-    writer.writes(&HostToBridge::GetStatus).unwrap();
-    let writes = writer.writes(&HostToBridge::GetStatus).unwrap();
+    alone(&mut writer, &HostToBridge::GetStatus);
+    let writes = alone(&mut writer, &HostToBridge::GetStatus);
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].kind, WriteKind::Request);
 }
@@ -187,7 +202,7 @@ fn ble_writer_sends_request_when_frame_takes_one_piece() {
 #[test]
 fn ble_writer_sends_lead_without_response_when_connection_is_new() {
     // The request answers for a frame the C6 has forwarded, so it is the frame's last piece.
-    let writes = DownWriter::new(247).writes(&HostToBridge::GetStatus).unwrap();
+    let writes = alone(&mut DownWriter::new(247), &HostToBridge::GetStatus);
     assert_eq!(writes.len(), 2);
     assert_eq!(writes[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command });
     assert_eq!(writes[1].kind, WriteKind::Request);
@@ -197,8 +212,81 @@ fn ble_writer_sends_lead_without_response_when_connection_is_new() {
 fn ble_writer_fits_the_c6_write_queue_when_frame_is_largest() {
     // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest.
     let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
-    let writes = DownWriter::new(247).writes(&largest).unwrap();
+    let writes = alone(&mut DownWriter::new(247), &largest);
     assert!(writes.len() <= 8, "{} writes", writes.len());
+}
+
+#[test]
+fn ble_writer_packs_frames_into_one_group_when_they_fit() {
+    let mut writer = DownWriter::new(247);
+    alone(&mut writer, &HostToBridge::GetStatus);
+    let sent = [HostToBridge::GetStatus, to_node(300), HostToBridge::StopScan, to_node(200)];
+    for cmd in &sent {
+        assert!(writer.offer(cmd).unwrap());
+    }
+    let group = writer.take();
+    assert_eq!(frames(&group), sent);
+    // The run is cut at the piece, not at each frame.
+    let total: usize = sent.iter().map(|cmd| host_frame(cmd).len()).sum();
+    assert_eq!(group.len(), total.div_ceil(244));
+}
+
+#[test]
+fn ble_writer_ends_group_with_one_request_when_it_holds_several_frames() {
+    let mut writer = DownWriter::new(247);
+    for cmd in [HostToBridge::GetStatus, to_node(500), HostToBridge::GetStatus] {
+        assert!(writer.offer(&cmd).unwrap());
+    }
+    let group = writer.take();
+    assert_eq!(requests(&group), 1);
+    assert_eq!(group.last().unwrap().kind, WriteKind::Request);
+    assert_eq!(group[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command }, "the lead");
+}
+
+#[test]
+fn ble_writer_refuses_frame_when_group_is_full() {
+    let mut writer = DownWriter::new(247);
+    alone(&mut writer, &HostToBridge::GetStatus);
+    let chunk = to_node(1000);
+    assert!(writer.offer(&chunk).unwrap());
+    // Two such frames take more pieces than a group holds.
+    assert!(!writer.offer(&chunk).unwrap());
+    assert_eq!(
+        frames(&writer.take()),
+        std::slice::from_ref(&chunk),
+        "the refused frame is not in it"
+    );
+    // It waits for the next group, which takes it.
+    assert_eq!(frames(&alone(&mut writer, &chunk)), [chunk]);
+}
+
+#[test]
+fn ble_writer_takes_oversize_frame_alone_when_group_is_empty() {
+    // At the default MTU of 23 one frame takes far more pieces than the C6 queues.
+    let mut writer = DownWriter::new(23);
+    alone(&mut writer, &HostToBridge::GetStatus);
+    let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
+    assert!(writer.offer(&largest).unwrap());
+    assert!(!writer.offer(&HostToBridge::GetStatus).unwrap(), "nothing joins it");
+    let group = writer.take();
+    assert!(group.len() > 8, "{} writes", group.len());
+    assert_eq!(frames(&group), [largest]);
+}
+
+#[test]
+fn ble_writer_fits_the_c6_write_queue_when_group_is_full() {
+    // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest; a group stays
+    // a write short of that, its lead included.
+    for len in [1, 100, 500, 1000, wartui_proto::link::MAX_NODE_DOWN] {
+        let mut writer = DownWriter::new(247);
+        let mut offered = 0;
+        while writer.offer(&to_node(len)).unwrap() {
+            offered += 1;
+        }
+        let group = writer.take();
+        assert!(group.len() < 8, "{} writes of {offered} frames of {len}", group.len());
+        assert_eq!(frames(&group).len(), offered);
+    }
 }
 
 #[test]
