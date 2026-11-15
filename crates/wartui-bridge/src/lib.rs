@@ -23,6 +23,16 @@
 //! [`close_all`] waits for every one before `main` returns, so no command path has to remember
 //! to. Serial and the simulator close at once.
 //!
+//! **Every command a transport takes is reported done exactly once**, written or dropped
+//! ([`CommandRx::done`], [`CommandRx::discard`]). [`LinkHandle::written_count`] is that count and
+//! [`LinkHandle::backlog`] what is queued past it, so a sender that waits on it ([`pace`]) waits
+//! for the link rather than a timer, and never hangs on a command the transport let go. Serial
+//! is done with a command once its writer thread has it, the simulator once it has handled one,
+//! and Bluetooth once the write group carrying it is answered or has failed. Bluetooth also drops
+//! what was queued before a connection's `Ready`, as the gate drops what decodes before it: a
+//! command queued during a gap would reach the next connection stale. USB keeps it, since
+//! `wartui reset` writes before any `Ready`.
+//!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
 //! Keeping that in one place is what lets anything else that opens a device share
@@ -32,11 +42,13 @@ pub mod ble;
 #[cfg(target_os = "linux")]
 pub mod bluez;
 mod gate;
+pub mod pace;
 pub mod ports;
 pub mod remember;
 pub mod serial;
 pub mod sim;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
@@ -275,6 +287,10 @@ pub struct LinkHandle {
     events: mpsc::Receiver<LinkEvent>,
     urgent: mpsc::Sender<HostToBridge>,
     bulk: mpsc::Sender<HostToBridge>,
+    /// Commands accepted by either queue.
+    queued: AtomicU64,
+    /// Commands the transport is done with.
+    written: watch::Receiver<u64>,
     /// Ends when a transport that must finish before exit has finished; `None` for the rest.
     running: Option<Finished>,
 }
@@ -284,7 +300,7 @@ impl LinkHandle {
     /// Over Bluetooth that is the unsubscribe and the disconnect; over USB and in the simulator
     /// it is at once.
     pub async fn close(self) {
-        let Self { events, urgent, bulk, running } = self;
+        let Self { events, urgent, bulk, running, .. } = self;
         drop((events, urgent, bulk));
         if let Some(running) = running {
             let _ = tokio::time::timeout(CLOSE_WITHIN, running.wait()).await;
@@ -304,7 +320,7 @@ impl LinkHandle {
     /// # Errors
     /// [`SendError`] if the queue is full or the link has closed.
     pub fn send_urgent(&self, cmd: HostToBridge) -> Result<(), SendError> {
-        Self::try_send(&self.urgent, cmd)
+        self.try_send(&self.urgent, cmd)
     }
 
     /// Queue a command that can wait behind urgent traffic.
@@ -312,14 +328,59 @@ impl LinkHandle {
     /// # Errors
     /// [`SendError`] if the queue is full or the link has closed.
     pub fn send_bulk(&self, cmd: HostToBridge) -> Result<(), SendError> {
-        Self::try_send(&self.bulk, cmd)
+        self.try_send(&self.bulk, cmd)
     }
 
-    fn try_send(tx: &mpsc::Sender<HostToBridge>, cmd: HostToBridge) -> Result<(), SendError> {
+    /// How many commands either queue has accepted.
+    #[must_use]
+    pub fn queued(&self) -> u64 {
+        self.queued.load(Ordering::Relaxed)
+    }
+
+    /// How many commands the transport is done with: written, or dropped.
+    #[must_use]
+    pub fn written_count(&self) -> u64 {
+        *self.written.borrow()
+    }
+
+    /// How many accepted commands the transport is not yet done with.
+    #[must_use]
+    pub fn backlog(&self) -> u64 {
+        // The transport can be done with a command before its send has counted it.
+        self.queued().saturating_sub(self.written_count())
+    }
+
+    /// A waiter on [`Self::written_count`], to wake a sender as soon as the link catches up.
+    #[must_use]
+    pub fn written(&self) -> Written {
+        Written(self.written.clone())
+    }
+
+    fn try_send(
+        &self,
+        tx: &mpsc::Sender<HostToBridge>,
+        cmd: HostToBridge,
+    ) -> Result<(), SendError> {
         tx.try_send(cmd).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => SendError::Full,
             mpsc::error::TrySendError::Closed(_) => SendError::Closed,
-        })
+        })?;
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Wakes when the transport is done with more commands ([`LinkHandle::written`]).
+#[derive(Debug, Clone)]
+pub struct Written(watch::Receiver<u64>);
+
+impl Written {
+    /// Resolves once the count moves. Pends forever once the transport is gone, so it can sit in
+    /// a `select!` beside the link's events, which say so.
+    pub async fn changed(&mut self) {
+        if self.0.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -337,11 +398,24 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
     let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
     let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel(BULK_CAPACITY);
+    let (written_tx, written_rx) = watch::channel(0);
     (
-        LinkHandle { events: event_rx, urgent: urgent_tx, bulk: bulk_tx, running: None },
+        LinkHandle {
+            events: event_rx,
+            urgent: urgent_tx,
+            bulk: bulk_tx,
+            queued: AtomicU64::new(0),
+            written: written_rx,
+            running: None,
+        },
         LinkPlumbing {
             events: event_tx,
-            commands: CommandRx { urgent: urgent_rx, bulk: bulk_rx },
+            commands: CommandRx {
+                urgent: urgent_rx,
+                bulk: bulk_rx,
+                held: None,
+                written: written_tx,
+            },
             _running: None,
         },
     )
@@ -389,21 +463,61 @@ pub async fn close_all(within: Duration) {
 /// Without this bias a burst of status polls can queue ahead of a channel
 /// assignment and hold it back from the heartbeat it answers. It is the
 /// concrete mechanism keeping assignments prompt.
+///
+/// It also keeps the count of commands the transport is done with, which the handle reads.
 #[derive(Debug)]
 pub(crate) struct CommandRx {
     urgent: mpsc::Receiver<HostToBridge>,
     bulk: mpsc::Receiver<HostToBridge>,
+    /// A command taken and given back ([`Self::hold`]), returned before either queue.
+    held: Option<HostToBridge>,
+    written: watch::Sender<u64>,
 }
 
 impl CommandRx {
     /// Next command, urgent first. `None` once both senders are dropped.
     pub async fn recv(&mut self) -> Option<HostToBridge> {
+        if let Some(cmd) = self.held.take() {
+            return Some(cmd);
+        }
         tokio::select! {
             biased;
             Some(cmd) = self.urgent.recv() => Some(cmd),
             Some(cmd) = self.bulk.recv() => Some(cmd),
             else => None,
         }
+    }
+
+    /// The next command already queued, urgent first, without waiting.
+    pub fn try_recv(&mut self) -> Option<HostToBridge> {
+        self.held
+            .take()
+            .or_else(|| self.urgent.try_recv().ok())
+            .or_else(|| self.bulk.try_recv().ok())
+    }
+
+    /// Give back `cmd`, taken and not used: the next [`Self::recv`] or [`Self::try_recv`]
+    /// returns it, and it stays owed a [`Self::done`].
+    pub fn hold(&mut self, cmd: HostToBridge) {
+        debug_assert!(self.held.is_none(), "one command held at a time");
+        self.held = Some(cmd);
+    }
+
+    /// The transport is done with `n` more commands: written, or given up on.
+    pub fn done(&mut self, n: u64) {
+        if n > 0 {
+            self.written.send_modify(|written| *written += n);
+        }
+    }
+
+    /// Drop every command queued, counting each done, and return how many there were.
+    pub fn discard(&mut self) -> usize {
+        let mut dropped = 0;
+        while self.try_recv().is_some() {
+            dropped += 1;
+        }
+        self.done(dropped as u64);
+        dropped
     }
 }
 
@@ -500,6 +614,55 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(100), handle.close())
             .await
             .expect("closed at once");
+    }
+
+    #[tokio::test]
+    async fn link_handle_counts_command_written_when_transport_is_done_with_it() {
+        let (handle, mut plumbing) = link_pair();
+        let mut written = handle.written();
+        handle.send_urgent(HostToBridge::Reset).expect("queued");
+        handle.send_bulk(HostToBridge::GetStatus).expect("queued");
+        assert_eq!((handle.queued(), handle.written_count(), handle.backlog()), (2, 0, 2));
+
+        assert_eq!(plumbing.commands.recv().await, Some(HostToBridge::Reset));
+        plumbing.commands.done(1);
+        tokio::time::timeout(Duration::from_millis(100), written.changed())
+            .await
+            .expect("the waiter wakes");
+        assert_eq!((handle.written_count(), handle.backlog()), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn command_rx_counts_commands_written_when_queue_is_discarded() {
+        // A sender waiting on the backlog must see it empty, or it waits forever.
+        let (handle, mut plumbing) = link_pair();
+        for _ in 0..3 {
+            handle.send_urgent(HostToBridge::Reset).expect("queued");
+            handle.send_bulk(HostToBridge::GetStatus).expect("queued");
+        }
+        assert_eq!(plumbing.commands.discard(), 6);
+        assert_eq!((handle.written_count(), handle.backlog()), (6, 0));
+        assert_eq!(plumbing.commands.try_recv(), None);
+    }
+
+    #[tokio::test]
+    async fn command_rx_returns_urgent_first_when_try_recv_finds_both() {
+        let (handle, mut plumbing) = link_pair();
+        handle.send_bulk(HostToBridge::GetStatus).expect("queued");
+        handle.send_urgent(HostToBridge::Reset).expect("queued");
+        assert_eq!(plumbing.commands.try_recv(), Some(HostToBridge::Reset));
+        assert_eq!(plumbing.commands.try_recv(), Some(HostToBridge::GetStatus));
+        assert_eq!(plumbing.commands.try_recv(), None);
+    }
+
+    #[tokio::test]
+    async fn written_pends_when_transport_is_gone() {
+        // Safe as a `select!` arm: a closed link must not spin the loop.
+        let (handle, plumbing) = link_pair();
+        let mut written = handle.written();
+        drop(plumbing);
+        let woke = tokio::time::timeout(Duration::from_millis(50), written.changed()).await;
+        assert!(woke.is_err());
     }
 
     #[tokio::test]

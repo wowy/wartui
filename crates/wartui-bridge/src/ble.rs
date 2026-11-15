@@ -54,20 +54,33 @@
 //! reports `Connected` on the `Ready` that hands the queue back, though it is the same life, since
 //! the stream starts afresh there.
 //!
-//! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`) and cut into pieces
-//! of the ATT MTU less its 3-byte header: 244 bytes at the C6's MTU of 247. A write is a stream
-//! fragment, so the first frame after every connect follows a one-byte `0x00` write, which ends
-//! whatever partial frame the P4's accumulator held from an earlier attachment.
+//! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`). Down is a byte
+//! stream: the C6 forwards each write's bytes, and the P4 reassembles frames at each `0x00`. So
+//! the frames queued together go as one run, a write group ([`DownWriter`]), cut into pieces of the
+//! ATT MTU less its 3-byte header: 244 bytes at the C6's MTU of 247. A write is a stream fragment,
+//! so the first group after every connect follows a one-byte `0x00` write, which ends whatever
+//! partial frame the P4's accumulator held from an earlier attachment.
 //!
-//! **Each frame ends with a write request**, and every piece before it is a write without
+//! **Each group ends with a write request**, and every piece before it is a write without
 //! response. TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and silently drops the rest,
 //! and a write without response gives the central nothing to wait on: a burst of full writes lost
 //! some whenever the C6's forwarding to the P4 slowed, and a sustained flood stopped the C6's
 //! Bluetooth host. The C6 answers the request only once it has forwarded that piece, behind every
-//! piece queued ahead of it, so the central never has more than one frame outstanding: 5 pieces of
-//! the largest frame at MTU 247, and the leading `0x00`. Every write as a request held the link
-//! too, at about 3.4 KB/s on a 30 ms interval. A request the C6 answers with an ATT error fails as
-//! any write does, and ends the connection.
+//! piece queued ahead of it, so the central never has more than one group outstanding. A group
+//! holds at most one write fewer than the C6's queue, the leading `0x00` included; a frame that
+//! would take it past that waits for the next group, and one larger than a whole group, as at the
+//! default MTU of 23, goes alone. Every write as a request held the link too, at about 3.4 KB/s on
+//! a 30 ms interval. A request the C6 answers with an ATT error fails as any write does, and ends
+//! the connection. The transport is done with a group's commands once its request is answered or a
+//! write fails (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
+//!
+//! **Commands wait for the connection's `Ready`.** The commands queue is read only while the
+//! stream is announced, and what it holds is dropped as the transport reports that `Ready` as
+//! `Connected`, as the gate drops what decodes ahead of it. A command queued while the link was
+//! down, a USB host held the bridge or the bridge had not yet answered is stale by then: written
+//! at the next connection, an update's re-sends from a gap arrive as a backlog. Every Bluetooth
+//! caller waits for `Connected` before its first command. USB writes what was queued, since
+//! `wartui reset` writes before any `Ready`.
 //!
 //! **Not bonded, and maybe not bonded, are two causes.** BlueZ never starts a first pairing on its
 //! own (`docs/c6-ble-pairing-findings.md`), so the transport says when the bridge will not serve
@@ -117,7 +130,8 @@ use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
 use crate::serial::{BridgeSpec, encode_for_wire};
 use crate::{
-    DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError, link_pair_awaited,
+    CommandRx, DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError,
+    link_pair_awaited,
 };
 
 /// How long a scan looks for the bridge's name before giving up.
@@ -174,15 +188,18 @@ const MIN_WRITE: usize = 20;
 /// rest silently.
 const C6_WRITE_QUEUE: usize = 8;
 
+/// The most writes one group takes, the leading `0x00` included: one fewer than the C6 queues.
+const GROUP_WRITES: usize = C6_WRITE_QUEUE - 1;
+
 /// The ATT MTU the C6 asks for, the smallest the bridge serves well.
 const SERVED_MTU: u16 = 247;
 
-// The largest frame's pieces, with the leading `0x00` write beside them, fit the C6's queue at
-// the MTU it asks for. At the default MTU of 23 a frame takes far more, up to 58 pieces; a central
-// stuck there is slow anyway.
+// The largest frame's pieces, with the leading `0x00` write beside them, fit one group at the MTU
+// the C6 asks for. At the default MTU of 23 a frame takes far more, up to 58 pieces, and goes alone; a
+// central stuck there is slow anyway.
 const _: () = assert!(
-    MAX_HOST_FRAME.div_ceil((SERVED_MTU - ATT_HEADER) as usize) < C6_WRITE_QUEUE,
-    "the largest frame overflows the C6's write queue"
+    MAX_HOST_FRAME.div_ceil((SERVED_MTU - ATT_HEADER) as usize) < GROUP_WRITES,
+    "the largest frame overflows a write group"
 );
 
 /// A link to a real bridge over Bluetooth, reconnecting on its own.
@@ -418,43 +435,66 @@ pub struct DownWrite {
     pub kind: WriteKind,
 }
 
-/// The writes to Down that carry each host frame.
+/// The writes to Down that carry the host's frames, a group at a time: [`Self::offer`] frames, then
+/// [`Self::take`] their writes.
 #[derive(Debug)]
 pub struct DownWriter {
-    /// The next frame leads with a `0x00`: the first since this connect.
+    /// The next group leads with a `0x00`: the first since this connect.
     lead: bool,
     /// The most bytes one write carries.
-    chunk: usize,
+    piece: usize,
+    /// The frames offered since the last take, encoded end to end.
+    run: Vec<u8>,
+    /// How many frames `run` holds.
+    frames: usize,
 }
 
 impl DownWriter {
     /// A writer for a connection just made, at ATT MTU `mtu`.
     #[must_use]
     pub fn new(mtu: u16) -> Self {
-        let chunk = usize::from(mtu.saturating_sub(ATT_HEADER)).max(MIN_WRITE);
-        Self { lead: true, chunk }
+        let piece = usize::from(mtu.saturating_sub(ATT_HEADER)).max(MIN_WRITE);
+        Self { lead: true, piece, run: Vec::new(), frames: 0 }
     }
 
-    /// `cmd` encoded as on USB and cut into writes without response, the last a request, behind
-    /// a one-byte `0x00` write when it is the first since the connect.
+    /// Add `cmd`'s frame to the group, encoded as on USB: `false` when the group is full, and the
+    /// frame is not taken. A frame too large for any group is taken into an empty one.
     ///
     /// # Errors
     /// [`LinkError`] if `cmd` does not fit a frame.
-    pub fn writes(&mut self, cmd: &HostToBridge) -> Result<Vec<DownWrite>, LinkError> {
+    pub fn offer(&mut self, cmd: &HostToBridge) -> Result<bool, LinkError> {
         let mut buf = [0u8; MAX_HOST_FRAME];
         let len = encode_for_wire(cmd, false, &mut buf)?;
+        let writes = usize::from(self.lead) + (self.run.len() + len).div_ceil(self.piece);
+        if self.frames > 0 && writes > GROUP_WRITES {
+            return Ok(false);
+        }
+        self.run.extend_from_slice(&buf[..len]);
+        self.frames += 1;
+        Ok(true)
+    }
+
+    /// The group's writes, and an empty group after it: the offered frames cut into writes
+    /// without response, the last a request, behind a one-byte `0x00` write when it is the first
+    /// group since the connect. None when nothing was offered.
+    pub fn take(&mut self) -> Vec<DownWrite> {
+        if self.frames == 0 {
+            return Vec::new();
+        }
         let lead = std::mem::take(&mut self.lead).then(|| vec![0x00]);
-        let pieces = buf[..len].chunks(self.chunk).map(<[u8]>::to_vec);
+        let run = std::mem::take(&mut self.run);
+        self.frames = 0;
+        let pieces = run.chunks(self.piece).map(<[u8]>::to_vec);
         let mut writes: Vec<DownWrite> = lead
             .into_iter()
             .chain(pieces)
             .map(|bytes| DownWrite { bytes, kind: WriteKind::Command })
             .collect();
-        // A frame is never empty, so its last piece is not the lead.
+        // A frame is never empty, so the last piece is not the lead.
         if let Some(last) = writes.last_mut() {
             last.kind = WriteKind::Request;
         }
-        Ok(writes)
+        writes
     }
 }
 
@@ -1086,6 +1126,13 @@ async fn pump(
                             ));
                         }
                         Heard::Event(event) => {
+                            if matches!(event, LinkEvent::Connected(_)) {
+                                // Queued before this `Ready`, so stale (§ "Commands wait").
+                                let dropped = plumbing.commands.discard();
+                                if dropped > 0 {
+                                    tracing::debug!(dropped, "dropped commands queued before Ready");
+                                }
+                            }
                             if let LinkEvent::Disconnected { reason, .. } = &event {
                                 tracing::warn!(reason = %reason, "the bridge let this host go");
                                 // The handback is expected, and is no reason to warn again.
@@ -1121,18 +1168,27 @@ async fn pump(
                 );
             }
             _ = ask.tick(), if !inbound.announced() => {
-                let sent = send(peripheral, down, &mut writer, &HostToBridge::Identify, label);
+                if writer.offer(&HostToBridge::Identify).is_err() {
+                    tracing::error!("Identify did not fit in a frame");
+                }
+                let sent = send(peripheral, down, writer.take(), label);
                 if let Some(end) = unless_closed(sent, plumbing, ever_announced).await {
                     return end;
                 }
             }
-            cmd = plumbing.commands.recv() => {
+            cmd = plumbing.commands.recv(), if inbound.announced() => {
                 let Some(cmd) = cmd else { return End::HandleDropped };
-                let sent = send(peripheral, down, &mut writer, &cmd, label);
-                if let Some(end) = unless_closed(sent, plumbing, ever_announced).await {
+                let taken = group(&mut writer, cmd, &mut plumbing.commands);
+                let sent = send(peripheral, down, writer.take(), label);
+                let end = unless_closed(sent, plumbing, ever_announced).await;
+                // Written, or lost with the connection: done either way.
+                plumbing.commands.done(taken);
+                if let Some(end) = end {
                     return end;
                 }
             }
+            // The commands arm is off until the `Ready`, so it cannot say the handle is gone.
+            () = plumbing.events.closed() => return End::HandleDropped,
         }
     }
 }
@@ -1151,19 +1207,35 @@ async fn unless_closed(
     sent.err().map(|Failure { reason, cause }| End::Over { reason, cause, announced })
 }
 
-/// Write one command's frame to Down, a piece at a time, each within [`WRITE_WITHIN`].
+/// Offer `first`, then every command already queued, to `writer`'s group until it refuses one,
+/// which is held for the next group. Returns how many commands the group took, counting one
+/// dropped for not fitting a frame.
+fn group(writer: &mut DownWriter, first: HostToBridge, commands: &mut CommandRx) -> u64 {
+    let mut taken = 0;
+    let mut next = Some(first);
+    while let Some(cmd) = next {
+        match writer.offer(&cmd) {
+            Ok(true) => {}
+            Ok(false) => {
+                commands.hold(cmd);
+                break;
+            }
+            // Only reachable if a command outgrew MAX_HOST_FRAME.
+            Err(_) => tracing::error!("command did not fit in a frame; dropping it"),
+        }
+        taken += 1;
+        next = commands.try_recv();
+    }
+    taken
+}
+
+/// Write one group to Down, a piece at a time, each within [`WRITE_WITHIN`].
 async fn send(
     peripheral: &Peripheral,
     down: &Characteristic,
-    writer: &mut DownWriter,
-    cmd: &HostToBridge,
+    writes: Vec<DownWrite>,
     label: &str,
 ) -> Result<(), Failure> {
-    let Ok(writes) = writer.writes(cmd) else {
-        // Only reachable if a command outgrew MAX_HOST_FRAME.
-        tracing::error!("command did not fit in a frame; dropping it");
-        return Ok(());
-    };
     for write in writes {
         let kind = match write.kind {
             WriteKind::Command => WriteType::WithoutResponse,

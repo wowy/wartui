@@ -402,6 +402,55 @@ fn radio_link_update_sender_resends_install_when_no_hello_follows() {
 }
 
 #[test]
+fn radio_link_update_sender_waits_from_written_when_driver_reports_the_write() {
+    let image = image(SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut buf = [0u8; OP_MAX];
+    let len = sender.next(0, &mut buf).expect("the begin");
+    assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Begin);
+    // The link held the begin 300 ms before writing it.
+    sender.written(300);
+    assert_eq!(sender.next(REPLY_WAIT_MS, &mut buf), None, "timed from the queue");
+    assert_eq!(sender.next(300 + REPLY_WAIT_MS - 1, &mut buf), None);
+    let len = sender.next(300 + REPLY_WAIT_MS, &mut buf).expect("the begin again");
+    assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Begin);
+}
+
+#[test]
+fn radio_link_update_sender_resends_install_from_written_when_driver_reports_the_write() {
+    let image = image(SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    let (_, at) = run_late(&mut sender, &mut c6, 0, |sent| sent == Sent::Install);
+    assert_eq!(sender.stage(), Stage::Installed);
+    let mut buf = [0u8; OP_MAX];
+    sender.written(at + 200);
+    assert_eq!(sender.next(at + REPLY_WAIT_MS, &mut buf), None, "timed from the queue");
+    assert_eq!(sender.next(at + 200 + REPLY_WAIT_MS - 1, &mut buf), None);
+    let len = sender.next(at + 200 + REPLY_WAIT_MS, &mut buf).expect("Install again");
+    assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Install);
+}
+
+#[test]
+fn radio_link_update_sender_ignores_written_when_nothing_is_asked() {
+    let image = image(2 * SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    let mut buf = [0u8; OP_MAX];
+    let len = sender.next(0, &mut buf).unwrap();
+    sender.on_status(&c6.take(&buf[..len]).unwrap());
+    // The begin is answered and a mid-sector chunk asks for nothing.
+    let len = sender.next(1, &mut buf).unwrap();
+    assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Chunk(0));
+    let before = sender.clone();
+    sender.written(2);
+    assert_eq!(format!("{sender:?}"), format!("{before:?}"));
+    // The rest of the sector still goes at once.
+    let len = sender.next(2, &mut buf).unwrap();
+    assert_eq!(sent(&Op::decode(&buf[..len]).unwrap()), Sent::Chunk(UPDATE_CHUNK as u32));
+}
+
+#[test]
 fn radio_link_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);

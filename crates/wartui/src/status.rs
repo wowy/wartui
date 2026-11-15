@@ -375,19 +375,40 @@ pub(crate) async fn wait_for_ready(
     over: crate::config::Link,
     within: Duration,
 ) -> Result<Option<BridgeInfo>> {
+    match wait_for_ready_or_why(link, over, within).await.ready {
+        Ok(info) => Ok(info),
+        Err(reason) => bail!("{reason}"),
+    }
+}
+
+/// What [`wait_for_ready_or_why`] came to.
+#[derive(Debug)]
+pub(crate) struct ReadyWaited {
+    /// The announcement, `None` when the wait ran out with no failure to name, or why the link
+    /// went down first.
+    pub(crate) ready: Result<Option<BridgeInfo>, String>,
+    /// A frame arrived that did not decode.
+    pub(crate) garbled: bool,
+}
+
+/// [`wait_for_ready`], keeping the reason as text and noting whether a frame arrived that did not
+/// decode: a bridge running firmware from another tree.
+pub(crate) async fn wait_for_ready_or_why(
+    link: &mut LinkHandle,
+    over: crate::config::Link,
+    within: Duration,
+) -> ReadyWaited {
     let until = tokio::time::Instant::now() + within;
     let mut wait = ReadyWait::new(over);
+    let mut garbled = false;
     loop {
         let Ok(event) = tokio::time::timeout_at(until, link.recv()).await else {
-            return match wait.timed_out() {
-                Some(reason) => bail!("{reason}"),
-                None => Ok(None),
-            };
+            let ready = wait.timed_out().map_or(Ok(None), Err);
+            return ReadyWaited { ready, garbled };
         };
-        match wait.take(event) {
-            Some(Ok(info)) => return Ok(Some(info)),
-            Some(Err(reason)) => bail!("{reason}"),
-            None => {}
+        garbled |= matches!(event, Some(LinkEvent::Garbled(_)));
+        if let Some(ready) = wait.take(event) {
+            return ReadyWaited { ready: ready.map(Some), garbled };
         }
     }
 }

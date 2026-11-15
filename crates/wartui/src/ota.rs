@@ -35,6 +35,16 @@
 //! nothing of its own while they update, and the fleet stays idle afterwards until a run starts
 //! it.
 //!
+//! **The link is picked as every command picks it** (`crate::link_for`): `--link`, else a
+//! `--bridge` path's USB, else `[bridge] link`. Over Bluetooth the bridge is the one named or
+//! remembered there (`reset::bluetooth_target`), never one a scan hears, whose fleet would take
+//! the image. The upload and every session's records go through the one `LinkHandle` as over USB,
+//! more slowly. A link that drops mid-update fails each session as a pulled cable does.
+//!
+//! **A ctrl-c ends the run through `main`, which closes a Bluetooth link.** While connecting,
+//! listening, finding images and asking, it ends the run at once ([`unless_stopped`]); once
+//! sessions run, it cancels them, so each node is told before the run ends.
+//!
 //! [`wartui_core::ota`] has the session's own reasoning.
 
 use std::collections::{BTreeMap, HashMap};
@@ -65,10 +75,13 @@ use crate::text::node_name;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
-    /// if omitted.
+    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). If
+    /// omitted, detected over USB, and over Bluetooth the one remembered there.
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
+
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
 
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
@@ -109,7 +122,8 @@ pub struct Args {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 }
@@ -174,24 +188,32 @@ pub async fn run(args: Args) -> Result<()> {
     if !args.yes && !std::io::stdin().is_terminal() {
         bail!("standard input is not a terminal, so nothing can answer; pass --yes to update");
     }
-    let mut link = open(&args)?;
-    let info = match tokio::time::timeout(super::CONNECT_NOTICE_AFTER, connected(&mut link)).await {
-        Ok(info) => info?,
-        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), Link::Usb).await),
+    let (mut link, over, bridge) = open(&args)?;
+    let mut terminate = crate::Terminate::new();
+    let stop = async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = terminate.recv() => {}
+        }
+    };
+    tokio::pin!(stop);
+    let ready = crate::status::wait_for_ready(&mut link, over, super::connect_wait(over));
+    let Some(info) = unless_stopped(&mut stop, ready).await?? else {
+        bail!("{}", super::no_bridge_notice(bridge.as_deref(), over).await)
     };
     let board = info.node_board;
     let named = slots_named(board, &args.nodes).map_err(anyhow::Error::msg)?;
     println!("bridge  {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("listening {} s for heartbeats", args.listen);
     let listen_for = Duration::from_secs(args.listen);
-    let (heard, slots) = listen(&mut link, listen_for).await?;
+    let (heard, slots) = unless_stopped(&mut stop, listen(&mut link, listen_for)).await??;
     let targets = select(&heard, &slots, &named, board, listen_for)?;
     let names: HashMap<Mac, String> = targets
         .iter()
         .map(|(node, _)| (*node, node_name(board, slots.get(node).copied(), node)))
         .collect();
 
-    let images = images(&args, &targets).await?;
+    let images = unless_stopped(&mut stop, images(&args, &targets)).await??;
     let plan: Vec<(Mac, Capabilities, Option<Version>, Action)> = targets
         .iter()
         .map(|(node, caps)| {
@@ -210,27 +232,22 @@ pub async fn run(args: Args) -> Result<()> {
         println!("nothing to update");
         return Ok(());
     }
-    if !args.yes && !tokio::task::spawn_blocking(confirm).await.context("asking")?? {
-        println!("nothing updated");
-        return Ok(());
+    if !args.yes {
+        let asked = tokio::task::spawn_blocking(confirm);
+        if !unless_stopped(&mut stop, asked).await?.context("asking")?? {
+            println!("nothing updated");
+            return Ok(());
+        }
     }
 
     // Stop the scan first, so the P4 sends the nodes nothing of its own while they update.
-    if !stop_scan(&mut link, SCAN_STOP_WAIT).await {
+    if !unless_stopped(&mut stop, stop_scan(&mut link, SCAN_STOP_WAIT)).await? {
         println!("the bridge did not report its scan stopped; updating anyway");
     }
 
     // From the clock, so a host restarted mid-update is unlikely to reuse the byte; the node
     // copes if it does.
     let base = u8::try_from(chrono::Utc::now().timestamp().rem_euclid(256)).unwrap_or(1);
-    let mut terminate = crate::Terminate::new();
-    let stop = async {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            () = terminate.recv() => {}
-        }
-    };
-    tokio::pin!(stop);
     let mut outcomes = Vec::new();
     for (board, members) in fleets(&chosen) {
         let image = board.map(|board| &images[&board].ota);
@@ -363,28 +380,49 @@ fn cache_failure(failure: update::Failure) -> String {
     }
 }
 
-fn open(args: &Args) -> Result<LinkHandle> {
+/// Open the simulator, or the bridge [`reach`] picks. Returns the handle, the link and the bridge
+/// it was named by, if any.
+fn open(args: &Args) -> Result<(LinkHandle, Link, Option<String>)> {
     if let Some(node_count) = args.sim {
         let config = SimConfig {
             node_count,
             fleet_version: minor_behind(NODE_VERSION),
             ..SimConfig::default()
         };
-        return SimTransport::new(config).start().context("starting the simulator");
+        let link = SimTransport::new(config).start().context("starting the simulator")?;
+        return Ok((link, Link::Usb, None));
     }
-    // USB whatever `[bridge] link` says: updates use the cable.
-    let bridge = args.bridge.as_deref();
-    super::open(bridge, None, Link::Usb, super::memory(args.config.as_deref()))
+    let remembered = crate::config::remembered_bridge(args.config.as_deref());
+    let (over, bridge) = reach(args, &remembered)?;
+    let link = super::open(bridge.as_deref(), None, over, super::memory_of(&remembered))?;
+    Ok((link, over, bridge))
 }
 
-async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
-    loop {
-        match link.recv().await {
-            Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
+/// The link `crate::link_for` picks, given the `[bridge]` table `wartui.toml` holds, and the
+/// bridge to name on it: over USB `--bridge`, and over Bluetooth the bridge named or remembered
+/// there ([`crate::reset::bluetooth_target`]).
+fn reach(args: &Args, remembered: &crate::config::Bridge) -> Result<(Link, Option<String>)> {
+    let named = args.bridge.as_deref();
+    let over = super::link_for(args.link_flag.link, named, remembered.link)?;
+    let bridge = match over {
+        Link::Usb => named.map(str::to_owned),
+        Link::Bluetooth => {
+            let target = crate::reset::bluetooth_target(named, remembered, "ota")
+                .map_err(anyhow::Error::msg)?;
+            Some(target.to_string())
         }
+    };
+    Ok((over, bridge))
+}
+
+/// `step`'s output, or [`crate::Interrupted`] when `stop` resolves first.
+async fn unless_stopped<T>(
+    stop: impl Future<Output = ()>,
+    step: impl Future<Output = T>,
+) -> Result<T> {
+    tokio::select! {
+        out = step => Ok(out),
+        () = stop => Err(crate::Interrupted.into()),
     }
 }
 
@@ -727,9 +765,67 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use sha2::{Digest, Sha256};
+    use wartui_bridge::serial::BridgeSpec;
     use wartui_proto::bus::UpdateStatus;
 
     const NEW: Version = Version::new(0, 1, 1);
+
+    /// A bridge's address, locally administered.
+    const BRIDGE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+
+    /// Wait for the simulator's `Ready`, as `run` waits for a bridge's.
+    async fn connected(link: &mut LinkHandle) {
+        let ready = crate::status::wait_for_ready(link, Link::Usb, Duration::from_secs(5)).await;
+        ready.expect("the simulator connects").expect("the simulator announces itself");
+    }
+
+    /// `ota` as typed with `bridge` and `link`.
+    fn args(bridge: Option<&str>, link: Option<Link>) -> Args {
+        Args {
+            bridge: bridge.map(str::to_owned),
+            link_flag: crate::config::LinkFlag { link },
+            config: None,
+            nodes: Vec::new(),
+            image: None,
+            firmware_dir: None,
+            listen: 6,
+            force: false,
+            yes: true,
+            sim: None,
+        }
+    }
+
+    #[test]
+    fn ota_cmd_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
+        // Remembered over USB only: only a scan would find it, and a scan may hear another
+        // fleet's bridge, whose nodes would take this image.
+        let usb_only = crate::config::Bridge {
+            mac: Some(BRIDGE),
+            link: Some(Link::Bluetooth),
+            ..crate::config::Bridge::default()
+        };
+        let refused = reach(&args(None, None), &usb_only).unwrap_err().to_string();
+        assert!(refused.contains("`wartui ota`"), "{refused}");
+        assert!(refused.contains("--bridge XX:YY"), "{refused}");
+        let (over, bridge) = reach(&args(Some("44:C0"), None), &usb_only).unwrap();
+        assert_eq!((over, bridge.as_deref()), (Link::Bluetooth, Some("44:C0")), "named");
+        // Over USB the transport's own choice stands.
+        let (over, bridge) = reach(&args(None, Some(Link::Usb)), &usb_only).unwrap();
+        assert_eq!((over, bridge), (Link::Usb, None));
+    }
+
+    #[test]
+    fn ota_cmd_names_remembered_bridge_when_over_bluetooth_with_it_remembered_there() {
+        let remembered = crate::config::Bridge {
+            mac: Some(BRIDGE),
+            bluetooth_address: Some("02:00:5E:10:44:C2".to_owned()),
+            link: Some(Link::Bluetooth),
+            ..crate::config::Bridge::default()
+        };
+        let (over, bridge) = reach(&args(None, None), &remembered).unwrap();
+        let mac = BridgeSpec::Mac(BRIDGE).to_string();
+        assert_eq!((over, bridge), (Link::Bluetooth, Some(mac)));
+    }
 
     fn caps(version: Version, trial: bool) -> Capabilities {
         Capabilities { version, trial, ..Capabilities::here(Board::Esp32c5) }
@@ -856,7 +952,7 @@ mod tests {
             ..SimConfig::default()
         };
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
-        connected(&mut link).await.expect("the simulator connects");
+        connected(&mut link).await;
         let nodes: Vec<Mac> = (0..count).map(SimTransport::node_mac).collect();
         let (heard, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
         assert!(nodes.iter().all(|node| heard.contains_key(node)), "every node heard");
@@ -994,7 +1090,7 @@ mod tests {
             ..SimConfig::default()
         };
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
-        connected(&mut link).await.expect("the simulator connects");
+        connected(&mut link).await;
         let nodes: Vec<Mac> = (0..4).map(SimTransport::node_mac).collect();
         let (_, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
         let image = sim_image(6);
@@ -1047,7 +1143,7 @@ mod tests {
             ..SimConfig::default()
         };
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
-        connected(&mut link).await.expect("the simulator connects");
+        connected(&mut link).await;
         let nodes: Vec<Mac> = (0..4).map(SimTransport::node_mac).collect();
         let (_, slots) = listen(&mut link, Duration::from_secs(1)).await.expect("listening");
         let image = sim_image(6);

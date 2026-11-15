@@ -886,7 +886,10 @@ async fn connect(
             }
             cmd = plumbing.commands.recv() => match cmd {
                 Some(cmd) => {
-                    if write_tx.send(cmd).is_err() {
+                    let handed = write_tx.send(cmd);
+                    // Handed to the writer thread, or lost with it: done either way.
+                    plumbing.commands.done(1);
+                    if handed.is_err() {
                         break Err("writer stopped".to_owned());
                     }
                     keepalive.reset();

@@ -3,7 +3,7 @@
 //! simulated fleet, end to end.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -14,14 +14,15 @@ use wartui_core::ota::{
     BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES,
     MAX_STATUS_TIMEOUTS, OtaEvent, OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
-use wartui_core::runtime::{drive_fleet, now};
+use wartui_core::runtime::{FleetError, drive_fleet, now};
 use wartui_proto::bus::{
-    Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, NODE_VERSION, Slot, UPDATE_CHUNK,
-    UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
+    Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION, Slot,
+    UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::link::{BridgeToHost, HostToBridge, cache_chunk_body, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
+use wartui_proto::radio_link::update;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0, 0, 0, 0, 7];
@@ -1144,6 +1145,116 @@ async fn drive_fleet_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_
     assert_eq!((after[1].version, after[1].trial), (new, false));
     assert_eq!((after[2].version, after[2].trial), (old, false));
     assert_eq!((after[3].version, after[3].trial), (new, false));
+}
+
+/// Every warning logged on this thread while it is the default subscriber, by its message.
+struct Warnings(Arc<Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message<'a>(&'a mut String);
+        impl tracing::field::Visit for Message<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = String::new();
+        event.record(&mut Message(&mut message));
+        self.0.lock().unwrap().push(message);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_updates_sim_fleet_when_link_writes_slowly() {
+    // A Bluetooth link writes one group at a time, each answered in 60 ms or more. A full
+    // fleet's records and the upload share it. Nodes run in real time: sped up, their heartbeats
+    // and the `begin` each one draws outrun a link this slow before the upload starts.
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let _logged = tracing::subscriber::set_default(Warnings(Arc::clone(&warnings)));
+    let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
+    let count = u8::try_from(MAX_SLOTS).unwrap();
+    let mut link = SimTransport::new(SimConfig {
+        node_count: count,
+        speed: 1.0,
+        fleet_version: old,
+        command_latency: Duration::from_millis(60),
+        ..SimConfig::default()
+    })
+    .start()
+    .expect("starting the simulator");
+    connected(&mut link).await;
+    let nodes: Vec<Mac> = (0..count).map(SimTransport::node_mac).collect();
+    versions(&mut link, &nodes).await;
+
+    let new = NODE_VERSION;
+    let image = sim_image(new);
+    let mut sessions: Vec<OtaSession> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let session = u8::try_from(0x40 + i).unwrap_or(1);
+            OtaSession::new(*node, old, &image, session, Ids::of(i, nodes.len()), now())
+        })
+        .collect();
+    let outcomes =
+        drive_fleet(&mut link, &mut sessions, Some(&image), std::future::pending(), |_| {})
+            .await
+            .expect("the upload");
+    assert!(outcomes.iter().all(|outcome| *outcome == Outcome::Done(new)), "{outcomes:?}");
+    let warnings = warnings.lock().unwrap();
+    assert!(!warnings.iter().any(|w| w.contains("dropping an update record")), "{warnings:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_fails_upload_when_link_stops_taking_commands() {
+    // A bridge that handles no command for an hour, as a transport between connections reads
+    // none: the upload's op is never written, and the upload still ends in its silence.
+    let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
+    let mut link = SimTransport::new(SimConfig {
+        node_count: 2,
+        speed: SPEED,
+        fleet_version: old,
+        command_latency: Duration::from_secs(3_600),
+        ..SimConfig::default()
+    })
+    .start()
+    .expect("starting the simulator");
+    connected(&mut link).await;
+    let nodes: Vec<Mac> = (0..2).map(SimTransport::node_mac).collect();
+    versions(&mut link, &nodes).await;
+
+    let image = sim_image(NODE_VERSION);
+    let mut sessions: Vec<OtaSession> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let session = u8::try_from(0x40 + i).unwrap_or(1);
+            OtaSession::new(*node, old, &image, session, Ids::of(i, nodes.len()), now())
+        })
+        .collect();
+    let start = tokio::time::Instant::now();
+    let ended =
+        drive_fleet(&mut link, &mut sessions, Some(&image), std::future::pending(), |_| {}).await;
+    assert_eq!(ended, Err(FleetError::Upload(update::Failure::Silent)));
+    assert!(start.elapsed() < Duration::from_secs(30), "failed after {:?}", start.elapsed());
 }
 
 #[test]

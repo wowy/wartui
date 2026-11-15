@@ -20,8 +20,12 @@
 //! which bridge the main fleet's `run` uses. A save that fails leaves the flash a success, and says
 //! so.
 //!
-//! **A P4 bridge is updated over its own link** (`super::p4`): the cable the host already holds is
-//! the one that carries the update.
+//! **A P4 bridge is updated over its own link** (`super::p4`), picked as every command picks one
+//! (`crate::link_for`): `--link`, else a `--bridge` path's USB, else `[bridge] link`, else USB.
+//!
+//! **Over Bluetooth, the bridge is the one named or remembered there**
+//! (`reset::bluetooth_target`), never one a scan happens to hear, and nothing is probed or saved:
+//! a named bridge is not saved, and a remembered one is saved already.
 //!
 //! There is no `--skip` or `--jobs`: there is one target. There is no `--features` either: the P4
 //! bridge firmware has none, so a build and a release image are the same.
@@ -35,6 +39,7 @@ use wartui_bridge::serial::{BridgeSpec, Probed, discover_ports, probe_all};
 use wartui_proto::mac::{self, Mac};
 
 use super::{canonical, matches, p4};
+use crate::config::Link;
 use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
@@ -45,6 +50,13 @@ pub struct Args {
     /// answers. A board found without it is remembered as the bridge once flashed.
     #[arg(long, value_name = "PATH|MAC")]
     pub bridge: Option<String>,
+
+    /// Send the update over this link: `usb` or `bluetooth`. `[bridge] link` in `wartui.toml`
+    /// when omitted, else `usb`; a `--bridge` path is always USB. Over Bluetooth it goes to the
+    /// bridge `--bridge` names or the one remembered there, slower than over USB, and a failed
+    /// update is recovered over USB.
+    #[arg(long, value_name = "LINK")]
+    pub link: Option<Link>,
 
     /// Read and save the remembered bridge in this file instead of the default `wartui.toml`. A
     /// file that does not load refuses the run; see `crates/wartui/README.md` § "Config file".
@@ -60,12 +72,16 @@ pub struct Args {
     pub firmware_dir: Option<PathBuf>,
 
     /// Say where the image would come from and which board would be updated, then stop. Builds,
-    /// downloads and sends no image; each CH343 is still asked which bridge it is.
+    /// downloads and sends no image; over USB, each CH343 is still asked which bridge it is.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    let remembered = super::remembered_bridge(args.config.as_deref())?;
+    if link(&args, &remembered)? == Link::Bluetooth {
+        return over_bluetooth(&args, &remembered).await;
+    }
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
     let ch343s: Vec<PortCandidate> =
@@ -75,13 +91,26 @@ pub async fn run(args: Args) -> Result<()> {
         &found,
         &probed,
         named.as_ref().map(|(given, spec)| (*given, spec)),
-        super::remembered_bridge(args.config.as_deref())?,
+        remembered.mac,
     )?;
-    p4::run(&args, &board, expected).await?;
+    p4::run(&args, p4::Target::Usb { board: board.clone(), expected }).await?;
     if !args.dry_run {
         remember(&args, named.is_some(), &board, expected);
     }
     Ok(())
+}
+
+/// The link the update goes over, given the `[bridge]` table `wartui.toml` holds.
+fn link(args: &Args, remembered: &config::Bridge) -> Result<Link> {
+    crate::link_for(args.link, args.bridge.as_deref(), remembered.link)
+}
+
+/// Update the bridge named or remembered over Bluetooth.
+async fn over_bluetooth(args: &Args, remembered: &config::Bridge) -> Result<()> {
+    let bridge = crate::reset::bluetooth_target(args.bridge.as_deref(), remembered, "flash-bridge")
+        .map_err(anyhow::Error::msg)?;
+    let memory = crate::memory_of(remembered);
+    p4::run(args, p4::Target::Bluetooth { bridge, memory }).await
 }
 
 /// Remember the flashed board as the bridge, unless `--bridge` named it, saying so when that
@@ -429,6 +458,76 @@ mod tests {
         remember_flashed(&path, BRIDGE_MAC, Some("5CF7153520".to_owned())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    /// `flash-bridge` as typed with `bridge` and `link`, reading `config`.
+    fn args(bridge: Option<&str>, link: Option<Link>, config: Option<&Path>) -> Args {
+        Args {
+            bridge: bridge.map(str::to_owned),
+            link,
+            config: config.map(Path::to_path_buf),
+            image: None,
+            firmware_dir: None,
+            dry_run: false,
+        }
+    }
+
+    /// A `wartui.toml` holding `text`, in a directory kept as long as the result.
+    fn config_file(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn flash_bridge_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
+        // Remembered over USB only: only a scan would find it, and a scan may find another
+        // fleet's bridge. A dry run, so nothing is built or sent if the refusal ever goes.
+        let (_dir, path) =
+            config_file("[bridge]\nmac = \"02:00:5E:10:44:C0\"\nlink = \"bluetooth\"\n");
+        let args = Args { dry_run: true, ..args(None, None, Some(&path)) };
+        let refused = run(args).await.unwrap_err().to_string();
+        assert!(refused.contains("`wartui flash-bridge`"), "{refused}");
+        assert!(refused.contains("--bridge XX:YY"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn flash_bridge_dry_runs_over_bluetooth_when_bridge_is_named_or_remembered_there() {
+        let (_dir, usb_only) = config_file("[bridge]\nmac = \"02:00:5E:10:44:C0\"\n");
+        let named =
+            Args { dry_run: true, ..args(Some("44:C0"), Some(Link::Bluetooth), Some(&usb_only)) };
+        run(named).await.expect("the named bridge");
+        let (_dir, there) = config_file(
+            "[bridge]\nmac = \"02:00:5E:10:44:C0\"\nbluetooth-address = \"02:00:5E:10:44:C2\"\n\
+             link = \"bluetooth\"\n",
+        );
+        run(Args { dry_run: true, ..args(None, None, Some(&there)) }).await.expect("remembered");
+    }
+
+    #[test]
+    fn flash_bridge_refuses_bluetooth_when_bridge_is_a_path() {
+        let none = config::Bridge::default();
+        let refused = link(&args(Some("/dev/ttyACM0"), Some(Link::Bluetooth), None), &none);
+        assert!(refused.is_err());
+        // A path alone keeps the update on USB, whatever the file says.
+        let bluetooth = config::Bridge { link: Some(Link::Bluetooth), ..config::Bridge::default() };
+        let by_path = link(&args(Some("/dev/ttyACM0"), None, None), &bluetooth);
+        assert_eq!(by_path.unwrap(), Link::Usb);
+    }
+
+    #[test]
+    fn flash_bridge_follows_file_link_when_no_flag_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nlink = \"bluetooth\"\n").unwrap();
+        let remembered = super::super::remembered_bridge(Some(&path)).unwrap();
+        for bridge in [None, Some("44:C0")] {
+            let over = link(&args(bridge, None, Some(&path)), &remembered).unwrap();
+            assert_eq!(over, Link::Bluetooth, "{bridge:?}");
+        }
+        let flagged = link(&args(None, Some(Link::Usb), Some(&path)), &remembered).unwrap();
+        assert_eq!(flagged, Link::Usb, "the flag wins");
     }
 
     #[test]

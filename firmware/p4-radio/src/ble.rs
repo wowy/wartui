@@ -13,9 +13,9 @@
 //! evicts the queue's oldest to make room, and the oldest can be a write already acknowledged, so
 //! a write is queued only while [`UP_RESERVE_BYTES`] stay free beside it. A write request is
 //! answered only once its write is forwarded, behind every write queued ahead of it, which is
-//! what paces a central that ends each frame with one (`wartui_bridge::ble`). A request whose
-//! write was dropped is refused with Insufficient Resources rather than acknowledged, so the
-//! central learns its frame is gone: wartui's transport ends the connection on a failed request,
+//! what paces a central that ends each write group with one (`wartui_bridge::ble`). A request
+//! whose write was dropped is refused with Insufficient Resources rather than acknowledged, so the
+//! central learns its group is gone: wartui's transport ends the connection on a failed request,
 //! and its next connection leads with a `0x00`, which ends the torn frame on the P4. A write
 //! without response is answered by nothing either way.
 //!

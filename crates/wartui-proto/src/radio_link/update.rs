@@ -45,6 +45,11 @@
 //!   those statuses, save a refusal for its session: the C6 could not switch images, so
 //!   waiting for its reboot is pointless. That refusal is [`Failure::SwitchFailed`], apart from
 //!   a [`Failure::Refused`] session, since the fix differs: the image arrived whole.
+//! - **Both waits run from the write, which [`Sender::written`] reports.** A driver whose link can
+//!   hold ops unwritten, such as the host's over Bluetooth, calls it once the link has written
+//!   the last op it queued. Timed from the queue, a wait would expire while the op still waited
+//!   there, and the re-send would join the backlog it timed out behind. The P4's own driver
+//!   toward its C6 writes each op to the UART at once, so it never calls it.
 
 use crate::bus::{
     UPDATE_CHUNK, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState, UpdateStatus, Version,
@@ -476,6 +481,18 @@ impl<'a> Sender<'a> {
                     self.stage = Stage::Failed(Failure::Refused(state));
                 }
             }
+        }
+    }
+
+    /// The link wrote the ops sent so far, at P4 time `now_ms`: the reply wait of the op asked,
+    /// and the `Install` re-send clock, start again from here. The try count stays. Nothing
+    /// changes when no op is asked and no `Install` is pending.
+    pub fn written(&mut self, now_ms: u64) {
+        if let Some((asked, _)) = self.asked {
+            self.asked = Some((asked, now_ms));
+        }
+        if self.stage == Stage::Installed {
+            self.install_sent_ms = now_ms;
         }
     }
 

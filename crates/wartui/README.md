@@ -24,7 +24,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Update the P4 bridge's firmware over USB; see "Flashing the bridge"                 |
+| `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 | `bluetooth`    | `pair` this PC with the bridge, or `forget` it; see "The Bluetooth link"            |
 
@@ -349,9 +349,9 @@ wartui refuses to start on an unknown key or table, naming the file and line. A 
 a malformed `[bridge] mac`, a `mac`, `serial` or `bluetooth-address` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
 `status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read
-only `[bridge]`, and treat a broken file as no bridge remembered, so it cannot stop them. `ota`
-ignores `link`, and so does `bluetooth pair`. `flash-bridge` reads only `[bridge]`, ignores
-`link`, and refuses a broken file, since it decides which board gets firmware. `flash-fleet` never
+only `[bridge]`, and treat a broken file as no bridge remembered, so it cannot stop them.
+`bluetooth pair` ignores `link`. `flash-bridge` reads only `[bridge]`, and refuses a broken file,
+since it decides which board gets firmware. `flash-fleet` never
 reads the file. Settings (`c`) rewrites the whole file on save.
 The waiting-for-GPS pop-up's box writes `[gps] wait-for-fix = false` when ticked, and drops the
 key when unticked.
@@ -460,27 +460,31 @@ candidate once, since `board-info` does.
 
 ### Flashing the bridge
 
-`flash-bridge` updates the P4 bridge over the link it bridges on: the Type-C cable to its CH343,
-the one its first flash used (`firmware/p4-bridge/README.md` § "First flash").
-`[bridge] link = "bluetooth"` does not change that, and `--link` is refused.
+`flash-bridge` updates the P4 bridge over the link it bridges on: over USB, the Type-C cable to
+its CH343, the one its first flash used (`firmware/p4-bridge/README.md` § "First flash"); over
+Bluetooth, its C6. It picks the link as every command does: `--link`, else USB for a `--bridge`
+path, else `[bridge] link`, else USB. Bluetooth is slower than USB, and an update that fails over
+it is recovered over USB ("Over Bluetooth" below).
 
 ```sh
 wartui flash-bridge --dry-run                       # which board, and the image's source
 wartui flash-bridge
 wartui flash-bridge --bridge 71:F4
+wartui flash-bridge --link bluetooth --bridge 44:C0
 ```
 
-| Flag                 | Default        | What it is                                                            |
-|----------------------|----------------|-----------------------------------------------------------------------|
-| `--bridge PATH\|MAC` | see below      | The P4 bridge to update, which must answer; `71:F4` works too         |
-| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
-| `--image BIN`        | —              | Send this app-only image rather than building or fetching one         |
-| `--firmware-dir DIR` | the checkout's | Build the image from the P4 bridge firmware here                      |
-| `--dry-run`          | off            | Report the board and the image's source; build, fetch and send no image |
+| Flag                    | Default         | What it is                                                              |
+|-------------------------|-----------------|-------------------------------------------------------------------------|
+| `--bridge PATH\|MAC`    | see below       | The P4 bridge to update, which must answer; `71:F4` works too           |
+| `--link usb\|bluetooth` | `[bridge] link` | Which link carries the update; see "Over Bluetooth"                     |
+| `--config PATH`         | per-OS path     | Where to read and save the remembered bridge; see "Config file"         |
+| `--image BIN`           | —               | Send this app-only image rather than building or fetching one           |
+| `--firmware-dir DIR`    | the checkout's  | Build the image from the P4 bridge firmware here                        |
+| `--dry-run`             | off             | Report the board and the image's source; build, fetch and send no image |
 
-**The board is chosen before any image is sent.** Each attached CH343 is asked which bridge it is,
-as `wartui ports` asks, and the choice is made among those that answered, from the first that
-applies. A node beside the bridge changes nothing.
+**Over USB, the board is chosen before any image is sent.** Each attached CH343 is asked which
+bridge it is, as `wartui ports` asks, and the choice is made among those that answered, from the
+first that applies. A node beside the bridge changes nothing.
 
 1. The board `--bridge` names.
 2. The bridge remembered in `wartui.toml`, which must answer.
@@ -541,10 +545,50 @@ The run also fails when the P4 came back on the new image but did not report it 
 3 s. The image is then still on trial and rolls back unless a host confirms it: run `flash-bridge`
 again, or any `wartui` command that opens the bridge.
 
+#### Over Bluetooth
+
+The bridge is the one `--bridge` names, by address, or the one remembered over Bluetooth in
+`wartui.toml`; never one a scan merely hears. Nothing is probed, and nothing is saved. With neither,
+the run is refused and asks for `--bridge XX:YY`. The run stops the bridge's scan before it sends,
+saying so when the bridge does not report it stopped; the P4 boots stopped either way.
+
+The P4's reboot resets its C6, which drops the link, and when the new image carries a new C6 image
+the C6's update drops it again. The transport reconnects each time, and the run reads the outcome
+across the reconnects: it waits up to 180 s for the bridge to come back, then up to 150 s more, long
+enough for three trial boots to end in a rollback. It ends once the new image is confirmed and the
+link has stayed up 5 s with no line about the C6's update. An update takes about 80 s over
+Bluetooth, against about 20 s over USB, from a PC at a 30 ms connection interval. Besides the lines
+above, the board prints:
+
+| Line                                                        | Meaning                                                       |
+|-------------------------------------------------------------|---------------------------------------------------------------|
+| `the link dropped as the bridge restarts; reconnecting`     | The P4 is rebooting into the image, or its C6 is restarting   |
+| `the radio restarted on its bundled image`                  | The C6's update ended and the link came back                  |
+| `installed, and confirmed: it outlived its trial watchdog`  | The confirm's line was lost to a drop, and the P4 stayed up past its 30 s trial watchdog, which only a confirmed image does |
+| `did not report its scan stopped; updating anyway`          | The bridge did not answer the stop in 2 s                     |
+
+It fails, beside the cases above, when:
+
+- The link drops while the image is sent. The bridge keeps its image; run `flash-bridge` again.
+- The bridge comes back on the life it had before the install: `never took the install, and keeps
+  its image`. The link dropped before the P4 took the `Install`. Run `flash-bridge` again. A C6
+  that restarts alone at that moment reads as a rollback instead.
+- The bridge does not come back within 180 s, or comes back on the new image with no confirm seen
+  by the end: `no confirm was seen over Bluetooth`, and the image rolls back unless a host confirms
+  it.
+- Nothing answers over Bluetooth: the same notice `status` gives ("When the Bluetooth link does not
+  come up").
+
+A failed update over Bluetooth is recovered over USB: run `flash-bridge --link usb`. Nothing resumes
+a partly sent image.
+
 ### Updating over the air
 
 `ota` updates the nodes' firmware through the bridge, with no USB cable to them. It reaches the
-bridge over USB whatever `[bridge] link` says. It listens for
+bridge over the link every command picks ("The Bluetooth link"); over Bluetooth it is slower than
+over USB, and a link that drops fails each node's update as a pulled cable does. Over Bluetooth the
+bridge is the one `--bridge` names or the one remembered over Bluetooth in `wartui.toml`, never one
+a scan merely hears; with neither, the run is refused and asks for `--bridge XX:YY`. It listens for
 heartbeats, shows what it would do with each node, asks, then updates every chosen node at once
 while it uploads the image into the bridge's node image cache. Nothing else may hold the bridge
 meanwhile, so stop `run` first.
@@ -555,17 +599,18 @@ wartui ota --node N3 --node N7                # just these two
 wartui ota --image wartui-node-app-esp32c5.bin --yes
 ```
 
-| Flag                 | Default          | What it is                                                     |
-|----------------------|------------------|----------------------------------------------------------------|
-| `--bridge PATH\|MAC` | detected         | The bridge, by path, address or `00:08`                        |
-| `--node SLOT`        | every node heard | A node to update, by the name its node block shows (`N3`)      |
-| `--image BIN`        | —                | Send this app-only image, to the nodes of the board it is for  |
-| `--firmware-dir DIR` | the checkout's   | Build the image from the node firmware here                    |
-| `--listen SECS`      | `6`              | How long to gather heartbeats before choosing                  |
-| `--force`            | off              | Also update a node on the image's version, or a newer one      |
-| `--yes`, `-y`        | off              | Update without asking                                          |
-| `--sim N`            | —                | Update a fake fleet, running an older version, instead         |
-| `--config PATH`      | per-OS path      | Where to read the remembered bridge; see "Config file"         |
+| Flag                    | Default          | What it is                                                    |
+|-------------------------|------------------|---------------------------------------------------------------|
+| `--bridge PATH\|MAC`    | detected         | The bridge, by path, address or `00:08`                       |
+| `--link usb\|bluetooth` | `[bridge] link`  | How to reach it; see "The Bluetooth link"                     |
+| `--node SLOT`           | every node heard | A node to update, by the name its node block shows (`N3`)     |
+| `--image BIN`           | —                | Send this app-only image, to the nodes of the board it is for |
+| `--firmware-dir DIR`    | the checkout's   | Build the image from the node firmware here                   |
+| `--listen SECS`         | `6`              | How long to gather heartbeats before choosing                 |
+| `--force`               | off              | Also update a node on the image's version, or a newer one     |
+| `--yes`, `-y`           | off              | Update without asking                                         |
+| `--sim N`               | —                | Update a fake fleet, running an older version, instead        |
+| `--config PATH`         | per-OS path      | Where to read the remembered bridge; see "Config file"        |
 
 **The image is app-only**: what one app slot holds, not the merged image `flash-fleet` writes.
 Its board and version come from the app descriptor inside it, never from its file name. A merged
@@ -618,8 +663,9 @@ or by not hearing the host for 15 s. With `--log-file` and `RUST_LOG=wartui_core
 holds every frame sent, every send result, every status from a node and every phase change, as
 `key=value` fields.
 
-**How long it takes.** The upload to the bridge is bounded by its link, about 386 KB/s, so it takes
-a few seconds.
+**How long it takes.** The upload to the bridge is bounded by its link, about 386 KB/s over
+USB, so it takes a few seconds. Over Bluetooth it runs at about 17 KB/s from a PC at a 30 ms
+connection interval, so an update of ten nodes takes about a minute and a half in all.
 `ota` stops the bridge's scan before it sends anything, so the nodes idle through the update and
 stay idle afterwards until a `run` or `wartui scan start` starts it again. Each node's first frame
 goes at once to the slot the listen heard it in, and one that has moved since waits for its next
@@ -1176,11 +1222,11 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## The Bluetooth link
 
 **`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
-`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth forget` take it.
-`[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected over
-there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. **Updates use the USB
-cable**: `flash-bridge` and `ota` take no `--link`, refuse one with `updates use the USB cable`,
-and ignore `[bridge] link`. Nothing scans for Bluetooth unless the link is Bluetooth. Every
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota` and `bluetooth forget`
+take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
+over there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. Updates over
+Bluetooth are slower than over USB, and one that fails is recovered over USB ("Flashing the
+bridge"). Nothing scans for Bluetooth unless the link is Bluetooth. Every
 command lets the bridge go before it exits, ctrl-c included, so the bridge never keeps serving a
 PC that has gone. So a Bluetooth command takes about 3 s, 2 s of it BlueZ's own disconnect at
 exit.
@@ -1262,7 +1308,7 @@ scans Bluetooth:
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
-`flash-bridge` does. The Bluetooth host stays connected and waits. The bridge hands it back 15 s
+`flash-bridge` over USB does. The Bluetooth host stays connected and waits. The bridge hands it back 15 s
 after USB falls silent, and the view reconnects without being asked. Meanwhile the view's border
 is red and its footer says, plain rather than in the fault box, since nothing is broken:
 
@@ -1275,8 +1321,9 @@ bridge hands it back. A Bluetooth connection with no answer after 20 s logs that
 hold the bridge, and keeps waiting. `wartui ports` and `--bridge` lookups over USB never take the
 bridge from a Bluetooth host.
 
-**A host other than wartui writes each frame's last piece as a write request**, and the rest
-without response: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
+**A host other than wartui ends each write group with a write request**, and writes the rest
+without response. A group is the frames the host has queued together, cut into writes, at most 7
+of them: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
 
 **A paired host that connects and does not subscribe is dropped after 30 s**, so a phone's
 background link cannot hold the bridge's one connection. wartui subscribes within a second or two.
@@ -1311,7 +1358,7 @@ host link, and `wartui analyze` names the link and any of those counts that rose
 keeps the first that answers the link protocol. `run` saves that address to `wartui.toml` as
 `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only that port. A
 capture given `--bridge` saves the named board once it answers, since naming it for a capture is
-choosing it. `flash-bridge` saves the board it found and flashed. `status`, `sniff`, `reset`,
+choosing it. `flash-bridge` over USB saves the board it found and flashed. `status`, `sniff`, `reset`,
 `power-cycle`, `fan`, `pool` and `ota` read it and save nothing, so questioning a board
 changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
 unplug the bridge to reflash a node, and wartui waits rather than transmit into it.

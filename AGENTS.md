@@ -468,10 +468,11 @@ edit stops; follow the pointer before changing the rule.
   again. A lost packet is credited as though sent, and costs the central its frame
   (`resynced_bytes`).
   → `crates/wartui-proto/src/radio_link/inflow.rs` `//!`
-- **A frame from a central ends with a write request**, and its earlier pieces are writes without
+- **A central's write group ends with a write request**, and its earlier pieces are writes without
   response. TrouBLE queues 8 writes per connection and drops the rest, and the C6 answers the
-  request only once it has forwarded that piece, so a central has one frame outstanding at most. A
-  request whose write the C6 dropped is refused, and the transport ends the connection.
+  request only once it has forwarded that piece, so a central has one group outstanding at most,
+  a write short of that queue. A group carries the frames queued together, since Down is a byte
+  stream. A request whose write the C6 dropped is refused, and the transport ends the connection.
   → `crates/wartui-bridge/src/ble.rs` `//!` § "Writes", `firmware/p4-radio/src/ble.rs` `//!`
 - **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
   long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
@@ -484,9 +485,11 @@ edit stops; follow the pointer before changing the rule.
   so the P4 keeps the line and repeats it to every host that attaches.
   → `firmware/p4-radio/src/ble.rs`, `run_host`; `firmware/p4-radio/src/last_panic.rs`;
   `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
-- **Updates use the USB cable.** `flash-bridge` and `ota` take no `--link`, refuse one with the
-  reason, and ignore `[bridge] link`; updating over Bluetooth is issue #314.
-  → `crates/wartui/src/main.rs`, `UPDATES`
+- **Updates follow the link, and a failed one over Bluetooth is recovered over USB.**
+  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's
+  reboot and its C6's update each drop the link, so `flash-bridge` reads its outcome across the
+  reconnects, and nothing resumes a partly sent image.
+  → `crates/wartui/src/flash/p4.rs` `//!`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A
   `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and
