@@ -63,7 +63,7 @@ pub enum Down<'a> {
         bytes: &'a [u8],
     },
     /// Every bond the P4 holds, oldest first, and the pairing window's time left. Sent after each
-    /// hello answer, and whenever the bonds or the window change.
+    /// hello answer, whenever the bonds or the window change, and every 5 s.
     Bonds {
         /// The bonds.
         bonds: Vec<BondRecord, MAX_BONDS>,
@@ -103,7 +103,8 @@ pub enum Up<'a> {
     },
     /// The Bluetooth link. Sent on every change, and repeated every second.
     BleState(BleState),
-    /// A central paired and bonded: store it as the newest bond.
+    /// A central paired and bonded: store it as the newest bond. Repeated every second until the
+    /// P4's `Down::Bonds` holds it, 10 sends at most.
     BondAdded(BondRecord),
     /// A bonded central paired again: drop its old bond. A [`Up::BondAdded`] follows.
     BondRemoved(BondAddr),

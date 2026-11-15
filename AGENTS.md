@@ -457,7 +457,8 @@ edit stops; follow the pointer before changing the rule.
 - **Only an encrypted central holding a stored bond subscribes or writes.** The attribute table
   requires encryption, but Just Works gives an unbonded link the same level, so the C6 checks the
   bond itself before a write is forwarded or a subscription counts, and drops a central that
-  cannot bond or whose bond the P4 dropped while it was connected.
+  cannot bond, whose bond the P4 dropped while it was connected, or that stays unsubscribed for
+  30 s.
   → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`
 - **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
   the P4's own offsets, up to which the C6 is done, so every `HostStart` and `HostBytes`

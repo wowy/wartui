@@ -4,14 +4,20 @@
 //! **The P4 is the bonds' system of record.** It reads the sector once at boot ([`boot`]), and
 //! sends the C6 every bond after each hello answer, so the C6, which keeps no flash state, holds
 //! them across a restart of either chip and an update of the C6. A bond the C6 reports is applied
-//! at once, stored, and sent back down, so the C6 drops one the store evicted. Each write parks
-//! core 1, as a settings write does (`src/settings.rs`). A write that fails leaves the change
-//! applied until reboot and says so to the host.
+//! at once, stored, and sent back down, so the C6 drops one the store evicted. The C6 repeats a
+//! new bond until it hears it back, so a repeat of one already held only sends the bonds down
+//! again. Each write parks core 1, as a settings write does (`src/settings.rs`). A write that
+//! fails leaves the change applied until reboot and says so to the host.
+//!
+//! **`Down::Bonds` goes on every change and is repeated every [`REPEAT_EVERY_MS`]** while the
+//! pair bridges ([`repeat`]). The link never resends, so a lost one would leave the C6 serving
+//! bonds the P4 dropped until the next hello. The C6 takes a repeat that changes nothing as
+//! changing nothing. Only a change that finds the queue full says so; a repeat stays silent.
 //!
 //! **The pairing window** is open while no bond is stored, for the first [`WINDOW_MS`] after the
 //! P4 boots, and for [`WINDOW_MS`] after a host's `OpenPairing`. The host link reaches that
-//! command only from USB or a bonded central. Its time left goes down in each `Down::Bonds`,
-//! which is sent again whenever the bonds or the window change; the C6 times its close.
+//! command only from USB or a bonded central. Its time left goes down in each `Down::Bonds`, and
+//! the C6 times its close.
 //!
 //! **Clearing the bonds strands every host that held one.** A host whose bond the bridge dropped
 //! fails every connect until it forgets the bridge and pairs again
@@ -20,7 +26,7 @@
 use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 
-use wartui_proto::bonds::{self, BondAddr, BondRecord, MAX_BONDS, Record, Write, write_for};
+use wartui_proto::bonds::{self, BondAddr, BondRecord, MAX_BONDS, Record, write_for};
 use wartui_proto::link::{LogStr, PairWindow};
 use wartui_proto::mac;
 use wartui_proto::ota::SECTOR;
@@ -33,11 +39,16 @@ use crate::{Shared, now_ms};
 /// How long the pairing window stays open after the P4 boots, or after a host opens it.
 pub const WINDOW_MS: u64 = wartui_proto::link::PAIR_WINDOW_SECS as u64 * 1000;
 
-/// The bonds, and when a host last opened the window.
+/// How often the P4 sends its bonds to a bridging C6 again, changed or not.
+pub const REPEAT_EVERY_MS: u64 = 5_000;
+
+/// The bonds, when a host last opened the window, and when they last went to the C6.
 pub struct Bonds {
     held: RefCell<bonds::Bonds>,
     /// P4 milliseconds at the latest `OpenPairing`.
     opened_at: Cell<Option<u64>>,
+    /// P4 milliseconds at the latest `Down::Bonds` the down queue took.
+    sent_at: Cell<u64>,
 }
 
 impl Bonds {
@@ -78,20 +89,43 @@ pub fn boot(updates: &mut Updates, image: &mut [u8; SECTOR]) -> Bonds {
         .and_then(|mut sector| sector.read(image).ok())
         .map(|()| bonds::read(image))
         .unwrap_or_default();
-    Bonds { held: RefCell::new(held), opened_at: Cell::new(None) }
+    Bonds { held: RefCell::new(held), opened_at: Cell::new(None), sent_at: Cell::new(0) }
 }
 
 /// Send the C6 every bond and the window's time left.
 pub fn send(shared: &Shared) {
-    let bonds = shared.bonds.held.borrow().clone();
-    let window_ms = shared.bonds.window_ms(now_ms());
-    if !shared.push_down(&Down::Bonds { bonds, window_ms }) {
+    if !push(shared) {
         shared.push_error("Bluetooth bonds not sent to the radio: its queue is full");
     }
 }
 
-/// The C6 bonded a central: store it as the newest, evicting the oldest past [`MAX_BONDS`].
+/// Send the bonds again once [`REPEAT_EVERY_MS`] has passed since the down queue last took them.
+/// Silent when it refuses them: the next repeat tries again.
+pub fn repeat(shared: &Shared) {
+    if now_ms().saturating_sub(shared.bonds.sent_at.get()) >= REPEAT_EVERY_MS {
+        push(shared);
+    }
+}
+
+/// Queue `Down::Bonds`, and return whether the down queue took it.
+fn push(shared: &Shared) -> bool {
+    let now = now_ms();
+    let bonds = shared.bonds.held.borrow().clone();
+    let window_ms = shared.bonds.window_ms(now);
+    let pushed = shared.push_down(&Down::Bonds { bonds, window_ms });
+    if pushed {
+        shared.bonds.sent_at.set(now);
+    }
+    pushed
+}
+
+/// The C6 bonded a central: store it as the newest, evicting the oldest past [`MAX_BONDS`]. A
+/// repeat of a bond already held only sends the bonds down: the C6 missed their echo.
 pub fn on_added(shared: &Shared, bond: BondRecord) {
+    if shared.bonds.held.borrow().contains(&bond) {
+        send(shared);
+        return;
+    }
     let evicted = {
         let held = shared.bonds.held.borrow();
         let new = !held.iter().any(|kept| kept.addr == bond.addr);
@@ -156,21 +190,7 @@ fn change(shared: &Shared, record: &Record) {
 /// Store `record`, unless it changes nothing the sector holds: at its next erased slot, or, when
 /// it is full, by erasing it and writing every bond it holds.
 fn save(shared: &Shared, record: &Record) -> Result<(), Unsaved> {
-    let mut updates = shared.updates.borrow_mut();
-    let mut sector = updates.bonds().ok_or(Unsaved::NoPartition)?;
-    let mut image = shared.sector.borrow_mut();
-    sector.read(&mut image)?;
-    match write_for(&image, record) {
-        None => {}
-        // `offset` is inside one sector.
-        #[allow(clippy::cast_possible_truncation)]
-        Some(Write::At { offset, record }) => sector.write(offset as u32, &record)?,
-        Some(Write::Erase { records, len }) => {
-            sector.erase()?;
-            sector.write(0, &records[..len])?;
-        }
-    }
-    Ok(())
+    crate::settings::store(shared, Updates::bonds, |image| write_for(image, record))
 }
 
 /// Erase the sector, unless it holds nothing.

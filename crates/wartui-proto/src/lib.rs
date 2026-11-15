@@ -18,7 +18,7 @@
 //! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
 //! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
 //! the P4 keeps its settings in, and [`bonds`] the Bluetooth bonds it keeps for its C6, each record
-//! ending in a [`crc`]. [`fleet`] is the P4's fleet planner: who scans what, and the records that
+//! ending in a [`crc`] and both logged in a sector as [`sector_log`] lays out. [`fleet`] is the P4's fleet planner: who scans what, and the records that
 //! tell each node.
 
 #![no_std]
@@ -46,6 +46,7 @@ pub mod pending;
 pub mod plan;
 pub mod radio_link;
 pub mod reset;
+pub mod sector_log;
 pub mod settings;
 pub mod split;
 

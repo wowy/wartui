@@ -86,10 +86,11 @@
 //! C6 and drops the link, which is an ordinary reconnect.
 //!
 //! **Closing.** Once the handle is gone the connection unsubscribes from Up and disconnects, and a
-//! scan, a connect or a write under way stops, so the bridge never serves a process that has
-//! exited. The transport counts as running until then, which `crate::close_all` waits for. A
-//! write the C6 does not answer within [`WRITE_WITHIN`] ends the connection, so it never waits out
-//! BlueZ's 30 s ATT timeout.
+//! scan, a connect, a service discovery, the subscription or a write under way stops, so the
+//! bridge never serves a process that has exited. The transport counts as running until then,
+//! which `crate::close_all` waits for. A write the C6 does not answer within [`WRITE_WITHIN`], or
+//! a subscription within [`CONNECT_WITHIN`], ends the connection, so neither waits out BlueZ's
+//! 30 s ATT timeout.
 //!
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
@@ -126,7 +127,8 @@ pub const SCAN_FOR: Duration = Duration::from_secs(10);
 /// advertising nearby is seen rather than passed over.
 const UNNAMED_LISTEN: Duration = Duration::from_secs(2);
 
-/// How long a connect or a service discovery may take.
+/// How long a connect, a service discovery or the subscription may take. The subscription can
+/// wait on the link's encryption, which the C6's refusal of an unencrypted one prompts.
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 
 /// How long the disconnect that cancels a timed-out connect may take.
@@ -954,10 +956,9 @@ async fn serve(
     settled: &mut Option<Peripheral>,
     label: &str,
 ) -> End {
-    match tokio::time::timeout(CONNECT_WITHIN, peripheral.discover_services()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return End::failed(format!("could not read {label}'s services: {e}")),
-        Err(_) => return End::failed(format!("{label} did not list its services")),
+    let discovered = discover(peripheral.discover_services(), label);
+    if let Some(end) = unless_closed(discovered, plumbing, false).await {
+        return end;
     }
     let chars = peripheral.characteristics();
     let pick = |uuid: u128| chars.iter().find(|c| c.uuid.as_u128() == uuid).cloned();
@@ -972,10 +973,9 @@ async fn serve(
         Ok(events) => events,
         Err(e) => return End::failed(bluetooth(e).to_string()),
     };
-    if let Err(e) = peripheral.subscribe(&up).await {
-        let Failure { reason, cause } = refusal(label, &e)
-            .unwrap_or_else(|| Failure::other(format!("could not subscribe to {label}: {e}")));
-        return End::Over { reason, cause, announced: false };
+    let subscribed = subscribe(peripheral.subscribe(&up), label);
+    if let Some(end) = unless_closed(subscribed, plumbing, false).await {
+        return end;
     }
     let mtu = peripheral.mtu();
     tracing::info!(bridge = %label, mtu, "subscribed to the bridge over Bluetooth");
@@ -993,6 +993,32 @@ async fn serve(
         let _ = peripheral.unsubscribe(&up).await;
     }
     end
+}
+
+/// Wait for `discovering`, the service discovery, for up to [`CONNECT_WITHIN`].
+async fn discover(
+    discovering: impl Future<Output = btleplug::Result<()>>,
+    label: &str,
+) -> Result<(), Failure> {
+    match tokio::time::timeout(CONNECT_WITHIN, discovering).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(Failure::other(format!("could not read {label}'s services: {e}"))),
+        Err(_) => Err(Failure::other(format!("{label} did not list its services"))),
+    }
+}
+
+/// Wait for `subscribing`, the subscription to Up, for up to [`CONNECT_WITHIN`]. The C6's refusal
+/// for want of a bond is [`refusal`]'s.
+async fn subscribe(
+    subscribing: impl Future<Output = btleplug::Result<()>>,
+    label: &str,
+) -> Result<(), Failure> {
+    match tokio::time::timeout(CONNECT_WITHIN, subscribing).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(refusal(label, &e)
+            .unwrap_or_else(|| Failure::other(format!("could not subscribe to {label}: {e}")))),
+        Err(_) => Err(Failure::other(format!("{label} did not answer the subscription"))),
+    }
 }
 
 /// The notifications stream, and the adapter's events.
@@ -1176,7 +1202,11 @@ fn refusal(label: &str, error: &btleplug::Error) -> Option<Failure> {
 mod tests {
     use tokio::time::Instant;
 
-    use super::{BridgeSpec, Hearing, IDENTIFY_EVERY, NAME_READS, asker, choose};
+    use super::{
+        BridgeSpec, CONNECT_WITHIN, End, Hearing, IDENTIFY_EVERY, NAME_READS, asker, choose,
+        subscribe, unless_closed,
+    };
+    use crate::link_pair;
 
     fn spec(text: &str) -> BridgeSpec {
         text.parse().unwrap_or_else(|never| match never {})
@@ -1247,6 +1277,27 @@ mod tests {
         let mut hearing = Hearing::new(Some(&named));
         hearing.noted(1, (), read("wartui 44:C0", true));
         assert!(!hearing.settled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_subscribe_fails_when_bridge_does_not_answer_in_time() {
+        let start = Instant::now();
+        let failed = subscribe(std::future::pending(), "wartui 44:C0").await.err();
+        let failure = failed.expect("an unanswered subscription fails");
+        assert_eq!(failure.reason, "wartui 44:C0 did not answer the subscription");
+        assert_eq!(start.elapsed(), CONNECT_WITHIN);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_unless_closed_ends_connection_when_handle_goes_during_subscription() {
+        // A quit while the C6 has yet to answer: the connection lets the bridge go at once.
+        let (handle, plumbing) = link_pair();
+        let start = Instant::now();
+        let subscribing = subscribe(std::future::pending(), "wartui 44:C0");
+        drop(handle);
+        let end = unless_closed(subscribing, &plumbing, false).await;
+        assert!(matches!(end, Some(End::HandleDropped)));
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 
     /// An hour with the arm off, as a stream announced that long leaves it.

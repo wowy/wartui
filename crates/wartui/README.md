@@ -1278,6 +1278,9 @@ bridge from a Bluetooth host.
 **A host other than wartui writes each frame's last piece as a write request**, and the rest
 without response: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
 
+**A paired host that connects and does not subscribe is dropped after 30 s**, so a phone's
+background link cannot hold the bridge's one connection. wartui subscribes within a second or two.
+
 **When the Bluetooth link does not come up**, the reason names the fix. A one-shot command such as
 `status` keeps waiting through a failed try, since the transport tries again a second later, and
 names the last one when its wait runs out:
@@ -1290,7 +1293,7 @@ names the last one when its wait runs out:
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
 | `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |
-| `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair` |
+| `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair`. When BlueZ holds a pairing the bridge may have forgotten, it says so: `wartui bluetooth pair --fresh` |
 | `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
 | A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
 

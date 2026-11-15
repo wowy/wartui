@@ -550,12 +550,13 @@ async fn read_packets(
             let mut link = link.borrow_mut();
             link.uart_errors = link.uart_errors.wrapping_add(1);
         }
-        // This poll is the C6's steady wake, so the repeats of the Bluetooth state and the credit
-        // ride on it. Before the P4's hello the writer sends only the hello, and repeats would
-        // only queue, evicting the last life's panic line.
+        // This poll is the C6's steady wake, so the repeats of the Bluetooth state, the credit
+        // and a new bond ride on it. Before the P4's hello the writer sends only the hello, and
+        // repeats would only queue, evicting the last life's panic line.
         if link.borrow().heard_p4 {
             crate::ble::repeat_state(shared);
             crate::ble::repeat_credit(shared);
+            crate::ble::repeat_bond(shared);
         }
         // The stop bit is read before the drain: a stopped DMA lands nothing more, so the drain
         // took everything, and a restart, which resets every descriptor, loses only what is in

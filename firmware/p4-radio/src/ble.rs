@@ -88,17 +88,26 @@
 //!   [`UNBONDABLE_DEADLINE`] after connecting outside it;
 //! - one whose bond the P4 dropped, as `ClearBonds` does, while it was connected.
 //!
+//! A bonded central that stays unsubscribed from Up for [`IDLE_DEADLINE`] is disconnected too, and
+//! not counted there, so a phone's background link cannot hold the only connection either
+//! ([`deadline`]).
+//!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM** (`wartui_proto::bonds`). It
 //! waits up to [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the
 //! resolving list holds them from the first advertisement. TrouBLE loads its resolving list only
 //! while it is not advertising, so a `Down::Bonds` that differs from TrouBLE's bonds stops the
-//! advertisement, is applied, and advertising starts again ([`accept`], [`sync_bonds`]); one
-//! that differs in nothing, as after every hello, leaves the advertisement running. While a
-//! central is connected the bonds are applied once it goes, and a central whose bond the P4 has
-//! dropped is disconnected first ([`revoke`]). A new bond goes up as `Up::BondAdded`, after an
-//! `Up::BondRemoved` when it replaces one a central lost. A bond whose `Up::BondAdded` is lost
-//! lasts until the C6 restarts, and the host pairs again. The window's end is tracked here from
-//! each `Down::Bonds`' `window_ms`.
+//! advertisement, is applied, and advertising starts again ([`accept`], [`sync_bonds`]). One that
+//! differs in nothing, as after every hello and in the P4's repeat every 5 s, leaves the
+//! advertisement running, logs nothing, and leaves a connected central as it is. While a central
+//! is connected the bonds are applied once it goes, and a central whose bond the P4 has dropped is
+//! disconnected first ([`revoke`]). A new bond goes up as `Up::BondAdded`, after an
+//! `Up::BondRemoved` when it replaces one a central lost. The link never resends, so the
+//! `Up::BondAdded` goes again every [`STATE_EVERY`] until the P4's list holds the bond, at most
+//! [`BOND_SENDS`] times in all ([`repeat_bond`]). The bound keeps a bond the P4 was told to clear
+//! before it held it from coming back forever. A bond the P4 has yet to hold leaves TrouBLE at
+//! the next disconnect, as any the P4 lacks does, and returns with the `Down::Bonds` that echoes a
+//! later send. The window's end is tracked here from each `Down::Bonds`' `window_ms`, the P4's
+//! time left as it sent it.
 //!
 //! **The first advertisement ends the image's trial** with the P4's hello (`src/link.rs`):
 //! [`advertise`] raises `advertising_started` once the controller takes it.
@@ -218,6 +227,15 @@ const PAIR_DEADLINE: Duration = Duration::from_secs(30);
 /// took under 0.7 s on every host, so it gets no time to wait on a person.
 const UNBONDABLE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long a bonded central may stay unsubscribed from Up before it is disconnected, from when
+/// it connected, paired or last unsubscribed. `wartui` subscribes within a second or two of
+/// connecting, and a person opening a test app needs longer.
+const IDLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How many times a new bond goes up as `Up::BondAdded`, the first included, while the P4's list
+/// lacks it: about 10 s of sends, where the P4 echoes one within a second.
+const BOND_SENDS: u8 = 10;
+
 /// `wartui XX:YY`.
 const NAME_MAX: usize = NAME_PREFIX.len() + 5;
 
@@ -308,6 +326,15 @@ impl Outbox {
     }
 }
 
+/// A new bond the P4's list has yet to hold, when its `Up::BondAdded` last went, and how many
+/// times it has.
+#[derive(Clone, Copy)]
+struct PendingBond {
+    record: BondRecord,
+    sent_at: Instant,
+    sent: u8,
+}
+
 /// The Bluetooth side's state, as the link and the stack see it.
 pub struct Ble {
     outbox: &'static RefCell<Outbox>,
@@ -336,6 +363,8 @@ pub struct Ble {
     bonds_changed: Signal<NoopRawMutex, ()>,
     /// When the P4's pairing window closes, or `None` while it is closed.
     window_until: Cell<Option<Instant>>,
+    /// The bond last paired, until the P4's list holds it ([`repeat_bond`]).
+    pending_bond: Cell<Option<PendingBond>>,
 }
 
 impl Ble {
@@ -356,6 +385,7 @@ impl Ble {
             bonds_heard: Cell::new(false),
             bonds_changed: Signal::new(),
             window_until: Cell::new(None),
+            pending_bond: Cell::new(None),
         }
     }
 
@@ -429,14 +459,51 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
 
 /// Take the P4's bonds and its pairing window's time left. [`advertise`] gives them to TrouBLE,
 /// at once while it advertises ([`accept`]) and else once the central goes, and [`revoke`]
-/// disconnects a central whose bond they dropped.
+/// disconnects a central whose bond they dropped. A list that holds the pending bond ends its
+/// repeats.
+///
+/// Each `Down::Bonds` signals `bonds_changed`, a repeat that changes nothing included. Its waiters
+/// compare before they act: [`accept`] keeps the advertisement running while TrouBLE's bonds are
+/// the P4's, and [`revoke`] finds the central's bond where it was. The window's end is re-derived
+/// from each, and moves by no more than the message's transit.
 pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32) {
     let ble = &shared.ble;
     let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
     ble.window_until.set(until);
+    if ble.pending_bond.get().is_some_and(|pending| holds(&bonds, &pending.record)) {
+        ble.pending_bond.set(None);
+    }
     ble.bonds.replace(bonds);
     ble.bonds_heard.set(true);
     ble.bonds_changed.signal(());
+}
+
+/// Whether `bonds` holds `record`'s bond: its address, with its key.
+fn holds(bonds: &Bonds, record: &BondRecord) -> bool {
+    bonds.iter().any(|kept| kept.addr == record.addr && kept.ltk == record.ltk)
+}
+
+/// Send the pending bond's `Up::BondAdded` again once [`STATE_EVERY`] has passed since the last,
+/// up to [`BOND_SENDS`] in all, so a lost one does not leave the P4 without the bond.
+pub fn repeat_bond(shared: &Shared) {
+    let ble = &shared.ble;
+    let Some(mut pending) = ble.pending_bond.get() else { return };
+    if pending.sent_at.elapsed() < STATE_EVERY {
+        return;
+    }
+    if pending.sent >= BOND_SENDS {
+        ble.pending_bond.set(None);
+        let peer = pending.record.addr.mac();
+        shared.log(format_args!(
+            "Bluetooth bond {} not echoed by the P4 after {BOND_SENDS} sends",
+            mac::short(&peer)
+        ));
+        return;
+    }
+    shared.push(&Up::BondAdded(pending.record));
+    pending.sent += 1;
+    pending.sent_at = Instant::now();
+    ble.pending_bond.set(Some(pending));
 }
 
 /// The counters `RadioStatus.ble` reports.
@@ -791,6 +858,11 @@ struct Session {
     lost: Cell<Option<BondAddr>>,
     /// The P4's bonds have held the central's since it connected or last paired ([`revoke`]).
     listed: Cell<bool>,
+    /// Since when the central has been unsubscribed from Up, for [`IDLE_DEADLINE`]: when it
+    /// connected, paired or last unsubscribed.
+    idle_since: Cell<Instant>,
+    /// Raised when the subscription or `idle_since` changes, for [`deadline`].
+    idle_changed: Signal<NoopRawMutex, ()>,
     /// The central's address, in display order, for the log.
     peer: Mac,
 }
@@ -801,10 +873,15 @@ fn authorized(conn: &Conn<'_, '_>) -> bool {
     raw.security_level().is_ok_and(|level| level.encrypted()) && raw.is_bonded_peer()
 }
 
-/// Disconnect a central that holds no bond, and say why.
+/// Disconnect a central that holds no bond, count it in `unbonded_kicks`, and say why.
 fn kick(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
-    conn.raw().disconnect();
     shared.ble.count(|c| c.unbonded_kicks = c.unbonded_kicks.wrapping_add(1));
+    disconnect(conn, session, shared, why);
+}
+
+/// Disconnect the central, and say why.
+fn disconnect(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
+    conn.raw().disconnect();
     shared.log(format_args!("Bluetooth disconnects {}: {why}", mac::short(&session.peer)));
 }
 
@@ -819,11 +896,14 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
     set_state(shared, |state| {
         *state = BleState { subscribed: false, encrypted: false, bonded: false, mtu: raw.att_mtu() }
     });
+    let connected_at = Instant::now();
     let session = Session {
-        connected_at: Instant::now(),
+        connected_at,
         bondable: shared.ble.window_open(),
         lost: Cell::new(None),
         listed: Cell::new(false),
+        idle_since: Cell::new(connected_at),
+        idle_changed: Signal::new(),
         peer: bond_addr(&raw.peer_identity()).mac(),
     };
     let window = if session.bondable { "open" } else { "closed" };
@@ -889,14 +969,29 @@ async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
 }
 
 /// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`]
-/// after it connected, so an idle or unbonded one cannot hold the only connection.
+/// after it connected, and one unsubscribed from Up for [`IDLE_DEADLINE`] after that, so neither
+/// an unbonded nor an idle one holds the only connection. A subscribed central is never idle, a
+/// USB host holding the bridge while it waits included. The idle clock runs from `idle_since`,
+/// which pairing and an unsubscribe restart ([`Session`]).
 async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     let limit = if session.bondable { PAIR_DEADLINE } else { UNBONDABLE_DEADLINE };
     Timer::at(session.connected_at + limit).await;
     if !authorized(conn) {
         kick(conn, session, shared, "not bonded and encrypted in time after connecting");
+        core::future::pending::<()>().await;
     }
-    core::future::pending().await
+    loop {
+        if shared.ble.subscribed() {
+            session.idle_changed.wait().await;
+            continue;
+        }
+        let until = session.idle_since.get() + IDLE_DEADLINE;
+        if Instant::now() >= until {
+            disconnect(conn, session, shared, "bonded but not subscribed in time");
+            core::future::pending::<()>().await;
+        }
+        select(Timer::at(until), session.idle_changed.wait()).await;
+    }
 }
 
 /// Handle the connection's events until it ends.
@@ -987,12 +1082,19 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
         let bonded = raw.is_bonded_peer();
         let subscribed = encrypted && bonded && server.link.up.should_notify(conn);
         let mtu = raw.att_mtu();
+        let was = ble.subscribed();
         set_state(shared, |state| {
             state.subscribed = subscribed;
             state.mtu = mtu;
             state.encrypted = encrypted;
             state.bonded = bonded;
         });
+        if subscribed != was {
+            if !subscribed {
+                session.idle_since.set(Instant::now());
+            }
+            session.idle_changed.signal(());
+        }
     }
 }
 
@@ -1017,10 +1119,15 @@ fn paired(
     shared.ble.count(|c| c.pairings = c.pairings.wrapping_add(1));
     // A new bond, which the P4's list holds only once it echoes it back.
     session.listed.set(false);
+    // The idle clock starts afresh at pairing, which can take a person most of `PAIR_DEADLINE`.
+    session.idle_since.set(Instant::now());
+    session.idle_changed.signal(());
     if let Some(old) = session.lost.take() {
         shared.push(&Up::BondRemoved(old));
     }
-    shared.push(&Up::BondAdded(bond_record(bond)));
+    let record = bond_record(bond);
+    shared.push(&Up::BondAdded(record));
+    shared.ble.pending_bond.set(Some(PendingBond { record, sent_at: Instant::now(), sent: 1 }));
     shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
 }
 

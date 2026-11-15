@@ -28,8 +28,9 @@
 //!
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The C6's Bluetooth bonds follow each answer
-//! to a C6 that bridges (`src/bonds.rs`). The pair hears the seq of every C6
-//! packet, since a hello whose seq is not past the last is a restart.
+//! to a C6 that bridges, and are repeated on the packets it sends, at least one a second while it
+//! bridges (`src/bonds.rs`, `repeat`). The pair hears the seq of every C6 packet, since a hello
+//! whose seq is not past the last is a restart.
 //!
 //! While a central over Bluetooth owns the host queue, each packet's room behind the queued
 //! records carries the host stream down as `Down::HostBytes`, inside the credit window
@@ -206,6 +207,11 @@ impl Link {
                     for record in records(packet.payload) {
                         self.relay(record, shared);
                     }
+                }
+                // A bridging C6 repeats its `BleState` every second, so this is the link's
+                // steady wake while there is a C6 to send the bonds to.
+                if radio_up(shared) {
+                    crate::bonds::repeat(shared);
                 }
             }
             Kind::Update => {

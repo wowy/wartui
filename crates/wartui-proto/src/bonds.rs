@@ -14,16 +14,15 @@
 //! **At most [`MAX_BONDS`], newest last.** A pairing past them evicts the oldest. A bond paired
 //! again moves to newest, so the bond evicted is the one least recently paired.
 //!
-//! **One [`SLOT`]-byte record a change, written at the first erased slot**, as the settings
-//! sector does (`crate::settings`): an add or a remove, each ending in a [`crc32`] over the rest.
-//! NOR flash programs only by clearing bits, so a change costs a slot written and nothing erased.
-//! Reading ([`read`]) walks the slots up to the first erased one and replays each valid record
-//! in order, so the last record for an address wins and the eviction replays with it. A slot a
-//! power cut tore fails its CRC and is skipped.
+//! **One [`SLOT`]-byte record a change, written at the first erased slot** ([`sector_log`], as
+//! the settings sector is): an add or a remove, each ending in a [`crc32`] over the rest. Reading
+//! ([`read`]) walks the slots up to the first erased one and replays each valid record in order,
+//! so the last record for an address wins and the eviction replays with it. A slot a power cut
+//! tore fails its CRC and is skipped.
 //!
-//! **A full sector erases and rewrites what it holds** ([`Write::Erase`]): the bonds [`read`]
-//! gives, oldest first, with the change applied. A power cut between the erase and the rewrite
-//! loses every bond, and each host pairs again inside the next boot's window.
+//! **A full sector erases and rewrites what it holds** ([`sector_log::Write::Erase`]): the bonds
+//! [`read`] gives, oldest first, with the change applied. A power cut between the erase and the
+//! rewrite loses every bond, and each host pairs again inside the next boot's window.
 
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
@@ -31,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::crc::crc32;
 use crate::mac::Mac;
 use crate::ota::SECTOR;
+use crate::sector_log;
 
 /// The most bonds the store holds.
 pub const MAX_BONDS: usize = 4;
@@ -102,24 +102,9 @@ pub enum Record {
     Remove(BondAddr),
 }
 
-/// The flash write a change takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Write {
-    /// Write `record` at `offset`, the sector's first erased slot.
-    At {
-        /// The byte offset in the sector.
-        offset: usize,
-        /// The slot to write.
-        record: [u8; SLOT],
-    },
-    /// Erase the sector, then write `records[..len]` at 0.
-    Erase {
-        /// Every bond the sector holds after the change, as adds, oldest first.
-        records: [u8; MAX_BONDS * SLOT],
-        /// Bytes of `records` to write.
-        len: usize,
-    },
-}
+/// The flash write a change takes: one slot, or an erase and every bond the sector holds after
+/// the change, as adds, oldest first.
+pub type Write = sector_log::Write<SLOT, { MAX_BONDS * SLOT }>;
 
 /// `bonds` with `record` applied: an add replaces its address's bond and goes last, evicting
 /// the oldest when the store is full; a remove drops its address's bond.
@@ -215,7 +200,7 @@ fn decode(slot: &[u8; SLOT]) -> Option<Record> {
 
 /// The slots up to the first erased one.
 fn written(sector: &[u8; SECTOR]) -> impl Iterator<Item = &[u8; SLOT]> {
-    sector.as_chunks::<SLOT>().0.iter().take_while(|slot| **slot != [0xFF; SLOT])
+    sector_log::written(sector)
 }
 
 /// What `sector` holds: its valid records replayed in order.
@@ -235,15 +220,12 @@ pub fn write_for(sector: &[u8; SECTOR], change: &Record) -> Option<Write> {
     if kept == stored {
         return None;
     }
-    let used = written(sector).count();
-    if used < SLOTS {
-        return Some(Write::At { offset: used * SLOT, record: record(change) });
-    }
-    let mut records = [0xFF; MAX_BONDS * SLOT];
-    for (at, bond) in kept.iter().enumerate() {
-        records[at * SLOT..(at + 1) * SLOT].copy_from_slice(&record(&Record::Add(*bond)));
-    }
-    Some(Write::Erase { records, len: kept.len() * SLOT })
+    Some(sector_log::write_for(sector, record(change), |records| {
+        for (at, bond) in kept.iter().enumerate() {
+            records[at * SLOT..(at + 1) * SLOT].copy_from_slice(&record(&Record::Add(*bond)));
+        }
+        kept.len() * SLOT
+    }))
 }
 
 /// Whether `sector` holds any record, so that clearing it takes an erase.

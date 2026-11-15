@@ -624,20 +624,34 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// What to say when no bridge has answered over `link`: over USB, [`silence_notice`] over the
 /// CH343s attached now, where a listing that fails reads as none attached, and the transport
 /// names that failure; over Bluetooth, [`bluetooth_silence_text`], asking BlueZ off the runtime
-/// whether this PC is paired ([`unpaired_here`]).
+/// whether this PC is paired ([`listing_here`]).
 pub async fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
     match link {
         Link::Usb => silence_notice(bridge, &serial::discover_bridges().unwrap_or_default()),
-        Link::Bluetooth => bluetooth_silence_text(bridge, unpaired_here(bridge).await),
+        Link::Bluetooth => bluetooth_silence_text(bridge, listing_here(bridge).await),
     }
 }
 
-/// What to say about a silence over Bluetooth, given whether this PC lists the bridge and is not
-/// paired with it. That is then the likeliest cause, and goes first: the bridge drops such a PC
-/// about 10 s after it connects, which can be after this notice. A scan that found nothing, or a
-/// bridge's refusal of a PC it is not paired with, arrives as the transport's own reason instead;
-/// this is a subscription the bridge has not served.
-fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
+/// What BlueZ lists of the bridge a silence over Bluetooth is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// No such bridge, BlueZ did not answer, or the OS has no BlueZ.
+    Absent,
+    /// The bridge, and this PC is paired with none of its entries.
+    Unpaired,
+    /// The bridge, paired with this PC.
+    Paired,
+}
+
+/// What to say about a silence over Bluetooth, given what BlueZ lists of the bridge.
+///
+/// A bridge listed and not paired is the likeliest cause, and goes first: the bridge drops such a
+/// PC about 10 s after it connects, which can be after this notice. A bridge listed as paired may
+/// have forgotten this PC, and then drops it about a second after it connects, which the
+/// transport's timing does not name, so it goes after the USB host. A scan that found nothing, or
+/// a bridge's refusal of a PC it is not paired with, arrives as the transport's own reason
+/// instead; this is a subscription the bridge has not served.
+fn bluetooth_silence_text(bridge: Option<&str>, listing: Listing) -> String {
     let seconds = connect_wait(Link::Bluetooth).as_secs();
     let where_ = bridge.map_or_else(String::new, |name| format!(" as {name}"));
     let mut lines = vec![
@@ -646,43 +660,49 @@ fn bluetooth_silence_text(bridge: Option<&str>, unpaired: bool) -> String {
         ),
         "Usually one of:".to_owned(),
     ];
-    if unpaired {
+    if listing == Listing::Unpaired {
         lines.push(
             "  - this PC is not paired with the bridge, which serves no other: pair once with \
              `wartui bluetooth pair`"
                 .to_owned(),
         );
     }
+    lines.push(format!(
+        "  - a USB host holds the bridge, which serves Bluetooth again {}s after USB falls silent",
+        wartui_proto::link::HOST_SILENCE_SECS
+    ));
+    if listing == Listing::Paired {
+        lines.push(
+            "  - the bridge has forgotten this PC, as after another host's `wartui bluetooth \
+             forget`: pair again with `wartui bluetooth pair --fresh`"
+                .to_owned(),
+        );
+    }
     lines.extend([
-        format!(
-            "  - a USB host holds the bridge, which serves Bluetooth again {}s after USB falls \
-             silent",
-            wartui_proto::link::HOST_SILENCE_SECS
-        ),
         "  - the bridge is starting, or out of range".to_owned(),
         "`--log-file` records what the transport tried.".to_owned(),
     ]);
     lines.join("\n")
 }
 
-/// Whether BlueZ lists a bridge `bridge` could name, or any bridge with none named, and this PC
-/// is paired with none of them. False when BlueZ does not answer or lists no such bridge. The
-/// read blocks on D-Bus, so it runs off the runtime.
+/// What BlueZ lists of a bridge `bridge` could name, or of any bridge with none named: paired
+/// when this PC is paired with one of them. Absent when BlueZ does not answer. The read blocks on
+/// D-Bus, so it runs off the runtime.
 #[cfg(target_os = "linux")]
-async fn unpaired_here(bridge: Option<&str>) -> bool {
+async fn listing_here(bridge: Option<&str>) -> Listing {
     let bridge = bridge.map(str::to_owned);
     tokio::task::spawn_blocking(move || {
         wartui_bridge::bluez::devices()
-            .is_ok_and(|devices| unpaired_among(&devices, bridge.as_deref()))
+            .map_or(Listing::Absent, |devices| listing_among(&devices, bridge.as_deref()))
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(Listing::Absent)
 }
 
-/// [`unpaired_here`], over the `devices` BlueZ lists. A path names no Bluetooth bridge, so it is
+/// [`listing_here`], over the `devices` BlueZ lists. A path names no Bluetooth bridge, so it is
 /// read as none named.
 #[cfg(target_os = "linux")]
-fn unpaired_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>) -> bool {
+fn listing_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>) -> Listing {
     let named = bridge.map(spec).filter(|named| !matches!(named, BridgeSpec::Path(_)));
     let mut bridges = devices
         .iter()
@@ -691,13 +711,19 @@ fn unpaired_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>
             name.is_some_and(|name| wartui_bridge::ble::names_bridge(named.as_ref(), name))
         })
         .peekable();
-    bridges.peek().is_some() && bridges.all(|device| !device.paired)
+    if bridges.peek().is_none() {
+        Listing::Absent
+    } else if bridges.any(|device| device.paired) {
+        Listing::Paired
+    } else {
+        Listing::Unpaired
+    }
 }
 
 /// Only BlueZ is asked: elsewhere the OS pairs on the first connection.
 #[cfg(not(target_os = "linux"))]
-async fn unpaired_here(_bridge: Option<&str>) -> bool {
-    false
+async fn listing_here(_bridge: Option<&str>) -> Listing {
+    Listing::Absent
 }
 
 /// What to say about a silence, given the CH343s attached.
@@ -771,8 +797,8 @@ mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
     use super::{
-        BridgeInfo, BridgeSpec, Command, Link, bluetooth_silence_text, last_reset_line, link_for,
-        no_boards_notice, parse, silence_notice, spec,
+        BridgeInfo, BridgeSpec, Command, Link, Listing, bluetooth_silence_text, last_reset_line,
+        link_for, no_boards_notice, parse, silence_notice, spec,
     };
     use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
@@ -1117,20 +1143,32 @@ mod tests {
 
     #[test]
     fn cli_diagnostics_names_usb_holder_when_bluetooth_bridge_is_silent() {
-        let notice = bluetooth_silence_text(Some("44:C0"), false);
+        let notice = bluetooth_silence_text(Some("44:C0"), Listing::Absent);
         assert!(notice.contains("as 44:C0 over Bluetooth after 15s"), "{notice}");
         assert!(notice.contains("a USB host holds the bridge"), "{notice}");
         // Nothing about ports: none was opened.
         assert!(!notice.contains("CH343"), "{notice}");
         assert!(!notice.contains("not paired"), "{notice}");
+        assert!(!notice.contains("forgotten"), "{notice}");
     }
 
     #[test]
     fn cli_diagnostics_names_pairing_first_when_pc_is_not_paired_with_silent_bridge() {
-        let notice = bluetooth_silence_text(None, true);
+        let notice = bluetooth_silence_text(None, Listing::Unpaired);
         let lines: Vec<&str> = notice.lines().collect();
         assert!(lines[2].contains("not paired") && lines[2].contains("wartui bluetooth pair"));
         assert!(lines[3].contains("a USB host holds the bridge"), "{notice}");
+        assert!(!notice.contains("forgotten"), "{notice}");
+    }
+
+    #[test]
+    fn cli_diagnostics_names_forgotten_pairing_when_pc_is_paired_with_silent_bridge() {
+        let notice = bluetooth_silence_text(None, Listing::Paired);
+        let lines: Vec<&str> = notice.lines().collect();
+        assert!(lines[2].contains("a USB host holds the bridge"), "{notice}");
+        assert!(lines[3].contains("the bridge has forgotten this PC"), "{notice}");
+        assert!(lines[3].contains("`wartui bluetooth pair --fresh`"), "{notice}");
+        assert!(!notice.contains("not paired"), "{notice}");
     }
 
     /// A device BlueZ lists, advertising `name`.
@@ -1149,11 +1187,20 @@ mod tests {
     #[test]
     fn cli_diagnostics_reads_bridge_as_unpaired_when_named_by_one_octet_or_a_path() {
         let devices = [listed("wartui 44:C0", false)];
-        assert!(super::unpaired_among(&devices, Some("C0")), "one octet names it");
-        assert!(super::unpaired_among(&devices, Some("44:C0")));
-        assert!(super::unpaired_among(&devices, Some("/dev/ttyACM0")), "a path names none");
-        assert!(!super::unpaired_among(&devices, Some("C1")));
-        assert!(!super::unpaired_among(&[listed("wartui 44:C0", true)], Some("C0")));
+        let listing = |bridge| super::listing_among(&devices, Some(bridge));
+        assert_eq!(listing("C0"), Listing::Unpaired, "one octet names it");
+        assert_eq!(listing("44:C0"), Listing::Unpaired);
+        assert_eq!(listing("/dev/ttyACM0"), Listing::Unpaired, "a path names none");
+        assert_eq!(listing("C1"), Listing::Absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_diagnostics_reads_bridge_as_paired_when_any_entry_for_it_is_paired() {
+        let devices = [listed("wartui 44:C0", false), listed("wartui 44:C0", true)];
+        assert_eq!(super::listing_among(&devices, Some("C0")), Listing::Paired);
+        assert_eq!(super::listing_among(&devices[1..], None), Listing::Paired);
+        assert_eq!(super::listing_among(&[], None), Listing::Absent);
     }
 
     #[test]

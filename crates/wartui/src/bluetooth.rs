@@ -635,7 +635,8 @@ async fn pair_with(
 }
 
 /// Whether a device the OS lists, named `listed_name` at `listed_address`, is the bridge that
-/// advertises `name`, or sits at the Bluetooth address remembered for it.
+/// advertises `name`, or sits at the Bluetooth address remembered for it. Every device with the
+/// name is taken, so two paired bridges that share their last two octets are both removed.
 #[cfg(any(target_os = "linux", test))]
 fn is_this_bridge(
     listed_name: Option<&str>,
