@@ -24,8 +24,9 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
+| `flash-bridge` | Update the P4 bridge's firmware over USB; see "Flashing the bridge"                 |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
+| `bluetooth`    | `pair` this PC with the bridge, or `forget` it; see "The Bluetooth link"            |
 
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
@@ -39,6 +40,7 @@ another slot leaves the plan at the old one and joins it at the new one on its n
 |-------------------------|-------------|--------------------------------------------------------|
 | `--db PATH`             | dated       | New file for the capture; an existing one is refused   |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
+| `--link usb\|bluetooth` | `usb`       | How to reach it; see "The Bluetooth link"              |
 | `--lat` `--lon` `--alt` | —           | A fixed test position; the capture is never uploaded   |
 | `--gps PATH\|bridge`    | detected    | An NMEA port, or `bridge` for the bridge's alone       |
 | `--no-gps`              | off         | Read no receiver, the bridge's included                |
@@ -79,6 +81,12 @@ share withdrawn is a row with epoch 0 and no channels. The row names no node: th
 the share before the host can know who takes it. The host sends no assignment, so a row says what
 the bridge gave, and the `heartbeat` rows from that slot carrying that epoch say which node took
 it.
+
+The `capture` row's `link` is the link the host used, `usb` or `bluetooth`, and NULL under `--sim`.
+Every bridge status keeps a `bridge_bluetooth` row beside its `bridge_status` row, over either
+link: who the bridge served, its bonds and pairing window, the connected Bluetooth host's link,
+and the C6's counters, as `status` prints them (§ "The Bluetooth link").
+
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
 queue: sequence gaps and store drops mean the history may be incomplete.
@@ -148,12 +156,12 @@ of its output, after the export summary:
   peak by node
     N3   120/s  2,310/min
     N11  1,790/s  39,880/min
-  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
+  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on Bluetooth
   queue      host-bulk  peak 245,760/245,760 bytes  1,300 dropped
   queue      node-down  peak 3,102/4,160 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
-  host link  0 host_uart_errors
-  host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
+  host link  bluetooth  1,244 resynced_bytes
+  host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥500 ms 31 times (worst 612 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   buffer full wifi 18,220  ble 1,203
@@ -167,10 +175,10 @@ of its output, after the export summary:
 | `peak`         | The most sightings in any one second and any one minute, across the fleet       |
 | `peak wifi`    | The same for Wi-Fi sightings alone; `peak ble` for BLE                          |
 | `peak by node` | The same for each node, by slot label; see below                                |
-| `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
+| `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on the host's link: `lost on USB`, or `lost on Bluetooth` |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
 | `radio link`   | Packets on the P4–C6 link, and its link errors that are not zero                |
-| `host link`    | Host-link reads on the P4 that saw line errors or overflows                     |
+| `host link`    | The link the host used, reads of the P4's host UART that saw line errors or overflows, and the C6's Bluetooth faults that rose: `resynced_bytes`, `dropped_writes`, `unbonded_kicks`, `failed_pairings`. A capture whose bridge never answered has only the link, and `no status reply` |
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the footer's `lost`                |
@@ -194,10 +202,12 @@ bridge replays after a reconnect counts as the burst it was on the link. Where t
 back, every window restarts and the `peak` line says how many times `wall clock reversed`; a peak
 around the step is a lower bound.
 
-Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
+Counts follow the assumptions below; `lost on USB` and `lost on Bluetooth` are approximate, and
+include what the bridge received while it did not serve this host: a link that was down, or over
+Bluetooth a USB host holding the bridge. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
 is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
-`store dropped`, `queue` drops, `host link` and, on a Pi, the `health` counts. A `queue` peak is
+`store dropped`, `queue` drops, `host_uart_errors` over USB and, on a Pi, the `health` counts. A `queue` peak is
 the most the queue held since the bridge booted, so it can predate the capture. Left out:
 
 - the `peak` lines, when the capture holds no sighting
@@ -206,7 +216,8 @@ the most the queue held since the bridge booted, so it can predate the capture. 
 - `queue` lines, when the bridge reports no queues
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
-- the `lost on USB` clause, when it is zero
+- the `lost on USB` or `lost on Bluetooth` clause, when it is zero
+- `host_uart_errors` at zero in a capture over Bluetooth, where that UART is not the host's link
 - the `oversize (not a node's)` clause, when it is zero. It counts node records longer than any
   node of this build sends, which the bridge dropped and left out of `frames received`
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
@@ -215,7 +226,7 @@ the most the queue held since the bridge booted, so it can predate the capture. 
 
 The host records a `host_status` row when the capture starts, every 5 s, and at shutdown. Each
 `bridge_status` row records the frames the host had read when the reply arrived. `frames
-received` less `dropped` less `host read` is `lost on USB`, to within the frames queued in the
+received` less `dropped` less `host read` is the `lost on` figure, to within the frames queued in the
 bridge at the first and last reply, since a reply overtakes them. On the `host` line:
 
 | Clause                 | What it counts                                                                 |
@@ -223,7 +234,7 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 | `not stored`           | Frames read and deliberately dropped: bus resends, undecodable, incompatible   |
 | `store dropped`        | Rows lost because the store's queue was full or a write failed                 |
 | `garbled`              | USB frames that failed their checksum                                          |
-| `behind ≥100 ms`       | Samples in which the host read the link 100 ms or more behind the bridge       |
+| `behind`               | Samples read behind the bridge: from 100 ms over USB, 500 ms over Bluetooth    |
 | `slowest commit`       | The slowest batch the store wrote                                              |
 | `queue peak`           | The deepest the store's queue got                                              |
 
@@ -309,6 +320,8 @@ excluded-ssids = ["HomeNet", "Pixel 9"]
 remember = true
 mac = "AA:BB:CC:DD:EE:FF"
 serial = "5CF7153520"
+bluetooth-address = "AA:BB:CC:DD:EE:00"
+link = "bluetooth"
 
 [gps]
 bridge-rate-hz = 5
@@ -324,6 +337,8 @@ wdgwars = ""
 | `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
 | `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
 | `[bridge] serial`      | —       | The USB serial number of the CH343 that bridge answered on                     |
+| `[bridge] bluetooth-address` | — | Its C6's Bluetooth address, or on macOS the identifier CoreBluetooth gives it    |
+| `[bridge] link`        | `usb`   | `usb` or `bluetooth`: how commands reach the bridge; see "The Bluetooth link"  |
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[gps] wait-for-fix`   | on      | Whether `run` holds the scan until a receiver holds a fix; see "Positions"     |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
@@ -331,16 +346,18 @@ wdgwars = ""
 wartui refuses to start on an unknown key or table, naming the file and line. A `pool` key or a
 `[bluetooth]` table is refused with the command that sets it instead: `wartui pool`, or
 `wartui scan start --bluetooth`, since the bridge keeps the pool and picks the Bluetooth node. An out-of-range value,
-a malformed `[bridge] mac`, a `mac` or `serial` beside `remember = false`, or an `excluded-ssids`
+a malformed `[bridge] mac`, a `mac`, `serial` or `bluetooth-address` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
-`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `ota` read only `[bridge]
-mac` and `serial`, and treat a broken file as no bridge remembered, so it cannot stop them.
-`flash-bridge` reads only `[bridge] mac`, but refuses a broken file, since it decides which board
-gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save.
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read
+only `[bridge]`, and treat a broken file as no bridge remembered, so it cannot stop them. `ota`
+ignores `link`, and so does `bluetooth pair`. `flash-bridge` reads only `[bridge]`, ignores
+`link`, and refuses a broken file, since it decides which board gets firmware. `flash-fleet` never
+reads the file. Settings (`c`) rewrites the whole file on save.
 The waiting-for-GPS pop-up's box writes `[gps] wait-for-fix = false` when ticked, and drops the
 key when unticked.
-`run` writes `[bridge] mac` and `serial` when the bridge it remembers changes; see "Keyboard
-commands" and "When nothing arrives". `flash-bridge` writes both for a board it found and flashed;
+`run` writes `[bridge] mac`, `serial` and `bluetooth-address` when the bridge it remembers
+changes, and `link` once the bridge answers over it; see "Keyboard commands", "When nothing
+arrives" and "The Bluetooth link". `flash-bridge` writes both for a board it found and flashed;
 see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`,
 except under `--sim`. A new file is readable only by its owner.
 
@@ -359,7 +376,7 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `scan`, `ota` and `flash-bridge`. A named file that is missing is refused; a missing
+`pool`, `scan`, `ota`, `flash-bridge` and `bluetooth`. A named file that is missing is refused; a missing
 default file silently means the built-in defaults.
 
 ### Benchmarking the store
@@ -445,6 +462,7 @@ candidate once, since `board-info` does.
 
 `flash-bridge` updates the P4 bridge over the link it bridges on: the Type-C cable to its CH343,
 the one its first flash used (`firmware/p4-bridge/README.md` § "First flash").
+`[bridge] link = "bluetooth"` does not change that, and `--link` is refused.
 
 ```sh
 wartui flash-bridge --dry-run                       # which board, and the image's source
@@ -525,7 +543,8 @@ again, or any `wartui` command that opens the bridge.
 
 ### Updating over the air
 
-`ota` updates the nodes' firmware through the bridge, with no USB cable to them. It listens for
+`ota` updates the nodes' firmware through the bridge, with no USB cable to them. It reaches the
+bridge over USB whatever `[bridge] link` says. It listens for
 heartbeats, shows what it would do with each node, asks, then updates every chosen node at once
 while it uploads the image into the bridge's node image cache. Nothing else may hold the bridge
 meanwhile, so stop `run` first.
@@ -1154,6 +1173,138 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   firmware; `unknown` is a cause this build cannot name. A power-on or a reset over USB is not
   shown.
 
+## The Bluetooth link
+
+**`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth forget` take it.
+`[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected over
+there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. **Updates use the USB
+cable**: `flash-bridge` and `ota` take no `--link`, refuse one with `updates use the USB cable`,
+and ignore `[bridge] link`. Nothing scans for Bluetooth unless the link is Bluetooth. Every
+command lets the bridge go before it exits, ctrl-c included, so the bridge never keeps serving a
+PC that has gone. So a Bluetooth command takes about 3 s, 2 s of it BlueZ's own disconnect at
+exit.
+
+A Linux build links the system's libdbus, so building needs its headers: `dbus-devel` on Fedora,
+`libdbus-1-dev` on Debian and Ubuntu.
+
+**The bridge advertises `wartui XX:YY`, its last two octets.** `--bridge XX:YY`, or the whole
+address, names the same board over either link, and no other bridge is taken. Without one, wartui
+connects straight to the Bluetooth address it remembers, and otherwise scans for 10 s and takes the
+one bridge it hears; several are refused. A remembered bridge that does not answer is tried once
+that way: after that wartui scans, takes the remembered bridge when it hears it, and another only
+while it does not. Once a bridge has answered, the run stays with it. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
+remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
+
+**The PC pairs with the bridge once, with `wartui bluetooth pair`.** The bridge serves only a
+paired, encrypted host. An unpaired PC is refused with `the bridge XX:YY refused this PC over
+Bluetooth because they are not paired`, or, when the bridge only drops it about 10 s in, `the
+bridge XX:YY dropped this PC over Bluetooth before serving it`. A P4 reset or a weak signal at that
+moment reads the same, so the second is no proof. BlueZ never pairs on its own, so on Linux `pair`
+does it:
+
+```sh
+wartui bluetooth pair                 # the bridge on USB, else the remembered one, else the one heard
+wartui bluetooth pair --bridge 44:C0
+```
+
+1. **It opens the pairing window.** A bridge lets a new host pair only inside its window: 120 s
+   after it powers up, while it holds no bond, and 120 s after a host on USB opens it. When the
+   bridge answers on USB, `pair` opens it there. Otherwise, pair within 120 s of powering the
+   bridge up.
+2. **It scans for `wartui XX:YY` and pairs through BlueZ.** The pairing is Just Works: nothing to
+   type, nothing to confirm.
+3. **It proves the bond.** It connects once and asks the bridge whether this PC is encrypted and
+   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`. Over USB first, the
+   bridge serves it 15 s after the USB link goes quiet.
+
+A PC BlueZ already lists as paired is checked first. When the bridge refuses it as not paired,
+`pair` removes the pairing and pairs again, since BlueZ never does. A pairing the bridge refuses is
+removed too, and the run fails: `its pairing window is most likely closed` names both fixes, the
+USB cable or a power cycle. A bridge that only drops this PC, or does not serve it within 40 s,
+proves nothing about the bond: `pair` removes nothing, says `A USB host may hold the bridge`, and
+asks for another try. When the bridge has forgotten this PC, `pair --fresh` removes this PC's
+pairing first and pairs again; on other OSes, remove it in the system's Bluetooth settings. `pair` saves nothing to `wartui.toml`; the next `run --link bluetooth`
+remembers the bridge. On other OSes `pair` opens the window and stops: the OS pairs on the first
+`--link bluetooth` connection inside it, which is untested.
+
+On a desktop with a Bluetooth agent, the first `--link bluetooth` connection inside the pairing
+window may raise the desktop's own pairing prompt. Accepting it pairs the PC. `wartui bluetooth
+pair` needs no click.
+
+**`wartui bluetooth forget` clears every bond the bridge keeps.** It sends that over `--link`, USB
+by default, removes the bridge from BlueZ on Linux, and says what it costs: every other host that
+paired with the bridge keeps a bond the bridge dropped, and cannot connect until it forgets the
+bridge too, in its own Bluetooth settings, and pairs again. A Bluetooth host connected when the
+bonds clear is disconnected, this PC too when `forget` runs over Bluetooth. With no bond, the
+bridge's window stays open until a host pairs. `forget` saves nothing to `wartui.toml` either.
+
+**The view's header names the host link** after the bridge, as `wartui status` names it, and
+apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
+latest status, and show only while the link is up:
+
+| Header                                        | Meaning                                                              |
+|-----------------------------------------------|----------------------------------------------------------------------|
+| `bridge 44:C0, fw v0.4.0 — host usb, link up` | The run reaches the bridge over USB                                  |
+| `… — host usb; Bluetooth waits, link up`      | A paired Bluetooth host is connected to the C6 and waits while this run holds the bridge: why a phone goes unserved |
+| `… — host bluetooth, MTU 247, link up`        | The run reaches the bridge over Bluetooth, and its link: below MTU 247 it is slower. The bridge serves only an encrypted, bonded host, so the header does not repeat it |
+| `waiting for bridge — host bluetooth`         | No bridge has answered over Bluetooth yet                            |
+
+**`status` shows the Bluetooth host link.** Its labels are apart from `bluetooth`, the node that
+scans Bluetooth:
+
+| Line                                                                     | Meaning                                                         |
+|--------------------------------------------------------------------------|-----------------------------------------------------------------|
+| `host  usb`                                                              | Who the bridge serves: `none`, `usb` or `bluetooth`             |
+| `host  bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
+| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
+| `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
+| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
+
+**One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
+`flash-bridge` does. The Bluetooth host stays connected and waits. The bridge hands it back 15 s
+after USB falls silent, and the view reconnects without being asked. Meanwhile the view's border
+is red and its footer says, plain rather than in the fault box, since nothing is broken:
+
+```
+  link down: the USB host took the bridge; back 15 s after USB goes quiet
+```
+
+`sniff` prints `# link down: the USB host took the bridge`, then `# bridge …, firmware …` once the
+bridge hands it back. A Bluetooth connection with no answer after 20 s logs that a USB host may
+hold the bridge, and keeps waiting. `wartui ports` and `--bridge` lookups over USB never take the
+bridge from a Bluetooth host.
+
+**A host other than wartui writes each frame's last piece as a write request**, and the rest
+without response: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
+
+**A paired host that connects and does not subscribe is dropped after 30 s**, so a phone's
+background link cannot hold the bridge's one connection. wartui subscribes within a second or two.
+
+**When the Bluetooth link does not come up**, the reason names the fix. A one-shot command such as
+`status` keeps waiting through a failed try, since the transport tries again a second later, and
+names the last one when its wait runs out:
+
+| Says                                                                  | Do                                                                   |
+|-----------------------------------------------------------------------|----------------------------------------------------------------------|
+| `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
+| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer                                    |
+| `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
+| `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
+| `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
+| `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |
+| `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair`. When BlueZ holds a pairing the bridge may have forgotten, it says so: `wartui bluetooth pair --fresh` |
+| `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
+| A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
+
+`status --link bluetooth` proves the link both ways. In its `bluetooth host` line,
+`resynced_bytes` above 0 is host frames lost between the P4 and the C6, `dropped_writes` above 0 is
+this host's writes lost on the C6, and `unbonded_kicks` is a host with no bond being dropped, often
+a phone or another PC. `last_disconnect` is an HCI code: `0x08` the link was lost to range or RF,
+`0x13` the host closed it, as every command does at exit, `0x16` the C6 closed it, and `0x3d` the
+encryption failed, as with a bond out of step. A capture keeps every status's Bluetooth
+host link, and `wartui analyze` names the link and any of those counts that rose.
+
 ## When nothing arrives
 
 **wartui finds the bridge by asking.** It opens each attached CH343 in turn, and never a node, and
@@ -1219,6 +1370,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
+- **`host  …`** and **`pairing  …`**, and the **`bluetooth host  …`** counters: the Bluetooth host
+  link; see "The Bluetooth link".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
 - **`share  N1   21 channels  1,3,5,…`**: one line per node holding a share of the bridge's plan,
@@ -1249,9 +1402,8 @@ and why a link went down, once per reason, since somebody else's port is retried
 capture. The GPS reader logs searching, its first fix, stale fixes, recovery, and unreadable or
 removed receivers on transitions, not every sentence or satellite-count change. Reopening a failed
 port does not count as recovery until a valid fix or no-fix report arrives. The log also records each
-time the host falls 100 ms or more behind the bridge and when it catches up, with both frames' bridge
-stamps. A reconnect while frames are arriving can log one spell of about 100 ms, because the lag after
-a connect starts from the 100 ms the engine assumes rather than from a measurement. Every line the
+time the host falls behind the bridge and when it catches up, with both frames' bridge stamps. Behind
+is 100 ms over USB and 500 ms over Bluetooth, whose connection interval clumps delivery. Every line the
 bridge sends is logged as `bridge: …`, faults at `warn`, such as `the radio has stopped answering`.
 Each node's membership changes are logged once each:
 

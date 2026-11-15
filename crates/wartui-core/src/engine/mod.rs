@@ -41,7 +41,7 @@ mod snapshot;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
-use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::{
@@ -53,6 +53,7 @@ use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
+pub use lag::{BEHIND_BLUETOOTH_US, BEHIND_USB_US, behind_us};
 pub use node::NodeState;
 pub use scan::FIX_WAIT;
 pub use snapshot::{
@@ -60,7 +61,6 @@ pub use snapshot::{
     power_cycled_text,
 };
 
-pub(crate) use lag::BEHIND_US;
 pub(crate) use node::supply_dropped_from;
 pub(crate) use rx::advance_since_boot;
 
@@ -88,6 +88,8 @@ pub struct FleetEngine {
     /// When the link last came up, `None` while down ([`Self::note_departures`]).
     link_up_since: Option<Instant>,
     link_error: Option<String>,
+    /// What the transport knew of why the link last went down. `None` while up.
+    link_cause: Option<DisconnectCause>,
     counters: Counters,
     tail: VecDeque<TailEntry>,
     unique_wifi: Distinct,
@@ -180,6 +182,7 @@ impl FleetEngine {
             link_up: false,
             link_up_since: None,
             link_error: None,
+            link_cause: None,
             counters: Counters::default(),
             tail: VecDeque::new(),
             unique_wifi: Distinct::new(),
@@ -233,11 +236,12 @@ impl FleetEngine {
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
+                self.link_cause = None;
                 self.forget_bus();
                 // Start caught up. Every record from here on was produced after this connection
                 // began: the bridge queues nothing for an absent host and clears its queue when one
                 // connects, and the transport drops what was already past that queue, which
-                // decodes ahead of `Ready` (`wartui_bridge::serial`, `read_loop`).
+                // decodes ahead of `Ready` (`wartui_bridge`'s `gate`).
                 self.reset_arrivals();
                 // A new connection means a new baseline, whether or not the bridge rebooted.
                 self.dropped_baseline = None;
@@ -246,11 +250,12 @@ impl FleetEngine {
                 // forgotten its rate.
                 self.poll_bridge(now, &mut batch);
             }
-            Event::Link(LinkEvent::Disconnected { reason }) => {
+            Event::Link(LinkEvent::Disconnected { reason, cause }) => {
                 self.link_up = false;
                 self.bridge_lacks_gps = false;
                 self.link_up_since = None;
                 self.link_error = Some(reason);
+                self.link_cause = Some(cause);
                 self.forget_bus();
                 self.reset_arrivals();
             }
@@ -409,6 +414,7 @@ impl FleetEngine {
                 ble,
                 present,
                 members,
+                bluetooth,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -422,6 +428,7 @@ impl FleetEngine {
                     dropped_since_attach: dropped_tx - baseline,
                     uptime_ms: *uptime_ms,
                     fan: *fan,
+                    bluetooth: *bluetooth,
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,
@@ -435,6 +442,8 @@ impl FleetEngine {
                     host_uart_errors: *host_uart_errors,
                     fan: *fan,
                     slots_present: *present,
+                    // As reported: the engine reads nothing in it, and the view and the store do.
+                    bluetooth: *bluetooth,
                 }));
                 // Every heartbeat read so far is no later than this `Status`, so a slot it shows
                 // absent holds a node that has not answered since.

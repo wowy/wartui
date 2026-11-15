@@ -11,12 +11,15 @@
 //! both. A chunk may carry the end of one frame and the start of the next, so a busy link
 //! fills each write.
 //!
+//! The bulk ring's bytes are an array ([`HostQueue`]) or a slice handed over at boot
+//! ([`HostQueueIn::with_bulk`]), as the P4 hands it PSRAM.
+//!
 //! # A new host
 //!
-//! The P4 queues nothing while no host is present, and [`HostQueue::clear`] empties both
+//! The P4 queues nothing while no host is present, and [`HostQueueIn::clear`] empties both
 //! rings when one arrives, so a host never reads a backlog from before it attached.
 
-use crate::frame_ring::FrameRing;
+use crate::frame_ring::{FrameRing, FrameRingIn};
 use crate::link::{BridgeToHost, QueueId, QueueStat};
 
 /// The most bytes one write to the host carries: the P4's transmit DMA buffer.
@@ -40,14 +43,17 @@ pub const fn is_priority(msg: &BridgeToHost) -> bool {
     }
 }
 
-/// Frames waiting to go to the host, `P` bytes of priority and `B` of bulk.
-pub struct HostQueue<const P: usize, const B: usize> {
+/// Frames waiting to go to the host, `P` bytes of priority and the bytes of `S` of bulk.
+pub struct HostQueueIn<const P: usize, S> {
     priority: FrameRing<P>,
-    bulk: FrameRing<B>,
-    /// [`HostQueue::clear`] cut a frame off part-way out, so the next chunk starts with
+    bulk: FrameRingIn<S>,
+    /// [`HostQueueIn::clear`] cut a frame off part-way out, so the next chunk starts with
     /// a `0x00` that ends the fragment.
     cut: bool,
 }
+
+/// Frames waiting to go to the host, `P` bytes of priority and `B` of bulk, in arrays.
+pub type HostQueue<const P: usize, const B: usize> = HostQueueIn<P, [u8; B]>;
 
 impl<const P: usize, const B: usize> Default for HostQueue<P, B> {
     fn default() -> Self {
@@ -59,7 +65,23 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
     /// An empty queue.
     #[must_use]
     pub const fn new() -> Self {
-        Self { priority: FrameRing::new(), bulk: FrameRing::new(), cut: false }
+        Self::with_bulk([0; B])
+    }
+}
+
+impl<const P: usize, S> HostQueueIn<P, S> {
+    /// An empty queue whose bulk ring is `bulk`.
+    #[must_use]
+    pub const fn with_bulk(bulk: S) -> Self {
+        Self { priority: FrameRing::new(), bulk: FrameRingIn::over(bulk), cut: false }
+    }
+}
+
+impl<const P: usize, S: AsRef<[u8]> + AsMut<[u8]>> HostQueueIn<P, S> {
+    /// Move the bulk ring onto `bulk`, empty, for a firmware that has its bytes only at boot.
+    /// Whatever the old ring held is gone, uncounted.
+    pub fn set_bulk(&mut self, bulk: S) {
+        self.bulk = FrameRingIn::over(bulk);
     }
 
     /// Queue a complete COBS frame, terminator included, as `link::encode_frame` writes it.
@@ -84,13 +106,24 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
     ///
     /// Returns 0 when nothing is queued.
     pub fn next_chunk(&mut self, out: &mut [u8; HOST_CHUNK]) -> usize {
+        self.fill(out)
+    }
+
+    /// Fill `out` with the next bytes for the host, as [`HostQueueIn::next_chunk`] does a chunk,
+    /// and return how many.
+    ///
+    /// Returns 0 when nothing is queued or `out` is empty.
+    pub fn fill(&mut self, out: &mut [u8]) -> usize {
         let mut filled = 0;
+        if out.is_empty() {
+            return 0;
+        }
         if self.cut {
             self.cut = false;
             out[0] = 0x00;
             filled = 1;
         }
-        while filled < HOST_CHUNK {
+        while filled < out.len() {
             // Priority only at a boundary: a frame part-way out is finished first.
             let from_priority = if self.priority.mid_frame() {
                 true
@@ -112,6 +145,12 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
         filled
     }
 
+    /// How many bytes the bulk ring holds: 0 over an empty slice, which refuses every bulk frame.
+    #[must_use]
+    pub fn bulk_capacity(&self) -> usize {
+        self.bulk.capacity()
+    }
+
     /// Both rings' depth, deepest point and drops, priority first.
     #[must_use]
     pub fn stats(&self) -> [QueueStat; 2] {
@@ -124,7 +163,7 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
             },
             QueueStat {
                 queue: QueueId::HostBulk,
-                capacity: B as u32,
+                capacity: self.bulk.capacity() as u32,
                 high_water: self.bulk.high_water() as u32,
                 dropped: self.bulk.dropped(),
             },

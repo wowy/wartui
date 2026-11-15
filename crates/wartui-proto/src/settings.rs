@@ -4,21 +4,21 @@
 //! **No ESP-IDF NVS reads that partition**, and neither a USB flash nor an update over the host
 //! link writes it, so the layout is this module's own.
 //!
-//! **One 4-byte record a change, written at the first erased word**: a tag naming the setting,
-//! its value, the value inverted, then 0 ([`record`]). NOR flash programs only by clearing bits,
-//! so a change costs a word written and nothing erased. Reading ([`read`]) walks the words up to
-//! the first erased one, and each tag's last valid record wins. A word a power cut tore fails its
-//! check and is skipped, and so is a tag or a value this build does not know, such as a `B`
-//! record another build wrote.
+//! **One 4-byte record a change, written at the first erased word** ([`sector_log`]): a tag
+//! naming the setting, its value, the value inverted, then 0 ([`record`]). Reading ([`read`])
+//! walks the words up to the first erased one, and each tag's last valid record wins. A word a
+//! power cut tore fails its check and is skipped, and so is a tag or a value this build does not
+//! know, such as a `B` record another build wrote.
 //!
-//! **A full sector erases and rewrites what it holds** ([`Write::Erase`]): every setting [`read`]
-//! gives, with the new one in its place, so one setting never costs another. A power cut
-//! between the erase and the rewrite loses them all, and the next boot runs the fan at
+//! **A full sector erases and rewrites what it holds** ([`sector_log::Write::Erase`]): every
+//! setting [`read`] gives, with the new one in its place, so one setting never costs another. A
+//! power cut between the erase and the rewrite loses them all, and the next boot runs the fan at
 //! [`FanDuty::FULL`] and the pool at [`ChannelPool::All`].
 
 use crate::fan::FanDuty;
 use crate::ota::SECTOR;
 use crate::plan::ChannelPool;
+use crate::sector_log;
 
 /// The tag of a fan duty's record.
 pub const FAN: u8 = b'F';
@@ -64,24 +64,9 @@ impl Stored {
     }
 }
 
-/// The flash write a setting takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Write {
-    /// Write `record` at `offset`, the sector's first erased word.
-    At {
-        /// The byte offset in the sector.
-        offset: usize,
-        /// The word to write.
-        record: [u8; WORD],
-    },
-    /// Erase the sector, then write `records[..len]` at 0.
-    Erase {
-        /// Every setting the sector holds, fan then pool, the new one in its place.
-        records: [u8; KINDS * WORD],
-        /// Bytes of `records` to write.
-        len: usize,
-    },
-}
+/// The flash write a setting takes: one word, or an erase and every setting the sector holds,
+/// fan then pool, the new one in its place.
+pub type Write = sector_log::Write<WORD, { KINDS * WORD }>;
 
 /// The byte a pool's record stores.
 const fn pool_byte(pool: ChannelPool) -> u8 {
@@ -127,7 +112,7 @@ fn decode(word: &[u8; WORD]) -> Option<Setting> {
 
 /// The words up to the first erased one.
 fn written(sector: &[u8; SECTOR]) -> impl Iterator<Item = &[u8; WORD]> {
-    sector.as_chunks::<WORD>().0.iter().take_while(|word| **word != [0xFF; WORD])
+    sector_log::written(sector)
 }
 
 /// What `sector` holds: each tag's last valid record.
@@ -143,21 +128,18 @@ pub fn read(sector: &[u8; SECTOR]) -> Stored {
 #[must_use]
 pub fn write_for(sector: &[u8; SECTOR], setting: Setting) -> Option<Write> {
     let stored = read(sector);
-    if stored.with(setting) == stored {
+    let kept = stored.with(setting);
+    if kept == stored {
         return None;
     }
-    let used = written(sector).count();
-    if used < RECORDS {
-        return Some(Write::At { offset: used * WORD, record: record(setting) });
-    }
-    let kept = stored.with(setting);
-    let mut records = [0xFF; KINDS * WORD];
-    let mut len = 0;
-    let fan = kept.fan.map(Setting::Fan);
-    let pool = kept.pool.map(Setting::Pool);
-    for setting in [fan, pool].into_iter().flatten() {
-        records[len..len + WORD].copy_from_slice(&record(setting));
-        len += WORD;
-    }
-    Some(Write::Erase { records, len })
+    Some(sector_log::write_for(sector, record(setting), |records| {
+        let mut len = 0;
+        let fan = kept.fan.map(Setting::Fan);
+        let pool = kept.pool.map(Setting::Pool);
+        for setting in [fan, pool].into_iter().flatten() {
+            records[len..len + WORD].copy_from_slice(&record(setting));
+            len += WORD;
+        }
+        len
+    }))
 }

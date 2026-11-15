@@ -110,6 +110,10 @@ fn remember_flashed(path: &Path, mac: Mac, serial: Option<String>) -> Result<()>
     if config.bridge.remember == Some(false) {
         return Ok(());
     }
+    // Another board's Bluetooth address would connect the old bridge first.
+    if config.bridge.mac != Some(mac) {
+        config.bridge.bluetooth_address = None;
+    }
     config.bridge.mac = Some(mac);
     config.bridge.serial = serial;
     config::save(path, &config)
@@ -398,6 +402,21 @@ mod tests {
         assert_eq!(saved.bridge.mac, Some(BRIDGE_MAC), "the new bridge replaces the old");
         assert_eq!(saved.bridge.serial.as_deref(), Some("5CF7153520"), "with its port");
         assert_eq!(saved.excluded_ssids, ["HomeNet"], "the rest is kept");
+    }
+
+    #[test]
+    fn flash_bridge_drops_bluetooth_address_when_flashed_board_is_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let text = "[bridge]\nmac = \"02:00:5E:10:A1:B0\"\nbluetooth-address = \"02:00:5E:10:A1:B1\"\n\
+                    link = \"bluetooth\"\n";
+        std::fs::write(&path, text).unwrap();
+
+        remember_flashed(&path, BRIDGE_MAC, None).unwrap();
+
+        let saved = config::load(Some(&path)).unwrap();
+        assert_eq!(saved.bridge.bluetooth_address, None, "the old board's");
+        assert_eq!(saved.bridge.link, Some(config::Link::Bluetooth), "the link is kept");
     }
 
     #[test]

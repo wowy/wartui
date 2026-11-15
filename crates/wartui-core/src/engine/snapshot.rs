@@ -1,8 +1,8 @@
-use wartui_bridge::BridgeInfo;
+use wartui_bridge::{BridgeInfo, DisconnectCause};
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::PowerOutcome;
+use wartui_proto::link::{BluetoothStatus, PowerOutcome};
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 #[cfg(doc)]
@@ -112,6 +112,10 @@ pub struct Snapshot {
     pub link_up: bool,
     /// Why it went down, if it did.
     pub link_error: Option<String>,
+    /// What the transport knew of why it went down, beside [`Self::link_error`]'s words. `None`
+    /// while it is up. The view reads [`DisconnectCause::UsbTookBridge`] as the bridge serving
+    /// another host, not as a fault.
+    pub link_cause: Option<DisconnectCause>,
     /// The channel pool the bridge reports, which its planner cuts. `None` before its first
     /// `Status`.
     pub pool: Option<ChannelPool>,
@@ -240,6 +244,9 @@ pub struct BridgeStatus {
     pub uptime_ms: u32,
     /// The carrier's lid fan, or `None` with no carrier.
     pub fan: Option<FanStats>,
+    /// The Bluetooth host link: who the bridge serves, its bonds and pairing window, the central
+    /// connected to its C6 and the C6's counters.
+    pub bluetooth: BluetoothStatus,
 }
 
 impl FleetEngine {
@@ -316,6 +323,7 @@ impl FleetEngine {
             bridge: self.bridge.clone(),
             link_up: self.link_up,
             link_error: self.link_error.clone(),
+            link_cause: self.link_cause,
             pool: self.pool,
             scan: self.scan,
             ble_slot: self.ble_slot,
@@ -375,7 +383,7 @@ impl FleetEngine {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use wartui_bridge::{BridgeInfo, LinkEvent};
+    use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
     use wartui_proto::bus::NodeBoard;
     use wartui_proto::link::{BridgeToHost, LogStr, LoopPhase, NO_GPS_RECEIVER};
     use wartui_proto::reset::ResetCause;
@@ -441,7 +449,8 @@ mod tests {
         assert!(engine.bridge_lacks_gps);
         let now = Now { mono: start, unix_ms: 0 };
         let reason = "unplugged".to_owned();
-        engine.handle(Event::Link(LinkEvent::Disconnected { reason }), now);
+        let cause = DisconnectCause::Other;
+        engine.handle(Event::Link(LinkEvent::Disconnected { reason, cause }), now);
         assert!(!engine.bridge_lacks_gps);
     }
 }

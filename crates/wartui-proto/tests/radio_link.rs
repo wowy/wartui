@@ -1,16 +1,19 @@
 //! The P4–C6 UART link: its framing, its frozen hello, and the messages it carries.
 
 use heapless::Vec;
+use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, MAX_BONDS};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
-    BODY_MAX, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN, HELLO_LEN, Held, Hello, Kind, MAGIC,
-    PAYLOAD_MAX, Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
-    WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up, records, seal, verify,
+    Accept, BODY_MAX, BleCounters, BleState, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN,
+    HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, MAGIC, PAYLOAD_MAX,
+    Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
+    WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up,
+    host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
 
-fn log(text: &str) -> Up {
+fn log(text: &str) -> Up<'_> {
     Up::Log { message: text.try_into().unwrap() }
 }
 
@@ -467,12 +470,105 @@ fn radio_link_largest_messages_fit_one_packet() {
         bad_magic: u32::MAX,
         seq_gap: u32::MAX,
         uart_errors: u32::MAX,
+        ble: BleCounters {
+            pairings: u32::MAX,
+            failed_pairings: u32::MAX,
+            unbonded_kicks: u32::MAX,
+            last_disconnect: u8::MAX,
+            resynced_bytes: u32::MAX,
+            dropped_writes: u32::MAX,
+            phy: u8::MAX,
+            interval_us: u32::MAX,
+            heap_high_water: u32::MAX,
+        },
     });
     let line = Up::Error { message: LogStr::try_from("x".repeat(96).as_str()).unwrap() };
-    for up in [status, line] {
+    let stream = [0xFFu8; HOST_BYTES_MAX];
+    let state =
+        Up::BleState(BleState { subscribed: true, encrypted: true, bonded: true, mtu: u16::MAX });
+    let bond = largest_bond();
+    let added = Up::BondAdded(bond);
+    let removed = Up::BondRemoved(bond.addr);
+    let credit = Up::Credit { accounted: u32::MAX };
+    for up in [status, line, Up::HostBytes(&stream), credit, state, added, removed] {
         let len = encode_up(&up, &mut out).unwrap();
-        assert!(len + 2 <= PAYLOAD_MAX, "{up:?} is {len} bytes");
+        assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
     }
+    let host_bytes = Down::HostBytes { at: u32::MAX, bytes: &stream };
+    assert_eq!(encode_down(&host_bytes, &mut out).unwrap(), RECORD_MAX);
+    let bonds = Down::Bonds {
+        bonds: Vec::from_slice(&[bond; MAX_BONDS]).unwrap(),
+        window_ms: WINDOW_UNTIL_BONDED,
+    };
+    let len = encode_down(&bonds, &mut out).unwrap();
+    assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
+}
+
+/// A bond with every field at its longest.
+fn largest_bond() -> BondRecord {
+    BondRecord {
+        addr: BondAddr { kind: u8::MAX, addr: [0xFF; 6] },
+        irk: Some(u128::MAX),
+        ltk: u128::MAX,
+        level: BondLevel::Authenticated,
+    }
+}
+
+#[test]
+fn radio_link_host_bytes_fit_room_when_record_is_any_size_and_offset_is_widest() {
+    // `at` at u32::MAX takes its varint's widest five bytes.
+    let stream = [0x5Au8; RECORD_MAX];
+    let mut out = [0u8; BODY_MAX];
+    assert_eq!(HOST_BYTES_MAX, RECORD_MAX - 8);
+    for room in 0..=RECORD_MAX {
+        let fit = host_bytes_fit(room);
+        if room < 7 {
+            assert_eq!(fit, 0, "room {room}");
+            continue;
+        }
+        let down = Down::HostBytes { at: u32::MAX, bytes: &stream[..fit] };
+        let down = encode_down(&down, &mut out).unwrap();
+        assert!(down <= room, "room {room}: {fit} bytes took {down}");
+        // One more byte would not fit.
+        let over = Down::HostBytes { at: u32::MAX, bytes: &stream[..fit + 1] };
+        let over = encode_down(&over, &mut out).unwrap();
+        assert!(over > room, "room {room}: {} bytes took {over}", fit + 1);
+        // No `at`, so the count is conservative for the C6's direction.
+        let up = encode_up(&Up::HostBytes(&stream[..fit]), &mut out).unwrap();
+        assert_eq!(up + 5, down, "room {room}");
+    }
+}
+
+#[test]
+fn radio_link_packer_pushes_record_written_in_place_when_it_fits() {
+    let mut payload = [0u8; 16];
+    let mut packer = Packer::new(&mut payload);
+    assert!(packer.push_encoded(&[1, 2]));
+    // Two records' prefixes and the first's two bytes leave ten.
+    assert_eq!(packer.room(), 10);
+    let host_bytes = Down::HostBytes { at: 3, bytes: &[7; 7] };
+    assert!(packer.push_with(|out| encode_down(&host_bytes, out).ok()));
+    assert_eq!(packer.room(), 0);
+    assert!(!packer.push_with(|out| encode_down(&Down::GetRadioStatus, out).ok()));
+    let len = packer.len();
+    assert_eq!(len, 16);
+    let got: std::vec::Vec<_> = records(&payload[..len]).collect();
+    assert_eq!(got, [&[1u8, 2][..], &[2, 3, 7, 7, 7, 7, 7, 7, 7, 7]]);
+}
+
+#[test]
+fn radio_link_packer_changes_nothing_when_writer_refuses() {
+    let mut payload = [0u8; 16];
+    let mut packer = Packer::new(&mut payload);
+    assert!(!packer.push_with(|_| None));
+    assert!(!packer.push_with(|_| Some(0)));
+    assert!(packer.is_empty());
+}
+
+#[test]
+fn radio_link_window_holds_16_kib_when_built() {
+    // Both firmwares read it: the P4 to hold its sends, the C6 to size its notify ring.
+    assert_eq!(HOST_WINDOW_BYTES, 16 * 1024);
 }
 
 #[test]
@@ -497,6 +593,17 @@ fn radio_link_revision_golden_bytes() {
         bad_magic: 8,
         seq_gap: 9,
         uart_errors: 10,
+        ble: BleCounters {
+            pairings: 1,
+            failed_pairings: 2,
+            unbonded_kicks: 3,
+            last_disconnect: 0x13,
+            resynced_bytes: 300,
+            dropped_writes: 4,
+            phy: 2,
+            interval_us: 7_500,
+            heap_high_water: 5,
+        },
     });
     let len = encode_up(&up, &mut out).unwrap();
     #[rustfmt::skip]
@@ -508,6 +615,13 @@ fn radio_link_revision_golden_bytes() {
         2, 1,       // high_water, dropped
         7, 8, 9,    // crc_fail, bad_magic, seq_gap
         10,         // uart_errors
+        1, 2, 3,    // ble: pairings, failed_pairings, unbonded_kicks
+        0x13,       // last_disconnect
+        0xAC, 0x02, // resynced_bytes 300, varint
+        4,          // dropped_writes
+        2,          // phy
+        0xCC, 0x3A, // interval_us 7500, varint
+        5,          // heap_high_water
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), up);
@@ -522,6 +636,246 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_up(&error, &mut out).unwrap();
     assert_eq!(out[..len], [2, 2, b'n', b'o'], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), error);
+}
+
+#[test]
+fn radio_link_pins_host_stream_bytes_when_encoded() {
+    const MSG: &str = "Up/Down encoding changed: re-pin these bytes";
+    let mut out = [0u8; 128];
+
+    let start = Down::HostStart { at: 300 };
+    let len = encode_down(&start, &mut out).unwrap();
+    // Down::HostStart, then `at` as a varint.
+    assert_eq!(out[..len], [1, 0xAC, 0x02], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), start);
+
+    let down = Down::HostBytes { at: u32::MAX, bytes: &[0, 1, 2] };
+    let len = encode_down(&down, &mut out).unwrap();
+    // Down::HostBytes, `at` at its widest, then the bytes, length first.
+    assert_eq!(out[..len], [2, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 3, 0, 1, 2], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), down);
+
+    let up = Up::HostBytes(&[0xAA, 0xBB]);
+    let len = encode_up(&up, &mut out).unwrap();
+    // Up::HostBytes, then the bytes, length first.
+    assert_eq!(out[..len], [3, 2, 0xAA, 0xBB], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), up);
+
+    let credit = Up::Credit { accounted: 300 };
+    let len = encode_up(&credit, &mut out).unwrap();
+    assert_eq!(out[..len], [4, 0xAC, 0x02], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), credit);
+
+    let state =
+        Up::BleState(BleState { subscribed: true, encrypted: true, bonded: false, mtu: 247 });
+    let len = encode_up(&state, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        5,          // Up::BleState
+        1, 1, 0,    // subscribed, encrypted, bonded
+        0xF7, 0x01, // mtu 247, varint
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), state);
+}
+
+#[test]
+fn radio_link_pins_bond_bytes_when_encoded() {
+    const MSG: &str = "Up/Down encoding changed: re-pin these bytes";
+    let mut out = [0u8; 128];
+    let bond = BondRecord {
+        addr: BondAddr { kind: 1, addr: [0x5A, 0x11, 0x22, 0x33, 0x44, 0x02] },
+        irk: Some(5),
+        ltk: 300,
+        level: BondLevel::Authenticated,
+    };
+    #[rustfmt::skip]
+    let bond_bytes = [
+        1,                                  // addr.kind
+        0x5A, 0x11, 0x22, 0x33, 0x44, 0x02, // addr.addr
+        1, 5,                               // irk: Some, 5 as a varint
+        0xAC, 0x02,                         // ltk 300, varint
+        1,                                  // BondLevel::Authenticated
+    ];
+
+    let down = Down::Bonds { bonds: Vec::from_slice(&[bond]).unwrap(), window_ms: 120_000 };
+    let len = encode_down(&down, &mut out).unwrap();
+    let mut expected = vec![3, 1]; // Down::Bonds, one bond
+    expected.extend_from_slice(&bond_bytes);
+    expected.extend_from_slice(&[0xC0, 0xA9, 0x07]); // window_ms 120000, varint
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), down);
+
+    let until = Down::Bonds { bonds: Vec::new(), window_ms: WINDOW_UNTIL_BONDED };
+    let len = encode_down(&until, &mut out).unwrap();
+    assert_eq!(out[..len], [3, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), until);
+
+    let added = Up::BondAdded(bond);
+    let len = encode_up(&added, &mut out).unwrap();
+    let mut expected = vec![6]; // Up::BondAdded
+    expected.extend_from_slice(&bond_bytes);
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), added);
+
+    let removed = Up::BondRemoved(bond.addr);
+    let len = encode_up(&removed, &mut out).unwrap();
+    assert_eq!(out[..len], [7, 1, 0x5A, 0x11, 0x22, 0x33, 0x44, 0x02], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), removed);
+}
+
+#[test]
+fn inflow_takes_everything_when_bytes_arrive_in_order() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(1_000), 0);
+    assert_eq!(inflow.accept(1_000, 100), Accept::Take { skip: 0, gap: 0 });
+    assert_eq!(inflow.accept(1_100, 50), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_adopts_first_offset_when_nothing_was_expected() {
+    // A C6 fresh from boot has no base, and adopts the P4's offsets from the first it sees.
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.accept(5_000, 10), Accept::Take { skip: 0, gap: 0 });
+    assert_eq!(inflow.accept(5_010, 10), Accept::Take { skip: 0, gap: 0 });
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(7_000), 0);
+}
+
+#[test]
+fn inflow_reports_gap_when_a_packet_was_lost() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(0), 0);
+    assert_eq!(inflow.accept(0, 100), Accept::Take { skip: 0, gap: 0 });
+    // The packet carrying 100..300 failed its CRC.
+    assert_eq!(inflow.accept(300, 50), Accept::Take { skip: 0, gap: 200 });
+    assert_eq!(inflow.accept(350, 50), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_takes_nothing_when_bytes_are_a_full_duplicate() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(0), 0);
+    assert_eq!(inflow.accept(0, 100), Accept::Take { skip: 0, gap: 0 });
+    assert_eq!(inflow.accept(40, 60), Accept::Duplicate);
+    assert_eq!(inflow.accept(0, 0), Accept::Duplicate);
+    // Nothing moved: the next in order is still at 100.
+    assert_eq!(inflow.accept(100, 10), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_skips_taken_bytes_when_bytes_partly_overlap() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(0), 0);
+    assert_eq!(inflow.accept(0, 100), Accept::Take { skip: 0, gap: 0 });
+    assert_eq!(inflow.accept(80, 50), Accept::Take { skip: 20, gap: 0 });
+    assert_eq!(inflow.accept(130, 10), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_reports_gap_when_loss_spans_the_u32_wrap() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(u32::MAX - 99), 0);
+    assert_eq!(inflow.accept(u32::MAX - 99, 50), Accept::Take { skip: 0, gap: 0 });
+    // Expected at u32::MAX - 49; these start 60 past the wrap.
+    assert_eq!(inflow.accept(60, 10), Accept::Take { skip: 0, gap: 110 });
+    assert_eq!(inflow.accept(70, 10), Accept::Take { skip: 0, gap: 0 });
+    // Behind across the wrap reads as behind.
+    assert_eq!(inflow.accept(u32::MAX - 9, 10), Accept::Duplicate);
+}
+
+#[test]
+fn inflow_discards_late_bytes_when_start_begins_a_new_attachment() {
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(0), 0);
+    assert_eq!(inflow.accept(0, 100), Accept::Take { skip: 0, gap: 0 });
+    assert_eq!(inflow.start(100), 0);
+    // An earlier attachment's bytes are behind the new one's start.
+    assert_eq!(inflow.accept(90, 10), Accept::Duplicate);
+    assert_eq!(inflow.accept(95, 15), Accept::Take { skip: 5, gap: 0 });
+}
+
+#[test]
+fn inflow_counts_lost_bytes_when_start_jumps_past_expected() {
+    // The UART is ordered, so bytes before the start that have not arrived never will.
+    let mut inflow = Inflow::new();
+    assert_eq!(inflow.start(0), 0);
+    assert_eq!(inflow.accept(0, 100), Accept::Take { skip: 0, gap: 0 });
+    // The earlier attachment's last packet, 100..180, was lost.
+    assert_eq!(inflow.start(180), 80);
+    assert_eq!(inflow.accept(180, 20), Accept::Take { skip: 0, gap: 0 });
+}
+
+#[test]
+fn inflow_expects_nothing_when_new() {
+    assert_eq!(Inflow::new().expected(), None);
+}
+
+#[test]
+fn inflow_expects_start_offset_when_started() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(7_000);
+    assert_eq!(inflow.expected(), Some(7_000));
+    // A start behind the expected offset moves it back: the P4 names where the attachment begins.
+    let _ = inflow.start(6_000);
+    assert_eq!(inflow.expected(), Some(6_000));
+}
+
+#[test]
+fn inflow_expects_end_of_bytes_when_bytes_arrive_in_order() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.accept(5_000, 10);
+    assert_eq!(inflow.expected(), Some(5_010), "the first offset seen is the base");
+    let _ = inflow.accept(5_010, 30);
+    assert_eq!(inflow.expected(), Some(5_040));
+}
+
+#[test]
+fn inflow_expects_past_the_gap_when_a_packet_was_lost() {
+    // The credit is read from the position, so it covers the lost bytes with nothing added.
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(0);
+    let _ = inflow.accept(0, 100);
+    assert_eq!(inflow.accept(300, 50), Accept::Take { skip: 0, gap: 200 });
+    assert_eq!(inflow.expected(), Some(350));
+}
+
+#[test]
+fn inflow_keeps_expected_when_bytes_are_a_duplicate() {
+    let mut inflow = Inflow::new();
+    let _ = inflow.start(0);
+    let _ = inflow.accept(0, 100);
+    assert_eq!(inflow.accept(40, 60), Accept::Duplicate);
+    assert_eq!(inflow.expected(), Some(100));
+}
+
+#[test]
+fn host_window_opens_fully_when_nothing_is_in_flight() {
+    assert_eq!(host_window(0, 0), HOST_WINDOW_BYTES);
+    assert_eq!(host_window(123_456, 123_456), HOST_WINDOW_BYTES);
+}
+
+#[test]
+fn host_window_shrinks_by_bytes_in_flight_when_part_is_uncredited() {
+    assert_eq!(host_window(11_000, 10_000), HOST_WINDOW_BYTES - 1_000);
+}
+
+#[test]
+fn host_window_closes_when_a_full_window_is_in_flight() {
+    assert_eq!(host_window(10_000 + HOST_WINDOW_BYTES, 10_000), 0);
+}
+
+#[test]
+fn host_window_counts_in_flight_when_offsets_wrap_past_u32() {
+    assert_eq!(host_window(400, u32::MAX - 99), HOST_WINDOW_BYTES - 500);
+}
+
+#[test]
+fn host_window_opens_fully_when_counters_disagree() {
+    // A credit ahead of `sent`, or more than a window behind it, cannot happen while the two
+    // agree. A closed window would never reopen; an open one lets the next send resynchronize.
+    assert_eq!(host_window(10_000, 10_001), HOST_WINDOW_BYTES);
+    assert_eq!(host_window(10_000 + HOST_WINDOW_BYTES + 1, 10_000), HOST_WINDOW_BYTES);
 }
 
 #[test]
@@ -577,6 +931,7 @@ fn radio_link_held_holds_nothing_when_ring_empties_mid_packet() {
     );
 
     // The ring ran dry with room to spare, so nothing is held over.
+    assert!(held.is_empty());
     assert!(pack_packet(&mut held, &mut ring).is_empty());
 
     assert!(ring.push(&[3; 5]));
@@ -599,5 +954,6 @@ fn radio_link_held_fills_packet_exactly_when_record_is_record_max() {
     assert!(ring.push(&[1; 10]));
     assert!(ring.push(&[8; RECORD_MAX]));
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![1; 10]]);
+    assert!(!held.is_empty(), "the record that did not fit is held");
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![8; RECORD_MAX]]);
 }

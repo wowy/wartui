@@ -25,7 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libdbus-1-dev
 
       - name: Lint
         run: cargo fmt --all -- --check

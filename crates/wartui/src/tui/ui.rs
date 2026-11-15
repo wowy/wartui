@@ -10,10 +10,9 @@ use super::Settings;
 use super::blocks::LOST_SLOT;
 use super::gps;
 use super::settings::{
-    ConfigModal, ModalAction, apply, apply_excluded, save_bridge, save_fix_wait,
+    ConfigModal, ModalAction, apply, apply_excluded, link_written, save_bridge, save_fix_wait,
 };
 use super::upload::Upload;
-#[cfg(test)]
 use crate::config;
 use crate::text::node_name;
 
@@ -56,7 +55,9 @@ pub(super) struct Ui {
     upload: Upload,
     /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
     /// the next change rather than repeating every frame.
-    bridge_tried: Option<(Option<Mac>, Option<String>)>,
+    bridge_tried: Option<(Option<Mac>, Option<String>, Option<String>)>,
+    /// Whether [`Self::poll_link`] has tried to save the link, which it does once.
+    link_tried: bool,
     /// The slot `p` asks to power-cycle, while its confirm is open.
     power_confirm: Option<Slot>,
     /// The last power-cycle answer shown, so each is shown once.
@@ -70,6 +71,12 @@ impl Ui {
     /// A fresh view that saves through `settings`.
     pub(super) fn new(settings: Settings) -> Self {
         Self { settings, ..Self::default() }
+    }
+
+    /// The link this run reaches its bridge over. The simulator stands in for a bridge on USB, and
+    /// reports USB as the bridge's host.
+    pub(super) fn link(&self) -> config::Link {
+        self.settings.link.unwrap_or_default()
     }
 
     /// The block under the cursor, and the grid's scroll and blocks per row, for
@@ -358,20 +365,39 @@ impl Ui {
         // Compared in place, since this runs every frame; cloned only once it has changed.
         let memory = &self.settings.bridge_memory;
         let saved = &self.settings.saved.bridge;
-        if memory.matches(saved.mac, saved.serial.as_deref()) {
+        if memory.matches(saved.mac, saved.serial.as_deref(), saved.bluetooth_address.as_deref()) {
             // In step with the file, so a bridge whose save failed is tried again when it
             // comes back.
             self.bridge_tried = None;
             return;
         }
-        if let Some((mac, serial)) = &self.bridge_tried
-            && memory.matches(*mac, serial.as_deref())
+        if let Some((mac, serial, bluetooth)) = &self.bridge_tried
+            && memory.matches(*mac, serial.as_deref(), bluetooth.as_deref())
         {
             return;
         }
-        self.bridge_tried = Some((memory.recall(), memory.recall_serial()));
+        self.bridge_tried =
+            Some((memory.recall(), memory.recall_serial(), memory.recall_bluetooth()));
         if let Err(error) = save_bridge(&mut self.settings) {
             tracing::debug!(error = error.trim_start_matches("; "), "could not save the bridge");
+        }
+    }
+
+    /// Save the link this run reaches its bridge over, once the bridge has announced itself
+    /// over it, so the next run takes the same link. Silent, and tried once.
+    pub(super) fn poll_link(&mut self, snapshot: &Snapshot) {
+        let Some(link) = self.settings.link else { return };
+        if self.link_tried || snapshot.bridge.is_none() {
+            return;
+        }
+        self.settings.link_proved = true;
+        let saved = self.settings.saved.bridge.link;
+        if link_written(link, saved) == saved {
+            return;
+        }
+        self.link_tried = true;
+        if let Err(error) = save_bridge(&mut self.settings) {
+            tracing::debug!(error = error.trim_start_matches("; "), "could not save the link");
         }
     }
 

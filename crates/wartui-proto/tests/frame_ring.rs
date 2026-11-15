@@ -1,6 +1,6 @@
 //! The frame ring behind the P4's host queue and the C6's queue toward the P4.
 
-use wartui_proto::frame_ring::FrameRing;
+use wartui_proto::frame_ring::{FrameRing, FrameRingIn};
 
 fn read_all<const N: usize>(ring: &mut FrameRing<N>) -> Vec<u8> {
     let mut out = [0u8; 64];
@@ -137,4 +137,36 @@ fn frame_ring_starts_next_frame_from_its_head_when_cleared_mid_frame() {
     assert!(ring.push(b"222"));
     assert_eq!(ring.read(&mut [0u8; 64][..]), (3, true));
     assert_eq!(ring.dropped(), 0);
+}
+
+#[test]
+fn frame_ring_refuses_every_frame_when_it_has_no_bytes() {
+    // A P4 whose PSRAM did not map runs its bulk ring over no bytes.
+    let mut ring = FrameRingIn::over(&mut [][..]);
+    assert_eq!(ring.capacity(), 0);
+    assert!(!ring.push(b""));
+    assert!(!ring.push(b"1"));
+    assert_eq!(ring.dropped(), 2);
+    assert_eq!(ring.read(&mut [0u8; 4]), (0, false));
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn frame_ring_reads_frame_in_pieces_when_it_crosses_the_end_of_a_slice() {
+    let mut ring = FrameRingIn::over(vec![0u8; 16].leak());
+    assert!(ring.push(b"xxxxxxxxxx"));
+    assert_eq!(ring.read(&mut [0u8; 16]), (10, true));
+    // The next prefix starts at 12, so the body runs 14..16 and on from 0.
+    assert!(ring.push(b"0123456789"));
+    let mut got = Vec::new();
+    let mut out = [0u8; 3];
+    loop {
+        let (n, finished) = ring.read(&mut out);
+        got.extend_from_slice(&out[..n]);
+        if finished {
+            break;
+        }
+    }
+    assert_eq!(got, b"0123456789");
+    assert!(ring.is_empty());
 }

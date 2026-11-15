@@ -174,6 +174,7 @@ It does not settle:
 
 - **Whether a phone accepts out-of-band data or a passkey.** Only Just Works was run.
 - **Why BlueZ does not start a first pairing on its own,** when Android and iOS do on the same
-  answers.
+  answers. It did on 2026-11-13, through a desktop session's prompt
+  ([`ble-host-link-findings.md`](ble-host-link-findings.md#bluez-and-a-first-pairing)).
 - **The iPad's first reset,** above.
 - **A fifth bond on hardware.** Eviction ran only in the bond store's tests.

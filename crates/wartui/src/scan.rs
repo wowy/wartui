@@ -74,6 +74,9 @@ struct Target {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -86,7 +89,8 @@ struct Target {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 }
@@ -125,12 +129,17 @@ pub async fn run(args: Args) -> Result<()> {
 /// The bridge `target` names, connected and announced.
 async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeInfo)> {
     if target.sim.is_none() {
-        return super::connect_one(target.bridge.as_deref(), target.config.as_deref()).await;
+        return super::connect_one(
+            target.bridge.as_deref(),
+            target.link_flag.link,
+            target.config.as_deref(),
+        )
+        .await;
     }
-    let mut link = super::open(None, target.sim, super::memory(None))?;
-    let info = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_ready(&mut link))
-        .await
-        .context("the simulator did not announce itself")??;
+    let mut link = super::open(None, target.sim, crate::config::Link::Usb, super::memory(None))?;
+    let info = crate::status::wait_for_ready(&mut link, crate::config::Link::Usb, REPLY_TIMEOUT)
+        .await?
+        .context("the simulator did not announce itself")?;
     Ok((link, info))
 }
 
@@ -244,7 +253,7 @@ async fn watch(
                 println!("fault      {message}");
             }
             Some(LinkEvent::Message(message)) => seen.note(&message),
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
             Some(_) => {}
             None => bail!("the link closed"),
         }
@@ -264,7 +273,12 @@ mod tests {
     async fn sim(nodes: u8) -> (LinkHandle, NodeBoard) {
         let config = SimConfig { node_count: nodes, speed: 20.0, ..SimConfig::default() };
         let mut link = SimTransport::new(config).start().expect("starting the simulator");
-        let info = crate::status::wait_for_ready(&mut link).await.expect("the simulator connects");
+        let ready = crate::status::wait_for_ready(
+            &mut link,
+            crate::config::Link::Usb,
+            super::REPLY_TIMEOUT,
+        );
+        let info = ready.await.expect("the simulator connects").expect("in time");
         (link, info.node_board)
     }
 

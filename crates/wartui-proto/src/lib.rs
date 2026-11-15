@@ -9,26 +9,33 @@
 //! firmware runs lives here too, such as [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
-//! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
+//! ring, and [`host_queue`] queues link frames for the P4's host link, which [`host_owner`] says
+//! whose it is: USB's, a Bluetooth central's or no one's. [`radio_link`] is the
 //! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
-//! decisions about that C6. [`bus`] frames the SPI transfers between a P4 bridge and its nodes,
-//! and holds the messages a node and the P4 exchange over it. [`carrier`] reads the carrier
+//! decisions about that C6. [`ble`] is the GATT identity of the C6's Bluetooth host link.
+//! [`bus`] frames the SPI transfers between a P4 bridge and its nodes, and holds the messages a
+//! node and the P4 exchange over it. [`carrier`] reads the carrier
 //! board's I/O expander at the P4's boot, and watches for a lost node supply. [`fan`] is the
 //! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
-//! the P4 keeps its settings in. [`fleet`] is the P4's fleet planner: who scans what, and the
-//! records that tell each node.
+//! the P4 keeps its settings in, and [`bonds`] the Bluetooth bonds it keeps for its C6, each record
+//! ending in a [`crc`] and both logged in a sector as [`sector_log`] lays out. [`fleet`] is the P4's fleet planner: who scans what, and the records that
+//! tell each node.
 
 #![no_std]
 
 pub mod beacon;
+pub mod ble;
+pub mod bonds;
 pub mod bus;
 pub mod carrier;
 pub mod config;
+pub mod crc;
 pub mod dedup;
 pub mod fan;
 pub mod fleet;
 pub mod frame_ring;
 pub mod hci;
+pub mod host_owner;
 pub mod host_queue;
 pub mod link;
 pub mod mac;
@@ -39,6 +46,7 @@ pub mod pending;
 pub mod plan;
 pub mod radio_link;
 pub mod reset;
+pub mod sector_log;
 pub mod settings;
 pub mod split;
 

@@ -13,11 +13,12 @@
 use core::fmt::{self, Write as _};
 
 use static_cell::ConstStaticCell;
-use wartui_firmware::ota::Fault;
+use wartui_firmware::ota::{Fault, SettingsSector};
 use wartui_proto::ChannelPool;
 use wartui_proto::link::LogStr;
 use wartui_proto::ota::SECTOR;
-use wartui_proto::settings::{self, Setting, Stored, Write, write_for};
+use wartui_proto::sector_log::Write;
+use wartui_proto::settings::{self, Setting, Stored, write_for};
 
 use crate::Shared;
 use crate::update::Updates;
@@ -80,11 +81,21 @@ impl From<Fault> for Unsaved {
 /// Store `setting`, unless the sector already holds it: at its next erased word, or, when it is
 /// full, by erasing it and writing every setting it holds.
 pub fn save(shared: &Shared, setting: Setting) -> Result<(), Unsaved> {
+    store(shared, Updates::settings, |image| write_for(image, setting))
+}
+
+/// Read the sector `sector` gives, and carry out the write `write_for` makes of it, if any.
+/// Shared by every sector the P4 logs records in (`wartui_proto::sector_log`).
+pub fn store<const SLOT: usize, const HELD: usize>(
+    shared: &Shared,
+    sector: impl FnOnce(&mut Updates) -> Option<SettingsSector<'_>>,
+    write_for: impl FnOnce(&[u8; SECTOR]) -> Option<Write<SLOT, HELD>>,
+) -> Result<(), Unsaved> {
     let mut updates = shared.updates.borrow_mut();
-    let mut sector = updates.settings().ok_or(Unsaved::NoPartition)?;
+    let mut sector = sector(&mut updates).ok_or(Unsaved::NoPartition)?;
     let mut image = shared.sector.borrow_mut();
     sector.read(&mut image)?;
-    match write_for(&image, setting) {
+    match write_for(&image) {
         None => {}
         // `offset` is inside one sector.
         #[allow(clippy::cast_possible_truncation)]

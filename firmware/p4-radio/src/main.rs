@@ -1,13 +1,16 @@
 //! The C6 half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
 //!
-//! The P4 owns the USB link to the host and the node buses. This chip holds the UART link to
-//! the P4 for a Bluetooth host link to come: it answers the P4's status poll, sends its lines,
-//! and takes its own updates. It never talks USB. The two talk over the board's SDIO traces, on
-//! UART1 with hardware flow control, through UHCI's DMA (`src/link.rs`).
+//! The P4 owns the USB link to the host and the node buses. This chip carries the host link to a
+//! Bluetooth central, as a GATT peripheral (`src/ble.rs`), and holds the UART link to the P4: it
+//! answers the P4's status poll, sends its lines, and takes its own updates. It never talks USB.
+//! The two talk over the board's SDIO traces, on UART1 with hardware flow control, through UHCI's
+//! DMA (`src/link.rs`).
 //!
 //! Updates arrive from the P4 over the link and boot on trial, through
-//! [`wartui_firmware::ota`], the flash code a node uses. The link's futures share one task, and
-//! each waits on a signal or a timer between looks, so neither spins.
+//! [`wartui_firmware::ota`], the flash code a node uses. The link's futures and the Bluetooth
+//! host's share one task, and each waits on an interrupt, a signal or a timer between looks, so
+//! none spins. Only the Bluetooth controller and the scheduler under it allocate, from the heap
+//! set up here: [`HEAP_RECLAIMED`] and [`HEAP_MAIN`].
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -19,11 +22,14 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod ble;
 mod config;
+mod last_panic;
 mod link;
 
 use core::cell::RefCell;
 
+use embassy_futures::join::join;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaTxBuf, descriptor_count};
@@ -48,6 +54,7 @@ use wartui_proto::radio_link::{
     WIRE_MAX,
 };
 
+use crate::ble::{Ble, Outbox};
 use crate::link::{Bus, Link, RX_CHUNK, RX_STREAM_LEN, Shared, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -72,10 +79,11 @@ macro_rules! dma_buf {
     }};
 }
 
-/// Resets rather than hanging. The P4 sees the new life in the next hello and announces a
-/// fresh `Ready`.
+/// Resets rather than hanging, keeping the text for the next life to send (`src/last_panic.rs`).
+/// The P4 sees the new life in the next hello and announces a fresh `Ready`.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    last_panic::record(info);
     reboot()
 }
 
@@ -93,6 +101,16 @@ static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX
 
 /// The update receiver, with its sector of buffer.
 static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32c6));
+
+/// The host stream waiting for a Bluetooth central.
+static OUTBOX: ConstStaticCell<RefCell<Outbox>> = ConstStaticCell::new(RefCell::new(Outbox::EMPTY));
+
+/// The heap's first region: the bootloader's RAM, reclaimed. The controller's high-water mark
+/// stayed under 38 KB on every host tested (`docs/c6-ble-pairing-findings.md`).
+const HEAP_RECLAIMED: usize = 64 * 1024;
+
+/// The heap's second region, from the app's RAM.
+const HEAP_MAIN: usize = 32 * 1024;
 
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
@@ -114,6 +132,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
     // Zeros name no image, so the P4 still sends its own.
     let image = ota.booted_digest().unwrap_or([0; 32]);
+
+    // The Bluetooth controller allocates, and the scheduler with it; nothing in wartui's own
+    // code does.
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: HEAP_RECLAIMED);
+    esp_alloc::heap_allocator!(size: HEAP_MAIN);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
@@ -160,8 +183,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         body: BODY.take(),
     };
 
-    let shared = Shared::new(UP_QUEUE.take());
+    let shared = Shared::new(UP_QUEUE.take(), Ble::new(OUTBOX.take()));
     // Queued behind the hello exchange, for the P4 to relay once the link is up.
+    last_panic::report(cause, &shared);
     if let Some(err) = table_fault {
         shared.error(format_args!("could not read the partition table: {err}; updates refused"));
     } else if let Some(lacks) = ota.lacks() {
@@ -174,5 +198,5 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         Updates { ota, receiver: RECEIVER.take(), trial: booted.trial, image, status: None };
     let link = RefCell::new(Link::new(boot, mac, cause, last_phase, HELD.take(), updates));
 
-    link_loop(bus, &link, &shared).await
+    join(link_loop(bus, &link, &shared), ble::run(peripherals.BT, &mac, &shared)).await.0
 }

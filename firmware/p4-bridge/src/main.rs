@@ -2,7 +2,7 @@
 //!
 //! The P4 talks to the host over UART0, which the board's CH343 carries to the Type-C, with
 //! wartui's link protocol, through UHCI's DMA. It talks to the board's ESP32-C6 over UART1 with
-//! hardware flow control, on the FIFO; the C6 holds that link for a future Bluetooth host link
+//! hardware flow control, on the FIFO; the C6 runs a Bluetooth host link over it
 //! (`firmware/p4-radio`). The host sees one bridge, reporting both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
@@ -18,7 +18,9 @@
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
 //!   (`src/update.rs`), queues the host's records for its nodes, and fills the node image cache
-//!   in PSRAM that their update chunks are built from (`src/cache.rs`);
+//!   in PSRAM that their update chunks are built from (`src/cache.rs`). A central subscribed
+//!   over Bluetooth, through the C6, can own the host queue instead, one host at a time
+//!   (`src/ble.rs`);
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
@@ -38,7 +40,11 @@
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
 //! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
-//! change there. The scan mode is not stored.
+//! change there. The scan mode is not stored. The C6's Bluetooth bonds are read from flash at
+//! boot too, and go down to it after each hello (`src/bonds.rs`).
+//!
+//! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why); the rest
+//! of the queues are in internal RAM.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -60,6 +66,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod ble;
+mod bonds;
 mod cache;
 mod carrier;
 mod config;
@@ -100,20 +108,22 @@ use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
 use wartui_proto::bus::PER_BUS;
 use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
-use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
+use wartui_proto::host_owner::Owner;
+use wartui_proto::host_queue::{HOST_CHUNK, HostQueueIn, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, HOST_BAUD, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
-    ShortStr, encode_frame,
+    BluetoothStatus, BridgeToHost, Central, HOST_BAUD, HostOwner, LogStr, LoopPhase, MAX_FRAME,
+    QueueId, QueueStat, RadioLinkStats, ShortStr, encode_frame,
 };
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::ota::SECTOR;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
-    WIRE_MAX, encode_down,
+    BAUD_RATE, BODY_MAX, BleCounters, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held,
+    PacketReader, RECORD_MAX, RTS_THRESHOLD, WIRE_MAX, encode_down,
 };
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
+use crate::ble::{Ble, BleFrames};
 use crate::cache::Cache;
 use crate::carrier::{Carrier, Power};
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
@@ -128,11 +138,13 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// How long the C6 is held in reset, at boot and when the pair asks.
 const C6_RESET_HOLD: Duration = Duration::from_millis(50);
 
-type HostFrames = HostQueue<HOST_PRIORITY_BYTES, HOST_BULK_BYTES>;
+type HostFrames = HostQueueIn<HOST_PRIORITY_BYTES, &'static mut [u8]>;
 type DownQueue = FrameRing<DOWN_QUEUE_BYTES>;
 
-/// Frames waiting for the host. Built at compile time, so the rings are never on the stack.
-static HOST_QUEUE: ConstStaticCell<HostFrames> = ConstStaticCell::new(HostQueue::new());
+/// Frames waiting for the host, the bulk ring over no bytes until [`host_queue`] gives it PSRAM.
+/// Built at compile time, so the priority ring is never on the stack.
+static HOST_QUEUE: ConstStaticCell<HostFrames> =
+    ConstStaticCell::new(HostQueueIn::with_bulk(&mut []));
 /// `Down` records waiting for the C6.
 static DOWN_QUEUE: ConstStaticCell<DownQueue> = ConstStaticCell::new(FrameRing::new());
 /// The record that did not fit the last packet.
@@ -143,6 +155,11 @@ static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
 /// Where the writer encodes the packet for the wire.
 static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
+/// Host stream bytes on their way into a `Down::HostBytes`.
+static HOST_BYTES: ConstStaticCell<[u8; HOST_BYTES_MAX]> =
+    ConstStaticCell::new([0; HOST_BYTES_MAX]);
+/// The host frame a central is part-way through writing.
+static BLE_FRAMES: ConstStaticCell<BleFrames> = ConstStaticCell::new(BleFrames::new());
 
 /// The fleet planner's core, stopped and cutting the default pool until `Shared::new` gives it the
 /// stored one. Built at compile time, so its slot table is never on the stack.
@@ -207,9 +224,14 @@ pub struct Shared {
     /// Raised by whatever may have given the link's writer something to send, so a waiting
     /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
     wake_link: Signal<NoopRawMutex, ()>,
-    /// Whether a host is present, by the frames it sends (`src/host.rs`).
+    /// Which host owns the host queue: USB, a central over Bluetooth, or none
+    /// (`wartui_proto::host_owner`, `src/ble.rs`).
+    owner: Cell<Owner>,
+    /// When UART0's host last sent a frame, and a `Ready` owed to it (`src/host.rs`).
     presence: Presence,
-    /// Raised when a host frame opens the gate.
+    /// The host over Bluetooth: its link's state and its stream's credit (`src/ble.rs`).
+    ble: Ble,
+    /// Raised when USB takes the host queue.
     host_arrived: Signal<NoopRawMutex, ()>,
     /// Line errors on the host UART since boot.
     host_uart_errors: Cell<u32>,
@@ -222,6 +244,11 @@ pub struct Shared {
     /// Why no GPS receiver is being read. Sent with every announcement, because a host
     /// usually attaches after boot, and cleared when the receiver answers again.
     gps_fault: Cell<Option<&'static str>>,
+    /// The first line of the C6's report of its last panic, kept to repeat to every host that
+    /// attaches. The C6 reports once, at its boot, and the host it restarted under has usually
+    /// gone by then, so without this nobody reads why. A later panic replaces it, and a P4 reset
+    /// forgets it.
+    radio_panic: RefCell<Option<LogStr>>,
     /// The GPS reader's write channel, once its bus is up.
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
@@ -234,8 +261,11 @@ pub struct Shared {
     power: Power,
     /// The carrier's lid fan, or `None` with no carrier.
     fan: Option<&'static fan::Fan>,
-    /// The settings sector's image, read before each write (`src/settings.rs`).
+    /// The settings sector's image, read before each write (`src/settings.rs`), and the bonds
+    /// sector's (`src/bonds.rs`).
     sector: RefCell<&'static mut [u8; SECTOR]>,
+    /// The C6's Bluetooth bonds and the pairing window (`src/bonds.rs`).
+    bonds: bonds::Bonds,
     /// The fleet planner's core: the mode, the pool in force and the Bluetooth pick, which
     /// `Status` reports, and every slot's share (`src/fleet.rs`).
     fleet: RefCell<&'static mut Fleet>,
@@ -256,6 +286,7 @@ impl Shared {
     ) -> Self {
         // The stored settings, read before any future runs.
         let (sector, stored) = settings::boot(updates);
+        let bonds = bonds::boot(updates, sector);
         let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
         let fleet = FLEET.take();
         fleet.set_pool(stored.pool.unwrap_or_default(), now_ms());
@@ -278,13 +309,16 @@ impl Shared {
                 radio_uart_errors: 0,
             }),
             wake_link: Signal::new(),
+            owner: Cell::new(Owner::new()),
             presence: Presence::new(),
+            ble: Ble::new(BLE_FRAMES.take()),
             host_arrived: Signal::new(),
             host_uart_errors: Cell::new(0),
             status_asked: Signal::new(),
             radio_status: Signal::new(),
             deadline_set: Signal::new(),
             gps_fault: Cell::new(None),
+            radio_panic: RefCell::new(None),
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
             cache: RefCell::new(cache),
@@ -292,6 +326,7 @@ impl Shared {
             power: Power::new(carrier),
             fan,
             sector: RefCell::new(sector),
+            bonds,
             fleet: RefCell::new(fleet),
             fleet_wake: Signal::new(),
             fleet_sleep: Cell::new(None),
@@ -306,9 +341,19 @@ impl Shared {
         self.radio_link.set(radio_link);
     }
 
+    /// Whether a host owns the queue: UART0's, or a central's over Bluetooth.
+    fn host_open(&self) -> bool {
+        self.owner.get().owner() != HostOwner::None
+    }
+
+    /// A host took the queue, on UART0 or over Bluetooth: clear what was queued for another.
+    fn host_attached(&self) {
+        self.host.borrow_mut().clear();
+    }
+
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
-    /// Dropped, and not counted, while no host is present. A backlog held for an absent host
+    /// Dropped, and not counted, while no host owns the queue. A backlog held for an absent host
     /// arrives late when one attaches, and the host stamps its current position onto the old
     /// sightings in it. Faults worth keeping are repeated by
     /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
@@ -316,14 +361,20 @@ impl Shared {
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
-        if !self.presence.is_open() {
+        let owner = self.owner.get().owner();
+        if owner == HostOwner::None {
             return;
         }
         let mut frame = [0; MAX_FRAME];
         // Every `BridgeToHost` fits `MAX_FRAME`.
         let Ok(len) = encode_frame(msg, &mut frame) else { return };
         self.host.borrow_mut().push(&frame[..len], is_priority(msg));
-        self.pushed.signal(());
+        // Each writer waits on its own signal: a central's is the C6 link's.
+        if owner == HostOwner::Bluetooth {
+            self.wake_link.signal(());
+        } else {
+            self.pushed.signal(());
+        }
     }
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.
@@ -331,7 +382,7 @@ impl Shared {
     /// Refused rather than evicting the oldest: an evicted record is lost with nothing to say
     /// so.
     #[inline(never)]
-    fn push_down(&self, down: &Down) -> bool {
+    fn push_down(&self, down: &Down<'_>) -> bool {
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
@@ -349,8 +400,8 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, what the carrier and the node image cache have to say, and what
-    /// the P4's own image has to say.
+    /// GPS fault if there is one, the C6's last panic if it reported one, what the carrier and the
+    /// node image cache have to say, and what the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -363,6 +414,10 @@ impl Shared {
         if let Some(why) = self.gps_fault.get() {
             self.push_error(why);
         }
+        let radio_panic = self.radio_panic.borrow().clone();
+        if let Some(line) = radio_panic {
+            self.push_error(&line);
+        }
         carrier::say(self);
         cache::say(self);
         fleet::say(self);
@@ -373,7 +428,7 @@ impl Shared {
     /// does. Only after a `Ready`, since the host drops what arrives on a connection before
     /// one, and only to a host that is present, since the lines are said once.
     fn flush_update_lines(&self) {
-        if !self.presence.is_open() {
+        if !self.host_open() {
             return;
         }
         update::say_lines(self);
@@ -420,9 +475,10 @@ impl Shared {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
-    /// A new pair life began: tell a host that is present, and the link's writer, since the
-    /// pair may bridge now.
+    /// A new pair life began: Bluetooth lets go, since a restarted C6 has no central, then tell
+    /// a host that is present, and the link's writer, since the pair may bridge now.
     fn new_life(&self) {
+        ble::on_new_life(self);
         self.wake_link.signal(());
         self.announce();
     }
@@ -431,6 +487,26 @@ impl Shared {
     fn push_status(&self) {
         self.push_status_only();
         fleet::say(self);
+    }
+
+    /// The Bluetooth host link as the P4 sees it. [`Pair::status`] adds the C6's counters and
+    /// the central's PHY and interval.
+    fn bluetooth(&self, now: u64) -> BluetoothStatus {
+        let state = self.ble.state();
+        let central = (state.mtu > 0).then_some(Central {
+            encrypted: state.encrypted,
+            bonded: state.bonded,
+            mtu: state.mtu,
+            phy: 0,
+            interval_us: 0,
+        });
+        BluetoothStatus {
+            owner: self.owner.get().owner(),
+            bonds: self.bonds.count(),
+            window: self.bonds.window(now),
+            central,
+            counters: BleCounters::default(),
+        }
     }
 
     #[inline(never)]
@@ -463,6 +539,7 @@ impl Shared {
             ble: fleet.bluetooth(),
             present: self.nodes.present(),
             members: fleet.members(),
+            bluetooth: self.bluetooth(now),
         };
         drop(fleet);
         let status = self.pair.borrow().status(now, counters);
@@ -486,8 +563,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
-    // The PSRAM, for the node image cache (`src/cache.rs`), mapped before the buses start.
-    let cache = Cache::new(peripherals.PSRAM);
+    // The PSRAM, for the node image cache (`src/cache.rs`) and the host bulk ring, mapped before
+    // the buses start.
+    let (cache, spare_psram) = Cache::new(peripherals.PSRAM);
     let boot = Instant::now();
 
     let mut own_mac = [0; 6];
@@ -609,10 +687,18 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {
-        Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates, cache, &carrier)
+        Shared::new(pair, host_queue(spare_psram), DOWN_QUEUE.take(), updates, cache, &carrier)
     });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
-    let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take(), link_image));
+    let link = RefCell::new(Link::new(
+        boot,
+        own_mac,
+        cause,
+        last_phase,
+        HELD.take(),
+        HOST_BYTES.take(),
+        link_image,
+    ));
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     match join(
@@ -630,6 +716,15 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         ),
     )
     .await {}
+}
+
+/// The host queue, its bulk ring over up to [`HOST_BULK_BYTES`] of `spare_psram`: the PSRAM the
+/// node image cache leaves, and none when none mapped.
+fn host_queue(spare_psram: &'static mut [u8]) -> &'static mut HostFrames {
+    let queue = HOST_QUEUE.take();
+    let len = spare_psram.len().min(HOST_BULK_BYTES);
+    queue.set_bulk(&mut spare_psram[..len]);
+    queue
 }
 
 /// Bring up I2C0 for the GPS receiver and a carrier's expander, read the expander blocking, then

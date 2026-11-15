@@ -26,6 +26,9 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
+
     /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
     /// that does not load is no bridge remembered. Never written; see
     /// `crates/wartui/README.md` § "Config file".
@@ -38,7 +41,8 @@ pub struct Args {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 
@@ -52,8 +56,12 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link =
-        super::open(args.bridge.as_deref(), args.sim, super::memory(args.config.as_deref()))?;
+    let (mut link, over) = super::open_remembered(
+        args.bridge.as_deref(),
+        args.sim,
+        args.link_flag.link,
+        args.config.as_deref(),
+    )?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();
@@ -63,7 +71,7 @@ pub async fn run(args: Args) -> Result<()> {
     let mut spoken = false;
     // Built before the loop, not inside the arm below: see `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
-    let notice = tokio::time::sleep(super::CONNECT_NOTICE_AFTER);
+    let notice = tokio::time::sleep(super::connect_wait(over));
     tokio::pin!(notice);
 
     loop {
@@ -75,7 +83,7 @@ pub async fn run(args: Args) -> Result<()> {
             () = &mut notice, if !spoken => {
                 spoken = true;
                 if !counts.heard_a_bridge {
-                    eprintln!("\n{}\n", super::no_bridge_notice(args.bridge.as_deref()));
+                    eprintln!("\n{}\n", super::no_bridge_notice(args.bridge.as_deref(), over).await);
                 }
             }
             event = link.recv() => match event {
@@ -406,7 +414,14 @@ mod tests {
     use wartui_proto::link::LinkError;
 
     fn args() -> Args {
-        Args { bridge: None, config: None, sim: None, raw: false, verbose: false }
+        Args {
+            bridge: None,
+            link_flag: crate::config::LinkFlag::default(),
+            config: None,
+            sim: None,
+            raw: false,
+            verbose: false,
+        }
     }
 
     fn heard(event: LinkEvent) -> bool {
@@ -441,6 +456,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            bluetooth: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
     }
@@ -466,7 +482,8 @@ mod tests {
 
     #[test]
     fn sniff_cmd_marks_bridge_heard_when_receiving_disconnected_event_with_reason() {
-        assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
+        let cause = wartui_bridge::DisconnectCause::Other;
+        assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned(), cause }));
     }
 
     /// Count one record the way `handle` does.

@@ -8,17 +8,21 @@
 //! too, and none of them creates or saves the file.
 //!
 //! **The remembered bridge is the one value other commands read.** `status`, `sniff`,
-//! `reset` and `ota` take `[bridge] mac` and `serial` through [`remembered_bridge`] to pick
-//! or order boards, and a missing or broken file is no bridge remembered there, so a bad
-//! `wartui.toml` cannot stop a command that checks the link. `flash-bridge` takes it
-//! through [`load`] and refuses a broken file: which board it writes firmware over
-//! depends on it. `flash-fleet` never reads the file.
+//! `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` take `[bridge] mac`,
+//! `serial` and `bluetooth-address` through [`remembered_bridge`] to pick or order boards, and all
+//! but `ota` and `bluetooth pair` take `link` to pick the link, and a missing or broken file is no
+//! bridge remembered there, so a bad `wartui.toml` cannot stop a command that checks the link.
+//! `flash-bridge` takes it through [`load`] and refuses a broken file: which board it writes
+//! firmware over depends on it. It ignores `link`, as `ota` does: updates use the USB cable.
+//! `flash-fleet` never reads the file. Neither `bluetooth pair` nor
+//! `bluetooth forget` writes it.
 //!
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API key, so a first-time operator has a place to paste one. It
 //! never rewrites an existing file at startup. Its view does, through one save path: the
-//! settings modal, a change to the bridge the transport remembers, and the box on the
-//! waiting-for-GPS pop-up, which writes `[gps] wait-for-fix`.
+//! settings modal, a change to the bridge the transport remembers, the link the run connected
+//! over, which writes `[bridge] link`, and the box on the waiting-for-GPS pop-up, which writes
+//! `[gps] wait-for-fix`.
 //! `flash-bridge` saves the board it found and flashed as the bridge, unless remembering
 //! is off, so `run` and the next `flash-bridge` open the new bridge first. A board named
 //! with `--bridge` is often some other device, and is not saved.
@@ -53,11 +57,13 @@ pub struct Config {
     pub api_keys: ApiKeys,
 }
 
-/// The `[bridge]` table: whether `run` and `flash-bridge` remember the bridge, and the
-/// bridge remembered, so the next start opens that board rather than sweeping.
-/// `remember` absent means on. `mac` is written the way `wartui ports` prints a MAC, and
-/// `serial` is the USB serial number of the CH343 it answered on, which the OS reports
-/// before anything is opened. Both are refused beside `remember = false`, which forgets them.
+/// The `[bridge]` table: which link reaches the bridge, whether `run` and `flash-bridge`
+/// remember the bridge, and the bridge remembered, so the next start opens that board rather
+/// than sweeping. `link` absent means USB. `remember` absent means on. `mac` is written the way
+/// `wartui ports` prints a MAC, `serial` is the USB serial number of the CH343 it answered on,
+/// which the OS reports before anything is opened, and `bluetooth-address` is the address the OS
+/// reports for its C6, or on macOS the identifier CoreBluetooth gives it. Those three are refused
+/// beside `remember = false`, which forgets them.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Bridge {
@@ -72,12 +78,49 @@ pub struct Bridge {
     pub mac: Option<Mac>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bluetooth_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<Link>,
 }
 
 impl Bridge {
     /// Whether no key is set, so `save` writes no `[bridge]` table at all.
     fn is_empty(&self) -> bool {
-        self.remember.is_none() && self.mac.is_none() && self.serial.is_none()
+        self.link.is_none()
+            && self.remember.is_none()
+            && self.mac.is_none()
+            && self.serial.is_none()
+            && self.bluetooth_address.is_none()
+    }
+}
+
+/// Which link reaches the bridge: `--link`, and `[bridge] link`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Link {
+    /// The board's CH343, over USB.
+    #[default]
+    Usb,
+    /// The board's C6, over Bluetooth, to a PC paired with it.
+    Bluetooth,
+}
+
+/// The `--link` flag, flattened into every command that reaches the bridge.
+#[derive(Debug, Clone, Copy, Default, clap::Args)]
+pub struct LinkFlag {
+    /// Which link reaches the bridge. `[bridge] link` in `wartui.toml` when omitted, else
+    /// `usb`. A `--bridge` path is always USB.
+    #[arg(long, value_name = "LINK")]
+    pub link: Option<Link>,
+}
+
+impl From<Link> for wartui_core::record::HostLink {
+    fn from(link: Link) -> Self {
+        match link {
+            Link::Usb => Self::Usb,
+            Link::Bluetooth => Self::Bluetooth,
+        }
     }
 }
 
@@ -163,6 +206,11 @@ impl Config {
         }
         if self.bridge.remember == Some(false) && self.bridge.serial.is_some() {
             bail!("bridge.serial is set while bridge.remember = false, which forgets it");
+        }
+        if self.bridge.remember == Some(false) && self.bridge.bluetooth_address.is_some() {
+            bail!(
+                "bridge.bluetooth-address is set while bridge.remember = false, which forgets it"
+            );
         }
         for (index, ssid) in self.excluded_ssids.iter().enumerate() {
             match check_excluded_ssid(ssid, &self.excluded_ssids[..index]) {
@@ -478,8 +526,8 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeys, Bridge, Config, Gps, create_if_missing, default_path_in, excluded_ssid_bytes,
-        load, load_from, path, remembered_bridge_from, save,
+        ApiKeys, Bridge, Config, Gps, Link, create_if_missing, default_path_in,
+        excluded_ssid_bytes, load, load_from, path, remembered_bridge_from, save,
     };
     use std::ffi::OsStr;
 
@@ -684,6 +732,8 @@ mod tests {
                 remember: Some(true),
                 mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]),
                 serial: Some("5CF7153520".to_owned()),
+                bluetooth_address: Some("02:00:5E:10:44:C1".to_owned()),
+                link: Some(Link::Bluetooth),
             },
             gps: Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) },
             api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
@@ -722,6 +772,36 @@ mod tests {
         assert_eq!(saved.gps.bridge_rate_hz, Some(2));
         assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
         assert_eq!(saved.api_keys.wdgwars, "abc123def456");
+        assert_eq!(saved.bridge.link, Some(Link::Bluetooth));
+        assert_eq!(saved.bridge.bluetooth_address.as_deref(), Some("02:00:5E:10:44:C1"));
+    }
+
+    #[test]
+    fn config_loader_reads_link_when_bridge_table_names_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nlink = \"bluetooth\"\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().bridge.link, Some(Link::Bluetooth));
+        std::fs::write(&path, "[bridge]\nlink = \"usb\"\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().bridge.link, Some(Link::Usb));
+    }
+
+    #[test]
+    fn config_loader_rejects_link_when_it_names_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nlink = \"wifi\"\n").unwrap();
+        assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn config_loader_rejects_bluetooth_address_when_remember_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let text = "[bridge]\nremember = false\nbluetooth-address = \"02:00:5E:10:44:C1\"\n";
+        std::fs::write(&path, text).unwrap();
+        let chain = format!("{:#}", load(Some(&path)).unwrap_err());
+        assert!(chain.contains("bluetooth-address"), "{chain}");
     }
 
     #[test]

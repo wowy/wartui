@@ -16,8 +16,14 @@
 //! `received` less the bridge's drops less `host_read` is the frames lost between the bridge's
 //! queue and the host. It is approximate: a status reply is a priority frame and overtakes the
 //! frames queued in the bulk ring, which `rx_count` counts and `host_frames` does not yet. So it is
-//! off by up to the ring's 24 frames at each end, and saturates at 0 when a baseline taken
-//! mid-backlog shows the host reading more than the bridge passed on.
+//! off by the ring's backlog at each end: a few frames on a link that keeps up, and up to the
+//! whole ring behind a burst. It saturates at 0 when a baseline taken mid-backlog shows the host
+//! reading more than the bridge passed on.
+//!
+//! The figure also counts every frame the bridge received while it did not serve this host: a
+//! link that was down, or, over Bluetooth, a USB host holding the bridge. Those frames went to the
+//! other host or to nobody, and the link itself lost none of them. A gap in the status replies
+//! marks such a stretch.
 //!
 //! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and its radio
 //! link's counters. A queue's `peak` is the largest `high_water` any row
@@ -29,6 +35,11 @@
 //! uptime. A P4 reboot whose counters regrow past the last row reads as no reboot, which is rare and
 //! only undercounts. Queues follow the same split, by [`QueueId::on_p4`].
 //!
+//! The Bluetooth host link's fault counters, from `bridge_bluetooth`, are the C6's, so they rebase
+//! as the `radio_*` counters do. They are reported for a capture over USB too: a Bluetooth host
+//! waiting behind USB is still the C6's, and so are its failures. [`LossSummary::link`] is the
+//! link the host used, so the report can say which link the figures were lost on.
+//!
 //! `dropped_tx` sums P4 and C6 queues into one number, so neither rule fits it: a C6 restart lowers
 //! it by only part of its total. A capture whose rows carry those queues takes `dropped` from their
 //! own deltas ([`QueueId::in_dropped_tx`]). Only rows without queues rebase `dropped_tx` itself.
@@ -36,8 +47,8 @@
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
 //! the first, which is written as the capture starts. Peaks are per row, so it takes the largest,
-//! and counts the rows whose lag peak reached the 100 ms that makes a heartbeat too stale to
-//! answer.
+//! and counts the rows whose lag peak reached the line that makes a heartbeat too stale to answer.
+//! That line is the capture link's (`engine::behind_us`), wider over Bluetooth than over USB.
 //!
 //! Every since-boot count is rebased by the engine's `advance_since_boot`, and the first row is a
 //! baseline only (per node, for heartbeats): what was dropped before the capture is not the
@@ -69,8 +80,9 @@ use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
-use crate::engine::{BEHIND_US, advance_since_boot, supply_dropped_from};
-use crate::store::parse_kind;
+use crate::engine::{advance_since_boot, behind_us, supply_dropped_from};
+use crate::record::HostLink;
+use crate::store::{capture_link, parse_kind};
 
 /// What a capture lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +90,8 @@ pub struct LossSummary {
     /// What carried the capture's nodes. No carrier for a capture whose bridge never announced
     /// itself or named a board this build does not know.
     pub board: NodeBoard,
+    /// The link the host reached the bridge over, or `None` under `--sim`.
+    pub link: Option<HostLink>,
     /// The bridge's own counts, or `None` when the capture holds no status reply.
     pub bridge: Option<BridgeLoss>,
     /// One entry per node that sent a heartbeat or lost a batch: by slot, then slotless nodes by
@@ -89,7 +103,13 @@ pub struct LossSummary {
 
 impl Default for LossSummary {
     fn default() -> Self {
-        Self { board: NodeBoard::NoCarrier, bridge: None, nodes: Vec::new(), host: None }
+        Self {
+            board: NodeBoard::NoCarrier,
+            link: None,
+            bridge: None,
+            nodes: Vec::new(),
+            host: None,
+        }
     }
 }
 
@@ -101,7 +121,7 @@ impl LossSummary {
     }
 }
 
-/// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
+/// What the bridge received and dropped during the capture. Exact but for `link_lost`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
     /// Records the bridge received from its nodes.
@@ -114,9 +134,10 @@ pub struct BridgeLoss {
     /// Frames the host read off the link between the first status reply and the last.
     pub host_read: u64,
     /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
-    /// `host_read`, saturating at 0. Approximate to the 24 frames the bulk ring can queue at each
-    /// end, which a status reply overtakes.
-    pub usb_lost: u64,
+    /// `host_read`, saturating at 0. Approximate to the bulk ring's backlog at each end, which a
+    /// status reply overtakes, and it includes what the bridge received while it did not serve
+    /// this host. The module documentation has both.
+    pub link_lost: u64,
     /// Frames the bridge dropped for being longer than any node sends: somebody else's
     /// traffic, and not in `received`.
     pub oversize: u64,
@@ -127,6 +148,44 @@ pub struct BridgeLoss {
     /// The P4's host-link reads that saw one or more line errors or overflows: host bytes lost
     /// or corrupted on the way in.
     pub host_uart_errors: u64,
+    /// The C6's Bluetooth host link counters.
+    pub bluetooth: BluetoothLoss,
+}
+
+/// The C6's Bluetooth host link faults over the capture. Named as
+/// [`BleCounters`](wartui_proto::radio_link::BleCounters) names them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BluetoothLoss {
+    /// Host stream bytes lost between the P4 and the C6, each costing the frame it was in.
+    pub resynced_bytes: u64,
+    /// Bytes a central wrote that the C6 dropped.
+    pub dropped_writes: u64,
+    /// Centrals dropped for holding no bond.
+    pub unbonded_kicks: u64,
+    /// Pairings that failed.
+    pub failed_pairings: u64,
+}
+
+impl BluetoothLoss {
+    /// A status row's counters. The store writes one `bridge_bluetooth` row with every status row.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let get = |name: &str| row.get::<_, i64>(name).map(count);
+        Ok(Self {
+            resynced_bytes: get("resynced_bytes")?,
+            dropped_writes: get("dropped_writes")?,
+            unbonded_kicks: get("unbonded_kicks")?,
+            failed_pairings: get("failed_pairings")?,
+        })
+    }
+
+    /// Adds what each counter advanced from `before` to `now`, restarting with the C6.
+    fn advance(&mut self, now: &Self, before: &Self, restarted: bool) {
+        let c6 = |now, before| advance_since_boot(now, Some(before), restarted);
+        self.resynced_bytes += c6(now.resynced_bytes, before.resynced_bytes);
+        self.dropped_writes += c6(now.dropped_writes, before.dropped_writes);
+        self.unbonded_kicks += c6(now.unbonded_kicks, before.unbonded_kicks);
+        self.failed_pairings += c6(now.failed_pairings, before.failed_pairings);
+    }
 }
 
 /// How full one of the bridge's queues got, and what it dropped during the capture.
@@ -213,8 +272,9 @@ pub struct HostLoss {
     pub incompatible: u64,
     /// Rows the store dropped.
     pub store_dropped: u64,
-    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the bridge.
-    pub lag_over_100ms: u64,
+    /// Rows whose lag peak reached the capture link's threshold (`engine::behind_us`): samples in
+    /// which the host fell behind the bridge.
+    pub lag_behind: u64,
     /// The furthest behind the bridge the host fell, in microseconds.
     pub lag_peak_us: u64,
     /// The slowest batch the store wrote, in microseconds.
@@ -295,16 +355,17 @@ pub struct NodePeak {
 }
 
 /// What the capture lost. Missed heartbeats follow the module's modulo assumptions;
-/// the bridge's `usb_lost` is approximate.
+/// the bridge's `link_lost` is approximate.
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let board = node_board(conn)?;
+    let link = capture_link(conn)?;
     let bridge = bridge(conn)?;
     let mut nodes: BTreeMap<Mac, NodeLoss> = BTreeMap::new();
     heartbeats(conn, board, &mut nodes)?;
     batches(conn, &mut nodes)?;
     let mut nodes: Vec<NodeLoss> = nodes.into_values().collect();
     nodes.sort_by_key(|node| slot_order(node.slot, node.mac));
-    Ok(LossSummary { board, bridge, nodes, host: host(conn)? })
+    Ok(LossSummary { board, link, bridge, nodes, host: host(conn, link)? })
 }
 
 /// What carried the capture's nodes, as [`LossSummary::board`] says.
@@ -429,8 +490,10 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
                 s.radio_link_seq_gap, s.radio_link_uart_errors, s.radio_link_radio_crc_fail,
                 s.radio_link_radio_bad_magic,
                 s.radio_link_radio_seq_gap, s.radio_link_radio_uart_errors, s.host_uart_errors,
+                b.resynced_bytes, b.dropped_writes, b.unbonded_kicks, b.failed_pairings,
                 q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
-         FROM bridge_status s LEFT JOIN bridge_queue q ON q.status_id = s.id
+         FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id
+         LEFT JOIN bridge_queue q ON q.status_id = s.id
          ORDER BY s.id, q.rowid",
     )?;
     let mut rows = stmt.query([])?;
@@ -443,6 +506,8 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut prev_host_uart: Option<u64> = None;
     // The previous status row's radio link counters, and the restarts seen by then.
     let mut prev_radio_link: Option<(RadioLinkLoss, u64)> = None;
+    // The previous Bluetooth counters, and the restarts seen by then.
+    let mut prev_bluetooth: Option<(BluetoothLoss, u64)> = None;
     // Beside each queue, its previous row's drops and the restarts seen by then.
     let mut prev_queue: Vec<(u64, u64)> = Vec::new();
     while let Some(row) = rows.next()? {
@@ -477,6 +542,12 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
                 loss.radio_link.advance(&now, before, *life != loss.reboots);
             }
             prev_radio_link = Some((now, loss.reboots));
+
+            let now = BluetoothLoss::read(row)?;
+            if let Some((before, life)) = &prev_bluetooth {
+                loss.bluetooth.advance(&now, before, *life != loss.reboots);
+            }
+            prev_bluetooth = Some((now, loss.reboots));
         }
 
         let Some(name) = row.get::<_, Option<String>>("queue")? else { continue };
@@ -506,7 +577,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     if let Some(dropped) = in_dropped_tx.map(|q| q.dropped).reduce(|sum, dropped| sum + dropped) {
         loss.dropped = dropped;
     }
-    loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
+    loss.link_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
     Ok(Some(loss))
 }
 
@@ -545,7 +616,8 @@ impl HostRow {
     }
 }
 
-fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
+fn host(conn: &Connection, link: Option<HostLink>) -> rusqlite::Result<Option<HostLoss>> {
+    let behind = behind_us(link);
     let mut stmt = conn.prepare(
         "SELECT duplicate_batches, garbled, undecodable, incompatible, store_dropped, lag_peak_us,
                 store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc, battery_mv
@@ -564,7 +636,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 
         let loss = loss.get_or_insert_default();
         let lag = row.lag_peak_us;
-        loss.lag_over_100ms += u64::from(lag >= BEHIND_US);
+        loss.lag_behind += u64::from(lag >= behind);
         loss.lag_peak_us = loss.lag_peak_us.max(lag);
         loss.commit_peak_us = loss.commit_peak_us.max(row.commit_peak_us);
         loss.queue_peak = loss.queue_peak.max(row.queue_peak);

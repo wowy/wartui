@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexSet;
 use wartui_bridge::sim::minor_behind;
-use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, NodeView, Now, StorePeaks,
@@ -19,7 +19,7 @@ use wartui_core::engine::{
 use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
-use wartui_core::record::{BatchGap, BridgeStatusSeen, HostStatus, Record, ShareChange};
+use wartui_core::record::{BatchGap, BridgeStatusSeen, HostLink, HostStatus, Record, ShareChange};
 use wartui_core::ubx::valset_rate;
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, Heartbeat as HeartbeatMsg, MAX_SLOTS, NODE_VERSION, NodeBoard,
@@ -29,13 +29,14 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BridgeToHost, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED, HostToBridge, LinkError,
-    LogStr, LoopPhase, NO_GPS_RECEIVER, PowerOutcome, QueueId, QueueStat, QueueStats,
-    RadioLinkStats,
+    BluetoothStatus, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED,
+    HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER, PairWindow,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -122,6 +123,7 @@ fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
         ble: BRIDGE_BLE.get(),
         present,
         members: members.iter().copied().collect(),
+        bluetooth: Default::default(),
     }))
 }
 
@@ -302,6 +304,14 @@ fn stray(rx_us: u32) -> Event {
 
 fn connected() -> Event {
     connected_with_mac([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24])
+}
+
+/// The link going down, for `reason`.
+fn disconnected(reason: &str) -> Event {
+    Event::Link(LinkEvent::Disconnected {
+        reason: reason.to_owned(),
+        cause: DisconnectCause::Other,
+    })
 }
 
 /// A connect from a bridge at `mac`, for the tests about a bridge swap.
@@ -1819,10 +1829,7 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
     bridge.feed_bytes(GSV, clock.at(2).unix_ms);
     assert!(shows_bridge_gps(&engine, clock.at(2)));
     assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     assert!(!shows_bridge_gps(&engine, clock.at(3)), "the host's search resumes");
 }
 
@@ -1859,10 +1866,7 @@ fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_no_brid
     let gps = |engine: &FleetEngine| engine.snapshot(clock.at(2), StoreStats::default()).gps;
     assert_eq!(gps(&engine), None, "no bridge yet");
     engine.handle(connected(), clock.at(1));
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(1),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(1));
     assert_eq!(gps(&engine), None, "the bridge has gone");
 }
 
@@ -1928,10 +1932,7 @@ fn engine_snapshot_shows_connecting_when_bridge_reconnects_after_reporting_none(
     let clock = Clock::new();
     let mut engine = bridge_only_engine(&clock);
     engine.handle(no_gps_receiver(), clock.at(1));
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(2),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(2));
     engine.handle(connected(), clock.at(3));
     assert_eq!(shown_gps_status(&engine, clock.at(3)), GpsStatus::Connecting);
 }
@@ -1946,10 +1947,7 @@ fn engine_records_gps_setting_when_bridge_is_connected() {
     assert!(!engine.capture_settings().gps, "no bridge yet");
     engine.handle(connected(), clock.at(2));
     assert!(engine.capture_settings().gps);
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     assert!(!engine.capture_settings().gps);
 }
 
@@ -1976,7 +1974,7 @@ fn engine_skips_status_poll_when_link_down() {
     let mut engine = engine(EngineConfig::default(), &clock);
 
     engine.handle(connected(), clock.at(1));
-    engine.handle(Event::Link(LinkEvent::Disconnected { reason: "cable".to_owned() }), clock.at(2));
+    engine.handle(disconnected("cable"), clock.at(2));
 
     assert!(engine.handle(Event::Tick, clock.at(60)).bulk.is_empty());
 }
@@ -2153,6 +2151,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         }))
     };
 
@@ -2210,6 +2209,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2243,6 +2243,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan,
             slots_present: ALL_PRESENT,
+            bluetooth: BluetoothStatus::default(),
         }]
     );
     assert_eq!(
@@ -2259,10 +2260,90 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan: None,
             slots_present: ALL_PRESENT,
+            bluetooth: BluetoothStatus::default(),
         }]
     );
     let shown = engine.snapshot(clock.at(7), StoreStats::default()).bridge_status;
     assert_eq!(shown.and_then(|status| status.fan), None, "the latest reply's fan");
+}
+
+#[test]
+fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
+    // The engine reads nothing in it: the store keeps it and the view shows the host link.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let bluetooth = BluetoothStatus {
+        owner: HostOwner::Bluetooth,
+        bonds: 2,
+        window: PairWindow::Open { secs: 87 },
+        central: Some(Central {
+            encrypted: true,
+            bonded: true,
+            mtu: 247,
+            phy: 2,
+            interval_us: 30_000,
+        }),
+        counters: BleCounters {
+            pairings: 1,
+            resynced_bytes: 244,
+            last_disconnect: 0x13,
+            ..BleCounters::default()
+        },
+    };
+    engine.handle(connected(), clock.at(1));
+    let batch = engine.handle(
+        Event::Link(LinkEvent::Message(BridgeToHost::Status {
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 9_000,
+            rx_oversize: 0,
+            queues: QueueStats::new(),
+            radio_link: RadioLinkStats::default(),
+            host_uart_errors: 0,
+            fan: None,
+            pool: ChannelPool::All,
+            scan: ScanMode::Stopped,
+            ble: None,
+            present: ALL_PRESENT,
+            members: Default::default(),
+            bluetooth,
+        })),
+        clock.at(2),
+    );
+    let recorded: Vec<BluetoothStatus> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::BridgeStatus(s) => Some(s.bluetooth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, [bluetooth]);
+    let shown = engine.snapshot(clock.at(2), StoreStats::default()).bridge_status;
+    assert_eq!(shown.map(|status| status.bluetooth), Some(bluetooth));
+}
+
+#[test]
+fn engine_keeps_disconnect_cause_until_link_returns_when_usb_takes_bridge() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let cause =
+        |engine: &FleetEngine| engine.snapshot(clock.at(9), StoreStats::default()).link_cause;
+    engine.handle(connected(), clock.at(1));
+    assert_eq!(cause(&engine), None);
+
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected {
+            reason: USB_TOOK_BRIDGE.to_owned(),
+            cause: DisconnectCause::UsbTookBridge,
+        }),
+        clock.at(2),
+    );
+    assert_eq!(cause(&engine), Some(DisconnectCause::UsbTookBridge));
+
+    // The handback's `Ready`.
+    engine.handle(connected(), clock.at(3));
+    assert_eq!(cause(&engine), None);
 }
 
 #[test]
@@ -2289,6 +2370,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            bluetooth: Default::default(),
         })),
         clock.at(4),
     );
@@ -2408,10 +2490,7 @@ fn engine_reports_no_lag_peak_when_only_connected() {
     let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(5)));
     assert_eq!(row.lag_peak_us, 0);
 
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(6),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(6));
     engine.handle(connected(), clock.at(7));
     // The first record after a connect has nothing to be timed against.
     engine.handle(stray(0), clock.at(7));
@@ -2707,10 +2786,7 @@ fn engine_adopts_bridge_mode_when_link_reconnects_to_scanning_bridge() {
     let clock = Clock::new();
     let mut engine = scanning_capture(&clock);
 
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     let batch = engine.handle(connected(), clock.at(4));
     assert!(scans(&batch).is_empty());
     let batch = engine.handle(scan_status(ScanMode::WifiBluetooth), clock.at(5));
@@ -2765,10 +2841,7 @@ fn engine_resends_bluetooth_start_when_stale_status_follows_set_bluetooth() {
 fn engine_resends_start_when_status_after_reconnect_names_another_mode() {
     let clock = Clock::new();
     let mut engine = scanning_capture(&clock);
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     engine.handle(connected(), clock.at(4));
     // A report ahead of the first `Status` adopts nothing.
     let batch = engine.handle(fleet(ScanMode::WifiBluetooth, &[]), clock.at(5));
@@ -2811,10 +2884,7 @@ fn engine_restarts_scan_in_wanted_mode_when_bridge_reports_stopped_mid_run() {
 fn engine_restarts_scan_when_link_reconnects_to_stopped_bridge() {
     let clock = Clock::new();
     let mut engine = scanning_capture(&clock);
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     let batch = engine.handle(connected(), clock.at(4));
     assert!(scans(&batch).is_empty(), "nothing before the bridge says");
 
@@ -3159,10 +3229,7 @@ fn engine_ignores_earlier_slot_mask_when_link_reconnects() {
     assert!(!view_of(&engine, NODE, clock.at(2)).on_bus);
 
     // The bridge may have restarted meanwhile, so its old mask says nothing about now.
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(3),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(3));
     engine.handle(connected(), clock.at(4));
     let view = view_of(&engine, NODE, clock.at(5));
     assert!(view.on_bus && view.alive, "{view:?}");
@@ -3234,10 +3301,7 @@ fn engine_keeps_node_undeparted_when_link_down() {
     engine.handle(heartbeat(NODE, 1), clock.at(1));
 
     // An outage silences every node at once; that is not the node leaving.
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(2),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(2));
     for at in 3..=63 {
         engine.handle(Event::Tick, clock.at(at));
         assert!(!departed(&engine, NODE), "at {at} s");
@@ -3306,6 +3370,29 @@ fn engine_reads_live_when_heartbeat_follows_backlog() {
         clock.at_ms(1_010),
     );
     assert!(stored_live(&live));
+}
+
+// A Bluetooth link delivers once per connection interval, so frames arrive in clumps that
+// read as lag. Over Bluetooth a clump of 200 ms is jitter; over USB it is a backlog.
+#[test]
+fn engine_stores_heartbeat_live_when_bluetooth_clump_lags_under_its_threshold() {
+    let clumped = |link| {
+        let clock = Clock::new();
+        let mut engine = engine(EngineConfig { link, ..EngineConfig::default() }, &clock);
+        caught_up(&mut engine, &clock);
+        // Four frames 50 ms apart on the bridge's clock, read a millisecond apart.
+        for n in 1..4u32 {
+            engine.handle(stray(n * 50_000), clock.at_ms(u64::from(n)));
+        }
+        let beat = engine.handle(
+            beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 200_000),
+            clock.at_ms(4),
+        );
+        stored_live(&beat)
+    };
+    assert!(clumped(Some(HostLink::Bluetooth)), "jitter over Bluetooth");
+    assert!(!clumped(Some(HostLink::Usb)), "a backlog over USB");
+    assert!(!clumped(None), "a simulated link reads as USB");
 }
 
 // An epoch a replayed heartbeat carries does not replace the one a live heartbeat reported:
@@ -3385,10 +3472,7 @@ fn engine_reads_live_when_link_reconnects_after_falling_behind() {
     );
     assert!(!stored_live(&behind));
 
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(10),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(10));
     engine.handle(connected(), clock.at(20));
     let fresh = engine.handle(
         beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 600_000_000),
@@ -3611,10 +3695,7 @@ fn engine_starts_on_next_status_when_fix_gate_opens_while_link_down() {
     let gps = Gps::detached();
     let mut engine = fix_capture(&gps, &clock);
     engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(2),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(2));
 
     let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(3));
     assert!(scans(&batch).is_empty(), "no link to send it on");
@@ -3724,10 +3805,7 @@ fn engine_keeps_pool_when_link_drops() {
     let clock = Clock::new();
     let mut engine = engine_on(ChannelPool::Eu, EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(1));
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(2),
-    );
+    engine.handle(disconnected("unplugged"), clock.at(2));
     let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
     assert_eq!(snapshot.pool, Some(ChannelPool::Eu));
 }
@@ -4045,10 +4123,7 @@ fn engine_logs_nothing_when_link_outage_holds_heartbeats_past_timeout() {
 
     // The node beats on through the outage, and the bridge's backlog delivers those beats late.
     let lines = Logs::during(|| {
-        engine.handle(
-            Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-            clock.at(40),
-        );
+        engine.handle(disconnected("unplugged"), clock.at(40));
         for at in 41..=130 {
             engine.handle(Event::Tick, clock.at(at));
         }

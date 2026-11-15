@@ -137,6 +137,10 @@ pub struct P4Counters {
     pub present: u32,
     /// The fleet planner's members ([`crate::fleet::Fleet::members`]).
     pub members: heapless::Vec<crate::fleet::Member, MAX_SLOTS>,
+    /// The Bluetooth host link as the P4 sees it. [`Pair::status`] replaces its `counters`, and
+    /// a connected central's `phy` and `interval_us`, with the C6's once the C6 has reported
+    /// them.
+    pub bluetooth: crate::link::BluetoothStatus,
 }
 
 /// The P4's pair state.
@@ -522,6 +526,7 @@ impl Pair {
             ble,
             present,
             members,
+            mut bluetooth,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -536,6 +541,11 @@ impl Pair {
             radio_link.radio_bad_magic = status.bad_magic;
             radio_link.radio_seq_gap = status.seq_gap;
             radio_link.radio_uart_errors = status.uart_errors;
+            bluetooth.counters = status.ble;
+            if let Some(central) = &mut bluetooth.central {
+                central.phy = status.ble.phy;
+                central.interval_us = status.ble.interval_us;
+            }
         }
         // The C6's queues leave room for these: 4 + 4 fits in 8.
         let _ = queues.push(down);
@@ -557,6 +567,7 @@ impl Pair {
             ble,
             present,
             members,
+            bluetooth,
         }
     }
 }

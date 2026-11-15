@@ -18,9 +18,13 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::{self, Mac};
 
+use crate::gate::{Admitted, Gate};
+// The tests here pin the rule the gate applies, as serial's connections live it.
+#[cfg(test)]
+use crate::gate::is_a_new_life;
 use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
-use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
+use crate::{DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair};
 
 /// Long enough not to spin, short enough that shutdown feels immediate.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
@@ -66,13 +70,15 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 
 /// The longest a proven connection goes without writing a frame.
 ///
-/// The P4 writes to a host only while it hears one, and stops 15 s after the last frame
-/// (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an operator's
+/// The P4 writes to a host only while it hears one, and stops [`HOST_SILENCE_SECS`] after the
+/// last frame (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an operator's
 /// answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
 /// connection that has written nothing for this long sends a `GetStatus`. Twice the engine's
 /// 5 s status poll, so a running capture never needs one: the engine checks for a due poll
 /// only on its tick, and a keepalive on the same interval would usually fire first and double
 /// the polls. Never before the first `Ready`: until then the board is unproven ([`connect`]).
+///
+/// [`HOST_SILENCE_SECS`]: wartui_proto::link::HOST_SILENCE_SECS
 const KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// Slowest retry after a sweep that opened several boards and found no bridge.
@@ -518,7 +524,8 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
             previous = Some(reason.clone());
             repeats = 0;
         }
-        if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+        let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+        if plumbing.events.send(down).await.is_err() {
             return;
         }
         tokio::time::sleep(delay).await;
@@ -649,7 +656,8 @@ async fn sweep(
                 // candidate: the sweep is over and what is left is a reconnection.
                 if let Some(mac) = announced {
                     tracing::warn!(reason = %reason, mac = %mac::full(&mac), "link down");
-                    if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+                    let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+                    if plumbing.events.send(down).await.is_err() {
                         return Pass::HandleDropped;
                     }
                     return Pass::Connected(Settled { mac, port: candidate.clone() });
@@ -938,16 +946,6 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
     TransportError::Open { port: path.to_owned(), source: error.clone() }.to_string()
 }
 
-/// Puts a line the bridge sent in the log: a `Log` at info, an `Error` as a warning. Here rather
-/// than in the engine, which does no I/O and drops these frames.
-fn log_bridge_line(msg: &BridgeToHost) {
-    match msg {
-        BridgeToHost::Error { message } => tracing::warn!("bridge: {message}"),
-        BridgeToHost::Log { message } => tracing::info!("bridge: {message}"),
-        _ => {}
-    }
-}
-
 /// One line describing a frame that did not decode, for the debug log: its length, where it
 /// sat in the `read()` that delivered its terminator, whether the chunk before it decoded, and
 /// its bytes as hex. `frame` is the raw COBS-encoded chunk as `FrameAccumulator::push` returned it
@@ -978,30 +976,27 @@ fn read_loop<R: Read>(
     state: &Attempt,
     memory: &BridgeMemory,
 ) -> String {
-    // Frames that decoded before this connection's first `Ready`, and were not passed on.
-    let mut skipped = 0_u32;
-    let reason = read_frames(port, events, state, memory, &mut skipped);
+    let mut gate = Gate::new();
+    let reason = read_frames(port, events, state, memory, &mut gate);
     // Said when the `Ready` arrives otherwise. A connection that ends without one shows
     // what it heard here.
-    if !state.announced.load(Ordering::Relaxed) && skipped > 0 {
-        tracing::debug!("skipped {skipped} frames from before this connection");
+    if !state.announced.load(Ordering::Relaxed) && gate.skipped() > 0 {
+        tracing::debug!("skipped {} frames from before this connection", gate.skipped());
     }
     reason
 }
 
-/// [`read_loop`]'s body, counting into `skipped` the frames it drops ahead of the first
-/// `Ready`.
+/// [`read_loop`]'s body: what decodes goes through this connection's [`Gate`], which drops
+/// what arrives ahead of the first `Ready` (`crate::gate`).
 fn read_frames<R: Read>(
     mut port: R,
     events: &mpsc::Sender<LinkEvent>,
     state: &Attempt,
     memory: &BridgeMemory,
-    skipped: &mut u32,
+    gate: &mut Gate,
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
-    // Local rather than shared: a property of one connection, not of the link.
-    let mut last_ready: Option<(u32, Instant)> = None;
     // Whether the last completed chunk decoded, and a copy of the current one taken before
     // `decode_frame` rewrites it in place: the evidence a garbled frame's debug line carries.
     // The copy is taken only when debug logging is on; otherwise `debug!` does not evaluate
@@ -1028,87 +1023,37 @@ fn read_frames<R: Read>(
             let decoded = decode_frame::<BridgeToHost>(frame);
             let prev = prev_ok.replace(decoded.is_ok());
             let event = match decoded {
-                Ok(BridgeToHost::Ready {
-                    mac,
-                    fw_version,
-                    reset_cause,
-                    last_phase,
-                    uptime_ms,
-                    node_board,
-                    radio,
-                    image,
-                }) => {
-                    state.announced.store(true, Ordering::Relaxed);
-                    // Read by the sweep, which stops here and holds this board for
-                    // the rest of the run rather than reaching for another. The
-                    // address is remembered here rather than when the connection
-                    // ends, because `run`'s view saves it while the capture goes on,
-                    // and a connection held for the whole run ends only after the
-                    // view has stopped.
-                    let first =
-                        state.mac.lock().unwrap_or_else(|e| e.into_inner()).replace(mac).is_none();
-                    if first {
-                        memory.remember_on(mac, state.serial.clone());
+                Ok(msg) => match gate.admit(msg, Instant::now()) {
+                    Admitted::Ready { info, fresh, .. } => {
+                        state.announced.store(true, Ordering::Relaxed);
+                        // Read by the sweep, which stops here and holds this board for
+                        // the rest of the run rather than reaching for another. The
+                        // address is remembered here rather than when the connection
+                        // ends, because `run`'s view saves it while the capture goes on,
+                        // and a connection held for the whole run ends only after the
+                        // view has stopped.
+                        let first = state
+                            .mac
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .replace(info.mac)
+                            .is_none();
+                        if first {
+                            memory.remember_on(info.mac, state.serial.clone());
+                        }
+                        // A second answer to an `Identify` sent before the first came back
+                        // is the same life. A new life under a held connection is a C6 that
+                        // restarted, or a P4 that rebooted and was asked again by the next
+                        // host frame, while the CH343 stayed on the bus.
+                        if !fresh {
+                            continue;
+                        }
+                        LinkEvent::Connected(info)
                     }
-                    // Two `Ready` frames arrive on one connection for two very
-                    // different reasons, and the uptime is what separates them.
-                    // One is a second answer to an `Identify` sent before the
-                    // first came back: same life, and reporting it would look
-                    // like a reconnect that never happened. The other is a new life
-                    // under a held connection — a C6 that restarted, or a P4 that
-                    // rebooted and was asked again by the next host frame, while the
-                    // CH343 stayed on the bus — and that has to be reported, or the
-                    // engine keeps the dead life's `BridgeInfo`. A second answer's uptime
-                    // keeps pace with the host's clock since the last `Ready`; a new
-                    // life's falls below the last `Ready`'s, or well behind that pace even
-                    // when above it, as when a C6 restarts seconds after a P4 reboot.
-                    let now = Instant::now();
-                    let fresh_life = is_a_new_life(uptime_ms, now, last_ready);
-                    if last_ready.is_none() && *skipped > 0 {
-                        tracing::debug!("skipped {skipped} frames from before this connection");
-                    }
-                    last_ready = Some((uptime_ms, now));
-                    if !fresh_life {
-                        continue;
-                    }
-                    // Without it, a log of a link that dropped and came back ends
-                    // at "opening the bridge" — as does one that never did.
-                    tracing::info!(
-                        mac = %mac::full(&mac),
-                        fw = %fw_version.as_str(),
-                        reset = ?reset_cause,
-                        phase = ?last_phase,
-                        uptime_ms,
-                        board = %node_board,
-                        radio = ?radio,
-                        "the bridge announced itself"
-                    );
-                    LinkEvent::Connected(BridgeInfo {
-                        mac,
-                        fw_version: fw_version.as_str().to_owned(),
-                        reset_cause,
-                        last_phase,
-                        uptime_ms,
-                        node_board,
-                        radio,
-                        image,
-                    })
-                }
-                Ok(msg) => {
-                    // A bridge queues `Ready` ahead of anything it hears after an
-                    // `Identify`, and clears its queue when a host arrives. So whatever
-                    // decodes before this connection's first `Ready` was written before
-                    // the connection, out of the CH343's or the tty's buffer, and is
-                    // stale: a heartbeat seconds old reads as a host behind the bridge. A
-                    // rebooted bridge's `Ready` on a connection already announced changes
-                    // nothing here.
-                    if last_ready.is_none() {
-                        *skipped += 1;
-                        continue;
-                    }
-                    log_bridge_line(&msg);
-                    LinkEvent::Message(msg)
-                }
+                    Admitted::Message(msg) => LinkEvent::Message(msg),
+                    // Written before the connection, out of the CH343's or the tty's buffer.
+                    Admitted::Stale => continue,
+                },
                 // The bootloader's log after a reset and half-frames land here; the
                 // framing has already resynchronized, so this is a counter rather than a
                 // fault. At `debug`, or a bad cable writes the log as fast as the bridge
@@ -1187,7 +1132,11 @@ fn write_loop(
 /// echoes what the bridge sent before raw mode was set, with no terminator in the echo,
 /// and another program may have left bytes of its own. The byte shares the frame's
 /// buffer, so the two stay one write and one packet (`connect`).
-fn encode_for_wire(cmd: &HostToBridge, lead: bool, buf: &mut [u8]) -> Result<usize, LinkError> {
+pub(crate) fn encode_for_wire(
+    cmd: &HostToBridge,
+    lead: bool,
+    buf: &mut [u8],
+) -> Result<usize, LinkError> {
     let start = usize::from(lead);
     if lead {
         *buf.first_mut().ok_or(LinkError::BufferTooSmall)? = 0x00;
@@ -1247,37 +1196,6 @@ fn asks_on_tick(waited: u32, drains: bool) -> bool {
 /// to go is settled on, and one with company gets a brief probe.
 fn patience(alone: bool) -> u32 {
     if alone { SETTLE_TICKS } else { PROBE_TICKS }
-}
-
-/// How far a `Ready` may fall short of the last life's projected uptime and still be
-/// that life.
-///
-/// It absorbs delivery delay: a second answer to one `Identify`, read late behind a
-/// backlog, falls short by the time it waited. The bridge sends `Ready` ahead of its queue
-/// and the host's measured lag is well under this.
-const READY_SLACK: Duration = Duration::from_secs(2);
-
-/// Whether a `Ready` arriving at `now` came from a life that started after the last one
-/// seen, which `last_seen` gives as its uptime and the host's time it arrived.
-///
-/// The first is always a new life. After that, a `Ready` is a new life when either holds:
-///
-/// - **Its uptime is below the last `Ready`'s.** One life's clock never falls, so this
-///   catches a restart however soon it follows, as when `wartui reset` reboots a bridge
-///   a second after its first `Ready`.
-/// - **Its uptime is below the last life's projection by more than [`READY_SLACK`]**, the
-///   projection being the last uptime plus the time since it arrived. This catches a C6 that
-///   restarts under a held connection seconds after a `Ready` carried the uptime of a C6
-///   reset with the P4, where the new life's uptime is above that one.
-///
-/// What neither catches is a restart whose uptime is above the last `Ready`'s and within
-/// the slack of its projection. See the call site for why both lives arrive on one
-/// connection.
-fn is_a_new_life(uptime_ms: u32, now: Instant, last_seen: Option<(u32, Instant)>) -> bool {
-    last_seen.is_none_or(|(previous, arrived)| {
-        let projected = u128::from(previous) + now.saturating_duration_since(arrived).as_millis();
-        uptime_ms < previous || u128::from(uptime_ms) + READY_SLACK.as_millis() < projected
-    })
 }
 
 #[cfg(test)]

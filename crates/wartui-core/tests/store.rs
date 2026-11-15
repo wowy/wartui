@@ -16,19 +16,22 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, NodeSeen, Observation, RawFrame,
-    Record, ShareChange,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodeSeen, Observation,
+    RawFrame, Record, ShareChange,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
-    is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
+    capture_link, is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{QueueId, QueueStat, RadioLinkStats};
+use wartui_proto::link::{
+    BluetoothStatus, Central, HostOwner, PairWindow, QueueId, QueueStat, RadioLinkStats,
+};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -109,7 +112,7 @@ fn open_at(path: &std::path::Path) -> Store {
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store")
 }
 
@@ -314,7 +317,7 @@ fn store_records_simulated_flag_when_capture_created() {
     for simulated in [false, true] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
-        let info = CaptureInfo { notes: None, simulated };
+        let info = CaptureInfo { notes: None, simulated, link: None };
         Store::create(&StoreConfig::new(&path), &info, EPOCH_MS)
             .expect("creating the store")
             .close();
@@ -540,8 +543,28 @@ fn bridge_status_with_fan(
         fan,
         // A1, A3 and B3, and the top bit, so the column holds the whole u32.
         slots_present: 0x8000_0205,
+        bluetooth: BLUETOOTH,
     })
 }
+
+/// A bonded host on an encrypted 2M link holding the bridge, every counter distinct.
+const BLUETOOTH: BluetoothStatus = BluetoothStatus {
+    owner: HostOwner::Bluetooth,
+    bonds: 2,
+    window: PairWindow::Open { secs: 87 },
+    central: Some(Central { encrypted: true, bonded: true, mtu: 247, phy: 2, interval_us: 30_000 }),
+    counters: BleCounters {
+        pairings: 3,
+        failed_pairings: 4,
+        unbonded_kicks: 5,
+        last_disconnect: 0x13,
+        resynced_bytes: 4_000_000_004,
+        dropped_writes: 6,
+        phy: 2,
+        interval_us: 30_000,
+        heap_high_water: 41_000,
+    },
+};
 
 const RADIO_LINK: RadioLinkStats = RadioLinkStats {
     packets: 4_000_000_001,
@@ -654,6 +677,97 @@ fn store_writes_queue_rows_when_bridge_status_carries_queues() {
             (parent, "node-down".to_owned(), 32, 20, 0),
         ]
     );
+}
+
+#[test]
+fn store_round_trips_every_column_when_bluetooth_section_written() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![bridge_status(&QUEUES, RADIO_LINK)]);
+    // With a central and the window open, nothing is NULL.
+    assert_insert_names_every_column(&conn, "bridge_bluetooth");
+
+    let parent: i64 = conn.query_row("SELECT id FROM bridge_status", [], |r| r.get(0)).unwrap();
+    let row: (i64, String, i64, String, i64) = conn
+        .query_row(
+            "SELECT status_id, owner, bonds, pair_window, pair_window_secs FROM bridge_bluetooth",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (parent, "bluetooth".to_owned(), 2, "open".to_owned(), 87));
+    let central: Vec<i64> = conn
+        .query_row(
+            "SELECT central_encrypted, central_bonded, central_mtu, central_phy,
+                    central_interval_us
+             FROM bridge_bluetooth",
+            [],
+            |r| (0..5).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    assert_eq!(central, [1, 1, 247, 2, 30_000]);
+    let counters: Vec<i64> = conn
+        .query_row(
+            "SELECT pairings, failed_pairings, unbonded_kicks, last_disconnect, resynced_bytes,
+                    dropped_writes, phy, interval_us, heap_high_water
+             FROM bridge_bluetooth",
+            [],
+            |r| (0..9).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    assert_eq!(counters, [3, 4, 5, 0x13, 4_000_000_004, 6, 2, 30_000, 41_000]);
+}
+
+#[test]
+fn store_writes_null_central_columns_when_no_central_is_connected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut closed = bridge_status(&[], RADIO_LINK);
+    let mut until_bonded = bridge_status(&[], RADIO_LINK);
+    for (record, window) in
+        [(&mut closed, PairWindow::Closed), (&mut until_bonded, PairWindow::UntilBonded)]
+    {
+        let Record::BridgeStatus(seen) = record else { unreachable!() };
+        seen.bluetooth =
+            BluetoothStatus { owner: HostOwner::Usb, window, ..BluetoothStatus::default() };
+    }
+    let conn = write(&dir, vec![closed, until_bonded]);
+    type Row = (String, String, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let rows: Vec<Row> = conn
+        .prepare(
+            "SELECT owner, pair_window, pair_window_secs, central_encrypted, central_mtu,
+                    central_interval_us
+             FROM bridge_bluetooth ORDER BY status_id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("usb".to_owned(), "closed".to_owned(), None, None, None, None),
+            ("usb".to_owned(), "until-bonded".to_owned(), None, None, None, None),
+        ]
+    );
+}
+
+#[test]
+fn store_records_link_when_capture_created() {
+    for (link, stored) in [
+        (Some(HostLink::Usb), Some("usb")),
+        (Some(HostLink::Bluetooth), Some("bluetooth")),
+        (None, None),
+    ] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("wartui.db");
+        let info = CaptureInfo { notes: None, simulated: link.is_none(), link };
+        Store::create(&StoreConfig::new(&path), &info, EPOCH_MS).expect("creating").close();
+        let conn = open_readonly(&path).expect("reopening");
+        let column: Option<String> =
+            conn.query_row("SELECT link FROM capture", [], |r| r.get(0)).unwrap();
+        assert_eq!(column.as_deref(), stored);
+        assert_eq!(capture_link(&conn).unwrap(), link);
+    }
 }
 
 fn host_status(
@@ -1128,7 +1242,7 @@ fn store_drops_without_blocking_when_queue_full() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let flood: Vec<Record> =
@@ -1168,7 +1282,7 @@ fn store_reports_batch_timings_on_close_when_asked() {
     config.batch_rows = 8;
     config.batch_interval = Duration::from_secs(3600);
     config.timings = true;
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..20u8)
@@ -1212,7 +1326,7 @@ fn store_copies_and_truncates_wal_when_checkpoint_background() {
     // Any WAL at all is past the limit, so every pass that catches up is followed by a
     // truncation, and the last one, with the writer gone, always catches up.
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u8 {
@@ -1247,7 +1361,7 @@ fn store_counts_caught_up_passes_when_checkpoint_background() {
     config.batch_interval = Duration::from_secs(60);
     config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     assert_eq!(store.checkpoints_caught_up(), 0, "nothing has been committed yet");
@@ -1273,7 +1387,7 @@ fn store_counts_no_caught_up_passes_when_checkpoint_inline() {
     config.batch_rows = 10;
     config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..10u8)
@@ -1309,7 +1423,7 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
     let checkpointed = matches!(checkpoint, Checkpoint::Background { .. });
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u64 {
@@ -1356,7 +1470,7 @@ fn store_background_checkpoint_runs_owed_pass_when_fleet_quiet() {
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint =
         Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     // Two commits well inside one interval, then nothing.
@@ -1400,7 +1514,7 @@ fn store_reports_no_passes_on_close_when_checkpoint_inline() {
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint = Checkpoint::Inline;
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
@@ -1447,7 +1561,7 @@ fn store_uses_page_size_when_creating_file() {
     config.page_size = Some(16_384);
     config.cache_kib = Some(32 * 1024);
     config.wal_autocheckpoint_pages = Some(4000);
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
 
     let conn = open_readonly(&path).expect("reopening read-only");
@@ -1660,7 +1774,7 @@ fn store_refuses_create_when_file_exists() {
     create(&path);
     let before = std::fs::read(&path).expect("reading the capture");
 
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link: None };
     let created = Store::create(&StoreConfig::new(&path), &info, EPOCH_MS);
     assert!(
         matches!(&created, Err(StoreError::Exists(p)) if *p == path),

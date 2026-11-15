@@ -21,12 +21,14 @@
 //! chunks.
 //!
 //! **The region is the mapped PSRAM**, capped at [`CACHE_MAX`], an app slot. A sector erase needs
-//! nothing, and a write is a copy. A P4 whose PSRAM does not map refuses every op as a table with
-//! no spare slot does, and every chunk command `NoImage`, and says so once to the first host
-//! announced to; everything else runs.
+//! nothing, and a write is a copy. The rest goes back to `main` for the host bulk ring, split off
+//! the one slice [`map`] makes. A P4 whose PSRAM does not map refuses every op as a table with no
+//! spare slot does, and every chunk command `NoImage`, and runs its bulk ring over no bytes, as
+//! does one whose PSRAM the cache takes whole. Either says so once to the first host announced to,
+//! as an error, since a log line goes in the bulk ring; everything else runs.
 //!
-//! The receiver is reset when the host gate closes, as the P4's own update receiver is, so a
-//! host that goes away leaves no image for the next one to send from unchecked.
+//! The receiver is reset when a host lets go of the queue, as the P4's own update receiver is, so
+//! a host that goes away leaves no image for the next one to send from unchecked.
 //!
 //! [`HostToBridge::CacheImage`]: wartui_proto::link::HostToBridge::CacheImage
 //! [`HostToBridge::ToNodeChunk`]: wartui_proto::link::HostToBridge::ToNodeChunk
@@ -47,8 +49,11 @@ use crate::Shared;
 /// The most of the PSRAM the cache uses: a node's app slot.
 pub const CACHE_MAX: usize = 2 * 1024 * 1024;
 
-/// The P4's log line when its PSRAM did not map.
-const NO_PSRAM: &str = "node image cache: no PSRAM";
+/// The P4's error line when its PSRAM did not map.
+const NO_PSRAM: &str = "no PSRAM: no node image cache, and the host bulk ring holds nothing";
+
+/// The P4's error line when its PSRAM mapped but the cache took all of it.
+const SMALL_PSRAM: &str = "too little PSRAM: the host bulk ring holds nothing";
 
 /// The cache's receiver, with its sector of buffer. Its board is a node's; the cache fills each
 /// `Begin` with it, as `src/update.rs` does, so the check passes every image.
@@ -59,18 +64,19 @@ pub struct Cache {
     /// Over the mapped PSRAM, up to [`CACHE_MAX`]; empty when none mapped. Its receiver is
     /// static, since it holds a sector of buffer.
     inner: NodeImageCache<&'static mut Receiver, &'static mut [u8]>,
-    /// Whether a host has been told there is no PSRAM.
+    /// Whether a host has been told the bulk ring holds nothing.
     said: bool,
 }
 
 impl Cache {
-    /// Map the PSRAM and take it as the cache. Out of line, so the driver stays off `main`'s
-    /// frame.
+    /// Map the PSRAM, take up to [`CACHE_MAX`] of it as the cache, and return the rest. Out of
+    /// line, so the driver stays off `main`'s frame.
     #[inline(never)]
-    pub fn new(psram: PSRAM<'static>) -> Self {
+    pub fn new(psram: PSRAM<'static>) -> (Self, &'static mut [u8]) {
         let region = map(psram);
         let len = region.len().min(CACHE_MAX);
-        Self { inner: NodeImageCache::new(RECEIVER.take(), &mut region[..len]), said: false }
+        let (region, rest) = region.split_at_mut(len);
+        (Self { inner: NodeImageCache::new(RECEIVER.take(), region), said: false }, rest)
     }
 }
 
@@ -138,21 +144,23 @@ pub fn to_node_chunk(
     }
 }
 
-/// Say there is no PSRAM, once, to the first host present for an announcement.
+/// Say the host bulk ring holds nothing, and why, once, to the first host present for an
+/// announcement. An error, since a log line is bulk and that ring would refuse it.
 pub fn say(shared: &Shared) {
-    if !shared.presence.is_open() {
+    if !shared.host_open() || shared.host.borrow().bulk_capacity() > 0 {
         return;
     }
     let mut cache = shared.cache.borrow_mut();
-    if cache.said || cache.inner.capacity() > 0 {
+    if cache.said {
         return;
     }
     cache.said = true;
+    let line = if cache.inner.capacity() == 0 { NO_PSRAM } else { SMALL_PSRAM };
     drop(cache);
-    shared.push_log(NO_PSRAM);
+    shared.push_error(line);
 }
 
-/// The host gate closed: drop the session and the image it filled.
+/// A host let go of the queue: drop the session and the image it filled.
 pub fn host_gone(shared: &Shared) {
     shared.cache.borrow_mut().inner.reset();
 }

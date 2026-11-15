@@ -32,7 +32,7 @@ NOT_FAULTS = ("power_on", "external")
 
 # Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
 # only, as the store does.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
@@ -50,6 +50,18 @@ BOARD_PER_BUS = {"carrier-6": 3, "carrier-10": 5, "carrier-14": 7}
 
 # Mirrors EngineConfig::status_interval in crates/wartui-core/src/engine/config.rs.
 STATUS_INTERVAL_MS = 5000
+
+# The HCI disconnect reasons a C6 reports in `bridge_bluetooth.last_disconnect`, from the Bluetooth
+# Core specification (Vol 1, Part F), as the C6 sees them: "local" is the C6, "remote" the central.
+HCI_REASONS = {
+    0x08: "supervision timeout",
+    0x13: "remote terminated",
+    0x16: "local terminated",
+    0x3D: "MIC failure",
+}
+
+# Mirrors ATT_MTU_MAX in firmware/p4-radio/src/ble.rs: the largest ATT MTU the C6 takes.
+WANTED_MTU = 247
 
 # Mirrors plan::SCAN_CHANNELS in crates/wartui-proto/src/plan/channels.rs.
 SCAN_CHANNELS = [
@@ -236,7 +248,7 @@ def since_boot_delta(cur, prev, rebooted):
 def provenance(db, ctx):
     global START_MS, BOARD
     section("capture")
-    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "notes",
+    cols = ("started_at", "ended_at", "bridge_mac", "bridge_fw", "node_board", "link", "notes",
             "simulated")
     row = dict(zip(cols, db.q(f"SELECT {', '.join(cols)} FROM capture")[0]))
     START_MS = row.get("started_at")
@@ -270,6 +282,14 @@ def provenance(db, ctx):
         flag("WARN", "capture",
              "node_board='no carrier': the P4 found no wartui-carrier at boot and drove no node",
              "SELECT node_board FROM capture")
+    link = row.get("link")
+    ctx["link"] = link
+    print(f"  link      {link or 'NULL (--sim)'}")
+    if link == "bluetooth":
+        flag("INFO", "capture",
+             "link=bluetooth: the host reached the bridge through its C6, so every host frame "
+             "crossed the C6's UART and its Bluetooth link (see the bluetooth host lines)",
+             "SELECT link FROM capture")
     print(f"  simulated {row.get('simulated')}")
     if row.get("notes"):
         print(f"  notes     {row['notes']}")
@@ -715,8 +735,11 @@ def bridge(db, ctx):
     host_read = rows[-1][6] - rows[0][6]
     print(f"  rows {len(rows)}  reboots {len(reboots)}  received {received}  dropped {dropped} "
           f"({pct(dropped, received)})  host read {host_read}")
-    print(f"  ~lost on USB {max(0, received - dropped - host_read)} "
-          "(inferred from counters; +/-24 frames at each end)")
+    # The host's link, as analyze names it: USB in a capture that names none.
+    on = "Bluetooth" if ctx.get("link") == "bluetooth" else "USB"
+    print(f"  ~lost on {on} {max(0, received - dropped - host_read)} "
+          "(inferred from counters; off by the host-bulk backlog at each end, and it counts "
+          "what the bridge received during any gap in status replies)")
     if oversize:
         print(f"  oversize {oversize} (node records over 1024 bytes; not in received)")
         flag("WARN", "bridge",
@@ -760,6 +783,7 @@ def bridge(db, ctx):
     bridge_host_uart(db)
     bridge_fan(db)
     bridge_slots(db)
+    bridge_bluetooth(db, ctx, lives)
 
 
 # Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
@@ -935,6 +959,106 @@ def bridge_slots(db):
               "answered")
 
 
+BLUETOOTH_COUNTERS = ("pairings", "failed_pairings", "unbonded_kicks", "resynced_bytes",
+                      "dropped_writes")
+
+
+def bridge_bluetooth(db, ctx, lives):
+    """The Bluetooth host link, from `bridge_bluetooth`: the central and the C6's counters over
+    the capture.
+
+    The counters are the C6's since its boot. The C6 restarts with the P4, and on its own when its
+    Bluetooth host stops. A reply's uptime is the C6's, so either shows as a restart, and the
+    counters rebase on one and whenever they fall, as analyze's `BluetoothLoss` does.
+
+    A reply's owner is who held the host queue as it was sent, and the bridge sends replies only to
+    that host. So every row names this capture's own link, and no row is written while another host
+    holds the bridge: a takeover is a gap in the replies, not a row.
+    """
+    cols = ", ".join(f"b.{c}" for c in BLUETOOTH_COUNTERS)
+    rows = db.q(
+        "SELECT s.id, s.rx_at, b.owner, b.central_mtu, b.last_disconnect, "
+        f"{cols} FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id "
+        "ORDER BY s.id"
+    )
+    if not rows:
+        return
+    link = ctx.get("link")
+    owners = Counter(r[2] for r in rows)
+    print("  bluetooth host  owner " + "  ".join(f"{o} ({owners[o]} rows)" for o in sorted(owners)))
+    sums = dict.fromkeys(BLUETOOTH_COUNTERS, 0)
+    for prev, cur in zip(rows, rows[1:]):
+        restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
+        for i, c in enumerate(BLUETOOTH_COUNTERS, start=5):
+            sums[c] += since_boot_delta(cur[i], prev[i], restarted)
+    print("  bluetooth host  " + "  ".join(f"{c} {sums[c]}" for c in BLUETOOTH_COUNTERS))
+    mtus = sorted({r[3] for r in rows if r[3] is not None})
+    print(f"  bluetooth host  central MTU {', '.join(map(str, mtus)) or 'none connected'}")
+    sql = (f"SELECT s.id, s.rx_at, s.uptime_ms, b.owner, b.central_mtu, b.last_disconnect, {cols} "
+           "FROM bridge_status s JOIN bridge_bluetooth b ON b.status_id = s.id ORDER BY s.id")
+
+    if sums["resynced_bytes"]:
+        flag("WARN", "bluetooth",
+             f"resynced_bytes {sums['resynced_bytes']}: P4 to C6 packets of the host stream were "
+             "lost, and each loss cost the frame it was in", sql)
+    if sums["dropped_writes"]:
+        flag("WARN", "bluetooth",
+             f"dropped_writes {sums['dropped_writes']}: bytes a host wrote were lost on the C6, "
+             "whose queue to the P4 stayed full", sql)
+    if sums["unbonded_kicks"] or sums["failed_pairings"]:
+        flag("INFO", "bluetooth",
+             f"unbonded_kicks {sums['unbonded_kicks']}, failed_pairings "
+             f"{sums['failed_pairings']}: a host with no bond tried to connect or had its bond "
+             "cleared while connected, or a pairing failed", sql)
+
+    # The bridge answers only the host that holds it, so any other owner is a reply that reached
+    # the wrong host. A simulated capture names no link.
+    strays = {o: n for o, n in owners.items() if link and o != link}
+    if strays:
+        flag("WARN", "bluetooth",
+             "status replies name "
+             + ", ".join(f"{o} ({n} rows)" for o, n in sorted(strays.items()))
+             + f" as the bridge's host in a {link} capture: the bridge answers only the host that "
+             "holds it", sql)
+
+    # Over Bluetooth a gap in the replies is a lost link or a USB host's takeover. The host stays
+    # connected through a takeover, so the C6's latest disconnect reason tells them apart: it
+    # changes across a lost link, unless the link drops twice running for one reason.
+    if link == "bluetooth":
+        gaps = [(prev, cur) for prev, cur in zip(rows, rows[1:])
+                if cur[1] - prev[1] > 3 * STATUS_INTERVAL_MS]
+        for prev, cur in gaps[:8]:
+            if cur[4] == prev[4]:
+                why = ("last disconnect unchanged: the host stayed connected, as through a USB "
+                       "takeover, or the link dropped again for the same reason")
+            else:
+                why = (f"the link dropped: last disconnect 0x{cur[4]:02X} "
+                       f"({HCI_REASONS.get(cur[4], 'unnamed')})")
+            print(f"  bluetooth host  no reply for {dur(cur[1] - prev[1])} after {rel(prev[1])}; "
+                  + why)
+
+    # Where last_disconnect changed to a code other than none. The first row is only a baseline:
+    # its code can predate the capture.
+    codes = [(cur, cur[4]) for prev, cur in zip(rows, rows[1:]) if cur[4] and cur[4] != prev[4]]
+    for r, code in codes[:8]:
+        print(f"  bluetooth host  last disconnect 0x{code:02X} "
+              f"({HCI_REASONS.get(code, 'unnamed')}) by {rel(r[1])}")
+    if codes:
+        seen = sorted({code for _, code in codes})
+        worst = any(code in (0x08, 0x3D) for code in seen)
+        flag("WARN" if worst else "INFO", "bluetooth",
+             "last disconnect reason(s) "
+             + ", ".join(f"0x{c:02X} {HCI_REASONS.get(c, 'unnamed')}" for c in seen), sql)
+
+    slow = [m for m in mtus if m < WANTED_MTU]
+    if slow:
+        flag("WARN", "bluetooth",
+             f"a central at MTU {', '.join(map(str, slow))}, below the {WANTED_MTU} the C6 "
+             "takes: smaller writes and notifications, so a slower link",
+             "SELECT s.id, s.rx_at, b.central_mtu FROM bridge_status s JOIN bridge_bluetooth b "
+             f"ON b.status_id = s.id WHERE b.central_mtu < {WANTED_MTU} ORDER BY s.id")
+
+
 def host(db, ctx):
     section("host status")
     order = ["at", "frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
@@ -953,12 +1077,14 @@ def host(db, ctx):
     print("  " + "  ".join(f"{k} {v}" for k, v in deltas.items()))
     for c in ("lag_peak_us", "store_queue_peak", "store_commit_peak_us"):
         print(f"  {c:<22}{spread([r[c] for r in rows])}")
-    behind = sum(1 for r in rows if r["lag_peak_us"] >= 100_000)
+    # The engine's `behind_us`: wider over Bluetooth, which delivers once per connection interval.
+    line_us = 500_000 if ctx.get("link") == "bluetooth" else 100_000
+    behind = sum(1 for r in rows if r["lag_peak_us"] >= line_us)
     if behind:
         flag("WARN" if behind > 5 else "INFO", "host",
-             f"host read the link >=100 ms behind the bridge in {behind} of {len(rows)} samples "
-             "(heartbeats read then are history)",
-             "SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= 100000")
+             f"host read the link >={line_us // 1000} ms behind the bridge in {behind} of "
+             f"{len(rows)} samples (heartbeats read then are history)",
+             f"SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= {line_us}")
     for c, sev in (("store_dropped", "WARN"), ("garbled", "WARN"), ("undecodable", "WARN"),
                    ("incompatible", "WARN")):
         if deltas.get(c):

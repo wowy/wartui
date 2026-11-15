@@ -1,0 +1,372 @@
+//! The Bluetooth transport's pure parts: naming, where it looks, writes, and what a subscription
+//! admits.
+//!
+//! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
+//! are checked on the bench.
+
+use std::time::{Duration, Instant};
+
+use wartui_bridge::ble::{
+    DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, advertised_name, choose,
+    dropped_as_unbonded, is_remembered, is_takeover, look, names_bridge, refused_for_bonding,
+};
+use wartui_bridge::serial::BridgeSpec;
+use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
+use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::link::{
+    BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
+    MAX_HOST_FRAME, ShortStr, ToNodeBody, USB_TOOK_BRIDGE, decode_frame, encode_frame,
+    encode_host_frame,
+};
+use wartui_proto::reset::ResetCause;
+
+const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+
+fn spec(text: &str) -> BridgeSpec {
+    text.parse().unwrap_or_else(|never| match never {})
+}
+
+fn frame(msg: &BridgeToHost) -> Vec<u8> {
+    let mut buf = [0; MAX_FRAME];
+    let len = encode_frame(msg, &mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
+fn ready(mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
+    BridgeToHost::Ready {
+        mac,
+        fw_version: ShortStr::new(),
+        reset_cause: ResetCause::PowerOn,
+        last_phase: LoopPhase::Unknown,
+        uptime_ms,
+        node_board: NodeBoard::NoCarrier,
+        radio: None,
+        image: None,
+    }
+}
+
+fn rx(rx_us: u32) -> BridgeToHost {
+    let body = FromNodeBody::from_slice(b"body").unwrap();
+    BridgeToHost::FromNode { slot: Slot::new(0, 0).unwrap(), rx_us, kind: 1, body }
+}
+
+fn takeover() -> BridgeToHost {
+    BridgeToHost::Error { message: LogStr::try_from(USB_TOOK_BRIDGE).unwrap() }
+}
+
+fn host_frame(cmd: &HostToBridge) -> Vec<u8> {
+    let mut buf = [0; MAX_HOST_FRAME];
+    let len = encode_host_frame(cmd, &mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
+/// What the engine would see of `heard`.
+fn events(heard: Vec<Heard>) -> Vec<LinkEvent> {
+    heard
+        .into_iter()
+        .filter_map(|heard| match heard {
+            Heard::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn ble_name_carries_last_two_octets_when_bridge_is_named_by_address_or_tail() {
+    assert_eq!(advertised_name(&spec("02:00:5E:10:44:C0")).as_deref(), Some("wartui 44:C0"));
+    assert_eq!(advertised_name(&spec("44:C0")).as_deref(), Some("wartui 44:C0"));
+    assert_eq!(advertised_name(&spec("10:44:C0")).as_deref(), Some("wartui 44:C0"));
+}
+
+#[test]
+fn ble_name_is_none_when_spec_gives_fewer_than_two_octets_or_a_path() {
+    assert_eq!(advertised_name(&spec("C0")), None);
+    assert_eq!(advertised_name(&spec("/dev/ttyACM0")), None);
+}
+
+#[test]
+fn ble_name_matches_bridge_when_spec_names_its_octets() {
+    assert!(names_bridge(Some(&spec("44:C0")), "wartui 44:C0"));
+    assert!(names_bridge(Some(&spec("02:00:5E:10:44:C0")), "wartui 44:C0"));
+    assert!(names_bridge(Some(&spec("C0")), "wartui 44:C0"), "one octet matches the last");
+    assert!(names_bridge(None, "wartui 96:C4"), "unnamed takes any bridge");
+}
+
+#[test]
+fn ble_name_refuses_bridge_when_octets_differ_or_name_is_not_a_bridge() {
+    assert!(!names_bridge(Some(&spec("44:C0")), "wartui 44:C1"));
+    assert!(!names_bridge(None, "wartui"));
+    assert!(!names_bridge(None, "Pixel 8"));
+    assert!(!names_bridge(None, "wartui 4:C0"));
+    assert!(!names_bridge(Some(&spec("/dev/ttyACM0")), "wartui 44:C0"));
+}
+
+/// A `ToNode` whose body is `len` bytes.
+fn to_node(len: usize) -> HostToBridge {
+    let body = ToNodeBody::from_slice(&vec![0x5A; len]).unwrap();
+    HostToBridge::ToNode { slot: Slot::new(0, 0).unwrap(), id: 1, kind: 2, body }
+}
+
+/// The writes' values, end to end.
+fn bytes(writes: &[DownWrite]) -> Vec<u8> {
+    writes.iter().flat_map(|w| w.bytes.iter().copied()).collect()
+}
+
+/// How many of `writes` are requests.
+fn requests(writes: &[DownWrite]) -> usize {
+    writes.iter().filter(|w| w.kind == WriteKind::Request).count()
+}
+
+#[test]
+fn ble_writer_leads_first_frame_with_terminator_when_connection_is_new() {
+    let mut writer = DownWriter::new(247);
+    let first = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(first[0].bytes, [0x00], "a write of its own");
+    let mut want = vec![0x00];
+    want.extend(host_frame(&HostToBridge::GetStatus));
+    assert_eq!(bytes(&first), want);
+    let again = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(bytes(&again), host_frame(&HostToBridge::GetStatus), "only the first");
+}
+
+#[test]
+fn ble_writer_leads_again_when_a_new_connection_starts() {
+    let mut writer = DownWriter::new(247);
+    writer.writes(&HostToBridge::GetStatus).unwrap();
+    let mut reconnected = DownWriter::new(247);
+    assert_eq!(reconnected.writes(&HostToBridge::GetStatus).unwrap()[0].bytes, [0x00]);
+}
+
+#[test]
+fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
+    let cmd = to_node(1000);
+    let mut writer = DownWriter::new(247);
+    let writes = writer.writes(&cmd).unwrap();
+    let pieces = &writes[1..];
+    assert!(pieces.len() > 1);
+    assert!(pieces.iter().all(|w| w.bytes.len() <= 244), "ATT MTU 247 less its 3-byte header");
+    assert!(pieces[..pieces.len() - 1].iter().all(|w| w.bytes.len() == 244));
+    // Reassembled as the P4 does, the writes are one frame.
+    let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
+    let mut decoded = None;
+    for byte in bytes(&writes) {
+        if let Some(frame) = acc.push(byte) {
+            decoded = Some(decode_frame::<HostToBridge>(frame));
+        }
+    }
+    assert_eq!(decoded, Some(Ok(cmd)));
+}
+
+#[test]
+fn ble_writer_writes_twenty_bytes_when_mtu_is_the_default() {
+    let cmd = to_node(64);
+    let writes = DownWriter::new(23).writes(&cmd).unwrap();
+    assert!(writes.iter().all(|w| w.bytes.len() <= 20));
+    assert!(DownWriter::new(0).writes(&cmd).unwrap().iter().all(|w| w.bytes.len() <= 20));
+}
+
+#[test]
+fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
+    let mut writer = DownWriter::new(247);
+    writer.writes(&HostToBridge::GetStatus).unwrap();
+    let writes = writer.writes(&to_node(1000)).unwrap();
+    assert!(writes.len() > 1);
+    assert_eq!(requests(&writes), 1);
+    assert_eq!(writes.last().unwrap().kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_sends_request_when_frame_takes_one_piece() {
+    let mut writer = DownWriter::new(247);
+    writer.writes(&HostToBridge::GetStatus).unwrap();
+    let writes = writer.writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_sends_lead_without_response_when_connection_is_new() {
+    // The request answers for a frame the C6 has forwarded, so it is the frame's last piece.
+    let writes = DownWriter::new(247).writes(&HostToBridge::GetStatus).unwrap();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], DownWrite { bytes: vec![0x00], kind: WriteKind::Command });
+    assert_eq!(writes[1].kind, WriteKind::Request);
+}
+
+#[test]
+fn ble_writer_fits_the_c6_write_queue_when_frame_is_largest() {
+    // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest.
+    let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
+    let writes = DownWriter::new(247).writes(&largest).unwrap();
+    assert!(writes.len() <= 8, "{} writes", writes.len());
+}
+
+#[test]
+fn ble_notice_is_takeover_only_when_text_is_the_usb_notice() {
+    assert!(is_takeover(&takeover()));
+    let other = BridgeToHost::Error { message: LogStr::try_from("the radio stopped").unwrap() };
+    assert!(!is_takeover(&other));
+    let log = BridgeToHost::Log { message: LogStr::try_from(USB_TOOK_BRIDGE).unwrap() };
+    assert!(!is_takeover(&log), "only as an Error");
+}
+
+#[test]
+fn ble_inbound_drops_frames_when_they_arrive_before_first_ready() {
+    let mut bytes = frame(&rx(10));
+    bytes.extend(frame(&ready(BRIDGE, 500)));
+    bytes.extend(frame(&rx(20)));
+    let mut inbound = Inbound::new(None);
+    let heard = inbound.feed(&bytes, Instant::now());
+    assert_eq!(heard[0], Heard::Proved(BRIDGE), "remembered before the engine hears of it");
+    let events = events(heard);
+    assert!(matches!(events[0], LinkEvent::Connected(_)));
+    assert!(matches!(events[1], LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. })));
+    assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn ble_inbound_reassembles_frames_when_split_across_notifications() {
+    let mut bytes = frame(&ready(BRIDGE, 500));
+    bytes.extend(frame(&rx(20)));
+    let mut inbound = Inbound::new(None);
+    let now = Instant::now();
+    let heard: Vec<Heard> = bytes.chunks(7).flat_map(|chunk| inbound.feed(chunk, now)).collect();
+    assert_eq!(events(heard).len(), 2);
+}
+
+#[test]
+fn ble_inbound_reports_disconnect_then_same_life_when_usb_takes_and_returns_bridge() {
+    let mut inbound = Inbound::new(None);
+    let t0 = Instant::now();
+    inbound.feed(&frame(&ready(BRIDGE, 10_000)), t0);
+
+    let gone = events(inbound.feed(&frame(&takeover()), t0 + Duration::from_secs(1)));
+    let cause = DisconnectCause::UsbTookBridge;
+    assert_eq!(gone, [LinkEvent::Disconnected { reason: USB_TOOK_BRIDGE.to_owned(), cause }]);
+    assert!(!inbound.announced(), "subscribed, waiting for the handback");
+
+    // Anything ahead of the handback's `Ready` is not this stream's.
+    let mut bytes = frame(&rx(30));
+    bytes.extend(frame(&ready(BRIDGE, 30_000)));
+    let heard = inbound.feed(&bytes, t0 + Duration::from_secs(20));
+    assert!(!heard.contains(&Heard::Proved(BRIDGE)), "proved once per connection");
+    let back = events(heard);
+    assert_eq!(back.len(), 1);
+    assert!(matches!(&back[0], LinkEvent::Connected(info) if info.uptime_ms == 30_000));
+}
+
+#[test]
+fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_name() {
+    let other = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
+    let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));
+    let heard = inbound.feed(&frame(&ready(other, 500)), Instant::now());
+    assert_eq!(heard, [Heard::WrongBridge(other)]);
+}
+
+#[test]
+fn ble_failure_reads_as_not_bonded_when_os_words_att_authentication_or_encryption_refusal() {
+    for error in [
+        // BlueZ, for 0x05, 0x0c and 0x0f, as btleplug passes it on.
+        "Not paired",
+        // CoreBluetooth's CBATTError texts.
+        "Authentication is insufficient.",
+        "Encryption is insufficient.",
+    ] {
+        assert!(refused_for_bonding(error), "{error}");
+    }
+}
+
+#[test]
+fn ble_failure_reads_as_other_when_os_error_is_no_bonding_refusal() {
+    for error in [
+        "Write not permitted",
+        "Operation failed with ATT error: 0x11",
+        "Operation Not Authorized",
+        "le-connection-abort-by-local",
+        "Not connected",
+        "Timed out after 10s",
+    ] {
+        assert!(!refused_for_bonding(error), "{error}");
+    }
+}
+
+#[test]
+fn ble_drop_reads_as_maybe_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_with_no_ready() {
+    let after = |secs| Some(Duration::from_secs(secs));
+    assert!(dropped_as_unbonded(after(10), false));
+    assert!(dropped_as_unbonded(after(30), false), "inside the pairing window");
+    assert!(!dropped_as_unbonded(after(10), true), "a bridge that announced");
+    assert!(!dropped_as_unbonded(after(1), false), "a connect that failed");
+    assert!(!dropped_as_unbonded(after(120), false));
+}
+
+#[test]
+fn ble_drop_proves_nothing_when_link_was_up_before_this_connect() {
+    // BlueZ held the link already, so nothing says when the C6's deadline started.
+    assert!(!dropped_as_unbonded(None, false));
+}
+
+#[test]
+fn ble_remembered_matches_address_or_identifier_when_case_differs() {
+    assert!(is_remembered("02:00:5e:10:44:c1", "02:00:5E:10:44:C1", "hci0/dev_02_00_5E_10_44_C1"));
+    let mac_id = "5c3e1a2b-0000-4000-8000-00805f9b34fb";
+    assert!(is_remembered(mac_id, "00:00:00:00:00:00", mac_id), "macOS hides the address");
+    assert!(!is_remembered("02:00:5E:10:44:C1", "02:00:5E:10:44:C2", "hci0/dev_02_00_5E_10_44_C2"));
+}
+
+#[test]
+fn ble_error_words_weak_case_apart_when_bridge_only_dropped_this_pc() {
+    let refused = TransportError::NotBonded { bridge: "44:C0".to_owned() }.to_string();
+    assert!(refused.contains("refused this PC over Bluetooth because they are not paired"));
+    let dropped = TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() }.to_string();
+    assert!(dropped.contains("dropped this PC over Bluetooth before serving it"), "{dropped}");
+    assert!(dropped.contains("if they are not paired"), "{dropped}");
+}
+
+const OTHER: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0xA1, 0xB0];
+const ADDRESS: &str = "02:00:5E:10:44:C1";
+
+#[test]
+fn ble_look_connects_to_remembered_address_when_no_direct_connect_has_failed() {
+    let looked = look(None, Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    let want = Look { direct: Some(ADDRESS.to_owned()), preferred: Some(BridgeSpec::Mac(BRIDGE)) };
+    assert_eq!(looked, want);
+    let named = look(Some(&spec("44:C0")), Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    assert_eq!(named.direct.as_deref(), Some(ADDRESS), "the remembered bridge is the one named");
+}
+
+#[test]
+fn ble_look_scans_preferring_remembered_bridge_when_direct_connect_failed() {
+    // As the serial sweep moves on from the remembered CH343: another bridge advertising is
+    // taken only while the remembered one is not heard.
+    let looked = look(None, Some(BRIDGE), Some(ADDRESS.to_owned()), true);
+    assert_eq!(looked, Look { direct: None, preferred: Some(BridgeSpec::Mac(BRIDGE)) });
+}
+
+#[test]
+fn ble_look_scans_for_named_bridge_only_when_it_is_not_the_remembered_one() {
+    let named = spec("A1:B0");
+    let looked = look(Some(&named), Some(BRIDGE), Some(ADDRESS.to_owned()), false);
+    assert_eq!(looked, Look { direct: None, preferred: Some(named) });
+    assert_eq!(look(None, None, None, false), Look { direct: None, preferred: None });
+}
+
+fn heard(name: &str, live: bool) -> (String, bool, String) {
+    (name.to_owned(), live, name.to_owned())
+}
+
+#[test]
+fn ble_choose_takes_advertising_bridge_when_another_is_only_listed() {
+    // BlueZ lists a bonded bridge it has not heard.
+    let found = choose(vec![heard("wartui 44:C0", false), heard("wartui A1:B0", true)], None);
+    assert_eq!(found.unwrap(), "wartui A1:B0");
+}
+
+#[test]
+fn ble_choose_takes_preferred_bridge_when_several_advertise() {
+    let both = vec![heard("wartui 44:C0", true), heard("wartui A1:B0", true)];
+    let found = choose(both.clone(), Some(&BridgeSpec::Mac(OTHER)));
+    assert_eq!(found.unwrap(), "wartui A1:B0");
+    let refused = choose(both, None).unwrap_err().to_string();
+    assert!(refused.contains("wartui 44:C0, wartui A1:B0"), "{refused}");
+}

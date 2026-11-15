@@ -109,6 +109,7 @@ wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
 wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware through the bridge
+wartui bluetooth pair # pair this PC with the bridge, for `--link bluetooth`
 wartui scan start # set the bridge scanning with no host attached; `scan stop` idles it
 ```
 
@@ -121,7 +122,7 @@ wartui scan start # set the bridge scanning with no host attached; `scan stop` i
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                 |
 | [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses, the C6 link and the fleet planner                  |
-| [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4 and its updates, and no radio                                        |
+| [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4, its updates and the Bluetooth host link                             |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
 | `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                      |
@@ -129,11 +130,14 @@ wartui scan start # set the bridge scanning with no host attached; `scan stop` i
 The nodes connect by SPI to a USB-attached ESP32-P4 board, the bridge, on two buses
 ([`docs/node-bus.md`](docs/node-bus.md)). The bridge assigns their channels. wartui reaches them
 through it: it starts and stops the scan, shows the fleet, and stores everything the nodes see.
+wartui reaches the bridge over USB, or over Bluetooth through its C6 once paired (`--link
+bluetooth`; [The Bluetooth link](crates/wartui/README.md#the-bluetooth-link)). Updates use the USB
+cable.
 
 The nodes run `firmware/node` and the bridge runs `firmware/p4-bridge` and `firmware/p4-radio`, all
 in this repository. A node is a C5, for its 5 GHz radio. The bridge is a Waveshare ESP32-P4-WIFI6:
-the P4 talks to the host, drives the node buses and plans the fleet, and its on-board C6 runs no
-radio.
+the P4 talks to the host, drives the node buses and plans the fleet, and its on-board C6 runs the
+Bluetooth host link.
 
 Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Each
 depends on `crates/wartui-proto`, which keeps the ends of every wire consistent. The library crates

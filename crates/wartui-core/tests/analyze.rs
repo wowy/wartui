@@ -5,16 +5,18 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use wartui_core::analyze::{
-    BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss, losses, peaks,
+    BluetoothLoss, BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
+    losses, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, Observation, Record,
 };
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
-use wartui_proto::link::{QueueId, QueueStat, QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
+use wartui_proto::radio_link::BleCounters;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -24,12 +26,17 @@ const SLOT: Slot = Slot::new(0, 0).unwrap();
 
 /// A fresh capture holding `records`.
 fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
+    capture_over(None, records)
+}
+
+/// A fresh capture over `link` holding `records`.
+fn capture_over(link: Option<HostLink>, records: Vec<Record>) -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { notes: None, simulated: false };
+    let info = CaptureInfo { notes: None, simulated: false, link };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();
@@ -60,6 +67,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         host_uart_errors: 0,
         fan: None,
         slots_present: 0,
+        bluetooth: BluetoothStatus::default(),
     })
 }
 
@@ -320,11 +328,12 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             dropped: 30,
             reboots: 0,
             host_read: 0,
-            usb_lost: 870,
+            link_lost: 870,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }
@@ -346,11 +355,12 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             dropped: 27,
             reboots: 1,
             host_read: 0,
-            usb_lost: 673,
+            link_lost: 673,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }
@@ -507,6 +517,59 @@ fn analyze_sums_radio_link_errors_when_p4_reboots() {
             radio_uart_errors: 8 * n,
         }
     );
+}
+
+/// A status reply carrying the C6's Bluetooth fault counters: resynced bytes `n`, then `2n`, `3n`
+/// and `4n` in [`BluetoothLoss`]'s field order, so no two counters match.
+fn bluetooth_status(uptime_ms: u32, n: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
+    let counters = BleCounters {
+        resynced_bytes: n,
+        dropped_writes: 2 * n,
+        unbonded_kicks: 3 * n,
+        failed_pairings: 4 * n,
+        ..BleCounters::default()
+    };
+    Record::BridgeStatus(BridgeStatusSeen {
+        bluetooth: BluetoothStatus { counters, ..BluetoothStatus::default() },
+        ..seen
+    })
+}
+
+#[test]
+fn analyze_sums_bluetooth_faults_when_c6_restarts_on_its_own() {
+    // The C6 restarts itself when its Bluetooth host stops. A reply's uptime is the C6's, so it
+    // falls, and the counters count from 0 again: here past where the last life left them, which
+    // only the uptime gives away.
+    let (_dir, conn) = capture(vec![
+        bluetooth_status(60_000, 2),
+        bluetooth_status(65_000, 5),
+        bluetooth_status(4_000, 7),
+    ]);
+    let bluetooth = losses(&conn).unwrap().bridge.unwrap().bluetooth;
+    let n = 3 + 7;
+    assert_eq!(
+        bluetooth,
+        BluetoothLoss {
+            resynced_bytes: n,
+            dropped_writes: 2 * n,
+            unbonded_kicks: 3 * n,
+            failed_pairings: 4 * n,
+        }
+    );
+}
+
+#[test]
+fn analyze_reads_capture_link_when_capture_names_one() {
+    let (_dir, conn) = capture(vec![]);
+    assert_eq!(losses(&conn).unwrap().link, None, "the fixture is a capture with no link");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let info = CaptureInfo { notes: None, simulated: false, link: Some(HostLink::Bluetooth) };
+    Store::create(&StoreConfig::new(&path), &info, EPOCH_MS).expect("creating").close();
+    let conn = open_readonly(&path).expect("reopening");
+    assert_eq!(losses(&conn).unwrap().link, Some(HostLink::Bluetooth));
 }
 
 /// A status reply carrying the P4's host UART errors.
@@ -730,17 +793,18 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             dropped: 0,
             reboots: 1,
             host_read: 670,
-            usb_lost: 30,
+            link_lost: 30,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         })
     );
 }
 
 #[test]
-fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
+fn analyze_excludes_bridge_drops_from_link_lost_when_bridge_dropped_frames() {
     // 1,000 received, 10 of them evicted from the bridge's host queue and never sent, and 985
     // read: 5 were lost on USB.
     let (_dir, conn) = capture(vec![
@@ -750,11 +814,11 @@ fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
     ]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
     assert_eq!((bridge.received, bridge.dropped, bridge.host_read), (1_000, 10, 985));
-    assert_eq!(bridge.usb_lost, 5);
+    assert_eq!(bridge.link_lost, 5);
 }
 
 #[test]
-fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
+fn analyze_saturates_link_lost_when_baseline_taken_mid_backlog() {
     // The first reply overtook 24 records still queued in the bridge, so the host had read
     // 24 fewer than `rx_count` says and reads them after the baseline: over the capture it
     // reads more than the bridge received.
@@ -764,7 +828,7 @@ fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
     ]);
     let bridge = losses(&conn).unwrap().bridge.unwrap();
     assert_eq!((bridge.received, bridge.host_read), (400, 424));
-    assert_eq!(bridge.usb_lost, 0);
+    assert_eq!(bridge.link_lost, 0);
 }
 
 #[test]
@@ -784,7 +848,7 @@ fn analyze_reads_host_deltas_and_peaks_when_host_rows_present() {
             undecodable: 30,
             incompatible: 30,
             store_dropped: 30,
-            lag_over_100ms: 2,
+            lag_behind: 2,
             lag_peak_us: 150_000,
             commit_peak_us: 400,
             queue_peak: 40,
@@ -795,6 +859,24 @@ fn analyze_reads_host_deltas_and_peaks_when_host_rows_present() {
             battery_min_mv: Some(3_620),
         }
     );
+}
+
+#[test]
+fn analyze_counts_lag_behind_against_link_threshold_when_capture_names_link() {
+    // Over Bluetooth, 150 ms is delivery clumped by the connection interval, not a backlog.
+    let rows = || {
+        vec![
+            host_row(1, 150_000, None, None, None),
+            host_row(2, 600_000, None, None, None),
+            host_row(3, 0, None, None, None),
+        ]
+    };
+    let lag_behind = |link| {
+        let (_dir, conn) = capture_over(link, rows());
+        losses(&conn).unwrap().host.expect("host rows").lag_behind
+    };
+    assert_eq!(lag_behind(Some(HostLink::Bluetooth)), 1);
+    assert_eq!(lag_behind(Some(HostLink::Usb)), 2);
 }
 
 #[test]

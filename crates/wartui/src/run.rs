@@ -26,7 +26,6 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
-use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
@@ -35,11 +34,19 @@ use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, Sto
 use wartui_core::ubx;
 
 #[derive(ClapArgs, Debug)]
+// `run` adds a sentence to the shared `--link` help, which clap holds without its final period.
+#[command(mut_arg("link", |arg| {
+    let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+    arg.help(format!("{help}. The link a run connects over is saved there"))
+}))]
 pub struct Args {
     /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
     /// if omitted. A board named here that answers is remembered as the bridge.
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
+
+    #[command(flatten)]
+    pub(crate) link_flag: crate::config::LinkFlag,
 
     /// Read settings from this file instead of the default location
     /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
@@ -53,7 +60,8 @@ pub struct Args {
         value_name = "NODES",
         num_args = 0..=1,
         default_missing_value = "3",
-        value_parser = crate::sim_nodes()
+        value_parser = crate::sim_nodes(),
+        conflicts_with = "link"
     )]
     sim: Option<u8>,
 
@@ -212,12 +220,17 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
-    let memory = BridgeMemory::holding(config.bridge.mac).on_port(config.bridge.serial.clone());
+    let memory = crate::memory_of(&config.bridge);
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
-    let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
+    let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), config.bridge.link)?;
+    let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
     let started = now();
-    let info = CaptureInfo { notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
+    let info = CaptureInfo {
+        notes: args.notes.clone(),
+        simulated: test_data(args.sim, args.lat),
+        link: args.sim.is_none().then_some(over.into()),
+    };
     let store_config = StoreConfig::new(&db);
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
@@ -231,6 +244,9 @@ pub async fn run(args: Args) -> Result<()> {
         saved: config,
         bridge_memory: memory,
         simulated: args.sim.is_some(),
+        // The simulator's link is no link to save.
+        link: args.sim.is_none().then_some(over),
+        link_proved: false,
         upload,
     };
     let config = EngineConfig {
@@ -241,6 +257,7 @@ pub async fn run(args: Args) -> Result<()> {
         position,
         excluded_ssids,
         gps_rate_hz,
+        link: info.link,
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

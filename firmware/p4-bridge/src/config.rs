@@ -4,17 +4,24 @@
 //! default here, so a bench run resizes one with a rebuild rather than an edit.
 //! `wartui_proto::config` has the parsing.
 //!
-//! esp-hal's default 256 KB L2 cache leaves the P4 about 439 KB of internal RAM, and the
-//! spike ran a 300 KB host queue in it, so these defaults fit without PSRAM. The main stack gets
-//! what the statics leave, about 32 KB with these defaults. A bench `wartui status` reports each
-//! queue's high-water mark, which is how to right-size them: the host bulk queue peaks well under
-//! 1% of its size on a carrier.
+//! esp-hal's default 256 KB L2 cache leaves the P4 about 439 KB of internal RAM, and the main
+//! stack gets what the statics leave. The host bulk ring is the one queue in PSRAM, past the node
+//! image cache (`src/cache.rs`), for three reasons (`docs/c6-ble-host-findings.md`, run 15):
+//!
+//! - it frees 240 KB of internal RAM;
+//! - at 1 MB it holds two 500-batch bursts, which a Bluetooth host drains far slower than UART0;
+//! - it bounds the lag. A sighting is positioned when it reaches the host, so the ring's size is
+//!   the worst lag: ~27 s at the slowest central measured, 39.1 KB/s.
+//!
+//! PSRAM costs UART0 nothing measurable: it carried 391 KB/s of 4 Mbaud's 400 KB/s from it. A bench
+//! `wartui status` reports each queue's high-water mark, which is how to right-size them.
 
 use wartui_proto::config::env_usize;
 
 /// Bytes of encoded frames bound for the host that may be evicted when it falls behind:
-/// node records, GPS bytes and logs.
-pub const HOST_BULK_BYTES: usize = env_usize(option_env!("WARTUI_P4_HOST_BULK_BYTES"), 240 * 1024);
+/// node records, GPS bytes and logs. Taken from the PSRAM the node image cache leaves, and fewer
+/// when less is mapped.
+pub const HOST_BULK_BYTES: usize = env_usize(option_env!("WARTUI_P4_HOST_BULK_BYTES"), 1024 * 1024);
 
 /// Bytes of encoded frames bound for the host that answer it: `Ready`, `Status`, delivery
 /// answers and errors.

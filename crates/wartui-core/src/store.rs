@@ -17,6 +17,13 @@
 //! A file holds one run. [`Store::create`] refuses a path that exists, so every export, analysis
 //! and upload cutoff is about one file, with no run to pick.
 //!
+//! Each status reply's Bluetooth host link is a `bridge_bluetooth` row beside its `bridge_status`
+//! row, as its queues are `bridge_queue` rows: its counters are the C6's, which restart with the C6
+//! while the P4's run on, and its central columns are null whenever no central is connected. A
+//! capture over USB keeps it too, since a Bluetooth host waiting behind USB shows only there. The
+//! link the host used is a `capture` column, written once at [`Store::create`]: a run picks its
+//! link before it opens it, and keeps it.
+//!
 //! The version marker, [`SCHEMA_VERSION`], names a file's shape. [`check_version`] refuses any
 //! other marker, because queries against another shape fail or misread. There is no migration to
 //! offer, so the fix for a refused file is a new `--db` path.
@@ -32,10 +39,11 @@ pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
+use wartui_proto::link::PairWindow;
 use wartui_proto::plan::ChannelPool;
 
 use crate::engine::{StorePeaks, StoreStats};
-use crate::record::{CaptureSettings, Record};
+use crate::record::{CaptureSettings, HostLink, Record};
 
 /// The schema version this build writes and reads, and the only thing that names a file's shape.
 /// Bump it for any change to a table, column or index, or to what a stored value wartui reads back
@@ -49,7 +57,7 @@ use crate::record::{CaptureSettings, Record};
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -63,6 +71,9 @@ CREATE TABLE IF NOT EXISTS capture (
   -- What carries the bridge's nodes: `no carrier`, `carrier-6`, `carrier-10` or `carrier-14`.
   -- It maps each stored slot to the name the operator read (`B1` is `N8` on the 14).
   node_board TEXT,
+  -- The link the host reached the bridge over: `usb` or `bluetooth`. NULL under --sim, whose
+  -- bridge is simulated.
+  link TEXT,
   notes TEXT,
   -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
   -- position). WDGWars and WiGLE ban both, so it is never uploaded.
@@ -203,6 +214,41 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
   capacity INTEGER NOT NULL,
   high_water INTEGER NOT NULL,
   dropped INTEGER NOT NULL
+);
+
+-- One row per bridge status reply, beside its `bridge_status` row: the Bluetooth host link as the
+-- reply carried it. `owner` is who the P4's host queue served: `none`, `usb` or `bluetooth`.
+-- `bonds` is the bonds the P4 keeps. `pair_window` is `closed`, `open` with `pair_window_secs`
+-- left, or `until-bonded`, open until a host pairs because no bond is stored; `pair_window_secs`
+-- is NULL unless `open`. The `central_*` columns are the central connected to the C6, all NULL
+-- with none: whether its link is encrypted, whether it holds a stored bond, its ATT MTU, its PHY
+-- (1 for 1M, 2 for 2M, 3 for Coded) and its connection interval in microseconds. The rest are the
+-- C6's counters since it booted, named as `BleCounters` names them: raw, so a C6 restart shows as
+-- the values falling. `last_disconnect` is the latest disconnection's HCI reason code, 0 before
+-- the first; `resynced_bytes` is host stream bytes lost on the way from the P4 to the C6;
+-- `dropped_writes` is bytes a central wrote that the C6 dropped; `phy` and `interval_us` are the
+-- C6's own reading of its connection, 0 with none; `heap_high_water` is the most heap the C6 has
+-- used, in bytes.
+CREATE TABLE IF NOT EXISTS bridge_bluetooth (
+  status_id INTEGER PRIMARY KEY REFERENCES bridge_status(id),
+  owner TEXT NOT NULL,
+  bonds INTEGER NOT NULL,
+  pair_window TEXT NOT NULL,
+  pair_window_secs INTEGER,
+  central_encrypted INTEGER,
+  central_bonded INTEGER,
+  central_mtu INTEGER,
+  central_phy INTEGER,
+  central_interval_us INTEGER,
+  pairings INTEGER NOT NULL,
+  failed_pairings INTEGER NOT NULL,
+  unbonded_kicks INTEGER NOT NULL,
+  last_disconnect INTEGER NOT NULL,
+  resynced_bytes INTEGER NOT NULL,
+  dropped_writes INTEGER NOT NULL,
+  phy INTEGER NOT NULL,
+  interval_us INTEGER NOT NULL,
+  heap_high_water INTEGER NOT NULL
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
@@ -441,6 +487,18 @@ pub struct CaptureInfo {
     pub notes: Option<String>,
     /// Whether it holds test data: made with `--sim` or `--lat`/`--lon`.
     pub simulated: bool,
+    /// The link the host reaches the bridge over, or `None` under `--sim`.
+    pub link: Option<HostLink>,
+}
+
+/// The link this capture's host used, or `None` under `--sim`.
+///
+/// # Errors
+/// If the query fails.
+pub fn capture_link(conn: &Connection) -> rusqlite::Result<Option<HostLink>> {
+    let name: Option<String> =
+        conn.query_row("SELECT link FROM capture WHERE id = 1", [], |row| row.get(0))?;
+    Ok(name.as_deref().and_then(HostLink::from_name))
 }
 
 /// Host identity and applied initial settings, supplied by the executable creating a capture.
@@ -523,8 +581,14 @@ impl Store {
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.execute(
-            "INSERT INTO capture (id, started_at, notes, simulated) VALUES (1, ?1, ?2, ?3)",
-            params![started_at_ms, capture.notes, capture.simulated],
+            "INSERT INTO capture (id, started_at, link, notes, simulated) \
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                started_at_ms,
+                capture.link.map(HostLink::name),
+                capture.notes,
+                capture.simulated
+            ],
         )?;
         for (key, value) in [
             ("capture.bus_version", Some(BUS_VERSION.to_string())),
@@ -960,6 +1024,15 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
     )
 }
 
+/// The `bridge_bluetooth.pair_window` token for `window`, and its seconds left when open.
+const fn window_columns(window: PairWindow) -> (&'static str, Option<u16>) {
+    match window {
+        PairWindow::Closed => ("closed", None),
+        PairWindow::Open { secs } => ("open", Some(secs)),
+        PairWindow::UntilBonded => ("until-bonded", None),
+    }
+}
+
 /// The `kind` column's token for `kind`.
 pub(crate) const fn kind_name(kind: RecordKind) -> &'static str {
     match kind {
@@ -1221,6 +1294,40 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         q.dropped
                     ])?;
                 }
+                let bluetooth = &status.bluetooth;
+                let central = bluetooth.central;
+                let c = &bluetooth.counters;
+                let (window, window_secs) = window_columns(bluetooth.window);
+                tx.prepare_cached(
+                    "INSERT INTO bridge_bluetooth
+                       (status_id, owner, bonds, pair_window, pair_window_secs,
+                        central_encrypted, central_bonded, central_mtu, central_phy,
+                        central_interval_us, pairings, failed_pairings, unbonded_kicks,
+                        last_disconnect, resynced_bytes, dropped_writes, phy, interval_us,
+                        heap_high_water)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                )?
+                .execute(params![
+                    status_id,
+                    bluetooth.owner.name(),
+                    bluetooth.bonds,
+                    window,
+                    window_secs,
+                    central.map(|central| central.encrypted),
+                    central.map(|central| central.bonded),
+                    central.map(|central| central.mtu),
+                    central.map(|central| central.phy),
+                    central.map(|central| central.interval_us),
+                    c.pairings,
+                    c.failed_pairings,
+                    c.unbonded_kicks,
+                    c.last_disconnect,
+                    c.resynced_bytes,
+                    c.dropped_writes,
+                    c.phy,
+                    c.interval_us,
+                    c.heap_high_water,
+                ])?;
             }
             Record::HostStatus(host) => {
                 tx.prepare_cached(
@@ -1297,6 +1404,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             slots_present: 0,
+            bluetooth: Default::default(),
         })
     }
 

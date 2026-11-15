@@ -3,9 +3,10 @@
 The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs this firmware: it
 talks to the host with wartui's link protocol over UART0, which the board's CH343 carries to the
 Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on the board's SDIO
-traces. The C6 holds that link for a future Bluetooth host link
-([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting both chips'
-diagnostics. The queue sizes are in `src/config.rs`.
+traces. The C6 runs a Bluetooth host link over it
+([`firmware/p4-radio`](../p4-radio/README.md)), so a bonded central can be the host instead
+(§ "Bluetooth hosts"). The host sees one bridge, reporting both chips' diagnostics. The queue
+sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -160,16 +161,21 @@ it (`src/cache.rs`). The upload goes through the same update receiver the P4's o
 the cache serves an image only once its SHA-256 checks. Until then, and for a chunk that names
 another image or runs past its end, the P4 answers `Undelivered` `NoImage`.
 
-The cache takes up to 2 MB, a node's app slot, of the board's 32 MB of PSRAM. A P4 whose PSRAM
-does not map refuses every upload and logs `node image cache: no PSRAM` to the first host it
-announces to; everything else runs. The cache is dropped when the host gate closes.
+The cache takes up to 2 MB, a node's app slot, of the board's 32 MB of PSRAM, and the host bulk
+ring the next 1 MB (§ "Queue sizes"). A P4 whose PSRAM does not map refuses every upload, runs its
+bulk ring over no bytes, and reports the error `no PSRAM: no node image cache, and the host bulk
+ring holds nothing` to the first host it announces to; everything else runs. One whose PSRAM the
+cache takes whole reports `too little PSRAM: the host bulk ring holds nothing` instead. The cache is
+dropped when a host lets go of the queue.
 
 ## The bundled radio image
 
 At boot the P4 compares the image digest in the C6's hello with the image it carries. When they
 differ, it sends the C6 its image over the UART link, once per boot. The C6 writes it, reboots
-into it and boots it on trial, and the P4's hello confirms it. The host sees the C6's reboot as a
-new bridge life, with a fresh `Ready`.
+into it and boots it on trial. The image is confirmed once it has heard the P4's hello and its
+Bluetooth host has started advertising, and one that has not advertised 30 s after boot restarts
+itself, which spends a trial boot ([`firmware/p4-radio/README.md`](../p4-radio/README.md)
+§ "Updates"). The host sees the C6's reboot as a new bridge life, with a fresh `Ready`.
 
 Meanwhile the bridge announces the C6's MAC. With a C6 image of about 570 KB, `flash-bridge`
 updated both chips in 11 s and 17 s on the bench
@@ -193,6 +199,35 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 A refused or silent update also sends one line naming why: `the radio refused the bundled image:
 …` or `the radio stopped answering its update`.
 
+## Bluetooth hosts
+
+A central bonded over Bluetooth, through the C6, can be the host instead of UART0 (`src/ble.rs`).
+One host owns the host queue at a time, by the rules of `wartui_proto::host_owner`:
+
+| What happens | Who owns the queue after |
+| --- | --- |
+| A bonded central subscribes on an encrypted link, with no owner | Bluetooth |
+| A central subscribes while USB owns the queue | USB; the central waits |
+| A UART0 frame other than `Identify` | USB. A central that owned the queue is first sent the error `the USB host took the bridge` |
+| An `Identify` on UART0 while Bluetooth owns the queue | Bluetooth. UART0 gets one `Ready`, so `wartui ports` and `--bridge` lookups cost the central nothing |
+| 15 s without a UART0 frame while USB owns the queue | Bluetooth if a central waits, else no one |
+| The central unsubscribes or disconnects, or the C6 restarts | No one, or USB if it owns the queue |
+
+So `wartui flash-bridge` over USB always gets in. Taking the queue clears it and announces the
+bridge to the new owner, as a USB host's first frame does. The P4 sends a central the host stream
+inside a 16 KB credit window, so a slow central backs it up in the host bulk ring rather than
+holding the C6 link.
+
+**Bonds.** The C6 serves only a central that has bonded (`firmware/p4-radio/src/ble.rs`). The P4
+keeps up to four bonds in the second sector of its `nvs` partition and sends them to the C6 after
+each hello, on each change and every 5 s (`src/bonds.rs`). The pairing window, when a new central
+may pair, is open while no bond is stored, for 120 s after the P4 boots, and for 120 s after a
+host's `OpenPairing`, from USB or a bonded central. `ClearBonds` drops every bond, which opens the window until a central bonds,
+and the C6 disconnects a central connected on one of them.
+A host that held a bond then fails every connect until it forgets the bridge and pairs again
+([`docs/c6-ble-pairing-findings.md`](../../docs/c6-ble-pairing-findings.md)). `Status` reports
+the owner, the bonds, the window, the connected central and the C6's Bluetooth counters.
+
 ## Settings
 
 The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
@@ -212,7 +247,9 @@ measured: 4 Mbaud is the fastest the CH343 carries cleanly.
 
 **The P4 writes to the host only while it hears one.** Any host frame that decodes opens the
 gate, clears both host queues and announces the bridge; 15 s without one closes it. A host
-connection that sends nothing for 10 s sends a status poll, so a reading host keeps it open.
+connection that sends nothing for 10 s sends a status poll, so a reading host keeps it open. While
+a Bluetooth central owns the host queue, an `Identify` is answered with a `Ready` alone, and any
+other frame takes the queue (§ "Bluetooth hosts").
 
 **Host bytes are lost while the P4 writes its own flash**, with interrupts off for about 40 ms.
 `Status.host_uart_errors` counts the host-link reads that saw one or more line errors or
@@ -259,14 +296,20 @@ Each is read at build time from an environment variable, so a bench run resizes 
 rebuild, for example `WARTUI_P4_HOST_BULK_BYTES=131072 cargo build --release`. `wartui status`
 reports each queue's high-water mark.
 
-The host queues fill only while a host is present. Frames produced without one are dropped, and a
-host's arrival clears both host queues before it reads anything, so the bulk ring absorbs
-congestion while a host reads and never holds a backlog for an absent one. Neither discard counts
-as a drop in `Status`.
+The host queues fill only while a host owns them, on UART0 or over Bluetooth. Frames produced
+without one are dropped, and a host's arrival clears both host queues before it reads anything, so
+the bulk ring absorbs congestion while a host reads and never holds a backlog for an absent one.
+Neither discard counts as a drop in `Status`.
+
+The bulk ring is in PSRAM, past the node image cache, and the other queues in internal RAM. At
+1 MB it holds two 500-batch bursts on the slowest central measured, and bounds the lag a backlog
+costs at about 27 s on it, since a sighting is positioned when it reaches the host
+([`docs/c6-ble-host-findings.md`](../../docs/c6-ble-host-findings.md), run 15). A board that maps
+less PSRAM gets a smaller ring.
 
 | Variable | Default | Holds |
 | --- | --- | --- |
-| `WARTUI_P4_HOST_BULK_BYTES` | 245760 | frames for the host that may be evicted: node records, GPS bytes and logs |
+| `WARTUI_P4_HOST_BULK_BYTES` | 1048576 | frames for the host that may be evicted: node records, GPS bytes and logs, in PSRAM |
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
 | `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |

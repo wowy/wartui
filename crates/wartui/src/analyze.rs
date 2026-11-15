@@ -14,9 +14,11 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{
-    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
+    BridgeLoss, HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
+use wartui_core::engine::behind_us;
 use wartui_core::export::wigle_csv;
+use wartui_core::record::HostLink;
 use wartui_core::store::open_readonly;
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::mac::{self, Mac};
@@ -123,7 +125,8 @@ fn peaks_text(peak: &PeakSummary, names: &NodeNames) -> String {
 }
 
 /// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
-/// `lost on USB` is approximate to the bridge's queued frames.
+/// `lost on USB`, `lost on Bluetooth` in a capture over Bluetooth, is approximate to the bridge's
+/// queued frames, and includes what the bridge received while it did not serve this host.
 fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 
@@ -145,8 +148,10 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         if bridge.host_read > 0 {
             let _ = write!(line, "  host read {}", thousands(bridge.host_read));
         }
-        if bridge.usb_lost > 0 {
-            let _ = write!(line, "  {} lost on USB", thousands(bridge.usb_lost));
+        if bridge.link_lost > 0 {
+            // The host's link, which is USB in a capture that names none.
+            let on = if loss.link == Some(HostLink::Bluetooth) { "Bluetooth" } else { "USB" };
+            let _ = write!(line, "  {} lost on {on}", thousands(bridge.link_lost));
         }
         if bridge.oversize > 0 {
             let _ = write!(line, "  {} oversize (not a node's)", thousands(bridge.oversize));
@@ -163,18 +168,14 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
                 thousands(queue.dropped)
             );
         }
-        // Both are the P4's, and the host link's errors are said at 0 too: they answer whether
-        // the host's frames reached the P4.
         let _ = writeln!(text, "  {:<11}{}", "radio link", radio_link_line(&bridge.radio_link));
-        let _ = writeln!(
-            text,
-            "  {:<11}{} host_uart_errors",
-            "host link",
-            thousands(bridge.host_uart_errors)
-        );
+        let _ = writeln!(text, "  {:<11}{}", "host link", host_link_line(loss.link, bridge));
+    } else if let Some(link) = loss.link {
+        // No status reply at all, where the link is the first suspect.
+        let _ = writeln!(text, "  {:<11}{}  no status reply", "host link", link.name());
     }
     if let Some(host) = &loss.host {
-        let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
+        let _ = writeln!(text, "  {:<11}{}", "host", host_line(host, loss.link));
         if let Some(health) = health_line(host) {
             let _ = writeln!(text, "  {:<11}{health}", "health");
         }
@@ -213,6 +214,31 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     text
 }
 
+/// The link the host used, the P4's host UART errors, then only the C6's Bluetooth host link
+/// faults that moved.
+///
+/// The UART errors are said at 0 over USB, where they answer whether the host's frames reached
+/// the P4. Over Bluetooth that UART is not the host's link, so they are a fault like the rest.
+/// The Bluetooth faults are reported over USB too: a Bluetooth host waiting behind USB is still
+/// the C6's.
+fn host_link_line(link: Option<HostLink>, bridge: &BridgeLoss) -> String {
+    let over_bluetooth = link == Some(HostLink::Bluetooth);
+    let mut parts: Vec<String> = link.map(|link| link.name().to_owned()).into_iter().collect();
+    let b = &bridge.bluetooth;
+    for (count, name, at_zero) in [
+        (bridge.host_uart_errors, "host_uart_errors", !over_bluetooth),
+        (b.resynced_bytes, "resynced_bytes", false),
+        (b.dropped_writes, "dropped_writes", false),
+        (b.unbonded_kicks, "unbonded_kicks", false),
+        (b.failed_pairings, "failed_pairings", false),
+    ] {
+        if count > 0 || at_zero {
+            parts.push(format!("{} {name}", thousands(count)));
+        }
+    }
+    parts.join("  ")
+}
+
 /// The UART link's packets, then only the error counters that moved.
 fn radio_link_line(radio_link: &RadioLinkLoss) -> String {
     use std::fmt::Write as _;
@@ -236,8 +262,8 @@ fn radio_link_line(radio_link: &RadioLinkLoss) -> String {
 }
 
 /// The host's figures, each clause only when non-zero but `store dropped`, which is the
-/// answer even at 0.
-fn host_line(host: &HostLoss) -> String {
+/// answer even at 0. `behind` names the capture link's threshold.
+fn host_line(host: &HostLoss, link: Option<HostLink>) -> String {
     let nonzero = |n: u64, what: &str| (n > 0).then(|| format!("{} {what}", thousands(n)));
     let mut clauses = Vec::new();
     let not_stored = host.duplicates + host.undecodable + host.incompatible;
@@ -254,11 +280,12 @@ fn host_line(host: &HostLoss) -> String {
     }
     clauses.push(format!("{} store dropped", thousands(host.store_dropped)));
     clauses.extend(nonzero(host.garbled, "garbled"));
-    if host.lag_over_100ms > 0 {
-        let plural = if host.lag_over_100ms == 1 { "" } else { "s" };
+    if host.lag_behind > 0 {
+        let plural = if host.lag_behind == 1 { "" } else { "s" };
         clauses.push(format!(
-            "behind ≥100 ms {} time{plural} (worst {})",
-            thousands(host.lag_over_100ms),
+            "behind ≥{} {} time{plural} (worst {})",
+            millis(behind_us(link)),
+            thousands(host.lag_behind),
             millis(host.lag_peak_us)
         ));
     }
@@ -318,9 +345,10 @@ fn percent(part: u64, whole: u64) -> String {
 #[cfg(test)]
 mod tests {
     use wartui_core::analyze::{
-        BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary, QueueLoss,
-        RadioLinkLoss,
+        BluetoothLoss, BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
+        QueueLoss, RadioLinkLoss,
     };
+    use wartui_core::record::HostLink;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::QueueId;
     use wartui_proto::mac::Mac;
@@ -377,11 +405,12 @@ mod tests {
                 dropped: 1_300,
                 reboots: 1,
                 host_read: 0,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             nodes: vec![
                 NodeLoss {
@@ -416,17 +445,18 @@ mod tests {
                 dropped: 0,
                 reboots: 0,
                 host_read: 31_821,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
                 duplicates: 140,
                 incompatible: 7,
-                lag_over_100ms: 31,
+                lag_behind: 31,
                 lag_peak_us: 412_300,
                 commit_peak_us: 58_000,
                 queue_peak: 1_204,
@@ -532,35 +562,41 @@ mod tests {
             dropped: 0,
             reboots: 0,
             host_read: 0,
-            usb_lost: 0,
+            link_lost: 0,
             oversize: 0,
             queues: vec![],
             radio_link: RadioLinkLoss::default(),
             host_uart_errors: 0,
+            bluetooth: BluetoothLoss::default(),
         });
         let text = loss_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
     }
 
-    /// A bridge line for `received`, `dropped` and `host_read`, `usb_lost` taken as
+    /// A bridge line for `received`, `dropped` and `host_read`, `link_lost` taken as
     /// analyze takes it.
     fn bridge_line(received: u64, dropped: u64, host_read: u64) -> String {
-        let usb_lost = received.saturating_sub(dropped).saturating_sub(host_read);
-        let loss = LossSummary {
+        first_line(&loss_text(&bridge_counts(received, dropped, host_read)))
+    }
+
+    /// A capture whose bridge reported `received`, `dropped` and `host_read`.
+    fn bridge_counts(received: u64, dropped: u64, host_read: u64) -> LossSummary {
+        let link_lost = received.saturating_sub(dropped).saturating_sub(host_read);
+        LossSummary {
             bridge: Some(BridgeLoss {
                 received,
                 dropped,
                 reboots: 0,
                 host_read,
-                usb_lost,
+                link_lost,
                 oversize: 0,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
-        };
-        first_line(&loss_text(&loss))
+        }
     }
 
     /// The report's first line, the bridge's, with its newline.
@@ -576,11 +612,12 @@ mod tests {
                 dropped: 10,
                 reboots: 0,
                 host_read: 990,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 42,
                 queues: vec![],
                 radio_link: RadioLinkLoss::default(),
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
         };
@@ -631,7 +668,7 @@ mod tests {
                 dropped: 0,
                 reboots: 0,
                 host_read: 1_000,
-                usb_lost: 0,
+                link_lost: 0,
                 oversize: 0,
                 queues: vec![
                     QueueLoss {
@@ -644,6 +681,7 @@ mod tests {
                 ],
                 radio_link,
                 host_uart_errors: 0,
+                bluetooth: BluetoothLoss::default(),
             }),
             ..Default::default()
         }
@@ -695,6 +733,41 @@ mod tests {
     }
 
     #[test]
+    fn analyze_report_names_link_and_bluetooth_faults_when_capture_has_them() {
+        let mut loss = bridge_with_link(RadioLinkLoss { packets: 9, ..Default::default() });
+        loss.link = Some(HostLink::Bluetooth);
+        // The P4's host UART is not this host's link, so its errors are not said at 0.
+        assert!(loss_text(&loss).ends_with("  host link  bluetooth\n"));
+        loss.bridge.as_mut().unwrap().bluetooth =
+            BluetoothLoss { resynced_bytes: 1_244, unbonded_kicks: 2, ..BluetoothLoss::default() };
+        loss.bridge.as_mut().unwrap().host_uart_errors = 3;
+        let text = loss_text(&loss);
+        assert!(
+            text.ends_with(
+                "  host link  bluetooth  3 host_uart_errors  1,244 resynced_bytes  \
+                 2 unbonded_kicks\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn analyze_report_names_lost_frames_by_link_when_capture_is_over_bluetooth() {
+        let mut loss = bridge_counts(1_000, 10, 985);
+        assert!(loss_text(&loss).contains("  5 lost on USB\n"));
+        loss.link = Some(HostLink::Bluetooth);
+        let text = loss_text(&loss);
+        assert!(text.contains("  5 lost on Bluetooth\n"), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_names_link_when_bridge_never_answered() {
+        let loss = LossSummary { link: Some(HostLink::Bluetooth), ..LossSummary::default() };
+        assert_eq!(loss_text(&loss), "  host link  bluetooth  no status reply\n");
+        assert_eq!(loss_text(&LossSummary::default()), "");
+    }
+
+    #[test]
     fn analyze_report_omits_buffer_full_figures_when_zero() {
         let mut loss = evening();
         for node in &mut loss.nodes {
@@ -722,6 +795,15 @@ mod tests {
              \x20 health     under-voltage in 3 samples  throttled in 0  \
              since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V\n"
         );
+    }
+
+    #[test]
+    fn analyze_report_names_bluetooth_threshold_when_capture_is_over_bluetooth() {
+        let mut loss = drive();
+        loss.link = Some(HostLink::Bluetooth);
+        loss.host.as_mut().unwrap().lag_peak_us = 612_300;
+        let text = loss_text(&loss);
+        assert!(text.contains("  behind ≥500 ms 31 times (worst 612 ms)  "), "{text}");
     }
 
     #[test]
