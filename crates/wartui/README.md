@@ -161,7 +161,7 @@ of its output, after the export summary:
   queue      node-down  peak 3,102/4,160 bytes  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
   host link  bluetooth  1,244 resynced_bytes
-  host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
+  host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥500 ms 31 times (worst 612 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   buffer full wifi 18,220  ble 1,203
@@ -234,7 +234,7 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 | `not stored`           | Frames read and deliberately dropped: bus resends, undecodable, incompatible   |
 | `store dropped`        | Rows lost because the store's queue was full or a write failed                 |
 | `garbled`              | USB frames that failed their checksum                                          |
-| `behind ≥100 ms`       | Samples in which the host read the link 100 ms or more behind the bridge       |
+| `behind`               | Samples read behind the bridge: from 100 ms over USB, 500 ms over Bluetooth    |
 | `slowest commit`       | The slowest batch the store wrote                                              |
 | `queue peak`           | The deepest the store's queue got                                              |
 
@@ -1402,9 +1402,8 @@ and why a link went down, once per reason, since somebody else's port is retried
 capture. The GPS reader logs searching, its first fix, stale fixes, recovery, and unreadable or
 removed receivers on transitions, not every sentence or satellite-count change. Reopening a failed
 port does not count as recovery until a valid fix or no-fix report arrives. The log also records each
-time the host falls 100 ms or more behind the bridge and when it catches up, with both frames' bridge
-stamps. A reconnect while frames are arriving can log one spell of about 100 ms, because the lag after
-a connect starts from the 100 ms the engine assumes rather than from a measurement. Every line the
+time the host falls behind the bridge and when it catches up, with both frames' bridge stamps. Behind
+is 100 ms over USB and 500 ms over Bluetooth, whose connection interval clumps delivery. Every line the
 bridge sends is logged as `bridge: …`, faults at `warn`, such as `the radio has stopped answering`.
 Each node's membership changes are logged once each:
 

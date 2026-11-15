@@ -287,6 +287,7 @@ pub async fn run(args: Args) -> Result<()> {
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.
             position: PositionChain::fixed(0.0, 0.0, None),
+            link: info.link,
             ..EngineConfig::default()
         },
         started,

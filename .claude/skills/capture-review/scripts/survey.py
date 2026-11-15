@@ -1077,12 +1077,14 @@ def host(db, ctx):
     print("  " + "  ".join(f"{k} {v}" for k, v in deltas.items()))
     for c in ("lag_peak_us", "store_queue_peak", "store_commit_peak_us"):
         print(f"  {c:<22}{spread([r[c] for r in rows])}")
-    behind = sum(1 for r in rows if r["lag_peak_us"] >= 100_000)
+    # The engine's `behind_us`: wider over Bluetooth, which delivers once per connection interval.
+    line_us = 500_000 if ctx.get("link") == "bluetooth" else 100_000
+    behind = sum(1 for r in rows if r["lag_peak_us"] >= line_us)
     if behind:
         flag("WARN" if behind > 5 else "INFO", "host",
-             f"host read the link >=100 ms behind the bridge in {behind} of {len(rows)} samples "
-             "(heartbeats read then are history)",
-             "SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= 100000")
+             f"host read the link >={line_us // 1000} ms behind the bridge in {behind} of "
+             f"{len(rows)} samples (heartbeats read then are history)",
+             f"SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= {line_us}")
     for c, sev in (("store_dropped", "WARN"), ("garbled", "WARN"), ("undecodable", "WARN"),
                    ("incompatible", "WARN")):
         if deltas.get(c):

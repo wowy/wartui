@@ -115,7 +115,7 @@ pub struct LinkFlag {
     pub link: Option<Link>,
 }
 
-impl From<Link> for wartui_core::store::HostLink {
+impl From<Link> for wartui_core::record::HostLink {
     fn from(link: Link) -> Self {
         match link {
             Link::Usb => Self::Usb,

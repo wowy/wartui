@@ -406,14 +406,15 @@ edit stops; follow the pointer before changing the rule.
   `crates/wartui-proto/src/fleet.rs`, `pick_bluetooth`; `docs/phase-2-findings.md`
 - **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains
   the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the gap is the
-  lag. Such a heartbeat's epoch is not believed: it does not set what the node holds, so the view
-  never shows a node adopting from one, and its epoch 0 never reads as a restart. A falling counter
-  in it still does. Delete the check and the symptom is a plausible-looking lie rather than an
-  error.
+  lag. How much lag counts as behind depends on the link: Bluetooth clumps delivery by its
+  connection interval, so its line is wider than USB's. Such a heartbeat's epoch is not believed:
+  it does not set what the node holds, so the view never shows a node adopting from one, and its
+  epoch 0 never reads as a restart. A falling counter in it still does. Delete the check and the
+  symptom is a plausible-looking lie rather than an error.
   A connection starts caught up, which is safe only because nothing older than it reaches the
   engine: a bridge clears its queue when a host connects, and the transport drops what decodes
   ahead of a connection's first `Ready`.
-  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `BEHIND_US`;
+  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `reading_live` / `behind_us`;
   `crates/wartui-core/src/engine/rx.rs`, `on_heartbeat`; `crates/wartui-bridge/src/gate.rs`,
   which both transports read through
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before

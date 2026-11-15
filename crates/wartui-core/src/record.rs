@@ -11,7 +11,7 @@ use wartui_proto::beacon::visible_ssid;
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{BluetoothStatus, QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, HostOwner, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -221,6 +221,40 @@ pub struct RawFrame {
     pub kind: u8,
     /// The undecoded body.
     pub bytes: Vec<u8>,
+}
+
+/// The link a host reaches its bridge over, as `capture.link` stores it. Its tokens are its
+/// [`HostOwner`]'s, so `capture.link` and `bridge_bluetooth.owner` compare equal for the same
+/// host; it has no `none`, since a capture's host always had a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostLink {
+    /// The board's CH343, over USB.
+    Usb,
+    /// The board's C6, over Bluetooth.
+    Bluetooth,
+}
+
+impl HostLink {
+    /// The owner of the P4's host queue while this link's host holds it.
+    #[must_use]
+    pub const fn owner(self) -> HostOwner {
+        match self {
+            Self::Usb => HostOwner::Usb,
+            Self::Bluetooth => HostOwner::Bluetooth,
+        }
+    }
+
+    /// The `capture.link` token: [`HostOwner::name`].
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        self.owner().name()
+    }
+
+    /// The link a `capture.link` token names, or `None` for a token [`Self::name`] never writes.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Usb, Self::Bluetooth].into_iter().find(|link| link.name() == name)
+    }
 }
 
 /// Which bridge this capture came through. Separate from [`crate::store::CaptureInfo`] because a

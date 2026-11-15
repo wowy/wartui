@@ -16,8 +16,10 @@ use clap::Args as ClapArgs;
 use wartui_core::analyze::{
     BridgeLoss, HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
+use wartui_core::engine::behind_us;
 use wartui_core::export::wigle_csv;
-use wartui_core::store::{HostLink, open_readonly};
+use wartui_core::record::HostLink;
+use wartui_core::store::open_readonly;
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::mac::{self, Mac};
 
@@ -173,7 +175,7 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
         let _ = writeln!(text, "  {:<11}{}  no status reply", "host link", link.name());
     }
     if let Some(host) = &loss.host {
-        let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
+        let _ = writeln!(text, "  {:<11}{}", "host", host_line(host, loss.link));
         if let Some(health) = health_line(host) {
             let _ = writeln!(text, "  {:<11}{health}", "health");
         }
@@ -260,8 +262,8 @@ fn radio_link_line(radio_link: &RadioLinkLoss) -> String {
 }
 
 /// The host's figures, each clause only when non-zero but `store dropped`, which is the
-/// answer even at 0.
-fn host_line(host: &HostLoss) -> String {
+/// answer even at 0. `behind` names the capture link's threshold.
+fn host_line(host: &HostLoss, link: Option<HostLink>) -> String {
     let nonzero = |n: u64, what: &str| (n > 0).then(|| format!("{} {what}", thousands(n)));
     let mut clauses = Vec::new();
     let not_stored = host.duplicates + host.undecodable + host.incompatible;
@@ -278,11 +280,12 @@ fn host_line(host: &HostLoss) -> String {
     }
     clauses.push(format!("{} store dropped", thousands(host.store_dropped)));
     clauses.extend(nonzero(host.garbled, "garbled"));
-    if host.lag_over_100ms > 0 {
-        let plural = if host.lag_over_100ms == 1 { "" } else { "s" };
+    if host.lag_behind > 0 {
+        let plural = if host.lag_behind == 1 { "" } else { "s" };
         clauses.push(format!(
-            "behind ≥100 ms {} time{plural} (worst {})",
-            thousands(host.lag_over_100ms),
+            "behind ≥{} {} time{plural} (worst {})",
+            millis(behind_us(link)),
+            thousands(host.lag_behind),
             millis(host.lag_peak_us)
         ));
     }
@@ -345,7 +348,7 @@ mod tests {
         BluetoothLoss, BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
         QueueLoss, RadioLinkLoss,
     };
-    use wartui_core::store::HostLink;
+    use wartui_core::record::HostLink;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::QueueId;
     use wartui_proto::mac::Mac;
@@ -453,7 +456,7 @@ mod tests {
             host: Some(HostLoss {
                 duplicates: 140,
                 incompatible: 7,
-                lag_over_100ms: 31,
+                lag_behind: 31,
                 lag_peak_us: 412_300,
                 commit_peak_us: 58_000,
                 queue_peak: 1_204,
@@ -792,6 +795,15 @@ mod tests {
              \x20 health     under-voltage in 3 samples  throttled in 0  \
              since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V\n"
         );
+    }
+
+    #[test]
+    fn analyze_report_names_bluetooth_threshold_when_capture_is_over_bluetooth() {
+        let mut loss = drive();
+        loss.link = Some(HostLink::Bluetooth);
+        loss.host.as_mut().unwrap().lag_peak_us = 612_300;
+        let text = loss_text(&loss);
+        assert!(text.contains("  behind ≥500 ms 31 times (worst 612 ms)  "), "{text}");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use wartui_proto::fleet;
 #[cfg(doc)]
 use super::{Command, FleetEngine};
 use crate::position::PositionChain;
+use crate::record::HostLink;
 use crate::ubx;
 
 /// How long a record the host sends a node, an update's, waits for its `Delivered` before it is
@@ -45,6 +46,9 @@ pub struct EngineConfig {
     /// How often the bridge's GPS receiver reports a fix, in hertz. `FleetEngine::poll_bridge` says
     /// why every status poll carries it.
     pub gps_rate_hz: u8,
+    /// The link the host reaches the bridge over, or `None` under `--sim`. It sets how far behind
+    /// the bridge the host must read to count as behind (`engine::behind_us`).
+    pub link: Option<HostLink>,
 }
 
 impl Default for EngineConfig {
@@ -59,6 +63,7 @@ impl Default for EngineConfig {
             position: PositionChain::empty(),
             excluded_ssids: IndexSet::new(),
             gps_rate_hz: ubx::DEFAULT_RATE_HZ,
+            link: None,
         }
     }
 }

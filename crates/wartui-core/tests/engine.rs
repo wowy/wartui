@@ -19,7 +19,7 @@ use wartui_core::engine::{
 use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
-use wartui_core::record::{BatchGap, BridgeStatusSeen, HostStatus, Record, ShareChange};
+use wartui_core::record::{BatchGap, BridgeStatusSeen, HostLink, HostStatus, Record, ShareChange};
 use wartui_core::ubx::valset_rate;
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, Heartbeat as HeartbeatMsg, MAX_SLOTS, NODE_VERSION, NodeBoard,
@@ -3370,6 +3370,29 @@ fn engine_reads_live_when_heartbeat_follows_backlog() {
         clock.at_ms(1_010),
     );
     assert!(stored_live(&live));
+}
+
+// A Bluetooth link delivers once per connection interval, so frames arrive in clumps that
+// read as lag. Over Bluetooth a clump of 200 ms is jitter; over USB it is a backlog.
+#[test]
+fn engine_stores_heartbeat_live_when_bluetooth_clump_lags_under_its_threshold() {
+    let clumped = |link| {
+        let clock = Clock::new();
+        let mut engine = engine(EngineConfig { link, ..EngineConfig::default() }, &clock);
+        caught_up(&mut engine, &clock);
+        // Four frames 50 ms apart on the bridge's clock, read a millisecond apart.
+        for n in 1..4u32 {
+            engine.handle(stray(n * 50_000), clock.at_ms(u64::from(n)));
+        }
+        let beat = engine.handle(
+            beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 200_000),
+            clock.at_ms(4),
+        );
+        stored_live(&beat)
+    };
+    assert!(clumped(Some(HostLink::Bluetooth)), "jitter over Bluetooth");
+    assert!(!clumped(Some(HostLink::Usb)), "a backlog over USB");
+    assert!(!clumped(None), "a simulated link reads as USB");
 }
 
 // An epoch a replayed heartbeat carries does not replace the one a live heartbeat reported:

@@ -10,9 +10,9 @@ use wartui_core::analyze::{
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, Observation, Record,
 };
-use wartui_core::store::{CaptureInfo, HostLink, Store, StoreConfig, open_readonly};
+use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::{BluetoothStatus, QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
@@ -26,12 +26,17 @@ const SLOT: Slot = Slot::new(0, 0).unwrap();
 
 /// A fresh capture holding `records`.
 fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
+    capture_over(None, records)
+}
+
+/// A fresh capture over `link` holding `records`.
+fn capture_over(link: Option<HostLink>, records: Vec<Record>) -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { notes: None, simulated: false, link: None };
+    let info = CaptureInfo { notes: None, simulated: false, link };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();
@@ -843,7 +848,7 @@ fn analyze_reads_host_deltas_and_peaks_when_host_rows_present() {
             undecodable: 30,
             incompatible: 30,
             store_dropped: 30,
-            lag_over_100ms: 2,
+            lag_behind: 2,
             lag_peak_us: 150_000,
             commit_peak_us: 400,
             queue_peak: 40,
@@ -854,6 +859,24 @@ fn analyze_reads_host_deltas_and_peaks_when_host_rows_present() {
             battery_min_mv: Some(3_620),
         }
     );
+}
+
+#[test]
+fn analyze_counts_lag_behind_against_link_threshold_when_capture_names_link() {
+    // Over Bluetooth, 150 ms is delivery clumped by the connection interval, not a backlog.
+    let rows = || {
+        vec![
+            host_row(1, 150_000, None, None, None),
+            host_row(2, 600_000, None, None, None),
+            host_row(3, 0, None, None, None),
+        ]
+    };
+    let lag_behind = |link| {
+        let (_dir, conn) = capture_over(link, rows());
+        losses(&conn).unwrap().host.expect("host rows").lag_behind
+    };
+    assert_eq!(lag_behind(Some(HostLink::Bluetooth)), 1);
+    assert_eq!(lag_behind(Some(HostLink::Usb)), 2);
 }
 
 #[test]

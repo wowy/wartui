@@ -53,6 +53,7 @@ use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
+pub use lag::{BEHIND_BLUETOOTH_US, BEHIND_USB_US, behind_us};
 pub use node::NodeState;
 pub use scan::FIX_WAIT;
 pub use snapshot::{
@@ -60,7 +61,6 @@ pub use snapshot::{
     power_cycled_text,
 };
 
-pub(crate) use lag::BEHIND_US;
 pub(crate) use node::supply_dropped_from;
 pub(crate) use rx::advance_since_boot;
 

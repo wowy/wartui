@@ -16,13 +16,12 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus, NodeSeen, Observation, RawFrame,
-    Record, ShareChange,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodeSeen, Observation,
+    RawFrame, Record, ShareChange,
 };
 use wartui_core::store::{
-    CaptureInfo, CaptureProvenance, Checkpoint, HostLink, SCHEMA_VERSION, Store, StoreConfig,
-    StoreError, capture_link, is_simulated, open_readonly, open_readwrite, record_upload,
-    set_upload_result,
+    CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
+    capture_link, is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
 use wartui_proto::fan::{FanDuty, FanStats};

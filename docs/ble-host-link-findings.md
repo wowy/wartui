@@ -14,6 +14,7 @@ transport, a command that resets the C6 alone, and a C6 build setting that disca
 `Down::HostBytes`.
 
 No phone ran that day. The Pixel and the iPad ran on 2026-11-15: see [The phones](#the-phones).
+A drive from a HackberryPi followed the same day: see [A first drive](#a-first-drive).
 
 ## Results
 
@@ -267,6 +268,36 @@ several takeovers. The phone was served again after each one between the reads, 
   says why. The same bytes written again started the load. The likely cause is the write's type
   in nRF Connect, or a write ahead of the subscription (inferred, not tested).
 
+## A first drive
+
+Measured on 2026-11-15: 2 h 14 min in a car, from a HackberryPi to bridge E6:A0, a carrier-10 with
+its ten nodes scanning Wi-Fi. The host is built from `3fcb1d0`. The positions come from the
+bridge's own GPS receiver, so its sentences cross the link too.
+
+| Figure | The drive |
+| --- | --- |
+| Link | MTU 247, 1M PHY, 48.75 ms, encrypted and bonded in every status reply |
+| Connections | One. No disconnect, and no status reply over 5.4 s after the one before |
+| Node records | 65,078 received by the bridge, 65,078 read by the host. No batch gap |
+| Lost on the link | 0 resynced bytes, 0 dropped writes, no radio link error |
+| The P4's host ring | 1,539 bytes at its fullest, of 1 MB |
+| Load | 78,127 sightings, 116 in the busiest second (2.4 KB of node records) |
+| Lag behind the bridge | 73 ms at the median 5 s peak, 203 ms at worst |
+| Fix age at a sighting | 253 ms at the median, under 1.5 s after the fix's first minute |
+| The C6's heap high-water | 32.1 KB, 34.8 KB after 70 min, then level |
+
+- **Nothing was lost,** and the one connection held for the whole drive.
+- **The Pi's controller has no 2M PHY.** `btmgmt phy` lists `LE1MTX LE1MRX` alone, so the C6's
+  request for 2M changes nothing there. No run measured the saturated rate on 1M.
+- **The lag is delivery, not a backlog.** A Bluetooth link delivers once per connection interval,
+  so frames arrive in clumps while the ring behind them stays empty. The lag reached 100 ms, the
+  line a USB host is behind at, in 320 of 1,613 samples, and in 36 of 83 on a run with the scan
+  stopped. Over Bluetooth the host's line is 500 ms for that reason
+  (`crates/wartui-core/src/engine/lag.rs`, `behind_us`). The bench PC at 30 ms peaked at 79 ms.
+- **The bridge's GPS works over the link.** The first fix came 6 min 21 s into the run, the bridge
+  powered on as it began, and went stale once, for 13 s, in its first minute: 20 sightings have
+  no position.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -279,6 +310,8 @@ several takeovers. The phone was served again after each one between the reads, 
 - One host at a time holds: a port probe takes nothing, a USB command takes the bridge, and the
   Bluetooth host gets it back.
 - The C6 does not ask for a connection interval by default.
+- A two-hour drive from a Pi on the 1M PHY loses nothing, with the bridge's GPS feeding the
+  positions over the same link.
 
 ## What this does not settle
 
@@ -297,5 +330,6 @@ several takeovers. The phone was served again after each one between the reads, 
   stops under sustained writes toward the bridge.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
   upper level through a later session of runs.
+- **The saturated rate on the 1M PHY.** The drive needed a few KB/s of it.
 - **Why a first connection sometimes times out.**
 - **macOS.** The transport builds there and is untested.

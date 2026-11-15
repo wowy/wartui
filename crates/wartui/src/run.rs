@@ -257,6 +257,7 @@ pub async fn run(args: Args) -> Result<()> {
         position,
         excluded_ssids,
         gps_rate_hz,
+        link: info.link,
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

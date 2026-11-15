@@ -47,8 +47,8 @@
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
 //! the first, which is written as the capture starts. Peaks are per row, so it takes the largest,
-//! and counts the rows whose lag peak reached the 100 ms that makes a heartbeat too stale to
-//! answer.
+//! and counts the rows whose lag peak reached the line that makes a heartbeat too stale to answer.
+//! That line is the capture link's (`engine::behind_us`), wider over Bluetooth than over USB.
 //!
 //! Every since-boot count is rebased by the engine's `advance_since_boot`, and the first row is a
 //! baseline only (per node, for heartbeats): what was dropped before the capture is not the
@@ -80,8 +80,9 @@ use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
-use crate::engine::{BEHIND_US, advance_since_boot, supply_dropped_from};
-use crate::store::{HostLink, capture_link, parse_kind};
+use crate::engine::{advance_since_boot, behind_us, supply_dropped_from};
+use crate::record::HostLink;
+use crate::store::{capture_link, parse_kind};
 
 /// What a capture lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,8 +272,9 @@ pub struct HostLoss {
     pub incompatible: u64,
     /// Rows the store dropped.
     pub store_dropped: u64,
-    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the bridge.
-    pub lag_over_100ms: u64,
+    /// Rows whose lag peak reached the capture link's threshold (`engine::behind_us`): samples in
+    /// which the host fell behind the bridge.
+    pub lag_behind: u64,
     /// The furthest behind the bridge the host fell, in microseconds.
     pub lag_peak_us: u64,
     /// The slowest batch the store wrote, in microseconds.
@@ -363,7 +365,7 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     batches(conn, &mut nodes)?;
     let mut nodes: Vec<NodeLoss> = nodes.into_values().collect();
     nodes.sort_by_key(|node| slot_order(node.slot, node.mac));
-    Ok(LossSummary { board, link, bridge, nodes, host: host(conn)? })
+    Ok(LossSummary { board, link, bridge, nodes, host: host(conn, link)? })
 }
 
 /// What carried the capture's nodes, as [`LossSummary::board`] says.
@@ -614,7 +616,8 @@ impl HostRow {
     }
 }
 
-fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
+fn host(conn: &Connection, link: Option<HostLink>) -> rusqlite::Result<Option<HostLoss>> {
+    let behind = behind_us(link);
     let mut stmt = conn.prepare(
         "SELECT duplicate_batches, garbled, undecodable, incompatible, store_dropped, lag_peak_us,
                 store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc, battery_mv
@@ -633,7 +636,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 
         let loss = loss.get_or_insert_default();
         let lag = row.lag_peak_us;
-        loss.lag_over_100ms += u64::from(lag >= BEHIND_US);
+        loss.lag_behind += u64::from(lag >= behind);
         loss.lag_peak_us = loss.lag_peak_us.max(lag);
         loss.commit_peak_us = loss.commit_peak_us.max(row.commit_peak_us);
         loss.queue_peak = loss.queue_peak.max(row.queue_peak);
