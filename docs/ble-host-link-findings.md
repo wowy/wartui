@@ -186,6 +186,42 @@ a central on a resolvable private address. This PC uses a fixed address, so the 
 plays no part in recognizing it. That case rests on reading TrouBLE 0.8.0, which loads its
 resolving list only while not advertising.
 
+## After a fifth review's fixes
+
+Measured on 2026-11-15, after the phones. `a54025e` changes both chips. The C6 repeats a new bond
+until the P4 echoes it, and disconnects a bonded central that stays unsubscribed for 30 s. The P4
+repeats its bonds to the C6 every 5 s. The checks ran on the production firmware at `a54025e`, and
+the load on `bench/ble-load` on top of it (`e59424a`).
+
+| Check | Result |
+| --- | --- |
+| A bonded PC connects and never subscribes (`bluetoothctl connect`) | Dropped 30 s after it connected, reason `0x16`. Not counted in `unbonded_kicks` |
+| A run subscribed and waiting 45 s while a USB host holds the bridge | Not dropped. Served again once USB let go |
+| The P4's bonds repeat, 75 s with nothing changing | The C6 logged no restart of its advertisement |
+| `wartui bluetooth forget --link usb` while the PC is served over Bluetooth | The C6 disconnected the PC, reason `0x16`, one `unbonded_kicks` |
+| `wartui bluetooth forget --link usb` with no central connected | Bonds cleared, the window open until a host pairs |
+| `wartui bluetooth pair` after each | Bonded in 17.4 and 16.9 s. Two `status` runs after each connected on the bond, 3.0 s each |
+| C6 reset alone, then `wartui status --link bluetooth` | 3.5 s by the remembered address, 3.0 s by a scan |
+| A run through a forced disconnect | Served again 2.1 s after the link dropped |
+
+**The saturated load did not get a clean run.** The PC's adapter held a second connection, to a
+mouse, and the board sat behind two USB hubs at 12 Mbit/s. So the image with the change and the
+one from before the third review's (`797882a`) ran in turn.
+
+| Image | Bluetooth, read by the host | USB, read by the host |
+| --- | --- | --- |
+| After | 16.1 KB/s | 391 KB/s, 0 to 3 undecodable frames a run |
+| Before | 15.1 KB/s | 389 KB/s, 1 to 3 undecodable frames a run |
+
+- **Both differ from the earlier sessions on both images alike,** so the cause is the setup and
+  not the change. The earlier image ran 144 KB/s over Bluetooth and lost nothing over USB two
+  days before.
+- **The Bluetooth rate is two notifications in each 30 ms connection event,** 16.3 KB/s
+  (inferred). The adapter fits the bridge's events between the mouse's.
+- **Over USB, each run but one lost 4 to 13 records that the ring did not evict,** a few KB at a
+  time, on both images.
+- The repeats ran, but no run lost a bond message, so no run shows one recovering a loss.
+
 ## The phones
 
 Measured on 2026-11-15 on D0:1C, on `bench/ble-load` at `368d1af`, which sits on `b25d52d`. A
@@ -229,6 +265,8 @@ several takeovers. The phone was served again after each one between the reads, 
 - The Pixel and the iPad pair from their own prompt in the window, and drain at the spike's rates
   or above.
 - The bridge drops a central it holds no bond for outside the window, a phone as well as the PC.
+- A bonded central that never subscribes is dropped after 30 s, and one that subscribes and waits
+  is not.
 - A lost P4→C6 packet costs the frames it cut and nothing else.
 - One host at a time holds: a port probe takes nothing, a USB command takes the bridge, and the
   Bluetooth host gets it back.
@@ -242,6 +280,10 @@ several takeovers. The phone was served again after each one between the reads, 
   from a central that does not hold the bridge. It counts neither, so the host gets no sign of it.
 - **A bond that reaches the C6 while it advertises, for a central on a resolvable private
   address.** It needs a phone and a bench build that delays the P4's bonds.
+- **The saturated rate on `a54025e` with the adapter to itself,** and a lost bond message
+  recovered by its repeat. The second needs a bench build that discards one.
+- **Saturated USB through two hubs at 12 Mbit/s** loses records on every image. A real fleet
+  sends under 3 KB/s.
 - **Updates over Bluetooth.** `flash-bridge` and `ota` stay on USB (issue #314): TrouBLE's host
   stops under sustained writes toward the bridge.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
