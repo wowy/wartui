@@ -472,28 +472,37 @@ mod tests {
         }
     }
 
-    #[test]
-    fn flash_bridge_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
+    /// A `wartui.toml` holding `text`, in a directory kept as long as the result.
+    fn config_file(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn flash_bridge_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
         // Remembered over USB only: only a scan would find it, and a scan may find another
-        // fleet's bridge.
-        let usb_only = config::Bridge { mac: Some(BRIDGE_MAC), ..config::Bridge::default() };
-        let refused = crate::reset::bluetooth_target(None, &usb_only, "flash-bridge").unwrap_err();
+        // fleet's bridge. A dry run, so nothing is built or sent if the refusal ever goes.
+        let (_dir, path) =
+            config_file("[bridge]\nmac = \"02:00:5E:10:44:C0\"\nlink = \"bluetooth\"\n");
+        let args = Args { dry_run: true, ..args(None, None, Some(&path)) };
+        let refused = run(args).await.unwrap_err().to_string();
         assert!(refused.contains("`wartui flash-bridge`"), "{refused}");
         assert!(refused.contains("--bridge XX:YY"), "{refused}");
     }
 
-    #[test]
-    fn flash_bridge_targets_named_or_remembered_bridge_when_over_bluetooth() {
-        let none = config::Bridge::default();
-        let named = crate::reset::bluetooth_target(Some("44:C0"), &none, "flash-bridge");
-        assert!(matches!(named, Ok(BridgeSpec::Tail(_))));
-        let remembered = config::Bridge {
-            mac: Some(BRIDGE_MAC),
-            bluetooth_address: Some("02:00:5E:10:44:C2".to_owned()),
-            ..config::Bridge::default()
-        };
-        let target = crate::reset::bluetooth_target(None, &remembered, "flash-bridge");
-        assert_eq!(target, Ok(BridgeSpec::Mac(BRIDGE_MAC)));
+    #[tokio::test]
+    async fn flash_bridge_dry_runs_over_bluetooth_when_bridge_is_named_or_remembered_there() {
+        let (_dir, usb_only) = config_file("[bridge]\nmac = \"02:00:5E:10:44:C0\"\n");
+        let named =
+            Args { dry_run: true, ..args(Some("44:C0"), Some(Link::Bluetooth), Some(&usb_only)) };
+        run(named).await.expect("the named bridge");
+        let (_dir, there) = config_file(
+            "[bridge]\nmac = \"02:00:5E:10:44:C0\"\nbluetooth-address = \"02:00:5E:10:44:C2\"\n\
+             link = \"bluetooth\"\n",
+        );
+        run(Args { dry_run: true, ..args(None, None, Some(&there)) }).await.expect("remembered");
     }
 
     #[test]

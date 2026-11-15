@@ -14,7 +14,7 @@ use wartui_core::ota::{
     BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES,
     MAX_STATUS_TIMEOUTS, OtaEvent, OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
-use wartui_core::runtime::{drive_fleet, now};
+use wartui_core::runtime::{FleetError, drive_fleet, now};
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION, Slot,
     UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
@@ -22,6 +22,7 @@ use wartui_proto::bus::{
 use wartui_proto::link::{BridgeToHost, HostToBridge, cache_chunk_body, image_tag};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
+use wartui_proto::radio_link::update;
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0, 0, 0, 0, 7];
@@ -1220,6 +1221,40 @@ async fn drive_fleet_updates_sim_fleet_when_link_writes_slowly() {
     assert!(outcomes.iter().all(|outcome| *outcome == Outcome::Done(new)), "{outcomes:?}");
     let warnings = warnings.lock().unwrap();
     assert!(!warnings.iter().any(|w| w.contains("dropping an update record")), "{warnings:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_fails_upload_when_link_stops_taking_commands() {
+    // A bridge that handles no command for an hour, as a transport between connections reads
+    // none: the upload's op is never written, and the upload still ends in its silence.
+    let old = wartui_bridge::sim::minor_behind(NODE_VERSION);
+    let mut link = SimTransport::new(SimConfig {
+        node_count: 2,
+        speed: SPEED,
+        fleet_version: old,
+        command_latency: Duration::from_secs(3_600),
+        ..SimConfig::default()
+    })
+    .start()
+    .expect("starting the simulator");
+    connected(&mut link).await;
+    let nodes: Vec<Mac> = (0..2).map(SimTransport::node_mac).collect();
+    versions(&mut link, &nodes).await;
+
+    let image = sim_image(NODE_VERSION);
+    let mut sessions: Vec<OtaSession> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let session = u8::try_from(0x40 + i).unwrap_or(1);
+            OtaSession::new(*node, old, &image, session, Ids::of(i, nodes.len()), now())
+        })
+        .collect();
+    let start = tokio::time::Instant::now();
+    let ended =
+        drive_fleet(&mut link, &mut sessions, Some(&image), std::future::pending(), |_| {}).await;
+    assert_eq!(ended, Err(FleetError::Upload(update::Failure::Silent)));
+    assert!(start.elapsed() < Duration::from_secs(30), "failed after {:?}", start.elapsed());
 }
 
 #[test]

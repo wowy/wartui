@@ -10,8 +10,11 @@
 //! **Every Bluetooth link is closed before the process exits.** `main` waits for each to
 //! unsubscribe and disconnect once the command returns, by any route, so the bridge never keeps
 //! serving a host that has gone (`wartui_bridge::close_all`). A ctrl-c reaches that wait too:
-//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge` and `bluetooth` stop at
-//! one, `sniff` and `ota` watch for one themselves, and `run`'s view reads it as a key.
+//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth` stop at one,
+//! `flash-bridge` once its link is open, `sniff` and `ota` watch for one themselves, and `run`'s
+//! view reads it as a key. Watching installs tokio's handler for the rest of the process, and
+//! `flash-bridge`'s download or build blocks its task, so it watches only once the link is open;
+//! until then a ctrl-c ends the process at once.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -135,7 +138,8 @@ async fn main() -> Result<()> {
         Some(Command::Scan(args)) => interruptible(scan::run(args)).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
-        Some(Command::FlashBridge(args)) => interruptible(flash::bridge::run(args)).await,
+        // Interruptible once its link is open (`flash::p4`).
+        Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
         Some(Command::Ota(args)) => ota::run(args).await,
         Some(Command::Bluetooth(args)) => interruptible(bluetooth::run(args)).await,
         Some(Command::Bench(args)) => bench::run(args).await,
@@ -165,7 +169,7 @@ impl std::fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 /// Run `command`, or stop it at a ctrl-c, dropping its link so `main` can close it.
-async fn interruptible(command: impl Future<Output = Result<()>>) -> Result<()> {
+pub(crate) async fn interruptible(command: impl Future<Output = Result<()>>) -> Result<()> {
     tokio::select! {
         outcome = command => outcome,
         // A handler that would not install is no ctrl-c: the arm is disabled, not fired.

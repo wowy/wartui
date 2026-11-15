@@ -215,7 +215,19 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     let Some(digest) = appended_digest_of(&image) else {
         bail!("{} carries no appended digest, which names the image to the P4", path.display());
     };
+    crate::interruptible(update_over_link(target, label, &image, sha256, &digest)).await
+}
 
+/// Send `image` to the bridge `target` names, from opening its link to the outcome. A ctrl-c
+/// stops it and `main` closes the link. The download or build before it blocks the task, so it
+/// runs with no ctrl-c handler, and a ctrl-c there ends the process.
+async fn update_over_link(
+    target: Target,
+    label: String,
+    image: &[u8],
+    sha256: [u8; DIGEST_LEN],
+    digest: &[u8; DIGEST_LEN],
+) -> Result<()> {
     let bluetooth = matches!(target, Target::Bluetooth { .. });
     let (mut link, info, label) = match target {
         Target::Usb { board, expected } => {
@@ -230,7 +242,7 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
             (link, info, label)
         }
     };
-    if info.image == Some(digest) {
+    if info.image == Some(*digest) {
         println!("{label:<6} already runs this image");
         return Ok(());
     }
@@ -239,14 +251,14 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     }
 
     let mut progress = ProgressLine::new(label.clone());
-    let mut update = Update::new(&image, sha256, &digest, info.image);
+    let mut update = Update::new(image, sha256, digest, info.image);
     update.send(&mut link, &mut progress).await?;
     progress.say("installing; waiting for the bridge to come back");
     if bluetooth {
         return update.settle_bluetooth(&mut link, &mut progress, &label).await;
     }
     let back = update.come_back(&mut link, &mut progress).await?;
-    match judge(&digest, info.image, back.image) {
+    match judge(digest, info.image, back.image) {
         Outcome::Installed => {}
         Outcome::RolledBack => bail!("{label} did not boot the new image; rolled back"),
         Outcome::Other => bail!("{label} came back running another image"),
@@ -303,29 +315,16 @@ async fn open_bluetooth(
 ) -> Result<(LinkHandle, BridgeInfo)> {
     let named = bridge.to_string();
     let mut link = crate::open(Some(&named), None, Link::Bluetooth, memory)?;
-    let until = tokio::time::Instant::now() + crate::connect_wait(Link::Bluetooth);
-    let mut wait = crate::status::ReadyWait::new(Link::Bluetooth);
-    let mut garbled = false;
-    loop {
-        let Ok(event) = tokio::time::timeout_at(until, link.recv()).await else {
-            match wait.timed_out() {
-                Some(why) => bail!("{}", no_ready_over_bluetooth(label, &why, garbled)),
-                None if garbled => {
-                    let why = format!(
-                        "no answer in {} s",
-                        crate::connect_wait(Link::Bluetooth).as_secs()
-                    );
-                    bail!("{}", no_ready_over_bluetooth(label, &why, garbled))
-                }
-                None => bail!("{}", crate::no_bridge_notice(Some(&named), Link::Bluetooth).await),
-            }
-        };
-        garbled |= matches!(event, Some(LinkEvent::Garbled(_)));
-        match wait.take(event) {
-            Some(Ok(info)) => return Ok((link, info)),
-            Some(Err(why)) => bail!("{}", no_ready_over_bluetooth(label, &why, garbled)),
-            None => {}
+    let within = crate::connect_wait(Link::Bluetooth);
+    let waited = crate::status::wait_for_ready_or_why(&mut link, Link::Bluetooth, within).await;
+    match waited.ready {
+        Ok(Some(info)) => Ok((link, info)),
+        Err(why) => bail!("{}", no_ready_over_bluetooth(label, &why, waited.garbled)),
+        Ok(None) if waited.garbled => {
+            let why = format!("no answer in {} s", within.as_secs());
+            bail!("{}", no_ready_over_bluetooth(label, &why, waited.garbled))
         }
+        Ok(None) => bail!("{}", crate::no_bridge_notice(Some(&named), Link::Bluetooth).await),
     }
 }
 
@@ -447,7 +446,7 @@ impl<'a> Update<'a> {
             }
             tokio::select! {
                 _ = tick.tick() => {}
-                () = written.changed() => {}
+                () = written.changed(), if self.sender.is_waiting() => {}
                 event = link.recv() => match event {
                     Some(LinkEvent::Message(message)) => self.take(message, progress),
                     Some(LinkEvent::Disconnected { reason, .. }) => bail!(
@@ -487,7 +486,7 @@ impl<'a> Update<'a> {
                 }
                 tokio::select! {
                     _ = tick.tick() => {}
-                    () = written.changed() => {}
+                    () = written.changed(), if self.sender.is_waiting() => {}
                     _ = poll.tick() => poll_status(link),
                     event = link.recv() => match event {
                         Some(LinkEvent::Connected(info)) => {
@@ -529,14 +528,13 @@ impl<'a> Update<'a> {
         let mut written = link.written();
         let mut deadline = tokio::time::Instant::now() + COME_BACK_BLUETOOTH;
         let mut dropped = false;
-        // A line about the C6's update since the last `Ready`.
-        let mut radio = false;
         loop {
             match settling.settled(Instant::now(), false) {
                 Settled::Waiting | Settled::Unconfirmed => {}
-                settled => return settled_text(&settled, label, true, progress),
+                settled => return settled_text(&settled, label, false, progress),
             }
-            if settling.up() && !settling.came_back() {
+            let pumping = settling.up() && !settling.came_back();
+            if pumping {
                 self.pump(link)?;
                 if let Stage::Failed(failure) = self.sender.stage() {
                     bail!("{}", self.failed(failure));
@@ -554,10 +552,10 @@ impl<'a> Update<'a> {
                     }
                     let now = Instant::now();
                     let settled = settling.settled(now, true);
-                    return settled_text(&settled, label, settling.quiet(now), progress);
+                    return settled_text(&settled, label, settling.radio_running(now), progress);
                 }
                 _ = tick.tick() => {}
-                () = written.changed() => {}
+                () = written.changed(), if pumping && self.sender.is_waiting() => {}
                 // Only while connected, so no backlog waits out a drop.
                 _ = poll.tick(), if settling.up() => poll_status(link),
                 event = link.recv() => match event {
@@ -565,6 +563,7 @@ impl<'a> Update<'a> {
                         // A trial image is confirmed by the first host frame it decodes.
                         poll_status(link);
                         let back = settling.came_back();
+                        let radio = settling.radio_updated();
                         let ready = Seen::Ready { image: info.image, uptime_ms: info.uptime_ms };
                         settling.see(ready, Instant::now());
                         if !back && settling.came_back() {
@@ -572,7 +571,6 @@ impl<'a> Update<'a> {
                         } else if back && radio {
                             progress.say("the radio restarted on its bundled image");
                         }
-                        radio = false;
                     }
                     Some(LinkEvent::Disconnected { .. }) => {
                         settling.see(Seen::Down, Instant::now());
@@ -591,7 +589,6 @@ impl<'a> Update<'a> {
                             continue;
                         }
                         if is_radio_update(&message) {
-                            radio = true;
                             settling.see(Seen::RadioUpdating, now);
                         }
                         if let BridgeToHost::Status { uptime_ms, .. } = &message {
@@ -800,6 +797,8 @@ struct Settling {
     confirm: Option<Confirm>,
     /// When the link last came up or dropped, or a line about the C6's update arrived.
     news: Instant,
+    /// A line about the C6's update arrived since the latest `Ready`.
+    radio: bool,
     /// The latest `Status` uptime since that `Ready`.
     uptime_ms: Option<u32>,
 }
@@ -820,6 +819,7 @@ impl Settling {
             up: true,
             confirm: None,
             news: installed_at,
+            radio: false,
             uptime_ms: None,
         }
     }
@@ -838,6 +838,17 @@ impl Settling {
         self.up && now.duration_since(self.news) >= QUIET
     }
 
+    /// Whether a line about the C6's update arrived since the latest `Ready`.
+    fn radio_updated(&self) -> bool {
+        self.radio
+    }
+
+    /// Whether the C6's update may still be running at `now`: a line about it arrived since the
+    /// latest `Ready`, and the link has not been quiet since.
+    fn radio_running(&self, now: Instant) -> bool {
+        self.radio && !self.quiet(now)
+    }
+
     fn see(&mut self, seen: Seen, now: Instant) {
         match seen {
             Seen::Down => {
@@ -847,6 +858,7 @@ impl Settling {
             Seen::Ready { image, uptime_ms } => {
                 self.up = true;
                 self.news = now;
+                self.radio = false;
                 // The P4 resets its C6 at boot, so a C6 older than the install is the P4's life
                 // before it, which dropped its update session when the link went.
                 let older =
@@ -859,7 +871,10 @@ impl Settling {
                 self.uptime_ms = None;
             }
             Seen::Confirm(confirm) => self.confirm = Some(confirm),
-            Seen::RadioUpdating => self.news = now,
+            Seen::RadioUpdating => {
+                self.radio = true;
+                self.news = now;
+            }
             Seen::Uptime(ms) => {
                 if self.came_back() {
                     self.uptime_ms = Some(ms);
@@ -894,12 +909,12 @@ impl Settling {
     }
 }
 
-/// Say how an update over Bluetooth ended, `Ok` once installed. `quiet` is whether the C6's
-/// update had ended by then.
+/// Say how an update over Bluetooth ended, `Ok` once installed. `radio_running` is whether the
+/// C6's update may still be running ([`Settling::radio_running`]).
 fn settled_text(
     settled: &Settled,
     label: &str,
-    quiet: bool,
+    radio_running: bool,
     progress: &mut ProgressLine,
 ) -> Result<()> {
     match settled {
@@ -908,7 +923,7 @@ fn settled_text(
                 Proof::Confirmed => "installed and confirmed",
                 Proof::OutlivedTrial => "installed, and confirmed: it outlived its trial watchdog",
             });
-            if !quiet {
+            if radio_running {
                 progress.say("the radio's update is still running; `wartui status` shows its end");
             }
             Ok(())
@@ -1212,6 +1227,32 @@ mod tests {
         assert_eq!(s.settled(after(at, 30_000), false), Settled::Waiting, "the link is down");
         s.see(Seen::Ready { image: Some(NEW), uptime_ms: 2_000 }, after(at, 33_000));
         assert_eq!(s.settled(after(at, 38_000), false), Settled::Installed(Proof::Confirmed));
+    }
+
+    #[test]
+    fn flash_p4_omits_radio_line_when_link_is_down_at_the_deadline_with_no_radio_update() {
+        let at = Instant::now();
+        let mut s = settling(at);
+        s.see(Seen::Ready { image: Some(NEW), uptime_ms: 1_500 }, after(at, 4_000));
+        s.see(Seen::Confirm(Confirm::Confirmed), after(at, 4_100));
+        s.see(Seen::Down, after(at, 6_000));
+        let deadline = after(at, 154_000);
+        assert_eq!(s.settled(deadline, true), Settled::Installed(Proof::Confirmed));
+        assert!(!s.radio_running(deadline), "nothing said the radio was updating");
+    }
+
+    #[test]
+    fn flash_p4_says_radio_line_when_link_is_down_at_the_deadline_after_a_radio_update() {
+        let at = Instant::now();
+        let mut s = settling(at);
+        s.see(Seen::Ready { image: Some(NEW), uptime_ms: 1_500 }, after(at, 4_000));
+        s.see(Seen::Confirm(Confirm::Confirmed), after(at, 4_100));
+        s.see(Seen::RadioUpdating, after(at, 5_000));
+        s.see(Seen::Down, after(at, 6_000));
+        assert!(s.radio_running(after(at, 154_000)));
+        // The C6's new life ends it.
+        s.see(Seen::Ready { image: Some(NEW), uptime_ms: 1_000 }, after(at, 154_000));
+        assert!(!s.radio_running(after(at, 154_000)));
     }
 
     #[test]

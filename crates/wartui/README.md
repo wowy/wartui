@@ -586,7 +586,9 @@ a partly sent image.
 
 `ota` updates the nodes' firmware through the bridge, with no USB cable to them. It reaches the
 bridge over the link every command picks ("The Bluetooth link"); over Bluetooth it is slower than
-over USB, and a link that drops fails each node's update as a pulled cable does. It listens for
+over USB, and a link that drops fails each node's update as a pulled cable does. Over Bluetooth the
+bridge is the one `--bridge` names or the one remembered over Bluetooth in `wartui.toml`, never one
+a scan merely hears; with neither, the run is refused and asks for `--bridge XX:YY`. It listens for
 heartbeats, shows what it would do with each node, asks, then updates every chosen node at once
 while it uploads the image into the bridge's node image cache. Nothing else may hold the bridge
 meanwhile, so stop `run` first.

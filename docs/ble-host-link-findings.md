@@ -396,6 +396,22 @@ Neither is specific to Bluetooth.
 - **After one of the ten updates over Bluetooth, the P4 found every node slot off.** Its boot line
   read `at boot 10 powered, 0 already on`. Every other boot read `0 powered, 10 already on`.
 
+### After a review's fixes
+
+A review of the branch gave ten findings, and seven were fixed: a paced sender that waited forever
+on a link taking no commands, a ctrl-c that did nothing while `flash-bridge` built or downloaded
+its image, `ota` over Bluetooth taking whichever bridge a scan heard, and four smaller ones. The
+re-check ran the same day on D0:1C, with the fixes on the host:
+
+- **`flash-bridge --link bluetooth`, both chips changed:** installed and confirmed, 66.1 s sending
+  and 80.6 s in all.
+- **`ota --link bluetooth`, ten nodes, forced:** the cache upload took 52.0 s, all ten ended
+  `done 0.5.2 (confirmed)`, the whole command took 88 s, and the run's log holds no warning.
+- **`ota --link bluetooth` with no bridge named or remembered over Bluetooth** was refused before
+  any link opened.
+- **The production image went back on both chips over Bluetooth,** and `flash-bridge` over USB
+  reported `already runs this image`.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.

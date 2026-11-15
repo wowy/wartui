@@ -350,8 +350,8 @@ pub async fn drive_fleet(
                 }
             }
             _ = ticker.tick() => feed(sessions, OtaEvent::Tick, &mut sends),
-            // The link wrote what was queued, so the upload's next ops may go.
-            () = written.changed(), if cache.is_some() => {}
+            // The link wrote what the upload queued, so its next ops may go.
+            () = written.changed(), if cache.as_ref().is_some_and(PacedSender::is_waiting) => {}
             event = link.recv() => match event {
                 Some(LinkEvent::Message(BridgeToHost::Delivered { id })) => {
                     tracing::debug!(id, status = "delivered", "ota send result");

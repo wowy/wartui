@@ -8,10 +8,18 @@
 //!
 //! [`PacedSender`] asks its sender for nothing until the link has written the last op it queued,
 //! then reports the write ([`Sender::written`]), so the wait runs from there. So at most one
-//! sector's ops are queued at once, and a link that is slow or down holds the sender rather than
-//! filling the queue. A transport counts every command it takes as done, written or dropped
+//! sector's ops are queued at once, and a slow link holds the sender rather than filling the
+//! queue. A transport counts every command it takes as done, written or dropped
 //! (`crate` docs), so an op lost with a discarded queue starts the wait too, and its silence
 //! re-sends it.
+//!
+//! **A link that takes no commands stalls the pacing, not the update.** A transport reads none
+//! between connections: serial after a pulled cable, Bluetooth while its link is down or a USB host
+//! holds the bridge. Its count never moves, so a sender held on it would wait forever, and its own
+//! silence timeout would never run. Once the last op has gone unwritten for [`STALL_MS`], past
+//! anything a working link takes, the sender runs on its own timers until the link's backlog is
+//! empty again, and its silence fails the update. Past [`STALL_OPS`] queued in that state, an op
+//! is dropped as a refused one is: the sender counts it sent.
 //!
 //! [`REPLY_WAIT_MS`]: wartui_proto::radio_link::update::REPLY_WAIT_MS
 
@@ -21,13 +29,32 @@ use wartui_proto::radio_link::update::{OP_MAX, Sender, Stage};
 
 use crate::{LinkHandle, SendError};
 
+/// How long the last op may go unwritten before the link counts as stalled: twice the Bluetooth
+/// transport's bound on one write (`ble::WRITE_WITHIN`, 5 s), so a write it still waits on never
+/// counts.
+const STALL_MS: u64 = 10_000;
+
+/// The most ops queued past the backlog once the link is stalled: enough for the sender's
+/// re-sends of the op it asked, which end in its silence.
+const STALL_OPS: u64 = 5;
+
 /// A [`Sender`] that queues its next ops only once the link has written its last.
 #[derive(Debug, Clone)]
 pub struct PacedSender<'a> {
     sender: Sender<'a>,
-    /// The link's [`LinkHandle::queued`] count once the last op was queued, until the link has
-    /// written that many.
-    owed: Option<u64>,
+    /// What the link owes, until it has written it.
+    owed: Option<Owed>,
+}
+
+/// Ops queued and not yet written.
+#[derive(Debug, Clone, Copy)]
+struct Owed {
+    /// The link's [`LinkHandle::queued`] count once the last op was queued.
+    queued: u64,
+    /// When the first of them was queued.
+    since_ms: u64,
+    /// Ops queued since the link stalled, `None` until it has.
+    stalled: Option<u64>,
 }
 
 impl<'a> PacedSender<'a> {
@@ -39,7 +66,7 @@ impl<'a> PacedSender<'a> {
 
     /// Queue every op the sender has at time `now_ms`, each as `wrap` makes it a command, once
     /// the link has written the ops queued before. Call it on each status, on a timer and on
-    /// each [`LinkHandle::written`] change.
+    /// each [`LinkHandle::written`] change while [`Self::is_waiting`].
     ///
     /// # Errors
     /// [`SendError`] if the link refused an op. The sender counts it sent, so its silence
@@ -50,20 +77,41 @@ impl<'a> PacedSender<'a> {
         now_ms: u64,
         wrap: impl Fn(UpdateOp) -> HostToBridge,
     ) -> Result<(), SendError> {
-        if let Some(owed) = self.owed {
-            if link.written_count() < owed {
-                return Ok(());
+        if let Some(owed) = &mut self.owed {
+            if link.written_count() >= owed.queued {
+                self.owed = None;
+                self.sender.written(now_ms);
+            } else if owed.stalled.is_none() {
+                if now_ms.saturating_sub(owed.since_ms) < STALL_MS {
+                    return Ok(());
+                }
+                owed.stalled = Some(0);
             }
-            self.owed = None;
-            self.sender.written(now_ms);
         }
         let mut buf = [0u8; OP_MAX];
         while let Some(len) = self.sender.next(now_ms, &mut buf) {
+            if let Some(Owed { stalled: Some(extra), .. }) = &mut self.owed {
+                if *extra >= STALL_OPS {
+                    continue;
+                }
+                *extra += 1;
+            }
             let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
             link.send_urgent(wrap(op))?;
-            self.owed = Some(link.queued());
+            let queued = link.queued();
+            match &mut self.owed {
+                Some(owed) => owed.queued = queued,
+                None => self.owed = Some(Owed { queued, since_ms: now_ms, stalled: None }),
+            }
         }
         Ok(())
+    }
+
+    /// Whether it waits for the link to write what it queued, so a [`LinkHandle::written`]
+    /// change can let its next ops go.
+    #[must_use]
+    pub fn is_waiting(&self) -> bool {
+        self.owed.is_some()
     }
 
     /// Take a status from the receiver ([`Sender::on_status`]).
@@ -100,7 +148,7 @@ mod tests {
     use wartui_proto::bus::{Board, UPDATE_CHUNK};
     use wartui_proto::link::{BridgeToHost, UPDATE_STATUS_MAX, UpdateStatusBytes};
     use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
-    use wartui_proto::radio_link::update::{Op, REPLY_WAIT_MS, Received, receive};
+    use wartui_proto::radio_link::update::{Failure, Op, REPLY_WAIT_MS, Received, TRIES, receive};
 
     use super::*;
     use crate::{LinkEvent, LinkPlumbing, link_pair};
@@ -163,6 +211,8 @@ mod tests {
         LoseStatus,
         /// Drop it and everything queued behind it, as a new connection does.
         Discard,
+        /// Take nothing more for this long, as a link between connections, then write it.
+        Stall(Duration),
     }
 
     /// Every op the transport wrote, and when.
@@ -186,6 +236,9 @@ mod tests {
                 let op = Op::decode(&bytes).expect("an op");
                 let what = sent(&op);
                 let fate = fate(what);
+                if let Fate::Stall(stall) = fate {
+                    tokio::time::sleep(stall).await;
+                }
                 if fate == Fate::Discard {
                     plumbing.commands.done(1);
                     plumbing.commands.discard();
@@ -197,7 +250,7 @@ mod tests {
                     Received::Install(_) => None,
                 };
                 plumbing.commands.done(1);
-                if let Some(status) = status.filter(|_| fate == Fate::Write) {
+                if let Some(status) = status.filter(|_| fate != Fate::LoseStatus) {
                     let mut buf = [0u8; UPDATE_STATUS_MAX];
                     let len = Op::Status(status).encode(&mut buf);
                     let up =
@@ -216,8 +269,8 @@ mod tests {
     }
 
     /// Drive `paced` over `link` as `flash-bridge` does, until it installs, and return the
-    /// largest backlog it left after a pump.
-    async fn drive(link: &mut LinkHandle, paced: &mut PacedSender<'_>) -> u64 {
+    /// largest backlog it left after a pump, or how it failed.
+    async fn drive(link: &mut LinkHandle, paced: &mut PacedSender<'_>) -> Result<u64, Failure> {
         let start = Instant::now();
         let mut written = link.written();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -228,12 +281,12 @@ mod tests {
             most = most.max(link.backlog());
             match paced.stage() {
                 Stage::Sending => {}
-                Stage::Installed => return most,
-                Stage::Failed(failure) => panic!("the update failed: {failure:?}"),
+                Stage::Installed => return Ok(most),
+                Stage::Failed(failure) => return Err(failure),
             }
             tokio::select! {
                 _ = tick.tick() => {}
-                () = written.changed() => {}
+                () = written.changed(), if paced.is_waiting() => {}
                 event = link.recv() => match event {
                     Some(LinkEvent::Message(BridgeToHost::Update(bytes))) => {
                         if let Some(Op::Status(status)) = Op::decode(&bytes) {
@@ -247,18 +300,27 @@ mod tests {
         }
     }
 
-    /// Run one update over a transport taking `per_command` per command.
-    async fn update(
+    /// Run one update over a transport taking `per_command` per command, to its end.
+    async fn run(
         per_command: Duration,
         fate: impl FnMut(Sent) -> Fate + Send + 'static,
-    ) -> (Log, u64) {
+    ) -> (Log, Result<u64, Failure>) {
         let image = image();
         let sha256: [u8; 32] = Sha256::digest(&image).into();
         let (mut link, plumbing) = link_pair();
         let log = transport(plumbing, per_command, fate);
         let mut paced = PacedSender::new(Sender::new(&image, sha256, &DIGEST));
-        let most = drive(&mut link, &mut paced).await;
-        (log, most)
+        let end = drive(&mut link, &mut paced).await;
+        (log, end)
+    }
+
+    /// [`run`], for an update that installs.
+    async fn update(
+        per_command: Duration,
+        fate: impl FnMut(Sent) -> Fate + Send + 'static,
+    ) -> (Log, u64) {
+        let (log, end) = run(per_command, fate).await;
+        (log, end.expect("the update installs"))
     }
 
     fn chunks(log: &Log, offset: u32) -> Vec<Instant> {
@@ -322,6 +384,46 @@ mod tests {
         for offset in (0..IMAGE_LEN).step_by(UPDATE_CHUNK) {
             let offset = u32::try_from(offset).unwrap();
             assert!(!chunks(&log, offset).is_empty(), "chunk {offset} never written");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paced_sender_fails_silent_when_transport_stops_taking_commands() {
+        // The second sector's first chunk is the last the link takes, as a pulled cable or a
+        // Bluetooth link that stays down leaves it.
+        let second = u32::try_from(SECTOR).unwrap();
+        let start = Instant::now();
+        let (log, end) = run(Duration::from_millis(100), move |sent| {
+            if sent == Sent::Chunk(second) {
+                return Fate::Stall(Duration::from_secs(3_600));
+            }
+            Fate::Write
+        })
+        .await;
+        assert_eq!(end, Err(Failure::Silent));
+        let took = start.elapsed();
+        let bound = Duration::from_millis(STALL_MS + u64::from(TRIES) * REPLY_WAIT_MS);
+        assert!(took <= bound + Duration::from_secs(1), "failed after {took:?}");
+        assert!(chunks(&log, second).is_empty(), "the stalled chunk was never written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paced_sender_sends_each_chunk_once_when_transport_resumes_before_the_stall_bound() {
+        // Past the reply wait many times over, but short of the stall bound: the sender waits.
+        let stall = Duration::from_millis(STALL_MS - 2_000);
+        let second = u32::try_from(SECTOR).unwrap();
+        let mut stalled = false;
+        let (log, _) = update(Duration::from_millis(100), move |sent| {
+            if !stalled && sent == Sent::Chunk(second) {
+                stalled = true;
+                return Fate::Stall(stall);
+            }
+            Fate::Write
+        })
+        .await;
+        for offset in (0..IMAGE_LEN).step_by(UPDATE_CHUNK) {
+            let offset = u32::try_from(offset).unwrap();
+            assert_eq!(chunks(&log, offset).len(), 1, "chunk {offset}");
         }
     }
 }
