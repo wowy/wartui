@@ -58,7 +58,8 @@
 //! stream: the C6 forwards each write's bytes, and the P4 reassembles frames at each `0x00`. So
 //! the frames queued together go as one run, a write group ([`DownWriter`]), cut into pieces of the
 //! ATT MTU less its 3-byte header, and at most `ble::DOWN_VALUE_MAX`: 179 bytes at the C6's MTU of
-//! 247. A longer write can reach the C6's host cut short and stop it, and the C6 cannot refuse one
+//! 182. A longer write can reach the C6's host cut short and stop it. The C6's MTU keeps every
+//! central to that size, and the transport caps its pieces too, for a bridge whose C6 serves more
 //! (`wartui_proto::ble` `//!`). A write is a stream fragment, so the first frame after every
 //! connect goes behind a `0x00`, which ends whatever partial frame the P4's accumulator held from
 //! an earlier attachment. The byte shares that frame's first write (`serial::encode_for_wire`).
@@ -72,7 +73,7 @@
 //! which carry the largest frame and the leading `0x00`. A frame that would take a group past that
 //! waits for the next group. One larger than a whole group goes alone, in more writes than a group
 //! holds: that takes an ATT MTU under 168, and BlueZ asks for 517, so the link runs at the C6's
-//! 247. Every write as a request held the link too, at about 3.4 KB/s on a 30 ms interval. A
+//! 182. Every write as a request held the link too, at about 3.4 KB/s on a 30 ms interval. A
 //! request the C6 answers with an ATT error fails as any write does, and ends the connection. The
 //! transport is done with a group's commands once its request is answered or a write fails
 //! (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
@@ -122,7 +123,7 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures_util::StreamExt;
 use tokio::time::{Interval, MissedTickBehavior};
-use wartui_proto::ble::{DOWN_UUID, DOWN_VALUE_MAX, NAME_PREFIX, UP_UUID};
+use wartui_proto::ble::{ATT_MTU, DOWN_UUID, DOWN_VALUE_MAX, NAME_PREFIX, UP_UUID};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
     USB_TOOK_BRIDGE, decode_frame,
@@ -194,9 +195,6 @@ const C6_WRITE_QUEUE: usize = 8;
 /// The most writes one group takes: one fewer than the C6 queues.
 const GROUP_WRITES: usize = C6_WRITE_QUEUE - 1;
 
-/// The ATT MTU the C6 asks for, the smallest the bridge serves well.
-const SERVED_MTU: u16 = 247;
-
 /// The most bytes one write carries at ATT MTU `mtu`: the MTU less its header, capped at
 /// [`DOWN_VALUE_MAX`] (`wartui_proto::ble`), and at least [`MIN_WRITE`].
 const fn piece_for(mtu: u16) -> usize {
@@ -206,10 +204,10 @@ const fn piece_for(mtu: u16) -> usize {
 }
 
 // The largest frame and the first group's leading `0x00` fit one group of capped pieces at the
-// MTU the C6 asks for. Under an MTU of 168 a frame can take more writes than a group, up to 58 at
+// MTU the C6 serves. Under an MTU of 168 a frame can take more writes than a group, up to 58 at
 // the default MTU of 23, and goes alone; a central stuck there is slow anyway.
 const _: () = assert!(
-    (MAX_HOST_FRAME + 1).div_ceil(piece_for(SERVED_MTU)) <= GROUP_WRITES,
+    (MAX_HOST_FRAME + 1).div_ceil(piece_for(ATT_MTU)) <= GROUP_WRITES,
     "the largest frame overflows a write group"
 );
 

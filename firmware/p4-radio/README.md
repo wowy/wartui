@@ -43,15 +43,17 @@ Two upstream bugs shape the build, each worked around without a patch
 
 | Workaround | Why |
 | --- | --- |
-| TrouBLE's packet pool is 251 bytes (`default-packet-pool-mtu-251`), so the ATT MTU is 247 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
+| TrouBLE's packet pool is 186 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in `.cargo/config.toml`), so the ATT MTU is 182 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
 | `trouble-host`'s `connection-params-update` stays off | bt-hci 0.10.1 panics on the reply to a central's connection parameter request; off, the controller answers it itself |
 
-A third is worked around by the central. esp-radio 1.0.0-beta.1's `ble_hs_rx_data` copies only
-the first buffer of a received ACL packet that arrives as a chain, and the controller chains a
-packet of 193 to 198 bytes, its 4-byte header included. The packet reaches TrouBLE short, its
-host stops, and the C6 restarts. So a central writes at most 179 value bytes to Down
-(`wartui_proto::ble::DOWN_VALUE_MAX`), and no packet it sends passes 190 bytes
+The ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`) works around a third. esp-radio
+1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer of a received ACL packet that
+arrives as a chain, and the controller chains a packet of 193 to 198 bytes, its 4-byte header
+included. The packet reaches TrouBLE short, its host stops, and the C6 restarts. On that MTU a
+central writes at most 179 value bytes to Down, and no packet it sends passes 190 bytes
 ([`ble-host-link-findings.md`](../../docs/ble-host-link-findings.md#the-host-stop-found)).
+Build from this directory, whose `.cargo/config.toml` sizes the pool; `src/ble.rs` fails the
+build when the pool and the MTU disagree.
 
 The central picks the connection interval unless the build names one.
 `WARTUI_RADIO_CONN_INTERVAL_MS=7.5-15 cargo build --release` asks for 7.5 to 15 ms, with

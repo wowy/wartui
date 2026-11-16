@@ -542,6 +542,7 @@ mod tests {
     };
     use crate::config::Link;
     use wartui_bridge::{DisconnectCause, LinkEvent};
+    use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::fleet::Share;
@@ -784,7 +785,7 @@ mod tests {
 
     /// A bonded host on an encrypted 2M link at a 30 ms interval.
     const CENTRAL: Central =
-        Central { encrypted: true, bonded: true, mtu: 247, phy: 2, interval_us: 30_000 };
+        Central { encrypted: true, bonded: true, mtu: ATT_MTU, phy: 2, interval_us: 30_000 };
 
     #[test]
     fn status_prints_host_as_owner_alone_when_no_bluetooth_host_is_connected() {
@@ -807,7 +808,7 @@ mod tests {
         };
         assert_eq!(
             host_text(&status),
-            "bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval"
+            "bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval"
         );
     }
 
@@ -821,7 +822,7 @@ mod tests {
         };
         assert_eq!(
             host_text(&status),
-            "usb; a Bluetooth host is connected, encrypted, not bonded, MTU 247, 7.5 ms interval"
+            "usb; a Bluetooth host is connected, encrypted, not bonded, MTU 182, 7.5 ms interval"
         );
     }
 

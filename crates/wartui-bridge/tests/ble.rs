@@ -12,7 +12,7 @@ use wartui_bridge::ble::{
 };
 use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
-use wartui_proto::ble::DOWN_VALUE_MAX;
+use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
 use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
@@ -142,7 +142,7 @@ fn led(cmd: &HostToBridge) -> Vec<u8> {
 
 #[test]
 fn ble_writer_leads_first_group_with_zero_byte_when_connection_is_new() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     let first = alone(&mut writer, &HostToBridge::GetStatus);
     // The `0x00` is the first byte of the first piece.
     assert_eq!(first.len(), 1, "{first:?}");
@@ -154,16 +154,16 @@ fn ble_writer_leads_first_group_with_zero_byte_when_connection_is_new() {
 
 #[test]
 fn ble_writer_leads_again_when_a_new_connection_starts() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     alone(&mut writer, &HostToBridge::GetStatus);
-    let mut reconnected = DownWriter::new(247);
+    let mut reconnected = DownWriter::new(ATT_MTU);
     let first = alone(&mut reconnected, &HostToBridge::GetStatus);
     assert_eq!(bytes(&first), led(&HostToBridge::GetStatus));
 }
 
 #[test]
 fn ble_writer_keeps_lead_when_nothing_was_offered() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     assert!(writer.take().is_empty());
     assert_eq!(bytes(&alone(&mut writer, &HostToBridge::GetStatus)), led(&HostToBridge::GetStatus));
 }
@@ -210,7 +210,7 @@ fn ble_writer_writes_twenty_bytes_when_mtu_is_the_default() {
 
 #[test]
 fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     alone(&mut writer, &HostToBridge::GetStatus);
     let writes = alone(&mut writer, &to_node(1000));
     assert!(writes.len() > 1);
@@ -220,7 +220,7 @@ fn ble_writer_ends_frame_with_one_request_when_frame_takes_several_pieces() {
 
 #[test]
 fn ble_writer_sends_request_when_frame_takes_one_piece() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     alone(&mut writer, &HostToBridge::GetStatus);
     let writes = alone(&mut writer, &HostToBridge::GetStatus);
     assert_eq!(writes.len(), 1);
@@ -232,14 +232,14 @@ fn ble_writer_fits_the_c6_write_queue_when_frame_is_largest() {
     // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest; a group stays a
     // write short of that, the first group's lead included.
     let largest = to_node(wartui_proto::link::MAX_NODE_DOWN);
-    let writes = alone(&mut DownWriter::new(247), &largest);
+    let writes = alone(&mut DownWriter::new(ATT_MTU), &largest);
     assert!(writes.len() < 8, "{} writes", writes.len());
     assert_eq!(frames(&writes), [largest]);
 }
 
 #[test]
 fn ble_writer_packs_frames_into_one_group_when_they_fit() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     alone(&mut writer, &HostToBridge::GetStatus);
     let sent = [HostToBridge::GetStatus, to_node(300), HostToBridge::StopScan, to_node(200)];
     for cmd in &sent {
@@ -254,7 +254,7 @@ fn ble_writer_packs_frames_into_one_group_when_they_fit() {
 
 #[test]
 fn ble_writer_ends_group_with_one_request_when_it_holds_several_frames() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     for cmd in [HostToBridge::GetStatus, to_node(500), HostToBridge::GetStatus] {
         assert!(writer.offer(&cmd).unwrap());
     }
@@ -267,7 +267,7 @@ fn ble_writer_ends_group_with_one_request_when_it_holds_several_frames() {
 
 #[test]
 fn ble_writer_refuses_frame_when_group_is_full() {
-    let mut writer = DownWriter::new(247);
+    let mut writer = DownWriter::new(ATT_MTU);
     alone(&mut writer, &HostToBridge::GetStatus);
     let chunk = to_node(1000);
     assert!(writer.offer(&chunk).unwrap());
@@ -300,7 +300,7 @@ fn ble_writer_fits_the_c6_write_queue_when_group_is_full() {
     // TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and drops the rest; a group stays
     // a write short of that, its lead included.
     for len in [1, 100, 500, 1000, wartui_proto::link::MAX_NODE_DOWN] {
-        let mut writer = DownWriter::new(247);
+        let mut writer = DownWriter::new(ATT_MTU);
         let mut offered = 0;
         while writer.offer(&to_node(len)).unwrap() {
             offered += 1;

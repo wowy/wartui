@@ -59,14 +59,15 @@
 //! an accepted one shows in `BleCounters`' `phy` and `interval_us`, and a refusal as no change.
 //!
 //! **Three upstream bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
-//! production build needs"). The packet pool is capped at 251 bytes, so the ATT MTU is
-//! [`ATT_MTU_MAX`] and no notification fragments (`Cargo.toml`). `trouble-host`'s
+//! production build needs"). The packet pool holds 186 bytes, so the C6 serves an ATT MTU of
+//! [`ATT_MTU_MAX`], 182, and a notification carries at most [`VALUE_MAX`], 179 bytes. That keeps
+//! every notification in one ACL packet, so none fragments (`Cargo.toml`). It is also the
+//! workaround for the chained packet: esp-radio copies only the first buffer of a received packet
+//! the controller hands over as a chain, which it does from 193 bytes, and the short packet stops
+//! the host. A central on that MTU sends no packet over 190 bytes
+//! (`docs/ble-host-link-findings.md`, "The host stop, found"). `trouble-host`'s
 //! `connection-params-update` stays off, so a central's parameter request never reaches the
-//! host, and the interval request goes out over L2CAP. esp-radio copies only the first buffer of
-//! a received packet that arrives as a chain, and the short packet stops the host; the C6 cannot
-//! see it above the controller, so the workaround is the central's: each write to Down carries at
-//! most `wartui_proto::ble::DOWN_VALUE_MAX` bytes (`docs/ble-host-link-findings.md`, "The host
-//! stop, found").
+//! host, and the interval request goes out over L2CAP.
 //!
 //! **Only a bonded, encrypted central reaches the host stream**, by LE Secure Connections Just
 //! Works pairing (`docs/c6-ble-pairing-findings.md`). Up's CCCD and Down's writes require
@@ -146,10 +147,16 @@ const RESYNC_MAX: usize = 16;
 /// The ring's bytes: the most the P4 keeps in flight, and room for the resync `0x00`s.
 const OUTBOX_BYTES: usize = HOST_WINDOW_BYTES as usize + RESYNC_MAX;
 
-/// The largest ATT MTU: the packet pool's 251 bytes less the L2CAP header. The pool is capped
-/// there (`Cargo.toml`, `default-packet-pool-mtu-251`) as the workaround for esp-radio
-/// 1.0.0-beta.1 marking every ACL fragment as a start, so a notification is never fragmented.
-const ATT_MTU_MAX: usize = 247;
+/// The ATT MTU the C6 serves: TrouBLE's packet pool less the 4-byte L2CAP header. It is the
+/// workaround for two esp-radio 1.0.0-beta.1 bugs (`Cargo.toml`): no notification fragments, and
+/// no central's packet reaches the size the controller hands over as a chain.
+const ATT_MTU_MAX: usize = wartui_proto::ble::ATT_MTU as usize;
+
+const _: () = assert!(
+    <DefaultPacketPool as PacketPool>::MTU == ATT_MTU_MAX + 4,
+    "TrouBLE's packet pool is not wartui_proto::ble::ATT_MTU + 4: build from firmware/p4-radio, \
+     whose .cargo/config.toml sizes it with TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU"
+);
 
 /// The most a notification or a write carries: the MTU less the ATT opcode and handle.
 const VALUE_MAX: usize = ATT_MTU_MAX - 3;

@@ -431,9 +431,9 @@ works with the held versions.
 - **The esp-radio bug has no fix upstream to wait for.** No esp-hal issue or pull request names
   it. The bt-hci one was fixed in embassy-rs/bt-hci#104.
 - **A third, found on 2026-11-15:** esp-radio's `ble_hs_rx_data` copies only the first buffer of a
-  chained ACL packet, which stops TrouBLE's host. The workaround is the central's: no write
-  carries more than 179 value bytes
-  ([`ble-host-link-findings.md`](ble-host-link-findings.md#the-host-stop-found)).
+  chained ACL packet, which stops TrouBLE's host. The workaround is an ATT MTU of 182, so no
+  write carries more than 179 value bytes
+  ([`ble-host-link-findings.md`](ble-host-link-findings.md#the-c6-serves-an-att-mtu-of-182)).
 
 Four design points the spike leaves for production:
 

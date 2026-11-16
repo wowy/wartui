@@ -449,9 +449,9 @@ buffer. The floods are the throwaway command above, into the P4's update receive
 (`wartui_proto::ble::DOWN_VALUE_MAX`), in the host transport. The L2CAP PDU is then at most 186
 bytes, so no packet, and no fragment of one, passes 190 bytes with its ACL header, whatever the
 central's controller does. The first group's leading `0x00` rides in its first piece, so the
-largest host frame and that byte fit the group's 7 writes. No dependency is patched. A lower ATT
-MTU would also cut the stream toward the host, which this bug does not touch. The C6 cannot
-refuse a long write, since the packet is cut short below ATT.
+largest host frame and that byte fit the group's 7 writes. No dependency is patched. The cap
+binds only wartui's transport: [the C6's MTU](#the-c6-serves-an-att-mtu-of-182) binds every
+central.
 
 The same two devices stayed on the PC's adapter for the runs with the cap:
 
@@ -484,6 +484,40 @@ PC's adapter and the C6 on the build that copies every buffer:
   length (inferred from the sizes). In the first sweep most packets of 193 to 198 bytes chained,
   463 of ~630 (inferred from the packet count), so a window as wide would show in one sector.
 
+### The C6 serves an ATT MTU of 182
+
+The host-side cap leaves every other central free to send a long write, so the C6 now serves an
+ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`), TrouBLE's packet pool at 186 bytes. A conforming
+central then sends no ATT PDU over 182 bytes, so no write over 179 value bytes and no packet over
+190. A notification toward the host carries 179 bytes where it carried 244.
+
+Measured on 2026-11-15 on D0:1C with its ten nodes, one other LE device on the PC's adapter, 2M
+PHY, a 30 ms interval. The cost toward the host ran on the load branch (`bench/ble-load`,
+`e59424a`), built at each MTU in turn: 247, 182, 182, 247. BlueZ reported an MTU of 182 on Up
+and Down in the 182 arm.
+
+| ATT MTU | `saturate`, 60 s, read by the host | Credited by the C6 |
+| --- | --- | --- |
+| 247 | 102.9 and 103.1 KB/s | 104.8 and 105.0 KB/s |
+| 182 | 98.5 and 99.2 KB/s | 100.4 and 101.1 KB/s |
+
+- **MTU 182 costs about 4% of the saturated rate toward the host.** The notification is 27%
+  shorter, so the PC's link is not bound by the notification's size.
+- Each run's missing records were no more than the P4's evictions: 3, 1, 2 and 0 missing against
+  3, 1, 3 and 0 evicted.
+
+The production image then ran on the same bench:
+
+| Run | Result |
+| --- | --- |
+| `flash-bridge --link bluetooth`, both chips, from the MTU 247 load build to the production image | Installed and confirmed: 62.4 s sending, 77.0 s in all. The host's own cap carried it, since that C6 served 247 |
+| `status --link bluetooth` | `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` |
+| `ota --link bluetooth`, ten nodes, forced | The cache upload took 52.0 s (17.1 KB/s), all ten ended `done 0.5.2 (confirmed)`, 91 s in all, and the run's log holds no warning |
+
+- `flash-bridge` over USB then reported `already runs this image`, and the bridge held no panic
+  line.
+- **Not run:** a phone on the MTU of 182, and a central that sends more than the MTU it agreed.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -503,8 +537,9 @@ PC's adapter and the C6 on the build that copies every buffer:
 - `flash-bridge` over Bluetooth reports a rollback and a cut link, and the bridge keeps a working
   image through both.
 - What stopped TrouBLE's host: an ACL packet of 193 to 198 bytes reaches the C6 as a chain, and
-  esp-radio passes on only its first buffer. Every write toward the bridge is capped at 179 value
-  bytes, so no packet a central sends reaches that size.
+  esp-radio passes on only its first buffer. The C6 serves an ATT MTU of 182, so no packet a
+  conforming central sends reaches that size, and wartui caps its own writes at 179 value bytes.
+- An ATT MTU of 182 costs about 4% of the saturated rate toward the bench PC.
 
 ## What this does not settle
 
@@ -519,8 +554,8 @@ PC's adapter and the C6 on the build that copies every buffer:
   sends under 3 KB/s, and no run measured one beside a mouse.
 - **Saturated USB through two hubs at 12 Mbit/s** loses records on every image. A real fleet
   sends under 3 KB/s.
-- **Updates from another central,** a phone or the Pi. Only the bench PC ran them. Each must keep
-  its writes to Down to 179 value bytes.
+- **Updates from another central,** a phone or the Pi. Only the bench PC ran them.
+- **A phone on the ATT MTU of 182.** Each phone's rates were measured at 247.
 - **A node rollback over Bluetooth.** It was not run.
 - **Why the saturated rate moves between two levels.** It is not the build: both images held the
   upper level through a later session of runs.
