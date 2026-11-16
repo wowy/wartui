@@ -3,7 +3,7 @@
 //!
 //! The first line names the host link the run uses, `host usb` or `host bluetooth`, as `wartui
 //! status` names it: `bluetooth` alone is the node that scans Bluetooth. Over Bluetooth it adds
-//! the link's MTU from the bridge's latest `Status`, since less than the C6's 247 is a slower
+//! the link's MTU from the bridge's latest `Status`, since less than the C6's 182 is a slower
 //! link. It does not say the link is encrypted and bonded: the bridge serves no other, so a
 //! `Status` that arrived says so. Over USB it adds a bonded Bluetooth host connected to the C6,
 //! which waits while USB holds the bridge: that is why a phone goes unserved.
@@ -83,7 +83,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 /// | `host usb` | the run reaches the bridge over USB |
 /// | `host usb; Bluetooth waits` | a host the bridge would serve is connected to the C6, and USB holds the bridge |
 /// | `host bluetooth` | over Bluetooth, before the bridge has reported the link |
-/// | `host bluetooth, MTU 247` | the link as the bridge last reported it |
+/// | `host bluetooth, MTU 182` | the link as the bridge last reported it |
 ///
 /// A central the bridge would not serve, one with no bond or no encryption, is not waiting for
 /// USB: the C6 drops it. `wartui status` names it.
@@ -224,6 +224,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
+    use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::link::{BluetoothStatus, Central, HostOwner};
@@ -525,14 +526,14 @@ mod tests {
     fn header_shows_bluetooth_link_when_run_is_over_bluetooth() {
         let snapshot = with_bluetooth(BluetoothStatus {
             owner: HostOwner::Bluetooth,
-            central: Some(central(185)),
+            central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
         let settings = Settings { link: Some(Link::Bluetooth), ..Settings::default() };
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("— host bluetooth, MTU 185, link up"), "{screen}");
+        assert!(screen.contains("— host bluetooth, MTU 182, link up"), "{screen}");
     }
 
     #[test]
@@ -543,8 +544,11 @@ mod tests {
         for (link, owner) in [(Link::Bluetooth, HostOwner::Bluetooth), (Link::Usb, HostOwner::Usb)]
         {
             if let Some(status) = &mut snapshot.bridge_status {
-                status.bluetooth =
-                    BluetoothStatus { owner, central: Some(central(247)), ..Default::default() };
+                status.bluetooth = BluetoothStatus {
+                    owner,
+                    central: Some(central(ATT_MTU)),
+                    ..Default::default()
+                };
             }
             let settings = Settings { link: Some(link), ..Settings::default() };
             let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
@@ -567,7 +571,7 @@ mod tests {
     fn header_shows_waiting_bluetooth_host_when_usb_holds_bridge() {
         let snapshot = with_bluetooth(BluetoothStatus {
             owner: HostOwner::Usb,
-            central: Some(central(247)),
+            central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
         assert_eq!(host(&snapshot, Link::Usb), "host usb; Bluetooth waits");
@@ -579,7 +583,7 @@ mod tests {
         // The C6 drops a central with no bond, so it is not waiting for USB.
         let snapshot = with_bluetooth(BluetoothStatus {
             owner: HostOwner::Usb,
-            central: Some(Central { bonded: false, ..central(247) }),
+            central: Some(Central { bonded: false, ..central(ATT_MTU) }),
             ..BluetoothStatus::default()
         });
         assert_eq!(host(&snapshot, Link::Usb), "host usb");
@@ -590,7 +594,7 @@ mod tests {
         // The last report describes a host that may have gone.
         let mut snapshot = with_bluetooth(BluetoothStatus {
             owner: HostOwner::Bluetooth,
-            central: Some(central(247)),
+            central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
         snapshot.link_up = false;

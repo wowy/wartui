@@ -1293,7 +1293,7 @@ latest status, and show only while the link is up:
 |-----------------------------------------------|----------------------------------------------------------------------|
 | `bridge 44:C0, fw v0.4.0 — host usb, link up` | The run reaches the bridge over USB                                  |
 | `… — host usb; Bluetooth waits, link up`      | A paired Bluetooth host is connected to the C6 and waits while this run holds the bridge: why a phone goes unserved |
-| `… — host bluetooth, MTU 247, link up`        | The run reaches the bridge over Bluetooth, and its link: below MTU 247 it is slower. The bridge serves only an encrypted, bonded host, so the header does not repeat it |
+| `… — host bluetooth, MTU 182, link up`        | The run reaches the bridge over Bluetooth, and its link: below MTU 182 it is slower. The bridge serves only an encrypted, bonded host, so the header does not repeat it |
 | `waiting for bridge — host bluetooth`         | No bridge has answered over Bluetooth yet                            |
 
 **`status` shows the Bluetooth host link.** Its labels are apart from `bluetooth`, the node that
@@ -1302,7 +1302,7 @@ scans Bluetooth:
 | Line                                                                     | Meaning                                                         |
 |--------------------------------------------------------------------------|-----------------------------------------------------------------|
 | `host  usb`                                                              | Who the bridge serves: `none`, `usb` or `bluetooth`             |
-| `host  bluetooth, encrypted and bonded, MTU 247, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
+| `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
 | `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
@@ -1323,7 +1323,10 @@ bridge from a Bluetooth host.
 
 **A host other than wartui ends each write group with a write request**, and writes the rest
 without response. A group is the frames the host has queued together, cut into writes, at most 7
-of them: the C6 queues 8 writes and silently drops the rest, and its answer paces the host.
+of them: the C6 queues 8 writes and silently drops the rest, and its answer paces the host. **The
+bridge serves an ATT MTU of 182**, so the host's Bluetooth stack keeps every write to 179 value
+bytes and the application has nothing to do. On Android, ask for an MTU to write more than the
+default of 23 allows.
 
 **A paired host that connects and does not subscribe is dropped after 30 s**, so a phone's
 background link cannot hold the bridge's one connection. wartui subscribes within a second or two.

@@ -430,6 +430,10 @@ works with the held versions.
   that release should run on the held esp-radio (inferred, not built).
 - **The esp-radio bug has no fix upstream to wait for.** No esp-hal issue or pull request names
   it. The bt-hci one was fixed in embassy-rs/bt-hci#104.
+- **A third, found on 2026-11-15:** esp-radio's `ble_hs_rx_data` copies only the first buffer of a
+  chained ACL packet, which stops TrouBLE's host. The workaround is an ATT MTU of 182, so no
+  write carries more than 179 value bytes
+  ([`ble-host-link-findings.md`](ble-host-link-findings.md#the-c6-serves-an-att-mtu-of-182)).
 
 Four design points the spike leaves for production:
 
@@ -485,6 +489,7 @@ It does not settle:
   written. A P4 image of about 431 KB would take about 4–11 s at the up rates seen on the
   stream receive, from 39.1 KB/s on the iPad to 117.9 KB/s on the Flip (inferred, not measured).
   On 2026-11-13 sustained writes stopped TrouBLE's host. Updates over Bluetooth were measured on
-  2026-11-15 ([`ble-host-link-findings.md`](ble-host-link-findings.md#updates-over-bluetooth)).
+  2026-11-15 ([`ble-host-link-findings.md`](ble-host-link-findings.md#updates-over-bluetooth)),
+  and the stop's cause found the same day.
 - **A phone app of our own,** which must ask for an MTU on Android. Pairing, bonding and
   encryption are in [`c6-ble-pairing-findings.md`](c6-ble-pairing-findings.md).

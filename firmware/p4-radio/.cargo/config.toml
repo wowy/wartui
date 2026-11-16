@@ -14,3 +14,9 @@ rustflags = [
 # header, which the image's digest covers, so they match the image `firmware/p4-bridge/build.rs`
 # bundles: left to detection, a C6 with other flash would get another digest and be reflashed.
 runner = "espflash flash --before no-reset --after no-reset --partition-table partitions.csv --erase-parts otadata --flash-mode dio --flash-freq 40mhz --flash-size 4mb"
+
+[env]
+# TrouBLE's packet pool, in bytes of L2CAP PDU: the ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`)
+# and the 4-byte L2CAP header. No `default-packet-pool-mtu-*` feature offers that size, and
+# TrouBLE's build script reads this variable over a feature. `src/ble.rs` asserts the two agree.
+TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "186"

@@ -2,11 +2,17 @@
 //!
 //! Over Bluetooth the C6 offers one GATT service, [`SERVICE_UUID`]. [`UP_UUID`] notifies the host
 //! stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host
-//! frames, framed as on USB, in writes without response that end in a write request. The identity lives here so the C6 and every
-//! host read the same one; a change strands whichever end was not rebuilt.
+//! frames, framed as on USB, in writes without response that end in a write request. The identity
+//! lives here so the C6 and every host read the same one; a change strands whichever end was not
+//! rebuilt.
 //!
 //! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
 //! `--bridge` takes, so an operator picks the bridge by the same name over either link.
+//!
+//! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
+//! [`DOWN_VALUE_MAX`] value bytes, and a central's own stack keeps to it. wartui's transport caps
+//! its pieces at [`DOWN_VALUE_MAX`] whatever the MTU, so it also updates a bridge whose C6 serves
+//! a larger one.
 //!
 //! The C6 holds the stream it has yet to notify in a [`ByteRing`] of
 //! [`HOST_WINDOW_BYTES`](crate::radio_link::HOST_WINDOW_BYTES), which the P4's credit window
@@ -20,6 +26,26 @@ pub const UP_UUID: u128 = 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877;
 pub const DOWN_UUID: u128 = 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877;
 /// What the C6 advertises ahead of the bridge's last two octets: `wartui 96:C4`.
 pub const NAME_PREFIX: &str = "wartui ";
+
+/// The ATT MTU the C6 serves.
+///
+/// A conforming central sends the C6 no ATT PDU over 182 bytes, so no L2CAP PDU over 186, and no
+/// ACL packet, nor any fragment its controller cuts from one, over 190 with its 4-byte header.
+/// The C6's controller hands over a packet of 193 to 198 bytes as a chain of two buffers, 190
+/// bytes in the first, and esp-radio 1.0.0-beta.1 copies only that first buffer. The short packet
+/// stops the C6's Bluetooth host (`docs/ble-host-link-findings.md`, "The host stop, found").
+pub const ATT_MTU: u16 = 182;
+
+/// The most value bytes one write to Down carries: [`ATT_MTU`] less the ATT opcode and handle.
+///
+/// A central on the C6's MTU cannot write more. wartui's transport caps its pieces at it whatever
+/// the MTU, so it also updates a bridge whose C6 serves a larger one.
+pub const DOWN_VALUE_MAX: usize = ATT_MTU as usize - 3;
+
+const _: () = assert!(
+    ATT_MTU as usize + 8 <= 190,
+    "an ATT PDU of ATT_MTU bytes makes an ACL packet the C6's controller chains"
+);
 
 /// The host stream bytes the C6 holds until it notifies them: a byte ring, oldest first.
 #[derive(Debug)]

@@ -60,8 +60,8 @@ HCI_REASONS = {
     0x3D: "MIC failure",
 }
 
-# Mirrors ATT_MTU_MAX in firmware/p4-radio/src/ble.rs: the largest ATT MTU the C6 takes.
-WANTED_MTU = 247
+# Mirrors ble::ATT_MTU in crates/wartui-proto/src/ble.rs: the ATT MTU the C6 serves.
+WANTED_MTU = 182
 
 # Mirrors plan::SCAN_CHANNELS in crates/wartui-proto/src/plan/channels.rs.
 SCAN_CHANNELS = [
@@ -1054,7 +1054,7 @@ def bridge_bluetooth(db, ctx, lives):
     if slow:
         flag("WARN", "bluetooth",
              f"a central at MTU {', '.join(map(str, slow))}, below the {WANTED_MTU} the C6 "
-             "takes: smaller writes and notifications, so a slower link",
+             "serves: smaller writes and notifications, so a slower link",
              "SELECT s.id, s.rx_at, b.central_mtu FROM bridge_status s JOIN bridge_bluetooth b "
              f"ON b.status_id = s.id WHERE b.central_mtu < {WANTED_MTU} ORDER BY s.id")
 
