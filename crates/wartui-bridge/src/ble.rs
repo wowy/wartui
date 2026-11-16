@@ -59,23 +59,23 @@
 //! the frames queued together go as one run, a write group ([`DownWriter`]), cut into pieces of the
 //! ATT MTU less its 3-byte header, and at most `ble::DOWN_VALUE_MAX`: 179 bytes at the C6's MTU of
 //! 247. A longer write can reach the C6's host cut short and stop it, and the C6 cannot refuse one
-//! (`wartui_proto::ble` `//!`). A write is a stream fragment, so the first group after every
-//! connect starts with a `0x00`, which ends whatever partial frame the P4's accumulator held from
-//! an earlier attachment. It is a byte of the run, ahead of the first frame, not a write of its
-//! own.
+//! (`wartui_proto::ble` `//!`). A write is a stream fragment, so the first frame after every
+//! connect goes behind a `0x00`, which ends whatever partial frame the P4's accumulator held from
+//! an earlier attachment. The byte shares that frame's first write (`serial::encode_for_wire`).
 //!
 //! **Each group ends with a write request**, and every piece before it is a write without
 //! response. TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and silently drops the rest,
 //! and a write without response gives the central nothing to wait on: a burst of full writes lost
-//! some whenever the C6's forwarding to the P4 slowed, and a sustained flood stopped the C6's
-//! Bluetooth host. The C6 answers the request only once it has forwarded that piece, behind every
-//! piece queued ahead of it, so the central never has more than one group outstanding. A group
-//! holds at most one write fewer than the C6's queue, 7 pieces, which carry the largest frame and
-//! the leading `0x00`. A frame that would take a group past that waits for the next group, and one
-//! larger than a whole group, as at the default MTU of 23, goes alone. Every write as a request held the link too, at about 3.4 KB/s on
-//! a 30 ms interval. A request the C6 answers with an ATT error fails as any write does, and ends
-//! the connection. The transport is done with a group's commands once its request is answered or a
-//! write fails (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
+//! some whenever the C6's forwarding to the P4 slowed. The C6 answers the request only once it has
+//! forwarded that piece, behind every piece queued ahead of it, so the central never has more than
+//! one group outstanding. A group holds at most one write fewer than the C6's queue, 7 pieces,
+//! which carry the largest frame and the leading `0x00`. A frame that would take a group past that
+//! waits for the next group. One larger than a whole group goes alone, in more writes than a group
+//! holds: that takes an ATT MTU under 168, and BlueZ asks for 517, so the link runs at the C6's
+//! 247. Every write as a request held the link too, at about 3.4 KB/s on a 30 ms interval. A
+//! request the C6 answers with an ATT error fails as any write does, and ends the connection. The
+//! transport is done with a group's commands once its request is answered or a write fails
+//! (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
 //!
 //! **Commands wait for the connection's `Ready`.** The commands queue is read only while the
 //! stream is announced, and what it holds is dropped as the transport reports that `Ready` as
@@ -206,8 +206,8 @@ const fn piece_for(mtu: u16) -> usize {
 }
 
 // The largest frame and the first group's leading `0x00` fit one group of capped pieces at the
-// MTU the C6 asks for. At the default MTU of 23 a frame takes far more, up to 58 pieces, and goes
-// alone; a central stuck there is slow anyway.
+// MTU the C6 asks for. Under an MTU of 168 a frame can take more writes than a group, up to 58 at
+// the default MTU of 23, and goes alone; a central stuck there is slow anyway.
 const _: () = assert!(
     (MAX_HOST_FRAME + 1).div_ceil(piece_for(SERVED_MTU)) <= GROUP_WRITES,
     "the largest frame overflows a write group"
@@ -452,47 +452,42 @@ pub struct DownWrite {
 pub struct DownWriter {
     /// The most bytes one write carries.
     piece: usize,
-    /// The frames offered since the last take, encoded end to end, behind the leading `0x00` in
-    /// the first group since this connect.
+    /// Whether the next frame offered is this connection's first, which goes behind a `0x00`.
+    lead: bool,
+    /// The frames offered since the last take, encoded end to end.
     run: Vec<u8>,
-    /// How many frames `run` holds.
-    frames: usize,
 }
 
 impl DownWriter {
     /// A writer for a connection just made, at ATT MTU `mtu`: its pieces are the MTU less its
-    /// header, at most [`DOWN_VALUE_MAX`], and its first group leads with a `0x00`.
+    /// header, at most [`DOWN_VALUE_MAX`], and its first frame is encoded behind a `0x00`.
     #[must_use]
     pub fn new(mtu: u16) -> Self {
-        Self { piece: piece_for(mtu), run: vec![0x00], frames: 0 }
+        Self { piece: piece_for(mtu), lead: true, run: Vec::new() }
     }
 
-    /// Add `cmd`'s frame to the group, encoded as on USB: `false` when the group is full, and the
-    /// frame is not taken. A frame too large for any group is taken into an empty one.
+    /// Add `cmd`'s frame to the group, encoded as on USB and, as the connection's first, behind a
+    /// `0x00`: `false` when the group is full, and the frame is not taken. A frame too large for
+    /// any group is taken into an empty one.
     ///
     /// # Errors
     /// [`LinkError`] if `cmd` does not fit a frame.
     pub fn offer(&mut self, cmd: &HostToBridge) -> Result<bool, LinkError> {
-        let mut buf = [0u8; MAX_HOST_FRAME];
-        let len = encode_for_wire(cmd, false, &mut buf)?;
+        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let len = encode_for_wire(cmd, self.lead, &mut buf)?;
         let writes = (self.run.len() + len).div_ceil(self.piece);
-        if self.frames > 0 && writes > GROUP_WRITES {
+        if !self.run.is_empty() && writes > GROUP_WRITES {
             return Ok(false);
         }
         self.run.extend_from_slice(&buf[..len]);
-        self.frames += 1;
+        self.lead = false;
         Ok(true)
     }
 
     /// The group's writes, and an empty group after it: the offered frames cut into writes
-    /// without response, the last a request, the first group since the connect led by its `0x00`.
-    /// None when nothing was offered, and the lead waits for the first frame.
+    /// without response, the last a request. None when nothing was offered.
     pub fn take(&mut self) -> Vec<DownWrite> {
-        if self.frames == 0 {
-            return Vec::new();
-        }
         let run = std::mem::take(&mut self.run);
-        self.frames = 0;
         let mut writes: Vec<DownWrite> = run
             .chunks(self.piece)
             .map(|bytes| DownWrite { bytes: bytes.to_vec(), kind: WriteKind::Command })

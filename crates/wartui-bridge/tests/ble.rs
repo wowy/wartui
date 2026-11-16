@@ -4,7 +4,6 @@
 //! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
 //! are checked on the bench.
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use wartui_bridge::ble::{
@@ -145,7 +144,7 @@ fn led(cmd: &HostToBridge) -> Vec<u8> {
 fn ble_writer_leads_first_group_with_zero_byte_when_connection_is_new() {
     let mut writer = DownWriter::new(247);
     let first = alone(&mut writer, &HostToBridge::GetStatus);
-    // The `0x00` is the first byte of the first piece, and costs no write of its own.
+    // The `0x00` is the first byte of the first piece.
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(first[0].kind, WriteKind::Request);
     assert_eq!(bytes(&first), led(&HostToBridge::GetStatus));
@@ -179,20 +178,6 @@ fn ble_writer_caps_piece_when_mtu_allows_more() {
         assert!(writes.iter().all(|w| w.bytes.len() <= DOWN_VALUE_MAX), "MTU {mtu}");
         assert!(writes[..writes.len() - 1].iter().all(|w| w.bytes.len() == DOWN_VALUE_MAX));
     }
-}
-
-#[test]
-fn ble_writer_keeps_every_write_under_the_cap_when_group_ends_on_any_length() {
-    // A group's last piece is whatever the run leaves; a 182- to 187-byte write chains on the C6
-    // by itself, so no remainder may pass the cap.
-    let mut lasts = HashSet::new();
-    let mut writer = DownWriter::new(517);
-    for len in 0..=wartui_proto::link::MAX_NODE_DOWN {
-        let writes = alone(&mut writer, &to_node(len));
-        assert!(writes.iter().all(|w| w.bytes.len() <= DOWN_VALUE_MAX), "body of {len}");
-        lasts.insert(writes.last().unwrap().bytes.len());
-    }
-    assert_eq!(lasts, (1..=DOWN_VALUE_MAX).collect(), "the sweep reaches every remainder");
 }
 
 #[test]

@@ -461,13 +461,28 @@ The same two devices stayed on the PC's adapter for the runs with the cap:
 | `flash-bridge --link bluetooth`, both chips changed, host with the cap | Stock, then the production image it installed | Installed and confirmed: 93.3 s sending, 13.7 s from the install |
 | `ota --link bluetooth`, ten nodes, forced, host with the cap | Production | The cache upload took 81.4 s (10.9 KB/s), all ten ended `done 0.5.2 (confirmed)`, 140 s in all, and the run's log holds no warning |
 
-- **The stock path died at 308 s with 244-byte writes and ran 587 s clean with the cap,** under the
-  same load beside the same devices.
+- **One run each way, under the same load beside the same devices:** the stock path died at 308 s
+  with 244-byte writes and ran 587 s with the cap. The clean run is weak evidence alone, since
+  the uncapped contrast run chained only 4 packets in about 6 min. The cap rests on the lengths:
+  every chained packet seen was 193 to 198 bytes, and a capped write sends none over 190.
 - **The cap costs no speed there:** 10.2 KB/s against 10.1 and 10.2 KB/s uncapped.
 - **A shared adapter is slower.** The update sent at about 10.8 KB/s beside the two devices, against
   15.3 KB/s alone.
 - `flash-bridge` over USB then reported `already runs this image`, and the bridge held no panic
   line.
+
+A second sweep the same day covered the lengths under the first, with one other LE device on the
+PC's adapter and the C6 on the build that copies every buffer:
+
+| Run | Write value | Result |
+| --- | --- | --- |
+| Sweep, 741 KB, every write a request | 1 to 181 bytes, in steps of 1 | Verified, no failed read, no link drop. 24,474 packets, the largest 192 bytes, none chained |
+
+- **No packet of 12 to 192 bytes chains.** With the first sweep, every length from 12 to 211 bytes
+  is measured, and only 193 to 198 chain. A capped write and its fragments stay at or under 190.
+- Each length carried one 4 KB sector: about 24 writes at 181 bytes, and more at each shorter
+  length (inferred from the sizes). In the first sweep most packets of 193 to 198 bytes chained,
+  463 of ~630 (inferred from the packet count), so a window as wide would show in one sector.
 
 ## What this settles
 

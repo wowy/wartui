@@ -2,8 +2,9 @@
 //!
 //! Over Bluetooth the C6 offers one GATT service, [`SERVICE_UUID`]. [`UP_UUID`] notifies the host
 //! stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host
-//! frames, framed as on USB, in writes without response that end in a write request. The identity lives here so the C6 and every
-//! host read the same one; a change strands whichever end was not rebuilt.
+//! frames, framed as on USB, in writes without response that end in a write request. The identity
+//! lives here so the C6 and every host read the same one; a change strands whichever end was not
+//! rebuilt.
 //!
 //! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
 //! `--bridge` takes, so an operator picks the bridge by the same name over either link.
