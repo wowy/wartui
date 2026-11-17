@@ -47,7 +47,7 @@ cargo run -p wartui -- --log-file wartui.log run     # the only way to see trans
 ```
 
 See what the view draws without a terminal: `tools/render.py --cols 120 --rows 30` runs the
-binary on a pty and prints the screen as text, `--keys jb` presses keys first, and `--bridge`
+binary on a pty and prints the screen as text, `--keys jc` presses keys first, and `--bridge`
 points it at the boards attached rather than the simulator. `README.md` § "Suggested tools" says
 when to reach for it over the `TestBackend` tests in `crates/wartui/src/tui/`.
 
@@ -172,7 +172,7 @@ running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is 
 `crates/wartui-proto/tests/fleet.rs` tests it.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b`, `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
+ordered against each other. Only `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
 far, beside the `StopScan` a quit sends; channels are the P4's.
 
 ### Store is the system of record
@@ -395,13 +395,14 @@ edit stops; follow the pointer before changing the rule.
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
   `ASSIGN_FLAG_BLE` is never a property of the flashed firmware. Whether a node scans Bluetooth is
-  the operator's choice of scan mode (`b`, `wartui scan start --bluetooth`); which node is the P4's
-  pick: none below two members, so a lone node keeps Wi-Fi, the current pick while it stays a
-  member, and else the highest member slot. The node holding it is dealt no channels and is counted
-  in `Plan::node_count` anyway, because that reports the fleet size the plan was cut for rather
-  than a census of who is sniffing. An empty `ChannelSet` is sent only with the flag beside it;
-  without it, a node told to scan nothing parks while the fleet believes it is sweeping, and
-  `Plan::assign_for` refuses to build that frame.
+  the operator's choice of scan mode (the settings' `bluetooth` row,
+  `wartui scan start --bluetooth`); which node is the P4's pick: none below two members, so a lone
+  node keeps Wi-Fi, the current pick while it stays a member, and else the highest member slot.
+  The node holding it is dealt no channels and is counted in `Plan::node_count` anyway, because
+  that reports the fleet size the plan was cut for rather than a census of who is sniffing. An
+  empty `ChannelSet` is sent only with the flag beside it; without it, a node told to scan nothing
+  parks while the fleet believes it is sweeping, and `Plan::assign_for` refuses to build that
+  frame.
   → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `assign_for`;
   `crates/wartui-proto/src/fleet.rs`, `pick_bluetooth`; `docs/phase-2-findings.md`
 - **A heartbeat read behind the bridge is history.** A host that falls behind a busy fleet drains

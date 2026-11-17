@@ -7,10 +7,11 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
-//! The pool and fan rows live on the bridge, not in the file. Each shows what the bridge last
-//! reported, and `Enter` sends it only when the row moved; the bridge stores it and boots into
-//! it. Neither is ever written to `wartui.toml`. The bridge picks the Bluetooth node too, and `b`
-//! rather than a row here asks for the scan.
+//! The pool, fan and bluetooth rows live on the bridge, not in the file. Each shows what the
+//! bridge last reported, and `Enter` sends it only when the row moved. The bridge stores the
+//! pool and fan and boots into them. It keeps no scan mode, so the run holds the one asked for
+//! and starts it again after a reboot. None of the three is ever written to `wartui.toml`. The
+//! bridge picks which node scans Bluetooth.
 //!
 //! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
 //! decides at launch whether it waits, so the row applies from the next launch. The
@@ -33,6 +34,7 @@ use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
 use wartui_proto::fan::FanDuty;
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;
@@ -75,6 +77,7 @@ pub struct Settings {
 enum Field {
     Pool,
     Fan,
+    Bluetooth,
     RememberBridge,
     WaitForGps,
     ExcludedSsids,
@@ -82,9 +85,10 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 6] = [
+const FIELDS: [Field; 7] = [
     Field::Pool,
     Field::Fan,
+    Field::Bluetooth,
     Field::RememberBridge,
     Field::WaitForGps,
     Field::ExcludedSsids,
@@ -119,7 +123,12 @@ pub(super) struct ConfigModal {
     fan: Option<FanDuty>,
     /// The duty the bridge reported when the modal opened, so `Enter` sends only a change.
     fan_seed: Option<FanDuty>,
-    /// Whether the link was up when the modal opened. While it is down, both bridge rows are
+    /// Whether the bluetooth row asks for the Bluetooth scan, or `None` while the bridge reports
+    /// the scan stopped.
+    bluetooth: Option<bool>,
+    /// The bluetooth row as the modal opened, so `Enter` sends only a change.
+    bluetooth_seed: Option<bool>,
+    /// Whether the link was up when the modal opened. While it is down, the pool and fan rows are
     /// `None`: a value sent then would be dropped, not stored.
     bridge_up: bool,
     /// Whether `run` remembers the bridge it connected to.
@@ -186,6 +195,7 @@ impl ConfigModal {
     /// |---|---|
     /// | pool | one place in [`POOL_STEPS`]; none at `no bridge` |
     /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
+    /// | bluetooth | flips; none at `scan stopped` |
     /// | remember | flips |
     /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
@@ -194,6 +204,11 @@ impl ConfigModal {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
             Field::Fan => self.fan = self.fan.map(|duty| step_fan(duty, delta)),
+            Field::Bluetooth => {
+                if delta != 0 {
+                    self.bluetooth = self.bluetooth.map(|on| !on);
+                }
+            }
             Field::RememberBridge => {
                 if delta != 0 {
                     self.remember_bridge = !self.remember_bridge;
@@ -236,12 +251,21 @@ impl ConfigModal {
             .and_then(|status| status.fan)
             .map(|fan| fan.duty)
             .filter(|_| bridge_up);
+        // Nothing to toggle while stopped: the run starts the scan once the bridge reports it
+        // stopped. Before the first report it is off, and the engine starts the scan in the mode
+        // asked for meanwhile.
+        let bluetooth = match snapshot.scan {
+            Some(ScanMode::Stopped) => None,
+            scan => Some(scan == Some(ScanMode::WifiBluetooth)),
+        };
         Self {
             selected: Field::Pool,
             pool,
             pool_seed: pool,
             fan,
             fan_seed: fan,
+            bluetooth,
+            bluetooth_seed: bluetooth,
             bridge_up,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
@@ -405,17 +429,20 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The pool and the fan go only when their rows moved, since the bridge stores every value
-    // it is sent.
+    // The pool, the fan and the bluetooth row go only when their rows moved, since the bridge
+    // stores every pool and duty it is sent.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
-    let wanted = usize::from(pool.is_some()) + usize::from(fan.is_some());
+    let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
+    let wanted =
+        usize::from(pool.is_some()) + usize::from(fan.is_some()) + usize::from(bluetooth.is_some());
     let Ok(mut permits) = commands.try_reserve_many(wanted) else {
         return Err(ENGINE_BUSY);
     };
     let pool_command = pool.map(|pool| Command::SetPool { pool });
     let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
-    for command in pool_command.into_iter().chain(fan_command) {
+    let bluetooth_command = bluetooth.map(Command::SetBluetooth);
+    for command in pool_command.into_iter().chain(fan_command).chain(bluetooth_command) {
         if let Some(permit) = permits.next() {
             permit.send(command);
         }
@@ -426,6 +453,9 @@ pub(super) fn apply(
     };
     if let Some(duty) = fan {
         text.push_str(&format!("; fan {duty} sent to the bridge"));
+    }
+    if let Some(on) = bluetooth {
+        text.push_str(if on { "; bluetooth on" } else { "; bluetooth off" });
     }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
@@ -570,7 +600,7 @@ pub(super) fn link_written(
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 12, frame.area());
+    let area = centered_rect(48, 13, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -618,6 +648,14 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
                 let why = if modal.bridge_up { "no fan" } else { "no bridge" };
                 Line::from(Span::styled(format!("{:<18}  {why}", "fan"), styled(Field::Fan)))
             }
+        },
+        match modal.bluetooth {
+            Some(on) => row("bluetooth", &on_off(on), Field::Bluetooth),
+            // Nothing to step, so no arrows.
+            None => Line::from(Span::styled(
+                format!("{:<18}  scan stopped", "bluetooth"),
+                styled(Field::Bluetooth),
+            )),
         },
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
         row("wait for gps", &on_off(modal.wait_for_gps), Field::WaitForGps),
@@ -781,6 +819,9 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("still open").selected, Field::Fan);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("still open").selected, Field::Bluetooth);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -996,22 +1037,24 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_one_queue_slot_free() {
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_one_slot_short() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = fan_snapshot(40);
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(3);
         tx.try_send(Command::StopScan).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        // The pool and fan rows moved, so the modal sends two commands.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        // The pool, fan and bluetooth rows moved, so the modal sends three commands.
+        for row in [Field::Pool, Field::Fan, Field::Bluetooth] {
+            assert_eq!(ui.modal().expect("open").selected, row);
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        }
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for one of the modal's two commands, so none goes out.
+        // Room for two of the modal's three commands, so none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
@@ -1109,10 +1152,10 @@ mod tests {
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the remember row moves. The pool row is left alone.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        // Past the fan row.
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::RememberBridge {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
@@ -2212,5 +2255,101 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(rx.try_recv().is_err(), "Esc leaves the bridge's duty alone");
+    }
+
+    /// The settings modal drawn over the view, as text.
+    fn rendered(snapshot: &Snapshot, ui: &mut Ui) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, snapshot, ui)).expect("drawing");
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn ui_sends_bluetooth_on_and_saves_none_of_it_when_row_turned_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::Bluetooth, &mut ui, &snapshot, &tx);
+        assert!(rendered(&snapshot, &mut ui).contains("bluetooth         ◂ off ▸"));
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(true));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("bluetooth on"), "{notice}");
+        let file = std::fs::read_to_string(&target).expect("the other rows were saved");
+        assert!(!file.contains("bluetooth"), "the bridge's scan, not the file's: {file}");
+    }
+
+    #[test]
+    fn ui_sends_bluetooth_off_when_row_turned_off_with_bluetooth_scanning() {
+        let snapshot = Snapshot { scan: Some(ScanMode::WifiBluetooth), ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Bluetooth, &mut ui, &snapshot, &tx);
+        let screen = rendered(&snapshot, &mut ui);
+        assert!(screen.contains("bluetooth         ◂ on ▸"), "{screen}");
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(false));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("bluetooth off"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_no_bluetooth_when_enter_pressed_with_row_unmoved() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Bluetooth, &mut ui, &snapshot, &tx);
+        // Out and back: the scan the bridge already runs.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetBluetooth");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("bluetooth"), "{notice}");
+    }
+
+    #[test]
+    fn ui_shows_scan_stopped_and_steps_nothing_when_scan_is_stopped() {
+        // The run starts the scan once the bridge reports it stopped, so there is nothing to
+        // toggle until then.
+        let snapshot = Snapshot { scan: Some(ScanMode::Stopped), ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Bluetooth, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").bluetooth, None);
+        let screen = rendered(&snapshot, &mut ui);
+        assert!(screen.contains("bluetooth           scan stopped"), "{screen}");
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetBluetooth");
+    }
+
+    #[test]
+    fn ui_sends_bluetooth_when_row_turned_on_before_bridge_reports_a_scan() {
+        // The engine starts the scan on the bridge's first report, in the mode asked for
+        // meanwhile.
+        let snapshot = Snapshot { scan: None, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Bluetooth, &mut ui, &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").bluetooth, Some(false));
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(true));
     }
 }

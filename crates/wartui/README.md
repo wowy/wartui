@@ -814,7 +814,7 @@ and a lone node stays on wifi`; the bridge gives Bluetooth to a node once a seco
 
 `run` holds the bridge's port, so `wartui scan` reaches a bridge only while no `run` is attached.
 In `run`, the scan starts on connecting, once a GPS receiver holds a fix (§ "How channels are
-assigned"), `b` toggles Bluetooth, and quitting stops it.
+assigned"), the settings' `bluetooth` row toggles Bluetooth, and quitting stops it.
 
 ## Keyboard commands
 
@@ -822,7 +822,6 @@ assigned"), `b` toggles Bluetooth, and quitting stops it.
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
 | `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
-| `b`                    | Toggle Bluetooth scanning; the bridge picks the node that scans              |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
@@ -845,11 +844,8 @@ takes every key until `Esc`, `q` or `g` closes it; the pop-up is then back if th
 to. The box is the file's `[gps] wait-for-fix`: ticked, later launches skip the wait. `wait for
 gps` in settings turns it back on.
 
-Only `b`, `c`, `p` and the pop-up's `Enter` reach the engine, and no key sets channels. `b` adds
-Bluetooth to the bridge's scan or takes it off; the bridge picks the node and authors every share.
-While the bridge reports the scan stopped, `b` sends nothing and says `scan stopped: this run
-starts it once the bridge answers`. Before the bridge has reported a scan, `b` asks for Bluetooth,
-and the run starts the scan with it.
+Only `c`, `p` and the pop-up's `Enter` reach the engine, and no key sets channels; the bridge
+authors every share.
 
 `u` asks before it sends, sends only what is new since the last upload, and leaves the capture
 running; see "Uploading to WDGWars".
@@ -861,15 +857,15 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                        |
-|---------------------|---------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                   |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
-| `Enter`             | Apply every row; pool and fan to the bridge, rest to `wartui.toml`  |
-| `Esc` / `q`         | Close without changing anything                                     |
-| `ctrl-c`            | Quit                                                                |
+| Key                 | What it does                                                                  |
+|---------------------|-------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                             |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
+| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                               |
+| `ctrl-c`            | Quit                                                                          |
 
 On the `excluded ssids` page:
 
@@ -883,23 +879,27 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5;
-see "The lid fan"), `remember bridge` (`off`, `on`), `wait for gps` (`off`, `on`; from the next
-launch, see "Positions"), `excluded ssids`, and the `wdgwars` API key. `excluded ssids` shows how
-many are listed, or `none`, and opens a page that lists them. While an SSID is being typed there,
-every letter types, spaces included. `Enter` refuses one that is empty, over 32 bytes, or already
-listed, and says why. `Enter` in the list sends it to the engine, writes `excluded-ssids` and the
-remembered bridge but none of the rows, and returns to the rows; edits to the rows stay pending.
-On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
-footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
-six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
-the engine and writes every row shown but the pool and the fan to `excluded-ssids`, `[bridge]`,
-`[gps] wait-for-fix` and `[api-keys]`, whatever was there, and settings closes. The pool and the
-fan go to the bridge, which keeps them, and only when their rows moved; neither is written to
-`wartui.toml`. If the engine is not accepting commands, nothing is sent or written, and settings
-stays open with its edits. The bridge re-cuts the fleet as soon as it takes a new pool, and sends
-each node its new share at once. A node empties its dedup ring when its share changes, and its next
-heartbeat shows the share held.
+The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5; see
+"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `remember bridge` (`off`, `on`),
+`wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, and the
+`wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
+lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
+one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
+the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns to
+the rows; edits to the rows stay pending. On the key row, letters type, so `h` `j` `k` `l` `q`
+neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip while a key is entered.
+The key shows its last three characters, up to six bullets before them, and from ten characters its
+first one to three. `Enter` sends the rows to the engine and writes every row shown but the pool,
+the fan and `bluetooth` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and `[api-keys]`,
+whatever was there, and settings closes. The pool, the fan and `bluetooth` go to the bridge only
+when their rows moved, and none is written to `wartui.toml`. The bridge keeps the pool and the fan;
+the run keeps `bluetooth` and asks for it again when the bridge reboots. While the bridge reports
+the scan stopped, `bluetooth` reads `scan stopped` and does not step, since the run starts the scan
+once the bridge answers. Before the bridge has reported a scan, it reads `off`, and the run starts
+the scan in the mode it holds. If the engine is not accepting commands, nothing is sent or written,
+and settings stays open with its edits. The bridge re-cuts the fleet as soon as it takes a new pool,
+and sends each node its new share at once. A node empties its dedup ring when its share changes, and
+its next heartbeat shows the share held.
 
 ## How channels are assigned
 
@@ -926,8 +926,8 @@ dozen scattered channels, too many for one line.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, none by default, and it is that node's whole job.** `b` asks
-the bridge to add Bluetooth to the scan, or take it off, whichever node is selected, and
+**At most one node scans Bluetooth, none by default, and it is that node's whole job.** The
+`bluetooth` row in settings asks the bridge to add Bluetooth to the scan, or take it off, and
 `wartui scan start --bluetooth` does the same with no run attached. The bridge picks the node: the
 highest slot that can scan, kept while that node stays, and none while only one node can scan.
 That node's block reads `bluetooth` where its channels would be, since it is dealt no channels, or

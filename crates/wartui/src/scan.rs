@@ -13,8 +13,8 @@
 //! a second joins. Without an action, nothing is sent but a status request.
 //!
 //! The bridge is resolved to one board as `wartui pool` resolves it. A `wartui run` holds the
-//! port, so this runs only while none is attached; in `run`, `b` toggles Bluetooth and quitting
-//! stops the scan.
+//! port, so this runs only while none is attached; in `run`, settings' `bluetooth` row toggles
+//! it and quitting stops the scan.
 
 use std::path::PathBuf;
 use std::time::Duration;

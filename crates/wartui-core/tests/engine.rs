@@ -2819,7 +2819,7 @@ fn engine_resends_stop_when_status_still_scanning_while_stopping() {
 
 #[test]
 fn engine_resends_bluetooth_start_when_stale_status_follows_set_bluetooth() {
-    // A `Status` already on its way when the operator pressed `b` still says Wi-Fi.
+    // A `Status` already on its way when the operator turned Bluetooth on still says Wi-Fi.
     let clock = Clock::new();
     let mut engine = scanning_capture(&clock);
     engine.handle(Event::Command(Command::SetBluetooth(true)), clock.at(3));

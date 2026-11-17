@@ -150,7 +150,6 @@ have no README; their `//!` module docs hold the detail.
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor by a row of node blocks                                      |
 | `←` `→` / `h` `l`      | Move the cursor by one block                                                 |
-| `b`                    | Toggle Bluetooth scanning; the bridge picks the node that scans              |
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
@@ -171,15 +170,15 @@ the pop-up again if the run still waits.
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                        |
-|---------------------|---------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                   |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100 |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)  |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                          |
-| `Enter`             | Apply every row; pool and fan to the bridge, rest to `wartui.toml`  |
-| `Esc` / `q`         | Close without changing anything                                     |
-| `ctrl-c`            | Quit                                                                |
+| Key                 | What it does                                                                  |
+|---------------------|-------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                             |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
+| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                               |
+| `ctrl-c`            | Quit                                                                          |
 
 On the `excluded ssids` page:
 
@@ -196,8 +195,9 @@ On the `excluded ssids` page:
 The bridge splits the channel pool across its nodes, and re-splits it whenever a node joins or
 leaves. That split is what the fleet is for. `run` starts the bridge's scan once a GPS receiver
 holds a fix, and a clean quit stops it; a run that is killed leaves the fleet scanning, and the
-next `run` restarts it clean. No key or flag assigns channels to a node. `b` only adds Bluetooth to
-the scan or takes it off; the bridge picks the node and shares that node's channels among the rest.
+next `run` restarts it clean. No key or flag assigns channels to a node. The settings' `bluetooth`
+row only adds Bluetooth to the scan or takes it off; the bridge picks the node and shares that
+node's channels among the rest.
 
 `u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
 capture running.
@@ -210,8 +210,8 @@ The default, `all`, is every channel a node can tune; `us` and `eu` are what the
 permit ([§ "Channel pools"](crates/wartui/README.md#channel-pools)).
 
 At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
-Wi-Fi, and its block's `channels` line reads `bluetooth`. `b` asks the bridge for the scan, which
-it gives to one node once two can scan.
+Wi-Fi, and its block's `channels` line reads `bluetooth`. The settings' `bluetooth` row asks the
+bridge for the scan, which it gives to one node once two can scan.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
 [`crates/wartui/README.md`](crates/wartui/README.md).**
@@ -268,8 +268,8 @@ sudo dnf install python3-pyte    # or pip install pyte
 
 python3 tools/render.py --cols 120 --rows 30    # wide layout: counts and chart above the node blocks
 python3 tools/render.py --cols 80 --rows 24     # narrow layout: scrolling blocks
-python3 tools/render.py --keys jb --attrs       # press two keys first, then list what is drawn in color
-python3 tools/render.py --bridge 00:08 --keys b # the attached fleet, naming its bridge
+python3 tools/render.py --keys jc --attrs       # press two keys first, then list what is drawn in color
+python3 tools/render.py --bridge 00:08          # the attached fleet, naming its bridge
 ```
 
 The output is text, so it diffs, greps, and is readable by a coding agent without an image. `--keys`

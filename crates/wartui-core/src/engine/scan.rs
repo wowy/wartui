@@ -35,10 +35,10 @@
 //! reconnect that finds the P4 scanning leaves it alone, and its mode becomes the one the run
 //! wants, since another host may have changed it meanwhile. Any later `Status` naming another
 //! scanning mode than the one wanted draws the start again: it may have been sent before the
-//! operator's `b` reached the P4, or that start may have been lost. A start in the mode the P4
-//! holds is a no-op on its core, so a stale `Status` costs one duplicate. Only a `Status` drives a
-//! resend, of a start or a stop, one per `Status`: a `Fleet` report is pushed on every plan
-//! change, and resending on each would multiply the traffic it answers. An operator's
+//! operator's Bluetooth toggle reached the P4, or that start may have been lost. A start in the
+//! mode the P4 holds is a no-op on its core, so a stale `Status` costs one duplicate. Only a
+//! `Status` drives a resend, of a start or a stop, one per `Status`: a `Fleet` report is pushed on
+//! every plan change, and resending on each would multiply the traffic it answers. An operator's
 //! [`Command::StopScan`], which a clean quit sends too, clears what the run wants first, so
 //! nothing restarts a fleet the operator stopped.
 
