@@ -140,7 +140,9 @@ a note says how many; see "Config file".
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
 row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
-inquiry produces, and the nodes never transmit while scanning.
+inquiry produces, and the nodes never transmit while scanning. A row whose submitting sighting has
+a blank name takes a name heard elsewhere in its window: a hidden network names itself only in some
+probe responses, and a BLE advertiser only in some advertisements.
 
 ### Analyzing a capture
 
@@ -266,12 +268,12 @@ wartui upload --db tonight.db -y  # another capture, without asking
 | `--yes`, `-y`         | off                      | Upload without asking         |
 | `--resend`            | off                      | Send everything, not just new |
 
-It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
-[y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
-`--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim` or
-`--lat`/`--lon` is never uploaded; `export` warns about such a capture too. The site takes at most
-40 MB (40,000,000 bytes) compressed, and a larger capture is refused before sending. Sizes are
-printed in decimal units.
+It prints the same counts as `export`, plus the CSV's size and its compressed size, then asks
+`Upload to WDGWars? [y/N]`. Without a terminal to ask on, it refuses before building the upload
+unless given `--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim`
+or `--lat`/`--lon` is never uploaded; `export` warns about such a capture too. The site takes at
+most 40 MB (40,000,000 bytes) of CSV, counted by the CSV's size rather than the compressed one, so a
+larger capture is refused before sending. Sizes are printed in decimal units.
 
 A repeat upload sends only sightings stored since the last upload the site queued. The cutoff is the
 last sighting that upload covered, in the order the capture stored them, so uploading a capture that

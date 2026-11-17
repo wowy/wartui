@@ -80,9 +80,10 @@ use crate::text::thousands;
 /// The leaderboard.
 pub(crate) const BASE: &str = "https://wdgwars.pl";
 
-/// The largest file the queue accepts. The site says 40 MB; the decimal reading is the
-/// smaller, so it is the safe one.
-const MAX_BODY: usize = 40_000_000;
+/// The largest CSV the queue accepts, counted before compression. The site counts a gzipped
+/// file by its decompressed size and says 40 MB; the decimal reading is the smaller, so it is
+/// the safe one.
+const MAX_CSV: usize = 40_000_000;
 
 /// How long to wait before the first poll, and the ceiling the wait grows to.
 const FIRST_POLL: Duration = Duration::from_secs(2);
@@ -186,6 +187,8 @@ pub fn run(args: Args) -> Result<()> {
 pub(crate) struct Prepared {
     pub(crate) key: String,
     pub(crate) body: Vec<u8>,
+    /// The CSV's length before compression, the size the site's limit counts.
+    pub(crate) csv_bytes: usize,
     pub(crate) summary: ExportSummary,
     /// The upload this one follows on from. `None` with `--resend`, which follows on from
     /// nothing.
@@ -193,11 +196,12 @@ pub(crate) struct Prepared {
 }
 
 impl Prepared {
-    /// What the operator is asked to send: the row count, the summary's details, the
-    /// compressed size and the upload this one follows on from, a line each.
+    /// What the operator is asked to send: the row count, the summary's details, the CSV's
+    /// size, its compressed size and the upload this one follows on from, a line each.
     pub(crate) fn describe(&self) -> String {
         let mut text =
             format!("{} rows to upload\n{}", thousands(self.summary.rows), details(&self.summary));
+        text.push_str(&format!("  {:<11}{}\n", "csv", size(self.csv_bytes)));
         text.push_str(&format!("  {:<11}{}\n", "compressed", size(self.body.len())));
         if let Some(previous) = &self.previous {
             text.push_str(&format!(
@@ -243,39 +247,71 @@ pub(crate) fn prepare(
         );
     }
     filter.after_uploads = !resend;
-    let (body, summary, previous) = body(db, &filter)?;
+    let Body { gz, csv_bytes, summary, previous } = body(db, &filter)?;
     if summary.rows == 0 {
         return Ok(match previous {
             Some(previous) => Prepare::NothingNew { previous, summary },
             None => Prepare::NoRows(summary),
         });
     }
-    if body.len() > MAX_BODY {
-        bail!(
-            "the upload is {} compressed, over WDGWars' limit of {}",
-            size(body.len()),
-            size(MAX_BODY)
-        );
-    }
-    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body, summary, previous }))
+    check_size(csv_bytes, MAX_CSV)?;
+    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body: gz, csv_bytes, summary, previous }))
 }
 
-/// The capture's WiGLE CSV, gzipped in memory, what went into it, and the upload it follows
-/// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a capture of test data,
-/// before anything is built.
-fn body(
-    db: &Path,
-    filter: &ExportFilter,
-) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
+/// Refuse a CSV of `csv_bytes` over `limit`. One exactly at the limit goes.
+fn check_size(csv_bytes: usize, limit: usize) -> Result<()> {
+    if csv_bytes > limit {
+        bail!(
+            "the upload's CSV is {} before compression, over WDGWars' limit of {}",
+            size(csv_bytes),
+            size(limit)
+        );
+    }
+    Ok(())
+}
+
+/// What [`body`] built.
+struct Body {
+    /// The capture's WiGLE CSV, gzipped.
+    gz: Vec<u8>,
+    /// The CSV's length before compression, which the site's limit counts.
+    csv_bytes: usize,
+    /// What went into it.
+    summary: ExportSummary,
+    /// The upload it follows on from when it is [`ExportFilter::after_uploads`].
+    previous: Option<UploadRecord>,
+}
+
+/// A writer that counts what it passes on.
+struct Counted<W> {
+    inner: W,
+    bytes: usize,
+}
+
+impl<W: Write> Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The capture's WiGLE CSV, gzipped in memory, with its uncompressed length. [`Simulated`] for a
+/// capture of test data, before anything is built.
+fn body(db: &Path, filter: &ExportFilter) -> Result<Body> {
     let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
     if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
         return Err(Simulated { db: db.to_owned() }.into());
     }
-    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    let summary = wigle_csv(&conn, filter, &mut gz, env!("CARGO_PKG_VERSION"))?;
-    let body = gz.finish().context("compressing the upload")?;
+    let mut csv = Counted { inner: GzEncoder::new(Vec::new(), Compression::default()), bytes: 0 };
+    let summary = wigle_csv(&conn, filter, &mut csv, env!("CARGO_PKG_VERSION"))?;
+    let gz = csv.inner.finish().context("compressing the upload")?;
     let previous = if filter.after_uploads { last_upload(&conn)? } else { None };
-    Ok((body, summary, previous))
+    Ok(Body { gz, csv_bytes: csv.bytes, summary, previous })
 }
 
 /// The capture holds test data (`--sim` or `--lat`/`--lon`), so it is not uploaded.
@@ -476,7 +512,7 @@ fn outcome(result: &Map<String, Value>) -> String {
     text
 }
 
-/// `bytes` in decimal units, the ones [`MAX_BODY`] is given in.
+/// `bytes` in decimal units, the ones [`MAX_CSV`] is given in.
 pub(crate) fn size(bytes: usize) -> String {
     const MB: usize = 1_000_000;
     if bytes >= MB {
@@ -711,14 +747,14 @@ mod tests {
     use std::time::Duration;
 
     use flate2::read::GzDecoder;
-    use wartui_core::export::{ExportFilter, wigle_csv};
+    use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
     use wartui_core::store::{
         last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
     };
 
     use super::{
-        Client, GIVE_UP, JobStatus, Prepare, Sent, Waited, body, finish, next_delay, outcome,
-        parse_job, parse_submit, prepare, send, size, wait,
+        Client, GIVE_UP, JobStatus, Prepare, Prepared, Sent, Waited, body, check_size, finish,
+        next_delay, outcome, parse_job, parse_submit, prepare, send, size, wait,
     };
     use crate::config::Config;
     use crate::testing::{
@@ -741,16 +777,60 @@ mod tests {
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
-        let (gz, summary, _) = body(&db, &ExportFilter::default()).unwrap();
-        assert_eq!(summary.rows, 2);
+        let built = body(&db, &ExportFilter::default()).unwrap();
+        assert_eq!(built.summary.rows, 2);
 
         let mut csv = Vec::new();
-        GzDecoder::new(gz.as_slice()).read_to_end(&mut csv).unwrap();
+        GzDecoder::new(built.gz.as_slice()).read_to_end(&mut csv).unwrap();
         let mut expected = Vec::new();
         let conn = open_readonly(&db).unwrap();
         wigle_csv(&conn, &ExportFilter::default(), &mut expected, env!("CARGO_PKG_VERSION"))
             .unwrap();
         assert_eq!(csv, expected);
+    }
+
+    #[test]
+    fn upload_body_counts_csv_bytes_before_compression_when_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(
+            &dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+            ],
+        );
+        let built = body(&db, &ExportFilter::default()).unwrap();
+        let mut csv = Vec::new();
+        GzDecoder::new(built.gz.as_slice()).read_to_end(&mut csv).unwrap();
+        assert_eq!(built.csv_bytes, csv.len());
+    }
+
+    #[test]
+    fn upload_describe_shows_csv_and_compressed_sizes_when_prepared() {
+        // The limit counts the CSV, so the operator sees that size beside the one sent.
+        let prepared = Prepared {
+            key: "secret".to_owned(),
+            body: vec![0; 412_345],
+            csv_bytes: 3_343_178,
+            summary: ExportSummary { rows: 2, ..Default::default() },
+            previous: None,
+        };
+        let text = prepared.describe();
+        assert!(text.contains("  csv        3.3 MB\n"), "{text}");
+        assert!(text.contains("  compressed 413 KB\n"), "{text}");
+    }
+
+    #[test]
+    fn upload_check_size_refuses_when_csv_over_limit() {
+        // WDGWars counts a gzipped file by its decompressed size, so a CSV over the limit is
+        // refused however well it compresses.
+        let error = check_size(41, 40).unwrap_err().to_string();
+        assert!(error.contains("before compression"), "{error}");
+    }
+
+    #[test]
+    fn upload_check_size_accepts_when_csv_exactly_at_limit() {
+        assert!(check_size(40, 40).is_ok());
     }
 
     #[test]

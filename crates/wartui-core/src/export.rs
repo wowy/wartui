@@ -10,8 +10,8 @@
 //!
 //! A network is an address and a kind. One address can be both a Wi-Fi network and a BLE
 //! advertiser, which WiGLE records as two things (the `Type` column), so each kind has its own
-//! windows and lends identifiers only to its own row. A sighting stored with any other kind is left
-//! out, counted in [`ExportSummary::unknown_kind`] and warned about once.
+//! windows. A window lends its name and identifiers only to its own row. A sighting stored with
+//! any other kind is left out, counted in [`ExportSummary::unknown_kind`] and warned about once.
 //! Wi-Fi zero and group addresses cannot name an access point, so export leaves them out without
 //! removing the stored evidence. The local-administration bit is not grounds for rejection, and
 //! BLE addresses follow no Wi-Fi rule. Channel zero is reported, not filtered: the export does not
@@ -63,7 +63,7 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
-use wartui_proto::beacon::rcoi_text;
+use wartui_proto::beacon::{rcoi_text, visible_ssid};
 use wartui_proto::bus::RecordKind;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Band, ChannelInfo, channel_info};
@@ -510,15 +510,21 @@ impl Candidate {
         }))
     }
 
-    /// Take `other`'s roaming consortium and manufacturer identifier where this sighting has none.
-    /// The fold only pairs sightings of one kind.
+    /// Take `other`'s name, roaming consortium and manufacturer identifier where this sighting has
+    /// none. The fold only pairs sightings of one kind.
     ///
-    /// The winner is picked by position and signal, which have nothing to do with trailers: a
-    /// beacon or probe response may omit the element, and only some advertisements carry
-    /// manufacturer data. Without this, a stronger sighting lacking them would blank a column the
-    /// store can fill, the loss the node's BLE pending buffer already guards against by merging in
-    /// a later report's identifier.
+    /// The winner is picked by position and signal, which say nothing about what a frame carried.
+    /// A hidden network beacons a blank name, empty or NUL padding, and reveals it only in some
+    /// probe responses. A BLE advertiser may carry its name in only some advertisements. A beacon
+    /// or probe response may omit the roaming consortium element, and only some advertisements
+    /// carry manufacturer data. Without this, a stronger sighting lacking them would blank a column
+    /// the store can fill, the loss the node's BLE pending buffer already guards against by merging
+    /// in a later report's identifier. A name that is not blank is kept.
     fn inherit_identifiers(&mut self, other: &mut Self) {
+        let blank = |ssid: Option<&[u8]>| visible_ssid(ssid.unwrap_or_default()).is_empty();
+        if blank(self.ssid.as_deref()) && !blank(other.ssid.as_deref()) {
+            self.ssid = other.ssid.take();
+        }
         if self.rcoi.is_none() {
             self.rcoi = other.rcoi.take();
         }
