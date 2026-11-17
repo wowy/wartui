@@ -337,6 +337,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("2 rows to upload"), "{rendered}");
+        assert!(rendered.contains("csv        "), "{rendered}");
         assert!(rendered.contains("compressed"), "{rendered}");
         assert!(rendered.contains("y upload · any other key cancels"), "{rendered}");
     }

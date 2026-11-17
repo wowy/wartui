@@ -187,6 +187,8 @@ pub fn run(args: Args) -> Result<()> {
 pub(crate) struct Prepared {
     pub(crate) key: String,
     pub(crate) body: Vec<u8>,
+    /// The CSV's length before compression, the size the site's limit counts.
+    pub(crate) csv_bytes: usize,
     pub(crate) summary: ExportSummary,
     /// The upload this one follows on from. `None` with `--resend`, which follows on from
     /// nothing.
@@ -194,11 +196,12 @@ pub(crate) struct Prepared {
 }
 
 impl Prepared {
-    /// What the operator is asked to send: the row count, the summary's details, the
-    /// compressed size and the upload this one follows on from, a line each.
+    /// What the operator is asked to send: the row count, the summary's details, the CSV's
+    /// size, its compressed size and the upload this one follows on from, a line each.
     pub(crate) fn describe(&self) -> String {
         let mut text =
             format!("{} rows to upload\n{}", thousands(self.summary.rows), details(&self.summary));
+        text.push_str(&format!("  {:<11}{}\n", "csv", size(self.csv_bytes)));
         text.push_str(&format!("  {:<11}{}\n", "compressed", size(self.body.len())));
         if let Some(previous) = &self.previous {
             text.push_str(&format!(
@@ -252,7 +255,7 @@ pub(crate) fn prepare(
         });
     }
     check_size(csv_bytes, MAX_CSV)?;
-    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body: gz, summary, previous }))
+    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body: gz, csv_bytes, summary, previous }))
 }
 
 /// Refuse a CSV of `csv_bytes` over `limit`. One exactly at the limit goes.
@@ -744,14 +747,14 @@ mod tests {
     use std::time::Duration;
 
     use flate2::read::GzDecoder;
-    use wartui_core::export::{ExportFilter, wigle_csv};
+    use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
     use wartui_core::store::{
         last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
     };
 
     use super::{
-        Client, GIVE_UP, JobStatus, Prepare, Sent, Waited, body, check_size, finish, next_delay,
-        outcome, parse_job, parse_submit, prepare, send, size, wait,
+        Client, GIVE_UP, JobStatus, Prepare, Prepared, Sent, Waited, body, check_size, finish,
+        next_delay, outcome, parse_job, parse_submit, prepare, send, size, wait,
     };
     use crate::config::Config;
     use crate::testing::{
@@ -800,6 +803,21 @@ mod tests {
         let mut csv = Vec::new();
         GzDecoder::new(built.gz.as_slice()).read_to_end(&mut csv).unwrap();
         assert_eq!(built.csv_bytes, csv.len());
+    }
+
+    #[test]
+    fn upload_describe_shows_csv_and_compressed_sizes_when_prepared() {
+        // The limit counts the CSV, so the operator sees that size beside the one sent.
+        let prepared = Prepared {
+            key: "secret".to_owned(),
+            body: vec![0; 412_345],
+            csv_bytes: 3_343_178,
+            summary: ExportSummary { rows: 2, ..Default::default() },
+            previous: None,
+        };
+        let text = prepared.describe();
+        assert!(text.contains("  csv        3.3 MB\n"), "{text}");
+        assert!(text.contains("  compressed 413 KB\n"), "{text}");
     }
 
     #[test]

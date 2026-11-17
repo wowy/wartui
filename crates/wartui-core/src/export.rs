@@ -515,10 +515,11 @@ impl Candidate {
     ///
     /// The winner is picked by position and signal, which say nothing about what a frame carried.
     /// A hidden network beacons a blank name, empty or NUL padding, and reveals it only in some
-    /// probe responses. A beacon or probe response may omit the roaming consortium element, and
-    /// only some advertisements carry manufacturer data. Without this, a stronger sighting lacking
-    /// them would blank a column the store can fill, the loss the node's BLE pending buffer already
-    /// guards against by merging in a later report's identifier. A name that is not blank is kept.
+    /// probe responses. A BLE advertiser may carry its name in only some advertisements. A beacon
+    /// or probe response may omit the roaming consortium element, and only some advertisements
+    /// carry manufacturer data. Without this, a stronger sighting lacking them would blank a column
+    /// the store can fill, the loss the node's BLE pending buffer already guards against by merging
+    /// in a later report's identifier. A name that is not blank is kept.
     fn inherit_identifiers(&mut self, other: &mut Self) {
         let blank = |ssid: Option<&[u8]>| visible_ssid(ssid.unwrap_or_default()).is_empty();
         if blank(self.ssid.as_deref()) && !blank(other.ssid.as_deref()) {
