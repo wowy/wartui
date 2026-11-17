@@ -7,11 +7,11 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
-//! The pool, fan and bluetooth rows live on the bridge, not in the file. Each shows what the
+//! The pool, fan and bluetooth rows are never written to `wartui.toml`. Each shows what the
 //! bridge last reported, and `Enter` sends it only when the row moved. The bridge stores the
-//! pool and fan and boots into them. It keeps no scan mode, so the run holds the one asked for
-//! and starts it again after a reboot. None of the three is ever written to `wartui.toml`. The
-//! bridge picks which node scans Bluetooth.
+//! pool and fan and boots into them. It keeps no scan mode, so the bluetooth row is held by the
+//! run, which starts the scan in that mode again after the bridge reboots. The bridge picks
+//! which node scans Bluetooth.
 //!
 //! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
 //! decides at launch whether it waits, so the row applies from the next launch. The
@@ -429,8 +429,8 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The pool, the fan and the bluetooth row go only when their rows moved, since the bridge
-    // stores every pool and duty it is sent.
+    // The pool, the fan and the bluetooth row go only when their rows moved: the bridge stores
+    // every pool and duty it is sent, and an unmoved bluetooth row would restate the scan.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
     let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
@@ -2258,7 +2258,7 @@ mod tests {
     }
 
     /// The settings modal drawn over the view, as text.
-    fn rendered(snapshot: &Snapshot, ui: &mut Ui) -> String {
+    fn modal_screen(snapshot: &Snapshot, ui: &mut Ui) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
         terminal.draw(|frame| draw(frame, snapshot, ui)).expect("drawing");
         terminal.backend().to_string()
@@ -2272,7 +2272,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         select(Field::Bluetooth, &mut ui, &snapshot, &tx);
-        assert!(rendered(&snapshot, &mut ui).contains("bluetooth         ◂ off ▸"));
+        assert!(modal_screen(&snapshot, &mut ui).contains("bluetooth         ◂ off ▸"));
         ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
 
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
@@ -2291,7 +2291,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         select(Field::Bluetooth, &mut ui, &snapshot, &tx);
-        let screen = rendered(&snapshot, &mut ui);
+        let screen = modal_screen(&snapshot, &mut ui);
         assert!(screen.contains("bluetooth         ◂ on ▸"), "{screen}");
         ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
 
@@ -2329,7 +2329,7 @@ mod tests {
         select(Field::Bluetooth, &mut ui, &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
         assert_eq!(ui.modal().expect("open").bluetooth, None);
-        let screen = rendered(&snapshot, &mut ui);
+        let screen = modal_screen(&snapshot, &mut ui);
         assert!(screen.contains("bluetooth           scan stopped"), "{screen}");
 
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);

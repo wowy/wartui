@@ -400,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument("--after", type=float, metavar="SECONDS",
                         help=f"how long to let the fleet fill in first; {SIM_AFTER:g}s, "
                              f"or {BRIDGE_AFTER:g}s with --bridge")
-    parser.add_argument("--keys", default="", help="keys to press first, e.g. jjb")
+    parser.add_argument("--keys", default="", help="keys to press first, e.g. jjc")
     parser.add_argument("--settle", type=float, metavar="SECONDS",
                         help=f"how long to let a key land; {SIM_SETTLE:g}s, or "
                              f"{BRIDGE_SETTLE:g}s with --bridge")
