@@ -30,9 +30,10 @@ The 10-node carrier boards have arrived and are currently undergoing testing. So
 
 **Be cool! This project is for fun and maybe some learning along the way.**
 
-This project is meant for _passive_ scanning of Wi-Fi networks and Bluetooth devices. Nothing in the
-fleet sends Wi-Fi of its own: the nodes reach the bridge over wires, and a node caps whatever its
-radio answers in hardware at 2 dBm.
+This project is meant for _passive_ scanning of Wi-Fi networks and Bluetooth devices. The nodes
+only listen: they send no Wi-Fi and scan Bluetooth passively, and they reach the bridge over wires.
+The bridge sends no Wi-Fi either; its only radio traffic is the Bluetooth link to the host, when
+you use one.
 
 It is not intended for any malicious or unauthorized use. By using this project, you agree to use it
 responsibly and in accordance with all applicable laws and regulations. 
