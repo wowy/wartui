@@ -272,8 +272,8 @@ It prints the same counts as `export`, plus the compressed size, then asks `Uplo
 [y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
 `--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim` or
 `--lat`/`--lon` is never uploaded; `export` warns about such a capture too. The site takes at most
-40 MB (40,000,000 bytes) compressed, and a larger capture is refused before sending. Sizes are
-printed in decimal units.
+40 MB (40,000,000 bytes) of CSV, counted before compression, so a larger capture is refused before
+sending. Sizes are printed in decimal units.
 
 A repeat upload sends only sightings stored since the last upload the site queued. The cutoff is the
 last sighting that upload covered, in the order the capture stored them, so uploading a capture that
