@@ -1145,6 +1145,111 @@ fn wigle_csv_keeps_rcois_when_strongest_lacks_them() {
     );
 }
 
+/// A sighting of `[0xAA; 6]` with `rssi` and `ssid`, otherwise as [`observation`].
+fn hidden_ap(rssi: i16, at_ms: i64, fix: Fix, ssid: &[u8]) -> Record {
+    let mut record = observation(NODE, [0xAA; 6], rssi, at_ms, fix);
+    let Record::Observation(obs) = &mut record else { unreachable!() };
+    obs.ssid = ssid.to_vec();
+    record
+}
+
+#[test]
+fn wigle_csv_names_row_when_weaker_later_sighting_carries_name() {
+    // A hidden AP's beacon, blank and strong, then a weak probe response that
+    // names it. The held winner takes the loser's name.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let strong = hidden_ap(-40, EPOCH_MS, fixed(38.0, -123.0), b"");
+    let weak = hidden_ap(-80, EPOCH_MS + 1000, fixed(37.0, -122.0), b"Hidden Home");
+    let conn = write(&dir, vec![strong, weak]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(row.contains(",-40,38,-123,"), "the strong sighting submits: {row}");
+    assert_eq!(row.split(',').nth(1), Some("Hidden Home"), "{row}");
+}
+
+#[test]
+fn wigle_csv_names_row_when_stronger_later_sighting_is_blank() {
+    // The other path through the fold: the named sighting is held when the
+    // stronger blank one arrives and wins.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let weak = hidden_ap(-80, EPOCH_MS, fixed(37.0, -122.0), b"Hidden Home");
+    let strong = hidden_ap(-40, EPOCH_MS + 1000, fixed(38.0, -123.0), b"");
+    let conn = write(&dir, vec![weak, strong]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(row.contains(",-40,38,-123,"), "the strong sighting submits: {row}");
+    assert_eq!(row.split(',').nth(1), Some("Hidden Home"), "{row}");
+}
+
+#[test]
+fn wigle_csv_names_row_when_strongest_sighting_is_cloaked_with_padding() {
+    // A cloaked beacon's NUL padding is as blank as an empty name.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let strong = hidden_ap(-40, EPOCH_MS, fixed(38.0, -123.0), &[0; 6]);
+    let weak = hidden_ap(-80, EPOCH_MS + 1000, fixed(37.0, -122.0), b"Hidden Home");
+    let conn = write(&dir, vec![strong, weak]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert_eq!(row.split(',').nth(1), Some("Hidden Home"), "{row}");
+}
+
+#[test]
+fn wigle_csv_keeps_winner_ssid_when_loser_names_another() {
+    // A winner with a name keeps it.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let strong = hidden_ap(-40, EPOCH_MS, fixed(38.0, -123.0), b"Front Door");
+    let weak = hidden_ap(-80, EPOCH_MS + 1000, fixed(37.0, -122.0), b"Back Door");
+    let conn = write(&dir, vec![strong, weak]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert_eq!(row.split(',').nth(1), Some("Front Door"), "{row}");
+}
+
+#[test]
+fn wigle_csv_leaves_ssid_blank_when_name_heard_only_in_another_window() {
+    // Past the default recapture width, so two windows. Each row reports what
+    // its own window heard.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let blank = hidden_ap(-40, EPOCH_MS, fixed(38.0, -123.0), b"");
+    let later = hidden_ap(-80, EPOCH_MS + 3_600_001, fixed(37.0, -122.0), b"Hidden Home");
+    let conn = write(&dir, vec![blank, later]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 2);
+    let first = csv.lines().nth(2).expect("a first row");
+    let second = csv.lines().nth(3).expect("a second row");
+    assert_eq!(first.split(',').nth(1), Some(""), "{first}");
+    assert_eq!(second.split(',').nth(1), Some("Hidden Home"), "{second}");
+}
+
+#[test]
+fn wigle_csv_leaves_ssid_blank_when_only_name_heard_is_excluded() {
+    // The excluded sighting never reaches the fold, so it cannot lend.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let strong = hidden_ap(-40, EPOCH_MS, fixed(38.0, -123.0), b"");
+    let weak = hidden_ap(-80, EPOCH_MS + 1000, fixed(37.0, -122.0), b"Hidden Home");
+    let conn = write(&dir, vec![strong, weak]);
+
+    let filter = ExportFilter {
+        excluded_ssids: HashSet::from([b"Hidden Home".to_vec()]),
+        ..Default::default()
+    };
+    let (csv, summary) = export_with(&conn, &filter);
+    assert_eq!(summary.rows, 1);
+    assert_eq!(summary.excluded_ssid, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert_eq!(row.split(',').nth(1), Some(""), "{row}");
+    assert!(!csv.contains("Hidden Home"), "{csv}");
+}
+
 #[test]
 fn wigle_csv_keeps_mfgr_id_when_only_weaker_later_sighting_carries_it() {
     // The other order: the best sighting is already held when a weaker
