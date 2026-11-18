@@ -71,7 +71,7 @@ Tried on 2026-11-18 at `9926c16`, with the app running on the phone and the sett
 | The PC's stored bond, pairing window closed | `status --link bluetooth` was served on the first try, encrypted and bonded |
 | A fresh `wartui bluetooth pair` after `forget`, window open | Paired and bonded in 2 of 12 tries. The other ten ended in `nothing advertised as wartui D0:1C over Bluetooth in 10s` |
 
-Seven of those tries, one of the two that paired among them, ran after the app was closed on the
+Eight of those tries, one of the two that paired among them, ran after the app was closed on the
 phone. The bridge's log shows why they fail. An unbonded central connects within about 0.1 s of
 each disconnect, under a new random address each time, and does nothing until the C6 drops it 30 s
 later, so the bridge advertises for about 0.1 s in every 30 s. Its 48.75 ms interval is the
