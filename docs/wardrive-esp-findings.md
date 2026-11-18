@@ -14,6 +14,10 @@ The PC stood in for a phone through BlueZ: a script that subscribes to TX, write
 unframed commands to RX, and prints every frame. The PC held a bond with the bridge throughout,
 so its link was encrypted, which the service does not need. The phone linked unencrypted.
 
+On 2026-11-18 the bridge and its radio were updated to `e6907dc`, which changes how a scan's
+period and counts start, how a channel list is read, and when a CMD is acknowledged. The stand-in
+ran once more against it; those rows name the build.
+
 ## Results
 
 | Check | Result |
@@ -34,6 +38,10 @@ so its link was encrypted, which the service does not need. The phone linked une
 | The app against the production firmware | It shows access points arriving |
 | `wartui ports` on the PC beside the linked app | The app keeps its link and its access points keep arriving, as seen in the app |
 | `WD:STATUS` | Every 5 s: 73, then 83 after a restart of the scan, then 10 as the nodes ran out of new access points |
+| `e6907dc`: the first `WD:STATUS` of a scan | 4.98 s after `WD:BEGIN`, on subscribing and again after `stop` and `start` |
+| `e6907dc`: `stop`, then `start` | `status` answers `aps 0 scans 0`, and the next `WD:STATUS` says `scans=1` |
+| `e6907dc`: `ch 1, 6, 11` | `WD:PLAN chans=1,6,11` and `scanning 1,6,11` |
+| `e6907dc`: a framed CMD | Its ACK still arrives ahead of its reply |
 | A central reading TX subscribes to the wartui stream too | Refused, ATT error `0xFC` |
 | A USB host takes the bridge | The phone is dropped, and a TX subscription is refused, ATT error `0xFC`, while USB holds the bridge |
 | The setting turned off with the app still running | The phone keeps connecting and is dropped each time: `unbonded_kicks` rose from 1 to 4 in 75 s. See below |
@@ -65,6 +73,8 @@ That was not tried. Turning the board off in the app, or the phone's Bluetooth, 
 - iOS.
 - `wartui ports` beside a linked phone, by the bridge's own counters. It was judged in the app,
   which showed no break.
+- A command dropped for a full queue toward the P4, which goes unacknowledged. The bench never
+  filled that queue.
 - A drive: the app's access point counts beside a wartui capture, a slow link, and the backlog's
   evictions.
 - A first pairing from a host other than Linux while the setting is on.
