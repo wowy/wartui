@@ -8,9 +8,14 @@
 //! `-cap` and `-promisc` match anywhere after the word, and the word `start` is not required. The
 //! app is closed, so the bridge takes what that firmware takes.
 //!
-//! **`reboot`, `drop` and `link` are unknown on purpose.** The service takes commands from any
-//! phone in range, with no bond and no encryption, so a command that restarts the bridge or drops
-//! its link is one any passer-by could send.
+//! **`reboot` alone is unknown on purpose.** The service takes commands from any phone in range,
+//! with no bond and no encryption, so a command that restarts the bridge is one any passer-by
+//! could send. `drop` and `link` are safe to take: a phone can drop only its own link, and `link`
+//! tells it only about that link.
+//!
+//! **`iam` names the app**: `iam a <nickname>` for Android, `iam i <nickname>` for an iPhone. The
+//! nickname is cut to [`NICKNAME_MAX`] bytes, then back to a whole UTF-8 character. Any other
+//! form is [`Command::Silent`].
 //!
 //! A command is cut to [`COMMAND_MAX`] bytes before it is read, so the reply naming an unknown
 //! word always fits a line.
@@ -19,6 +24,9 @@ use crate::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS, ind
 
 /// The most bytes of a command that are read.
 pub const COMMAND_MAX: usize = 240;
+
+/// The most bytes of an `iam` nickname that are kept.
+pub const NICKNAME_MAX: usize = 18;
 
 /// `text` cut to [`COMMAND_MAX`] bytes, without leading spaces or trailing spaces, CR and LF.
 ///
@@ -65,6 +73,17 @@ pub enum Command<'a> {
     Info,
     /// `status`.
     Status,
+    /// `link`.
+    Link,
+    /// `drop`.
+    Drop,
+    /// `iam a <nickname>` or `iam i <nickname>`.
+    Iam {
+        /// The app runs on an iPhone, else on Android.
+        iphone: bool,
+        /// The nickname, cut to at most [`NICKNAME_MAX`] bytes on a UTF-8 character boundary.
+        nickname: &'a [u8],
+    },
     /// `ch`, in its three forms.
     Channels(Channels<'a>),
     /// A command the bridge takes and answers with nothing.
@@ -88,6 +107,22 @@ fn ch_argument(rest: &[u8]) -> Option<&[u8]> {
     let flag = b"-ch ";
     let at = rest.windows(flag.len()).position(|w| w == flag)?;
     Some(&rest[at + flag.len()..])
+}
+
+/// The `iam` that `rest` holds, or [`Command::Silent`] when it names no platform.
+fn iam(rest: &[u8]) -> Command<'_> {
+    let iphone = match rest {
+        [b'a', b' ', ..] => false,
+        [b'i', b' ', ..] => true,
+        _ => return Command::Silent,
+    };
+    let nickname = &rest[2..];
+    let mut end = nickname.len().min(NICKNAME_MAX);
+    // Back to a whole character: a continuation byte at the cut belongs to the one before it.
+    while end > 0 && end < nickname.len() && nickname[end] & 0b1100_0000 == 0b1000_0000 {
+        end -= 1;
+    }
+    Command::Iam { iphone, nickname: &nickname[..end] }
 }
 
 /// The command `text` holds, or `None` when it is blank once trimmed.
@@ -115,6 +150,9 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
         b"help" => Command::Help,
         b"info" => Command::Info,
         b"status" => Command::Status,
+        b"link" => Command::Link,
+        b"drop" => Command::Drop,
+        b"iam" => iam(rest),
         b"ch" => {
             let start = rest.iter().position(|&b| b != b' ').unwrap_or(rest.len());
             Command::Channels(match &rest[start..] {
@@ -123,7 +161,7 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
                 argument => Channels::Set(argument),
             })
         }
-        b"bye" | b"iam" | b"hb" | b"client" | b"time" => Command::Silent,
+        b"bye" | b"hb" | b"client" | b"time" => Command::Silent,
         b"bt" | b"cap" | b"csi" | b"coproc" | b"led" | b"screen" | b"sd" | b"ota" => {
             Command::Unsupported
         }

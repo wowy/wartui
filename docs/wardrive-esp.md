@@ -105,8 +105,11 @@ A command is cut to 240 bytes and trimmed. Its first word picks it.
 | `start` | starts the scan with the list as it is. Nothing when it runs already |
 | `caps` | `WD:CAPS` |
 | `ch`, `ch 1,6,11`, `ch all` | shows, sets or resets the channel list |
-| `status`, `info`, `help` | plain text lines, in wartui's own wording |
-| `bye`, `iam …`, `hb`, `client`, `time …` | taken, and answered with nothing |
+| `status`, `info`, `help` | plain text lines, in wartui's own wording; `info` ends with `WD:BOOT` |
+| `link` | plain text lines about the Bluetooth link: the phone's address and time linked, its `iam` name, signal, MTU, interval and timeout, and the links and last drop since the C6 booted |
+| `drop` | `disconnecting the phone`, then the bridge disconnects the phone, which stops the scan |
+| `iam a <nickname>`, `iam i <nickname>` | kept until the phone links again or lets go, and shown by `link`: Android or iPhone, and the nickname cut to 18 bytes on a character boundary. Answered with nothing |
+| `bye`, `hb`, `client`, `time …`, and any other `iam` | taken, and answered with nothing |
 | `bt`, `cap`, `csi`, `coproc`, `led`, `screen`, `sd`, `ota`, and `wdstream` with `-bt`, `-cap` or `-promisc` | `WD:ERR reason=unsupported`, and nothing changes |
 | anything else | `unknown command '<word>'`, then the help list |
 
@@ -114,14 +117,16 @@ A command is cut to 240 bytes and trimmed. Its first word picks it.
 and `-promisc` count anywhere after the word, and `start` is optional. A channel list is the text
 after `-ch ` or `ch `: numbers between commas or spaces, ending at the first other byte.
 
-`reboot`, `drop` and `link` are unknown on purpose: the service takes commands from any phone in
-range, so none of them restarts the bridge or drops its link.
+`reboot` is unknown on purpose: the service takes commands from any phone in range, so none of
+them restarts the bridge. `drop` and `link` touch only the phone that sends them.
 
 ## Lines
 
 | Line | Sent |
 | --- | --- |
 | `WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui board_name=wartui link=ble chans=…` | at scan start and on `caps` |
+| `WD:BOOT fw=1.6.0 slot=<ota_0\|ota_1\|?> image=<trial\|confirmed> reset=<key>` | at scan start, and at the end of `info` |
+| `WD:LINK conns=<n> mtu=<n> prev_disc=<0x2NN\|none> [prev_disc_ago=<n>s]` | at scan start |
 | `WD:MODE mode=wifi` | at scan start, and to a `wdstream start` while scanning |
 | `WD:BEGIN type=wifi interval=0 channel=auto` | at scan start |
 | `WD:PLAN chans=…` | at scan start, and when the channel list changes while scanning |
@@ -129,6 +134,11 @@ range, so none of them restarts the bridge or drops its link.
 | `WD:STATUS aps=<n> scans=<n>` | every 5 s while scanning, and before `WD:END` |
 | `WD:END reason=stop` | when the scan stops |
 | `WD:ERR reason=<unsupported\|no_supported_channels>` | a command refused |
+| `WD:HEALTH up=<s> heap=<bytes> heap_min=<bytes> mtu=<n> txdrop=<n>` | every 15 s while the phone is linked, scanning or not |
+
+A scan starts with `WD:CAPS`, `WD:BOOT`, `WD:LINK`, `WD:MODE`, `WD:BEGIN` and `WD:PLAN`, in that
+order. `WD:HEALTH` is queued as a command's answer is, so a backlog of stream lines never holds
+it.
 
 - `fw=` names the level of the protocol document, not the bridge's firmware version, which
   `info` gives. `board=wartui` and `ota=0` tell an app the bridge is not a board it updates.
@@ -137,6 +147,18 @@ range, so none of them restarts the bridge or drops its link.
 - `auth` is `OPEN`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2_WPA3` or `UNKNOWN`. WPA2 Enterprise and
   mixed WPA/WPA2 read as `WPA2`; WAPI, OWE and anything unnamed read as `UNKNOWN`.
 - `hidden=1` goes with an empty `ssid_hex=`.
+- `WD:BOOT` describes the P4's image: `slot` is the running app slot, `image=trial` until a
+  wartui host confirms an update, and `reset` is `power_on`, `software`, `watchdog`, `brownout`,
+  `reset_pin` or `other`. The document's `boots`, `prev_fw`, `prev_stage` and `rolled_back` are
+  left out: the bridge keeps none of them.
+- `WD:LINK` describes the C6's Bluetooth link: `conns` counts the connections since the C6
+  booted, this one included. `prev_disc` is `0x200` plus the HCI reason the connection before
+  this one ended for, the form the WardriveESP firmware reports, and `prev_disc_ago` the seconds
+  since. With no earlier disconnection since the C6 booted, it is `prev_disc=none`.
+- `WD:HEALTH`: `up` is seconds since the P4 booted, `heap` and `heap_min` the C6's free and
+  least free heap (the P4 has no heap), and `txdrop` the lines dropped from the phone's queue
+  since it linked. The document's `largest`, `stack_*`, `low_stack`, `last`, `batt` and `temp`
+  are left out: the bridge has no figure for them.
 
 ## How the fleet maps onto one board
 
@@ -152,8 +174,8 @@ range, so none of them restarts the bridge or drops its link.
   sweep, so a phone sees fewer lines for the same neighborhood from the bridge.
 - **There is no sweep to count.** `WD:STATUS` goes every 5 s from the scan's start: `aps` is the
   `WD:AP` lines since the last one, and `scans` counts those periods.
-- **The phone lets go, the fleet stops.** An unsubscribe, a disconnect, the setting turned off
-  or USB taking the bridge each stop the scan.
+- **The phone lets go, the fleet stops.** An unsubscribe, a disconnect, a `drop`, the setting
+  turned off or USB taking the bridge each stop the scan.
 - **A slow phone loses the oldest lines.** The bridge holds 16 KB of stream lines for the phone
   and evicts the oldest past that. An app stamps an access point with the phone's position when
   its line arrives, so a deep backlog would put access points in the wrong place. `status` gives
@@ -163,7 +185,7 @@ range, so none of them restarts the bridge or drops its link.
 
 Everything the document marks as a later version or another transport: Bluetooth scanning
 (`WD:BT`), capture, GPS, firmware updates, the USB protocol, the status beacon and advert
-extras, `WD:BOOT`, `WD:CRASH`, `WD:LINK`, `WD:CONN` and `WD:HEALTH`, CSI, the LED ring, the
-screen, microSD runs and the co-processor.
+extras, `WD:CRASH` and `WD:CONN`, CSI, the LED ring, the screen, microSD runs and the
+co-processor.
 
 What the bench measured is in [`wardrive-esp-findings.md`](wardrive-esp-findings.md).

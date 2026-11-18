@@ -35,8 +35,8 @@
 //! While a central over Bluetooth or a phone holds the host queue, each packet's room behind the
 //! queued records carries the host stream down as `Down::HostBytes`, inside the credit window
 //! (`src/ble.rs`). The stream goes only behind every queued record, so a `Down::HostStart` always
-//! leads its attachment's bytes. A phone's commands come up as `Up::WardriveEspCommand`, to its
-//! session (`src/wardrive_esp.rs`).
+//! leads its attachment's bytes. A phone's commands come up as `Up::WardriveEspCommand`, and its
+//! link as `Up::PhoneLink`, to its session (`src/wardrive_esp.rs`).
 //!
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
 //! differently is sent none, and its records are not read. A C6 updating on this P4's revision
@@ -234,7 +234,7 @@ impl Link {
     }
 
     /// Act on one record from the C6: a line for the host, its counters, the Bluetooth host's
-    /// stream, credit and state, a change to its bonds, or a phone's command.
+    /// stream, credit and state, a change to its bonds, or a phone's command or link.
     #[inline(never)]
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
@@ -257,6 +257,7 @@ impl Link {
             Ok(Up::BondAdded(bond)) => crate::bonds::on_added(shared, bond),
             Ok(Up::BondRemoved(addr)) => crate::bonds::on_removed(shared, addr),
             Ok(Up::WardriveEspCommand(text)) => crate::wardrive_esp::on_command(shared, text),
+            Ok(Up::PhoneLink(link)) => crate::wardrive_esp::on_link(shared, link),
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

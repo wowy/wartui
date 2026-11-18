@@ -23,7 +23,14 @@
 //!
 //! **A scan period is [`PERIOD`], counted from the scan's start**: the fleet has no single sweep,
 //! and a node's assigned beat is the same 5 s. Each ends in a `WD:STATUS`, so the first lands
-//! [`PERIOD`] after `WD:BEGIN`.
+//! [`PERIOD`] after `WD:BEGIN`. A `WD:HEALTH` goes every [`HEALTH_EVERY`] while the phone holds
+//! the queue, scanning or not.
+//!
+//! **The C6 measures the phone's link** and sends it as `Up::PhoneLink`, just ahead of the
+//! `BleState` that attaches the phone and every 5 s after, so `WD:LINK` in the scan header,
+//! `WD:HEALTH` and the `link` answer read the latest. `WD:BOOT` reads the P4's own image: its
+//! slot, its trial (`src/update.rs`) and why it last reset. A phone that sends `drop` is
+//! answered first; `Down::DropPhone` then asks the C6 to disconnect it, which releases it here.
 //!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
@@ -31,13 +38,15 @@
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use wartui_proto::bus::{SightingBatch, Slot};
 use wartui_proto::host_owner::Holder;
-use wartui_proto::wardrive_esp::session::{Class, Ctx, Scan, Session, Sink};
+use wartui_proto::radio_link::{Down, PhoneLink};
+use wartui_proto::reset::ResetCause;
+use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
 
 use crate::{Shared, now_ms};
 
@@ -46,6 +55,9 @@ const BACKLOG_BYTES: usize = 16 * 1024;
 
 /// How often a scan period ends.
 const PERIOD: Duration = Duration::from_secs(5);
+
+/// How often the phone is sent `WD:HEALTH`.
+const HEALTH_EVERY: Duration = Duration::from_secs(15);
 
 /// The setting, and the session of the phone holding the queue.
 pub struct Phone {
@@ -56,16 +68,32 @@ pub struct Phone {
     dropped_at: Cell<u32>,
     /// A scan started: the period starts over.
     restart: Signal<NoopRawMutex, ()>,
+    /// The phone's link, as the C6 last reported it.
+    link: Cell<PhoneLink>,
+    /// Why the P4 last reset.
+    reset: ResetCause,
 }
 
 impl Phone {
-    /// No phone, the setting `enabled`.
-    pub const fn new(enabled: bool) -> Self {
+    /// No phone, the setting `enabled`, and the P4 reset for `reset`.
+    pub const fn new(enabled: bool, reset: ResetCause) -> Self {
         Self {
             enabled: Cell::new(enabled),
             session: RefCell::new(Session::new()),
             dropped_at: Cell::new(0),
             restart: Signal::new(),
+            link: Cell::new(PhoneLink {
+                peer: [0; 2],
+                connections: 0,
+                connected_s: 0,
+                rssi: None,
+                interval_us: 0,
+                timeout_ms: 0,
+                last_drop: None,
+                heap_free: 0,
+                heap_least: 0,
+            }),
+            reset,
         }
     }
 
@@ -115,20 +143,35 @@ fn ctx(shared: &Shared) -> Ctx<'static> {
         nodes: fleet.members().len() as u8,
         mtu: shared.ble.state().mtu,
         dropped: dropped(shared).wrapping_sub(shared.phone.dropped_at.get()),
+        link: shared.phone.link.get(),
+        boot: Boot {
+            slot: crate::update::slot(shared),
+            trial: crate::update::on_trial(shared),
+            reset: shared.phone.reset,
+        },
     }
 }
 
-/// Carry out what the session asked of the scan.
-fn apply(shared: &Shared, scan: Option<Scan>) {
-    match scan {
-        Some(Scan::Start) => {
+/// Carry out what the session asked of the bridge.
+fn apply(shared: &Shared, ask: Option<Ask>) {
+    match ask {
+        Some(Ask::Start) => {
             crate::fleet::stop(shared);
             crate::fleet::start(shared, false);
             shared.phone.restart.signal(());
         }
-        Some(Scan::Stop) => crate::fleet::stop(shared),
+        Some(Ask::Stop) => crate::fleet::stop(shared),
+        // The answer is queued already; the C6 holds the link a moment so it reaches the phone.
+        Some(Ask::Drop) => {
+            let _ = shared.push_down(&Down::DropPhone);
+        }
         None => {}
     }
+}
+
+/// The C6's latest report of the phone's link: kept for the session's lines.
+pub fn on_link(shared: &Shared, link: PhoneLink) {
+    shared.phone.link.set(link);
 }
 
 /// The setting changed: keep it, and tell the C6 when whether it admits a phone changed.
@@ -149,15 +192,15 @@ pub fn attach(shared: &Shared) {
     }
     shared.phone.dropped_at.set(dropped(shared));
     let ctx = ctx(shared);
-    let scan = shared.phone.session.borrow_mut().on_subscribe(&ctx, &mut Lines(shared));
-    apply(shared, scan);
+    let ask = shared.phone.session.borrow_mut().on_subscribe(&ctx, &mut Lines(shared));
+    apply(shared, ask);
     shared.wake_link.signal(());
 }
 
 /// Stop serving the phone: end its session, stop the scan it ran, and clear the queue.
 pub fn release(shared: &Shared) {
-    let scan = shared.phone.session.borrow_mut().release();
-    apply(shared, scan);
+    let ask = shared.phone.session.borrow_mut().release();
+    apply(shared, ask);
     shared.host.borrow_mut().clear();
 }
 
@@ -168,8 +211,8 @@ pub fn on_command(shared: &Shared, text: &[u8]) {
         return;
     }
     let ctx = ctx(shared);
-    let scan = shared.phone.session.borrow_mut().on_command(text, &ctx, &mut Lines(shared));
-    apply(shared, scan);
+    let ask = shared.phone.session.borrow_mut().on_command(text, &ctx, &mut Lines(shared));
+    apply(shared, ask);
 }
 
 /// A `Sightings` record from the node in `slot`: each access point in it to the phone, while the
@@ -192,12 +235,33 @@ pub fn on_sightings(shared: &Shared, slot: Slot, body: &[u8]) {
     }
 }
 
-/// End a scan period every [`PERIOD`] from the scan's start while the phone holds the queue.
+/// End a scan period every [`PERIOD`] from the scan's start, and send `WD:HEALTH` every
+/// [`HEALTH_EVERY`], while the phone holds the queue.
 pub async fn run(shared: &Shared) -> ! {
+    let mut period = Instant::now() + PERIOD;
+    let mut health = Instant::now() + HEALTH_EVERY;
     loop {
-        let ended = select(Timer::after(PERIOD), shared.phone.restart.wait()).await;
-        if matches!(ended, Either::First(())) && holds(shared) {
-            shared.phone.session.borrow_mut().on_period(&mut Lines(shared));
+        match select3(Timer::at(period), Timer::at(health), shared.phone.restart.wait()).await {
+            Either3::First(()) => {
+                period = Instant::now() + PERIOD;
+                if holds(shared) {
+                    shared.phone.session.borrow_mut().on_period(&mut Lines(shared));
+                }
+            }
+            Either3::Second(()) => {
+                health = Instant::now() + HEALTH_EVERY;
+                if holds(shared) {
+                    send_health(shared);
+                }
+            }
+            Either3::Third(()) => period = Instant::now() + PERIOD,
         }
     }
+}
+
+/// Send the phone `WD:HEALTH`. Out of line, as the other session calls are.
+#[inline(never)]
+fn send_health(shared: &Shared) {
+    let ctx = ctx(shared);
+    shared.phone.session.borrow().on_health(&ctx, &mut Lines(shared));
 }

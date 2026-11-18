@@ -126,6 +126,7 @@ use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, BleCounters, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held,
     PacketReader, RECORD_MAX, RTS_THRESHOLD, WIRE_MAX, encode_down,
 };
+use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
 use crate::ble::{Ble, BleFrames};
@@ -290,6 +291,7 @@ impl Shared {
         updates: &'static mut Updates,
         cache: Cache,
         carrier: &Carrier,
+        cause: ResetCause,
     ) -> Self {
         // The stored settings, read before any future runs.
         let (sector, stored) = settings::boot(updates);
@@ -319,7 +321,7 @@ impl Shared {
             owner: Cell::new(Owner::new()),
             presence: Presence::new(),
             ble: Ble::new(BLE_FRAMES.take()),
-            phone: wardrive_esp::Phone::new(stored.wardrive_esp.unwrap_or(false)),
+            phone: wardrive_esp::Phone::new(stored.wardrive_esp.unwrap_or(false), cause),
             host_arrived: Signal::new(),
             host_uart_errors: Cell::new(0),
             status_asked: Signal::new(),
@@ -703,7 +705,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {
-        Shared::new(pair, host_queue(spare_psram), DOWN_QUEUE.take(), updates, cache, &carrier)
+        let host = host_queue(spare_psram);
+        Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, cause)
     });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(

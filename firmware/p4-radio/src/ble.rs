@@ -103,6 +103,14 @@
 //! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
 //! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
 //!
+//! **The P4 holds the phone's link before its session starts.** An `Up::PhoneLink` goes just ahead
+//! of the `BleState` that names the phone's stream, with no signal reading yet, and again every
+//! [`PHONE_LINK_EVERY`] while the phone reads it, with one ([`phone`]). It counts the connections
+//! since boot and carries how the one before this ended, which the C6 keeps where it counts
+//! `last_disconnect`. A `Down::DropPhone` disconnects a phone reading its stream [`DROP_GRACE`]
+//! later, so the answer the P4 queued just ahead of it reaches the phone. One with no phone reading
+//! is ignored, and each connection starts with none pending.
+//!
 //! **The C6 sends no Security Request.** A phone answers one with a pairing prompt, and a phone
 //! that remembers the bridge connects whether or not phones are admitted. BlueZ starts no first
 //! pairing on one, and answers one that says no bonding by pairing again rather than encrypting
@@ -166,7 +174,7 @@ use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
 use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{
-    Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, Stream, Up,
+    Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, LastDrop, PhoneLink, Stream, Up,
 };
 use wartui_proto::wardrive_esp::command;
 use wartui_proto::wardrive_esp::frame::{self, Inbound};
@@ -219,6 +227,12 @@ const _: () = assert!(
 
 /// How often the C6 repeats its `BleState` to the P4, changed or not.
 const STATE_EVERY: Duration = Duration::from_secs(1);
+
+/// How often the C6 sends `Up::PhoneLink` while a phone reads its stream.
+const PHONE_LINK_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a phone that asked to be dropped stays connected, so its answer reaches it.
+const DROP_GRACE: Duration = Duration::from_millis(500);
 
 /// The first wait of a notification the packet pool has no room for, doubled on each retry up
 /// to [`POOL_RETRY_MAX`].
@@ -468,6 +482,13 @@ pub struct Ble {
     inbound: Cell<Inbound>,
     /// The ids of the ACKs owed to the phone, oldest first. Cleared when the stream changes.
     acks: RefCell<Deque<u32, ACKS_MAX>>,
+    /// Connections accepted since boot.
+    connections: Cell<u32>,
+    /// The latest disconnection's HCI reason and when it came, or `None` before the first.
+    /// During a connection, the one before it.
+    last_drop: Cell<Option<(u8, Instant)>>,
+    /// Raised by a `Down::DropPhone` while a phone reads its stream, for [`phone`].
+    drop_asked: Signal<NoopRawMutex, ()>,
 }
 
 impl Ble {
@@ -492,6 +513,9 @@ impl Ble {
             admitted: Cell::new(false),
             inbound: Cell::new(Inbound::new()),
             acks: RefCell::new(Deque::new()),
+            connections: Cell::new(0),
+            last_drop: Cell::new(None),
+            drop_asked: Signal::new(),
         }
     }
 
@@ -621,6 +645,13 @@ pub fn repeat_bond(shared: &Shared) {
     pending.sent += 1;
     pending.sent_at = Instant::now();
     ble.pending_bond.set(Some(pending));
+}
+
+/// The P4 asked to drop the phone: ask [`phone`] to, when a phone reads its stream.
+pub fn drop_phone_asked(shared: &Shared) {
+    if shared.ble.stream() == Stream::Phone {
+        shared.ble.drop_asked.signal(());
+    }
 }
 
 /// The counters `RadioStatus.ble` reports.
@@ -1021,6 +1052,8 @@ struct Session {
     idle_changed: Signal<NoopRawMutex, ()>,
     /// The central's address, in display order, for the log.
     peer: Mac,
+    /// When the last `Up::PhoneLink` went, or when the phone's stream last ended.
+    link_said: Cell<Instant>,
 }
 
 /// Whether the link is encrypted and the central holds a stored bond: what the host stream needs.
@@ -1051,6 +1084,10 @@ fn disconnect(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str
 /// Serve one central until it disconnects.
 async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) {
     let raw = conn.raw();
+    let ble = &shared.ble;
+    ble.connections.set(ble.connections.get().wrapping_add(1));
+    // A drop asked for no phone, or for the last one as it went, is not this connection's.
+    ble.drop_asked.reset();
     let interval_us = raw.params().conn_interval.as_micros() as u32;
     shared.ble.count(|c| {
         c.phy = 1;
@@ -1070,6 +1107,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         idle_since: Cell::new(connected_at),
         idle_changed: Signal::new(),
         peer: bond_addr(&raw.peer_identity()).mac(),
+        link_said: Cell::new(connected_at),
     };
     let window = if session.bondable { "open" } else { "closed" };
     let bonded = if raw.is_bonded_peer() { "bonded" } else { "not bonded" };
@@ -1105,9 +1143,64 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         events(conn, server, &session, shared),
         notify(conn, server, shared),
         deadline(conn, &session, shared),
-        revoke(conn, &session, shared),
+        select(revoke(conn, &session, shared), phone(stack, conn, &session, shared)),
     )
     .await;
+}
+
+/// The phone's link as it stands, with `rssi` as read, or `None` for no reading.
+fn phone_link(
+    conn: &Conn<'_, '_>,
+    session: &Session,
+    shared: &Shared,
+    rssi: Option<i8>,
+) -> PhoneLink {
+    let ble = &shared.ble;
+    let params = conn.raw().params();
+    let heap = esp_alloc::HEAP.stats();
+    let last_drop = ble
+        .last_drop
+        .get()
+        .map(|(reason, at)| LastDrop { reason, ago_s: at.elapsed().as_secs() as u32 });
+    PhoneLink {
+        peer: [session.peer[4], session.peer[5]],
+        connections: ble.connections.get(),
+        connected_s: session.connected_at.elapsed().as_secs() as u32,
+        rssi,
+        interval_us: params.conn_interval.as_micros() as u32,
+        timeout_ms: params.supervision_timeout.as_millis().min(u64::from(u16::MAX)) as u16,
+        last_drop,
+        heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
+        heap_least: heap.size.saturating_sub(heap.max_usage) as u32,
+    }
+}
+
+/// Send the P4 the phone's link, with `rssi`, and restart [`phone`]'s period.
+fn say_phone_link(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, rssi: Option<i8>) {
+    shared.push(&Up::PhoneLink(phone_link(conn, session, shared, rssi)));
+    session.link_said.set(Instant::now());
+}
+
+/// While a phone reads its stream, send the P4 its link every [`PHONE_LINK_EVERY`], with the
+/// signal read for each, and disconnect it [`DROP_GRACE`] after it asks to be dropped. A signal
+/// that does not read goes as `None`.
+async fn phone(stack: &BleStack<'_>, conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
+    let ble = &shared.ble;
+    loop {
+        let due = session.link_said.get() + PHONE_LINK_EVERY;
+        if let Either::Second(()) = select(Timer::at(due), ble.drop_asked.wait()).await {
+            Timer::after(DROP_GRACE).await;
+            disconnect(conn, session, shared, "the phone asked to be dropped");
+            core::future::pending::<()>().await;
+        }
+        if ble.stream() != Stream::Phone {
+            // No phone: the period starts over, so this waits rather than spins.
+            session.link_said.set(Instant::now());
+        } else if session.link_said.get().elapsed() >= PHONE_LINK_EVERY {
+            let rssi = conn.raw().rssi(stack).await.ok();
+            say_phone_link(conn, session, shared, rssi);
+        }
+    }
 }
 
 /// Disconnect the central once the P4's bonds stop holding its bond, as after a `ClearBonds`, so
@@ -1171,6 +1264,7 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
             GattConnectionEvent::Disconnected { reason } => {
                 let reason = reason.into_inner();
                 ble.count(|c| c.last_disconnect = reason);
+                ble.last_drop.set(Some((reason, Instant::now())));
                 let peer = mac::short(&session.peer);
                 shared.log(format_args!("Bluetooth disconnected {peer}: reason {reason:#04x}"));
                 return;
@@ -1281,6 +1375,11 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
         };
         let mtu = raw.att_mtu();
         let was = ble.stream();
+        // Ahead of the state that names the phone's stream, so the P4 holds it as the session
+        // starts. No signal is read yet: the next period's report carries the first.
+        if stream == Stream::Phone && was != Stream::Phone {
+            say_phone_link(conn, session, shared, None);
+        }
         set_state(shared, |state| {
             state.stream = stream;
             state.mtu = mtu;

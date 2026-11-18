@@ -27,6 +27,7 @@
 
 use core::fmt::{self, Write};
 
+use esp_bootloader_esp_idf::partitions::AppPartitionSubType;
 use esp_hal::peripherals::{FLASH, RTC_TIMER};
 use esp_hal::rtc_cntl::{Rtc, RwdtStage};
 use esp_hal::time::Duration;
@@ -277,6 +278,20 @@ pub fn host_gone(shared: &Shared) {
 /// The lines held for the host, emptied.
 pub fn take_lines(shared: &Shared) -> Lines {
     core::mem::take(&mut shared.updates.borrow_mut().lines)
+}
+
+/// Whether the booted image is on trial.
+pub fn on_trial(shared: &Shared) -> bool {
+    shared.updates.borrow().trial
+}
+
+/// The running slot's label, `ota_0` or `ota_1`, or `?` when the table names neither.
+pub fn slot(shared: &Shared) -> &'static str {
+    match shared.updates.borrow().ota.booted().map(|slot| slot.kind) {
+        Some(AppPartitionSubType::Ota0) => "ota_0",
+        Some(AppPartitionSubType::Ota1) => "ota_1",
+        _ => "?",
+    }
 }
 
 /// Why updates are refused, if they are.

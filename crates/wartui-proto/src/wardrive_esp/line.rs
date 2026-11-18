@@ -8,12 +8,22 @@
 //! partner hardware and offers it no firmware update, and `ota=0` says the same: the bridge is
 //! updated by wartui, never by the phone. Every other capability is `0` but the two bands, since
 //! the bridge offers only Wi-Fi.
+//!
+//! **`WD:BOOT`, `WD:LINK` and `WD:HEALTH` carry only the keys the bridge has a figure for.**
+//! The document's `boots`, `prev_fw`, `prev_stage` and `rolled_back` are left out of `WD:BOOT`,
+//! and its `largest`, `stack_*`, `low_stack`, `last`, `batt` and `temp` out of `WD:HEALTH`: the
+//! bridge keeps none of them. `heap` and `heap_min` are the C6's, since the P4 has no heap.
+//! `prev_disc` is `0x200` plus the HCI reason, the form the WardriveESP firmware's Bluetooth
+//! stack reports and apps read.
 
 use core::fmt::{self, Write as _};
 
 use super::command::ChannelList;
+use super::session::Boot;
 use crate::bus::{Security, SightingMsg};
 use crate::plan::ChannelPool;
+use crate::radio_link::PhoneLink;
+use crate::reset::ResetCause;
 
 /// The longest line, its `\n` included.
 pub const LINE_MAX: usize = 320;
@@ -58,6 +68,46 @@ pub fn caps(out: &mut Line, pool: ChannelPool) -> bool {
             "WD:CAPS fw={FW} chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui \
              board_name=wartui link=ble chans={}",
             Commas(list.channels())
+        )
+    })
+}
+
+/// `WD:BOOT`: the P4's booted image and why it last reset.
+pub fn boot(out: &mut Line, boot: &Boot<'_>) -> bool {
+    let image = if boot.trial { "trial" } else { "confirmed" };
+    build(out, |out| {
+        write!(
+            out,
+            "WD:BOOT fw={FW} slot={} image={image} reset={}",
+            boot.slot,
+            reset_key(boot.reset)
+        )
+    })
+}
+
+/// `WD:LINK`: the connections since the C6 booted, the MTU, and how the one before this ended.
+pub fn link(out: &mut Line, link: &PhoneLink, mtu: u16) -> bool {
+    build(out, |out| {
+        write!(out, "WD:LINK conns={} mtu={mtu} ", link.connections)?;
+        match link.last_drop {
+            Some(drop) => write!(
+                out,
+                "prev_disc=0x{:03x} prev_disc_ago={}s",
+                0x200 + u16::from(drop.reason),
+                drop.ago_s
+            ),
+            None => out.write_str("prev_disc=none"),
+        }
+    })
+}
+
+/// `WD:HEALTH`: `up_s` since the P4 booted, the C6's heap, the MTU, and the lines `dropped`.
+pub fn health(out: &mut Line, up_s: u32, link: &PhoneLink, mtu: u16, dropped: u32) -> bool {
+    build(out, |out| {
+        write!(
+            out,
+            "WD:HEALTH up={up_s} heap={} heap_min={} mtu={mtu} txdrop={dropped}",
+            link.heap_free, link.heap_least
         )
     })
 }
@@ -125,6 +175,29 @@ pub(super) fn unknown(out: &mut Line, word: &[u8]) -> bool {
             .and_then(|()| out.extend_from_slice(b"'"))
             .map_err(|_| fmt::Error)
     })
+}
+
+/// `  held by <nickname> (<platform>)`, with `nickname`'s bytes as they came.
+pub(super) fn held_by(out: &mut Line, nickname: &[u8], platform: &str) -> bool {
+    build(out, |out| {
+        out.extend_from_slice(b"  held by ")
+            .and_then(|()| out.extend_from_slice(nickname))
+            .map_err(|_| fmt::Error)?;
+        write!(out, " ({platform})")
+    })
+}
+
+/// The `reset=` key for `cause`.
+#[must_use]
+pub const fn reset_key(cause: ResetCause) -> &'static str {
+    match cause {
+        ResetCause::PowerOn => "power_on",
+        ResetCause::Software => "software",
+        ResetCause::Watchdog | ResetCause::Lockup => "watchdog",
+        ResetCause::Brownout => "brownout",
+        ResetCause::External => "reset_pin",
+        ResetCause::Unknown => "other",
+    }
 }
 
 /// The `auth=` token for `security`.

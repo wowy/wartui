@@ -11,7 +11,9 @@
 //! state and which [`Stream`] its central reads, and the bonds the P4 keeps for it
 //! ([`Down::Bonds`], [`Up::BondAdded`], [`Up::BondRemoved`], [`crate::bonds`]). A phone on the
 //! WardriveESP service reads the same stream down, and its commands come up as
-//! [`Up::WardriveEspCommand`] ([`crate::wardrive_esp`]).
+//! [`Up::WardriveEspCommand`] ([`crate::wardrive_esp`]). The C6 reports that phone's link as
+//! [`Up::PhoneLink`], for the lines that describe it, and [`Down::DropPhone`] asks it to
+//! disconnect the phone.
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while its bytes in
 //! flight, `sent.wrapping_sub(accounted)`, stay under
@@ -77,6 +79,8 @@ pub enum Down<'a> {
         /// depends on it.
         wardrive_esp: bool,
     },
+    /// Disconnect the phone reading the WardriveESP stream: it asked to be dropped.
+    DropPhone,
 }
 
 /// [`Down::Bonds`]'s `window_ms` while no bond is stored: open until one is.
@@ -118,6 +122,9 @@ pub enum Up<'a> {
     /// [`COMMAND_MAX`](crate::wardrive_esp::command::COMMAND_MAX) bytes. Its own variant, so a
     /// phone's bytes never reach the host frame decoder.
     WardriveEspCommand(#[serde(serialize_with = "byte_string", borrow)] &'a [u8]),
+    /// The phone's link, as the C6 measures it. Sent just ahead of the `BleState` that names a
+    /// phone's stream, and every 5 s while a phone reads it.
+    PhoneLink(PhoneLink),
 }
 
 /// Which stream a central reads.
@@ -144,6 +151,38 @@ pub struct BleState {
     pub bonded: bool,
     /// The ATT MTU, or 0 with no connection.
     pub mtu: u16,
+}
+
+/// A phone's Bluetooth link, as [`Up::PhoneLink`] reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhoneLink {
+    /// The central's last two address octets.
+    pub peer: [u8; 2],
+    /// Centrals that have connected since the C6 booted, this one included.
+    pub connections: u32,
+    /// Seconds this connection has been up.
+    pub connected_s: u32,
+    /// The central's signal in dBm, or `None` before the first reading.
+    pub rssi: Option<i8>,
+    /// The connection interval, in microseconds.
+    pub interval_us: u32,
+    /// The supervision timeout, in milliseconds.
+    pub timeout_ms: u16,
+    /// How the connection before this one ended, or `None` when the C6 has seen none end.
+    pub last_drop: Option<LastDrop>,
+    /// The C6's free heap, in bytes.
+    pub heap_free: u32,
+    /// The least heap the C6 has had free since it booted, in bytes.
+    pub heap_least: u32,
+}
+
+/// A disconnection, as [`PhoneLink`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastDrop {
+    /// The HCI reason code.
+    pub reason: u8,
+    /// Seconds since it.
+    pub ago_s: u32,
 }
 
 /// The C6's Bluetooth counters: totals since it booted, each wrapping, and the latest

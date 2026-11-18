@@ -291,6 +291,12 @@ impl Ota {
         (Self { flash, table, layout }, fault)
     }
 
+    /// The running slot, if the table names it.
+    #[must_use]
+    pub fn booted(&self) -> Option<AppSlot> {
+        self.layout.booted
+    }
+
     /// The slot an update is written into, if the table has one.
     #[must_use]
     pub fn target(&self) -> Option<AppSlot> {

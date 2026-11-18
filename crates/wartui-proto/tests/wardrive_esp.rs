@@ -4,15 +4,17 @@
 use wartui_proto::ChannelPool;
 use wartui_proto::bus::{RecordKind, Security, SightingMsg};
 use wartui_proto::plan::{SCAN_CHANNELS, index_of};
+use wartui_proto::radio_link::{LastDrop, PhoneLink};
+use wartui_proto::reset::ResetCause;
 use wartui_proto::wardrive_esp::command::{
-    self, COMMAND_MAX, ChannelList, Channels, Command, parse_channels,
+    self, COMMAND_MAX, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels,
 };
 use wartui_proto::wardrive_esp::frame::{
     self, CTRL_UUID, HEADER_LEN, Inbound, RX_UUID, SERVICE_UUID, TX_UUID, TYPE_ACK, TYPE_CMD,
     TYPE_DATA, Taken, Write,
 };
 use wartui_proto::wardrive_esp::line::{self, LINE_MAX, Line};
-use wartui_proto::wardrive_esp::session::{Class, Ctx, Scan, Session, Sink};
+use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
 
 /// A framed write: the header with `version` and `flags`, then `payload`.
 fn framed(kind: u8, id: u32, payload: &[u8], version: u8, flags: u8) -> Vec<u8> {
@@ -217,11 +219,13 @@ fn wardrive_command_reads_each_channel_form_when_word_is_ch() {
     assert_eq!(command::parse(b"help"), Some(Command::Help));
     assert_eq!(command::parse(b"info"), Some(Command::Info));
     assert_eq!(command::parse(b"status"), Some(Command::Status));
+    assert_eq!(command::parse(b"link"), Some(Command::Link));
+    assert_eq!(command::parse(b"drop"), Some(Command::Drop));
 }
 
 #[test]
-fn wardrive_command_is_silent_when_app_sends_bye_iam_hb_client_time() {
-    for text in [&b"bye"[..], b"iam a pixel", b"hb", b"client android 2.1", b"time 1763380000"] {
+fn wardrive_command_is_silent_when_app_sends_bye_hb_client_time() {
+    for text in [&b"bye"[..], b"hb", b"client android 2.1", b"time 1763380000"] {
         assert_eq!(
             command::parse(text),
             Some(Command::Silent),
@@ -246,8 +250,7 @@ fn wardrive_command_names_word_when_unknown() {
     assert_eq!(command::parse(b"reboot"), Some(Command::Unknown(b"reboot")));
     assert_eq!(command::parse(b"frobnicate x"), Some(Command::Unknown(b"frobnicate")));
     assert_eq!(command::parse(b"CAPS"), Some(Command::Unknown(b"CAPS")));
-    assert_eq!(command::parse(b"drop"), Some(Command::Unknown(b"drop")));
-    assert_eq!(command::parse(b"link"), Some(Command::Unknown(b"link")));
+    assert_eq!(command::parse(b"links"), Some(Command::Unknown(b"links")));
     let word = [0xFFu8; COMMAND_MAX];
     assert_eq!(command::parse(&word), Some(Command::Unknown(&word[..])));
 }
@@ -449,7 +452,7 @@ impl Lines {
 const ALL_CHANS: &str = "1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,52,56,60,64,100,104,108,112,\
                          116,120,124,128,132,136,140,144,149,153,157,161,165,169,173,177";
 
-const HELP: [&str; 12] = [
+const HELP: [&str; 14] = [
     "wartui bridge, WardriveESP commands:\n",
     "  wdstream start -wifi [-ch 1,6,11]\n",
     "  wdstream stop\n",
@@ -461,6 +464,8 @@ const HELP: [&str; 12] = [
     "  ch all\n",
     "  status\n",
     "  info\n",
+    "  link\n",
+    "  drop\n",
     "  help\n",
 ];
 
@@ -473,8 +478,23 @@ fn ctx() -> Ctx<'static> {
         nodes: 3,
         mtu: 182,
         dropped: 2,
+        link: PhoneLink {
+            peer: [0x4A, 0x9F],
+            connections: 3,
+            connected_s: 65,
+            rssi: Some(-61),
+            interval_us: 48_750,
+            timeout_ms: 4000,
+            last_drop: Some(LastDrop { reason: 0x13, ago_s: 12 }),
+            heap_free: 41_000,
+            heap_least: 38_000,
+        },
+        boot: Boot { slot: "ota_0", trial: false, reset: ResetCause::PowerOn },
     }
 }
+
+const BOOT: &str = "WD:BOOT fw=1.6.0 slot=ota_0 image=confirmed reset=power_on\n";
+const LINK: &str = "WD:LINK conns=3 mtu=182 prev_disc=0x213 prev_disc_ago=12s\n";
 
 fn caps_all() -> String {
     format!(
@@ -486,6 +506,8 @@ fn caps_all() -> String {
 fn header(plan: &str) -> Vec<String> {
     vec![
         caps_all(),
+        BOOT.into(),
+        LINK.into(),
         "WD:MODE mode=wifi\n".into(),
         "WD:BEGIN type=wifi interval=0 channel=auto\n".into(),
         format!("WD:PLAN chans={plan}\n"),
@@ -496,7 +518,7 @@ fn header(plan: &str) -> Vec<String> {
 fn subscribed() -> (Session, Lines) {
     let mut session = Session::new();
     let mut lines = Lines::default();
-    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Scan::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start));
     lines.take();
     (session, lines)
 }
@@ -521,7 +543,7 @@ fn wardrive_session_sends_header_in_order_when_phone_subscribes() {
 fn wardrive_session_asks_scan_start_when_phone_subscribes() {
     let mut session = Session::new();
     assert!(!session.scanning());
-    assert_eq!(session.on_subscribe(&ctx(), &mut Lines::default()), Some(Scan::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut Lines::default()), Some(Ask::Start));
     assert!(session.scanning());
 }
 
@@ -604,7 +626,7 @@ fn wardrive_session_sends_status_then_end_when_stopped() {
     session.on_period(&mut lines);
     session.on_sighting(2, &sighting(6, b"coffee"), &mut lines);
     lines.take();
-    assert_eq!(session.on_command(b"wdstream stop", &ctx(), &mut lines), Some(Scan::Stop));
+    assert_eq!(session.on_command(b"wdstream stop", &ctx(), &mut lines), Some(Ask::Stop));
     assert_eq!(
         lines.take_classed(),
         [
@@ -629,7 +651,7 @@ fn wardrive_session_sends_header_again_when_started_after_stop() {
     let (mut session, mut lines) = subscribed();
     session.on_command(b"stop", &ctx(), &mut lines);
     lines.take();
-    assert_eq!(session.on_command(b"start", &ctx(), &mut lines), Some(Scan::Start));
+    assert_eq!(session.on_command(b"start", &ctx(), &mut lines), Some(Ask::Start));
     assert_eq!(lines.take(), header(ALL_CHANS));
     // Already scanning: nothing to start, nothing said.
     assert_eq!(session.on_command(b"start", &ctx(), &mut lines), None);
@@ -716,7 +738,7 @@ fn wardrive_session_starts_anyway_when_channel_list_errs() {
     let mut session = Session::new();
     let mut lines = Lines::default();
     let scan = session.on_command(b"wdstream start -wifi -ch 14", &ctx(), &mut lines);
-    assert_eq!(scan, Some(Scan::Start));
+    assert_eq!(scan, Some(Ask::Start));
     let mut want = vec!["WD:ERR reason=no_supported_channels\n".to_owned()];
     want.extend(header(ALL_CHANS));
     assert_eq!(lines.take(), want);
@@ -785,7 +807,7 @@ fn wardrive_session_resets_list_when_released() {
 #[test]
 fn wardrive_session_asks_scan_stop_when_released_while_scanning() {
     let (mut session, _) = subscribed();
-    assert_eq!(session.release(), Some(Scan::Stop));
+    assert_eq!(session.release(), Some(Ask::Stop));
     assert!(!session.scanning());
     assert_eq!(session.release(), None);
     assert_eq!(Session::new().release(), None);
@@ -798,7 +820,7 @@ fn wardrive_session_resets_list_when_phone_subscribes_again() {
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_period(&mut lines);
     lines.take();
-    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Scan::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start));
     assert_eq!(lines.take(), header(ALL_CHANS));
     session.on_command(b"status", &ctx(), &mut lines);
     assert_eq!(lines.take()[1], "aps 0 scans 0\n");
@@ -810,7 +832,8 @@ fn wardrive_session_classes_answers_apart_from_stream_when_scanning() {
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_period(&mut lines);
     assert!(lines.take_classed().iter().all(|(class, _)| *class == Class::Stream));
-    for command in [&b"caps"[..], b"status", b"info", b"help", b"ch", b"ch all", b"ch 6", b"x"] {
+    let commands = [&b"caps"[..], b"status", b"info", b"link", b"drop", b"help", b"ch", b"ch 6"];
+    for command in commands.into_iter().chain([&b"ch all"[..], b"x"]) {
         session.on_command(command, &ctx(), &mut lines);
         let classed = lines.take_classed();
         assert!(!classed.is_empty());
@@ -837,7 +860,12 @@ fn wardrive_session_answers_status_and_info_when_asked() {
     session.on_command(b"info", &ctx(), &mut lines);
     assert_eq!(
         lines.take(),
-        ["wartui bridge 44:C0 fw 0.9.0\n", "WardriveESP protocol 1.6.0\n", "uptime 61 s nodes 3\n"]
+        [
+            "wartui bridge 44:C0 fw 0.9.0\n",
+            "WardriveESP protocol 1.6.0\n",
+            "uptime 61 s nodes 3\n",
+            BOOT
+        ]
     );
     session.on_command(b"stop", &ctx(), &mut lines);
     lines.take();
@@ -876,9 +904,212 @@ fn wardrive_session_takes_longest_command_when_240_bytes_of_channels() {
     }
     let mut session = Session::new();
     let mut lines = Lines::default();
-    assert_eq!(session.on_command(&command, &ctx(), &mut lines), Some(Scan::Start));
+    assert_eq!(session.on_command(&command, &ctx(), &mut lines), Some(Ask::Start));
     let lines = lines.take();
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 6);
     // The cut is mid-list, so the whole pool fits once, in the order given.
-    assert_eq!(lines[3], format!("WD:PLAN chans={ALL_CHANS}\n"));
+    assert_eq!(lines[5], format!("WD:PLAN chans={ALL_CHANS}\n"));
+}
+
+#[test]
+fn wardrive_session_sends_boot_and_link_after_caps_when_subscribed() {
+    let mut session = Session::new();
+    let mut lines = Lines::default();
+    session.on_subscribe(&ctx(), &mut lines);
+    let want: Vec<_> = [
+        caps_all(),
+        BOOT.into(),
+        LINK.into(),
+        "WD:MODE mode=wifi\n".into(),
+        "WD:BEGIN type=wifi interval=0 channel=auto\n".into(),
+        format!("WD:PLAN chans={ALL_CHANS}\n"),
+    ]
+    .into_iter()
+    .map(|line| (Class::Stream, line))
+    .collect();
+    assert_eq!(lines.take_classed(), want);
+}
+
+#[test]
+fn wardrive_line_names_previous_drop_when_formatting_link() {
+    let mut out = Line::new();
+    let link = PhoneLink {
+        connections: 3,
+        last_drop: Some(LastDrop { reason: 0x13, ago_s: 12 }),
+        ..PhoneLink::default()
+    };
+    assert!(line::link(&mut out, &link, 182));
+    assert_eq!(text(&out), "WD:LINK conns=3 mtu=182 prev_disc=0x213 prev_disc_ago=12s\n");
+}
+
+#[test]
+fn wardrive_line_says_none_when_no_previous_drop() {
+    let mut out = Line::new();
+    let link = PhoneLink { connections: 1, ..PhoneLink::default() };
+    assert!(line::link(&mut out, &link, 182));
+    assert_eq!(text(&out), "WD:LINK conns=1 mtu=182 prev_disc=none\n");
+}
+
+#[test]
+fn wardrive_line_maps_reset_cause_to_vendor_key_when_formatting_boot() {
+    let causes = [
+        (ResetCause::PowerOn, "power_on"),
+        (ResetCause::Software, "software"),
+        (ResetCause::Watchdog, "watchdog"),
+        (ResetCause::Lockup, "watchdog"),
+        (ResetCause::Brownout, "brownout"),
+        (ResetCause::External, "reset_pin"),
+        (ResetCause::Unknown, "other"),
+    ];
+    let mut out = Line::new();
+    for (reset, key) in causes {
+        assert_eq!(line::reset_key(reset), key);
+        assert!(line::boot(&mut out, &Boot { slot: "ota_1", trial: false, reset }));
+        let want = format!("WD:BOOT fw=1.6.0 slot=ota_1 image=confirmed reset={key}\n");
+        assert_eq!(text(&out), want, "{reset:?}");
+    }
+}
+
+#[test]
+fn wardrive_line_says_trial_when_image_on_trial() {
+    let mut out = Line::new();
+    let boot = Boot { slot: "?", trial: true, reset: ResetCause::Software };
+    assert!(line::boot(&mut out, &boot));
+    assert_eq!(text(&out), "WD:BOOT fw=1.6.0 slot=? image=trial reset=software\n");
+}
+
+#[test]
+fn wardrive_session_sends_health_as_answer_when_period_ends() {
+    let health = "WD:HEALTH up=61 heap=41000 heap_min=38000 mtu=182 txdrop=2\n";
+    let (mut session, mut lines) = subscribed();
+    session.on_health(&ctx(), &mut lines);
+    assert_eq!(lines.take_classed(), [(Class::Answer, health.into())]);
+    // Sent while not scanning too.
+    session.on_command(b"stop", &ctx(), &mut lines);
+    lines.take();
+    session.on_health(&ctx(), &mut lines);
+    assert_eq!(lines.take_classed(), [(Class::Answer, health.into())]);
+}
+
+#[test]
+fn wardrive_session_answers_link_with_four_lines_when_asked() {
+    let (mut session, mut lines) = subscribed();
+    assert_eq!(session.on_command(b"iam a Pixel", &ctx(), &mut lines), None);
+    assert!(lines.take().is_empty());
+    session.on_command(b"link", &ctx(), &mut lines);
+    let want = [
+        "Bluetooth: connected to 4A:9F for 0h 01m 05s\n",
+        "  held by Pixel (Android)\n",
+        "  signal -61 dBm, MTU 182, interval 48 ms, timeout 4000 ms\n",
+        "  links since boot 3, last drop 12 s ago (0x13)\n",
+    ];
+    let classed = lines.take_classed();
+    assert!(classed.iter().all(|(class, _)| *class == Class::Answer));
+    assert_eq!(classed.into_iter().map(|(_, line)| line).collect::<Vec<_>>(), want);
+    // A later `iam` replaces the earlier one.
+    session.on_command(b"iam i Ana's phone", &ctx(), &mut lines);
+    session.on_command(b"link", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "  held by Ana's phone (iPhone)\n");
+}
+
+#[test]
+fn wardrive_session_says_no_name_when_link_asked_before_iam() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"link", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "  held by an app that gave no name\n");
+}
+
+#[test]
+fn wardrive_session_says_signal_unknown_when_link_has_no_reading() {
+    let (mut session, mut lines) = subscribed();
+    let mut ctx = ctx();
+    ctx.link.rssi = None;
+    session.on_command(b"link", &ctx, &mut lines);
+    assert_eq!(lines.take()[2], "  signal unknown, MTU 182, interval 48 ms, timeout 4000 ms\n");
+}
+
+#[test]
+fn wardrive_session_says_no_drops_when_link_has_none() {
+    let (mut session, mut lines) = subscribed();
+    let mut ctx = ctx();
+    ctx.link.connections = 1;
+    ctx.link.last_drop = None;
+    session.on_command(b"link", &ctx, &mut lines);
+    assert_eq!(lines.take()[3], "  links since boot 1, no drops\n");
+}
+
+#[test]
+fn wardrive_session_asks_for_drop_when_drop_sent() {
+    let (mut session, mut lines) = subscribed();
+    assert_eq!(session.on_command(b"drop", &ctx(), &mut lines), Some(Ask::Drop));
+    assert_eq!(lines.take_classed(), [(Class::Answer, "disconnecting the phone\n".into())]);
+    // The disconnect releases the session; until then it scans on.
+    assert!(session.scanning());
+}
+
+#[test]
+fn wardrive_command_cuts_nickname_to_whole_characters_when_iam_is_long() {
+    // Seventeen ASCII bytes, then `é`, two bytes: the 18th and 19th.
+    let mut text = b"iam a ".to_vec();
+    text.extend_from_slice(b"abcdefghijklmnopq");
+    text.extend_from_slice("é".as_bytes());
+    assert_eq!(
+        command::parse(&text),
+        Some(Command::Iam { iphone: false, nickname: b"abcdefghijklmnopq" })
+    );
+    // One that fits is kept whole.
+    let short = "iam i café".as_bytes();
+    assert_eq!(
+        command::parse(short),
+        Some(Command::Iam { iphone: true, nickname: "café".as_bytes() })
+    );
+    let long = [b'x'; 40];
+    let mut text = b"iam i ".to_vec();
+    text.extend_from_slice(&long);
+    assert_eq!(
+        command::parse(&text),
+        Some(Command::Iam { iphone: true, nickname: &long[..NICKNAME_MAX] })
+    );
+}
+
+#[test]
+fn wardrive_command_ignores_iam_when_platform_letter_is_missing() {
+    for text in [&b"iam Pixel"[..], b"iam a", b"iam x y", b"iam"] {
+        assert_eq!(
+            command::parse(text),
+            Some(Command::Silent),
+            "{}",
+            String::from_utf8_lossy(text)
+        );
+    }
+}
+
+#[test]
+fn wardrive_session_forgets_nickname_when_phone_subscribes_again() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"iam a Pixel", &ctx(), &mut lines);
+    session.on_subscribe(&ctx(), &mut lines);
+    lines.take();
+    session.on_command(b"link", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "  held by an app that gave no name\n");
+    // A release forgets it too.
+    session.on_command(b"iam a Pixel", &ctx(), &mut lines);
+    session.release();
+    session.on_command(b"link", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "  held by an app that gave no name\n");
+}
+
+#[test]
+fn wardrive_session_ends_info_with_boot_line_when_asked() {
+    let mut session = Session::new();
+    let mut lines = Lines::default();
+    let mut ctx = ctx();
+    ctx.boot = Boot { slot: "ota_1", trial: true, reset: ResetCause::Brownout };
+    session.on_command(b"info", &ctx, &mut lines);
+    let classed = lines.take_classed();
+    assert_eq!(classed.len(), 4);
+    assert_eq!(
+        classed[3],
+        (Class::Answer, "WD:BOOT fw=1.6.0 slot=ota_1 image=trial reset=brownout\n".into())
+    );
 }
