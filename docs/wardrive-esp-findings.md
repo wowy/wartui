@@ -69,8 +69,14 @@ Tried on 2026-11-18 at `9926c16`, with the app running on the phone and the sett
 | Check | Result |
 | --- | --- |
 | The PC's stored bond, pairing window closed | `status --link bluetooth` was served on the first try, encrypted and bonded |
-| A fresh `wartui bluetooth pair` after `forget`, window open | Failed 3 of 3: `nothing advertised as wartui D0:1C over Bluetooth in 10s`. The phone held the connection 30 s at a time, and the bridge advertises only between its visits |
-| The same with `bluetoothctl scan on` running beside it | Paired and bonded on the first try |
+| A fresh `wartui bluetooth pair` after `forget`, window open | Paired and bonded in 2 of 12 tries. The other ten ended in `nothing advertised as wartui D0:1C over Bluetooth in 10s` |
+
+Seven of those tries, one of the two that paired among them, ran after the app was closed on the
+phone. The bridge's log shows why they fail. An unbonded central connects within about 0.1 s of
+each disconnect, under a new random address each time, and does nothing until the C6 drops it 30 s
+later, so the bridge advertises for about 0.1 s in every 30 s. Its 48.75 ms interval is the
+Pixel's; whether it is the phone was not settled. A `bluetoothctl scan on` beside the pairing made
+no difference: one try paired with it running and three failed.
 
 With the setting on and the phone linked, the PC is not served at all, which is the rule: the
 phone is the host. Turning the board off in the app, or the phone's Bluetooth, frees the bridge.
