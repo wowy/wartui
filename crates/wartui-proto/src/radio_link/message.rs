@@ -123,7 +123,7 @@ pub enum Up<'a> {
     /// phone's bytes never reach the host frame decoder.
     WardriveEspCommand(#[serde(serialize_with = "byte_string", borrow)] &'a [u8]),
     /// The phone's link, as the C6 measures it. Sent just ahead of the `BleState` that names a
-    /// phone's stream, and every 5 s while a phone reads it.
+    /// phone's stream, then a second after, then every 5 s while a phone reads it.
     PhoneLink(PhoneLink),
 }
 

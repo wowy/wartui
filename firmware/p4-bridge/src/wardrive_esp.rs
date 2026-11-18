@@ -27,10 +27,12 @@
 //! the queue, scanning or not.
 //!
 //! **The C6 measures the phone's link** and sends it as `Up::PhoneLink`, just ahead of the
-//! `BleState` that attaches the phone and every 5 s after, so `WD:LINK` in the scan header,
-//! `WD:HEALTH` and the `link` answer read the latest. `WD:BOOT` reads the P4's own image: its
-//! slot, its trial (`src/update.rs`) and why it last reset. A phone that sends `drop` is
-//! answered first; `Down::DropPhone` then asks the C6 to disconnect it, which releases it here.
+//! `BleState` that attaches the phone, a second after, then every 5 s, so `WD:LINK` in the scan
+//! header, `WD:HEALTH` and the `link` answer read the latest. Its two ages, the connection's and
+//! the last drop's, gain the seconds since it arrived, so each line reads as of when it is
+//! written. `WD:BOOT` reads the P4's own image: its slot, its trial (`src/update.rs`) and why it
+//! last reset. A phone that sends `drop` is answered first; `Down::DropPhone` then asks the C6 to
+//! disconnect it, which releases it here.
 //!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
@@ -70,6 +72,8 @@ pub struct Phone {
     restart: Signal<NoopRawMutex, ()>,
     /// The phone's link, as the C6 last reported it.
     link: Cell<PhoneLink>,
+    /// When that report arrived.
+    link_at: Cell<Instant>,
     /// Why the P4 last reset.
     reset: ResetCause,
 }
@@ -93,6 +97,7 @@ impl Phone {
                 heap_free: 0,
                 heap_least: 0,
             }),
+            link_at: Cell::new(Instant::from_ticks(0)),
             reset,
         }
     }
@@ -143,7 +148,7 @@ fn ctx(shared: &Shared) -> Ctx<'static> {
         nodes: fleet.members().len() as u8,
         mtu: shared.ble.state().mtu,
         dropped: dropped(shared).wrapping_sub(shared.phone.dropped_at.get()),
-        link: shared.phone.link.get(),
+        link: aged_link(shared),
         boot: Boot {
             slot: crate::update::slot(shared),
             trial: crate::update::on_trial(shared),
@@ -172,6 +177,19 @@ fn apply(shared: &Shared, ask: Option<Ask>) {
 /// The C6's latest report of the phone's link: kept for the session's lines.
 pub fn on_link(shared: &Shared, link: PhoneLink) {
     shared.phone.link.set(link);
+    shared.phone.link_at.set(Instant::now());
+}
+
+/// The latest report of the phone's link, its ages moved on by the whole seconds since it
+/// arrived.
+fn aged_link(shared: &Shared) -> PhoneLink {
+    let mut link = shared.phone.link.get();
+    let age = shared.phone.link_at.get().elapsed().as_secs() as u32;
+    link.connected_s = link.connected_s.saturating_add(age);
+    if let Some(drop) = &mut link.last_drop {
+        drop.ago_s = drop.ago_s.saturating_add(age);
+    }
+    link
 }
 
 /// The setting changed: keep it, and tell the C6 when whether it admits a phone changed.

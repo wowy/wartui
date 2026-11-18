@@ -104,8 +104,9 @@
 //! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
 //!
 //! **The P4 holds the phone's link before its session starts.** An `Up::PhoneLink` goes just ahead
-//! of the `BleState` that names the phone's stream, with no signal reading yet, and again every
-//! [`PHONE_LINK_EVERY`] while the phone reads it, with one ([`phone`]). It counts the connections
+//! of the `BleState` that names the phone's stream, with no signal reading yet, then
+//! [`PHONE_LINK_FIRST`] after with one, so a `link` soon after linking has a signal, then every
+//! [`PHONE_LINK_EVERY`] while the phone reads it ([`phone`]). It counts the connections
 //! since boot and carries how the one before this ended, which the C6 keeps where it counts
 //! `last_disconnect`. A `Down::DropPhone` disconnects a phone reading its stream [`DROP_GRACE`]
 //! later, so the answer the P4 queued just ahead of it reaches the phone. One with no phone reading
@@ -159,7 +160,7 @@ use core::fmt::Write as _;
 use core::pin::pin;
 
 use embassy_futures::join::join;
-use embassy_futures::select::{Either, select, select4};
+use embassy_futures::select::{Either, Either3, select, select3, select4};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
@@ -228,7 +229,11 @@ const _: () = assert!(
 /// How often the C6 repeats its `BleState` to the P4, changed or not.
 const STATE_EVERY: Duration = Duration::from_secs(1);
 
-/// How often the C6 sends `Up::PhoneLink` while a phone reads its stream.
+/// How long after a phone's stream starts the first `Up::PhoneLink` with a signal reading goes.
+const PHONE_LINK_FIRST: Duration = Duration::from_secs(1);
+
+/// How often the C6 sends `Up::PhoneLink` after the first with a signal reading, while a phone
+/// reads its stream.
 const PHONE_LINK_EVERY: Duration = Duration::from_secs(5);
 
 /// How long a phone that asked to be dropped stays connected, so its answer reaches it.
@@ -1052,8 +1057,11 @@ struct Session {
     idle_changed: Signal<NoopRawMutex, ()>,
     /// The central's address, in display order, for the log.
     peer: Mac,
-    /// When the last `Up::PhoneLink` went, or when the phone's stream last ended.
-    link_said: Cell<Instant>,
+    /// When the next `Up::PhoneLink` with a signal reading is due, or `None` while no phone reads
+    /// its stream.
+    link_due: Cell<Option<Instant>>,
+    /// Raised when `link_due` is set, for [`phone`].
+    link_armed: Signal<NoopRawMutex, ()>,
 }
 
 /// Whether the link is encrypted and the central holds a stored bond: what the host stream needs.
@@ -1107,7 +1115,8 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         idle_since: Cell::new(connected_at),
         idle_changed: Signal::new(),
         peer: bond_addr(&raw.peer_identity()).mac(),
-        link_said: Cell::new(connected_at),
+        link_due: Cell::new(None),
+        link_armed: Signal::new(),
     };
     let window = if session.bondable { "open" } else { "closed" };
     let bonded = if raw.is_bonded_peer() { "bonded" } else { "not bonded" };
@@ -1175,30 +1184,39 @@ fn phone_link(
     }
 }
 
-/// Send the P4 the phone's link, with `rssi`, and restart [`phone`]'s period.
+/// Send the P4 the phone's link, with `rssi`.
 fn say_phone_link(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, rssi: Option<i8>) {
     shared.push(&Up::PhoneLink(phone_link(conn, session, shared, rssi)));
-    session.link_said.set(Instant::now());
 }
 
-/// While a phone reads its stream, send the P4 its link every [`PHONE_LINK_EVERY`], with the
-/// signal read for each, and disconnect it [`DROP_GRACE`] after it asks to be dropped. A signal
-/// that does not read goes as `None`.
+/// While a phone reads its stream, send the P4 its link with the signal read, at `link_due`:
+/// [`PHONE_LINK_FIRST`] after the stream starts, then every [`PHONE_LINK_EVERY`]. A signal that
+/// does not read goes as `None`. Disconnect the phone [`DROP_GRACE`] after it asks to be dropped.
 async fn phone(stack: &BleStack<'_>, conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     let ble = &shared.ble;
     loop {
-        let due = session.link_said.get() + PHONE_LINK_EVERY;
-        if let Either::Second(()) = select(Timer::at(due), ble.drop_asked.wait()).await {
-            Timer::after(DROP_GRACE).await;
-            disconnect(conn, session, shared, "the phone asked to be dropped");
-            core::future::pending::<()>().await;
-        }
-        if ble.stream() != Stream::Phone {
-            // No phone: the period starts over, so this waits rather than spins.
-            session.link_said.set(Instant::now());
-        } else if session.link_said.get().elapsed() >= PHONE_LINK_EVERY {
-            let rssi = conn.raw().rssi(stack).await.ok();
-            say_phone_link(conn, session, shared, rssi);
+        let due = session.link_due.get();
+        let timer = async {
+            match due {
+                Some(at) => Timer::at(at).await,
+                None => core::future::pending().await,
+            }
+        };
+        match select3(timer, session.link_armed.wait(), ble.drop_asked.wait()).await {
+            Either3::First(()) if ble.stream() == Stream::Phone => {
+                session.link_due.set(Some(Instant::now() + PHONE_LINK_EVERY));
+                let rssi = conn.raw().rssi(stack).await.ok();
+                say_phone_link(conn, session, shared, rssi);
+            }
+            // The phone's stream ended: nothing is due until it starts again.
+            Either3::First(()) => session.link_due.set(None),
+            // Armed: the next turn waits for it.
+            Either3::Second(()) => {}
+            Either3::Third(()) => {
+                Timer::after(DROP_GRACE).await;
+                disconnect(conn, session, shared, "the phone asked to be dropped");
+                core::future::pending::<()>().await;
+            }
         }
     }
 }
@@ -1376,9 +1394,11 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
         let mtu = raw.att_mtu();
         let was = ble.stream();
         // Ahead of the state that names the phone's stream, so the P4 holds it as the session
-        // starts. No signal is read yet: the next period's report carries the first.
+        // starts. No signal is read yet: the report `PHONE_LINK_FIRST` later carries the first.
         if stream == Stream::Phone && was != Stream::Phone {
             say_phone_link(conn, session, shared, None);
+            session.link_due.set(Some(Instant::now() + PHONE_LINK_FIRST));
+            session.link_armed.signal(());
         }
         set_state(shared, |state| {
             state.stream = stream;
