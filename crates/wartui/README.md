@@ -1309,9 +1309,11 @@ wartui bluetooth wardrive-esp on
   but `ports` drops the phone, and the app links again by itself 15 s after USB goes quiet.
 - **A linked phone keeps a Bluetooth wartui host out**, and the reverse: the bridge takes one
   Bluetooth connection.
-- **With the setting off, a phone that remembers the bridge still connects**, is refused, and
-  is dropped 10 s later, again and again. A Bluetooth wartui host can miss the bridge's one
-  connection meanwhile. Turn the board off in the app, or the phone's Bluetooth.
+- **A phone that has linked to the bridge keeps connecting** whenever its Bluetooth is on, with
+  the app closed too. With the setting off, or while USB holds the bridge, it is refused and
+  dropped 10 s later, or 30 s later while the pairing window is open, again and again, and it
+  holds the bridge's one connection meanwhile. `wartui bluetooth pair` then mostly fails to find
+  the bridge, so turn that phone's Bluetooth off before pairing a PC.
 
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
@@ -1367,7 +1369,7 @@ names the last one when its wait runs out:
 | Says                                                                  | Do                                                                   |
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
-| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer                                    |
+| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer. Turn off Bluetooth on a phone that has linked to the bridge as a WardriveESP board |
 | `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
