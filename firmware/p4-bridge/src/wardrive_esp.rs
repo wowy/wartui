@@ -23,6 +23,11 @@
 //! lets go on an unsubscribe, a disconnect, a new C6 life, the setting turned off, or USB taking
 //! the queue.
 //!
+//! **The session's channel list is given to the planner** after each attach, command and release,
+//! and outranks the pool there. A start gives it between its stop and its start, so a start costs
+//! one cut. A list changed while scanning re-cuts at once, with no stop, so no dedup ring is
+//! cleared. A release clears the list, so the next host's scan deals the pool.
+//!
 //! **A scan period is [`PERIOD`], counted from the scan's start**: the fleet has no single sweep,
 //! and a node's assigned beat is the same 5 s. Each ends in a `WD:STATUS`, so the first lands
 //! [`PERIOD`] after `WD:BEGIN`. A `WD:HEALTH` goes every [`HEALTH_EVERY`] while the phone holds
@@ -175,13 +180,17 @@ fn ctx(shared: &Shared) -> Ctx<'static> {
     }
 }
 
-/// Carry out what the session asked of the bridge.
+/// Carry out what the session asked of the bridge, and give the planner the session's list.
+///
+/// A start gives it between the stop and the start, so the start costs one cut.
 fn apply(shared: &Shared, ask: Option<Ask>) {
     match ask {
         Some(Ask::Start(mode)) => {
             crate::fleet::stop(shared);
+            follow_channels(shared);
             crate::fleet::start(shared, mode == Mode::Bluetooth);
             shared.phone.restart.signal(());
+            return;
         }
         Some(Ask::Stop) => crate::fleet::stop(shared),
         // The answer is queued already; the C6 holds the link a moment so it reaches the phone.
@@ -190,6 +199,14 @@ fn apply(shared: &Shared, ask: Option<Ask>) {
         }
         None => {}
     }
+    follow_channels(shared);
+}
+
+/// Give the planner the session's channel list, or the pool with none. An unchanged list sends
+/// nothing.
+fn follow_channels(shared: &Shared) {
+    let only = shared.phone.session.borrow().channels();
+    crate::fleet::set_channels(shared, only);
 }
 
 /// The C6's latest report of the phone's link: kept for the session's lines, and given to the

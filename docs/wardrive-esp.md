@@ -81,7 +81,7 @@ The advert extras are 6 bytes of service data under `0x5744`, frame A and frame 
 - How the last phone link ended: `0` no phone has linked since the P4 booted, `1` the app sent
   `bye` before it let go, `2` any other end, USB taking the bridge and the setting turned off
   among them.
-- The channel bits are the phone's channel list, or the whole pool with no list or no phone, in
+- The channel bits are the phone's channel list, or the pool with no list or no phone, in
   the document's order. The bridge has no screen and no co-processor, so those bits are clear.
 - Both refresh every 5 s and at once when what they say changes. The connectable advertisement
   keeps running through a refresh.
@@ -143,7 +143,9 @@ word are skipped.
 | `bt on`, `bt off` | switches to Bluetooth or to Wi-Fi |
 | `bt`, or `bt` with anything but `on` or `off` | `mode Wi-Fi` or `mode Bluetooth` |
 | `caps` | `WD:CAPS` |
-| `ch`, `ch 1,6,11`, `ch all` | shows, sets or resets the channel list |
+| `ch` | `supported …`, every channel a node can tune, then `scanning …`, what the fleet scans |
+| `ch 1,6,11` | sets the channel list |
+| `ch all` | sets the channel list to every channel a node can tune, and answers `scanning all 41 channels` |
 | `status`, `info`, `help` | plain text lines, in wartui's own wording; `status` starts with the mode, and `info` ends with `WD:BOOT` |
 | `link` | plain text lines about the Bluetooth link: the phone's address and time linked, its `iam` name, signal, MTU, interval and timeout, and the links and last drop since the C6 booted |
 | `drop` | `disconnecting the phone`, then the bridge disconnects the phone, which stops the scan |
@@ -158,7 +160,8 @@ word, and `start` is optional. They are read in this order:
 
 1. `stop` stops the scan, and nothing else is read.
 2. `-cap` or `-promisc` is refused as unsupported, and nothing changes.
-3. `-ch ` sets the channel list, or answers `WD:ERR reason=no_supported_channels`.
+3. `-ch ` sets the channel list, or answers `WD:ERR reason=no_supported_channels` when it names no
+   channel a node can tune.
 4. `-bt` switches to Bluetooth.
 5. Else `-wifi` switches to Wi-Fi.
 6. Else the scan starts in the session's mode.
@@ -205,7 +208,8 @@ queued as a command's answer is, so a backlog of stream lines never holds them.
 - `fw=` names the highest level the protocol document describes, not the bridge's firmware
   version, which `info` gives. The bridge implements that level's Bluetooth side, or says in
   `WD:CAPS` that it lacks a capability. `board=wartui` and `ota=0` tell an app the bridge is not a board it updates.
-- `chans=` in `WD:CAPS` is the bridge's channel pool. `WD:PLAN` is the phone's channel list.
+- `chans=` in `WD:CAPS` names every channel a node can tune, whatever the pool. `WD:PLAN` names
+  what the fleet scans: the phone's channel list, or the pool with no list.
 - `ts` is milliseconds since the bridge booted, when the line was written.
 - `auth` is `OPEN`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2_WPA3` or `UNKNOWN`. WPA2 Enterprise and
   mixed WPA/WPA2 read as `WPA2`; WAPI, OWE and anything unnamed read as `UNKNOWN`.
@@ -235,16 +239,23 @@ queued as a command's answer is, so a backlog of stream lines never holds them.
 
 ## How the fleet maps onto one board
 
-- **The planner is untouched.** The fleet scans its whole pool, split across its nodes, as it
-  does for a wartui host. A phone's channel list only filters what it is sent: a `WD:AP` goes out
-  when its channel is on the list. A list naming no channel of the pool is refused with
-  `WD:ERR reason=no_supported_channels`, and the list stays as it was. The list resets when the
-  phone links or lets go.
+- **The fleet scans the phone's channel list**, split across its nodes. With no list it scans the
+  pool, as it does for a wartui host. A list outranks the pool and may name any channel a node
+  can tune: 2.4 GHz 1-13 and all of 5 GHz. A list naming none is refused with
+  `WD:ERR reason=no_supported_channels`, and the list stays as it was. A list changed while
+  scanning re-cuts the fleet at once, with no stop. The list resets when the phone links or lets
+  go.
+- **Fewer channels than nodes means nodes double up**, on 1, 6 and 11 first. The planner keeps 1,
+  6 and 11 on different nodes (`crates/wartui/README.md` § "Channel pools").
+- **The phone is sent everything the nodes hear.** A node reports the channel a beacon names,
+  which can be beside its share, so a phone that asked for 1 also hears what its node picks up
+  from 2 and 3.
 - **Starting a scan stops the fleet first**, so every node starts with nothing reported and the
   phone hears each device afresh.
 - **In Bluetooth mode one node scans Bluetooth**, the planner's pick, and the others keep
   scanning Wi-Fi, which the phone is not sent. A fleet of one refuses the mode, since the planner
-  gives Bluetooth to no node below two members. The channel list filters Wi-Fi only.
+  gives Bluetooth to no node below two members. The channel list sets what those Wi-Fi nodes
+  scan.
 - **The Bluetooth scan is passive**, so a `WD:BT` carries a name only when the advertisement
   itself carried one.
 - **A node reports a device once**, then again after 5 minutes or when it is 5 dB stronger

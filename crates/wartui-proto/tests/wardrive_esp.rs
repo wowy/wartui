@@ -4,7 +4,7 @@
 use wartui_proto::ChannelPool;
 use wartui_proto::bus::{RecordKind, Security, SightingMsg};
 use wartui_proto::hci::BleTrailer;
-use wartui_proto::plan::{SCAN_CHANNELS, index_of};
+use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS, index_of};
 use wartui_proto::radio_link::{LastDrop, PhoneLink};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::wardrive_esp::beacon::{
@@ -146,8 +146,8 @@ fn wardrive_inbound_starts_at_reply_id_one_when_new() {
     assert_eq!(Inbound::default().reply_id(), 1);
 }
 
-fn channels(text: &[u8], pool: ChannelPool) -> Option<Vec<u8>> {
-    parse_channels(text, pool).map(|list| list.channels().to_vec())
+fn channels(text: &[u8]) -> Option<Vec<u8>> {
+    parse_channels(text).map(|list| list.channels().to_vec())
 }
 
 #[test]
@@ -311,35 +311,34 @@ fn wardrive_command_names_word_when_unknown() {
 
 #[test]
 fn wardrive_channels_keep_order_and_drop_duplicates_when_parsing() {
-    assert_eq!(channels(b"11,1,6,11", ChannelPool::All), Some(vec![11, 1, 6]));
+    assert_eq!(channels(b"11,1,6,11"), Some(vec![11, 1, 6]));
 }
 
 #[test]
 fn wardrive_channels_stop_at_first_non_digit_when_parsing() {
-    assert_eq!(channels(b"1,6 x,11", ChannelPool::All), Some(vec![1, 6]));
-    assert_eq!(channels(b"1,,6,", ChannelPool::All), Some(vec![1, 6]));
+    assert_eq!(channels(b"1,6 x,11"), Some(vec![1, 6]));
+    assert_eq!(channels(b"1,,6,"), Some(vec![1, 6]));
 }
 
 #[test]
 fn wardrive_channels_read_spaces_as_separators_when_parsing() {
-    assert_eq!(channels(b"1, 6, 11", ChannelPool::All), Some(vec![1, 6, 11]));
-    assert_eq!(channels(b"1 6 11", ChannelPool::All), Some(vec![1, 6, 11]));
+    assert_eq!(channels(b"1, 6, 11"), Some(vec![1, 6, 11]));
+    assert_eq!(channels(b"1 6 11"), Some(vec![1, 6, 11]));
 }
 
 #[test]
-fn wardrive_channels_drop_channel_when_pool_lacks_it() {
-    let in_us = |channel| index_of(channel).is_some_and(|idx| ChannelPool::Us.contains(idx));
-    assert!(in_us(1) && in_us(165) && !in_us(14));
-    assert_eq!(channels(b"1,14,165,999", ChannelPool::Us), Some(vec![1, 165]));
+fn wardrive_channels_keep_every_tunable_channel_when_parsing() {
+    // Whatever the pool: 12 and 169 are in no US share, and a phone may still ask for them.
+    assert_eq!(channels(b"1,12,14,165,169,999"), Some(vec![1, 12, 165, 169]));
     // 255 past a byte's reach would wrap onto a real channel if it were not dropped.
-    assert_eq!(channels(b"262,6", ChannelPool::All), Some(vec![6]));
+    assert_eq!(channels(b"262,6"), Some(vec![6]));
 }
 
 #[test]
-fn wardrive_channels_refuse_list_when_none_in_pool() {
-    assert_eq!(channels(b"14,200", ChannelPool::All), None);
-    assert_eq!(channels(b"", ChannelPool::All), None);
-    assert_eq!(channels(b",,,", ChannelPool::All), None);
+fn wardrive_channels_refuse_list_when_none_is_tunable() {
+    assert_eq!(channels(b"14,200"), None);
+    assert_eq!(channels(b""), None);
+    assert_eq!(channels(b",,,"), None);
 }
 
 #[test]
@@ -353,10 +352,16 @@ fn wardrive_channels_list_whole_pool_when_built_from_all() {
             .map(|(_, ch)| *ch)
             .collect();
         assert_eq!(list.channels(), want);
-        assert!(list.contains(36));
-        assert!(!list.contains(14));
-        assert!(!list.contains(0));
+        assert_eq!(list.set(), pool.channels());
     }
+}
+
+#[test]
+fn wardrive_channels_list_every_tunable_channel_when_supported() {
+    let supported = ChannelList::supported();
+    assert_eq!(supported.set(), ChannelPool::All.channels());
+    assert_eq!(supported.channels().len(), 41);
+    assert!(!supported.channels().contains(&14));
 }
 
 const BSSID: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
@@ -434,22 +439,17 @@ fn wardrive_line_maps_security_to_vendor_token_when_formatting_auth() {
 }
 
 #[test]
-fn wardrive_line_formats_caps_golden_when_pool_is_us() {
+fn wardrive_line_formats_caps_golden_with_every_tunable_channel_when_built() {
     let mut out = Line::new();
-    assert!(line::caps(&mut out, ChannelPool::Us));
-    assert_eq!(
-        text(&out),
-        "WD:CAPS fw=1.7.3 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
-         board_name=wartui link=ble chans=1,2,3,4,5,6,7,8,9,10,11,36,40,44,48,52,56,60,64,100,\
-         104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165\n"
-    );
+    assert!(line::caps(&mut out));
+    assert_eq!(text(&out), caps_all());
     assert_eq!(line::FW, "1.7.3");
 }
 
 #[test]
-fn wardrive_line_fits_caps_when_pool_is_all() {
+fn wardrive_line_fits_caps_when_naming_every_tunable_channel() {
     let mut out = Line::new();
-    assert!(line::caps(&mut out, ChannelPool::All));
+    assert!(line::caps(&mut out));
     assert!(text(&out).ends_with(",169,173,177\n"));
     assert!(out.len() <= LINE_MAX);
 }
@@ -457,7 +457,7 @@ fn wardrive_line_fits_caps_when_pool_is_all() {
 #[test]
 fn wardrive_line_formats_plan_status_end_err_golden_when_built() {
     let mut out = Line::new();
-    let list = parse_channels(b"1,6,11", ChannelPool::All).expect("a list");
+    let list = parse_channels(b"1,6,11").expect("a list");
     assert!(line::plan(&mut out, &list));
     assert_eq!(text(&out), "WD:PLAN chans=1,6,11\n");
     assert!(line::status(&mut out, 12, 3));
@@ -622,16 +622,18 @@ fn wardrive_session_sends_ap_when_scanning_and_channel_is_listed() {
 }
 
 #[test]
-fn wardrive_session_filters_ap_when_channel_is_off_the_list() {
+fn wardrive_session_sends_ap_when_channel_is_off_the_list() {
+    // The list sets what the fleet scans; the phone hears whatever the nodes report, which can
+    // be a channel beside a node's share.
     let (mut session, mut lines) = subscribed();
     session.on_command(b"ch 1,6", &ctx(), &mut lines);
     lines.take();
-    for channel in [11, 0, 14, 200, 255] {
+    for channel in [2, 36] {
         session.on_sighting(1, &sighting(channel, b"coffee"), &mut lines);
     }
-    assert!(lines.take().is_empty());
+    assert_eq!(lines.take(), [ap_line(1, 2), ap_line(1, 36)]);
     session.on_period(&ctx(), &mut lines);
-    assert_eq!(lines.take(), ["WD:STATUS aps=0 scans=1\n"]);
+    assert_eq!(lines.take(), ["WD:STATUS aps=2 scans=1\n"]);
 }
 
 #[test]
@@ -748,8 +750,7 @@ fn wardrive_session_keeps_list_when_stopped_and_started() {
     lines.take();
     session.on_command(b"wdstream start -wifi", &ctx(), &mut lines);
     assert_eq!(lines.take(), header("1,6"));
-    session.on_sighting(1, &sighting(11, b"coffee"), &mut lines);
-    assert!(lines.take().is_empty());
+    assert_eq!(session.channels(), Some(channel_set(&[1, 6])));
 }
 
 #[test]
@@ -869,6 +870,72 @@ fn wardrive_session_resets_list_when_released() {
     lines.take();
     session.on_command(b"start", &ctx(), &mut lines);
     assert_eq!(lines.take(), header(ALL_CHANS));
+}
+
+/// The set naming `channels`.
+fn channel_set(channels: &[u8]) -> ChannelSet {
+    let mut set = ChannelSet::empty();
+    for &channel in channels {
+        set.insert(index_of(channel).expect("a table channel"));
+    }
+    set
+}
+
+#[test]
+fn wardrive_session_asks_for_the_pool_when_fresh() {
+    assert_eq!(Session::new().channels(), None);
+    let (session, _) = subscribed();
+    assert_eq!(session.channels(), None);
+}
+
+#[test]
+fn wardrive_session_asks_for_the_list_when_ch_names_channels() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"ch 1,6", &ctx(), &mut lines);
+    assert_eq!(session.channels(), Some(channel_set(&[1, 6])));
+}
+
+#[test]
+fn wardrive_session_asks_for_the_list_when_wdstream_carries_ch() {
+    let mut session = Session::new();
+    let mut lines = Lines::default();
+    session.on_command(b"wdstream start -wifi -ch 1,6,11,36", &ctx(), &mut lines);
+    assert_eq!(session.channels(), Some(channel_set(&[1, 6, 11, 36])));
+}
+
+#[test]
+fn wardrive_session_asks_for_every_tunable_channel_when_ch_all() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"ch 1,6", &ctx(), &mut lines);
+    session.on_command(b"ch all", &ctx(), &mut lines);
+    assert_eq!(session.channels(), Some(ChannelPool::All.channels()));
+}
+
+#[test]
+fn wardrive_session_asks_for_the_pool_when_released() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"ch 1,6", &ctx(), &mut lines);
+    session.release();
+    assert_eq!(session.channels(), None);
+}
+
+#[test]
+fn wardrive_session_offers_every_tunable_channel_when_pool_is_us() {
+    // The pool bounds a host's scan; a phone may name any channel a node can tune.
+    let us = Ctx { pool: ChannelPool::Us, ..ctx() };
+    let mut session = Session::new();
+    let mut lines = Lines::default();
+    session.on_subscribe(&us, &mut lines);
+    assert_eq!(lines.take()[0], caps_all());
+    session.on_command(b"ch", &us, &mut lines);
+    assert_eq!(lines.take()[0], format!("supported {ALL_CHANS}\n"));
+    session.on_command(b"ch 12,13", &us, &mut lines);
+    assert_eq!(lines.take(), ["WD:PLAN chans=12,13\n", "scanning 12,13\n"]);
+    session.on_command(b"ch all", &us, &mut lines);
+    assert_eq!(
+        lines.take(),
+        [format!("WD:PLAN chans={ALL_CHANS}\n"), "scanning all 41 channels\n".into()]
+    );
 }
 
 #[test]
@@ -1647,7 +1714,7 @@ fn wardrive_session_sends_only_mode_kind_when_records_arrive() {
     assert!(lines.take().is_empty());
     session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);
     assert_eq!(lines.take_classed(), [(Class::Stream, BT_LINE.into())]);
-    // The channel list does not apply: a Bluetooth record's channel is 0.
+    // A channel list sets what the Wi-Fi nodes scan and filters nothing.
     session.on_command(b"ch 1,6", &ctx(), &mut lines);
     lines.take();
     session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);

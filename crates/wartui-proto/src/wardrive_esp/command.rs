@@ -225,16 +225,22 @@ impl ChannelList {
         list
     }
 
+    /// Every channel a node can tune, in [`SCAN_CHANNELS`] order: [`ChannelPool::All`]'s.
+    #[must_use]
+    pub fn supported() -> Self {
+        Self::all(ChannelPool::All)
+    }
+
     /// Channel numbers, in order.
     #[must_use]
     pub fn channels(&self) -> &[u8] {
         &self.order
     }
 
-    /// Whether `channel` is on the list.
+    /// The same channels, as [`SCAN_CHANNELS`] indices.
     #[must_use]
-    pub fn contains(&self, channel: u8) -> bool {
-        index_of(channel).is_some_and(|idx| self.set.contains(idx))
+    pub const fn set(&self) -> ChannelSet {
+        self.set
     }
 
     /// Add `channel` when `pool` holds it and the list does not yet.
@@ -249,17 +255,17 @@ impl ChannelList {
     }
 }
 
-/// The channels `text` lists that `pool` holds, or `None` when it holds none of them.
+/// The channels `text` lists that a node can tune, or `None` when it lists none.
 ///
 /// Reads decimal numbers separated by commas or spaces, and stops at the first byte that is none
 /// of these.
 #[must_use]
-pub fn parse_channels(text: &[u8], pool: ChannelPool) -> Option<ChannelList> {
+pub fn parse_channels(text: &[u8]) -> Option<ChannelList> {
     let mut list = ChannelList::empty();
     let mut number: Option<u16> = None;
     let mut finish = |number: &mut Option<u16>| {
         if let Some(channel) = number.take().and_then(|n| u8::try_from(n).ok()) {
-            list.keep(channel, pool);
+            list.keep(channel, ChannelPool::All);
         }
     };
     for &byte in text {

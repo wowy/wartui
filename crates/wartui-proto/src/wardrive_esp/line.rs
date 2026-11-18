@@ -7,7 +7,8 @@
 //! **`WD:CAPS` names `board=wartui`.** An app that does not know a `board=` treats the board as
 //! partner hardware and offers it no firmware update, and `ota=0` says the same: the bridge is
 //! updated by wartui, never by the phone. Every other capability is `0` but the two bands and
-//! `bt`, since the bridge offers Wi-Fi and Bluetooth scans alone.
+//! `bt`, since the bridge offers Wi-Fi and Bluetooth scans alone. Its `chans=` names every
+//! channel a node can tune, whatever the pool, since a phone's list may name any of them.
 //!
 //! **`WD:BT` reads the record's trailer** ([`BleTrailer`]) for `type`, `mfg` and `conn`, and its
 //! SSID field for the name. A record whose trailer does not decode sends no line.
@@ -25,7 +26,6 @@ use super::command::ChannelList;
 use super::session::{Boot, Mode};
 use crate::bus::{Security, SightingMsg};
 use crate::hci::BleTrailer;
-use crate::plan::ChannelPool;
 use crate::radio_link::PhoneLink;
 use crate::reset::ResetCause;
 
@@ -68,9 +68,9 @@ fn build(out: &mut Line, body: impl FnOnce(&mut Line) -> fmt::Result) -> bool {
     fit
 }
 
-/// `WD:CAPS`: what the bridge offers, with `pool`'s channels.
-pub fn caps(out: &mut Line, pool: ChannelPool) -> bool {
-    let list = ChannelList::all(pool);
+/// `WD:CAPS`: what the bridge offers, with every channel a node can tune.
+pub fn caps(out: &mut Line) -> bool {
+    let list = ChannelList::supported();
     build(out, |out| {
         write!(
             out,
@@ -154,7 +154,7 @@ pub fn begin(out: &mut Line, mode: Mode) -> bool {
     build(out, |out| write!(out, "WD:BEGIN type={} interval=0 channel=auto", mode_token(mode)))
 }
 
-/// `WD:PLAN`: the channels `list` holds.
+/// `WD:PLAN`: the channels `list` holds, which the fleet scans.
 pub fn plan(out: &mut Line, list: &ChannelList) -> bool {
     build(out, |out| write!(out, "WD:PLAN chans={}", Commas(list.channels())))
 }

@@ -13,7 +13,7 @@ use wartui_proto::fleet::{
     pick_bluetooth,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, ChannelSet};
+use wartui_proto::plan::{ChannelPool, ChannelSet, index_of};
 use wartui_proto::reset::ResetCause;
 
 fn slot(byte: u8) -> Slot {
@@ -365,6 +365,122 @@ fn fleet_keeps_plan_when_pool_set_unchanged() {
     rig.fleet.set_pool(ChannelPool::All, rig.now);
     assert!(rig.drain().is_empty());
     assert!(rig.fleet.take_report().is_none());
+}
+
+// ---- a phone's channel list ----
+
+/// The set naming `channels`.
+fn channel_set(channels: &[u8]) -> ChannelSet {
+    let mut set = ChannelSet::empty();
+    for &channel in channels {
+        set.insert(index_of(channel).expect("a table channel"));
+    }
+    set
+}
+
+/// Every channel index the shares hold.
+fn dealt(report: &Report) -> ChannelSet {
+    report.shares.iter().fold(ChannelSet::empty(), |all, share| {
+        ChannelSet::from_bits(all.bits() | share.channels.bits())
+    })
+}
+
+/// A started fleet with nodes in slots 0 to `count - 1`, settled.
+fn settled(count: u8) -> Rig {
+    let mut rig = Rig::started(false);
+    for byte in 0..count {
+        rig.plug(byte, byte + 1);
+    }
+    rig.settle();
+    rig
+}
+
+#[test]
+fn fleet_deals_only_the_list_when_a_phone_names_channels() {
+    let mut rig = settled(3);
+    let list = channel_set(&[1, 6, 11, 36]);
+    rig.fleet.set_channels(Some(list), rig.now);
+    rig.settle();
+    let report = rig.report();
+    assert_eq!(dealt(&report), list);
+    let held: u32 = report.shares.iter().map(|share| share.channels.len()).sum();
+    assert_eq!(held, list.len(), "each channel dealt once");
+}
+
+#[test]
+fn fleet_deals_listed_channel_outside_the_pool_when_list_names_it() {
+    // The list outranks the pool: 12 is in no US share, and a phone may still ask for it.
+    let mut rig = settled(2);
+    rig.fleet.set_pool(ChannelPool::Us, rig.now);
+    rig.fleet.set_channels(Some(channel_set(&[1, 12])), rig.now);
+    rig.settle();
+    assert_eq!(dealt(&rig.report()), channel_set(&[1, 12]));
+}
+
+#[test]
+fn fleet_never_deals_channel_14_when_list_names_it() {
+    let mut rig = settled(2);
+    rig.fleet.set_channels(Some(channel_set(&[1, 14])), rig.now);
+    rig.settle();
+    assert_eq!(dealt(&rig.report()), channel_set(&[1]));
+}
+
+#[test]
+fn fleet_deals_pool_when_list_holds_only_channel_14() {
+    let mut rig = settled(2);
+    rig.fleet.set_channels(Some(channel_set(&[14])), rig.now);
+    rig.settle();
+    assert_partition(&rig.report());
+}
+
+#[test]
+fn fleet_recuts_under_new_epochs_and_sends_at_once_when_list_changes() {
+    let mut rig = settled(2);
+    let before: Vec<u8> = rig.report().shares.iter().map(|share| share.epoch).collect();
+    rig.fleet.take_report();
+    rig.fleet.set_channels(Some(channel_set(&[1, 6, 11])), rig.now);
+    let sends = rig.drain();
+    let sent: Vec<(u8, u8)> =
+        assigns(&sends).iter().map(|(byte, assign)| (*byte, assign.epoch)).collect();
+    assert_eq!(sent.iter().map(|(byte, _)| *byte).collect::<Vec<_>>(), [0, 1]);
+    for ((_, epoch), old) in sent.iter().zip(&before) {
+        assert_ne!(epoch, old, "a changed share takes a new epoch");
+    }
+    let report = rig.fleet.take_report().expect("a change");
+    assert_eq!(dealt(&report), channel_set(&[1, 6, 11]));
+}
+
+#[test]
+fn fleet_keeps_plan_and_sends_nothing_when_same_list_set_again() {
+    let mut rig = settled(2);
+    rig.fleet.set_channels(Some(channel_set(&[1, 6])), rig.now);
+    rig.settle();
+    rig.fleet.take_report();
+    rig.fleet.set_channels(Some(channel_set(&[1, 6])), rig.now);
+    assert!(rig.drain().is_empty());
+    assert!(rig.fleet.take_report().is_none());
+}
+
+#[test]
+fn fleet_deals_pool_when_list_cleared() {
+    let mut rig = settled(3);
+    rig.fleet.set_channels(Some(channel_set(&[36, 40])), rig.now);
+    rig.settle();
+    rig.fleet.set_channels(None, rig.now);
+    rig.settle();
+    assert_partition(&rig.report());
+}
+
+#[test]
+fn fleet_gives_every_member_a_channel_when_list_is_shorter_than_fleet() {
+    let mut rig = settled(5);
+    rig.fleet.set_channels(Some(channel_set(&[1, 6])), rig.now);
+    let sends = rig.settle();
+    assert_no_empty_wifi(&sends);
+    let report = rig.report();
+    assert_eq!(report.shares.len(), 5);
+    assert!(report.shares.iter().all(|share| share.channels.len() == 1));
+    assert_eq!(dealt(&report), channel_set(&[1, 6]));
 }
 
 #[test]

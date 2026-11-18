@@ -110,7 +110,7 @@ own.
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
   GATT identity of the C6's Bluetooth host link), `wardrive_esp` (the WardriveESP protocol a phone
   app reads the bridge in: its frames, commands, lines and session), `mac` (the `Mac` type and its text form), `plan`
-  (channel pools and the round-robin deal that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
+  (channel pools and the round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
   records that tell each node), `node` (a node's timings and sweep cursor), `pending` (the buffers
   sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
@@ -282,9 +282,10 @@ is here rather than only in a `//!`.
   per-node mode and no flag: `wartui_proto::fleet::Fleet` decides what every node scans and sends
   every `Assign` and `Stop`, and the host authors no node record but an update's. That is what
   lets the fleet table and the store read a node's share as the plan's without asking who put it
-  there. It has two inputs, both the bridge's: the pool, kept in NVS and set by `SetPool`, and the
+  there. It has three inputs, all the bridge's: the pool, kept in NVS and set by `SetPool`; the
   scan mode, set by `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session,
-  in Wi-Fi or Bluetooth mode, and kept nowhere. Which node scans
+  in Wi-Fi or Bluetooth mode, and kept nowhere; and a linked phone's channel list, which outranks
+  the pool while the phone holds it and is kept nowhere. Which node scans
   Bluetooth is its pick, not an input. The host's `Command::SetPool`, `SetBluetooth` and
   `StopScan` only ask, and the engine believes what the next `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
@@ -326,10 +327,11 @@ is here rather than only in a `//!`.
   → `crates/wartui-proto/src/fleet.rs` `//!`, `next_epoch`;
   `crates/wartui-core/src/engine/snapshot.rs`, `NodeView::adopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
-  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so `plan_for` flattens the pool and deals
-  round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
-  changes when membership, the scan mode, the Bluetooth pick or the pool changes, and at no other
-  time (`Fleet::settle`).
+  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so `plan_for` deals a `ChannelSet`, the
+  pool's channels or a phone's list, round-robin from one order (1, 6 and 11 first) rather than
+  steering around run boundaries. The plan has no phases and no timer; it changes when
+  membership, the scan mode, the Bluetooth pick, the pool or a phone's list changes, and at no
+  other time (`Fleet::settle`).
 - **An updated node image is confirmed only by hearing the bridge.** The first record from the P4 a
   trial image decodes — assign, stop, update confirm or an update record — marks it valid; nothing
   else does, because hearing the bridge is the whole test. A stopped P4 sends an idle node
