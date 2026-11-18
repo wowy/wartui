@@ -966,16 +966,24 @@ no pool; `esp-radio` cannot reach it.
 
 Set it from settings (`c`) or with `wartui pool`; see "The channel pool".
 
-An assignment's forty-two-bit mask can name any subset. The planner deals round-robin, pool index
-_k_ to node _k mod n_, so every node carries both bands. A block split would put one node on all of
-2.4 GHz, and losing it would blind the fleet to that band until the next re-cut landed.
+An assignment's forty-two-bit mask can name any subset. The planner deals round-robin from one
+order: 1, 6 and 11, then the rest of the pool ascending. Position _k_ of that order goes to
+sniffing node _k mod n_, so 1, 6 and 11 land on the first three. They are the busiest channels, so
+no node carries two of them once three nodes sniff. Every node carries both bands while each band
+has a channel for it. A block split
+would put one node on all of 2.4 GHz, and losing it would blind the fleet to that band until the
+next re-cut landed.
+
+A phone linked over the WardriveESP service names its own channels, and its list replaces the pool
+for its scan ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md) § "How the fleet maps onto one
+board").
 
 Every fleet change re-cuts the _whole_ fleet. The bridge sends each changed share at once, and
 each node's next heartbeat shows it held, so the fleet converges within one heartbeat interval. A
 share the cut leaves unchanged is not sent again, so an unchanged fleet is left alone.
 
-**A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1, 3,
-5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. A strong access
+**A node can report a channel outside its share.** 2.4 GHz channels are 5 MHz apart but 20 MHz
+wide, so a node on 2 hears 1 and 3. A strong access
 point is heard well beyond its own channel, and an access point may send copies of its beacon across
 its width. A node reports the channel the beacon names when it is a scan-table channel the node
 could have heard: any 2.4 GHz channel when parked on 2.4 GHz, or one within 160 MHz on 5 GHz, so a 5

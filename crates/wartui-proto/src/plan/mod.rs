@@ -1,16 +1,28 @@
 //! Channel pools, and the distribution math that cuts one across a fleet.
 //!
-//! [`crate::fleet`] is the planner: it decides who is in the fleet and which slot scans Bluetooth,
-//! and calls [`plan_for`] and [`Plan::assign_for`] to cut the pool. Nothing here holds state.
+//! [`crate::fleet`] is the planner: it decides who is in the fleet, which slot scans Bluetooth and
+//! which channels are dealt, and calls [`plan_for`] and [`Plan::assign_for`] to cut them. Nothing
+//! here holds state.
 //!
 //! A *pool* is described in runs, because that is the shape regulation gives it: every
 //! pool is two runs with a gap between. An *assignment* is not. [`crate::bus::Assign`]
 //! carries a forty-two-bit [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node
-//! can hold any subset. A run boundary is nothing the planner steers around.
+//! can hold any subset. A run boundary is nothing the planner steers around, and [`plan_for`]
+//! deals a [`ChannelSet`]: a pool's channels, or a phone's list.
 //!
-//! The split is a round-robin deal: index `k` of the pool's flattened order goes to node
-//! `k % node_count`. The operator's manual has the rest of the reasoning
-//! (`crates/wartui/README.md` § "Channel pools").
+//! **The deal is one order, cycled.** Channels 1, 6 and 11 come first, those the set holds, then
+//! the rest ascending. Position `p` goes to the `p`-th Wi-Fi slot in turn, and the deal runs for
+//! as many positions as there are channels or Wi-Fi slots, whichever is more.
+//!
+//! - 1, 6 and 11 are the busiest channels, so they take the first three positions: with three or
+//!   more Wi-Fi slots no node carries two of them.
+//! - With at least as many channels as Wi-Fi slots, each channel is dealt once and shares differ
+//!   by at most one, so sweep times stay within one dwell of each other.
+//! - With fewer, the order starts over, so every Wi-Fi slot holds one channel and 1, 6 and 11 are
+//!   the first held twice.
+//!
+//! The operator's manual has the rest of the reasoning (`crates/wartui/README.md` § "Channel
+//! pools").
 //!
 //! A fleet is a slice of [`Job`]s rather than of radios, because the node scanning
 //! Bluetooth is dealt nothing. It is still a slot, counted in [`Plan::node_count`].
@@ -28,6 +40,16 @@ pub use channels::{
 /// The largest fleet wartui supports: the bridge's node-bus slots. A node in no slot is not
 /// one the bridge can drive.
 pub const MAX_NODES: usize = MAX_SLOTS;
+
+/// The [`SCAN_CHANNELS`] indices of channels 1, 6 and 11, which the deal places first.
+const POPULAR: [u8; 3] = [0, 5, 10];
+
+const _: () = assert!(
+    SCAN_CHANNELS[POPULAR[0] as usize] == 1
+        && SCAN_CHANNELS[POPULAR[1] as usize] == 6
+        && SCAN_CHANNELS[POPULAR[2] as usize] == 11,
+    "POPULAR must still be channels 1, 6 and 11"
+);
 
 /// What the planner is dealing to, one per fleet slot.
 ///
@@ -76,12 +98,12 @@ impl Plan {
     ///
     /// Three answers. The two empty ones mean opposite things:
     ///
-    /// - `Some` non-empty: its share of the pool.
+    /// - `Some` non-empty: its share of the channels dealt.
     /// - `Some` empty: it is the node scanning Bluetooth. The empty set, sent with
     ///   [`ASSIGN_FLAG_BLE`], says so on the wire.
     /// - `None`: nothing for this node. The index is outside the fleet, or it is a
-    ///   [`Job::Bluetooth`] slot after the first. A [`Job::Wifi`] slot is never `None`:
-    ///   every pool holds at least [`MAX_NODES`] channels.
+    ///   [`Job::Bluetooth`] slot after the first. A [`Job::Wifi`] slot is never `None` while
+    ///   anything was dealt: a set smaller than the fleet is dealt again.
     #[must_use]
     pub fn channels_for(&self, index: u8) -> Option<ChannelSet> {
         let set = *self.slots.get(usize::from(index))?;
@@ -100,11 +122,10 @@ impl Plan {
         self.bluetooth
     }
 
-    /// Channels of the pool that went into no share, and that no amount of waiting
-    /// will fill.
+    /// Channels dealt that went into no share, and that no amount of waiting will fill.
     ///
     /// Empty unless no slot is sniffing, which happens only when the whole fleet is the
-    /// Bluetooth node. Then it is the whole pool.
+    /// Bluetooth node. Then it is every channel dealt.
     #[must_use]
     pub const fn unreachable(&self) -> ChannelSet {
         self.unreachable
@@ -131,9 +152,10 @@ impl Plan {
 
 /// Build a plan distributing `pool` across `node_count` nodes.
 ///
-/// The pool's runs are flattened into one ascending list and dealt round-robin: index
-/// `k` goes to node `k % node_count`, so every node gets some of every run. Shares differ
-/// by at most one channel, so sweep times stay within one dwell of each other.
+/// The deal is [`plan_for`]'s, over the pool's channels: 1, 6 and 11 first, then the rest
+/// ascending, so every node gets some of both bands when each band has a channel for every node.
+/// Every pool holds more channels than [`MAX_NODES`], so each is dealt once and shares differ by
+/// at most one channel.
 ///
 /// Every node is taken to be sniffing Wi-Fi. For a fleet with a Bluetooth node, use
 /// [`plan_for`].
@@ -142,14 +164,20 @@ impl Plan {
 #[must_use]
 pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
     let fleet = [Job::Wifi; MAX_NODES];
-    plan_for(pool, fleet.get(..usize::from(node_count))?)
+    plan_for(pool.channels(), fleet.get(..usize::from(node_count))?)
 }
 
-/// Build a plan distributing `pool` across a fleet of known jobs.
+/// Build a plan distributing `channels` across a fleet of known jobs.
 ///
-/// The same deal as [`plan`], with a [`Job::Bluetooth`] slot left out of it. That slot is
-/// counted but not dealt to, so the sniffing slots' shares come out as though it were not
-/// there. `crates/wartui/README.md` § "Channel pools" is the operator's account.
+/// The deal order is channels 1, 6 and 11, those `channels` holds, then the rest ascending.
+/// Position `p` of it goes to the `p`-th [`Job::Wifi`] slot in turn, in slot order, wrapping. So
+/// with three or more Wi-Fi slots no node carries two of the busiest channels. The deal runs for as many positions as there are channels or Wi-Fi slots,
+/// whichever is more, starting the order over when it runs out: a set smaller than the fleet is
+/// dealt again, popular first, so every Wi-Fi slot holds a channel.
+///
+/// A [`Job::Bluetooth`] slot is counted but not dealt to, so the sniffing slots' shares come out
+/// as though it were not there. `crates/wartui/README.md` § "Channel pools" is the operator's
+/// account.
 ///
 /// When the whole fleet scans Bluetooth, every channel goes in no share and is reported by
 /// [`Plan::unreachable`]. Such a fleet still gets a plan: a refusal would leave the node on
@@ -157,34 +185,29 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///
 /// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
 #[must_use]
-pub fn plan_for(pool: ChannelPool, fleet: &[Job]) -> Option<Plan> {
+pub fn plan_for(channels: ChannelSet, fleet: &[Job]) -> Option<Plan> {
     let node_count = u8::try_from(fleet.len()).ok()?;
     if node_count == 0 || fleet.len() > MAX_NODES {
         return None;
     }
     let mut slots = [ChannelSet::empty(); MAX_NODES];
     let mut unreachable = ChannelSet::empty();
-    // Ties go to the node after the last one dealt to. Every sniffing node is always
-    // tied or one behind, so this is the round-robin.
-    let mut cursor = 0usize;
     #[allow(clippy::cast_possible_truncation)]
     let bluetooth =
         fleet.iter().position(|job| matches!(job, Job::Bluetooth)).map(|slot| slot as u8);
 
-    for run in pool.runs() {
-        for idx in run.start..=run.end {
-            let winner = (0..usize::from(node_count))
-                .map(|step| (cursor + step) % usize::from(node_count))
-                .filter(|node| fleet[*node] == Job::Wifi)
-                .min_by_key(|node| slots[*node].len());
-            match winner {
-                Some(node) => {
-                    slots[node].insert(idx);
-                    cursor = (node + 1) % usize::from(node_count);
-                }
-                // Nothing in this fleet is sniffing, so it goes in no share.
-                None => unreachable.insert(idx),
-            }
+    let wifi = || (0..fleet.len()).filter(|node| fleet[*node] == Job::Wifi);
+    let wifi_count = wifi().count();
+    if wifi_count == 0 {
+        // Nothing in this fleet is sniffing, so every channel goes in no share.
+        unreachable = channels;
+    } else {
+        let popular = POPULAR.into_iter().filter(move |idx| channels.contains(*idx));
+        let rest = channels.indices().filter(|idx| !POPULAR.contains(idx));
+        // `len` is at most `NUM_SCAN_CHANNELS`.
+        let positions = (channels.len() as usize).max(wifi_count);
+        for (idx, node) in popular.chain(rest).cycle().zip(wifi().cycle()).take(positions) {
+            slots[node].insert(idx);
         }
     }
     Some(Plan { node_count, slots, bluetooth, unreachable })

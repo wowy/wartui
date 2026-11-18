@@ -9,7 +9,13 @@
 //! Wi-Fi in either, and in Bluetooth mode one node scans Bluetooth beside it; the session sends
 //! only the mode's kind, `WD:AP` or `WD:BT`. A switch ends the running scan's lines as `stop` does
 //! and starts the new mode's. Bluetooth is refused below two fleet members, since the planner
-//! gives it to no node there and the mode would hear nothing. The channel list filters Wi-Fi only.
+//! gives it to no node there and the mode would hear nothing.
+//!
+//! **The channel list sets what the fleet scans** ([`Session::channels`]). The P4 gives it to the
+//! planner, where it outranks the saved pool, and in Bluetooth mode it sets what the nodes still
+//! scanning Wi-Fi hold. It filters nothing: the phone is sent whatever the nodes hear, and a node
+//! reports the channel a beacon names, which can be near its share rather than in it. A list may
+//! name any channel a node can tune ([`ChannelList::supported`]), whatever the pool.
 //!
 //! **Lines come in two classes** ([`Class`]), because the P4 queues them differently.
 //! [`Class::Stream`] lines are the scan's own, `WD:AP` and `WD:BT` among them, and keep their
@@ -22,7 +28,7 @@
 //! linking sends none.
 //!
 //! The mode, the channel list, the app's `iam` and its `bye` are the session's: a list of `None`
-//! means every channel of the pool. They last until the phone subscribes again or lets go
+//! means the pool. They last until the phone subscribes again or lets go
 //! ([`Session::release`]), so a stop and a start keep them. The P4 reads [`Session::said_bye`]
 //! before the release, for how the link ended, and [`Session::beacon`] for what the status beacon
 //! says. The free-text replies are wartui's own wording.
@@ -34,7 +40,7 @@ use super::command::{self, Bt, ChannelList, Channels, Command, NICKNAME_MAX, par
 use super::line::{self, Commas, FW, Line};
 use crate::bus::{RecordKind, SightingMsg};
 use crate::hci::BleTrailer;
-use crate::plan::ChannelPool;
+use crate::plan::{ChannelPool, ChannelSet};
 use crate::radio_link::PhoneLink;
 use crate::reset::ResetCause;
 
@@ -161,7 +167,7 @@ impl Timing {
 pub struct Session {
     scanning: bool,
     mode: Mode,
-    /// The channels the phone asked for, or `None` for every channel.
+    /// The channels the phone asked for, or `None` for the pool.
     list: Option<ChannelList>,
     /// `WD:AP` or `WD:BT` lines since the last period.
     sent: u32,
@@ -222,7 +228,7 @@ fn help(sink: &mut impl Sink) {
 }
 
 impl Session {
-    /// No phone, not scanning, Wi-Fi, every channel.
+    /// No phone, not scanning, Wi-Fi, the pool.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -249,6 +255,12 @@ impl Session {
     #[must_use]
     pub const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The channels the phone asked the fleet to scan, or `None` for the pool.
+    #[must_use]
+    pub fn channels(&self) -> Option<ChannelSet> {
+        self.list.as_ref().map(ChannelList::set)
     }
 
     /// Whether the app sent `bye`.
@@ -308,7 +320,7 @@ impl Session {
             }
             Command::Stream { channels, mode, .. } => {
                 if let Some(text) = channels {
-                    self.set_channels(text, ctx, sink);
+                    self.set_channels(text, sink);
                 }
                 match mode {
                     Some(mode) => self.switch(mode, ctx, sink),
@@ -335,33 +347,33 @@ impl Session {
                 None
             }
             Command::Caps => {
-                emit(sink, Class::Answer, |out| line::caps(out, ctx.pool));
+                emit(sink, Class::Answer, line::caps);
                 None
             }
             Command::Channels(Channels::Show) => {
-                let pool = ChannelList::all(ctx.pool);
+                let supported = ChannelList::supported();
                 let list = self.list(ctx.pool);
                 answer(
                     sink,
                     &[
-                        format_args!("supported {}", Commas(pool.channels())),
+                        format_args!("supported {}", Commas(supported.channels())),
                         format_args!("scanning {}", Commas(list.channels())),
                     ],
                 );
                 None
             }
             Command::Channels(Channels::All) => {
-                self.list = None;
+                let list = ChannelList::supported();
                 if self.scanning {
-                    let list = self.list(ctx.pool);
                     emit(sink, Class::Answer, |out| line::plan(out, &list));
                 }
-                let count = ctx.pool.channel_count();
+                let count = list.channels().len();
+                self.list = Some(list);
                 answer(sink, &[format_args!("scanning all {count} channels")]);
                 None
             }
             Command::Channels(Channels::Set(text)) => {
-                if self.set_channels(text, ctx, sink) {
+                if self.set_channels(text, sink) {
                     let list = self.list(ctx.pool);
                     answer(sink, &[format_args!("scanning {}", Commas(list.channels()))]);
                 }
@@ -428,17 +440,14 @@ impl Session {
 
     /// A node heard `sighting`, `ts_ms` after the bridge booted.
     ///
-    /// Sent only while scanning, and only for the mode's kind: in Wi-Fi an access point on a
-    /// listed channel, in Bluetooth an advertiser whose trailer decodes.
+    /// Sent only while scanning, and only for the mode's kind: in Wi-Fi every access point, on
+    /// the list or not, in Bluetooth an advertiser whose trailer decodes.
     pub fn on_sighting(&mut self, ts_ms: u32, sighting: &SightingMsg<'_>, sink: &mut impl Sink) {
         if !self.scanning {
             return;
         }
         match (self.mode, sighting.kind) {
             (Mode::Wifi, RecordKind::Wifi) => {
-                if self.list.as_ref().is_some_and(|list| !list.contains(sighting.channel)) {
-                    return;
-                }
                 emit(sink, Class::Stream, |out| line::ap(out, ts_ms, sighting));
             }
             (Mode::Bluetooth, RecordKind::Ble) => {
@@ -474,7 +483,7 @@ impl Session {
         ask
     }
 
-    /// The session's list, or the whole pool.
+    /// The session's list, or the pool's channels.
     fn list(&self, pool: ChannelPool) -> ChannelList {
         self.list.clone().unwrap_or_else(|| ChannelList::all(pool))
     }
@@ -527,7 +536,7 @@ impl Session {
         self.dropped_at = ctx.dropped;
         let mode = self.mode;
         if mode == Mode::Wifi {
-            emit(sink, Class::Stream, |out| line::caps(out, ctx.pool));
+            emit(sink, Class::Stream, line::caps);
             emit(sink, Class::Stream, |out| line::boot(out, &ctx.boot));
             emit(sink, Class::Stream, |out| line::link(out, &ctx.link, ctx.mtu));
         }
@@ -587,10 +596,10 @@ impl Session {
 
     /// Replace the list with the one `text` names, saying whether it named one.
     ///
-    /// A new list is announced with `WD:PLAN` while scanning. A list naming no channel of the pool
-    /// is refused, and the old one stays.
-    fn set_channels(&mut self, text: &[u8], ctx: &Ctx<'_>, sink: &mut impl Sink) -> bool {
-        let Some(list) = parse_channels(text, ctx.pool) else {
+    /// A new list is announced with `WD:PLAN` while scanning. A list naming no channel a node can
+    /// tune is refused, and the old one stays.
+    fn set_channels(&mut self, text: &[u8], sink: &mut impl Sink) -> bool {
+        let Some(list) = parse_channels(text) else {
             emit(sink, Class::Answer, |out| line::err(out, "no_supported_channels"));
             return false;
         };

@@ -120,6 +120,12 @@ impl ChannelSet {
         idx < NUM_SCAN_CHANNELS && (self.0 >> idx) & 1 == 1
     }
 
+    /// The indices both sets hold.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
     /// How many channels the node holding this would dwell on per sweep.
     #[must_use]
     pub const fn len(self) -> u32 {

@@ -24,7 +24,14 @@
 //!   lists the members and their MACs ([`Fleet::members`]).
 //! - **The plan** is [`plan_for`] over the members in ascending slot order: a member's index is
 //!   the number of members below it. It is cut again only when membership, the mode, the
-//!   Bluetooth pick or the pool changes, so a heartbeat that changes none of them costs nothing.
+//!   Bluetooth pick, the pool or a phone's list changes, so a heartbeat that changes none of them
+//!   costs nothing.
+//! - **A phone's channel list** ([`Fleet::set_channels`]) is the third input, beside the pool and
+//!   the mode, and outranks the pool: with a list the cut deals the list's tunable channels and
+//!   the pool is not consulted; with none, or one naming no tunable channel, it deals the pool.
+//!   Channel 14 is never dealt. No [`Report`] carries the list, because a wartui host never sees
+//!   a plan cut from one: a host that takes the queue releases the phone, which stops the scan
+//!   and clears the list.
 //! - **Bluetooth** goes to [`pick_bluetooth`]'s slot in [`ScanMode::WifiBluetooth`], and only
 //!   once two nodes are members, so a lone node keeps sniffing Wi-Fi. The pick is sticky: it
 //!   moves only when its node leaves.
@@ -68,7 +75,7 @@ pub enum ScanMode {
     /// Nothing: every node idles.
     #[default]
     Stopped,
-    /// Every member sniffs its share of the pool.
+    /// Every member sniffs its share.
     Wifi,
     /// As [`Self::Wifi`], with one member scanning Bluetooth once there are two.
     WifiBluetooth,
@@ -214,6 +221,8 @@ impl Entry {
 pub struct Fleet {
     mode: ScanMode,
     pool: ChannelPool,
+    /// The channels a phone asked for, or `None` for the pool.
+    only: Option<ChannelSet>,
     /// Bit n for slot byte n: the slot holds a node.
     present: u32,
     entries: [Entry; MAX_SLOTS],
@@ -221,7 +230,7 @@ pub struct Fleet {
     members: u32,
     /// The slot scanning Bluetooth in the current plan.
     bluetooth: Option<Slot>,
-    /// The mode or pool changed, or an entry lost its want, since the last cut.
+    /// The mode, pool or list changed, or an entry lost its want, since the last cut.
     recut: bool,
     unreachable: ChannelSet,
     /// The epoch counter, narrowed by [`wire_epoch`].
@@ -239,6 +248,7 @@ impl Fleet {
         Self {
             mode: ScanMode::Stopped,
             pool,
+            only: None,
             present: 0,
             entries: [Entry::EMPTY; MAX_SLOTS],
             members: 0,
@@ -277,6 +287,16 @@ impl Fleet {
             self.pool = pool;
             self.recut = true;
             self.changed = true;
+        }
+        self.settle(now_ms);
+    }
+
+    /// Deal `only`, the channels a phone asked for, from now on, or the pool for `None`.
+    pub fn set_channels(&mut self, only: Option<ChannelSet>, now_ms: u64) {
+        // No report carries the list, so only the shares it changes mark one.
+        if self.only != only {
+            self.only = only;
+            self.recut = true;
         }
         self.settle(now_ms);
     }
@@ -489,7 +509,7 @@ impl Fleet {
         mask
     }
 
-    /// Cut again if membership, the mode, the Bluetooth pick or the pool changed.
+    /// Cut again if membership, the mode, the Bluetooth pick, the pool or the list changed.
     fn settle(&mut self, now_ms: u64) {
         let members = self.member_mask(now_ms);
         let pick = match self.mode {
@@ -505,7 +525,16 @@ impl Fleet {
         self.cut();
     }
 
-    /// Deal the pool to the members and give each slot its want.
+    /// The channels the cut deals: the list's tunable ones, or the pool's when there is no list
+    /// or it names none.
+    fn dealt(&self) -> ChannelSet {
+        self.only
+            .map(|only| only.intersection(ChannelPool::All.channels()))
+            .filter(|only| !only.is_empty())
+            .unwrap_or_else(|| self.pool.channels())
+    }
+
+    /// Deal the channels to the members and give each slot its want.
     fn cut(&mut self) {
         let mut jobs = [Job::Wifi; MAX_SLOTS];
         let mut count = 0;
@@ -517,7 +546,7 @@ impl Fleet {
         }
         let plan = match self.mode {
             ScanMode::Stopped => None,
-            ScanMode::Wifi | ScanMode::WifiBluetooth => plan_for(self.pool, &jobs[..count]),
+            ScanMode::Wifi | ScanMode::WifiBluetooth => plan_for(self.dealt(), &jobs[..count]),
         };
         let unreachable = plan.map_or(ChannelSet::empty(), |plan| plan.unreachable());
         if unreachable != self.unreachable {

@@ -179,6 +179,33 @@ With the bridge switched off in the app, the beacon read `57 00 …`, a free boa
 `02 00 ff ff c7 ff` / `03 ff 7f 00 00 00`: the last link released. So the app sends `bye` before
 it lets go. Over the 12 s read, no central connected.
 
+## A channel list that drives the planner (2026-11-18)
+
+D0:1C, ten nodes, pool `us`, the PC stand-in as the phone, before and after the planner took the
+phone's list. Each row is the `WD:AP` lines after `ch 1,6,11`, `stop` and `start`, over 20 s. One
+run of each, about an hour apart.
+
+| Build | Lines | BSSIDs | Lines per BSSID |
+| --- | --- | --- | --- |
+| the list filters, the pool is scanned | 72 | 52 | 36 once, 13 twice, 3 more often |
+| the list is dealt | 288 | 78 | 20 once, 9 twice, 49 three to ten times |
+
+- **Half again as many access points in the same 20 s**, from ten nodes parked on three channels
+  in place of one node visiting each. The first 5 s period counted 217 lines, against 46.
+- **One-channel shares hold.** This is their first run on hardware: lines kept arriving through
+  the 20 s, and `ch all` afterward brought 5 GHz lines back within 12 s.
+- **Lines name channels beside the list**: 8 and 10 under a list of 1, 6 and 11. One line named
+  36 in the second after the list was set, from a node that had not yet taken its new share.
+- **A list outside the pool is taken**: `ch 12,13` answered `scanning 12,13` under the US pool.
+  The five access points heard in its 4 s all named channel 11, each four to six times: nothing
+  near the bench sits on 12 or 13.
+- **`WD:CAPS` and `ch` name 41 channels** under the US pool, 12, 13, 169, 173 and 177 among them,
+  and `ch all` answered `scanning all 41 channels`.
+- **Nothing was dropped**: `txdrop=0` and `dropped 0` through the run.
+- **The host's cut**: `wartui scan start` over USB dealt 1, 6 and 11 to N1, N2 and N3, 36
+  channels in shares of four and three. After the stand-in unlinked, `wartui status` showed the
+  scan stopped and the pool still US.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -199,3 +226,6 @@ it lets go. Over the 12 s read, no central connected.
 - A first pairing from a host other than Linux while the setting is on.
 - The app beside `WD:BOOT`, `WD:LINK` and `WD:HEALTH`, and whether it sends `iam` or `bye`: it sent
   neither in the 75 s watched on 2026-11-17.
+- The app beside the wider `chans=`: whether its channel picker offers 12, 13 and 169 to 177, and
+  what list it sends.
+- A list shorter than the fleet in a drive, where the doubled nodes' extra lines meet a slow link.

@@ -9,12 +9,30 @@ use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
     ChannelPool, ChannelSet, IndexRun, Job, MAX_NODES, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
-    UNSUPPORTED_INDEX, plan, plan_for,
+    UNSUPPORTED_INDEX, index_of, plan, plan_for,
 };
 
 const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
 
 const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=MAX_NODES as u8;
+
+/// The [`SCAN_CHANNELS`] indices of channels 1, 6 and 11.
+const POPULAR: [u8; 3] = [0, 5, 10];
+
+/// The set naming `channels`.
+fn set(channels: &[u8]) -> ChannelSet {
+    let mut set = ChannelSet::empty();
+    for &channel in channels {
+        set.insert(index_of(channel).expect("a table channel"));
+    }
+    set
+}
+
+/// The nodes holding `channel`, ascending.
+fn holders(p: &wartui_proto::plan::Plan, channel: u8) -> Vec<u8> {
+    let idx = index_of(channel).expect("a table channel");
+    (0..p.node_count()).filter(|&n| p.channels_for(n).is_some_and(|s| s.contains(idx))).collect()
+}
 
 /// Every index the plan hands to anybody, with repeats kept so overlap shows.
 fn covered(p: &wartui_proto::plan::Plan) -> Vec<u8> {
@@ -172,15 +190,19 @@ fn planner_assigns_all_tunable_channels_when_planning_single_node_on_all_pool() 
 }
 
 #[test]
-fn planner_distributes_channels_round_robin_when_partitioning_pool() {
-    // Index k of the pool's flattened order goes to node k % node_count. Said out
-    // longhand because everything below is a consequence of it, and a planner
-    // satisfying those by other means would pass the same tests.
+fn planner_deals_1_6_and_11_first_then_ascending_round_robin_when_partitioning_pool() {
+    // Position k of the deal order goes to node k % node_count, and the order is 1, 6 and 11,
+    // then the rest of the pool ascending. Said out longhand because everything below is a
+    // consequence of it, and a planner satisfying those by other means would pass the same tests.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
             let flattened: Vec<u8> = pool.runs().iter().flat_map(|r| r.start..=r.end).collect();
-            for (k, idx) in flattened.into_iter().enumerate() {
+            let order: Vec<u8> = POPULAR
+                .into_iter()
+                .chain(flattened.into_iter().filter(|idx| !POPULAR.contains(idx)))
+                .collect();
+            for (k, idx) in order.into_iter().enumerate() {
                 let owner = u8::try_from(k % usize::from(nodes)).expect("below node_count");
                 assert!(
                     p.channels_for(owner).expect("assigned").contains(idx),
@@ -248,7 +270,7 @@ fn planner_assigns_empty_channel_set_when_node_holds_ble_flag() {
     // Counted, because `Plan::node_count` reports the fleet's shape rather than
     // a census of who is sniffing.
     let fleet = [Job::Bluetooth, Job::Wifi, Job::Wifi];
-    let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
+    let p = plan_for(ChannelPool::Us.channels(), &fleet).expect("a valid fleet");
 
     assert_eq!(p.node_count(), 3);
     assert_eq!(p.bluetooth(), Some(0));
@@ -267,11 +289,11 @@ fn planner_partitions_pool_across_wifi_nodes_only_when_ble_node_present() {
     // Three nodes, one of them on Bluetooth, deals the same shares as two nodes —
     // the point of the change, and the reason moving the scan has to re-cut.
     let two = plan(ChannelPool::Us, 2).expect("valid");
-    let explicit = plan_for(ChannelPool::Us, &[Job::Wifi; 2]).expect("valid");
+    let explicit = plan_for(ChannelPool::Us.channels(), &[Job::Wifi; 2]).expect("valid");
     assert_eq!(two, explicit, "the convenience route and the explicit one agree");
 
     let with_scanner = plan_for(
-        ChannelPool::Us,
+        ChannelPool::Us.channels(),
         &[Job::Wifi; 2].iter().copied().chain([Job::Bluetooth]).collect::<Vec<_>>(),
     )
     .expect("valid");
@@ -285,7 +307,8 @@ fn planner_marks_entire_pool_unreachable_when_only_node_is_assigned_ble() {
     // A plan rather than a refusal: refusing would leave that node holding the
     // share it already had, still sniffing Wi-Fi, which is the opposite of what
     // was asked. The hole is real and `unreachable` is where it is reported.
-    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth]).expect("one node is a valid fleet");
+    let p =
+        plan_for(ChannelPool::Us.channels(), &[Job::Bluetooth]).expect("one node is a valid fleet");
     assert_eq!(p.channels_for(0), Some(ChannelSet::empty()));
     assert_eq!(p.unreachable(), ChannelPool::Us.channels());
 }
@@ -295,7 +318,8 @@ fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
     // The one frame that must never exist: an empty mask without the flag tells a
     // node to scan nothing, and a node sent one parks while the host goes on
     // believing it is sweeping.
-    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Wifi]).expect("a valid fleet");
+    let p =
+        plan_for(ChannelPool::Us.channels(), &[Job::Bluetooth, Job::Wifi]).expect("a valid fleet");
     assert!(
         p.assign_for(0, 1, wartui_proto::bus::ASSIGN_FLAG_BLE)
             .is_some_and(|assign| assign.channels.is_empty())
@@ -305,7 +329,8 @@ fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
 
     // A second Bluetooth slot is `None` either way: there is nothing to say to it, and
     // the flag does not invent something.
-    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Bluetooth]).expect("a valid fleet");
+    let p = plan_for(ChannelPool::Us.channels(), &[Job::Bluetooth, Job::Bluetooth])
+        .expect("a valid fleet");
     assert!(p.channels_for(1).is_none());
     assert!(p.assign_for(1, 1, wartui_proto::bus::ASSIGN_FLAG_BLE).is_none());
 }
@@ -318,7 +343,7 @@ fn planner_gives_every_wifi_slot_a_share_when_fleet_is_max_nodes_on_smallest_poo
         POOLS.into_iter().min_by_key(|pool| pool.channel_count()).expect("there are pools");
     assert!(usize::from(smallest.channel_count()) >= MAX_NODES);
 
-    let p = plan_for(smallest, &[Job::Wifi; MAX_NODES]).expect("a valid fleet");
+    let p = plan_for(smallest.channels(), &[Job::Wifi; MAX_NODES]).expect("a valid fleet");
     let nodes = u8::try_from(MAX_NODES).expect("fits");
     for node in 0..nodes {
         assert!(!p.channels_for(node).expect("assigned").is_empty(), "slot {node}");
@@ -326,7 +351,7 @@ fn planner_gives_every_wifi_slot_a_share_when_fleet_is_max_nodes_on_smallest_poo
 
     let mut fleet = [Job::Wifi; MAX_NODES];
     fleet[0] = Job::Bluetooth;
-    let p = plan_for(smallest, &fleet).expect("a valid fleet");
+    let p = plan_for(smallest.channels(), &fleet).expect("a valid fleet");
     for node in 1..nodes {
         assert!(!p.channels_for(node).expect("assigned").is_empty(), "slot {node}");
     }
@@ -338,7 +363,7 @@ fn planner_produces_identical_plan_when_using_convenience_or_explicit_api() {
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let fleet = vec![Job::Wifi; usize::from(nodes)];
-            assert_eq!(plan(pool, nodes), plan_for(pool, &fleet), "{pool:?}/{nodes}");
+            assert_eq!(plan(pool, nodes), plan_for(pool.channels(), &fleet), "{pool:?}/{nodes}");
         }
     }
 }
@@ -347,8 +372,116 @@ fn planner_produces_identical_plan_when_using_convenience_or_explicit_api() {
 fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
     assert!(plan(ChannelPool::Us, 0).is_none());
     assert!(plan(ChannelPool::Us, u8::try_from(MAX_NODES).expect("fits") + 1).is_none());
-    assert!(plan_for(ChannelPool::Us, &[]).is_none());
-    assert!(plan_for(ChannelPool::Us, &[Job::Wifi; MAX_NODES + 1]).is_none());
+    assert!(plan_for(ChannelPool::Us.channels(), &[]).is_none());
+    assert!(plan_for(ChannelPool::Us.channels(), &[Job::Wifi; MAX_NODES + 1]).is_none());
+}
+
+#[test]
+fn planner_places_1_6_and_11_on_different_nodes_when_fleet_has_three_or_more() {
+    // The busiest channels: a node holding two of them spends twice the dwell on the crowd.
+    for pool in POOLS {
+        for nodes in 3..=MAX_NODES as u8 {
+            let p = plan(pool, nodes).expect("valid fleet size");
+            let owners: BTreeSet<u8> =
+                [1, 6, 11].into_iter().flat_map(|c| holders(&p, c)).collect();
+            assert_eq!(owners.len(), 3, "{pool:?}/{nodes} nodes: 1, 6 and 11 share a node");
+        }
+    }
+}
+
+#[test]
+fn planner_deals_only_listed_channels_when_given_a_list() {
+    let listed = set(&[1, 6, 36, 149, 177]);
+    for nodes in FLEET_SIZES {
+        let fleet = vec![Job::Wifi; usize::from(nodes)];
+        let p = plan_for(listed, &fleet).expect("valid fleet size");
+        let seen: BTreeSet<u8> = covered(&p).into_iter().collect();
+        let want: BTreeSet<u8> = listed.indices().collect();
+        assert_eq!(seen, want, "{nodes} nodes dealt another set than the list");
+    }
+}
+
+#[test]
+fn planner_puts_1_6_and_11_on_nodes_0_1_and_2_when_dealing_us_pool_to_ten_nodes() {
+    let p = plan(ChannelPool::Us, 10).expect("valid");
+    assert_eq!(holders(&p, 1), [0]);
+    assert_eq!(holders(&p, 6), [1]);
+    assert_eq!(holders(&p, 11), [2]);
+}
+
+#[test]
+fn planner_gives_node_0_channels_1_and_10_when_dealing_1_to_11_to_ten_nodes() {
+    let p = plan_for(set(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]), &[Job::Wifi; 10]).expect("valid");
+    assert_eq!(p.channels_for(0), Some(set(&[1, 10])));
+    for node in 1..10 {
+        assert_eq!(p.channels_for(node).expect("assigned").len(), 1, "node {node}");
+    }
+}
+
+#[test]
+fn planner_doubles_1_6_and_11_when_dealing_1_to_11_to_fourteen_nodes() {
+    let p = plan_for(set(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]), &[Job::Wifi; 14]).expect("valid");
+    for channel in 1..=11 {
+        let want = if [1, 6, 11].contains(&channel) { 2 } else { 1 };
+        assert_eq!(holders(&p, channel).len(), want, "channel {channel}");
+    }
+}
+
+#[test]
+fn planner_deals_1_6_and_11_to_four_three_and_three_nodes_when_dealing_them_to_ten() {
+    let p = plan_for(set(&[1, 6, 11]), &[Job::Wifi; 10]).expect("valid");
+    assert_eq!(holders(&p, 1).len(), 4);
+    assert_eq!(holders(&p, 6).len(), 3);
+    assert_eq!(holders(&p, 11).len(), 3);
+}
+
+#[test]
+fn planner_doubles_1_6_11_and_36_when_dealing_five_channels_to_nine_nodes() {
+    let p = plan_for(set(&[1, 6, 11, 36, 40]), &[Job::Wifi; 9]).expect("valid");
+    for channel in [1, 6, 11, 36] {
+        assert_eq!(holders(&p, channel).len(), 2, "channel {channel}");
+    }
+    assert_eq!(holders(&p, 40).len(), 1);
+}
+
+#[test]
+fn planner_deals_36_to_three_nodes_and_40_to_two_when_dealing_them_to_five() {
+    let p = plan_for(set(&[36, 40]), &[Job::Wifi; 5]).expect("valid");
+    assert_eq!(holders(&p, 36).len(), 3);
+    assert_eq!(holders(&p, 40).len(), 2);
+}
+
+#[test]
+fn planner_gives_every_wifi_slot_one_channel_when_channels_are_fewer_than_slots() {
+    // Every node holds one channel, and the channels' node counts differ by at most one.
+    let lists: [&[u8]; 4] = [&[1], &[1, 6, 11], &[36, 40, 44], &[1, 6, 11, 36, 40, 149]];
+    for channels in lists {
+        for nodes in channels.len() + 1..=MAX_NODES {
+            let p = plan_for(set(channels), &vec![Job::Wifi; nodes]).expect("valid");
+            for node in 0..u8::try_from(nodes).expect("fits") {
+                assert_eq!(p.channels_for(node).expect("assigned").len(), 1, "node {node}");
+            }
+            let counts: Vec<usize> = channels.iter().map(|&c| holders(&p, c).len()).collect();
+            let (low, high) = (counts.iter().min(), counts.iter().max());
+            assert!(
+                high.zip(low).is_some_and(|(high, low)| high - low <= 1),
+                "{channels:?} on {nodes} nodes: counts {counts:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn planner_deals_no_channel_to_bluetooth_slot_when_channels_are_fewer_than_slots() {
+    let fleet = [Job::Wifi, Job::Wifi, Job::Bluetooth, Job::Wifi, Job::Wifi];
+    let p = plan_for(set(&[1, 6]), &fleet).expect("valid");
+    assert_eq!(p.bluetooth(), Some(2));
+    assert_eq!(p.channels_for(2), Some(ChannelSet::empty()), "dealt nothing, and told so");
+    for node in [0, 1, 3, 4] {
+        assert_eq!(p.channels_for(node).expect("assigned").len(), 1, "node {node}");
+    }
+    assert_eq!(holders(&p, 1), [0, 3]);
+    assert_eq!(holders(&p, 6), [1, 4]);
 }
 
 #[test]
