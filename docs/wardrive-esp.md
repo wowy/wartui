@@ -77,7 +77,7 @@ The frame is the document's: a 12-byte header (`47 42`, version `01`, type, stat
 
 | Direction | Frame | What the bridge does |
 | --- | --- | --- |
-| phone → bridge | CMD (type 1) | acknowledges it, then runs its payload as one command |
+| phone → bridge | CMD (type 1) | runs its payload as one command, acknowledged when it is empty or queued for the P4 |
 | phone → bridge | unframed text | runs the whole write as one command, unacknowledged |
 | phone → bridge | any other framed type | takes its id and runs nothing |
 | bridge → phone | ACK (type 2) | 12 bytes, the command's id, no payload, ahead of the reply |
@@ -109,6 +109,10 @@ A command is cut to 240 bytes and trimmed. Its first word picks it.
 | `bye`, `iam …`, `hb`, `client`, `time …` | taken, and answered with nothing |
 | `bt`, `cap`, `csi`, `coproc`, `led`, `screen`, `sd`, `ota`, and `wdstream` with `-bt`, `-cap` or `-promisc` | `WD:ERR reason=unsupported`, and nothing changes |
 | anything else | `unknown command '<word>'`, then the help list |
+
+`wdstream` reads its arguments as the WardriveESP firmware does: `stop`, `-ch `, `-bt`, `-cap`
+and `-promisc` count anywhere after the word, and `start` is optional. A channel list is the text
+after `-ch ` or `ch `: numbers between commas or spaces, ending at the first other byte.
 
 `reboot`, `drop` and `link` are unknown on purpose: the service takes commands from any phone in
 range, so none of them restarts the bridge or drops its link.
@@ -146,8 +150,8 @@ range, so none of them restarts the bridge or drops its link.
 - **A node reports an access point once**, then again after 5 minutes or when it is 5 dB
   stronger (`wartui_proto::dedup`). A WardriveESP board reports every access point on every
   sweep, so a phone sees fewer lines for the same neighborhood from the bridge.
-- **There is no sweep to count.** `WD:STATUS` goes every 5 s: `aps` is the `WD:AP` lines since
-  the last one, and `scans` counts those periods.
+- **There is no sweep to count.** `WD:STATUS` goes every 5 s from the scan's start: `aps` is the
+  `WD:AP` lines since the last one, and `scans` counts those periods.
 - **The phone lets go, the fleet stops.** An unsubscribe, a disconnect, the setting turned off
   or USB taking the bridge each stop the scan.
 - **A slow phone loses the oldest lines.** The bridge holds 16 KB of stream lines for the phone

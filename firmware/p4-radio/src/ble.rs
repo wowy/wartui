@@ -96,9 +96,10 @@
 //! - no central gets a Security Request, which raises a pairing prompt on a phone;
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
 //!   a line, or part of one longer than the frame's room;
-//! - a write to RX or CTRL is read through `frame::Inbound`: a CMD's ACK is owed, and the command
-//!   goes to the P4 as `Up::WardriveEspCommand`, waiting for room as Down's writes do. A write
-//!   before the phone reads TX is dropped.
+//! - a write to RX or CTRL is read through `frame::Inbound`, and its command goes to the P4 as
+//!   `Up::WardriveEspCommand`, waiting for room as Down's writes do. A CMD's ACK is owed once its
+//!   command is queued, or at once when the command is empty, so a dropped command is never
+//!   acknowledged. A write before the phone reads TX is dropped.
 //!
 //! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
 //! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
@@ -1376,8 +1377,10 @@ fn enables_notify(write: &WriteEvent<'_, '_, DefaultPacketPool>) -> bool {
 /// answer that makes a phone pair.
 ///
 /// Before phones are admitted a request is refused and a write without response dropped. While
-/// the central reads no WardriveESP stream a write is dropped. Else its ACK is owed, and its
-/// command goes to the P4 as `Up::WardriveEspCommand`, as Down's writes do.
+/// the central reads no WardriveESP stream a write is dropped. Else its command goes to the P4 as
+/// `Up::WardriveEspCommand`, as Down's writes do, and a CMD's ACK is owed when its command is
+/// empty or was queued. Nothing awaits between the queueing and the ACK, so the ACK still goes
+/// ahead of the command's reply.
 async fn phone_write<'s>(
     shared: &Shared,
     write: WriteEvent<'s, '_, DefaultPacketPool>,
@@ -1395,34 +1398,44 @@ async fn phone_write<'s>(
         return write.accept_unprocessed();
     }
     let mut text = [0; VALUE_MAX];
-    let len = write.with_data(|_, data| take_phone_write(ble, data, &mut text));
+    let (ack, len) = write.with_data(|_, data| take_phone_write(ble, data, &mut text));
     if len == 0 {
+        owe_ack(ble, ack);
         return write.accept_unprocessed();
     }
     let command = &text[..len];
-    if forward(shared, len, || shared.push(&Up::WardriveEspCommand(command))).await || !request {
+    let went = forward(shared, len, || shared.push(&Up::WardriveEspCommand(command))).await;
+    if went {
+        owe_ack(ble, ack);
+    }
+    if went || !request {
         write.accept_unprocessed()
     } else {
         write.reject(AttErrorCode::INSUFFICIENT_RESOURCES)
     }
 }
 
-/// Read a phone's write: owe its ACK, and copy its command, trimmed, into `out`. Returns the
-/// command's length, 0 for none.
-fn take_phone_write(ble: &Ble, data: &[u8], out: &mut [u8; VALUE_MAX]) -> usize {
+/// Read a phone's write and copy its command, trimmed, into `out`. Returns the id of the ACK
+/// the write owes, `None` for a write that owes none, and the command's length, 0 for none.
+fn take_phone_write(ble: &Ble, data: &[u8], out: &mut [u8; VALUE_MAX]) -> (Option<u32>, usize) {
     let mut inbound = ble.inbound.get();
     let taken = inbound.on_write(data);
     ble.inbound.set(inbound);
-    // A CMD sets the reply id to its own. A full queue drops the newest: the phone has written
-    // more than TrouBLE queues without an answer.
-    if taken.ack.is_some() {
-        let _ = ble.acks.borrow_mut().push_back(inbound.reply_id());
-        ble.ready.signal(());
-    }
+    // A CMD sets the reply id to its own.
+    let ack = taken.ack.is_some().then(|| inbound.reply_id());
     let text = taken.command.map_or(&[][..], command::trim);
     let len = text.len().min(VALUE_MAX);
     out[..len].copy_from_slice(&text[..len]);
-    len
+    (ack, len)
+}
+
+/// Owe the phone the ACK with id `ack`, when there is one.
+fn owe_ack(ble: &Ble, ack: Option<u32>) {
+    let Some(id) = ack else { return };
+    // A full queue drops the newest: the phone has written more than TrouBLE queues without an
+    // answer.
+    let _ = ble.acks.borrow_mut().push_back(id);
+    ble.ready.signal(());
 }
 
 /// Notify the ring to the central while it reads a stream, a notification at a time: on Up as

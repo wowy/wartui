@@ -179,20 +179,20 @@ fn wardrive_command_reads_channels_when_wdstream_carries_ch() {
     );
     assert_eq!(
         command::parse(b"wdstream start -ch 1,6 -wifi"),
-        Some(Command::Stream { channels: Some(b"1,6"), unsupported_mode: false })
+        Some(Command::Stream { channels: Some(b"1,6 -wifi"), unsupported_mode: false })
     );
     assert_eq!(
         command::parse(b"wdstream start -wifi"),
         Some(Command::Stream { channels: None, unsupported_mode: false })
     );
-    // `-ch` with nothing after it names an empty list, which parses to none.
+    // `-ch` with no space after it names no list.
     assert_eq!(
         command::parse(b"wdstream start -wifi -ch"),
-        Some(Command::Stream { channels: Some(b""), unsupported_mode: false })
+        Some(Command::Stream { channels: None, unsupported_mode: false })
     );
     assert_eq!(
         command::parse(b"wdstream start -ch ,,, -wifi"),
-        Some(Command::Stream { channels: Some(b",,,"), unsupported_mode: false })
+        Some(Command::Stream { channels: Some(b",,, -wifi"), unsupported_mode: false })
     );
 }
 
@@ -261,6 +261,12 @@ fn wardrive_channels_keep_order_and_drop_duplicates_when_parsing() {
 fn wardrive_channels_stop_at_first_non_digit_when_parsing() {
     assert_eq!(channels(b"1,6 x,11", ChannelPool::All), Some(vec![1, 6]));
     assert_eq!(channels(b"1,,6,", ChannelPool::All), Some(vec![1, 6]));
+}
+
+#[test]
+fn wardrive_channels_read_spaces_as_separators_when_parsing() {
+    assert_eq!(channels(b"1, 6, 11", ChannelPool::All), Some(vec![1, 6, 11]));
+    assert_eq!(channels(b"1 6 11", ChannelPool::All), Some(vec![1, 6, 11]));
 }
 
 #[test]
@@ -631,6 +637,23 @@ fn wardrive_session_sends_header_again_when_started_after_stop() {
 }
 
 #[test]
+fn wardrive_session_counts_from_zero_when_started_after_stop() {
+    let (mut session, mut lines) = subscribed();
+    session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
+    session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
+    session.on_period(&mut lines);
+    session.on_sighting(2, &sighting(6, b"coffee"), &mut lines);
+    session.on_command(b"stop", &ctx(), &mut lines);
+    session.on_command(b"start", &ctx(), &mut lines);
+    lines.take();
+    session.on_command(b"status", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "aps 0 scans 0\n");
+    session.on_sighting(3, &sighting(6, b"coffee"), &mut lines);
+    session.on_period(&mut lines);
+    assert_eq!(lines.take().last().map(String::as_str), Some("WD:STATUS aps=1 scans=1\n"));
+}
+
+#[test]
 fn wardrive_session_keeps_list_when_stopped_and_started() {
     let (mut session, mut lines) = subscribed();
     session.on_command(b"ch 1,6", &ctx(), &mut lines);
@@ -661,14 +684,31 @@ fn wardrive_session_keeps_list_and_errs_when_no_channel_is_supported() {
     let (mut session, mut lines) = subscribed();
     session.on_command(b"ch 1,6", &ctx(), &mut lines);
     lines.take();
-    for command in [&b"ch 14,200"[..], b"wdstream start -wifi -ch", b"wdstream start -ch ,, -wifi"]
-    {
+    for command in [&b"ch 14,200"[..], b"wdstream start -ch ,, -wifi"] {
         session.on_command(command, &ctx(), &mut lines);
         let lines = lines.take_classed();
         assert_eq!(lines[0], (Class::Answer, "WD:ERR reason=no_supported_channels\n".into()));
     }
     session.on_command(b"ch", &ctx(), &mut lines);
     assert_eq!(lines.take(), [format!("supported {ALL_CHANS}\n"), "scanning 1,6\n".into()]);
+}
+
+#[test]
+fn wardrive_session_keeps_list_when_ch_flag_ends_command() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"ch 1,6", &ctx(), &mut lines);
+    lines.take();
+    session.on_command(b"wdstream start -wifi -ch", &ctx(), &mut lines);
+    assert!(lines.take().iter().all(|line| !line.starts_with("WD:ERR")));
+    session.on_command(b"ch", &ctx(), &mut lines);
+    assert_eq!(lines.take(), [format!("supported {ALL_CHANS}\n"), "scanning 1,6\n".into()]);
+}
+
+#[test]
+fn wardrive_session_reads_list_to_flag_when_ch_precedes_wifi() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"wdstream start -ch 1, 6 -wifi", &ctx(), &mut lines);
+    assert_eq!(lines.take()[0], "WD:PLAN chans=1,6\n");
 }
 
 #[test]

@@ -4,6 +4,10 @@
 //! [`Command::Unsupported`], so the app hears a refusal rather than a help list. Words an app
 //! sends to describe itself or keep the link are [`Command::Silent`]: they ask for no reply.
 //!
+//! **`wdstream` reads its arguments as the WardriveESP firmware does.** `stop`, `-ch `, `-bt`,
+//! `-cap` and `-promisc` match anywhere after the word, and the word `start` is not required. The
+//! app is closed, so the bridge takes what that firmware takes.
+//!
 //! **`reboot`, `drop` and `link` are unknown on purpose.** The service takes commands from any
 //! phone in range, with no bond and no encryption, so a command that restarts the bridge or drops
 //! its link is one any passer-by could send.
@@ -42,9 +46,9 @@ pub enum Channels<'a> {
 /// One command, as its text reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
-    /// `wdstream start …`: `channels` is the text after `-ch `, when given.
+    /// `wdstream start …`: `channels` is the text after `-ch `, to the end of the command.
     Stream {
-        /// The channel list's text.
+        /// The channel list's text: after `-ch `, to the end of the command.
         channels: Option<&'a [u8]>,
         /// The command asks for a mode the bridge lacks: Bluetooth, capture or promiscuous.
         unsupported_mode: bool,
@@ -76,15 +80,14 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// The text after the first `-ch` followed by a space or the end, up to the next space.
+/// The text after the first `-ch `, to the end of `rest`, or `None` when no `-ch ` appears.
+///
+/// [`parse_channels`] stops at the first byte past the list, so the flags after it are left
+/// there. A `-ch` that ends the command, or a longer flag such as `-chx`, names no list.
 fn ch_argument(rest: &[u8]) -> Option<&[u8]> {
-    let flag = b"-ch";
-    let at = (0..=rest.len().saturating_sub(flag.len())).find(|&i| {
-        rest[i..].starts_with(flag) && rest.get(i + flag.len()).is_none_or(|&b| b == b' ')
-    })?;
-    let after = rest.get(at + flag.len() + 1..).unwrap_or_default();
-    let end = after.iter().position(|&b| b == b' ').unwrap_or(after.len());
-    Some(&after[..end])
+    let flag = b"-ch ";
+    let at = rest.windows(flag.len()).position(|w| w == flag)?;
+    Some(&rest[at + flag.len()..])
 }
 
 /// The command `text` holds, or `None` when it is blank once trimmed.
@@ -178,7 +181,8 @@ impl ChannelList {
 
 /// The channels `text` lists that `pool` holds, or `None` when it holds none of them.
 ///
-/// Reads decimal numbers separated by commas, and stops at the first byte that is neither.
+/// Reads decimal numbers separated by commas or spaces, and stops at the first byte that is none
+/// of these.
 #[must_use]
 pub fn parse_channels(text: &[u8], pool: ChannelPool) -> Option<ChannelList> {
     let mut list = ChannelList::empty();
@@ -194,7 +198,7 @@ pub fn parse_channels(text: &[u8], pool: ChannelPool) -> Option<ChannelList> {
                 let digit = u16::from(byte - b'0');
                 number = Some(number.unwrap_or(0).saturating_mul(10).saturating_add(digit));
             }
-            b',' => finish(&mut number),
+            b',' | b' ' => finish(&mut number),
             _ => break,
         }
     }

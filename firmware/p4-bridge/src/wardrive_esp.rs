@@ -21,8 +21,9 @@
 //! a phone that lets go while scanning, stop the fleet. The phone lets go on an unsubscribe, a
 //! disconnect, a new C6 life, the setting turned off, or USB taking the queue.
 //!
-//! **A scan period is [`PERIOD`]**: the fleet has no single sweep, and a node's assigned beat is
-//! the same 5 s. Each ends in a `WD:STATUS`.
+//! **A scan period is [`PERIOD`], counted from the scan's start**: the fleet has no single sweep,
+//! and a node's assigned beat is the same 5 s. Each ends in a `WD:STATUS`, so the first lands
+//! [`PERIOD`] after `WD:BEGIN`.
 //!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
@@ -30,6 +31,9 @@
 
 use core::cell::{Cell, RefCell};
 
+use embassy_futures::select::{Either, select};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use wartui_proto::bus::{SightingBatch, Slot};
 use wartui_proto::host_owner::Holder;
@@ -50,6 +54,8 @@ pub struct Phone {
     session: RefCell<Session>,
     /// The host queue's drops when the phone attached.
     dropped_at: Cell<u32>,
+    /// A scan started: the period starts over.
+    restart: Signal<NoopRawMutex, ()>,
 }
 
 impl Phone {
@@ -59,6 +65,7 @@ impl Phone {
             enabled: Cell::new(enabled),
             session: RefCell::new(Session::new()),
             dropped_at: Cell::new(0),
+            restart: Signal::new(),
         }
     }
 
@@ -117,6 +124,7 @@ fn apply(shared: &Shared, scan: Option<Scan>) {
         Some(Scan::Start) => {
             crate::fleet::stop(shared);
             crate::fleet::start(shared, false);
+            shared.phone.restart.signal(());
         }
         Some(Scan::Stop) => crate::fleet::stop(shared),
         None => {}
@@ -184,11 +192,11 @@ pub fn on_sightings(shared: &Shared, slot: Slot, body: &[u8]) {
     }
 }
 
-/// End a scan period every [`PERIOD`] while the phone holds the queue.
+/// End a scan period every [`PERIOD`] from the scan's start while the phone holds the queue.
 pub async fn run(shared: &Shared) -> ! {
     loop {
-        Timer::after(PERIOD).await;
-        if holds(shared) {
+        let ended = select(Timer::after(PERIOD), shared.phone.restart.wait()).await;
+        if matches!(ended, Either::First(())) && holds(shared) {
             shared.phone.session.borrow_mut().on_period(&mut Lines(shared));
         }
     }

@@ -485,7 +485,7 @@ pub(super) fn apply(
     }
     if let Some(on) = wardrive_esp {
         text.push_str(if on {
-            "; wardrive esp on sent to the bridge"
+            "; wardrive esp on sent to the bridge, open to any phone in range"
         } else {
             "; wardrive esp off sent to the bridge"
         });
@@ -2316,7 +2316,10 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Command::SetWardriveEsp(true));
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("wardrive esp on sent to the bridge"), "{notice}");
+        assert!(
+            notice.contains("wardrive esp on sent to the bridge, open to any phone in range"),
+            "{notice}"
+        );
         let file = std::fs::read_to_string(&target).expect("the other rows were saved");
         assert!(!file.contains("wardrive"), "the bridge keeps it, not the file: {file}");
     }

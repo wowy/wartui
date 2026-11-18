@@ -267,9 +267,12 @@ impl Session {
         self.list.clone().unwrap_or_else(|| ChannelList::all(pool))
     }
 
-    /// Start scanning and send the header.
+    /// Start scanning from zero counts and send the header.
     fn start(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) -> Option<Scan> {
         self.scanning = true;
+        self.aps = 0;
+        self.scans = 0;
+        self.last_aps = 0;
         let list = self.list(ctx.pool);
         emit(sink, Class::Stream, |out| line::caps(out, ctx.pool));
         emit(sink, Class::Stream, line::mode);

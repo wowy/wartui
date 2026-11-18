@@ -955,7 +955,7 @@ fn fleet_lists_new_mac_when_another_node_heartbeats_from_slot() {
 }
 
 #[test]
-fn planner_reports_member_when_slot_heartbeats() {
+fn fleet_reports_member_when_slot_heartbeats() {
     let mut rig = Rig::started(false);
     rig.plug(3, 1);
     assert!(!rig.fleet.is_member(slot(3)));
@@ -964,7 +964,7 @@ fn planner_reports_member_when_slot_heartbeats() {
 }
 
 #[test]
-fn planner_reports_no_member_when_slot_is_silent() {
+fn fleet_reports_no_member_when_slot_is_silent() {
     let mut rig = Rig::started(false);
     rig.plug(0, 1);
     rig.plug(4, 2);
