@@ -175,6 +175,10 @@ firmware update. The bridge's beacon, read on the PC while the phone was linked,
 nickname. So the app sends `iam` at this level; it sent none in the 75 s watched at 1.6.0. The
 extras named every channel of the pool.
 
+With the bridge switched off in the app, the beacon read `57 00 …`, a free board, and the extras
+`02 00 ff ff c7 ff` / `03 ff 7f 00 00 00`: the last link released. So the app sends `bye` before
+it lets go. Over the 12 s read, no central connected.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -183,7 +187,6 @@ extras named every channel of the pool.
 - A first pairing beside the beacon's advertisement. The stored bond resumed.
 - The beacon read by a phone app: a second phone beside a linked one.
 - `WD:CONN` on a link whose timing changes: the stand-in's never did.
-- Whether the app sends `bye` when it lets the board go.
 - The app in Bluetooth mode: whether it sends `bt on` or `wdstream start -bt`, and what it shows.
 - `bt on` on a fleet of one node, refused in the session's tests only.
 - iOS.
