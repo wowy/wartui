@@ -85,6 +85,15 @@ impl<const N: usize> ByteRing<N> {
         n
     }
 
+    /// Moves the oldest bytes into `out` up to and including the first `delim`, and returns how
+    /// many. Stops short of it at `out.len()` bytes or at all it holds.
+    pub fn take_through(&mut self, out: &mut [u8], delim: u8) -> usize {
+        let limit = out.len().min(self.len);
+        let n =
+            (0..limit).find(|&i| self.buf[(self.head + i) % N] == delim).map_or(limit, |i| i + 1);
+        self.take(&mut out[..n])
+    }
+
     /// Discards everything held.
     pub const fn clear(&mut self) {
         self.head = 0;

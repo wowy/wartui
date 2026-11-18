@@ -450,6 +450,12 @@ impl Fleet {
         members
     }
 
+    /// Whether the plan was last cut with `slot` among its members.
+    #[must_use]
+    pub const fn is_member(&self, slot: Slot) -> bool {
+        self.members & slot.bit() != 0
+    }
+
     /// The mode in force.
     #[must_use]
     pub const fn mode(&self) -> ScanMode {

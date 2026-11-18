@@ -170,3 +170,43 @@ fn frame_ring_reads_frame_in_pieces_when_it_crosses_the_end_of_a_slice() {
     assert_eq!(got, b"0123456789");
     assert!(ring.is_empty());
 }
+
+#[test]
+fn frame_ring_evicts_oldest_when_pushed_within_a_limit() {
+    let mut ring = FrameRing::<64>::new();
+    assert!(ring.push(b"11111"));
+    assert!(ring.push(b"22222"));
+    assert!(ring.push(b"33333"));
+    // 21 bytes held; with a fourth frame, 28. A limit of 16 keeps two.
+    assert!(ring.push_within(b"44444", 16));
+    assert_eq!(ring.dropped(), 2);
+    assert_eq!(ring.len_bytes(), 14);
+    // A frame part-way read stays, and the one behind it goes.
+    let mut one = [0u8; 1];
+    assert_eq!(ring.read(&mut one), (1, false));
+    assert!(ring.push_within(b"55555", 14));
+    assert_eq!(ring.dropped(), 3);
+    assert_eq!(read_all(&mut ring), b"3333");
+    assert_eq!(read_all(&mut ring), b"55555");
+    assert!(ring.is_empty());
+    // A limit past the ring's bytes is the ring's bytes.
+    assert!(ring.push_within(&[7; 60], usize::MAX));
+}
+
+#[test]
+fn frame_ring_refuses_frame_when_it_exceeds_the_limit() {
+    let mut ring = FrameRing::<64>::new();
+    assert!(ring.push(b"1"));
+    assert!(!ring.push_within(&[0u8; 10], 11));
+    assert_eq!(ring.dropped(), 1);
+    assert_eq!(read_all(&mut ring), b"1");
+    // The frame being read counts against the limit.
+    assert!(ring.push(b"2222222222"));
+    let mut one = [0u8; 1];
+    assert_eq!(ring.read(&mut one), (1, false));
+    assert!(!ring.push_within(b"33333", 18));
+    assert_eq!(ring.dropped(), 2);
+    assert!(ring.push_within(b"33333", 19));
+    // Past the ring's bytes, it refuses as `push` does.
+    assert!(!ring.push_within(&[0u8; 63], usize::MAX));
+}

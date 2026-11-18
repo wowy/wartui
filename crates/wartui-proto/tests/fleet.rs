@@ -953,3 +953,26 @@ fn fleet_lists_new_mac_when_another_node_heartbeats_from_slot() {
     rig.beat(0);
     assert_eq!(members(&rig), [(0, mac(2))]);
 }
+
+#[test]
+fn planner_reports_member_when_slot_heartbeats() {
+    let mut rig = Rig::started(false);
+    rig.plug(3, 1);
+    assert!(!rig.fleet.is_member(slot(3)));
+    rig.beat(3);
+    assert!(rig.fleet.is_member(slot(3)));
+}
+
+#[test]
+fn planner_reports_no_member_when_slot_is_silent() {
+    let mut rig = Rig::started(false);
+    rig.plug(0, 1);
+    rig.plug(4, 2);
+    rig.beat(0);
+    // Slot 4 holds a node that has not heartbeated, and slot 5 holds none.
+    assert!(!rig.fleet.is_member(slot(4)));
+    assert!(!rig.fleet.is_member(slot(5)));
+    rig.now += HEARTBEAT_TIMEOUT_MS;
+    rig.fleet.on_tick(rig.now);
+    assert!(!rig.fleet.is_member(slot(0)));
+}
