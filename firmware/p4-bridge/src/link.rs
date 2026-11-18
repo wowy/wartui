@@ -29,8 +29,9 @@
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The C6's Bluetooth bonds follow each answer
 //! to a C6 that bridges, and are repeated on the packets it sends, at least one a second while it
-//! bridges (`src/bonds.rs`, `repeat`). The pair hears the seq of every C6 packet, since a hello
-//! whose seq is not past the last is a restart.
+//! bridges (`src/bonds.rs`, `repeat`). So is the WardriveESP beacon (`src/wardrive_esp.rs`,
+//! `repeat_beacon`). The pair hears the seq of every C6 packet, since a hello whose seq is not
+//! past the last is a restart.
 //!
 //! While a central over Bluetooth or a phone holds the host queue, each packet's room behind the
 //! queued records carries the host stream down as `Down::HostBytes`, inside the credit window
@@ -198,6 +199,7 @@ impl Link {
                     // bridges, which reads them; another hears them after its update.
                     if radio_up(shared) {
                         crate::bonds::send(shared);
+                        crate::wardrive_esp::send_beacon(shared);
                     }
                 }
             }
@@ -213,6 +215,7 @@ impl Link {
                 // steady wake while there is a C6 to send the bonds to.
                 if radio_up(shared) {
                     crate::bonds::repeat(shared);
+                    crate::wardrive_esp::repeat_beacon(shared);
                 }
             }
             Kind::Update => {

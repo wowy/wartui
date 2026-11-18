@@ -6,14 +6,17 @@ use wartui_proto::bus::{RecordKind, Security, SightingMsg};
 use wartui_proto::plan::{SCAN_CHANNELS, index_of};
 use wartui_proto::radio_link::{LastDrop, PhoneLink};
 use wartui_proto::reset::ResetCause;
+use wartui_proto::wardrive_esp::beacon::{
+    self, Beacon, COMPANY, EXTRAS_CHANNELS, EXTRAS_UUID, LinkEnd, STATUS_MAX, channel_bits,
+};
 use wartui_proto::wardrive_esp::command::{
     self, COMMAND_MAX, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels,
 };
 use wartui_proto::wardrive_esp::frame::{
-    self, CTRL_UUID, HEADER_LEN, Inbound, RX_UUID, SERVICE_UUID, TX_UUID, TYPE_ACK, TYPE_CMD,
-    TYPE_DATA, Taken, Write,
+    self, CTRL_UUID, HEADER_LEN, Inbound, RX_UUID, SERVICE_UUID, STATUS_UUID, TX_UUID, TYPE_ACK,
+    TYPE_CMD, TYPE_DATA, Taken, Write,
 };
-use wartui_proto::wardrive_esp::line::{self, LINE_MAX, Line};
+use wartui_proto::wardrive_esp::line::{self, FW, FW_LEVEL, LINE_MAX, Line};
 use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
 
 /// A framed write: the header with `version` and `flags`, then `payload`.
@@ -36,6 +39,9 @@ fn wardrive_uuids_stay_pinned_when_built() {
     assert_eq!(RX_UUID, 0x0147_686F_7374_4553_5042_7269_6467_5852);
     assert_eq!(TX_UUID, 0x0247_686F_7374_4553_5042_7269_6467_5854);
     assert_eq!(CTRL_UUID, 0x0347_686F_7374_4553_5042_7269_4C52_5443);
+    assert_eq!(STATUS_UUID, 0x0547_686F_7374_4553_5042_7269_6467_5354);
+    assert_eq!(COMPANY, 0xFFFF);
+    assert_eq!(EXTRAS_UUID, 0x5744);
     assert_eq!(HEADER_LEN, 12);
     assert_eq!((TYPE_CMD, TYPE_ACK, TYPE_DATA), (1, 2, 3));
 }
@@ -224,8 +230,14 @@ fn wardrive_command_reads_each_channel_form_when_word_is_ch() {
 }
 
 #[test]
-fn wardrive_command_is_silent_when_app_sends_bye_hb_client_time() {
-    for text in [&b"bye"[..], b"hb", b"client android 2.1", b"time 1763380000"] {
+fn wardrive_command_reads_bye_when_word_is_bye() {
+    assert_eq!(command::parse(b"bye"), Some(Command::Bye));
+    assert_eq!(command::parse(b" bye\r\n"), Some(Command::Bye));
+}
+
+#[test]
+fn wardrive_command_is_silent_when_app_sends_hb_client_time() {
+    for text in [&b"hb"[..], b"client android 2.1", b"time 1763380000"] {
         assert_eq!(
             command::parse(text),
             Some(Command::Silent),
@@ -1112,4 +1124,171 @@ fn wardrive_session_ends_info_with_boot_line_when_asked() {
         classed[3],
         (Class::Answer, "WD:BOOT fw=1.6.0 slot=ota_1 image=trial reset=brownout\n".into())
     );
+}
+
+/// A sink that keeps nothing.
+struct Discard;
+
+impl Sink for Discard {
+    fn line(&mut self, _: Class, _: &[u8]) {}
+}
+
+/// A beacon scanning, with 0x0102 lines, from an iPhone named `Al`.
+fn named_beacon() -> Beacon {
+    Beacon {
+        scanning: true,
+        count: 0x0102,
+        iphone: true,
+        nickname: wartui_proto::heapless::Vec::from_slice(b"Al").unwrap(),
+        link_end: LinkEnd::Released,
+        channels: 0,
+    }
+}
+
+/// The status bytes of `beacon`, for the bridge `44:C0`.
+fn status_bytes(beacon: &Beacon, connected: bool) -> Vec<u8> {
+    let mut out = [0; STATUS_MAX];
+    let len = beacon::status(&mut out, beacon, [0x44, 0xC0], connected);
+    out[..len].to_vec()
+}
+
+#[test]
+fn wardrive_line_spells_fw_level_when_built() {
+    // `WD:CAPS` and the status beacon name one level.
+    let (major, minor, patch) = FW_LEVEL;
+    assert_eq!(FW, format!("{major}.{minor}.{patch}"));
+}
+
+#[test]
+fn wardrive_beacon_sends_fixed_status_golden_when_free() {
+    // The free board's scan response: no nickname, and no iPhone bit without a central.
+    #[rustfmt::skip]
+    let want = [
+        0x57,       // `W`
+        0b10,       // scanning
+        0x80,       // temperature unknown
+        0x02, 0x01, // count, LE
+        0x16, 0x00, // level 1.6, patch 0
+        0x44, 0xC0, // the bridge's last two octets
+    ];
+    assert_eq!(status_bytes(&named_beacon(), false), want);
+    assert_eq!(status_bytes(&Beacon::default(), false), [0x57, 0, 0x80, 0, 0, 0x16, 0, 0x44, 0xC0]);
+}
+
+#[test]
+fn wardrive_beacon_sends_status_with_nickname_golden_when_connected() {
+    let iphone = named_beacon();
+    // Connected, scanning and an iPhone, then the nickname.
+    let want = [0x57, 0x83, 0x80, 0x02, 0x01, 0x16, 0x00, 0x44, 0xC0, b'A', b'l'];
+    assert_eq!(status_bytes(&iphone, true), want);
+    let android = Beacon { iphone: false, ..named_beacon() };
+    let want = [0x57, 0x03, 0x80, 0x02, 0x01, 0x16, 0x00, 0x44, 0xC0, b'A', b'l'];
+    assert_eq!(status_bytes(&android, true), want);
+    // A central that gave no name, such as a wartui host.
+    assert_eq!(status_bytes(&Beacon::default(), true), [0x57, 1, 0x80, 0, 0, 0x16, 0, 0x44, 0xC0]);
+}
+
+#[test]
+fn wardrive_beacon_fills_status_max_when_nickname_is_whole() {
+    let nickname = wartui_proto::heapless::Vec::from_slice(&[b'n'; NICKNAME_MAX]).unwrap();
+    let beacon = Beacon { nickname, ..Beacon::default() };
+    assert_eq!(status_bytes(&beacon, true).len(), STATUS_MAX);
+    assert_eq!(STATUS_MAX, 27);
+}
+
+#[test]
+fn wardrive_beacon_sends_extras_golden_when_pool_is_us() {
+    let beacon = Session::new().beacon(ChannelPool::Us, LinkEnd::None);
+    // 1-11, then 36-165.
+    assert_eq!(beacon.channels, 0x7F_FFFF_C7FF);
+    assert_eq!(beacon::extras(&beacon, false), [0, 0, 0xFF, 0xFF, 0xC7, 0xFF]);
+    assert_eq!(beacon::extras(&beacon, true), [1, 0xFF, 0x7F, 0, 0, 0]);
+    let lost = Beacon { link_end: LinkEnd::Lost, ..beacon };
+    assert_eq!(beacon::extras(&lost, false)[0], 0b100);
+    assert_eq!(beacon::extras(&lost, true)[0], 0b101);
+}
+
+#[test]
+fn wardrive_beacon_sends_extras_golden_when_list_is_1_6_11_36() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"ch 1,6,11,36", &ctx(), &mut lines);
+    let beacon = session.beacon(ChannelPool::All, LinkEnd::Released);
+    assert_eq!(beacon.channels, 0x4421);
+    assert_eq!(beacon::extras(&beacon, false), [0b10, 0, 0xFF, 0x21, 0x44, 0x00]);
+    assert_eq!(beacon::extras(&beacon, true), [0b11, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn wardrive_beacon_sends_top_bits_when_pool_is_all() {
+    let beacon = Session::new().beacon(ChannelPool::All, LinkEnd::None);
+    // Every entry but channel 14.
+    assert_eq!(beacon.channels, (1 << 42) - 1 - (1 << 13));
+    assert_eq!(beacon::extras(&beacon, true), [1, 0xFF, 0xFF, 0b11, 0, 0]);
+}
+
+#[test]
+fn wardrive_beacon_sets_bit_of_table_entry_when_channel_is_listed() {
+    assert_eq!(channel_bits(&[1]), 1);
+    assert_eq!(channel_bits(&[14]), 1 << 13);
+    assert_eq!(channel_bits(&[36]), 1 << 14);
+    assert_eq!(channel_bits(&[177]), 1 << 41);
+    assert_eq!(EXTRAS_CHANNELS.len(), 42);
+}
+
+#[test]
+fn wardrive_beacon_sets_no_bit_when_channel_is_outside_table() {
+    for channel in [0, 15, 34, 38, 178, 255] {
+        assert_eq!(channel_bits(&[channel]), 0, "channel {channel}");
+    }
+    assert_eq!(channel_bits(&[34, 6]), 1 << 5);
+}
+
+#[test]
+fn wardrive_session_saturates_beacon_count_when_period_holds_over_u16() {
+    let mut session = Session::new();
+    session.on_subscribe(&ctx(), &mut Discard);
+    for _ in 0..=u32::from(u16::MAX) {
+        session.on_sighting(1, &sighting(6, b"coffee"), &mut Discard);
+    }
+    session.on_period(&mut Discard);
+    assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).count, u16::MAX);
+}
+
+#[test]
+fn wardrive_session_fills_beacon_when_phone_names_itself_and_period_ends() {
+    let (mut session, mut lines) = subscribed();
+    let fresh = session.beacon(ChannelPool::All, LinkEnd::Lost);
+    let all = Session::new().beacon(ChannelPool::All, LinkEnd::None).channels;
+    assert_eq!(
+        fresh,
+        Beacon { scanning: true, link_end: LinkEnd::Lost, channels: all, ..Beacon::default() }
+    );
+    session.on_command(b"iam i Al", &ctx(), &mut lines);
+    for _ in 0..3 {
+        session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
+    }
+    // Counted only once the period ends.
+    assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).count, 0);
+    session.on_period(&mut lines);
+    let beacon = session.beacon(ChannelPool::All, LinkEnd::None);
+    assert_eq!((beacon.count, beacon.iphone, &beacon.nickname[..]), (3, true, &b"Al"[..]));
+    session.on_command(b"ch 1,6,11", &ctx(), &mut lines);
+    assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).channels, 0x421);
+    session.on_command(b"stop", &ctx(), &mut lines);
+    assert!(!session.beacon(ChannelPool::All, LinkEnd::None).scanning);
+}
+
+#[test]
+fn wardrive_session_says_bye_when_app_sends_it() {
+    let (mut session, mut lines) = subscribed();
+    assert!(!session.said_bye());
+    assert_eq!(session.on_command(b"bye", &ctx(), &mut lines), None);
+    assert!(lines.take().is_empty());
+    assert!(session.said_bye());
+    // It is the session's: a subscribe clears it, and so does a release.
+    session.on_subscribe(&ctx(), &mut lines);
+    assert!(!session.said_bye());
+    session.on_command(b"bye", &ctx(), &mut lines);
+    session.release();
+    assert!(!session.said_bye());
 }

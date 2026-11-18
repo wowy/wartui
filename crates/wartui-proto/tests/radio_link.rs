@@ -12,7 +12,8 @@ use wartui_proto::radio_link::{
     encode_packet, encode_up, host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
-use wartui_proto::wardrive_esp::command::COMMAND_MAX;
+use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
+use wartui_proto::wardrive_esp::command::{COMMAND_MAX, NICKNAME_MAX};
 
 fn log(text: &str) -> Up<'_> {
     Up::Log { message: text.try_into().unwrap() }
@@ -521,6 +522,16 @@ fn radio_link_largest_messages_fit_one_packet() {
     };
     let len = encode_down(&bonds, &mut out).unwrap();
     assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
+    let beacon = Down::Beacon(Beacon {
+        scanning: true,
+        count: u16::MAX,
+        iphone: true,
+        nickname: Vec::from_slice(&[0xFF; NICKNAME_MAX]).unwrap(),
+        link_end: LinkEnd::Lost,
+        channels: u64::MAX,
+    });
+    let len = encode_down(&beacon, &mut out).unwrap();
+    assert!(len <= RECORD_MAX, "{beacon:?} is {len} bytes");
 }
 
 /// A bond with every field at its longest.
@@ -672,6 +683,34 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_down(&drop, &mut out).unwrap();
     assert_eq!(out[..len], [4], "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), drop);
+
+    let beacon = Down::Beacon(Beacon {
+        scanning: true,
+        count: 300,
+        iphone: true,
+        nickname: Vec::from_slice(b"Al").unwrap(),
+        link_end: LinkEnd::Released,
+        channels: 0x4421,
+    });
+    let len = encode_down(&beacon, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        5,                // Down::Beacon
+        1,                // scanning
+        0xAC, 0x02,       // count 300, varint
+        1,                // iphone
+        2, b'A', b'l',    // nickname, length first
+        1,                // LinkEnd::Released
+        0xA1, 0x88, 0x01, // channels 0x4421, varint
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), beacon);
+
+    let none = Down::Beacon(Beacon::default());
+    let len = encode_down(&none, &mut out).unwrap();
+    // Every field zero, the nickname empty and `LinkEnd::None`.
+    assert_eq!(out[..len], [5, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), none);
 
     let link = Up::PhoneLink(PhoneLink {
         peer: [0x4A, 0x9F],

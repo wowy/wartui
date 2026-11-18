@@ -34,6 +34,15 @@
 //! last reset. A phone that sends `drop` is answered first; `Down::DropPhone` then asks the C6 to
 //! disconnect it, which releases it here.
 //!
+//! **The P4 holds what the status beacon and advert extras say** (`wardrive_esp::beacon`): the
+//! session's scan, count, `iam` and channel list, or a fresh session's while no phone holds the
+//! queue, and how the last phone link ended. A release ends it as `Released` when the app sent
+//! `bye` first, else as `Lost`; it is `None` until a phone has held the queue since boot.
+//! `Down::Beacon` goes when what it says differs from the last the down queue took, after each
+//! hello answer, since a C6 that has just said hello holds none, and every [`BEACON_EVERY`]
+//! beside the bonds' repeat. A full down queue drops it silently, and the repeat covers it. The
+//! C6 encodes it.
+//!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
 //! there, and `src/ble.rs` releases it once its `BleState` says so.
@@ -48,6 +57,7 @@ use wartui_proto::bus::{SightingBatch, Slot};
 use wartui_proto::host_owner::Holder;
 use wartui_proto::radio_link::{Down, PhoneLink};
 use wartui_proto::reset::ResetCause;
+use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
 use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
 
 use crate::{Shared, now_ms};
@@ -60,6 +70,9 @@ const PERIOD: Duration = Duration::from_secs(5);
 
 /// How often the phone is sent `WD:HEALTH`.
 const HEALTH_EVERY: Duration = Duration::from_secs(15);
+
+/// How often the C6 is sent the beacon again, changed or not, in P4 milliseconds.
+const BEACON_EVERY: u64 = 5_000;
 
 /// The setting, and the session of the phone holding the queue.
 pub struct Phone {
@@ -76,6 +89,12 @@ pub struct Phone {
     link_at: Cell<Instant>,
     /// Why the P4 last reset.
     reset: ResetCause,
+    /// How the last phone link ended.
+    link_end: Cell<LinkEnd>,
+    /// The latest `Down::Beacon` the down queue took, or `None` before one.
+    beacon: RefCell<Option<Beacon>>,
+    /// P4 milliseconds when it took it.
+    beacon_at: Cell<u64>,
 }
 
 impl Phone {
@@ -99,6 +118,9 @@ impl Phone {
             }),
             link_at: Cell::new(Instant::from_ticks(0)),
             reset,
+            link_end: Cell::new(LinkEnd::None),
+            beacon: RefCell::new(None),
+            beacon_at: Cell::new(0),
         }
     }
 
@@ -213,13 +235,21 @@ pub fn attach(shared: &Shared) {
     let ask = shared.phone.session.borrow_mut().on_subscribe(&ctx, &mut Lines(shared));
     apply(shared, ask);
     shared.wake_link.signal(());
+    follow_beacon(shared);
 }
 
-/// Stop serving the phone: end its session, stop the scan it ran, and clear the queue.
+/// Stop serving the phone: note how its link ended, end its session, stop the scan it ran, and
+/// clear the queue.
 pub fn release(shared: &Shared) {
-    let ask = shared.phone.session.borrow_mut().release();
+    let ask = {
+        let mut session = shared.phone.session.borrow_mut();
+        let end = if session.said_bye() { LinkEnd::Released } else { LinkEnd::Lost };
+        shared.phone.link_end.set(end);
+        session.release()
+    };
     apply(shared, ask);
     shared.host.borrow_mut().clear();
+    follow_beacon(shared);
 }
 
 /// A command the phone wrote. Dropped unless the phone holds the queue.
@@ -231,6 +261,7 @@ pub fn on_command(shared: &Shared, text: &[u8]) {
     let ctx = ctx(shared);
     let ask = shared.phone.session.borrow_mut().on_command(text, &ctx, &mut Lines(shared));
     apply(shared, ask);
+    follow_beacon(shared);
 }
 
 /// A `Sightings` record from the node in `slot`: each access point in it to the phone, while the
@@ -264,6 +295,7 @@ pub async fn run(shared: &Shared) -> ! {
                 period = Instant::now() + PERIOD;
                 if holds(shared) {
                     shared.phone.session.borrow_mut().on_period(&mut Lines(shared));
+                    follow_beacon(shared);
                 }
             }
             Either3::Second(()) => {
@@ -282,4 +314,47 @@ pub async fn run(shared: &Shared) -> ! {
 fn send_health(shared: &Shared) {
     let ctx = ctx(shared);
     shared.phone.session.borrow().on_health(&ctx, &mut Lines(shared));
+}
+
+/// What the beacon says now: the session of the phone holding the queue, or a fresh one's.
+#[inline(never)]
+fn beacon(shared: &Shared) -> Beacon {
+    let pool = shared.fleet.borrow().pool();
+    let link_end = shared.phone.link_end.get();
+    if holds(shared) {
+        shared.phone.session.borrow().beacon(pool, link_end)
+    } else {
+        Session::new().beacon(pool, link_end)
+    }
+}
+
+/// Send the beacon when it differs from the last the down queue took.
+fn follow_beacon(shared: &Shared) {
+    let now = beacon(shared);
+    if shared.phone.beacon.borrow().as_ref() != Some(&now) {
+        push_beacon(shared, now);
+    }
+}
+
+/// Send the beacon when it differs from the last the down queue took, or [`BEACON_EVERY`] has
+/// passed since it took one.
+pub fn repeat_beacon(shared: &Shared) {
+    if now_ms().saturating_sub(shared.phone.beacon_at.get()) >= BEACON_EVERY {
+        push_beacon(shared, beacon(shared));
+    } else {
+        follow_beacon(shared);
+    }
+}
+
+/// Send the beacon, changed or not: a C6 that has just said hello holds none.
+pub fn send_beacon(shared: &Shared) {
+    push_beacon(shared, beacon(shared));
+}
+
+/// Queue `beacon` as `Down::Beacon`. A full down queue drops it silently: the repeat sends it.
+fn push_beacon(shared: &Shared, beacon: Beacon) {
+    if shared.push_down(&Down::Beacon(beacon.clone())) {
+        shared.phone.beacon.replace(Some(beacon));
+        shared.phone.beacon_at.set(now_ms());
+    }
 }

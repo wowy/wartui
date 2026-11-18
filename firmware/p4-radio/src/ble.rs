@@ -92,7 +92,12 @@
 //! Authentication, which makes a phone pair. While phones are admitted:
 //!
 //! - the advertisement carries the WardriveESP service's UUID, which a phone app looks for, and
-//!   the scan response the name; a change of admission restarts the advertisement ([`accept`]);
+//!   the advert extras, and the scan response the name and the status beacon's fixed bytes; a
+//!   change of admission restarts the advertisement ([`accept`]);
+//! - while a central is connected, whatever it reads, the C6 advertises the status beacon beside
+//!   it ([`linked`]): not connectable, about once a second, under the status UUID in place of the
+//!   service's, so an app looking for the service does not try a board that is taken, with the
+//!   whole status in the scan response;
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
 //!   a line, or part of one longer than the frame's room. TrouBLE keeps a bonded central's TX
 //!   subscription across its connections, so it counts only once the central writes it on the
@@ -103,7 +108,15 @@
 //!   acknowledged. A write before the phone reads TX is dropped.
 //!
 //! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
-//! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
+//! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]). The
+//! wartui pair is advertised, and nothing while a central is connected.
+//!
+//! **The P4 says what the beacon says** (`Down::Beacon`, `wartui_proto::wardrive_esp::beacon`),
+//! and the C6 encodes it. Each advertisement while phones are admitted is rebuilt and given to the
+//! controller in place every [`BEACON_EVERY`], which swaps the extras' frame, and at once when the
+//! beacon changes. The connectable one is never stopped for that, so a central can connect at any
+//! moment. A beacon that will not start or refresh is logged once a connection and changes nothing
+//! else: the link is served without it.
 //!
 //! **The P4 holds the phone's link before its session starts.** An `Up::PhoneLink` goes just ahead
 //! of the `BleState` that names the phone's stream, with no signal reading yet, then
@@ -145,7 +158,10 @@
 //! differs in nothing, as after every hello and in the P4's repeat every 5 s, leaves the
 //! advertisement running, logs nothing, and leaves a connected central as it is. While a central
 //! is connected the bonds are applied once it goes, and a central whose bond the P4 has dropped is
-//! disconnected first ([`revoke`]). A new bond goes up as `Up::BondAdded`, after an
+//! disconnected first ([`revoke`]). The status beacon keeps TrouBLE advertising through a
+//! connection, so once it is dropped the C6 gives the runner [`RESOLVING_SETTLE`] to stop it before
+//! the bonds are applied, and again after, as for any change, so a bond paired meanwhile reaches
+//! the resolving list. A new bond goes up as `Up::BondAdded`, after an
 //! `Up::BondRemoved` when it replaces one a central lost. The link never resends, so the
 //! `Up::BondAdded` goes again every [`STATE_EVERY`] until the P4's list holds the bond, at most
 //! [`BOND_SENDS`] times in all ([`repeat_bond`]). The bound keeps a bond the P4 was told to clear
@@ -155,7 +171,8 @@
 //! time left as it sent it.
 //!
 //! **The first advertisement ends the image's trial** with the P4's hello (`src/link.rs`):
-//! [`advertise`] raises `advertising_started` once the controller takes it.
+//! [`advertise`] raises `advertising_started` once the controller takes the first connectable
+//! one.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
@@ -179,6 +196,7 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{
     Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, LastDrop, PhoneLink, Stream, Up,
 };
+use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, EXTRAS_UUID, STATUS_MAX};
 use wartui_proto::wardrive_esp::command;
 use wartui_proto::wardrive_esp::frame::{self, Inbound};
 
@@ -310,6 +328,14 @@ const NAME_MAX: usize = NAME_PREFIX.len() + 5;
 
 /// How long one advertising interval is.
 const ADVERTISE_EVERY: Duration = Duration::from_millis(100);
+
+/// The status beacon's advertising interval while a central is connected: about once a second,
+/// as the protocol has it.
+const LINKED_EVERY: (Duration, Duration) =
+    (Duration::from_millis(1000), Duration::from_millis(1100));
+
+/// How often the advert extras swap frames, and the phones' advertisement is refreshed.
+const BEACON_EVERY: Duration = Duration::from_secs(5);
 
 type Controller<'a> = ExternalController<BleConnector<'a>, COMMAND_SLOTS>;
 type BleStack<'a> = Stack<'a, Controller<'a>, DefaultPacketPool>;
@@ -496,6 +522,11 @@ pub struct Ble {
     last_drop: Cell<Option<(u8, Instant)>>,
     /// Raised by a `Down::DropPhone` while a phone reads its stream, for [`phone`].
     drop_asked: Signal<NoopRawMutex, ()>,
+    /// What the WardriveESP beacon says: the P4's latest `Down::Beacon`.
+    beacon: RefCell<Beacon>,
+    /// Raised by a `Down::Beacon` that changes it, and by a change of admission. One waiter at a
+    /// time: [`accept`] while advertising, [`linked`] while a central is connected.
+    beacon_changed: Signal<NoopRawMutex, ()>,
 }
 
 impl Ble {
@@ -523,6 +554,8 @@ impl Ble {
             connections: Cell::new(0),
             last_drop: Cell::new(None),
             drop_asked: Signal::new(),
+            beacon: RefCell::new(Beacon::default()),
+            beacon_changed: Signal::new(),
         }
     }
 
@@ -615,7 +648,9 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
 /// from each, and moves by no more than the message's transit.
 pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32, wardrive_esp: bool) {
     let ble = &shared.ble;
-    ble.admitted.set(wardrive_esp);
+    if ble.admitted.replace(wardrive_esp) != wardrive_esp {
+        ble.beacon_changed.signal(());
+    }
     let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
     ble.window_until.set(until);
     if ble.pending_bond.get().is_some_and(|pending| holds(&bonds, &pending.record)) {
@@ -658,6 +693,16 @@ pub fn repeat_bond(shared: &Shared) {
 pub fn drop_phone_asked(shared: &Shared) {
     if shared.ble.stream() == Stream::Phone {
         shared.ble.drop_asked.signal(());
+    }
+}
+
+/// Take what the P4 says the WardriveESP beacon says. A repeat that changes nothing raises
+/// nothing.
+pub fn take_beacon(shared: &Shared, beacon: Beacon) {
+    let ble = &shared.ble;
+    if *ble.beacon.borrow() != beacon {
+        ble.beacon.replace(beacon);
+        ble.beacon_changed.signal(());
     }
 }
 
@@ -793,6 +838,7 @@ async fn advertise(
 ) -> ! {
     let mut name = wartui_proto::heapless::String::<NAME_MAX>::new();
     let _ = write!(name, "{NAME_PREFIX}{}", mac::short(mac));
+    let bridge = [mac[4], mac[5]];
     let gap =
         GapConfig::Peripheral(PeripheralConfig { name: &name, appearance: &appearance::UNKNOWN });
     // Matched by reference, so the server is not copied out of the result.
@@ -805,9 +851,12 @@ async fn advertise(
         }
     };
 
-    let (Some(wartui), Some(phones)) =
-        (Payload::new(name.as_bytes(), false), Payload::new(name.as_bytes(), true))
-    else {
+    // The phones' pair takes the same room whatever the beacon says, so one that encodes here
+    // always does.
+    let (Some(wartui), Some(_)) = (
+        Payload::wartui(name.as_bytes()),
+        Payload::free(name.as_bytes(), &Beacon::default(), bridge, false),
+    ) else {
         shared.error(format_args!("the advertisement would not encode"));
         core::future::pending().await
     };
@@ -841,13 +890,20 @@ async fn advertise(
 
     loop {
         let admitted = shared.ble.admitted();
-        let payload = if admitted { &phones } else { &wartui };
-        let conn = match peripheral.advertise(&params, payload.advertisement()).await {
+        let payload =
+            if admitted { free_payload(name.as_bytes(), bridge, shared) } else { Some(wartui) };
+        let advertised = match payload {
+            Some(payload) => peripheral.advertise(&params, payload.advertisement()).await,
+            None => Err(BleHostError::BleHost(Error::InvalidValue)),
+        };
+        let conn = match advertised {
             Ok(advertiser) => {
                 if !shared.ble.advertising.replace(true) {
                     shared.ble.advertising_started.signal(());
                 }
-                let Some(accepted) = accept(advertiser, stack, shared, admitted).await else {
+                let free = admitted.then_some((name.as_bytes(), bridge));
+                let Some(accepted) = accept(advertiser, peripheral, stack, shared, free).await
+                else {
                     // The advertisement is dropped, and TrouBLE's runner stops it.
                     if shared.ble.admitted() != admitted {
                         let service = service_name(shared.ble.admitted());
@@ -877,20 +933,44 @@ async fn advertise(
                 continue;
             }
         };
-        serve(stack, &conn, server, shared).await;
+        let beaconed = Cell::new(false);
+        select(serve(stack, &conn, server, shared), linked(peripheral, bridge, &beaconed, shared))
+            .await;
         shared.ble.count(|c| {
             c.phy = 0;
             c.interval_us = 0;
         });
         set_state(shared, |state| *state = BleState::default());
-        // The bonds held back while the central was connected.
-        if sync_bonds(stack, shared) {
+        // The status beacon, dropped with `linked`, is stopped by TrouBLE's runner, which loads
+        // its resolving list only once it has.
+        if beaconed.get() {
+            Timer::after(RESOLVING_SETTLE).await;
+        }
+        // The bonds held back while the central was connected, and any TrouBLE stored meanwhile.
+        if sync_bonds(stack, shared) || beaconed.get() {
             Timer::after(RESOLVING_SETTLE).await;
         }
     }
 }
 
+/// The phones' pair while no central is connected, as the beacon says now.
+fn free_payload(name: &[u8], bridge: [u8; 2], shared: &Shared) -> Option<Payload> {
+    Payload::free(name, &shared.ble.beacon.borrow(), bridge, frame_b())
+}
+
+/// Whether the advert extras show frame B: they swap every [`BEACON_EVERY`] of the C6's uptime.
+fn frame_b() -> bool {
+    (Instant::now().as_millis() / BEACON_EVERY.as_millis()) % 2 == 1
+}
+
+/// When the advert extras next swap.
+fn next_swap() -> Instant {
+    let every = BEACON_EVERY.as_millis();
+    Instant::from_millis((Instant::now().as_millis() / every + 1) * every)
+}
+
 /// One advertisement and its scan response.
+#[derive(Clone, Copy)]
 struct Payload {
     adv: [u8; 31],
     adv_len: usize,
@@ -899,31 +979,80 @@ struct Payload {
 }
 
 impl Payload {
-    /// The pair for the wartui link, or, with `phones`, for the WardriveESP service. A phone app
-    /// finds a board by its service UUID in the advertisement, so that pair moves the name to the
-    /// scan response; the wartui pair carries the name an operator picks the bridge by.
-    fn new(name: &[u8], phones: bool) -> Option<Self> {
-        let flags = AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED);
-        let name = AdStructure::CompleteLocalName(name);
+    /// The wartui link's pair: the name an operator picks the bridge by, then the link's service.
+    fn wartui(name: &[u8]) -> Option<Self> {
         let link = [SERVICE_UUID.to_le_bytes()];
-        let wardrive_esp = [frame::SERVICE_UUID.to_le_bytes()];
-        let (adv, scan) = if phones {
-            ([flags, AdStructure::CompleteServiceUuids128(&wardrive_esp)], name)
-        } else {
-            ([flags, name], AdStructure::CompleteServiceUuids128(&link))
-        };
+        Self::encode(
+            &[flags(), AdStructure::CompleteLocalName(name)],
+            &[AdStructure::CompleteServiceUuids128(&link)],
+        )
+    }
+
+    /// The phones' pair while no central is connected. A phone app finds a board by its service
+    /// UUID in the advertisement, so the name moves to the scan response, beside the status's
+    /// fixed bytes; the extras' frame B when `second`.
+    fn free(name: &[u8], beacon: &Beacon, bridge: [u8; 2], second: bool) -> Option<Self> {
+        let service = [frame::SERVICE_UUID.to_le_bytes()];
+        let extras = beacon::extras(beacon, second);
+        let mut status = [0; STATUS_MAX];
+        let len = beacon::status(&mut status, beacon, bridge, false);
+        Self::encode(
+            &[flags(), AdStructure::CompleteServiceUuids128(&service), extras_data(&extras)],
+            &[AdStructure::CompleteLocalName(name), status_data(&status[..len])],
+        )
+    }
+
+    /// The status beacon while a central is connected: the status UUID in place of the service's,
+    /// so an app looking for the service does not try a board that is taken, and the whole
+    /// status, nickname included, in the scan response.
+    fn linked(beacon: &Beacon, bridge: [u8; 2], second: bool) -> Option<Self> {
+        let status_uuid = [frame::STATUS_UUID.to_le_bytes()];
+        let extras = beacon::extras(beacon, second);
+        let mut status = [0; STATUS_MAX];
+        let len = beacon::status(&mut status, beacon, bridge, true);
+        Self::encode(
+            &[flags(), AdStructure::CompleteServiceUuids128(&status_uuid), extras_data(&extras)],
+            &[status_data(&status[..len])],
+        )
+    }
+
+    fn encode(adv: &[AdStructure<'_>], scan: &[AdStructure<'_>]) -> Option<Self> {
         let mut payload = Self { adv: [0; 31], adv_len: 0, scan: [0; 31], scan_len: 0 };
-        payload.adv_len = AdStructure::encode_slice(&adv, &mut payload.adv).ok()?;
-        payload.scan_len = AdStructure::encode_slice(&[scan], &mut payload.scan).ok()?;
+        payload.adv_len = AdStructure::encode_slice(adv, &mut payload.adv).ok()?;
+        payload.scan_len = AdStructure::encode_slice(scan, &mut payload.scan).ok()?;
         Some(payload)
     }
 
+    /// The pair as a connectable advertisement.
     fn advertisement(&self) -> Advertisement<'_> {
         Advertisement::ConnectableScannableUndirected {
             adv_data: &self.adv[..self.adv_len],
             scan_data: &self.scan[..self.scan_len],
         }
     }
+
+    /// The pair as an advertisement a central scans and cannot connect to.
+    fn beacon(&self) -> Advertisement<'_> {
+        Advertisement::NonconnectableScannableUndirected {
+            adv_data: &self.adv[..self.adv_len],
+            scan_data: &self.scan[..self.scan_len],
+        }
+    }
+}
+
+/// The flags every advertisement leads with: LE only, and discoverable.
+fn flags() -> AdStructure<'static> {
+    AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED)
+}
+
+/// The advert extras, as service data.
+fn extras_data(extras: &[u8]) -> AdStructure<'_> {
+    AdStructure::ServiceData16 { uuid: EXTRAS_UUID.to_le_bytes(), data: extras }
+}
+
+/// The status, as manufacturer data.
+fn status_data(status: &[u8]) -> AdStructure<'_> {
+    AdStructure::ManufacturerSpecificData { company_identifier: COMPANY, payload: status }
 }
 
 /// The service advertised while phones are `admitted` or not, for the log.
@@ -932,24 +1061,117 @@ fn service_name(admitted: bool) -> &'static str {
 }
 
 /// Wait for a central to connect to `advertiser`'s advertisement, through every `Down::Bonds`
-/// that leaves the P4's bonds as TrouBLE holds them and phones admitted as `admitted` says. `None`
-/// once one does not: the advertisement is dropped on return, so TrouBLE stops it and can load its
+/// that leaves the P4's bonds as TrouBLE holds them and phones admitted as they were. `None` once
+/// one does not: the advertisement is dropped on return, so TrouBLE stops it and can load its
 /// resolving list ([`RESOLVING_SETTLE`]), and the next is the pair for phones as they now are.
+///
+/// With `free`, the name and the bridge's octets, the advertisement is the phones' pair: it is
+/// rebuilt and given to the controller in place every [`BEACON_EVERY`] and on each change of the
+/// beacon, so a central can connect at any moment. A refresh that fails is logged once and leaves
+/// the last one advertised.
 async fn accept<'d>(
     advertiser: Advertiser<'d, Controller<'_>, DefaultPacketPool>,
+    peripheral: &mut Peripheral<'_, Controller<'_>, DefaultPacketPool>,
     stack: &BleStack<'_>,
     shared: &Shared,
-    admitted: bool,
+    free: Option<(&[u8], [u8; 2])>,
 ) -> Option<Result<Connection<'d, DefaultPacketPool>, Error>> {
+    let admitted = free.is_some();
+    let mut failed = false;
     // Pinned here, so the same advertisement runs through a `Down::Bonds` that changes nothing.
     let mut accepting = pin!(advertiser.accept());
     loop {
-        match select(accepting.as_mut(), shared.ble.bonds_changed.wait()).await {
-            Either::First(conn) => return Some(conn),
-            Either::Second(()) if shared.ble.admitted() != admitted => return None,
-            Either::Second(()) if bonds_differ(stack, shared) => return None,
-            Either::Second(()) => {}
+        let refresh = async {
+            match free {
+                Some(_) => {
+                    select(Timer::at(next_swap()), shared.ble.beacon_changed.wait()).await;
+                }
+                None => core::future::pending().await,
+            }
+        };
+        match select3(accepting.as_mut(), shared.ble.bonds_changed.wait(), refresh).await {
+            Either3::First(conn) => return Some(conn),
+            Either3::Second(()) if shared.ble.admitted() != admitted => return None,
+            Either3::Second(()) if bonds_differ(stack, shared) => return None,
+            Either3::Second(()) => {}
+            // Admission ended: the `Down::Bonds` that said so ends this advertisement.
+            Either3::Third(()) if !shared.ble.admitted() => {}
+            Either3::Third(()) => {
+                let Some((name, bridge)) = free else { continue };
+                let updated = match free_payload(name, bridge, shared) {
+                    Some(payload) => peripheral.update_adv_data(payload.advertisement()).await,
+                    None => Err(BleHostError::BleHost(Error::InvalidValue)),
+                };
+                if let Err(err) = updated {
+                    beacon_failed(
+                        &mut failed,
+                        "refresh the WardriveESP advertisement",
+                        &err,
+                        shared,
+                    );
+                }
+            }
         }
+    }
+}
+
+/// While a central is connected and phones are admitted, advertise the status beacon: not
+/// connectable, scannable, about once a second, refreshed in place every [`BEACON_EVERY`] and on
+/// each change of the beacon. It runs whatever the central reads, and starts when admission does.
+/// It is dropped when admission ends, and with this future when the central goes, so TrouBLE's
+/// runner stops it. `beaconed` says it was started.
+///
+/// A beacon that will not start or refresh is logged once, and the link is served without it.
+async fn linked(
+    peripheral: &mut Peripheral<'_, Controller<'_>, DefaultPacketPool>,
+    bridge: [u8; 2],
+    beaconed: &Cell<bool>,
+    shared: &Shared,
+) -> ! {
+    let ble = &shared.ble;
+    let (interval_min, interval_max) = LINKED_EVERY;
+    let params = AdvertisementParameters { interval_min, interval_max, ..Default::default() };
+    let mut failed = false;
+    loop {
+        if !ble.admitted() {
+            ble.beacon_changed.wait().await;
+            continue;
+        }
+        let payload = Payload::linked(&ble.beacon.borrow(), bridge, frame_b());
+        let started = match payload {
+            Some(payload) => peripheral.advertise(&params, payload.beacon()).await,
+            None => Err(BleHostError::BleHost(Error::InvalidValue)),
+        };
+        let _advertiser = match started {
+            Ok(advertiser) => advertiser,
+            Err(err) => {
+                beacon_failed(&mut failed, "start the WardriveESP status beacon", &err, shared);
+                core::future::pending().await
+            }
+        };
+        beaconed.set(true);
+        while ble.admitted() {
+            select(Timer::at(next_swap()), ble.beacon_changed.wait()).await;
+            if !ble.admitted() {
+                break;
+            }
+            let payload = Payload::linked(&ble.beacon.borrow(), bridge, frame_b());
+            let updated = match payload {
+                Some(payload) => peripheral.update_adv_data(payload.beacon()).await,
+                None => Err(BleHostError::BleHost(Error::InvalidValue)),
+            };
+            if let Err(err) = updated {
+                beacon_failed(&mut failed, "refresh the WardriveESP status beacon", &err, shared);
+            }
+        }
+        // `_advertiser` drops here, and TrouBLE's runner stops the beacon.
+    }
+}
+
+/// Log that the beacon would not `what`, unless `failed` says it was logged already.
+fn beacon_failed(failed: &mut bool, what: &str, err: &impl core::fmt::Debug, shared: &Shared) {
+    if !core::mem::replace(failed, true) {
+        shared.log(format_args!("Bluetooth could not {what}: {err:?}"));
     }
 }
 

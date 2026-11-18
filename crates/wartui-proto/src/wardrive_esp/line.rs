@@ -31,8 +31,11 @@ pub const LINE_MAX: usize = 320;
 /// One output line.
 pub type Line = heapless::Vec<u8, LINE_MAX>;
 
-/// The WardriveESP protocol level `WD:CAPS` names.
+/// The WardriveESP protocol level `WD:CAPS` names: [`FW_LEVEL`], spelled out.
 pub const FW: &str = "1.6.0";
+
+/// The protocol level as major, minor and patch, which the status beacon carries.
+pub const FW_LEVEL: (u8, u8, u8) = (1, 6, 0);
 
 /// Channel numbers, comma-separated.
 pub(super) struct Commas<'a>(pub &'a [u8]);

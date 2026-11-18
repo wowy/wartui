@@ -13,7 +13,8 @@
 //! WardriveESP service reads the same stream down, and its commands come up as
 //! [`Up::WardriveEspCommand`] ([`crate::wardrive_esp`]). The C6 reports that phone's link as
 //! [`Up::PhoneLink`], for the lines that describe it, and [`Down::DropPhone`] asks it to
-//! disconnect the phone.
+//! disconnect the phone. [`Down::Beacon`] carries what the WardriveESP status beacon and advert
+//! extras say.
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while its bytes in
 //! flight, `sent.wrapping_sub(accounted)`, stay under
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::bonds::{BondAddr, BondRecord, MAX_BONDS};
 use crate::link::{LogStr, QueueStat};
+use crate::wardrive_esp::beacon::Beacon;
 
 /// The revision of the [`Up`] and [`Down`] encoding, which [`Hello`](super::Hello)
 /// carries.
@@ -81,6 +83,9 @@ pub enum Down<'a> {
     },
     /// Disconnect the phone reading the WardriveESP stream: it asked to be dropped.
     DropPhone,
+    /// What the WardriveESP beacon says. Sent after each hello answer, when it changes, and every
+    /// 5 s.
+    Beacon(Beacon),
 }
 
 /// [`Down::Bonds`]'s `window_ms` while no bond is stored: open until one is.

@@ -118,10 +118,33 @@ later, on 4 connections of 4. The C6 counts a TX subscription only once the cent
 the connection it holds, and the same sequence linked on both tries. A phone holds no bond, so the
 app never met this. Why the central's requests went unanswered was not traced.
 
+## Status beacon and advert extras (2026-11-18)
+
+D0:1C on the build that adds them, pool US, read on the bench PC through BlueZ, one short scan
+per sample. BlueZ gives the manufacturer data and the service data; the bytes below follow the
+company id and the `0x5744` UUID.
+
+| State | Status | Extras, frame A / frame B |
+| --- | --- | --- |
+| free, no phone since boot | `57 00 80 00 00 16 00 d0 1c` | `00 00 ff ff c7 ff` / `01 ff 7f 00 00 00` |
+| stand-in linked, `iam i Bench`, `ch 1,6,11,36`, scanning | `57 83 80 54 00 16 00 d0 1c` and `Bench` | `00 00 ff 21 44 00` / `01 00 00 00 00 00` |
+| free, after `bye` and a disconnect | `57 00 80 00 00 16 00 d0 1c` | `02 00 ff ff c7 ff` / `03 ff 7f 00 00 00` |
+| free, after `drop` | the same | `04 00 ff ff c7 ff` / `05 ff 7f 00 00 00` |
+
+- The frames swapped every 5 s, with the connectable advertisement running through each swap.
+- The count, `54 00`, was the `WD:STATUS aps=84` of the period before it, and moved to `08 00`
+  with the next.
+- The C6's controller took the beacon beside a connection: the PC read it while it was itself the
+  linked central.
+- `wartui status` answered over Bluetooth and over USB afterwards, on the stored bond.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
   service UUID and the name while the setting was on.
+- The status UUID in the linked board's advertisement, for the same reason, and its 1 s interval.
+- A first pairing beside the beacon's advertisement. The stored bond resumed.
+- The beacon read by a phone app: a second phone beside a linked one.
 - iOS.
 - `wartui ports` beside a linked phone, by the bridge's own counters. It was judged in the app,
   which showed no break.

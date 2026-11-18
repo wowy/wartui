@@ -13,6 +13,9 @@
 //! could send. `drop` and `link` are safe to take: a phone can drop only its own link, and `link`
 //! tells it only about that link.
 //!
+//! **`bye` is its own command**: the app sends it before it lets go on purpose, and the advert
+//! extras tell other phones so.
+//!
 //! **`iam` names the app**: `iam a <nickname>` for Android, `iam i <nickname>` for an iPhone. The
 //! nickname is cut to [`NICKNAME_MAX`] bytes, then back to a whole UTF-8 character. Any other
 //! form is [`Command::Silent`].
@@ -86,6 +89,8 @@ pub enum Command<'a> {
     },
     /// `ch`, in its three forms.
     Channels(Channels<'a>),
+    /// `bye`: the app is about to let go on purpose.
+    Bye,
     /// A command the bridge takes and answers with nothing.
     Silent,
     /// A command for a mode the bridge lacks.
@@ -161,7 +166,8 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
                 argument => Channels::Set(argument),
             })
         }
-        b"bye" | b"hb" | b"client" | b"time" => Command::Silent,
+        b"bye" => Command::Bye,
+        b"hb" | b"client" | b"time" => Command::Silent,
         b"bt" | b"cap" | b"csi" | b"coproc" | b"led" | b"screen" | b"sd" | b"ota" => {
             Command::Unsupported
         }

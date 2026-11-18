@@ -41,17 +41,50 @@ A linked phone counts as the bridge's host and holds it alone.
 
 ## What a phone sees
 
-**Advertising.** A legacy advertisement cannot hold two 128-bit UUIDs and the name, so the pair
-depends on the setting.
+**Advertising.** A legacy advertisement holds 31 bytes and cannot carry two 128-bit UUIDs and the
+name, so what it carries depends on the setting and on whether a central is connected.
 
-| Setting | Advertisement | Scan response |
+| State | Advertisement | Scan response |
 | --- | --- | --- |
-| on, and USB does not hold the bridge | flags, the WardriveESP service UUID | the name, `wartui XX:YY` |
-| off, or USB holds the bridge | flags, the name | the wartui link's service UUID |
+| on, no central | connectable, every 100 ms: flags, the WardriveESP service UUID, the advert extras | the name, `wartui XX:YY`, and status bytes 0-8 |
+| on, a central connected | not connectable, about once a second: flags, the status UUID, the advert extras | the status, with the nickname |
+| off, no central | connectable, every 100 ms: flags, the name | the wartui link's service UUID |
+| off, a central connected | nothing | nothing |
 
-The name is `wartui XX:YY`, the bridge's last two octets, under either pair, which is how a
-wartui host finds the bridge. The bridge sends no status beacon and no advert extras, and
-advertises nothing while a central is connected.
+"On" is the setting on and USB not holding the bridge. The name is `wartui XX:YY`, the bridge's
+last two octets, which is how a wartui host finds the bridge. The status UUID is
+`0547686F-7374-4553-5042-726964675354`. It replaces the service UUID while a central is connected,
+whether a phone or a wartui host, so an app does not try a bridge that is taken.
+
+The status is manufacturer data under company id `0xFFFF`:
+
+| Byte | The bridge sends |
+| --- | --- |
+| 0 | `W` |
+| 1 | bit 0 a central is connected, bit 1 the phone's session scans, bit 7 the connected app said it is an iPhone. The mode is Wi-Fi; the USB, GPS and updating bits are clear |
+| 2 | `0x80`: the temperature is unknown |
+| 3-4 | the `WD:AP` lines in the last finished 5 s period, little-endian, at most `0xFFFF`; 0 with no phone |
+| 5-6 | `0x16`, `0x00`: protocol level 1.6.0, as `WD:CAPS` names it |
+| 7-8 | the bridge's last two octets, as in the name |
+| 9+ | while a central is connected, the nickname from `iam`; nothing without one |
+
+The advert extras are 6 bytes of service data under `0x5744`, frame A and frame B swapped every
+5 s:
+
+| Byte | Frame A | Frame B |
+| --- | --- | --- |
+| 0 | bit 0 `0`; bits 1-2 how the last phone link ended | bit 0 `1`; bits 1-2 the same |
+| 1 | `0`: a generic board | channel bits 24-31 |
+| 2 | `0xFF`: no battery gauge | channel bits 32-39 |
+| 3-5 | channel bits 0-23 | channel bits 40-41, then `0` |
+
+- How the last phone link ended: `0` no phone has linked since the P4 booted, `1` the app sent
+  `bye` before it let go, `2` any other end, USB taking the bridge and the setting turned off
+  among them.
+- The channel bits are the phone's channel list, or the whole pool with no list or no phone, in
+  the document's order. The bridge has no screen and no co-processor, so those bits are clear.
+- Both refresh every 5 s and at once when what they say changes. The connectable advertisement
+  keeps running through a refresh.
 
 **GATT.** The service sits beside the wartui link's, with no encryption or bonding required.
 
@@ -110,7 +143,8 @@ A command is cut to 240 bytes and trimmed. Its first word picks it.
 | `link` | plain text lines about the Bluetooth link: the phone's address and time linked, its `iam` name, signal, MTU, interval and timeout, and the links and last drop since the C6 booted |
 | `drop` | `disconnecting the phone`, then the bridge disconnects the phone, which stops the scan |
 | `iam a <nickname>`, `iam i <nickname>` | kept until the phone links again or lets go, and shown by `link`: Android or iPhone, and the nickname cut to 18 bytes on a character boundary. Answered with nothing |
-| `bye`, `hb`, `client`, `time …`, and any other `iam` | taken, and answered with nothing |
+| `bye` | answered with nothing; the advert extras then say the link was released when the phone lets go |
+| `hb`, `client`, `time …`, and any other `iam` | taken, and answered with nothing |
 | `bt`, `cap`, `csi`, `coproc`, `led`, `screen`, `sd`, `ota`, and `wdstream` with `-bt`, `-cap` or `-promisc` | `WD:ERR reason=unsupported`, and nothing changes |
 | anything else | `unknown command '<word>'`, then the help list |
 
@@ -185,8 +219,7 @@ it.
 ## What is not implemented
 
 Everything the document marks as a later version or another transport: Bluetooth scanning
-(`WD:BT`), capture, GPS, firmware updates, the USB protocol, the status beacon and advert
-extras, `WD:CRASH` and `WD:CONN`, CSI, the LED ring, the screen, microSD runs and the
-co-processor.
+(`WD:BT`), capture, GPS, firmware updates, the USB protocol, `WD:CRASH` and `WD:CONN`, CSI, the
+LED ring, the screen, microSD runs and the co-processor.
 
 What the bench measured is in [`wardrive-esp-findings.md`](wardrive-esp-findings.md).

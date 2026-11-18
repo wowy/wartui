@@ -11,12 +11,15 @@
 //! and may overtake a backlog of stream lines, so a busy scan still answers. `WD:HEALTH` is an
 //! answer too, so a backlog never holds it.
 //!
-//! The channel list and the app's `iam` are the session's: a list of `None` means every channel
-//! of the pool. Both last until the phone subscribes again or lets go ([`Session::release`]), so
-//! a stop and a start keep them. The free-text replies are wartui's own wording.
+//! The channel list, the app's `iam` and its `bye` are the session's: a list of `None` means every
+//! channel of the pool. They last until the phone subscribes again or lets go
+//! ([`Session::release`]), so a stop and a start keep them. The P4 reads [`Session::said_bye`]
+//! before the release, for how the link ended, and [`Session::beacon`] for what the status beacon
+//! says. The free-text replies are wartui's own wording.
 
 use heapless::Vec;
 
+use super::beacon::{Beacon, LinkEnd, channel_bits};
 use super::command::{self, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels};
 use super::line::{self, Commas, FW, Line};
 use crate::bus::{RecordKind, SightingMsg};
@@ -119,6 +122,8 @@ pub struct Session {
     last_aps: u32,
     /// The app's latest `iam`, or `None` before one.
     iam: Option<Iam>,
+    /// The app sent `bye`.
+    bye: bool,
 }
 
 /// Build a line with `build` and send it, or send nothing when it does not fit.
@@ -163,13 +168,35 @@ impl Session {
     /// No phone, not scanning, every channel.
     #[must_use]
     pub const fn new() -> Self {
-        Self { scanning: false, list: None, aps: 0, scans: 0, last_aps: 0, iam: None }
+        Self { scanning: false, list: None, aps: 0, scans: 0, last_aps: 0, iam: None, bye: false }
     }
 
     /// Whether the session is scanning.
     #[must_use]
     pub const fn scanning(&self) -> bool {
         self.scanning
+    }
+
+    /// Whether the app sent `bye`.
+    #[must_use]
+    pub const fn said_bye(&self) -> bool {
+        self.bye
+    }
+
+    /// What the status beacon says of this session, over `pool`, with the last link's end as
+    /// `link_end`.
+    #[must_use]
+    pub fn beacon(&self, pool: ChannelPool, link_end: LinkEnd) -> Beacon {
+        let (iphone, nickname) =
+            self.iam.as_ref().map_or((false, Vec::new()), |iam| (iam.iphone, iam.nickname.clone()));
+        Beacon {
+            scanning: self.scanning,
+            count: u16::try_from(self.last_aps).unwrap_or(u16::MAX),
+            iphone,
+            nickname,
+            link_end,
+            channels: channel_bits(self.list(pool).channels()),
+        }
     }
 
     /// The phone subscribed to TX: a fresh session, scanning.
@@ -183,6 +210,10 @@ impl Session {
         let command = command::parse(text)?;
         match command {
             Command::Silent => None,
+            Command::Bye => {
+                self.bye = true;
+                None
+            }
             Command::Stream { unsupported_mode: true, .. } | Command::Unsupported => {
                 emit(sink, Class::Answer, |out| line::err(out, "unsupported"));
                 None
