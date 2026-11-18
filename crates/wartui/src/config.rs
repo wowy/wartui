@@ -347,7 +347,8 @@ fn bridge_setting(text: &str) -> Option<&'static str> {
     } else if table.contains_key("bluetooth") {
         Some(
             "the bridge picks the node that scans Bluetooth, so wartui.toml has no `[bluetooth]`: \
-             add Bluetooth to the scan with `wartui scan start --bluetooth`, or `b` in `run`",
+             add Bluetooth to the scan with `wartui scan start --bluetooth`, or the `bluetooth` \
+             row in `run`'s settings (`c`)",
         )
     } else {
         None

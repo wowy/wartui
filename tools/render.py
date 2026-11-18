@@ -16,9 +16,10 @@ and everything it draws is fed to a `pyte.Screen`. What comes back is the grid:
 
     tools/render.py --sim 3 --cols 120 --rows 30
 
-`--keys` presses keys before the capture, so the states behind `j`, `k` and `b`
-are reachable too; `b` shows as `pending` until the node's next heartbeat, which
-is the protocol rather than lag.
+`--keys` presses keys before the capture, so the states behind `j`, `k` and the
+settings are reachable too: `--keys $'cjjl\r'` turns Bluetooth on, and the scan
+shows as `pending` until the node's next heartbeat, which is the protocol rather
+than lag.
 
 The binary is built before it is spawned rather than run through `cargo run`,
 because a first `draw` writes only the cells it considers non-empty: cargo's
@@ -33,8 +34,8 @@ pin a position for whatever that leaves unfixed.
 
 Real nodes answer on their own schedule rather than an accelerated clock, which is what
 `--after` and `--settle` default differently for: the bridge sends a share at once, but
-the node's next heartbeat, up to 5 s away, is what shows it held, so a `b` read a second
-later reads as pending when it is merely early.
+the node's next heartbeat, up to 5 s away, is what shows it held, so a Bluetooth toggle read
+a second later reads as pending when it is merely early.
 
 The capture goes to a temporary database that is deleted on the way out, since `run`
 otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,
@@ -47,8 +48,8 @@ about the machine. `--config` passed through `-- ARGS` is used instead. A bare `
 has no remembered bridge and finds the board by sweeping the attached P4 bridges, so naming the
 bridge is the way to avoid opening another one. A `--bridge` render also drives the real fleet:
 `run` starts the bridge's scan on the pool it holds, on otherwise default host settings, so
-the screen is not the operator's own setup, and a `b` pressed there toggles the bridge's
-Bluetooth scan. Its closing `q` stops the scan.
+the screen is not the operator's own setup, and the settings' `bluetooth` row toggles the
+bridge's Bluetooth scan. Its closing `q` stops the scan.
 """
 
 import argparse
@@ -399,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument("--after", type=float, metavar="SECONDS",
                         help=f"how long to let the fleet fill in first; {SIM_AFTER:g}s, "
                              f"or {BRIDGE_AFTER:g}s with --bridge")
-    parser.add_argument("--keys", default="", help="keys to press first, e.g. jjb")
+    parser.add_argument("--keys", default="", help="keys to press first, e.g. jjc")
     parser.add_argument("--settle", type=float, metavar="SECONDS",
                         help=f"how long to let a key land; {SIM_SETTLE:g}s, or "
                              f"{BRIDGE_SETTLE:g}s with --bridge")
