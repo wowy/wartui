@@ -14,8 +14,8 @@
 //! the rest ascending. Position `p` goes to the `p`-th Wi-Fi slot in turn, and the deal runs for
 //! as many positions as there are channels or Wi-Fi slots, whichever is more.
 //!
-//! - 1, 6 and 11 are the busiest channels, so they land on three different nodes, and with three
-//!   or more Wi-Fi slots no node carries two of them.
+//! - 1, 6 and 11 are the busiest channels, so they take the first three positions: with three or
+//!   more Wi-Fi slots no node carries two of them.
 //! - With at least as many channels as Wi-Fi slots, each channel is dealt once and shares differ
 //!   by at most one, so sweep times stay within one dwell of each other.
 //! - With fewer, the order starts over, so every Wi-Fi slot holds one channel and 1, 6 and 11 are
@@ -171,8 +171,7 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///
 /// The deal order is channels 1, 6 and 11, those `channels` holds, then the rest ascending.
 /// Position `p` of it goes to the `p`-th [`Job::Wifi`] slot in turn, in slot order, wrapping. So
-/// the busiest channels sit on different nodes, and with three or more Wi-Fi slots no node carries
-/// two of them. The deal runs for as many positions as there are channels or Wi-Fi slots,
+/// with three or more Wi-Fi slots no node carries two of the busiest channels. The deal runs for as many positions as there are channels or Wi-Fi slots,
 /// whichever is more, starting the order over when it runs out: a set smaller than the fleet is
 /// dealt again, popular first, so every Wi-Fi slot holds a channel.
 ///

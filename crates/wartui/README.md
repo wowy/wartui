@@ -969,7 +969,8 @@ Set it from settings (`c`) or with `wartui pool`; see "The channel pool".
 An assignment's forty-two-bit mask can name any subset. The planner deals round-robin from one
 order: 1, 6 and 11, then the rest of the pool ascending. Position _k_ of that order goes to
 sniffing node _k mod n_, so 1, 6 and 11 land on the first three. They are the busiest channels, so
-no node carries two of them once three nodes sniff. Every node carries both bands. A block split
+no node carries two of them once three nodes sniff. Every node carries both bands while each band
+has a channel for it. A block split
 would put one node on all of 2.4 GHz, and losing it would blind the fleet to that band until the
 next re-cut landed.
 
