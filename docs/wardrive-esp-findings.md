@@ -74,9 +74,12 @@ Tried on 2026-11-18 at `9926c16`, with the app running on the phone and the sett
 Eight of those tries, one of the two that paired among them, ran after the app was closed on the
 phone. The bridge's log shows why they fail. An unbonded central connects within about 0.1 s of
 each disconnect, under a new random address each time, and does nothing until the C6 drops it 30 s
-later, so the bridge advertises for about 0.1 s in every 30 s. Its 48.75 ms interval is the
-Pixel's; whether it is the phone was not settled. A `bluetoothctl scan on` beside the pairing made
-no difference: one try paired with it running and three failed.
+later, so the bridge advertises for about 0.1 s in every 30 s. A `bluetoothctl scan on` beside the pairing made no difference: one try paired with it running
+and three failed.
+
+The central is the phone, app closed or not. With the phone's Bluetooth turned off, the bridge
+logged no connection in 45 s, `unbonded_kicks` stayed at 31, and a fresh pairing after `forget`
+paired and bonded in 3 of 3 tries.
 
 With the setting on and the phone linked, the PC is not served at all, which is the rule: the
 phone is the host. Turning the board off in the app, or the phone's Bluetooth, frees the bridge.
@@ -88,8 +91,8 @@ admitted. A phone that remembers the bridge connects then too, and Android answe
 with a pairing prompt: the Pixel 8 showed one each time `wartui status` ran over USB, which holds
 phones out for 15 s. From `9926c16` the C6 sends no Security Request. On that build the PC's
 stored bond resumed and a fresh pairing bonded (the table above), and through 14
-`unbonded_kicks` of the phone the bridge counted no pairing begun or failed. Whether the prompt
-is gone was not seen from the bench: it shows only on the phone.
+`unbonded_kicks` of the phone the bridge counted no pairing begun or failed. The phone
+showed no prompt on that build.
 
 ## Not measured
 
