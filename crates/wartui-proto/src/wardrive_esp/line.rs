@@ -35,11 +35,13 @@ pub const LINE_MAX: usize = 320;
 /// One output line.
 pub type Line = heapless::Vec<u8, LINE_MAX>;
 
-/// The WardriveESP protocol level `WD:CAPS` names: [`FW_LEVEL`], spelled out.
-pub const FW: &str = "1.6.0";
+/// The WardriveESP protocol level `WD:CAPS` names: [`FW_LEVEL`], spelled out. The highest level
+/// the vendored document describes, whose Bluetooth side the bridge implements or says in
+/// `WD:CAPS` it lacks.
+pub const FW: &str = "1.7.3";
 
 /// The protocol level as major, minor and patch, which the status beacon carries.
-pub const FW_LEVEL: (u8, u8, u8) = (1, 6, 0);
+pub const FW_LEVEL: (u8, u8, u8) = (1, 7, 3);
 
 /// Channel numbers, comma-separated.
 pub(super) struct Commas<'a>(pub &'a [u8]);
@@ -115,6 +117,21 @@ pub fn health(out: &mut Line, up_s: u32, link: &PhoneLink, mtu: u16, dropped: u3
             out,
             "WD:HEALTH up={up_s} heap={} heap_min={} mtu={mtu} txdrop={dropped}",
             link.heap_free, link.heap_least
+        )
+    })
+}
+
+/// `WD:CONN`: the link's timing. The interval in whole milliseconds, rounded down, the latency
+/// in connection events and the supervision timeout. `status=0`: the C6 reports only a change
+/// that took.
+pub fn conn(out: &mut Line, link: &PhoneLink) -> bool {
+    build(out, |out| {
+        write!(
+            out,
+            "WD:CONN itvl_ms={} latency={} timeout_ms={} status=0",
+            link.interval_us / 1000,
+            link.latency,
+            link.timeout_ms
         )
     })
 }

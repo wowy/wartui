@@ -503,6 +503,7 @@ fn radio_link_largest_messages_fit_one_packet() {
         connected_s: u32::MAX,
         rssi: Some(i8::MIN),
         interval_us: u32::MAX,
+        latency: u16::MAX,
         timeout_ms: u16::MAX,
         last_drop: Some(LastDrop { reason: u8::MAX, ago_s: u32::MAX }),
         heap_free: u32::MAX,
@@ -721,6 +722,7 @@ fn radio_link_revision_golden_bytes() {
         connected_s: 65,
         rssi: Some(-61),
         interval_us: 48_000,
+        latency: 4,
         timeout_ms: 4000,
         last_drop: Some(LastDrop { reason: 0x13, ago_s: 12 }),
         heap_free: 300,
@@ -734,6 +736,7 @@ fn radio_link_revision_golden_bytes() {
         3, 65,            // connections, connected_s
         1, 0xC3,          // rssi: Some, -61 as one byte
         0x80, 0xF7, 0x02, // interval_us 48000, varint
+        4,                // latency
         0xA0, 0x1F,       // timeout_ms 4000, varint
         1, 0x13, 12,      // last_drop: Some, reason, ago_s
         0xAC, 0x02,       // heap_free 300, varint
@@ -745,7 +748,7 @@ fn radio_link_revision_golden_bytes() {
     let none = Up::PhoneLink(PhoneLink::default());
     let len = encode_up(&none, &mut out).unwrap();
     // Every number 0, and both options `None`.
-    assert_eq!(out[..len], [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(out[..len], [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), none);
 }
 

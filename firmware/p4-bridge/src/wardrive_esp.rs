@@ -29,12 +29,14 @@
 //! the queue, scanning or not.
 //!
 //! **The C6 measures the phone's link** and sends it as `Up::PhoneLink`, just ahead of the
-//! `BleState` that attaches the phone, a second after, then every 5 s, so `WD:LINK` in the scan
-//! header, `WD:HEALTH` and the `link` answer read the latest. Its two ages, the connection's and
-//! the last drop's, gain the seconds since it arrived, so each line reads as of when it is
-//! written. `WD:BOOT` reads the P4's own image: its slot, its trial (`src/update.rs`) and why it
-//! last reset. A phone that sends `drop` is answered first; `Down::DropPhone` then asks the C6 to
-//! disconnect it, which releases it here.
+//! `BleState` that attaches the phone, a second after, then every 5 s, and at once when the
+//! link's timing changes, so `WD:LINK` in the scan header, `WD:HEALTH` and the `link` answer read
+//! the latest. A report's two ages, the connection's and the last drop's, gain the seconds since
+//! it arrived, so each line reads as of when it is written. The session sends `WD:CONN` when a
+//! report's timing differs from the one it last told the phone of, and the report ahead of the
+//! attach is its baseline. `WD:BOOT` reads the P4's own image: its slot, its trial
+//! (`src/update.rs`) and why it last reset. A phone that sends `drop` is answered first;
+//! `Down::DropPhone` then asks the C6 to disconnect it, which releases it here.
 //!
 //! **The P4 holds what the status beacon and advert extras say** (`wardrive_esp::beacon`): the
 //! session's scan, count, `iam` and channel list, or a fresh session's while no phone holds the
@@ -113,6 +115,7 @@ impl Phone {
                 connected_s: 0,
                 rssi: None,
                 interval_us: 0,
+                latency: 0,
                 timeout_ms: 0,
                 last_drop: None,
                 heap_free: 0,
@@ -198,10 +201,15 @@ fn apply(shared: &Shared, ask: Option<Ask>) {
     }
 }
 
-/// The C6's latest report of the phone's link: kept for the session's lines.
+/// The C6's latest report of the phone's link: kept for the session's lines, and given to the
+/// session while the phone holds the queue, for `WD:CONN`.
+#[inline(never)]
 pub fn on_link(shared: &Shared, link: PhoneLink) {
     shared.phone.link.set(link);
     shared.phone.link_at.set(Instant::now());
+    if holds(shared) {
+        shared.phone.session.borrow_mut().on_link(&link, &mut Lines(shared));
+    }
 }
 
 /// The latest report of the phone's link, its ages moved on by the whole seconds since it

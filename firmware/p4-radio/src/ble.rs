@@ -121,7 +121,9 @@
 //! **The P4 holds the phone's link before its session starts.** An `Up::PhoneLink` goes just ahead
 //! of the `BleState` that names the phone's stream, with no signal reading yet, then
 //! [`PHONE_LINK_FIRST`] after with one, so a `link` soon after linking has a signal, then every
-//! [`PHONE_LINK_EVERY`] while the phone reads it ([`phone`]). It counts the connections
+//! [`PHONE_LINK_EVERY`] while the phone reads it ([`phone`]). One also goes at once when the
+//! link's timing changes while the phone reads it, with the last signal read on the connection,
+//! so the report does not lose a known signal ([`events`]). It counts the connections
 //! since boot and carries how the one before this ended, which the C6 keeps where it counts
 //! `last_disconnect`. A `Down::DropPhone` disconnects a phone reading its stream [`DROP_GRACE`]
 //! later, so the answer the P4 queued just ahead of it reaches the phone. One with no phone reading
@@ -1288,6 +1290,8 @@ struct Session {
     link_due: Cell<Option<Instant>>,
     /// Raised when `link_due` is set, for [`phone`].
     link_armed: Signal<NoopRawMutex, ()>,
+    /// The last signal read on this connection, or `None` before one.
+    rssi: Cell<Option<i8>>,
 }
 
 /// Whether the link is encrypted and the central holds a stored bond: what the host stream needs.
@@ -1344,6 +1348,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         peer: bond_addr(&raw.peer_identity()).mac(),
         link_due: Cell::new(None),
         link_armed: Signal::new(),
+        rssi: Cell::new(None),
     };
     let window = if session.bondable { "open" } else { "closed" };
     let bonded = if raw.is_bonded_peer() { "bonded" } else { "not bonded" };
@@ -1404,6 +1409,7 @@ fn phone_link(
         connected_s: session.connected_at.elapsed().as_secs() as u32,
         rssi,
         interval_us: params.conn_interval.as_micros() as u32,
+        latency: params.peripheral_latency,
         timeout_ms: params.supervision_timeout.as_millis().min(u64::from(u16::MAX)) as u16,
         last_drop,
         heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
@@ -1433,6 +1439,9 @@ async fn phone(stack: &BleStack<'_>, conn: &Conn<'_, '_>, session: &Session, sha
             Either3::First(()) if ble.stream() == Stream::Phone => {
                 session.link_due.set(Some(Instant::now() + PHONE_LINK_EVERY));
                 let rssi = conn.raw().rssi(stack).await.ok();
+                if rssi.is_some() {
+                    session.rssi.set(rssi);
+                }
                 say_phone_link(conn, session, shared, rssi);
             }
             // The phone's stream ended: nothing is due until it starts again.
@@ -1520,6 +1529,10 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
             GattConnectionEvent::ConnectionParamsUpdated { conn_interval, .. } => {
                 let us = conn_interval.as_micros() as u32;
                 ble.count(|c| c.interval_us = us);
+                // The P4 tells the phone of the new timing at once.
+                if ble.stream() == Stream::Phone {
+                    say_phone_link(conn, session, shared, session.rssi.get());
+                }
             }
             // Never raised: without trouble-host's `connection-params-update` the controller
             // keeps the remote parameter request event masked and answers a central's

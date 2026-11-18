@@ -15,7 +15,11 @@
 //! [`Class::Stream`] lines are the scan's own, `WD:AP` and `WD:BT` among them, and keep their
 //! order with it: an app reads `WD:END` as the last line of a scan. [`Class::Answer`] lines reply
 //! to a command and may overtake a backlog of stream lines, so a busy scan still answers.
-//! `WD:HEALTH` is an answer too, so a backlog never holds it.
+//! `WD:HEALTH` and `WD:CONN` are answers too, so a backlog never holds them.
+//!
+//! **`WD:CONN` goes when the link's timing changes** ([`Session::on_link`]): its interval,
+//! latency or supervision timeout. The timing in force at the subscribe is the baseline, so
+//! linking sends none.
 //!
 //! The mode, the channel list, the app's `iam` and its `bye` are the session's: a list of `None`
 //! means every channel of the pool. They last until the phone subscribes again or lets go
@@ -134,6 +138,24 @@ impl core::fmt::Display for Signal {
     }
 }
 
+/// The link's timing, as `WD:CONN` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Timing {
+    interval_us: u32,
+    latency: u16,
+    timeout_ms: u16,
+}
+
+impl Timing {
+    /// No timing: a session with no phone.
+    const NONE: Self = Self { interval_us: 0, latency: 0, timeout_ms: 0 };
+
+    /// `link`'s timing.
+    const fn of(link: &PhoneLink) -> Self {
+        Self { interval_us: link.interval_us, latency: link.latency, timeout_ms: link.timeout_ms }
+    }
+}
+
 /// One phone's session. See the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -153,6 +175,8 @@ pub struct Session {
     iam: Option<Iam>,
     /// The app sent `bye`.
     bye: bool,
+    /// The link's timing the phone was last told of, or the subscribe's.
+    timing: Timing,
 }
 
 /// Build a line with `build` and send it, or send nothing when it does not fit.
@@ -211,6 +235,7 @@ impl Session {
             dropped_at: 0,
             iam: None,
             bye: false,
+            timing: Timing::NONE,
         }
     }
 
@@ -249,10 +274,23 @@ impl Session {
         }
     }
 
-    /// The phone subscribed to TX: a fresh session, scanning.
+    /// The phone subscribed to TX: a fresh session, scanning, with the link's timing as its
+    /// baseline.
     pub fn on_subscribe(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) -> Option<Ask> {
         *self = Self::new();
+        self.timing = Timing::of(&ctx.link);
         self.start(ctx, sink)
+    }
+
+    /// The C6 reported the phone's `link`: `WD:CONN`, an answer, when its timing differs from
+    /// what the phone was last told of. Scanning or not.
+    pub fn on_link(&mut self, link: &PhoneLink, sink: &mut impl Sink) {
+        let timing = Timing::of(link);
+        if timing == self.timing {
+            return;
+        }
+        self.timing = timing;
+        emit(sink, Class::Answer, |out| line::conn(out, link));
     }
 
     /// The phone sent `text`.

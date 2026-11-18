@@ -162,6 +162,13 @@ passive scan hears no scan response.
 | No `WD:AP` in Bluetooth mode, no `WD:BT` in Wi-Fi mode | held |
 | Status beacon while linked in Bluetooth mode | `57 07 80 59 00 …`: linked, scanning, mode 1, 89 devices |
 
+## Protocol level 1.7.3 (2026-11-18)
+
+D0:1C on the build that names level 1.7.3 and adds `WD:CONN`, with the PC stand-in: `WD:CAPS
+fw=1.7.3`, `WD:BOOT fw=1.7.3`, `info`'s `WardriveESP protocol 1.7.3`, and the free board's status
+`57 00 80 00 00 17 03 d0 1c`. Linking sent no `WD:CONN`, since the timing at the subscribe is the
+baseline, and the stand-in's link kept its 30 ms interval throughout, so none followed.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -169,6 +176,8 @@ passive scan hears no scan response.
 - The status UUID in the linked board's advertisement, for the same reason, and its 1 s interval.
 - A first pairing beside the beacon's advertisement. The stored bond resumed.
 - The beacon read by a phone app: a second phone beside a linked one.
+- `WD:CONN` on a link whose timing changes: the stand-in's never did.
+- The app at level 1.7.3: whether it sends `iam` and `bye`, and whether it offers an update.
 - The app in Bluetooth mode: whether it sends `bt on` or `wdstream start -bt`, and what it shows.
 - `bt on` on a fleet of one node, refused in the session's tests only.
 - iOS.

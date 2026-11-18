@@ -64,7 +64,7 @@ The status is manufacturer data under company id `0xFFFF`:
 | 1 | bit 0 a central is connected, bit 1 the phone's session scans, bits 2-3 its mode (`0` Wi-Fi, `1` Bluetooth), bit 7 the connected app said it is an iPhone. The USB, GPS and updating bits are clear |
 | 2 | `0x80`: the temperature is unknown |
 | 3-4 | the `WD:AP` or `WD:BT` lines in the last finished 5 s period, little-endian, at most `0xFFFF`; 0 with no phone |
-| 5-6 | `0x16`, `0x00`: protocol level 1.6.0, as `WD:CAPS` names it |
+| 5-6 | `0x17`, `0x03`: protocol level 1.7.3, as `WD:CAPS` names it |
 | 7-8 | the bridge's last two octets, as in the name |
 | 9+ | while a central is connected, the nickname from `iam`; nothing without one |
 
@@ -182,8 +182,8 @@ them restarts the bridge. `drop` and `link` touch only the phone that sends them
 
 | Line | Sent |
 | --- | --- |
-| `WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui board_name=wartui link=ble chans=…` | at a Wi-Fi scan's start and on `caps` |
-| `WD:BOOT fw=1.6.0 slot=<ota_0\|ota_1\|?> image=<trial\|confirmed> reset=<key>` | at a Wi-Fi scan's start, and at the end of `info` |
+| `WD:CAPS fw=1.7.3 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui board_name=wartui link=ble chans=…` | at a Wi-Fi scan's start and on `caps` |
+| `WD:BOOT fw=1.7.3 slot=<ota_0\|ota_1\|?> image=<trial\|confirmed> reset=<key>` | at a Wi-Fi scan's start, and at the end of `info` |
 | `WD:LINK conns=<n> mtu=<n> prev_disc=<0x2NN\|none> [prev_disc_ago=<n>s]` | at a Wi-Fi scan's start |
 | `WD:MODE mode=<wifi\|bt>` | at scan start, and to a switch while scanning |
 | `WD:BEGIN type=<wifi\|bt> interval=0 channel=auto` | at scan start |
@@ -195,13 +195,15 @@ them restarts the bridge. `drop` and `link` touch only the phone that sends them
 | `WD:END reason=stop` | when the scan stops |
 | `WD:ERR reason=<unsupported\|no_supported_channels\|bt_needs_two_nodes>` | a command refused |
 | `WD:HEALTH up=<s> heap=<bytes> heap_min=<bytes> mtu=<n> txdrop=<n>` | every 15 s while the phone is linked, scanning or not |
+| `WD:CONN itvl_ms=<n> latency=<n> timeout_ms=<n> status=0` | when the link's timing changes while the phone is linked, scanning or not |
 
 A Wi-Fi scan starts with `WD:CAPS`, `WD:BOOT`, `WD:LINK`, `WD:MODE`, `WD:BEGIN` and `WD:PLAN`, in
-that order; a Bluetooth scan with `WD:MODE` and `WD:BEGIN`. `WD:HEALTH` is queued as a command's answer is, so a backlog of stream lines never holds
-it.
+that order; a Bluetooth scan with `WD:MODE` and `WD:BEGIN`. `WD:HEALTH` and `WD:CONN` are
+queued as a command's answer is, so a backlog of stream lines never holds them.
 
-- `fw=` names the level of the protocol document, not the bridge's firmware version, which
-  `info` gives. `board=wartui` and `ota=0` tell an app the bridge is not a board it updates.
+- `fw=` names the highest level the protocol document describes, not the bridge's firmware
+  version, which `info` gives. The bridge implements that level's Bluetooth side, or says in
+  `WD:CAPS` that it lacks a capability. `board=wartui` and `ota=0` tell an app the bridge is not a board it updates.
 - `chans=` in `WD:CAPS` is the bridge's channel pool. `WD:PLAN` is the phone's channel list.
 - `ts` is milliseconds since the bridge booted, when the line was written.
 - `auth` is `OPEN`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2_WPA3` or `UNKNOWN`. WPA2 Enterprise and
@@ -225,6 +227,10 @@ it.
   least free heap (the P4 has no heap), and `txdrop` the lines dropped from the phone's queue
   since it linked. The document's `largest`, `stack_*`, `low_stack`, `last`, `batt` and `temp`
   are left out: the bridge has no figure for them.
+- `WD:CONN`: `itvl_ms` is the connection interval in whole milliseconds, rounded down,
+  `latency` the peripheral latency in connection events, and `timeout_ms` the supervision
+  timeout. `status=0`, since the C6 reports only a change that took. None is sent at linking:
+  the timing in force when the phone subscribes is the baseline.
 
 ## How the fleet maps onto one board
 
@@ -255,7 +261,7 @@ it.
 
 ## What is not implemented
 
-Everything the document marks as a later version or another transport: capture, GPS, firmware updates, the USB protocol, `WD:CRASH` and `WD:CONN`, CSI, the
+Everything the document marks as a later version or another transport: capture, GPS, firmware updates, the USB protocol, `WD:CRASH`, CSI, the
 LED ring, the screen, microSD runs and the co-processor.
 
 What the bench measured is in [`wardrive-esp-findings.md`](wardrive-esp-findings.md).

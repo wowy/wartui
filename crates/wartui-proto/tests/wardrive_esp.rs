@@ -424,11 +424,11 @@ fn wardrive_line_formats_caps_golden_when_pool_is_us() {
     assert!(line::caps(&mut out, ChannelPool::Us));
     assert_eq!(
         text(&out),
-        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
+        "WD:CAPS fw=1.7.3 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
          board_name=wartui link=ble chans=1,2,3,4,5,6,7,8,9,10,11,36,40,44,48,52,56,60,64,100,\
          104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165\n"
     );
-    assert_eq!(line::FW, "1.6.0");
+    assert_eq!(line::FW, "1.7.3");
 }
 
 #[test]
@@ -533,6 +533,7 @@ fn ctx() -> Ctx<'static> {
             connected_s: 65,
             rssi: Some(-61),
             interval_us: 48_750,
+            latency: 0,
             timeout_ms: 4000,
             last_drop: Some(LastDrop { reason: 0x13, ago_s: 12 }),
             heap_free: 41_000,
@@ -542,12 +543,12 @@ fn ctx() -> Ctx<'static> {
     }
 }
 
-const BOOT: &str = "WD:BOOT fw=1.6.0 slot=ota_0 image=confirmed reset=power_on\n";
+const BOOT: &str = "WD:BOOT fw=1.7.3 slot=ota_0 image=confirmed reset=power_on\n";
 const LINK: &str = "WD:LINK conns=3 mtu=182 prev_disc=0x213 prev_disc_ago=12s\n";
 
 fn caps_all() -> String {
     format!(
-        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
+        "WD:CAPS fw=1.7.3 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
          board_name=wartui link=ble chans={ALL_CHANS}\n"
     )
 }
@@ -919,7 +920,7 @@ fn wardrive_session_answers_status_and_info_when_asked() {
         lines.take(),
         [
             "wartui bridge 44:C0 fw 0.9.0\n",
-            "WardriveESP protocol 1.6.0\n",
+            "WardriveESP protocol 1.7.3\n",
             "uptime 61 s nodes 3\n",
             BOOT
         ]
@@ -1008,6 +1009,16 @@ fn wardrive_line_says_none_when_no_previous_drop() {
 }
 
 #[test]
+fn wardrive_line_formats_conn_golden_when_timing_given() {
+    let mut out = Line::new();
+    // The interval rounds down to whole milliseconds.
+    let link =
+        PhoneLink { interval_us: 48_750, latency: 2, timeout_ms: 5000, ..PhoneLink::default() };
+    assert!(line::conn(&mut out, &link));
+    assert_eq!(text(&out), "WD:CONN itvl_ms=48 latency=2 timeout_ms=5000 status=0\n");
+}
+
+#[test]
 fn wardrive_line_maps_reset_cause_to_vendor_key_when_formatting_boot() {
     let causes = [
         (ResetCause::PowerOn, "power_on"),
@@ -1022,7 +1033,7 @@ fn wardrive_line_maps_reset_cause_to_vendor_key_when_formatting_boot() {
     for (reset, key) in causes {
         assert_eq!(line::reset_key(reset), key);
         assert!(line::boot(&mut out, &Boot { slot: "ota_1", trial: false, reset }));
-        let want = format!("WD:BOOT fw=1.6.0 slot=ota_1 image=confirmed reset={key}\n");
+        let want = format!("WD:BOOT fw=1.7.3 slot=ota_1 image=confirmed reset={key}\n");
         assert_eq!(text(&out), want, "{reset:?}");
     }
 }
@@ -1032,7 +1043,67 @@ fn wardrive_line_says_trial_when_image_on_trial() {
     let mut out = Line::new();
     let boot = Boot { slot: "?", trial: true, reset: ResetCause::Software };
     assert!(line::boot(&mut out, &boot));
-    assert_eq!(text(&out), "WD:BOOT fw=1.6.0 slot=? image=trial reset=software\n");
+    assert_eq!(text(&out), "WD:BOOT fw=1.7.3 slot=? image=trial reset=software\n");
+}
+
+#[test]
+fn wardrive_session_sends_nothing_when_link_timing_matches_subscribe() {
+    let (mut session, mut lines) = subscribed();
+    session.on_link(&ctx().link, &mut lines);
+    assert!(lines.take().is_empty());
+}
+
+#[test]
+fn wardrive_session_sends_conn_once_when_link_timing_changes() {
+    let base = ctx().link;
+    let changes = [
+        PhoneLink { interval_us: 30_000, ..base },
+        PhoneLink { latency: 4, ..base },
+        PhoneLink { timeout_ms: 6000, ..base },
+    ];
+    let wants = [
+        "WD:CONN itvl_ms=30 latency=0 timeout_ms=4000 status=0\n",
+        "WD:CONN itvl_ms=48 latency=4 timeout_ms=4000 status=0\n",
+        "WD:CONN itvl_ms=48 latency=0 timeout_ms=6000 status=0\n",
+    ];
+    for (link, want) in changes.iter().zip(wants) {
+        let (mut session, mut lines) = subscribed();
+        session.on_link(link, &mut lines);
+        assert_eq!(lines.take_classed(), [(Class::Answer, want.into())], "{link:?}");
+        // The same report again is no change.
+        session.on_link(link, &mut lines);
+        assert!(lines.take().is_empty(), "{link:?}");
+    }
+}
+
+#[test]
+fn wardrive_session_sends_conn_when_link_timing_changes_while_stopped() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"stop", &ctx(), &mut lines);
+    lines.take();
+    session.on_link(&PhoneLink { latency: 4, ..ctx().link }, &mut lines);
+    assert_eq!(lines.take().len(), 1);
+}
+
+#[test]
+fn wardrive_session_sends_nothing_when_only_signal_or_heap_changes() {
+    let (mut session, mut lines) = subscribed();
+    let base = ctx().link;
+    session.on_link(&PhoneLink { rssi: Some(-80), ..base }, &mut lines);
+    session.on_link(&PhoneLink { heap_free: 1, heap_least: 1, ..base }, &mut lines);
+    session.on_link(&PhoneLink { rssi: None, connected_s: 900, ..base }, &mut lines);
+    assert!(lines.take().is_empty());
+}
+
+#[test]
+fn wardrive_session_takes_new_baseline_when_phone_subscribes_again() {
+    let (mut session, mut lines) = subscribed();
+    let mut ctx = ctx();
+    ctx.link.interval_us = 30_000;
+    session.on_subscribe(&ctx, &mut lines);
+    lines.take();
+    session.on_link(&ctx.link, &mut lines);
+    assert!(lines.take().is_empty());
 }
 
 #[test]
@@ -1167,7 +1238,7 @@ fn wardrive_session_ends_info_with_boot_line_when_asked() {
     assert_eq!(classed.len(), 4);
     assert_eq!(
         classed[3],
-        (Class::Answer, "WD:BOOT fw=1.6.0 slot=ota_1 image=trial reset=brownout\n".into())
+        (Class::Answer, "WD:BOOT fw=1.7.3 slot=ota_1 image=trial reset=brownout\n".into())
     );
 }
 
@@ -1214,24 +1285,24 @@ fn wardrive_beacon_sends_fixed_status_golden_when_free() {
         0b10,       // scanning
         0x80,       // temperature unknown
         0x02, 0x01, // count, LE
-        0x16, 0x00, // level 1.6, patch 0
+        0x17, 0x03, // level 1.7, patch 3
         0x44, 0xC0, // the bridge's last two octets
     ];
     assert_eq!(status_bytes(&named_beacon(), false), want);
-    assert_eq!(status_bytes(&Beacon::default(), false), [0x57, 0, 0x80, 0, 0, 0x16, 0, 0x44, 0xC0]);
+    assert_eq!(status_bytes(&Beacon::default(), false), [0x57, 0, 0x80, 0, 0, 0x17, 3, 0x44, 0xC0]);
 }
 
 #[test]
 fn wardrive_beacon_sends_status_with_nickname_golden_when_connected() {
     let iphone = named_beacon();
     // Connected, scanning and an iPhone, then the nickname.
-    let want = [0x57, 0x83, 0x80, 0x02, 0x01, 0x16, 0x00, 0x44, 0xC0, b'A', b'l'];
+    let want = [0x57, 0x83, 0x80, 0x02, 0x01, 0x17, 0x03, 0x44, 0xC0, b'A', b'l'];
     assert_eq!(status_bytes(&iphone, true), want);
     let android = Beacon { iphone: false, ..named_beacon() };
-    let want = [0x57, 0x03, 0x80, 0x02, 0x01, 0x16, 0x00, 0x44, 0xC0, b'A', b'l'];
+    let want = [0x57, 0x03, 0x80, 0x02, 0x01, 0x17, 0x03, 0x44, 0xC0, b'A', b'l'];
     assert_eq!(status_bytes(&android, true), want);
     // A central that gave no name, such as a wartui host.
-    assert_eq!(status_bytes(&Beacon::default(), true), [0x57, 1, 0x80, 0, 0, 0x16, 0, 0x44, 0xC0]);
+    assert_eq!(status_bytes(&Beacon::default(), true), [0x57, 1, 0x80, 0, 0, 0x17, 3, 0x44, 0xC0]);
 }
 
 #[test]
