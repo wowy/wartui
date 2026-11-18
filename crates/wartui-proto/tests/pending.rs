@@ -277,16 +277,46 @@ mod wifi_pending {
 
 mod ble_pending {
     use super::*;
-    use wartui_proto::hci::AdvReport;
+    use wartui_proto::hci::{AdvReport, adv_reports};
     use wartui_proto::pending::BlePending;
 
-    /// A report from the advertiser whose address ends in `n`.
-    fn report(n: u8, rssi: i8, mfgr: Option<u16>) -> AdvReport {
-        AdvReport { address: [0x11, 0x22, 0x33, 0x44, 0x55, n], rssi, mfgr }
+    /// A report heard from `address`, parsed out of an LE Advertising Report event, since
+    /// `AdvReport` has no public constructor and the parser is what the node uses.
+    fn parsed(
+        address: [u8; 6],
+        rssi: i8,
+        mfgr: Option<u16>,
+        name: &[u8],
+        connectable: bool,
+    ) -> AdvReport {
+        let mut data = Vec::new();
+        if !name.is_empty() {
+            data.push(u8::try_from(name.len() + 1).expect("short name"));
+            data.push(0x09); // complete local name
+            data.extend_from_slice(name);
+        }
+        if let Some(id) = mfgr {
+            data.extend_from_slice(&[0x03, 0xFF]); // manufacturer-specific data
+            data.extend_from_slice(&id.to_le_bytes());
+        }
+        let mut packet = vec![0x04, 0x3E, 0x00, 0x02, 0x01]; // LE Meta, one report
+        packet.push(if connectable { 0x00 } else { 0x03 }); // ADV_IND or ADV_NONCONN_IND
+        packet.push(0x01); // random address
+        packet.extend(address.iter().rev());
+        packet.push(u8::try_from(data.len()).expect("short data"));
+        packet.extend_from_slice(&data);
+        packet.push(rssi.to_le_bytes()[0]);
+        packet[2] = u8::try_from(packet.len() - 3).expect("fits");
+        adv_reports(&packet).next().expect("one report")
     }
 
-    /// A report with a reading is held; a repeat keeps the strongest reading and the first
-    /// identifier.
+    /// A nameless, connectable report from the advertiser whose address ends in `n`.
+    fn report(n: u8, rssi: i8, mfgr: Option<u16>) -> AdvReport {
+        parsed([0x11, 0x22, 0x33, 0x44, 0x55, n], rssi, mfgr, b"", true)
+    }
+
+    /// A report with a reading is held; a repeat keeps the strongest reading, the first
+    /// identifier and the first name, and connectable if either was.
     impl Model for AdvReport {
         fn address(&self) -> [u8; 6] {
             self.address
@@ -297,9 +327,47 @@ mod ble_pending {
         }
 
         fn merge(&mut self, repeat: &Self) {
-            self.rssi = self.rssi.max(repeat.rssi);
-            self.mfgr = self.mfgr.or(repeat.mfgr);
+            let name = if self.name().is_empty() { repeat.name() } else { self.name() }.to_vec();
+            *self = parsed(
+                self.address,
+                self.rssi.max(repeat.rssi),
+                self.mfgr.or(repeat.mfgr),
+                &name,
+                self.connectable || repeat.connectable,
+            );
         }
+    }
+
+    #[test]
+    fn ble_pending_keeps_name_when_later_report_has_none() {
+        let address = [0x02, 0, 0, 0, 0, 1];
+        let mut pending = BlePending::<4, 8>::new();
+        pending.record(parsed(address, -60, None, b"Tag", true), due);
+        pending.record(parsed(address, -50, None, b"", true), due);
+        pending.record(parsed(address, -70, None, b"Other", true), due);
+        let held = drain(|| pending.take());
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].name(), b"Tag", "neither erased nor replaced");
+        assert_eq!(held[0].rssi, -50);
+    }
+
+    #[test]
+    fn ble_pending_fills_name_when_later_report_carries_one() {
+        let address = [0x02, 0, 0, 0, 0, 1];
+        let mut pending = BlePending::<4, 8>::new();
+        pending.record(parsed(address, -60, None, b"", true), due);
+        pending.record(parsed(address, -70, None, b"Tag", true), not_due);
+        assert_eq!(drain(|| pending.take())[0].name(), b"Tag");
+    }
+
+    #[test]
+    fn ble_pending_keeps_connectable_when_any_report_was_connectable() {
+        let address = [0x02, 0, 0, 0, 0, 1];
+        let mut pending = BlePending::<4, 8>::new();
+        pending.record(parsed(address, -60, None, b"", false), due);
+        pending.record(parsed(address, -60, None, b"", true), due);
+        pending.record(parsed(address, -60, None, b"", false), due);
+        assert!(drain(|| pending.take())[0].connectable);
     }
 
     #[test]
@@ -473,8 +541,15 @@ mod ble_pending {
                         .next_u32()
                         .is_multiple_of(3)
                         .then(|| u16::try_from(rng.next_u32() % 4).expect("fits"));
+                    let name: &[u8] = match rng.next_u32() % 4 {
+                        0 => b"one",
+                        1 => b"two",
+                        _ => b"",
+                    };
+                    let connectable = rng.next_u32().is_multiple_of(2);
                     let is_due = !rng.next_u32().is_multiple_of(4);
-                    let report = report(n, rssi, mfgr);
+                    let report =
+                        parsed([0x11, 0x22, 0x33, 0x44, 0x55, n], rssi, mfgr, name, connectable);
                     pending.record(report, |_| is_due);
                     model.record(report, is_due);
                 }

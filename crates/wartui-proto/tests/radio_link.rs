@@ -6,13 +6,14 @@ use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
     Accept, BODY_MAX, BleCounters, BleState, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN,
-    HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, MAGIC, PAYLOAD_MAX,
-    Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Stream, Up, VerifyError,
-    WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up,
-    host_bytes_fit, host_window, records, seal, verify,
+    HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, LastDrop, MAGIC,
+    PAYLOAD_MAX, Packer, PacketReader, PhoneLink, RECORD_MAX, RadioStatus, SeqCheck, SeqNote,
+    Stream, Up, VerifyError, WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down,
+    encode_packet, encode_up, host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
-use wartui_proto::wardrive_esp::command::COMMAND_MAX;
+use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
+use wartui_proto::wardrive_esp::command::{COMMAND_MAX, NICKNAME_MAX};
 
 fn log(text: &str) -> Up<'_> {
     Up::Log { message: text.try_into().unwrap() }
@@ -496,7 +497,20 @@ fn radio_link_largest_messages_fit_one_packet() {
     let removed = Up::BondRemoved(bond.addr);
     let credit = Up::Credit { accounted: u32::MAX };
     let command = Up::WardriveEspCommand(&stream[..COMMAND_MAX]);
-    for up in [status, line, Up::HostBytes(&stream), credit, state, added, removed, command] {
+    let phone = Up::PhoneLink(PhoneLink {
+        peer: [0xFF; 2],
+        connections: u32::MAX,
+        connected_s: u32::MAX,
+        rssi: Some(i8::MIN),
+        interval_us: u32::MAX,
+        latency: u16::MAX,
+        timeout_ms: u16::MAX,
+        last_drop: Some(LastDrop { reason: u8::MAX, ago_s: u32::MAX }),
+        heap_free: u32::MAX,
+        heap_least: u32::MAX,
+    });
+    let ups = [status, line, Up::HostBytes(&stream), credit, state, added, removed, command, phone];
+    for up in ups {
         let len = encode_up(&up, &mut out).unwrap();
         assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
     }
@@ -509,6 +523,17 @@ fn radio_link_largest_messages_fit_one_packet() {
     };
     let len = encode_down(&bonds, &mut out).unwrap();
     assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
+    let beacon = Down::Beacon(Beacon {
+        scanning: true,
+        bluetooth: true,
+        count: u16::MAX,
+        iphone: true,
+        nickname: Vec::from_slice(&[0xFF; NICKNAME_MAX]).unwrap(),
+        link_end: LinkEnd::Lost,
+        channels: u64::MAX,
+    });
+    let len = encode_down(&beacon, &mut out).unwrap();
+    assert!(len <= RECORD_MAX, "{beacon:?} is {len} bytes");
 }
 
 /// A bond with every field at its longest.
@@ -655,6 +680,82 @@ fn radio_link_revision_golden_bytes() {
     // Down::Bonds, no bonds, window_ms 0, phones admitted.
     assert_eq!(out[..len], [3, 0, 0, 1], "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), bonds);
+
+    let drop = Down::DropPhone;
+    let len = encode_down(&drop, &mut out).unwrap();
+    assert_eq!(out[..len], [4], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), drop);
+
+    let beacon = Down::Beacon(Beacon {
+        scanning: true,
+        bluetooth: true,
+        count: 300,
+        iphone: true,
+        nickname: Vec::from_slice(b"Al").unwrap(),
+        link_end: LinkEnd::Released,
+        channels: 0x4421,
+    });
+    let len = encode_down(&beacon, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        5,                // Down::Beacon
+        1,                // scanning
+        1,                // bluetooth
+        0xAC, 0x02,       // count 300, varint
+        1,                // iphone
+        2, b'A', b'l',    // nickname, length first
+        1,                // LinkEnd::Released
+        0xA1, 0x88, 0x01, // channels 0x4421, varint
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), beacon);
+
+    let none = Down::Beacon(Beacon::default());
+    let len = encode_down(&none, &mut out).unwrap();
+    // Every field zero, the nickname empty and `LinkEnd::None`.
+    assert_eq!(out[..len], [5, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), none);
+
+    let link = Up::PhoneLink(PhoneLink {
+        peer: [0x4A, 0x9F],
+        connections: 3,
+        connected_s: 65,
+        rssi: Some(-61),
+        interval_us: 48_000,
+        latency: 4,
+        timeout_ms: 4000,
+        last_drop: Some(LastDrop { reason: 0x13, ago_s: 12 }),
+        heap_free: 300,
+        heap_least: 200,
+    });
+    let len = encode_up(&link, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        9,                // Up::PhoneLink
+        0x4A, 0x9F,       // peer
+        3, 65,            // connections, connected_s
+        1, 0xC3,          // rssi: Some, -61 as one byte
+        0x80, 0xF7, 0x02, // interval_us 48000, varint
+        4,                // latency
+        0xA0, 0x1F,       // timeout_ms 4000, varint
+        1, 0x13, 12,      // last_drop: Some, reason, ago_s
+        0xAC, 0x02,       // heap_free 300, varint
+        0xC8, 0x01,       // heap_least 200, varint
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), link);
+
+    let none = Up::PhoneLink(PhoneLink::default());
+    let len = encode_up(&none, &mut out).unwrap();
+    // Every number 0, and both options `None`.
+    assert_eq!(out[..len], [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), none);
+}
+
+#[test]
+fn radio_link_phone_link_none_matches_default_when_built() {
+    // The P4 starts from `NONE` in a const context, where `Default` is not callable.
+    assert_eq!(PhoneLink::NONE, PhoneLink::default());
 }
 
 #[test]

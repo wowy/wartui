@@ -185,8 +185,8 @@ pub struct Observation {
     pub slot: Slot,
     /// The observed BSSID, six raw bytes.
     pub bssid: [u8; 6],
-    /// Raw SSID bytes. An SSID is whatever the access point beaconed, so UTF-8 here would lose the
-    /// original. [`ssid_text`] turns it into text.
+    /// Raw SSID bytes, or a BLE advertiser's name, empty when it sent none. Either is whatever was
+    /// on the air, so UTF-8 here would lose the original. [`ssid_text`] turns it into text.
     pub ssid: Vec<u8>,
     /// The `AuthMode` token exactly as the node wrote it.
     pub security: String,

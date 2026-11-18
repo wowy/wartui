@@ -29,14 +29,15 @@
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The C6's Bluetooth bonds follow each answer
 //! to a C6 that bridges, and are repeated on the packets it sends, at least one a second while it
-//! bridges (`src/bonds.rs`, `repeat`). The pair hears the seq of every C6 packet, since a hello
-//! whose seq is not past the last is a restart.
+//! bridges (`src/bonds.rs`, `repeat`). So is the WardriveESP beacon (`src/wardrive_esp.rs`,
+//! `repeat_beacon`). The pair hears the seq of every C6 packet, since a hello whose seq is not
+//! past the last is a restart.
 //!
 //! While a central over Bluetooth or a phone holds the host queue, each packet's room behind the
 //! queued records carries the host stream down as `Down::HostBytes`, inside the credit window
 //! (`src/ble.rs`). The stream goes only behind every queued record, so a `Down::HostStart` always
-//! leads its attachment's bytes. A phone's commands come up as `Up::WardriveEspCommand`, to its
-//! session (`src/wardrive_esp.rs`).
+//! leads its attachment's bytes. A phone's commands come up as `Up::WardriveEspCommand`, and its
+//! link as `Up::PhoneLink`, to its session (`src/wardrive_esp.rs`).
 //!
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
 //! differently is sent none, and its records are not read. A C6 updating on this P4's revision
@@ -198,6 +199,7 @@ impl Link {
                     // bridges, which reads them; another hears them after its update.
                     if radio_up(shared) {
                         crate::bonds::send(shared);
+                        crate::wardrive_esp::send_beacon(shared);
                     }
                 }
             }
@@ -213,6 +215,7 @@ impl Link {
                 // steady wake while there is a C6 to send the bonds to.
                 if radio_up(shared) {
                     crate::bonds::repeat(shared);
+                    crate::wardrive_esp::repeat_beacon(shared);
                 }
             }
             Kind::Update => {
@@ -234,7 +237,7 @@ impl Link {
     }
 
     /// Act on one record from the C6: a line for the host, its counters, the Bluetooth host's
-    /// stream, credit and state, a change to its bonds, or a phone's command.
+    /// stream, credit and state, a change to its bonds, or a phone's command or link.
     #[inline(never)]
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
@@ -257,6 +260,7 @@ impl Link {
             Ok(Up::BondAdded(bond)) => crate::bonds::on_added(shared, bond),
             Ok(Up::BondRemoved(addr)) => crate::bonds::on_removed(shared, addr),
             Ok(Up::WardriveEspCommand(text)) => crate::wardrive_esp::on_command(shared, text),
+            Ok(Up::PhoneLink(link)) => crate::wardrive_esp::on_link(shared, link),
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

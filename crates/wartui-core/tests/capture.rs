@@ -305,6 +305,10 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
         csv.contains(",76,BLE"),
         "the simulated advertisers carry their manufacturer identifiers: {csv}"
     );
+    assert!(
+        csv.lines().any(|row| row.ends_with(",BLE") && row.split(',').nth(1) != Some("")),
+        "and some their names, in the SSID column: {csv}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

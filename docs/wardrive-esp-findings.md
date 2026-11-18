@@ -94,10 +94,101 @@ stored bond resumed and a fresh pairing bonded (the table above), and through 14
 `unbonded_kicks` of the phone the bridge counted no pairing begun or failed. The phone
 showed no prompt on that build.
 
+## Health and link lines (2026-11-18)
+
+D0:1C, both chips on the build that adds `WD:BOOT`, `WD:LINK`, `WD:HEALTH`, `link`, `drop` and
+`iam`, with the PC stand-in as the phone.
+
+| Check | Result |
+| --- | --- |
+| Scan header | `WD:CAPS`, `WD:BOOT fw=1.6.0 slot=ota_0 image=confirmed reset=software`, `WD:LINK conns=1 mtu=182 prev_disc=none`, `WD:MODE`, `WD:BEGIN`, `WD:PLAN`, in that order |
+| `WD:HEALTH` | arrived inside 15 s of linking: `up=30 heap=67524 heap_min=63452 mtu=182 txdrop=0` |
+| `link`, 2 s after linking | `connected to … for 0h 00m 02s`, `signal -51 dBm, MTU 182, interval 30 ms, timeout 420 ms`, `links since boot 1, no drops` |
+| `iam a <name>`, then `link` | `held by <name> (Android)`, a two-byte character intact |
+| `info` | ends with the `WD:BOOT` line |
+| `drop` | `disconnecting the phone` arrived, and the link ended 0.5 s later |
+| Link again after `drop`, twice | `WD:LINK conns=2 … prev_disc=0x216 prev_disc_ago=5s`, then `conns=3`; `link` named the drop as `0x16` |
+| `wartui status --link bluetooth` afterwards | answered, encrypted and bonded |
+
+**A bonded central's subscription outlives its connection.** The stand-in is bonded, for the
+wartui link, and TrouBLE keeps a bonded central's subscriptions across connections. On a build
+that read TX's as it stood, `drop` left it set: the next connection got the phone's stream before
+it asked for anything, its own requests then went unanswered, and BlueZ failed its subscribe 30 s
+later, on 4 connections of 4. The C6 counts a TX subscription only once the central writes it on
+the connection it holds, and the same sequence linked on both tries. A phone holds no bond, so the
+app never met this. Why the central's requests went unanswered was not traced.
+
+## Status beacon and advert extras (2026-11-18)
+
+D0:1C on the build that adds them, pool US, read on the bench PC through BlueZ, one short scan
+per sample. BlueZ gives the manufacturer data and the service data; the bytes below follow the
+company id and the `0x5744` UUID.
+
+| State | Status | Extras, frame A / frame B |
+| --- | --- | --- |
+| free, no phone since boot | `57 00 80 00 00 16 00 d0 1c` | `00 00 ff ff c7 ff` / `01 ff 7f 00 00 00` |
+| stand-in linked, `iam i Bench`, `ch 1,6,11,36`, scanning | `57 83 80 54 00 16 00 d0 1c` and `Bench` | `00 00 ff 21 44 00` / `01 00 00 00 00 00` |
+| free, after `bye` and a disconnect | `57 00 80 00 00 16 00 d0 1c` | `02 00 ff ff c7 ff` / `03 ff 7f 00 00 00` |
+| free, after `drop` | the same | `04 00 ff ff c7 ff` / `05 ff 7f 00 00 00` |
+
+- The frames swapped every 5 s, with the connectable advertisement running through each swap.
+- The count, `54 00`, was the `WD:STATUS aps=84` of the period before it, and moved to `08 00`
+  with the next.
+- The C6's controller took the beacon beside a connection: the PC read it while it was itself the
+  linked central.
+- `wartui status` answered over Bluetooth and over USB afterwards, on the stored bond.
+
+## Bluetooth mode (2026-11-18)
+
+D0:1C with its ten nodes on 0.6.0, updated over the bus by `wartui ota`, all confirmed. N10 held
+the Bluetooth scan.
+
+**The node's record.** `wartui sniff` beside `wartui scan start --bluetooth`, 6.5 minutes: 172
+Bluetooth records, none undecodable, 12 with a name. The bridge's own advertisement was among
+them as `wartui D0:1C` at -19 dBm, read by a node on the same board. Complete names and shortened
+ones both arrived. Most advertisers in the room sent none in the advertisement itself, and a
+passive scan hears no scan response.
+
+**The phone's mode**, with the PC stand-in:
+
+| Check | Result |
+| --- | --- |
+| `bt on` while scanning Wi-Fi | `WD:MODE mode=bt`, `WD:STATUS aps=80 scans=0`, `WD:END reason=stop`, `WD:MODE mode=bt`, `WD:BEGIN type=bt interval=0 channel=auto`, in that order |
+| `WD:BT` lines | 101 in 15 s, the first 0.6 s after the switch; 9 named; `type=public` and `type=random`, `conn=0` and `conn=1`, `mfg=` empty and filled all seen |
+| `WD:STATUS` | `bt=90 scans=1 dropped=0`, then `bt=5 scans=2 dropped=0`, 5 s apart |
+| `status`, `bt` | `mode Bluetooth`, `bt 5 scans 2` |
+| `wdstream start -bt` in Bluetooth mode | `WD:MODE mode=bt`, nothing else |
+| `bt off` | `WD:MODE mode=wifi`, the last Bluetooth `WD:STATUS`, `WD:END`, then the six Wi-Fi header lines; `WD:STATUS aps=102 scans=1` 5 s later |
+| No `WD:AP` in Bluetooth mode, no `WD:BT` in Wi-Fi mode | held |
+| Status beacon while linked in Bluetooth mode | `57 07 80 59 00 …`: linked, scanning, mode 1, 89 devices |
+
+## Protocol level 1.7.3 (2026-11-18)
+
+D0:1C on the build that names level 1.7.3 and adds `WD:CONN`, with the PC stand-in: `WD:CAPS
+fw=1.7.3`, `WD:BOOT fw=1.7.3`, `info`'s `WardriveESP protocol 1.7.3`, and the free board's status
+`57 00 80 00 00 17 03 d0 1c`. Linking sent no `WD:CONN`, since the timing at the subscribe is the
+baseline, and the stand-in's link kept its 30 ms interval throughout, so none followed.
+
+**The app at 1.7.3** (Android, Pixel 8): it linked, showed the board as v1.7.3 and offered no
+firmware update. The bridge's beacon, read on the PC while the phone was linked, was `57 03 80 04
+00 17 03 d0 1c` and the six bytes of `Pixel8`: linked, scanning, Wi-Fi, an Android app, and a
+nickname. So the app sends `iam` at this level; it sent none in the 75 s watched at 1.6.0. The
+extras named every channel of the pool.
+
+With the bridge switched off in the app, the beacon read `57 00 …`, a free board, and the extras
+`02 00 ff ff c7 ff` / `03 ff 7f 00 00 00`: the last link released. So the app sends `bye` before
+it lets go. Over the 12 s read, no central connected.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
   service UUID and the name while the setting was on.
+- The status UUID in the linked board's advertisement, for the same reason, and its 1 s interval.
+- A first pairing beside the beacon's advertisement. The stored bond resumed.
+- The beacon read by a phone app: a second phone beside a linked one.
+- `WD:CONN` on a link whose timing changes: the stand-in's never did.
+- The app in Bluetooth mode: whether it sends `bt on` or `wdstream start -bt`, and what it shows.
+- `bt on` on a fleet of one node, refused in the session's tests only.
 - iOS.
 - `wartui ports` beside a linked phone, by the bridge's own counters. It was judged in the app,
   which showed no break.
@@ -106,3 +197,5 @@ showed no prompt on that build.
 - A drive: the app's access point counts beside a wartui capture, a slow link, and the backlog's
   evictions.
 - A first pairing from a host other than Linux while the setting is on.
+- The app beside `WD:BOOT`, `WD:LINK` and `WD:HEALTH`, and whether it sends `iam` or `bye`: it sent
+  neither in the 75 s watched on 2026-11-17.

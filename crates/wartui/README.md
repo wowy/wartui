@@ -139,7 +139,8 @@ a note says how many; see "Config file".
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
-row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
+row's `SSID` is the name the advertiser sent, blank when it sent none. A BLE row's `Frequency` is
+blank on purpose: that column is a Bluetooth "device type" code only an active
 inquiry produces, and the nodes never transmit while scanning. A row whose submitting sighting has
 a blank name takes a name heard elsewhere in its window: a hidden network names itself only in some
 probe responses, and a BLE advertiser only in some advertisements.
@@ -1303,8 +1304,9 @@ wartui bluetooth wardrive-esp on
 
 - **It is open.** While it is on, any phone in range can link, hold the bridge's one Bluetooth
   connection, and start or stop the scan.
-- **The phone is the host.** It starts the scan when it links and stops it when it lets go, and
-  the fleet scans Wi-Fi only. No capture is written: wartui's store sees none of it.
+- **The phone is the host.** It starts the scan when it links and stops it when it lets go. It
+  reads Wi-Fi, or Bluetooth after the app's `bt on`, which one node scans. No capture is written:
+  wartui's store sees none of it.
 - **USB takes the bridge from a phone**, as from a Bluetooth host. Any `wartui` command over USB
   but `ports` drops the phone, and the app links again by itself 15 s after USB goes quiet.
 - **A linked phone keeps a Bluetooth wartui host out**, and the reverse: the bridge takes one

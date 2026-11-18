@@ -85,9 +85,9 @@ pub struct SightingMsg<'a> {
     pub rssi: i8,
     /// What its information elements amounted to.
     pub security: Security,
-    /// Raw SSID bytes, at most [`SSID_MAX`]. Empty for a hidden network and always
-    /// empty for BLE. Not necessarily UTF-8: an SSID is whatever the access point
-    /// beaconed.
+    /// Raw SSID bytes, at most [`SSID_MAX`]. Empty for a hidden network. For BLE, the
+    /// advertised local name, at most [`crate::hci::BLE_NAME_MAX`], and empty when the
+    /// advertiser sent none. Not necessarily UTF-8: either is whatever was on the air.
     ///
     /// This layer is byte-transparent and trims nothing. A cloaked access point's zero
     /// padding is stripped where the beacon is parsed
@@ -98,8 +98,9 @@ pub struct SightingMsg<'a> {
     ///
     /// - **Wi-Fi:** the roaming consortium element's body verbatim, every byte after its
     ///   `Length` octet.
-    /// - **BLE:** the Bluetooth SIG company identifier, two bytes little-endian, or
-    ///   nothing when the advertiser carried none.
+    /// - **BLE:** a flags byte (random address, connectable), then the Bluetooth SIG
+    ///   company identifier, two bytes little-endian, when the advertiser carried one.
+    ///   [`crate::hci::BleTrailer`] owns the layout.
     ///
     /// One trailer rather than a field per kind, because the two never compete for the
     /// same record. This layer carries the bytes and never interprets them; what they

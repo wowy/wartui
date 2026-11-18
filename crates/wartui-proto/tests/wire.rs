@@ -63,14 +63,16 @@ const WIFI_RECORD: &[u8] = &[
     0x00, // no trailer: this access point beaconed no roaming consortium
 ];
 
+/// A BLE record from an advertiser that sent no name and no manufacturer data.
 const BLE_RECORD: &[u8] = &[
     0x01, // kind: BLE
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // address
     0x00, // channel 0, which is what BLE reports
     0xBA, // rssi -70
     0x0A, // security: [BLE]
-    0x00, // no SSID
-    0x00, // no trailer: this advertiser carried no manufacturer data
+    0x00, // no name
+    0x01, // ext_len: the flags byte alone
+    0x00, // flags: public address, not connectable
 ];
 
 /// A Wi-Fi record whose beacon carried the OpenRoaming roaming consortium
@@ -91,15 +93,16 @@ const WIFI_RCOI_RECORD: &[u8] = &[
     0xBA, 0xA2, 0xD0, 0x20, 0x00, // BAA2D02000
 ];
 
-/// A BLE record from an advertiser that carried a manufacturer identifier.
+/// A BLE record from an advertiser that sent a name and a manufacturer identifier.
 const BLE_MFGR_RECORD: &[u8] = &[
     0x01, // kind: BLE
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // address
     0x00, // channel 0
     0xBA, // rssi -70
     0x0A, // security: [BLE]
-    0x00, // no SSID
-    0x02, // ext_len: the identifier, and nothing else
+    0x03, b'T', b'a', b'g', // the advertised name, as the SSID
+    0x03, // ext_len: flags and identifier
+    0x03, // flags: random address, connectable
     0x4C, 0x00, // company identifier 76, little-endian
 ];
 
@@ -116,7 +119,8 @@ const SIGHTING_BATCH_1: &[u8] = &[
 const SIGHTING_BATCH_BLE: &[u8] = &[
     0x09, 0x00, // seq 9
     0x01, // count
-    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x00, // BLE_RECORD
+    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x01,
+    0x00, // BLE_RECORD
 ];
 
 /// A mixed batch: Wi-Fi, then BLE, then the widest record there is.
@@ -127,7 +131,7 @@ const SIGHTING_BATCH_3: &[u8] = &[
     0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
     b't', 0x00, //
     // BLE_RECORD
-    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x00, //
+    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x01, 0x00, //
     // WIFI_RCOI_RECORD
     0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
     b't', 0x11, 0x02, 0x55, 0x5A, 0x03, 0xBA, 0x00, 0x00, 0xBA, 0xA2, 0xD0, 0x00, 0x00, 0xBA, 0xA2,
@@ -200,8 +204,8 @@ fn bus_msg_codec_matches_expected_body_lengths_when_checking_constants() {
     assert_eq!(ASSIGN.len(), ASSIGN_LEN);
     assert_eq!(
         BLE_RECORD.len(),
-        SIGHTING_RECORD_MIN,
-        "a record with no SSID and no trailer is the floor"
+        SIGHTING_RECORD_MIN + 1,
+        "the floor, and a BLE record's flags byte"
     );
     assert_eq!(
         WIFI_RCOI_RECORD.len(),
@@ -497,7 +501,7 @@ fn sighting_msg_serializes_ble_record_byte_for_byte_when_encoded_and_decoded() {
         rssi: -70,
         security: Security::Ble,
         ssid: b"",
-        ext: &[],
+        ext: &[0x00],
     };
     let mut buf = [0u8; SIGHTING_RECORD_MAX];
     let len = msg.encode_record_into(&mut buf).expect("fits");
@@ -507,16 +511,16 @@ fn sighting_msg_serializes_ble_record_byte_for_byte_when_encoded_and_decoded() {
 
 #[test]
 fn sighting_msg_serializes_ble_manufacturer_trailer_when_encoded() {
-    // Two little-endian bytes and nothing else: the trailer for a BLE
-    // sighting is the identifier or it is empty, never anything in between.
+    // The wire carries the name and the trailer as bytes; `hci::BleTrailer` says what
+    // the trailer's bytes mean.
     let msg = SightingMsg {
         kind: RecordKind::Ble,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
         channel: 0,
         rssi: -70,
         security: Security::Ble,
-        ssid: b"",
-        ext: &76u16.to_le_bytes(),
+        ssid: b"Tag",
+        ext: &[0x03, 0x4C, 0x00],
     };
     let mut buf = [0u8; SIGHTING_RECORD_MAX];
     let len = msg.encode_record_into(&mut buf).expect("fits");
@@ -609,13 +613,16 @@ fn sighting_msg_rejects_oversized_trailer_when_encoding_or_decoding() {
 
 #[test]
 fn sighting_msg_returns_too_short_error_when_trailer_length_is_truncated() {
-    // `ext_len` says two and one arrived. Reading what is there would file an
+    // `ext_len` says three and two arrived. Reading what is there would file an
     // identifier nobody sent.
     let mut record = BLE_MFGR_RECORD.to_vec();
     record.pop();
     assert_eq!(
         SightingMsg::decode_record(&record),
-        Err(DecodeError::TooShort { need: SIGHTING_RECORD_MIN + 2, got: SIGHTING_RECORD_MIN + 1 })
+        Err(DecodeError::TooShort {
+            need: SIGHTING_RECORD_MIN + 3 + 3,
+            got: SIGHTING_RECORD_MIN + 3 + 2
+        })
     );
 }
 
@@ -685,7 +692,7 @@ fn sighting_batch_writer_packs_mixed_records_byte_for_byte_when_built() {
         rssi: -70,
         security: Security::Ble,
         ssid: b"",
-        ext: &[],
+        ext: &[0x00],
     }));
     // The trailer bytes of `WIFI_RCOI_RECORD`, past its own header-free fields.
     assert!(writer.push(&SightingMsg {
@@ -709,12 +716,13 @@ fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
     // Eighty-four bare records and one carrying a one-byte SSID sum to
     // exactly 1021 bytes behind the three-byte header: 1024 total, the batch
     // ceiling, reached at exactly SIGHTINGS_PER_BATCH_MAX records.
+    // A hidden network with no roaming consortium: the smallest record a node sends.
     let minimal = SightingMsg {
-        kind: RecordKind::Ble,
+        kind: RecordKind::Wifi,
         bssid: [0; 6],
-        channel: 0,
+        channel: 1,
         rssi: -1,
-        security: Security::Ble,
+        security: Security::Open,
         ssid: b"",
         ext: &[],
     };

@@ -16,6 +16,7 @@ use wartui_proto::bus::{
     Compat, DecodeError, Heartbeat, NODE_VERSION, NodeBoard, RecordKind, SightingMsg, Slot, UpMsg,
     UpType,
 };
+use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION};
 use wartui_proto::mac;
 
@@ -383,10 +384,10 @@ fn render(sighting: &SightingMsg<'_>) -> String {
         RecordKind::Wifi if !sighting.ext.is_empty() => {
             format!("  rcoi {}", rcoi_text(sighting.ext))
         }
-        RecordKind::Ble if sighting.ext.len() == 2 => {
-            format!("  mfgr {}", u16::from_le_bytes([sighting.ext[0], sighting.ext[1]]))
-        }
-        _ => String::new(),
+        RecordKind::Ble => BleTrailer::decode(sighting.ext)
+            .and_then(|trailer| trailer.mfgr)
+            .map_or_else(String::new, |id| format!("  mfgr {id}")),
+        RecordKind::Wifi => String::new(),
     };
     format!(
         "{kind}  {}  ch {:>3}  {:>4}dBm  {:<16}  {}{trailer}",

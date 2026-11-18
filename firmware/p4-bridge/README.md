@@ -222,7 +222,7 @@ A phone holds the queue the same way while the `wardrive esp` setting is on (`sr
 
 | What happens | Who holds the queue after |
 | --- | --- |
-| A phone subscribes to the WardriveESP stream, with no owner | The phone. The P4 starts its session and the fleet's Wi-Fi scan |
+| A phone subscribes to the WardriveESP stream, with no owner | The phone. The P4 starts its session and the fleet's scan, Wi-Fi until the phone asks for Bluetooth |
 | A UART0 frame other than `Identify` | USB. The phone gets no notice; the C6 drops it and admits none while USB holds the queue |
 | An `Identify` on UART0 while a phone holds the queue | The phone. UART0 gets one `Ready` |
 | The phone unsubscribes or disconnects, the C6 restarts, or the setting goes off | No one. The scan stops |

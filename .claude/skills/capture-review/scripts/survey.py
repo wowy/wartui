@@ -1140,6 +1140,10 @@ def observations(db, ctx):
     for k, n in db.q("SELECT kind, COUNT(*) FROM observation GROUP BY 1"):
         print(f"  kind {k}: {n}")
     kinds = dict(db.q("SELECT kind, COUNT(*) FROM observation GROUP BY 1"))
+    if kinds.get("ble"):
+        # A BLE row's ssid is the advertised name, empty when the advertiser sent none.
+        named = db.one("SELECT COUNT(*) FROM observation WHERE kind='ble' AND LENGTH(ssid) > 0")
+        print(f"  ble named: {named} ({pct(named, kinds['ble'])})")
     unknown = {k: n for k, n in kinds.items() if k not in ("wifi", "ble")}
     if unknown:
         flag("WARN", "sightings", f"observations of unknown kind {unknown}: the export skips them",

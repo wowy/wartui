@@ -17,7 +17,8 @@ The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src
 advertises `wartui XX:YY`, the bridge's last two octets, with the `wartui_proto::ble` service in its
 scan response. It notifies the P4's host stream on Up and forwards what a central writes on Down.
 Beside it sits the WardriveESP service, which a phone app reads with no pairing while the P4
-admits phones; the advertisement then carries that service and the scan response the name.
+admits phones; the advertisement then carries that service and the scan response the name, and
+while a central is connected the C6 advertises the WardriveESP status beacon.
 
 - **A phone reads the WardriveESP stream with no bond**, while the P4 admits phones
   ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md)). A central reads one stream, the first

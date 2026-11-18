@@ -22,6 +22,9 @@ pub const RX_UUID: u128 = 0x0147_686F_7374_4553_5042_7269_6467_5852;
 pub const TX_UUID: u128 = 0x0247_686F_7374_4553_5042_7269_6467_5854;
 /// CTRL, phone to board: commands, read as RX's are.
 pub const CTRL_UUID: u128 = 0x0347_686F_7374_4553_5042_7269_4C52_5443;
+/// The status beacon's UUID, advertised in place of [`SERVICE_UUID`] while a central is connected,
+/// so an app looking for the service does not try a board that is taken.
+pub const STATUS_UUID: u128 = 0x0547_686F_7374_4553_5042_7269_6467_5354;
 
 /// Bytes in a frame's header.
 pub const HEADER_LEN: usize = 12;

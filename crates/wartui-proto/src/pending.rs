@@ -78,8 +78,8 @@ impl Entry for Sighting {
     }
 }
 
-/// An advertiser's identifier can arrive after its first hearing, so a repeat merges into
-/// the held report. A report without a reading is not held.
+/// An advertiser's identifier and name can arrive after its first hearing, so a repeat
+/// merges into the held report. A report without a reading is not held.
 impl Entry for AdvReport {
     const BLANK: Self = AdvReport::BLANK;
 
@@ -91,13 +91,20 @@ impl Entry for AdvReport {
         self.has_rssi()
     }
 
-    /// The strongest reading wins. The first identifier stays, because a later one is
-    /// not a better reading of it.
+    /// The strongest reading wins. The first identifier and the first name stay, because
+    /// a later one is not a better reading of either, and a later report without one
+    /// erases neither. Connectable holds if any report of the scan was, since one
+    /// connectable advertisement is enough to connect. Every other field stays from the
+    /// first report.
     fn merge(&mut self, repeat: &Self) {
         self.rssi = self.rssi.max(repeat.rssi);
         if self.mfgr.is_none() {
             self.mfgr = repeat.mfgr;
         }
+        if self.name().is_empty() {
+            self.take_name(repeat);
+        }
+        self.connectable |= repeat.connectable;
     }
 }
 
@@ -106,8 +113,8 @@ impl Entry for AdvReport {
 pub type WifiPending<const N: usize, const S: usize> = Pending<Sighting, N, S>;
 
 /// One scan's advertisers, one per address. A repeat merges into the held report, keeping
-/// the strongest RSSI and the first manufacturer ID. A report without an RSSI reading is not
-/// held.
+/// the strongest RSSI, the first manufacturer ID, the first name, and connectable if any
+/// report was. A report without an RSSI reading is not held.
 pub type BlePending<const N: usize, const S: usize> = Pending<AdvReport, N, S>;
 
 /// The entries of one dwell or scan, one per address. The module docs give the rules it

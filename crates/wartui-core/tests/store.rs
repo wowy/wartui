@@ -1295,6 +1295,24 @@ fn wigle_csv_writes_mfgr_id_when_ble_advertiser_carries_one() {
     );
 }
 
+#[test]
+fn wigle_csv_writes_ble_name_in_ssid_column_when_advertiser_sent_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut ble =
+        as_ble(observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)), Some(76));
+    let Record::Observation(obs) = &mut ble else { unreachable!() };
+    obs.ssid = b"Kitchen, left".to_vec();
+    let conn = write(&dir, vec![ble]);
+
+    let (csv, _) = export(&conn);
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(
+        row.starts_with("AA:AA:AA:AA:AA:AA,\"Kitchen, left\",[BLE],"),
+        "quoted as any SSID: {row}"
+    );
+    assert!(row.ends_with(",76,BLE"), "{row}");
+}
+
 /// `record` as a BLE advertisement: no channel, no SSID, and the `[BLE]` security tag.
 fn as_ble(mut record: Record, mfgr_id: Option<u16>) -> Record {
     let Record::Observation(obs) = &mut record else { unreachable!() };
@@ -2591,6 +2609,7 @@ fn wigle_csv_keeps_ble_sighting_when_name_matches_excluded_ssid() {
     // `ble_observation` stores the name `example`, and the exclusion is for Wi-Fi only.
     let (csv, summary) = export_with(&conn, &excluding(b"example"));
     assert_eq!(macs(&csv), ["C3:C3:C3:C3:C3:C3"], "{csv}");
+    assert!(csv.contains("C3:C3:C3:C3:C3:C3,example,"), "and its name is in the row: {csv}");
     assert_eq!(summary.excluded_ssid, 0);
     assert_eq!(summary.ble.rows, 1);
 }

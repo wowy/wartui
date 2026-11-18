@@ -75,6 +75,7 @@ reasoning.
 | No 5 GHz rows at all | Dual band failed to enable, which the node only logs as `could not enable dual band`, or the regulatory domain is wrong. | `firmware/node/src/main.rs` (`set_band_mode`); AGENTS.md (the `US` domain rule) |
 | Zero BSSID, or the multicast bit set on a BSSID | Parsing took the wrong address field, or the frame was not a beacon or probe response. | `crates/wartui-proto/src/beacon.rs`, `firmware/node/src/sniff.rs` |
 | Security `[UNDEFINED]` | No RSN or WPA element, and the privacy bit is ambiguous. Check which frame types produce it. | `crates/wartui-proto/src/beacon.rs` |
+| `ble named` low or 0 (survey prints it) | A BLE row's `ssid` is the advertised name, empty when the advertiser sent none. Most advertisers send none, so a low share is ordinary. None at all over a busy capture points at the name parsing. | `crates/wartui-proto/src/hci.rs` (`ad_fields`) |
 | Unknown `kind` | A kind this build does not know. The export skips it. | `crates/wartui-core/src/export.rs`, `crates/wartui-core/src/store.rs` (kind mapping) |
 | A node heartbeats but stores no sighting for minutes | The node is idle with no assignment, or its channel change did not stick, or the area really was empty. Compare with other nodes in the same window. If they saw networks, it is the node. | `firmware/node/src/radio.rs` `park`, `crates/wartui-core/src/engine/node.rs` |
 
