@@ -1,8 +1,9 @@
 # The WardriveESP service — bench on D0:1C
 
 Measured on 2026-11-17 on D0:1C, the carrier-10 P4 with its ten C5 nodes, from the bench PC
-(Fedora 44, BlueZ 5.88) and an Android phone running the Wardrive Go app. The service is described
-in [`wardrive-esp.md`](wardrive-esp.md).
+(Fedora 44, BlueZ 5.88) and an Android phone running the Wardrive Go app. The two checks made in
+the app against the production firmware are from 2026-11-18. The service is described in
+[`wardrive-esp.md`](wardrive-esp.md).
 
 Two builds ran. The first was a C6-only bench build at `c5462c6`, which admitted a phone and
 answered it from the C6 with no access points, to try the service against the app before the P4
@@ -30,6 +31,8 @@ so its link was encrypted, which the service does not need. The phone linked une
 | `reboot` | `unknown command 'reboot'` and the help list. The bridge does not restart |
 | `stop`, then `start` | `WD:STATUS` and `WD:END`, then the header again |
 | The fleet's sightings | About 170 `WD:AP` lines in 20 s from ten nodes on the bench, none dropped |
+| The app against the production firmware | It shows access points arriving |
+| `wartui ports` on the PC beside the linked app | The app keeps its link and its access points keep arriving, as seen in the app |
 | `WD:STATUS` | Every 5 s: 73, then 83 after a restart of the scan, then 10 as the nodes ran out of new access points |
 | A central reading TX subscribes to the wartui stream too | Refused, ATT error `0xFC` |
 | A USB host takes the bridge | The phone is dropped, and a TX subscription is refused, ATT error `0xFC`, while USB holds the bridge |
@@ -60,8 +63,8 @@ That was not tried. Turning the board off in the app, or the phone's Bluetooth, 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
   service UUID and the name while the setting was on.
 - iOS.
-- Whether `wartui ports` leaves a linked phone undisturbed, from the phone's side. The app held
-  the bridge's one connection whenever the stand-in tried.
+- `wartui ports` beside a linked phone, by the bridge's own counters. It was judged in the app,
+  which showed no break.
 - A drive: the app's access point counts beside a wartui capture, a slow link, and the backlog's
   evictions.
 - A first pairing from a host other than Linux while the setting is on.
