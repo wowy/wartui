@@ -112,7 +112,8 @@ fn push(shared: &Shared) -> bool {
     let now = now_ms();
     let bonds = shared.bonds.held.borrow().clone();
     let window_ms = shared.bonds.window_ms(now);
-    let pushed = shared.push_down(&Down::Bonds { bonds, window_ms });
+    // The P4 admits no phone to the WardriveESP service yet.
+    let pushed = shared.push_down(&Down::Bonds { bonds, window_ms, wardrive_esp: false });
     if pushed {
         shared.bonds.sent_at.set(now);
     }

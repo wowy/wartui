@@ -1,10 +1,10 @@
 //! The C6 half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
 //!
 //! The P4 owns the USB link to the host and the node buses. This chip carries the host link to a
-//! Bluetooth central, as a GATT peripheral (`src/ble.rs`), and holds the UART link to the P4: it
-//! answers the P4's status poll, sends its lines, and takes its own updates. It never talks USB.
-//! The two talk over the board's SDIO traces, on UART1 with hardware flow control, through UHCI's
-//! DMA (`src/link.rs`).
+//! Bluetooth central, as a GATT peripheral that also offers a phone the WardriveESP service
+//! (`src/ble.rs`), and holds the UART link to the P4: it answers the P4's status poll, sends its
+//! lines, and takes its own updates. It never talks USB. The two talk over the board's SDIO
+//! traces, on UART1 with hardware flow control, through UHCI's DMA (`src/link.rs`).
 //!
 //! Updates arrive from the P4 over the link and boot on trial, through
 //! [`wartui_firmware::ota`], the flash code a node uses. The link's futures and the Bluetooth
@@ -26,6 +26,7 @@ mod ble;
 mod config;
 mod last_panic;
 mod link;
+mod wardrive_esp_bench;
 
 use core::cell::RefCell;
 

@@ -90,6 +90,11 @@ const fn millis_as_micros(bytes: &[u8], start: usize, end: usize) -> u64 {
     micros
 }
 
+/// Whether this is a bench build that admits a phone to the WardriveESP service on its own and
+/// answers it from a session of its own (`src/wardrive_esp_bench.rs`). Set by
+/// `WARTUI_RADIO_WARDRIVE_ESP_BENCH` to any value.
+pub const WARDRIVE_ESP_BENCH: bool = option_env!("WARTUI_RADIO_WARDRIVE_ESP_BENCH").is_some();
+
 // The firmware has no host test target, so the parser's cases are checked as it builds.
 const _: () = assert!(matches!(interval_range(Some("7.5-15")), Some((7_500, 15_000))));
 const _: () = assert!(matches!(interval_range(Some("11.25-11.25")), Some((11_250, 11_250))));

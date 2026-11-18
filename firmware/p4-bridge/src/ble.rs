@@ -4,10 +4,11 @@
 //! **One host owns the host queue**, and `wartui_proto::host_owner::Owner` decides which, so its
 //! rules are tested with `cargo test`. Its inputs are a central's subscription, as the C6's
 //! `BleState` reports it, and UART0's frames and silence (`src/host.rs`); [`own`] carries out
-//! what it returns. A central counts as subscribed only while its link is encrypted and it holds a
-//! stored bond. Bluetooth lets go on an unsubscribe, a disconnect or a C6 restart, and never on
-//! silence, since a subscription is the sign that someone reads. While it owns the queue the UART0
-//! writer sends nothing from it.
+//! what it returns. A central counts as subscribed only while it reads the host stream
+//! (`Stream::Host`) on an encrypted link and holds a stored bond; a phone on the WardriveESP
+//! service never does. Bluetooth lets go on an unsubscribe, a disconnect or a C6 restart, and
+//! never on silence, since a subscription is the sign that someone reads. While it owns the queue
+//! the UART0 writer sends nothing from it.
 //!
 //! **The stream's offsets never rewind**, across C6 lives too. `sent` is the wrapping offset of the
 //! next stream byte. Each attachment starts with a `Down::HostStart` at `sent`, and each
@@ -41,7 +42,7 @@ use wartui_proto::link::{
     encode_frame,
 };
 use wartui_proto::radio_link::{
-    BleState, Down, HOST_BYTES_MAX, Packer, encode_down, host_bytes_fit, host_window,
+    BleState, Down, HOST_BYTES_MAX, Packer, Stream, encode_down, host_bytes_fit, host_window,
 };
 
 use crate::Shared;
@@ -121,7 +122,7 @@ impl Ble {
 
 /// Whether `state` is a central that may hold the host queue.
 const fn authorized(state: BleState) -> bool {
-    state.subscribed && state.encrypted && state.bonded
+    matches!(state.stream, Stream::Host) && state.encrypted && state.bonded
 }
 
 /// Feed `input` to the owner, and carry out what it returns, in order. Returns the effects, so a

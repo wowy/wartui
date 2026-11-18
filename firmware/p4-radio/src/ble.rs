@@ -1,9 +1,11 @@
 //! The host link over Bluetooth: a GATT peripheral that carries the P4's host stream to one
-//! bonded central and the central's frames back.
+//! bonded central and the central's frames back, or, while the P4 admits phones, a stream to one
+//! phone on the WardriveESP service and its commands back.
 //!
 //! TrouBLE is the host, over `esp-radio`'s controller, on the link's executor: its futures are
 //! joined beside the link's in the one task, so each `.await` here hands the C6 link its turn.
-//! The service, its characteristics and the advertised name are `wartui_proto::ble`'s.
+//! The link's service, its characteristics and the advertised name are `wartui_proto::ble`'s;
+//! the WardriveESP service's are `wartui_proto::wardrive_esp::frame`'s.
 //!
 //! **Up notifies the stream; Down takes the central's writes.** Up carries what the P4 sends as
 //! `Down::HostBytes`, cut at the ATT MTU less 3 wherever that falls. Down forwards each write
@@ -26,33 +28,40 @@
 //! delivery: the window keeps the C6 link from stalling behind RTS/CTS, and bytes TrouBLE holds
 //! are off that link. The position is recomputed whenever it may have moved: after each
 //! `Down::HostStart` and `Down::HostBytes`, after each notification, and when a change of
-//! subscription clears the ring. It is coalesced to one `Up::Credit` per [`CREDIT_EVERY_BYTES`],
+//! stream clears the ring. It is coalesced to one `Up::Credit` per [`CREDIT_EVERY_BYTES`],
 //! per [`CREDIT_EVERY`], or when the ring empties, whichever comes first, and nothing is sent
-//! before the P4 has named a first offset. With no subscribed central the stream is discarded and
-//! credited at once. While a central is subscribed the current position is also repeated every
+//! before the P4 has named a first offset. With no central reading the stream is discarded and
+//! credited at once. While a central reads the current position is also repeated every
 //! [`STATE_EVERY`] ([`repeat_credit`]): the queue to the P4 evicts, and losing the last credit
 //! before the window fills would leave the P4's window shut with nothing left to move it. The
 //! position is absolute, so the P4 takes a repeat as changing nothing.
 //!
-//! - `Down::HostStart` begins an attachment: the ring is cleared and the position is `at`, so the
-//!   central reads only bytes from that offset on. One resync `0x00` goes in first. A
-//!   notification [`notify`] took from the ring before the clear is still sent, and its partial
-//!   frame would run into this attachment's `Ready`; the `0x00` ends it, so the `Ready` decodes
-//!   whole. It is not a stream byte either, and is never credited.
-//! - A gap before a `Down::HostBytes` is counted in `resynced_bytes`, and the position is past it.
-//!   One `0x00` goes into the ring ahead of the bytes, so the central's COBS reader drops the torn
-//!   frame rather than merging it with the next. That byte is not a stream byte, so the position
-//!   never counts it. The ring holds [`HOST_WINDOW_BYTES`] and [`RESYNC_MAX`] of them; a gap with
-//!   no room left gets none, and the central resynchronizes at the next terminator, one frame
-//!   later.
+//! The resync byte ends what a gap tore: `0x00` on the host stream, a COBS terminator, and `\n`
+//! on a phone's, which ends its line.
 //!
-//! **A subscription is the CCCD on Up.** Every change of it, the encryption, the bond or the MTU
-//! sends a `BleState`; the P4 reads a subscribed one as Bluetooth taking the host queue. The
-//! queue to the P4 evicts and the link does not resend, so one lost `BleState` would leave the P4
-//! never knowing a central subscribed: the current one is also repeated every [`STATE_EVERY`] once
-//! the P4 has said hello. The P4 acts only on a change of whether the central may hold the queue,
-//! so a repeat changes nothing there. The ring is cleared on every change of subscription, which
-//! moves the credit past what it held, so a new central never reads the last one's stream.
+//! - `Down::HostStart` begins an attachment: the ring is cleared and the position is `at`, so the
+//!   central reads only bytes from that offset on. One resync byte goes in first. A notification
+//!   [`notify`] took from the ring before the clear is still sent, and its partial frame would run
+//!   into this attachment's `Ready`; the resync byte ends it, so the `Ready` decodes whole. It is
+//!   not a stream byte either, and is never credited.
+//! - A gap before a `Down::HostBytes` is counted in `resynced_bytes`, and the position is past it.
+//!   One resync byte goes into the ring ahead of the bytes, so the central's reader drops the torn
+//!   frame or line rather than merging it with the next. That byte is not a stream byte, so the
+//!   position never counts it. The ring holds [`HOST_WINDOW_BYTES`] and [`RESYNC_MAX`] of them; a
+//!   gap with no room left gets none, and the central resynchronizes at the next terminator, one
+//!   frame later.
+//!
+//! **Which stream a central reads is a CCCD** (`Stream`): Up's, on an encrypted and bonded link,
+//! for the host stream, else TX's, while phones are admitted, for the phone's. A central reads
+//! one: a subscription to the other is refused with Write Request Rejected. Every change of the
+//! stream,
+//! the encryption, the bond or the MTU sends a `BleState`; the P4 reads the host stream as
+//! Bluetooth taking the host queue. The queue to the P4 evicts and the link does not resend, so
+//! one lost `BleState` would leave the P4 never knowing a central subscribed: the current one is
+//! also repeated every [`STATE_EVERY`] once the P4 has said hello. The P4 acts only on a change of
+//! whether the central may hold the queue, so a repeat changes nothing there. The ring is cleared
+//! on every change of stream, which moves the credit past what it held, so a new central never
+//! reads the last one's stream.
 //!
 //! **The C6 asks for the 2M PHY and data length 251 once connected, and an interval only when
 //! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
@@ -77,24 +86,43 @@
 //! a Down write is forwarded, and a subscription counts in `BleState`, only while the link is
 //! encrypted and the central holds a stored bond ([`authorized`]).
 //!
+//! **A phone reaches only the WardriveESP service, and only while the P4 admits phones**
+//! (`Down::Bonds`' `wardrive_esp`). The service is open, as the protocol has it
+//! (`docs/vendor/wardrive-esp/PROTOCOL.md`), and nothing on it is ever refused with Insufficient
+//! Authentication, which makes a phone pair. While phones are admitted:
+//!
+//! - the advertisement carries the WardriveESP service's UUID, which a phone app looks for, and
+//!   the scan response the name; a change of admission restarts the advertisement ([`accept`]);
+//! - no central gets a Security Request, which raises a pairing prompt on a phone;
+//! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
+//!   a line, or part of one longer than the frame's room;
+//! - a write to RX or CTRL is read through `frame::Inbound`: a CMD's ACK is owed, and the command
+//!   goes to the P4 as `Up::WardriveEspCommand`, waiting for room as Down's writes do. A write
+//!   before the phone reads TX is dropped.
+//!
+//! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
+//! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]). A
+//! bench build admits phones on its own (`src/wardrive_esp_bench.rs`).
+//!
 //! **A central the C6 holds a bond for gets no Security Request.** Outside the window the request
 //! would say no bonding, and BlueZ 5.88 answers that by pairing again rather than encrypting with
 //! the key it holds, and is then disconnected as unbonded (`docs/c6-ble-pairing-findings.md`,
 //! "Two faults the bench found"). It encrypts on its own, or on the Insufficient Authentication
-//! answer.
+//! answer, as a wartui host does while phones are admitted.
 //!
 //! **TrouBLE accepts every pairing, so the window is the C6's to enforce.** A connection is
 //! bondable only when it is made inside the P4's pairing window. These centrals are disconnected
-//! and counted in `unbonded_kicks`, so none holds the only connection without a bond:
+//! and counted in `unbonded_kicks`, so none holds the only connection without a bond or a phone's
+//! stream:
 //!
 //! - one encrypted without a stored bond on a connection made outside the window;
 //! - one that lost its bond, outside the window;
-//! - one not bonded and encrypted [`PAIR_DEADLINE`] after connecting inside the window, or
-//!   [`UNBONDABLE_DEADLINE`] after connecting outside it;
+//! - one neither bonded and encrypted nor reading the phone's stream [`PAIR_DEADLINE`] after
+//!   connecting inside the window, or [`UNBONDABLE_DEADLINE`] after connecting outside it;
 //! - one whose bond the P4 dropped, as `ClearBonds` does, while it was connected.
 //!
-//! A bonded central that stays unsubscribed from Up for [`IDLE_DEADLINE`] is disconnected too, and
-//! not counted there, so a phone's background link cannot hold the only connection either
+//! A central that reads no stream for [`IDLE_DEADLINE`] after that is disconnected too, and not
+//! counted there, so a phone's background link cannot hold the only connection either
 //! ([`deadline`]).
 //!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM** (`wartui_proto::bonds`). It
@@ -121,7 +149,7 @@ use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 use core::pin::pin;
 
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_futures::select::{Either, select, select4};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -132,14 +160,20 @@ use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::att::AttClient;
 use trouble_host::prelude::*;
-use wartui_proto::ble::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
+use wartui_proto::ble::{ByteRing, NAME_PREFIX, SERVICE_UUID};
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
 use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::radio_link::{Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, Up};
+use wartui_proto::radio_link::{
+    Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, Stream, Up,
+};
+use wartui_proto::wardrive_esp::command;
+use wartui_proto::wardrive_esp::frame::{self, Inbound};
 
-use crate::config::{CONN_INTERVAL_US, UP_QUEUE_MIN_BYTES};
+use crate::config::{CONN_INTERVAL_US, UP_QUEUE_MIN_BYTES, WARDRIVE_ESP_BENCH};
 use crate::link::Shared;
+use crate::wardrive_esp_bench::Bench;
+use gatt::Server;
 
 /// Resync `0x00`s the ring holds beside the window's stream bytes.
 const RESYNC_MAX: usize = 16;
@@ -247,6 +281,9 @@ const IDLE_DEADLINE: Duration = Duration::from_secs(30);
 /// lacks it: about 10 s of sends, where the P4 echoes one within a second.
 const BOND_SENDS: u8 = 10;
 
+/// ACKs owed to a phone at once: a write short of TrouBLE's queue of 8 per connection.
+const ACKS_MAX: usize = 8;
+
 /// `wartui XX:YY`.
 const NAME_MAX: usize = NAME_PREFIX.len() + 5;
 
@@ -257,29 +294,63 @@ type Controller<'a> = ExternalController<BleConnector<'a>, COMMAND_SLOTS>;
 type BleStack<'a> = Stack<'a, Controller<'a>, DefaultPacketPool>;
 type Conn<'a, 'b> = GattConnection<'a, 'b, DefaultPacketPool>;
 
-#[gatt_server(connections_max = CONNECTIONS, mutex_type = NoopRawMutex)]
-struct Server {
-    link: LinkService,
+mod gatt {
+    //! The GATT server and its two services.
+    //!
+    //! TrouBLE's `#[gatt_server]` constructors build the attribute table by value. With both
+    //! services that is a frame of about 5.4 KB: `Server` is 1,128 bytes and each attribute 44.
+    //! It is built once, at boot, from `advertise`. The allow covers only this generated code, so
+    //! every other frame in the crate answers to the crate's threshold.
+    #![allow(clippy::large_stack_frames)]
+
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use trouble_host::prelude::*;
+    use wartui_proto::ble::{DOWN_UUID, SERVICE_UUID, UP_UUID};
+    use wartui_proto::wardrive_esp::frame::{self, CTRL_UUID, RX_UUID, TX_UUID};
+
+    use super::CONNECTIONS;
+
+    /// The link's service first, so its handles are the same with the WardriveESP service beside
+    /// it.
+    #[gatt_server(connections_max = CONNECTIONS, mutex_type = NoopRawMutex)]
+    pub(super) struct Server {
+        pub(super) link: LinkService,
+        pub(super) wardrive_esp: WardriveEspService,
+    }
+
+    /// The "wartui link" service.
+    #[gatt_service(uuid = SERVICE_UUID)]
+    pub(super) struct LinkService {
+        /// The bridge's frame stream, notified. Its stored value is never read. Subscribing needs
+        /// an encrypted link.
+        #[characteristic(uuid = UP_UUID, notify, permissions(encrypted))]
+        pub(super) up: u8,
+        /// The host's frames, written. Writes are taken unprocessed, so nothing is stored. Writing
+        /// needs an encrypted link.
+        #[characteristic(uuid = DOWN_UUID, write, write_without_response, permissions(encrypted))]
+        pub(super) down: u8,
+    }
+
+    /// The WardriveESP service, open: a phone app reads it with no pairing.
+    #[gatt_service(uuid = frame::SERVICE_UUID)]
+    pub(super) struct WardriveEspService {
+        /// A phone's commands, written. Taken unprocessed, so nothing is stored.
+        #[characteristic(uuid = RX_UUID, write, write_without_response)]
+        pub(super) rx: u8,
+        /// The phone's output, notified in frames. Its stored value is never read.
+        #[characteristic(uuid = TX_UUID, notify)]
+        pub(super) tx: u8,
+        /// A phone's commands, read as RX's are.
+        #[characteristic(uuid = CTRL_UUID, write, write_without_response)]
+        pub(super) ctrl: u8,
+    }
 }
 
-/// The "wartui link" service.
-#[gatt_service(uuid = SERVICE_UUID)]
-struct LinkService {
-    /// The bridge's frame stream, notified. Its stored value is never read. Subscribing needs
-    /// an encrypted link.
-    #[characteristic(uuid = UP_UUID, notify, permissions(encrypted))]
-    up: u8,
-    /// The host's frames, written. Writes are taken unprocessed, so nothing is stored. Writing
-    /// needs an encrypted link.
-    #[characteristic(uuid = DOWN_UUID, write, write_without_response, permissions(encrypted))]
-    down: u8,
-}
-
-/// The host stream waiting to be notified, and where the resync `0x00`s in it sit, so the credit
-/// counts only its stream bytes.
+/// The stream waiting to be notified, and where the resync bytes in it sit, so the credit counts
+/// only its stream bytes.
 pub struct Outbox {
     ring: ByteRing<OUTBOX_BYTES>,
-    /// Each resync `0x00` the ring holds, oldest first, as the count of bytes pushed before it.
+    /// Each resync byte the ring holds, oldest first, as the count of bytes pushed before it.
     resyncs: Deque<u32, RESYNC_MAX>,
     /// Bytes pushed and taken since boot, each wrapping.
     pushed: u32,
@@ -299,9 +370,9 @@ impl Outbox {
         n
     }
 
-    /// Append one resync `0x00`, or return `false` when there is no room for it.
-    fn push_resync(&mut self) -> bool {
-        if self.resyncs.is_full() || self.ring.push(&[0]) == 0 {
+    /// Append one resync `byte`, or return `false` when there is no room for it.
+    fn push_resync(&mut self, byte: u8) -> bool {
+        if self.resyncs.is_full() || self.ring.push(&[byte]) == 0 {
             return false;
         }
         // Room was checked above.
@@ -313,11 +384,24 @@ impl Outbox {
     /// Move the oldest bytes into `out`, and return how many.
     fn take(&mut self, out: &mut [u8]) -> usize {
         let n = self.ring.take(out);
+        self.forget(n);
+        n
+    }
+
+    /// Move the oldest bytes into `out`, up to and including the first `delim`, and return how
+    /// many.
+    fn take_through(&mut self, out: &mut [u8], delim: u8) -> usize {
+        let n = self.ring.take_through(out, delim);
+        self.forget(n);
+        n
+    }
+
+    /// Account for `n` bytes taken: drop the resyncs among them.
+    fn forget(&mut self, n: usize) {
         while self.resyncs.front().is_some_and(|at| at.wrapping_sub(self.taken) < n as u32) {
             self.resyncs.pop_front();
         }
         self.taken = self.taken.wrapping_add(n as u32);
-        n
     }
 
     /// Discard everything held.
@@ -327,7 +411,7 @@ impl Outbox {
         self.taken = self.pushed;
     }
 
-    /// The stream bytes held: every byte but the resync `0x00`s.
+    /// The stream bytes held: every byte but the resync bytes.
     fn stream_held(&self) -> usize {
         self.ring.len() - self.resyncs.len()
     }
@@ -376,6 +460,15 @@ pub struct Ble {
     window_until: Cell<Option<Instant>>,
     /// The bond last paired, until the P4's list holds it ([`repeat_bond`]).
     pending_bond: Cell<Option<PendingBond>>,
+    /// A phone may read the WardriveESP service: the P4 said so in its last `Down::Bonds`, or the
+    /// build is a bench's.
+    admitted: Cell<bool>,
+    /// The id the phone's frames carry. It lives as long as the C6, not the connection.
+    inbound: Cell<Inbound>,
+    /// The ids of the ACKs owed to the phone, oldest first. Cleared when the stream changes.
+    acks: RefCell<Deque<u32, ACKS_MAX>>,
+    /// The bench build's own phone session (`src/wardrive_esp_bench.rs`).
+    pub bench: Bench,
 }
 
 impl Ble {
@@ -397,6 +490,10 @@ impl Ble {
             bonds_changed: Signal::new(),
             window_until: Cell::new(None),
             pending_bond: Cell::new(None),
+            admitted: Cell::new(WARDRIVE_ESP_BENCH),
+            inbound: Cell::new(Inbound::new()),
+            acks: RefCell::new(Deque::new()),
+            bench: Bench::new(),
         }
     }
 
@@ -406,9 +503,19 @@ impl Ble {
         self.counters.set(counters);
     }
 
-    /// Whether an authorized central has subscribed to Up.
-    fn subscribed(&self) -> bool {
-        self.state.get().subscribed
+    /// The link as the C6 sees it.
+    pub fn state(&self) -> BleState {
+        self.state.get()
+    }
+
+    /// Which stream the central reads.
+    pub fn stream(&self) -> Stream {
+        self.state.get().stream
+    }
+
+    /// Whether a phone may read the WardriveESP service.
+    fn admitted(&self) -> bool {
+        self.admitted.get()
     }
 
     /// Whether the P4's pairing window is open.
@@ -422,8 +529,13 @@ impl Ble {
     }
 }
 
+/// The byte that ends a torn piece of `stream`: `0x00` ends a COBS frame, and `\n` a phone's line.
+fn resync_byte(stream: Stream) -> u8 {
+    if stream == Stream::Phone { b'\n' } else { 0 }
+}
+
 /// A central took the host queue, and its first byte is at `at`: clear the ring, lead it with a
-/// resync `0x00`, and credit up to `at`.
+/// resync byte, and credit up to `at`.
 pub fn host_start(shared: &Shared, at: u32) {
     let ble = &shared.ble;
     let mut inflow = ble.inflow.get();
@@ -433,14 +545,14 @@ pub fn host_start(shared: &Shared, at: u32) {
     let mut outbox = ble.outbox.borrow_mut();
     outbox.clear();
     // A cleared ring has room for it.
-    outbox.push_resync();
+    outbox.push_resync(resync_byte(ble.stream()));
     drop(outbox);
     credit(shared, true);
     ble.ready.signal(());
 }
 
 /// Take the host stream's next bytes, at stream offset `at`: held for the central, or discarded
-/// and credited when none is subscribed.
+/// and credited when none reads.
 pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     let ble = &shared.ble;
     let mut inflow = ble.inflow.get();
@@ -451,7 +563,7 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     if gap > 0 {
         ble.count(|c| c.resynced_bytes = c.resynced_bytes.wrapping_add(gap));
     }
-    if !ble.subscribed() {
+    if ble.stream() == Stream::None {
         // Nothing is held, so the credit is the expected offset.
         credit(shared, true);
         return;
@@ -459,7 +571,7 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     let mut outbox = ble.outbox.borrow_mut();
     // Without room, the central resynchronizes at the next terminator instead.
     if gap > 0 {
-        outbox.push_resync();
+        outbox.push_resync(resync_byte(ble.stream()));
     }
     let lost = bytes.len() - outbox.push(bytes);
     drop(outbox);
@@ -468,17 +580,25 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     ble.ready.signal(());
 }
 
-/// Take the P4's bonds and its pairing window's time left. [`advertise`] gives them to TrouBLE,
-/// at once while it advertises ([`accept`]) and else once the central goes, and [`revoke`]
-/// disconnects a central whose bond they dropped. A list that holds the pending bond ends its
-/// repeats.
+/// Queue a line the bench build's session wrote for the phone (`src/wardrive_esp_bench.rs`).
+pub fn push_bench_line(shared: &Shared, line: &[u8]) {
+    shared.ble.outbox.borrow_mut().push(line);
+    shared.ble.ready.signal(());
+}
+
+/// Take the P4's bonds, its pairing window's time left, and whether it admits phones.
+/// [`advertise`] gives the bonds to TrouBLE, at once while it advertises ([`accept`]) and else
+/// once the central goes, and [`revoke`] disconnects a central whose bond they dropped, and a
+/// phone once phones are not admitted. A list that holds the pending bond ends its repeats. A
+/// bench build admits phones whatever the P4 says.
 ///
 /// Each `Down::Bonds` signals `bonds_changed`, a repeat that changes nothing included. Its waiters
 /// compare before they act: [`accept`] keeps the advertisement running while TrouBLE's bonds are
 /// the P4's, and [`revoke`] finds the central's bond where it was. The window's end is re-derived
 /// from each, and moves by no more than the message's transit.
-pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32) {
+pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32, wardrive_esp: bool) {
     let ble = &shared.ble;
+    ble.admitted.set(wardrive_esp || WARDRIVE_ESP_BENCH);
     let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
     ble.window_until.set(until);
     if ble.pending_bond.get().is_some_and(|pending| holds(&bonds, &pending.record)) {
@@ -537,13 +657,13 @@ fn credit(shared: &Shared, now: bool) {
     }
 }
 
-/// Send the credit again once [`STATE_EVERY`] has passed since the last, while a central is
-/// subscribed and the P4 has named a first offset, so a lost credit cannot leave the P4's window
+/// Send the credit again once [`STATE_EVERY`] has passed since the last, while a central reads
+/// and the P4 has named a first offset, so a lost credit cannot leave the P4's window
 /// shut. The P4's `on_credit` sets the position it already holds and wakes its writer, so a
 /// repeat changes nothing there.
 pub fn repeat_credit(shared: &Shared) {
     let ble = &shared.ble;
-    if !ble.subscribed() || ble.credited_at.get().elapsed() < STATE_EVERY {
+    if ble.stream() == Stream::None || ble.credited_at.get().elapsed() < STATE_EVERY {
         return;
     }
     if let Some(accounted) = accounted(ble) {
@@ -565,18 +685,20 @@ fn send_credit(shared: &Shared, accounted: u32) {
     shared.push(&Up::Credit { accounted });
 }
 
-/// Set the link's state, and tell the P4 if it changed. A change of subscription clears the
-/// ring.
+/// Set the link's state, and tell the P4 if it changed. A change of stream clears the ring and
+/// the ACKs owed.
 fn set_state(shared: &Shared, change: impl FnOnce(&mut BleState)) {
     let ble = &shared.ble;
     let mut state = ble.state.get();
-    let was = state.subscribed;
+    let was = state.stream;
     change(&mut state);
     ble.state.set(state);
-    if state.subscribed != was {
+    if state.stream != was {
         ble.outbox.borrow_mut().clear();
+        ble.acks.borrow_mut().clear();
         credit(shared, true);
         ble.ready.signal(());
+        crate::wardrive_esp_bench::on_stream(shared, was, state.stream);
     }
     if ble.said.get() != Some(state) {
         say_state(shared, state);
@@ -623,7 +745,13 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    join(run_host(&mut runner), advertise(&stack, &mut peripheral, mac, shared)).await.0
+    join3(
+        run_host(&mut runner),
+        advertise(&stack, &mut peripheral, mac, shared),
+        crate::wardrive_esp_bench::run(shared, mac),
+    )
+    .await
+    .0
 }
 
 /// Run TrouBLE's host, and restart the C6 if it ever stops.
@@ -660,24 +788,9 @@ async fn advertise(
         }
     };
 
-    let mut adv_data = [0; 31];
-    let mut scan_data = [0; 31];
-    let service = SERVICE_UUID.to_le_bytes();
-    let encoded = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteLocalName(name.as_bytes()),
-        ],
-        &mut adv_data,
-    )
-    .and_then(|adv| {
-        let scan = AdStructure::encode_slice(
-            &[AdStructure::CompleteServiceUuids128(&[service])],
-            &mut scan_data,
-        )?;
-        Ok((adv, scan))
-    });
-    let Ok((adv_len, scan_len)) = encoded else {
+    let (Some(wartui), Some(phones)) =
+        (Payload::new(name.as_bytes(), false), Payload::new(name.as_bytes(), true))
+    else {
         shared.error(format_args!("the advertisement would not encode"));
         core::future::pending().await
     };
@@ -700,29 +813,36 @@ async fn advertise(
     }
     let held = shared.ble.bonds.borrow().len();
     let window = if shared.ble.window_open() { "open" } else { "closed" };
+    let service = service_name(shared.ble.admitted());
     shared.log(format_args!(
-        "Bluetooth advertises `{name}` with {held} bonds, pairing window {window}"
+        "Bluetooth advertises `{name}` and the {service} service with {held} bonds, pairing \
+         window {window}"
     ));
     if sync_bonds(stack, shared) {
         Timer::after(RESOLVING_SETTLE).await;
     }
 
     loop {
-        let advertisement = Advertisement::ConnectableScannableUndirected {
-            adv_data: &adv_data[..adv_len],
-            scan_data: &scan_data[..scan_len],
-        };
-        let conn = match peripheral.advertise(&params, advertisement).await {
+        let admitted = shared.ble.admitted();
+        let payload = if admitted { &phones } else { &wartui };
+        let conn = match peripheral.advertise(&params, payload.advertisement()).await {
             Ok(advertiser) => {
                 if !shared.ble.advertising.replace(true) {
                     shared.ble.advertising_started.signal(());
                 }
-                let Some(accepted) = accept(advertiser, stack, shared).await else {
+                let Some(accepted) = accept(advertiser, stack, shared, admitted).await else {
                     // The advertisement is dropped, and TrouBLE's runner stops it.
-                    let held = shared.ble.bonds.borrow().len();
-                    shared.log(format_args!(
-                        "Bluetooth stops advertising to load {held} bonds from the P4"
-                    ));
+                    if shared.ble.admitted() != admitted {
+                        let service = service_name(shared.ble.admitted());
+                        shared.log(format_args!(
+                            "Bluetooth stops advertising to advertise the {service} service"
+                        ));
+                    } else {
+                        let held = shared.ble.bonds.borrow().len();
+                        shared.log(format_args!(
+                            "Bluetooth stops advertising to load {held} bonds from the P4"
+                        ));
+                    }
                     Timer::after(RESOLVING_SETTLE).await;
                     sync_bonds(stack, shared);
                     Timer::after(RESOLVING_SETTLE).await;
@@ -753,19 +873,63 @@ async fn advertise(
     }
 }
 
+/// One advertisement and its scan response.
+struct Payload {
+    adv: [u8; 31],
+    adv_len: usize,
+    scan: [u8; 31],
+    scan_len: usize,
+}
+
+impl Payload {
+    /// The pair for the wartui link, or, with `phones`, for the WardriveESP service. A phone app
+    /// finds a board by its service UUID in the advertisement, so that pair moves the name to the
+    /// scan response; the wartui pair carries the name an operator picks the bridge by.
+    fn new(name: &[u8], phones: bool) -> Option<Self> {
+        let flags = AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED);
+        let name = AdStructure::CompleteLocalName(name);
+        let link = [SERVICE_UUID.to_le_bytes()];
+        let wardrive_esp = [frame::SERVICE_UUID.to_le_bytes()];
+        let (adv, scan) = if phones {
+            ([flags, AdStructure::CompleteServiceUuids128(&wardrive_esp)], name)
+        } else {
+            ([flags, name], AdStructure::CompleteServiceUuids128(&link))
+        };
+        let mut payload = Self { adv: [0; 31], adv_len: 0, scan: [0; 31], scan_len: 0 };
+        payload.adv_len = AdStructure::encode_slice(&adv, &mut payload.adv).ok()?;
+        payload.scan_len = AdStructure::encode_slice(&[scan], &mut payload.scan).ok()?;
+        Some(payload)
+    }
+
+    fn advertisement(&self) -> Advertisement<'_> {
+        Advertisement::ConnectableScannableUndirected {
+            adv_data: &self.adv[..self.adv_len],
+            scan_data: &self.scan[..self.scan_len],
+        }
+    }
+}
+
+/// The service advertised while phones are `admitted` or not, for the log.
+fn service_name(admitted: bool) -> &'static str {
+    if admitted { "WardriveESP" } else { "wartui" }
+}
+
 /// Wait for a central to connect to `advertiser`'s advertisement, through every `Down::Bonds`
-/// that leaves the P4's bonds as TrouBLE holds them. `None` once one does not: the advertisement
-/// is dropped on return, so TrouBLE stops it and can load its resolving list ([`RESOLVING_SETTLE`]).
+/// that leaves the P4's bonds as TrouBLE holds them and phones admitted as `admitted` says. `None`
+/// once one does not: the advertisement is dropped on return, so TrouBLE stops it and can load its
+/// resolving list ([`RESOLVING_SETTLE`]), and the next is the pair for phones as they now are.
 async fn accept<'d>(
     advertiser: Advertiser<'d, Controller<'_>, DefaultPacketPool>,
     stack: &BleStack<'_>,
     shared: &Shared,
+    admitted: bool,
 ) -> Option<Result<Connection<'d, DefaultPacketPool>, Error>> {
     // Pinned here, so the same advertisement runs through a `Down::Bonds` that changes nothing.
     let mut accepting = pin!(advertiser.accept());
     loop {
         match select(accepting.as_mut(), shared.ble.bonds_changed.wait()).await {
             Either::First(conn) => return Some(conn),
+            Either::Second(()) if shared.ble.admitted() != admitted => return None,
             Either::Second(()) if bonds_differ(stack, shared) => return None,
             Either::Second(()) => {}
         }
@@ -869,10 +1033,12 @@ struct Session {
     lost: Cell<Option<BondAddr>>,
     /// The P4's bonds have held the central's since it connected or last paired ([`revoke`]).
     listed: Cell<bool>,
-    /// Since when the central has been unsubscribed from Up, for [`IDLE_DEADLINE`]: when it
-    /// connected, paired or last unsubscribed.
+    /// The phone was disconnected because phones are not admitted ([`drop_phone`]).
+    phone_dropped: Cell<bool>,
+    /// Since when the central has read no stream, for [`IDLE_DEADLINE`]: when it connected,
+    /// paired or last let go of one.
     idle_since: Cell<Instant>,
-    /// Raised when the subscription or `idle_since` changes, for [`deadline`].
+    /// Raised when the stream or `idle_since` changes, for [`deadline`].
     idle_changed: Signal<NoopRawMutex, ()>,
     /// The central's address, in display order, for the log.
     peer: Mac,
@@ -890,6 +1056,13 @@ fn kick(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
     disconnect(conn, session, shared, why);
 }
 
+/// Disconnect a phone because phones are not admitted, once: [`revoke`] and [`events`] both look.
+fn drop_phone(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) {
+    if !session.phone_dropped.replace(true) {
+        disconnect(conn, session, shared, "phones are not admitted");
+    }
+}
+
 /// Disconnect the central, and say why.
 fn disconnect(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
     conn.raw().disconnect();
@@ -905,7 +1078,8 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         c.interval_us = interval_us;
     });
     set_state(shared, |state| {
-        *state = BleState { subscribed: false, encrypted: false, bonded: false, mtu: raw.att_mtu() }
+        *state =
+            BleState { stream: Stream::None, encrypted: false, bonded: false, mtu: raw.att_mtu() }
     });
     let connected_at = Instant::now();
     let session = Session {
@@ -913,6 +1087,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         bondable: shared.ble.window_open(),
         lost: Cell::new(None),
         listed: Cell::new(false),
+        phone_dropped: Cell::new(false),
         idle_since: Cell::new(connected_at),
         idle_changed: Signal::new(),
         peer: bond_addr(&raw.peer_identity()).mac(),
@@ -927,7 +1102,11 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
     if let Err(err) = raw.set_bondable(session.bondable) {
         shared.error(format_args!("Bluetooth could not set bondable: {err:?}"));
     }
-    if !raw.is_bonded_peer()
+    // A phone answers a Security Request with a pairing prompt, so none goes while phones are
+    // admitted: a wartui host then pairs on the Insufficient Authentication answer, or through
+    // BlueZ.
+    if !shared.ble.admitted()
+        && !raw.is_bonded_peer()
         && let Err(err) = raw.request_security()
     {
         shared.log(format_args!("Bluetooth security not requested: {err:?}"));
@@ -965,7 +1144,11 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
 /// a host that forgot the bridge is not served on the bond TrouBLE still holds. The bond counts
 /// only once the P4's list has held it ([`Session`]'s `listed`): a central that has just paired
 /// holds its bond in TrouBLE before the P4 echoes it back, and a `Down::Bonds` sent in that gap
-/// lacks it. A central whose identity matches no record is never disconnected here.
+/// lacks it. A central whose identity matches no record is never disconnected for its bond.
+///
+/// A phone reading the WardriveESP stream is disconnected, and not counted, once a `Down::Bonds`
+/// says phones are not admitted. [`events`] does the same when an event recomputes the stream
+/// first.
 async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     loop {
         let addr = bond_addr(&conn.raw().peer_identity());
@@ -975,30 +1158,35 @@ async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
             kick(conn, session, shared, "its bond was cleared");
             core::future::pending::<()>().await;
         }
+        if !shared.ble.admitted() && shared.ble.stream() == Stream::Phone {
+            drop_phone(conn, session, shared);
+            core::future::pending::<()>().await;
+        }
         shared.ble.bonds_changed.wait().await;
     }
 }
 
-/// Disconnect a central not bonded and encrypted [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`]
-/// after it connected, and one unsubscribed from Up for [`IDLE_DEADLINE`] after that, so neither
-/// an unbonded nor an idle one holds the only connection. A subscribed central is never idle, a
-/// USB host holding the bridge while it waits included. The idle clock runs from `idle_since`,
-/// which pairing and an unsubscribe restart ([`Session`]).
+/// Disconnect a central that is neither bonded and encrypted nor reading the WardriveESP stream
+/// [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`] after it connected, and one that reads no stream
+/// for [`IDLE_DEADLINE`] after that, so neither an unbonded nor an idle one holds the only
+/// connection. A central reading a stream is never idle, a USB host holding the bridge while it
+/// waits included. The idle clock runs from `idle_since`, which pairing and letting go of a
+/// stream restart ([`Session`]).
 async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     let limit = if session.bondable { PAIR_DEADLINE } else { UNBONDABLE_DEADLINE };
     Timer::at(session.connected_at + limit).await;
-    if !authorized(conn) {
+    if !authorized(conn) && shared.ble.stream() != Stream::Phone {
         kick(conn, session, shared, "not bonded and encrypted in time after connecting");
         core::future::pending::<()>().await;
     }
     loop {
-        if shared.ble.subscribed() {
+        if shared.ble.stream() != Stream::None {
             session.idle_changed.wait().await;
             continue;
         }
         let until = session.idle_since.get() + IDLE_DEADLINE;
         if Instant::now() >= until {
-            disconnect(conn, session, shared, "bonded but not subscribed in time");
+            disconnect(conn, session, shared, "not subscribed in time");
             core::future::pending::<()>().await;
         }
         select(Timer::at(until), session.idle_changed.wait()).await;
@@ -1057,16 +1245,22 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                 // The table refused these unencrypted already; an encrypted link without a bond
                 // is refused here.
                 let refused = AttErrorCode::INSUFFICIENT_AUTHENTICATION;
+                // A central reads one stream: a subscription to the other is refused.
+                let taken = AttErrorCode::WRITE_REQUEST_REJECTED;
                 let up_cccd = server.link.up.cccd_handle;
+                let tx_cccd = server.wardrive_esp.tx.cccd_handle;
+                let phone = [server.wardrive_esp.rx.handle, server.wardrive_esp.ctrl.handle];
                 // Down's writes skip the attribute table, which would store each one.
                 let reply = match event {
                     GattEvent::Write(write) if write.handle() == server.link.down.handle => {
                         // TrouBLE answers a rejected write without response too, so only a
                         // request is ever rejected for a dropped write.
                         let request = matches!(write.payload().incoming(), AttClient::Request(_));
+                        let len = write.with_data(|_, data| data.len());
+                        let send = || write.with_data(|_, data| shared.push(&Up::HostBytes(data)));
                         if !authorized(conn) {
                             write.reject(refused)
-                        } else if forward(shared, &write).await || !request {
+                        } else if forward(shared, len, send).await || !request {
                             write.accept_unprocessed()
                         } else {
                             write.reject(AttErrorCode::INSUFFICIENT_RESOURCES)
@@ -1076,6 +1270,23 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                         if Some(write.handle()) == up_cccd && !authorized(conn) =>
                     {
                         write.reject(refused)
+                    }
+                    GattEvent::Write(write)
+                        if Some(write.handle()) == up_cccd
+                            && enables_notify(&write)
+                            && ble.stream() == Stream::Phone =>
+                    {
+                        write.reject(taken)
+                    }
+                    GattEvent::Write(write)
+                        if Some(write.handle()) == tx_cccd
+                            && enables_notify(&write)
+                            && (!ble.admitted() || ble.stream() == Stream::Host) =>
+                    {
+                        write.reject(taken)
+                    }
+                    GattEvent::Write(write) if phone.contains(&write.handle()) => {
+                        phone_write(shared, write).await
                     }
                     event => event.accept(),
                 };
@@ -1091,20 +1302,40 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
         let raw = conn.raw();
         let encrypted = raw.security_level().is_ok_and(|level| level.encrypted());
         let bonded = raw.is_bonded_peer();
-        let subscribed = encrypted && bonded && server.link.up.should_notify(conn);
+        let stream = if encrypted && bonded && server.link.up.should_notify(conn) {
+            Stream::Host
+        } else if ble.admitted() && server.wardrive_esp.tx.should_notify(conn) {
+            Stream::Phone
+        } else {
+            Stream::None
+        };
         let mtu = raw.att_mtu();
-        let was = ble.subscribed();
+        let was = ble.stream();
         set_state(shared, |state| {
-            state.subscribed = subscribed;
+            state.stream = stream;
             state.mtu = mtu;
             state.encrypted = encrypted;
             state.bonded = bonded;
         });
-        if subscribed != was {
-            if !subscribed {
-                session.idle_since.set(Instant::now());
+        if stream != was {
+            match stream {
+                Stream::None => session.idle_since.set(Instant::now()),
+                Stream::Phone => {
+                    let peer = mac::short(&session.peer);
+                    shared.log(format_args!("Bluetooth phone linked {peer}"));
+                }
+                Stream::Host => {}
             }
             session.idle_changed.signal(());
+        }
+        // Admission ended and an event came before `revoke` looked: the phone still reads TX, so
+        // it is not left to the idle rule.
+        if was == Stream::Phone
+            && stream == Stream::None
+            && !ble.admitted()
+            && server.wardrive_esp.tx.should_notify(conn)
+        {
+            drop_phone(conn, session, shared);
         }
     }
 }
@@ -1142,14 +1373,13 @@ fn paired(
     shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
 }
 
-/// Send what a central wrote to the P4, waiting for room beside [`UP_RESERVE_BYTES`] rather than
-/// evicting, and return whether it went: `false` for a write dropped after [`FORWARD_WAIT`]. The
-/// write is held meanwhile, so the next waits behind it.
+/// Send the record carrying `len` bytes a central wrote to the P4 with `send`, waiting for room
+/// beside [`UP_RESERVE_BYTES`] rather than evicting, and return whether it went: `false` for one
+/// dropped after [`FORWARD_WAIT`]. The write is held meanwhile, so the next waits behind it.
 ///
 /// Only the link's writer makes room, by taking records off the queue for a packet, and it
 /// raises `up_freed` each time, so the wait is that signal rather than a poll.
-async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>) -> bool {
-    let len = write.with_data(|_, data| data.len());
+async fn forward(shared: &Shared, len: usize, send: impl FnOnce()) -> bool {
     let deadline = Instant::now() + FORWARD_WAIT;
     while shared.up_room() < len + FORWARD_OVERHEAD + UP_RESERVE_BYTES {
         if let Either::Second(()) = select(shared.up_freed.wait(), Timer::at(deadline)).await {
@@ -1158,29 +1388,100 @@ async fn forward(shared: &Shared, write: &WriteEvent<'_, '_, DefaultPacketPool>)
         }
     }
     // A write is at most `VALUE_MAX`, well inside one record.
-    write.with_data(|_, data| shared.push(&Up::HostBytes(data)));
+    send();
     true
 }
 
-/// Notify the ring to the central while it is subscribed, a notification at a time.
+/// Whether a write to a CCCD turns notifications on: its value is two bytes LE, bit 0 notify.
+fn enables_notify(write: &WriteEvent<'_, '_, DefaultPacketPool>) -> bool {
+    write.with_data(|_, data| data.first().is_some_and(|flags| flags & 1 != 0))
+}
+
+/// Answer a phone's write to RX or CTRL. Never refused with Insufficient Authentication, the
+/// answer that makes a phone pair.
+///
+/// Before phones are admitted a request is refused and a write without response dropped. While
+/// the central reads no WardriveESP stream a write is dropped. Else its ACK is owed, and its
+/// command goes to the P4 as `Up::WardriveEspCommand`, as Down's writes do.
+async fn phone_write<'s>(
+    shared: &Shared,
+    write: WriteEvent<'s, '_, DefaultPacketPool>,
+) -> Result<Reply<'s, DefaultPacketPool>, Error> {
+    let ble = &shared.ble;
+    let request = matches!(write.payload().incoming(), AttClient::Request(_));
+    if !ble.admitted() {
+        return if request {
+            write.reject(AttErrorCode::WRITE_NOT_PERMITTED)
+        } else {
+            write.accept_unprocessed()
+        };
+    }
+    if ble.stream() != Stream::Phone {
+        return write.accept_unprocessed();
+    }
+    let mut text = [0; VALUE_MAX];
+    let (len, framed) = write.with_data(|_, data| take_phone_write(ble, data, &mut text));
+    if len == 0 {
+        return write.accept_unprocessed();
+    }
+    let command = &text[..len];
+    crate::wardrive_esp_bench::on_command(shared, command, framed);
+    if forward(shared, len, || shared.push(&Up::WardriveEspCommand(command))).await || !request {
+        write.accept_unprocessed()
+    } else {
+        write.reject(AttErrorCode::INSUFFICIENT_RESOURCES)
+    }
+}
+
+/// Read a phone's write: owe its ACK, and copy its command, trimmed, into `out`. Returns the
+/// command's length, 0 for none, and whether the write was framed.
+fn take_phone_write(ble: &Ble, data: &[u8], out: &mut [u8; VALUE_MAX]) -> (usize, bool) {
+    let mut inbound = ble.inbound.get();
+    let taken = inbound.on_write(data);
+    ble.inbound.set(inbound);
+    let framed = taken.ack.is_some();
+    // A CMD sets the reply id to its own. A full queue drops the newest: the phone has written
+    // more than TrouBLE queues without an answer.
+    if framed {
+        let _ = ble.acks.borrow_mut().push_back(inbound.reply_id());
+        ble.ready.signal(());
+    }
+    let text = taken.command.map_or(&[][..], command::trim);
+    let len = text.len().min(VALUE_MAX);
+    out[..len].copy_from_slice(&text[..len]);
+    (len, framed)
+}
+
+/// Notify the ring to the central while it reads a stream, a notification at a time: on Up as
+/// it comes, or on TX in frames, each owed ACK first.
 async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! {
     let ble = &shared.ble;
     let mut chunk = [0; VALUE_MAX];
     loop {
-        if !ble.subscribed() || ble.outbox.borrow().is_empty() {
+        let stream = ble.stream();
+        let idle = match stream {
+            Stream::None => true,
+            Stream::Host => ble.outbox.borrow().is_empty(),
+            Stream::Phone => ble.outbox.borrow().is_empty() && ble.acks.borrow().is_empty(),
+        };
+        if idle {
             ble.ready.wait().await;
             continue;
         }
         // An MTU exchange raises no event, so the notifier is where a change shows.
         let mtu = conn.raw().att_mtu();
         set_state(shared, |state| state.mtu = mtu);
-        let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
-        let n = ble.outbox.borrow_mut().take(&mut chunk[..room]);
+        let (characteristic, n) = if stream == Stream::Phone {
+            (&server.wardrive_esp.tx, phone_chunk(ble, mtu, &mut chunk))
+        } else {
+            let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
+            (&server.link.up, ble.outbox.borrow_mut().take(&mut chunk[..room]))
+        };
         // TrouBLE frees its packets inside its runner and offers nothing to wait on, so a full
         // pool is waited out with a back-off.
         let mut wait = POOL_RETRY;
         while let Err(Error::OutOfMemory) =
-            server.link.up.notify_raw(conn, &chunk[..n], false).await
+            characteristic.notify_raw(conn, &chunk[..n], false).await
         {
             Timer::after(wait).await;
             wait = (wait * 2).min(POOL_RETRY_MAX);
@@ -1191,6 +1492,22 @@ async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! 
         // A send TrouBLE's queue had room for never waited, so the link gets its turn here.
         yield_now().await;
     }
+}
+
+/// Build the phone's next notification in `chunk` and return its length: an owed ACK, else one
+/// DATA frame of the ring's bytes through the next `\n`, so a frame carries one line, or part of
+/// one longer than the frame's room.
+fn phone_chunk(ble: &Ble, mtu: u16, chunk: &mut [u8; VALUE_MAX]) -> usize {
+    if let Some(id) = ble.acks.borrow_mut().pop_front() {
+        chunk[..frame::HEADER_LEN].copy_from_slice(&frame::ack(id));
+        return frame::HEADER_LEN;
+    }
+    let room = frame::data_room(mtu).min(VALUE_MAX - frame::HEADER_LEN);
+    let (header, body) = chunk.split_at_mut(frame::HEADER_LEN);
+    let n = ble.outbox.borrow_mut().take_through(&mut body[..room], b'\n');
+    // At most `VALUE_MAX`, well inside a `u16`.
+    header.copy_from_slice(&frame::data_header(ble.inbound.get().reply_id(), n as u16));
+    frame::HEADER_LEN + n
 }
 
 /// `BleCounters`' number for a PHY.

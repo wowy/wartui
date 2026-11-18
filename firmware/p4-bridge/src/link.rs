@@ -255,6 +255,8 @@ impl Link {
             Ok(Up::BleState(_)) => {}
             Ok(Up::BondAdded(bond)) => crate::bonds::on_added(shared, bond),
             Ok(Up::BondRemoved(addr)) => crate::bonds::on_removed(shared, addr),
+            // The P4 runs no phone session yet, so a phone's command goes nowhere.
+            Ok(Up::WardriveEspCommand(_)) => {}
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

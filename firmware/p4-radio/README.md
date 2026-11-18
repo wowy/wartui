@@ -16,6 +16,8 @@ cargo build --release
 The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src/ble.rs`). It
 advertises `wartui XX:YY`, the bridge's last two octets, with the `wartui_proto::ble` service in its
 scan response. It notifies the P4's host stream on Up and forwards what a central writes on Down.
+Beside it sits the WardriveESP service, which a phone app reads with no pairing while the P4
+admits phones; the advertisement then carries that service and the scan response the name.
 
 - **Only a bonded, encrypted central reaches the stream.** It pairs by LE Secure Connections Just
   Works, inside the P4's pairing window. The P4 keeps the bonds and sends them down after each
@@ -115,13 +117,14 @@ wire from the same tree carries the bundled digest and is not reflashed.
 
 Each is read at build time from an environment variable, so a bench run changes it with a
 rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=16384 cargo build --release`. The P4's build
-passes both through to the image it bundles. `wartui status` reports the queue's high-water mark
+passes each through to the image it bundles. `wartui status` reports the queue's high-water mark
 as `radio-up`.
 
 | Variable | Default | Sets |
 | --- | --- | --- |
 | `WARTUI_RADIO_UP_QUEUE_BYTES` | 8192 | the C6's lines, status and Bluetooth messages waiting for a packet to the P4; a full queue evicts the oldest |
 | `WARTUI_RADIO_CONN_INTERVAL_MS` | unset: the central's | the connection interval the C6 asks a central for, `MIN-MAX` in ms ([above](#bluetooth-host-link)) |
+| `WARTUI_RADIO_WARDRIVE_ESP_BENCH` | unset | set to anything, a bench build that admits a phone and answers its WardriveESP commands itself, sending no access points (`src/wardrive_esp_bench.rs`) |
 
 ## Dependency versions
 

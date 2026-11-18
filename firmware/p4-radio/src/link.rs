@@ -29,8 +29,9 @@
 //! ring.
 //!
 //! **The host stream goes to a Bluetooth central** (`src/ble.rs`): `Down::HostStart` and
-//! `Down::HostBytes` feed the notify ring, `Down::Bonds` gives the C6 the bonds the P4 keeps, and
-//! the C6's Bluetooth counters ride on each `RadioStatus`.
+//! `Down::HostBytes` feed the notify ring, `Down::Bonds` gives the C6 the bonds the P4 keeps and
+//! whether it admits phones, and the C6's Bluetooth counters ride on each `RadioStatus`. A phone's
+//! commands go up as `Up::WardriveEspCommand`.
 //!
 //! The C6 sends a hello every [`HELLO_EVERY_MS`] until it hears the P4's. The P4 tells a repeat
 //! from a new life by the packet seq, which starts at 0 on every boot
@@ -416,7 +417,9 @@ impl Link {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared))),
             Down::HostStart { at } => crate::ble::host_start(shared, at),
             Down::HostBytes { at, bytes } => crate::ble::host_bytes(shared, at, bytes),
-            Down::Bonds { bonds, window_ms } => crate::ble::take_bonds(shared, bonds, window_ms),
+            Down::Bonds { bonds, window_ms, wardrive_esp } => {
+                crate::ble::take_bonds(shared, bonds, window_ms, wardrive_esp);
+            }
         }
     }
 

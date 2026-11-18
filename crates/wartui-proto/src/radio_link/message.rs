@@ -8,8 +8,10 @@
 //! They carry the P4's poll for the C6's counters, the counters, the C6's lines for the host,
 //! and the host link over Bluetooth: the host stream each way ([`Down::HostBytes`],
 //! [`Up::HostBytes`]), the C6's credit for what it is done with ([`Up::Credit`]), its Bluetooth
-//! state, and the bonds the P4 keeps for it ([`Down::Bonds`], [`Up::BondAdded`],
-//! [`Up::BondRemoved`], [`crate::bonds`]).
+//! state and which [`Stream`] its central reads, and the bonds the P4 keeps for it
+//! ([`Down::Bonds`], [`Up::BondAdded`], [`Up::BondRemoved`], [`crate::bonds`]). A phone on the
+//! WardriveESP service reads the same stream down, and its commands come up as
+//! [`Up::WardriveEspCommand`] ([`crate::wardrive_esp`]).
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while its bytes in
 //! flight, `sent.wrapping_sub(accounted)`, stay under
@@ -70,6 +72,10 @@ pub enum Down<'a> {
         /// Milliseconds the pairing window stays open from now: 0 while it is closed,
         /// [`WINDOW_UNTIL_BONDED`] while no bond is stored.
         window_ms: u32,
+        /// Whether the C6 admits a phone to the WardriveESP service. It rides here because the
+        /// C6 waits for its first `Down::Bonds` before it advertises, and the advertisement
+        /// depends on it.
+        wardrive_esp: bool,
     },
 }
 
@@ -108,13 +114,29 @@ pub enum Up<'a> {
     BondAdded(BondRecord),
     /// A bonded central paired again: drop its old bond. A [`Up::BondAdded`] follows.
     BondRemoved(BondAddr),
+    /// One command a phone wrote to the WardriveESP service, unframed, at most
+    /// [`COMMAND_MAX`](crate::wardrive_esp::command::COMMAND_MAX) bytes. Its own variant, so a
+    /// phone's bytes never reach the host frame decoder.
+    WardriveEspCommand(#[serde(serialize_with = "byte_string", borrow)] &'a [u8]),
+}
+
+/// Which stream a central reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stream {
+    /// None: no central, or one that has subscribed to nothing it may read.
+    #[default]
+    None,
+    /// The host stream: subscribed to Up on an encrypted link, holding a stored bond.
+    Host,
+    /// The WardriveESP stream: subscribed to its TX while phones are admitted. No bond.
+    Phone,
 }
 
 /// The C6's Bluetooth link, as [`Up::BleState`] reports it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BleState {
-    /// A central has subscribed to the host stream's notifications.
-    pub subscribed: bool,
+    /// Which stream the central reads.
+    pub stream: Stream,
     /// The link is encrypted.
     pub encrypted: bool,
     /// The central holds a stored bond. The host stream flows only while this and `encrypted`
