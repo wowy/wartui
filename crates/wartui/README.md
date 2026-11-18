@@ -1290,10 +1290,28 @@ bridge too, in its own Bluetooth settings, and pairs again. A Bluetooth host con
 bonds clear is disconnected, this PC too when `forget` runs over Bluetooth. With no bond, the
 bridge's window stays open until a host pairs. `forget` saves nothing to `wartui.toml` either.
 
-**`wartui bluetooth wardrive-esp on` lets phones link to the bridge as to a WardriveESP board,**
-with no pairing; `off` stops it, and no word prints the setting, which the bridge keeps, off by
-default. While it is on, any phone in range can hold the bridge's one Bluetooth connection and
-start or stop the scan, and a USB host still takes the bridge from it.
+**`wartui bluetooth wardrive-esp on` lets a phone app read the bridge as a WardriveESP board,**
+with no pairing. `off` stops it, and no word prints the setting. The bridge keeps it, off by
+default, so a bridge set once serves a phone with no wartui host attached. The settings'
+`wardrive esp` row sets it too. [`docs/wardrive-esp.md`](../../docs/wardrive-esp.md) says what the
+app is sent.
+
+```sh
+wartui bluetooth wardrive-esp        # the setting now
+wartui bluetooth wardrive-esp on
+```
+
+- **It is open.** While it is on, any phone in range can link, hold the bridge's one Bluetooth
+  connection, and start or stop the scan.
+- **The phone is the host.** It starts the scan when it links and stops it when it lets go, and
+  the fleet scans Wi-Fi only. No capture is written: wartui's store sees none of it.
+- **USB takes the bridge from a phone**, as from a Bluetooth host. Any `wartui` command over USB
+  but `ports` drops the phone, and the app links again by itself 15 s after USB goes quiet.
+- **A linked phone keeps a Bluetooth wartui host out**, and the reverse: the bridge takes one
+  Bluetooth connection.
+- **With the setting off, a phone that remembers the bridge still connects**, is refused, and
+  is dropped 10 s later, again and again. A Bluetooth wartui host can miss the bridge's one
+  connection meanwhile. Turn the board off in the app, or the phone's Bluetooth.
 
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
@@ -1313,7 +1331,7 @@ scans Bluetooth:
 |--------------------------------------------------------------------------|-----------------------------------------------------------------|
 | `host  usb`                                                              | Who the bridge serves: `none`, `usb` or `bluetooth`             |
 | `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
-| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
+| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses, a phone among them |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
 | `wardrive esp on`                                                        | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |

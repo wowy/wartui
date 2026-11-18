@@ -51,6 +51,12 @@ with some lightly modified firmware ended up as an entirely separate project.
 I wanted a way to motivate myself to relearn Rust, and a fun little TUI sounded like just the
 ticket. I hope you enjoy what I've built, modify it, and share with others!
 
+The bridge also speaks the Bluetooth protocol of RocketGod's
+[WardriveESP](https://rocketgod.dev/WardriveESP/), so the Wardrive Go phone app can read the fleet
+as one board. wartui's implementation is its own code, written from WardriveESP's MIT-licensed
+protocol document, which is vendored with its license in
+[`docs/vendor/wardrive-esp`](docs/vendor/wardrive-esp/README.md).
+
 ## Running it
 
 ### Simulated

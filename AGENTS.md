@@ -19,6 +19,9 @@ Where the prose lives:
   set (`firmware/p4-radio/README.md`).
 - `docs/node-bus.md` — the SPI bus between the P4 bridge and its nodes: pins, pin behavior and the
   messages its records carry.
+- `docs/wardrive-esp.md` — the WardriveESP service the bridge offers a phone app: what it
+  implements and how the fleet maps onto it. `docs/vendor/wardrive-esp/` holds the protocol
+  document it is written from, unmodified, with its license and provenance. Never edit that copy.
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -102,10 +105,11 @@ own.
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
   `settings` (the records the P4 keeps its fan duty and channel pool in), `bonds` (the Bluetooth
-  bonds the P4 keeps for its C6, and their records), `host_owner` (who owns the P4's host queue:
-  USB, a Bluetooth central or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
+  bonds the P4 keeps for its C6, and their records), `host_owner` (who holds the P4's host queue:
+  USB, a Bluetooth central, a phone or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
-  GATT identity of the C6's Bluetooth host link), `mac` (the `Mac` type and its text form), `plan`
+  GATT identity of the C6's Bluetooth host link), `wardrive_esp` (the WardriveESP protocol a phone
+  app reads the bridge in: its frames, commands, lines and session), `mac` (the `Mac` type and its text form), `plan`
   (channel pools and the round-robin deal that cuts one), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
   records that tell each node), `node` (a node's timings and sweep cursor), `pending` (the buffers
   sightings wait in on a node),
@@ -132,17 +136,21 @@ own.
   reads heartbeats, decides what every node scans and sends every `Assign` and `Stop`
   (`src/fleet.rs`). The planner itself is `wartui_proto::fleet`, because a fix in firmware costs
   a reflash and a fix there is tested with `cargo test` first. It forwards every node record to
-  the host, heartbeats included, and reads no other kind. Its image carries the C6's, and
+  the host, heartbeats included. It reads heartbeats, and sighting batches while a phone is
+  linked, and no other kind. Its image carries the C6's, and
   updates it. It caches a node image in PSRAM for `wartui ota`, and builds `UpdateChunk`s from it,
   a layout in the bus's frozen core (`src/cache.rs`). On a carrier it drives the lid fan
-  (`src/fan.rs`). It keeps the fan's duty and the channel pool in the `nvs` partition, the
-  settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
+  (`src/fan.rs`). It keeps the fan's duty, the channel pool and the `wardrive esp` setting in the `nvs`
+  partition, the settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
   nowhere, so it boots stopped. A bonded central over Bluetooth, through the C6, can be its host
   instead of USB (`src/ble.rs`): it keeps the C6's bonds in `nvs` too (`src/bonds.rs`), and the host
-  bulk ring in PSRAM, past the node image cache.
+  bulk ring in PSRAM, past the node image cache. With `wardrive esp` on, a phone on the C6's
+  WardriveESP service can hold the queue instead: the P4 runs its session, scans for it and
+  sends it text lines (`src/wardrive_esp.rs`).
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
-  (`src/ble.rs`).
+  (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
+  the P4 admits one.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   and owns the channel (`firmware/node/README.md` § "What it does differently"). Hops from one
   assigned channel to the next, reporting each dwell over the node bus, and idles servicing the
@@ -200,6 +208,11 @@ Which tier answered is stored per row.
 These bite from a distance — from a file other than the one that owns them — so the reasoning
 is here rather than only in a `//!`.
 
+- **One wire is not ours: the WardriveESP service.** The C6 offers it to a phone while
+  `wardrive esp` is on. It carries text lines in the vendored protocol's frames, written from
+  `docs/vendor/wardrive-esp/PROTOCOL.md`, and shares no path with host frames or the node bus: a
+  phone's command arrives as its own radio-link record and never reaches the host frame decoder.
+  → `crates/wartui-proto/src/wardrive_esp/mod.rs` `//!`, `docs/wardrive-esp.md`
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every node-bus
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
@@ -219,8 +232,8 @@ is here rather than only in a `//!`.
   never half-decoded. A heartbeat whose prefix names another major or minor is the exception: its
   node is shown as `needs update` (older) or `host behind` (newer), and the P4 leaves it out of
   its plan and sends it nothing. Once its heartbeat has named that version, its sighting batches
-  are counted `incompatible` and not recorded. The P4 decodes heartbeats and encodes `Assign` and
-  `Stop`, so a change to those three layouts costs a P4 reflash too (`wartui flash-bridge`, from
+  are counted `incompatible` and not recorded. The P4 decodes heartbeats and sighting batches and encodes `Assign` and
+  `Stop`, so a change to those four layouts costs a P4 reflash too (`wartui flash-bridge`, from
   the same tree); any other node message passes through it unread and does not.
   `wartui ota` updates the nodes over the bus.
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
@@ -268,7 +281,8 @@ is here rather than only in a `//!`.
   every `Assign` and `Stop`, and the host authors no node record but an update's. That is what
   lets the fleet table and the store read a node's share as the plan's without asking who put it
   there. It has two inputs, both the bridge's: the pool, kept in NVS and set by `SetPool`, and the
-  scan mode, set by `StartScan { bluetooth }` and `StopScan` and kept nowhere. Which node scans
+  scan mode, set by `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session,
+  which scans Wi-Fi only, and kept nowhere. Which node scans
   Bluetooth is its pick, not an input. The host's `Command::SetPool`, `SetBluetooth` and
   `StopScan` only ask, and the engine believes what the next `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
@@ -327,7 +341,7 @@ is here rather than only in a `//!`.
   are ordered so a power cut cannot leave an image running untrialed. The P4 bridge's C6 shares
   the trial: its image is confirmed once it has heard the P4's hello and its Bluetooth host has
   started advertising, one that has not advertised 30 s after boot restarts itself, and that
-  restart and the P4's resets count its boots. So does the P4: the first host frame it decodes confirms its image, and a trial boot arms its RTC watchdog,
+  restart and the P4's resets count its boots. So does the P4: the first host frame it decodes confirms its image, which a phone's command is not, and a trial boot arms its RTC watchdog,
   whose resets count its boots, so a hung P4 image or one no host hears rolls back after three.
   → `firmware/common/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
@@ -440,7 +454,9 @@ edit stops; follow the pointer before changing the rule.
   host attaches with a decoded frame, since the P4 cannot see the CH343's DTR, and its gate closes
   15 s after the last one: three of the engine's 5 s status polls. A Bluetooth central attaches by
   subscribing on an encrypted, bonded link, and lets go when it unsubscribes, disconnects or the C6
-  restarts, never on silence. Frames produced while no host is attached are dropped, and attaching
+  restarts, never on silence. A phone attaches by subscribing to the WardriveESP stream while
+  `wardrive esp` is on and USB does not hold the queue. It needs no bond, is sent lines and never
+  frames, and its release stops the scan. Frames produced while no host is attached are dropped, and attaching
   clears whatever is queued before it is served, so a host never reads a backlog from before it
   attached. Bytes already past the queue still reach the port, and the host drops every frame that
   decodes ahead of the connection's first `Ready`. The fleet planner runs regardless: a P4 with no
@@ -448,26 +464,32 @@ edit stops; follow the pointer before changing the rule.
   the current plan.
   → `firmware/p4-bridge/src/host.rs` `//!`, `src/ble.rs` `//!`, and `src/main.rs`,
   `Shared::push_host`
-- **One host owns the P4's host queue, and an `Identify` never takes it from a Bluetooth host.**
-  There is one stream and one credit window, so the queue goes to USB or to a central, never both.
+- **One host owns the P4's host queue, and an `Identify` never takes it from a Bluetooth host or a
+  phone.** There is one stream and one credit window, so the queue goes to USB, to a central or to
+  a phone, never two. A UART0 frame takes it from a phone with no notice, and the C6 admits no
+  phone until UART0 has been silent 15 s.
   Any other UART0 frame takes it, so `flash-bridge` over USB always gets in, and the central is
   told why. An `Identify` while a central owns it gets a `Ready` written straight to UART0: `wartui
   ports`, `--bridge` lookups and a probe from another PC all send one, and taking the queue for
   each dropped what was queued for the central. Once UART0 falls silent for 15 s, a central still
   subscribed takes the queue back.
   → `crates/wartui-proto/src/host_owner.rs` `//!`, `firmware/p4-bridge/src/ble.rs`
-- **Only an encrypted central holding a stored bond subscribes or writes.** The attribute table
-  requires encryption, but Just Works gives an unbonded link the same level, so the C6 checks the
-  bond itself before a write is forwarded or a subscription counts, and drops a central that
-  cannot bond, whose bond the P4 dropped while it was connected, or that stays unsubscribed for
-  30 s.
+- **Only an encrypted central holding a stored bond subscribes to or writes the wartui link.** The
+  attribute table requires encryption, but Just Works gives an unbonded link the same level, so
+  the C6 checks the bond itself before a write is forwarded or a subscription counts, and drops a
+  central that cannot bond, whose bond the P4 dropped while it was connected, or that reads no
+  stream for 30 s. With `wardrive esp` on, any central subscribes to the WardriveESP stream and
+  writes its commands, which reach only the phone's session. A central reads one stream, the
+  first it subscribes to, and one central connects at a time, so a linked phone keeps a Bluetooth
+  host out and USB always gets in. While phones are admitted the C6 sends no Security Request,
+  which a phone would answer with a pairing prompt.
   → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`
 - **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
   the P4's own offsets, up to which the C6 is done, so every `HostStart` and `HostBytes`
   resynchronizes it and a restart of either chip cannot skew it. A sum kept from the C6's boot
   would leave the P4 holding more credit than it sent after a restart, and it would never send
-  again. A lost packet is credited as though sent, and costs the central its frame
-  (`resynced_bytes`).
+  again. A lost packet is credited as though sent, and costs the central its frame, or a phone
+  its line (`resynced_bytes`).
   → `crates/wartui-proto/src/radio_link/inflow.rs` `//!`
 - **A central's write group ends with a write request**, and its earlier pieces are writes without
   response. TrouBLE queues 8 writes per connection and drops the rest, and the C6 answers the
