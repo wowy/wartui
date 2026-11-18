@@ -26,7 +26,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
-| `bluetooth`    | `pair` this PC with the bridge, or `forget` it; see "The Bluetooth link"            |
+| `bluetooth`    | `pair` this PC, `forget` it, or let phones link; see "The Bluetooth link"           |
 
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
@@ -1224,8 +1224,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## The Bluetooth link
 
 **`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
-`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota` and `bluetooth forget`
-take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota`, `bluetooth forget`
+and `bluetooth wardrive-esp` take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
 over there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. Updates over
 Bluetooth are slower than over USB, and one that fails is recovered over USB ("Flashing the
 bridge"). Nothing scans for Bluetooth unless the link is Bluetooth. Every
@@ -1287,6 +1287,11 @@ bridge too, in its own Bluetooth settings, and pairs again. A Bluetooth host con
 bonds clear is disconnected, this PC too when `forget` runs over Bluetooth. With no bond, the
 bridge's window stays open until a host pairs. `forget` saves nothing to `wartui.toml` either.
 
+**`wartui bluetooth wardrive-esp on` lets phones link to the bridge as to a WardriveESP board,**
+with no pairing; `off` stops it, and no word prints the setting, which the bridge keeps, off by
+default. While it is on, any phone in range can hold the bridge's one Bluetooth connection and
+start or stop the scan, and a USB host still takes the bridge from it.
+
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
 latest status, and show only while the link is up:
@@ -1307,6 +1312,7 @@ scans Bluetooth:
 | `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
 | `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
+| `wardrive esp on`                                                        | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
@@ -1422,8 +1428,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
-- **`host  …`** and **`pairing  …`**, and the **`bluetooth host  …`** counters: the Bluetooth host
-  link; see "The Bluetooth link".
+- **`host  …`**, **`pairing  …`** and **`wardrive esp  …`**, and the **`bluetooth host  …`**
+  counters: the Bluetooth host link; see "The Bluetooth link".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
 - **`share  N1   21 channels  1,3,5,…`**: one line per node holding a share of the bridge's plan,

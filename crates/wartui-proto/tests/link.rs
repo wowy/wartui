@@ -62,6 +62,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::StopScan).expect("sample_commands has room");
     v.push(HostToBridge::OpenPairing).expect("sample_commands has room");
     v.push(HostToBridge::ClearBonds).expect("sample_commands has room");
+    v.push(HostToBridge::SetWardriveEsp { on: true }).expect("sample_commands has room");
     v
 }
 
@@ -223,11 +224,13 @@ fn usb_bluetooth() -> BluetoothStatus {
         window: PairWindow::Closed,
         central: None,
         counters: BleCounters::default(),
+        wardrive_esp: false,
     }
 }
 
-/// [`usb_bluetooth`]'s bytes: `owner`, `bonds`, `window`, `central`'s tag, then nine counters.
-const USB_BLUETOOTH_BYTES: [u8; 13] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+/// [`usb_bluetooth`]'s bytes: `owner`, `bonds`, `window`, `central`'s tag, nine counters, then
+/// `wardrive_esp`.
+const USB_BLUETOOTH_BYTES: [u8; 14] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// A Status body with [`usb_bluetooth`] taken off its end.
 fn without_bluetooth(mut body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
@@ -641,7 +644,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 15, "one of each");
+    assert_eq!(commands.len(), 16, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -855,6 +858,7 @@ fn link_fits_status_in_one_frame_when_every_field_is_largest() {
                 interval_us: u32::MAX,
                 heap_high_water: u32::MAX,
             },
+            wardrive_esp: true,
         },
     };
     let mut out = [0u8; MAX_FRAME];
@@ -1034,6 +1038,7 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
             interval_us: 7_500,
             heap_high_water: 5,
         },
+        wardrive_esp: true,
     };
     if let BridgeToHost::Status { bluetooth: field, .. } = &mut status {
         *field = bluetooth;
@@ -1055,6 +1060,7 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
         4, 2,                   // dropped_writes, phy
         0xCC, 0x3A,             // interval_us 7500
         5,                      // heap_high_water
+        1,                      // wardrive_esp
     ];
     assert_eq!(body[head.len()..], expected);
     assert_eq!(round_trip(&status), status);
@@ -1095,6 +1101,19 @@ fn link_codec_pins_scan_bytes_when_host_starts_or_stops() {
     }
     let n = encode_host_frame(&HostToBridge::StopScan, &mut out).expect("encodes");
     assert_eq!(frame_body(&out[..n]), [12]);
+}
+
+#[test]
+fn link_round_trips_set_wardrive_esp_when_encoded() {
+    // Postcard's variant index, last of the commands, then `on`'s byte.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    for (on, byte) in [(false, 0), (true, 1)] {
+        let cmd = HostToBridge::SetWardriveEsp { on };
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [15, byte]);
+        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        assert_eq!(decoded, cmd);
+    }
 }
 
 #[test]

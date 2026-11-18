@@ -101,8 +101,7 @@
 //!   before the phone reads TX is dropped.
 //!
 //! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
-//! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]). A
-//! bench build admits phones on its own (`src/wardrive_esp_bench.rs`).
+//! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
 //!
 //! **A central the C6 holds a bond for gets no Security Request.** Outside the window the request
 //! would say no bonding, and BlueZ 5.88 answers that by pairing again rather than encrypting with
@@ -149,7 +148,7 @@ use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 use core::pin::pin;
 
-use embassy_futures::join::join3;
+use embassy_futures::join::join;
 use embassy_futures::select::{Either, select, select4};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -170,9 +169,8 @@ use wartui_proto::radio_link::{
 use wartui_proto::wardrive_esp::command;
 use wartui_proto::wardrive_esp::frame::{self, Inbound};
 
-use crate::config::{CONN_INTERVAL_US, UP_QUEUE_MIN_BYTES, WARDRIVE_ESP_BENCH};
+use crate::config::{CONN_INTERVAL_US, UP_QUEUE_MIN_BYTES};
 use crate::link::Shared;
-use crate::wardrive_esp_bench::Bench;
 use gatt::Server;
 
 /// Resync `0x00`s the ring holds beside the window's stream bytes.
@@ -460,15 +458,12 @@ pub struct Ble {
     window_until: Cell<Option<Instant>>,
     /// The bond last paired, until the P4's list holds it ([`repeat_bond`]).
     pending_bond: Cell<Option<PendingBond>>,
-    /// A phone may read the WardriveESP service: the P4 said so in its last `Down::Bonds`, or the
-    /// build is a bench's.
+    /// A phone may read the WardriveESP service: the P4 said so in its last `Down::Bonds`.
     admitted: Cell<bool>,
     /// The id the phone's frames carry. It lives as long as the C6, not the connection.
     inbound: Cell<Inbound>,
     /// The ids of the ACKs owed to the phone, oldest first. Cleared when the stream changes.
     acks: RefCell<Deque<u32, ACKS_MAX>>,
-    /// The bench build's own phone session (`src/wardrive_esp_bench.rs`).
-    pub bench: Bench,
 }
 
 impl Ble {
@@ -490,10 +485,9 @@ impl Ble {
             bonds_changed: Signal::new(),
             window_until: Cell::new(None),
             pending_bond: Cell::new(None),
-            admitted: Cell::new(WARDRIVE_ESP_BENCH),
+            admitted: Cell::new(false),
             inbound: Cell::new(Inbound::new()),
             acks: RefCell::new(Deque::new()),
-            bench: Bench::new(),
         }
     }
 
@@ -501,11 +495,6 @@ impl Ble {
         let mut counters = self.counters.get();
         change(&mut counters);
         self.counters.set(counters);
-    }
-
-    /// The link as the C6 sees it.
-    pub fn state(&self) -> BleState {
-        self.state.get()
     }
 
     /// Which stream the central reads.
@@ -580,17 +569,10 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     ble.ready.signal(());
 }
 
-/// Queue a line the bench build's session wrote for the phone (`src/wardrive_esp_bench.rs`).
-pub fn push_bench_line(shared: &Shared, line: &[u8]) {
-    shared.ble.outbox.borrow_mut().push(line);
-    shared.ble.ready.signal(());
-}
-
 /// Take the P4's bonds, its pairing window's time left, and whether it admits phones.
 /// [`advertise`] gives the bonds to TrouBLE, at once while it advertises ([`accept`]) and else
 /// once the central goes, and [`revoke`] disconnects a central whose bond they dropped, and a
-/// phone once phones are not admitted. A list that holds the pending bond ends its repeats. A
-/// bench build admits phones whatever the P4 says.
+/// phone once phones are not admitted. A list that holds the pending bond ends its repeats.
 ///
 /// Each `Down::Bonds` signals `bonds_changed`, a repeat that changes nothing included. Its waiters
 /// compare before they act: [`accept`] keeps the advertisement running while TrouBLE's bonds are
@@ -598,7 +580,7 @@ pub fn push_bench_line(shared: &Shared, line: &[u8]) {
 /// from each, and moves by no more than the message's transit.
 pub fn take_bonds(shared: &Shared, bonds: Bonds, window_ms: u32, wardrive_esp: bool) {
     let ble = &shared.ble;
-    ble.admitted.set(wardrive_esp || WARDRIVE_ESP_BENCH);
+    ble.admitted.set(wardrive_esp);
     let until = (window_ms > 0).then(|| Instant::now() + Duration::from_millis(window_ms.into()));
     ble.window_until.set(until);
     if ble.pending_bond.get().is_some_and(|pending| holds(&bonds, &pending.record)) {
@@ -698,7 +680,6 @@ fn set_state(shared: &Shared, change: impl FnOnce(&mut BleState)) {
         ble.acks.borrow_mut().clear();
         credit(shared, true);
         ble.ready.signal(());
-        crate::wardrive_esp_bench::on_stream(shared, was, state.stream);
     }
     if ble.said.get() != Some(state) {
         say_state(shared, state);
@@ -745,13 +726,7 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    join3(
-        run_host(&mut runner),
-        advertise(&stack, &mut peripheral, mac, shared),
-        crate::wardrive_esp_bench::run(shared, mac),
-    )
-    .await
-    .0
+    join(run_host(&mut runner), advertise(&stack, &mut peripheral, mac, shared)).await.0
 }
 
 /// Run TrouBLE's host, and restart the C6 if it ever stops.
@@ -1420,12 +1395,11 @@ async fn phone_write<'s>(
         return write.accept_unprocessed();
     }
     let mut text = [0; VALUE_MAX];
-    let (len, framed) = write.with_data(|_, data| take_phone_write(ble, data, &mut text));
+    let len = write.with_data(|_, data| take_phone_write(ble, data, &mut text));
     if len == 0 {
         return write.accept_unprocessed();
     }
     let command = &text[..len];
-    crate::wardrive_esp_bench::on_command(shared, command, framed);
     if forward(shared, len, || shared.push(&Up::WardriveEspCommand(command))).await || !request {
         write.accept_unprocessed()
     } else {
@@ -1434,22 +1408,21 @@ async fn phone_write<'s>(
 }
 
 /// Read a phone's write: owe its ACK, and copy its command, trimmed, into `out`. Returns the
-/// command's length, 0 for none, and whether the write was framed.
-fn take_phone_write(ble: &Ble, data: &[u8], out: &mut [u8; VALUE_MAX]) -> (usize, bool) {
+/// command's length, 0 for none.
+fn take_phone_write(ble: &Ble, data: &[u8], out: &mut [u8; VALUE_MAX]) -> usize {
     let mut inbound = ble.inbound.get();
     let taken = inbound.on_write(data);
     ble.inbound.set(inbound);
-    let framed = taken.ack.is_some();
     // A CMD sets the reply id to its own. A full queue drops the newest: the phone has written
     // more than TrouBLE queues without an answer.
-    if framed {
+    if taken.ack.is_some() {
         let _ = ble.acks.borrow_mut().push_back(inbound.reply_id());
         ble.ready.signal(());
     }
     let text = taken.command.map_or(&[][..], command::trim);
     let len = text.len().min(VALUE_MAX);
     out[..len].copy_from_slice(&text[..len]);
-    (len, framed)
+    len
 }
 
 /// Notify the ring to the central while it reads a stream, a notification at a time: on Up as

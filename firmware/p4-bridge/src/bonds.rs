@@ -14,6 +14,11 @@
 //! bonds the P4 dropped until the next hello. The C6 takes a repeat that changes nothing as
 //! changing nothing. Only a change that finds the queue full says so; a repeat stays silent.
 //!
+//! **`Down::Bonds` also says whether the C6 admits a phone** to the WardriveESP service:
+//! `host_owner::phones_admitted`, the setting and whether USB holds the queue
+//! (`src/wardrive_esp.rs`). It goes again whenever that differs from what the last one the down
+//! queue took said ([`follow_admission`]); a refused one waits for the next repeat.
+//!
 //! **The pairing window** is open while no bond is stored, for the first [`WINDOW_MS`] after the
 //! P4 boots, and for [`WINDOW_MS`] after a host's `OpenPairing`. The host link reaches that
 //! command only from USB or a bonded central. Its time left goes down in each `Down::Bonds`, and
@@ -27,6 +32,7 @@ use core::cell::{Cell, RefCell};
 use core::fmt::Write as _;
 
 use wartui_proto::bonds::{self, BondAddr, BondRecord, MAX_BONDS, Record, write_for};
+use wartui_proto::host_owner::phones_admitted;
 use wartui_proto::link::{LogStr, PairWindow};
 use wartui_proto::mac;
 use wartui_proto::ota::SECTOR;
@@ -49,6 +55,8 @@ pub struct Bonds {
     opened_at: Cell<Option<u64>>,
     /// P4 milliseconds at the latest `Down::Bonds` the down queue took.
     sent_at: Cell<u64>,
+    /// Whether the latest `Down::Bonds` the down queue took admitted phones.
+    admitted: Cell<bool>,
 }
 
 impl Bonds {
@@ -89,7 +97,12 @@ pub fn boot(updates: &mut Updates, image: &mut [u8; SECTOR]) -> Bonds {
         .and_then(|mut sector| sector.read(image).ok())
         .map(|()| bonds::read(image))
         .unwrap_or_default();
-    Bonds { held: RefCell::new(held), opened_at: Cell::new(None), sent_at: Cell::new(0) }
+    Bonds {
+        held: RefCell::new(held),
+        opened_at: Cell::new(None),
+        sent_at: Cell::new(0),
+        admitted: Cell::new(false),
+    }
 }
 
 /// Send the C6 every bond and the window's time left.
@@ -107,15 +120,29 @@ pub fn repeat(shared: &Shared) {
     }
 }
 
+/// Send the bonds again when whether the C6 admits phones differs from what the latest
+/// `Down::Bonds` the down queue took said.
+pub fn follow_admission(shared: &Shared) {
+    if admits(shared) != shared.bonds.admitted.get() {
+        send(shared);
+    }
+}
+
+/// Whether the C6 may admit a phone now.
+fn admits(shared: &Shared) -> bool {
+    phones_admitted(shared.phone.enabled(), shared.owner.get().holder())
+}
+
 /// Queue `Down::Bonds`, and return whether the down queue took it.
 fn push(shared: &Shared) -> bool {
     let now = now_ms();
     let bonds = shared.bonds.held.borrow().clone();
     let window_ms = shared.bonds.window_ms(now);
-    // The P4 admits no phone to the WardriveESP service yet.
-    let pushed = shared.push_down(&Down::Bonds { bonds, window_ms, wardrive_esp: false });
+    let wardrive_esp = admits(shared);
+    let pushed = shared.push_down(&Down::Bonds { bonds, window_ms, wardrive_esp });
     if pushed {
         shared.bonds.sent_at.set(now);
+        shared.bonds.admitted.set(wardrive_esp);
     }
     pushed
 }

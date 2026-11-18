@@ -564,6 +564,7 @@ const BLUETOOTH: BluetoothStatus = BluetoothStatus {
         interval_us: 30_000,
         heap_high_water: 41_000,
     },
+    wardrive_esp: false,
 };
 
 const RADIO_LINK: RadioLinkStats = RadioLinkStats {

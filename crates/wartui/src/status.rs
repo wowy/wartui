@@ -134,6 +134,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("bluetooth  {}", ble_text(info.node_board, ble));
     println!("host       {}", host_text(&bluetooth));
     println!("pairing    {}", pairing_text(&bluetooth));
+    println!("wardrive esp {}", wardrive_esp_text(&bluetooth));
     println!("slots      {}", slots_text(info.node_board, present));
     for line in plan_lines(info.node_board, plan.as_ref()) {
         println!("{line}");
@@ -239,6 +240,11 @@ pub(crate) fn pairing_text(status: &BluetoothStatus) -> String {
         PairWindow::UntilBonded => "open until a host pairs".to_owned(),
     };
     format!("{window}, {}", bonds_text(status.bonds))
+}
+
+/// Whether the bridge lets phones link to it as a WardriveESP board.
+pub(crate) const fn wardrive_esp_text(status: &BluetoothStatus) -> &'static str {
+    if status.wardrive_esp { "on" } else { "off" }
 }
 
 /// The bonds the bridge keeps, counted.
@@ -538,7 +544,7 @@ mod tests {
     use super::{
         Awaited, ReadyWait, Report, ScanMode, awaited, ble_text, board_line, counters_line,
         diagnostic_lines, fan_text, host_text, human_uptime, pairing_text, plan_lines, radio_line,
-        scan_text, silence_note, slots_text,
+        scan_text, silence_note, slots_text, wardrive_esp_text,
     };
     use crate::config::Link;
     use wartui_bridge::{DisconnectCause, LinkEvent};
@@ -834,6 +840,15 @@ mod tests {
         assert_eq!(pairing(PairWindow::Closed, 2), "closed, 2 bonds stored");
         assert_eq!(pairing(PairWindow::Open { secs: 87 }, 1), "open for 87 s more, 1 bond stored");
         assert_eq!(pairing(PairWindow::UntilBonded, 0), "open until a host pairs, no bond stored");
+    }
+
+    #[test]
+    fn status_prints_wardrive_esp_setting_when_bridge_reports_it() {
+        let text = |wardrive_esp| {
+            wardrive_esp_text(&BluetoothStatus { wardrive_esp, ..BluetoothStatus::default() })
+        };
+        assert_eq!(text(true), "on");
+        assert_eq!(text(false), "off");
     }
 
     #[test]

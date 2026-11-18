@@ -1,6 +1,6 @@
-//! The settings the P4 keeps on flash: the lid fan's duty and the channel pool, in the first
-//! sector of its `nvs` partition. `wartui_proto::settings` has the records'
-//! layout.
+//! The settings the P4 keeps on flash: the lid fan's duty, the channel pool and whether it offers
+//! phones the WardriveESP service, in the first sector of its `nvs` partition.
+//! `wartui_proto::settings` has the records' layout.
 //!
 //! **The P4 is the settings' system of record.** It reads the sector once at boot, on every
 //! board, before the futures start ([`boot`]), and runs what it holds, or the defaults when
@@ -51,6 +51,19 @@ pub fn set_pool(shared: &Shared, pool: ChannelPool) {
     if let Err(why) = save(shared, Setting::Pool(pool)) {
         let mut message = LogStr::new();
         let _ = write!(message, "pool {pool} not saved, so it holds until reboot: {why}");
+        shared.push_error(&message);
+    }
+}
+
+/// A `SetWardriveEsp`: offer phones the service when `on`, now, and store it when the sector does
+/// not hold it, so a repeat retries a save that failed.
+#[inline(never)]
+pub fn set_wardrive_esp(shared: &Shared, on: bool) {
+    crate::wardrive_esp::set(shared, on);
+    if let Err(why) = save(shared, Setting::WardriveEsp(on)) {
+        let state = if on { "on" } else { "off" };
+        let mut message = LogStr::new();
+        let _ = write!(message, "wardrive esp {state} not saved, so it holds until reboot: {why}");
         shared.push_error(&message);
     }
 }

@@ -22,9 +22,9 @@
 //! for about 40 ms, the armed buffer lasts about 10 ms, and then the FIFO overflows. The link
 //! needs no flow control for it. An update of the P4's own image is the flash work a host causes,
 //! and `wartui_proto::radio_link::update::Sender` waits for each sector's status and rewinds on
-//! `next_offset` and on silence. A `SetFan` or `SetPool` for a value the sector does not hold
-//! writes one word, and one in 1024 erases a sector first, which can lose the host's next frames
-//! (`src/settings.rs`).
+//! `next_offset` and on silence. A `SetFan`, `SetPool` or `SetWardriveEsp` for a value the sector
+//! does not hold writes one word, and one in 1024 erases a sector first, which can lose the host's
+//! next frames (`src/settings.rs`).
 //! `Status.host_uart_errors` counts the reads that saw one or more line errors or overflows, not
 //! the errors themselves.
 //!
@@ -39,13 +39,14 @@
 //! the gate does: its reports are dropped while no host owns the queue, and the announcement that
 //! opens it carries the current plan.
 //!
-//! **A central subscribed over Bluetooth can own the queue instead** (`src/ble.rs`). Its frames
-//! take [`take_frame`] too, from their own accumulator, and while it owns the queue this writer
-//! sends nothing from it. Any UART0 frame but `Identify` takes the queue from the central, so
-//! `wartui flash-bridge` always gets in. An `Identify` leaves it with the central and is answered
-//! with one `Ready` written straight to UART0 ([`owe_ready`]), so a port probe on the PC the
-//! bridge is plugged into costs the central nothing. Once UART0's gate closes on silence, a
-//! central still subscribed takes the queue back.
+//! **A central subscribed over Bluetooth, or a phone, can hold the queue instead** (`src/ble.rs`,
+//! `src/wardrive_esp.rs`). A central's frames take [`take_frame`] too, from their own
+//! accumulator; a phone's commands never do. This writer takes the queue only while USB holds it,
+//! so it never writes a phone's lines to the CH343. Any UART0 frame but `Identify` takes the queue
+//! from the central or the phone, so `wartui flash-bridge` always gets in. An `Identify` leaves it
+//! where it is and is answered with one `Ready` written straight to UART0 ([`owe_ready`]), so a
+//! port probe on the PC the bridge is plugged into costs the central or the phone nothing. Once
+//! UART0's gate closes on silence, a central still subscribed takes the queue back.
 //!
 //! **The bootloader prints on UART0 at every boot**, at 115200 for about 250 ms, so a host
 //! reads garbage after every reset. The host's framing resynchronizes on the next `0x00`.
@@ -221,6 +222,7 @@ pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
         HostToBridge::StopScan => crate::fleet::stop(shared),
         HostToBridge::OpenPairing => crate::bonds::open_window(shared),
         HostToBridge::ClearBonds => crate::bonds::clear(shared),
+        HostToBridge::SetWardriveEsp { on } => crate::settings::set_wardrive_esp(shared, *on),
     }
 }
 
@@ -256,8 +258,8 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
             buf.as_mut_slice().try_into().expect("the buffer holds a chunk");
         let n = if shared.presence.ready_owed.replace(false) {
             ready_frame(shared, chunk)
-        } else if shared.owner.get().owner() == HostOwner::Bluetooth {
-            // A central that owns the queue reads it through the C6 (`src/ble.rs`).
+        } else if shared.owner.get().owner() != HostOwner::Usb {
+            // A central or a phone holding the queue reads it through the C6 (`src/ble.rs`).
             0
         } else {
             shared.host.borrow_mut().next_chunk(chunk)

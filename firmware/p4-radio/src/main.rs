@@ -26,7 +26,6 @@ mod ble;
 mod config;
 mod last_panic;
 mod link;
-mod wardrive_esp_bench;
 
 use core::cell::RefCell;
 

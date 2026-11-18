@@ -2289,6 +2289,7 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
             last_disconnect: 0x13,
             ..BleCounters::default()
         },
+        wardrive_esp: false,
     };
     engine.handle(connected(), clock.at(1));
     let batch = engine.handle(

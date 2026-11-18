@@ -20,7 +20,10 @@
 //!   (`src/update.rs`), queues the host's records for its nodes, and fills the node image cache
 //!   in PSRAM that their update chunks are built from (`src/cache.rs`). A central subscribed
 //!   over Bluetooth, through the C6, can own the host queue instead, one host at a time
-//!   (`src/ble.rs`);
+//!   (`src/ble.rs`), and so can a phone on the WardriveESP service, while the setting allows;
+//! - **the phone's session** (`src/wardrive_esp.rs`) answers a phone's commands, starts and stops
+//!   the fleet's Wi-Fi scan for it, turns the nodes' sighting batches into its lines, and ends a
+//!   scan period every 5 s;
 //! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
 //!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
 //!   never addresses;
@@ -39,9 +42,10 @@
 //!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty and the channel pool, which `Status` reports. A host's `SetFan` or `SetPool` stores its
-//! change there. The scan mode is not stored. The C6's Bluetooth bonds are read from flash at
-//! boot too, and go down to it after each hello (`src/bonds.rs`).
+//! duty, the channel pool and the WardriveESP setting, which `Status` reports. A host's `SetFan`,
+//! `SetPool` or `SetWardriveEsp` stores its change there. The scan mode is not stored. The C6's
+//! Bluetooth bonds are read from flash at boot too, and go down to it after each hello
+//! (`src/bonds.rs`).
 //!
 //! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why); the rest
 //! of the queues are in internal RAM.
@@ -79,10 +83,11 @@ mod link;
 mod radio;
 mod settings;
 mod update;
+mod wardrive_esp;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::{join, join4};
+use embassy_futures::join::{join, join3, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -224,13 +229,15 @@ pub struct Shared {
     /// Raised by whatever may have given the link's writer something to send, so a waiting
     /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
     wake_link: Signal<NoopRawMutex, ()>,
-    /// Which host owns the host queue: USB, a central over Bluetooth, or none
+    /// Which host owns the host queue: USB, a central over Bluetooth, a phone, or none
     /// (`wartui_proto::host_owner`, `src/ble.rs`).
     owner: Cell<Owner>,
     /// When UART0's host last sent a frame, and a `Ready` owed to it (`src/host.rs`).
     presence: Presence,
     /// The host over Bluetooth: its link's state and its stream's credit (`src/ble.rs`).
     ble: Ble,
+    /// The WardriveESP setting, and a linked phone's session (`src/wardrive_esp.rs`).
+    phone: wardrive_esp::Phone,
     /// Raised when USB takes the host queue.
     host_arrived: Signal<NoopRawMutex, ()>,
     /// Line errors on the host UART since boot.
@@ -312,6 +319,7 @@ impl Shared {
             owner: Cell::new(Owner::new()),
             presence: Presence::new(),
             ble: Ble::new(BLE_FRAMES.take()),
+            phone: wardrive_esp::Phone::new(stored.wardrive_esp.unwrap_or(false)),
             host_arrived: Signal::new(),
             host_uart_errors: Cell::new(0),
             status_asked: Signal::new(),
@@ -341,20 +349,26 @@ impl Shared {
         self.radio_link.set(radio_link);
     }
 
-    /// Whether a host owns the queue: UART0's, or a central's over Bluetooth.
+    /// Whether a host owns the queue: UART0's, or a central's over Bluetooth. A phone is not a
+    /// host this serves: it reads as none.
     fn host_open(&self) -> bool {
         self.owner.get().owner() != HostOwner::None
     }
 
-    /// A host took the queue, on UART0 or over Bluetooth: clear what was queued for another.
+    /// A host took the queue, on UART0 or over Bluetooth: clear what was queued for another. A
+    /// record part-way out is cut with `0x00`, which COBS ends a frame with, whatever a phone
+    /// before it was cut with.
     fn host_attached(&self) {
-        self.host.borrow_mut().clear();
+        let mut host = self.host.borrow_mut();
+        host.set_terminator(0x00);
+        host.clear();
     }
 
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
-    /// Dropped, and not counted, while no host owns the queue. A backlog held for an absent host
-    /// arrives late when one attaches, and the host stamps its current position onto the old
+    /// Dropped, and not counted, while no host owns the queue, a phone holding it included: a
+    /// phone reads text lines, not frames (`src/wardrive_esp.rs`). A backlog held for an absent
+    /// host arrives late when one attaches, and the host stamps its current position onto the old
     /// sightings in it. Faults worth keeping are repeated by
     /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
     ///
@@ -426,7 +440,8 @@ impl Shared {
 
     /// Send the lines the P4's image held for the host, then why it refuses updates, if it
     /// does. Only after a `Ready`, since the host drops what arrives on a connection before
-    /// one, and only to a host that is present, since the lines are said once.
+    /// one, and only to a host that is present, since the lines are said once. A phone is not
+    /// one: the lines wait for a host.
     fn flush_update_lines(&self) {
         if !self.host_open() {
             return;
@@ -475,8 +490,8 @@ impl Shared {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
-    /// A new pair life began: Bluetooth lets go, since a restarted C6 has no central, then tell
-    /// a host that is present, and the link's writer, since the pair may bridge now.
+    /// A new pair life began: Bluetooth lets go, since a restarted C6 has no central or phone,
+    /// then tell a host that is present, and the link's writer, since the pair may bridge now.
     fn new_life(&self) {
         ble::on_new_life(self);
         self.wake_link.signal(());
@@ -506,6 +521,7 @@ impl Shared {
             window: self.bonds.window(now),
             central,
             counters: BleCounters::default(),
+            wardrive_esp: self.phone.enabled(),
         }
     }
 
@@ -712,7 +728,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             carrier::run(carrier, i2c.ok(), shared),
             bus::run(bus_a, shared),
             bus::run(bus_b, shared),
-            join(fan::run(fan_pins, shared), fleet::run(shared)),
+            join3(fan::run(fan_pins, shared), fleet::run(shared), wardrive_esp::run(shared)),
         ),
     )
     .await {}

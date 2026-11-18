@@ -117,14 +117,13 @@ wire from the same tree carries the bundled digest and is not reflashed.
 
 Each is read at build time from an environment variable, so a bench run changes it with a
 rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=16384 cargo build --release`. The P4's build
-passes each through to the image it bundles. `wartui status` reports the queue's high-water mark
+passes both through to the image it bundles. `wartui status` reports the queue's high-water mark
 as `radio-up`.
 
 | Variable | Default | Sets |
 | --- | --- | --- |
 | `WARTUI_RADIO_UP_QUEUE_BYTES` | 8192 | the C6's lines, status and Bluetooth messages waiting for a packet to the P4; a full queue evicts the oldest |
 | `WARTUI_RADIO_CONN_INTERVAL_MS` | unset: the central's | the connection interval the C6 asks a central for, `MIN-MAX` in ms ([above](#bluetooth-host-link)) |
-| `WARTUI_RADIO_WARDRIVE_ESP_BENCH` | unset | set to anything, a bench build that admits a phone and answers its WardriveESP commands itself, sending no access points (`src/wardrive_esp_bench.rs`) |
 
 ## Dependency versions
 

@@ -16,8 +16,9 @@
 //!
 //! The queue also carries a phone's WardriveESP text lines ([`crate::wardrive_esp`]), one a
 //! record, cut with `\n` rather than `0x00` ([`HostQueueIn::set_terminator`]), since a phone
-//! splits its stream on `\n`. [`HostQueueIn::push_bulk_within`] holds that stream's bulk under a
-//! bound of its own.
+//! splits its stream on `\n`. The P4 sets the terminator at each attachment, before it clears the
+//! queue, so the byte that ends a cut record is the new host's. [`HostQueueIn::push_bulk_within`]
+//! holds that stream's bulk under a bound of its own.
 //!
 //! # A new host
 //!

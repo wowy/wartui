@@ -46,7 +46,8 @@
 //!
 //! Its board is a carrier, so it has a lid fan: a `SetFan` sets the duty `Status` reports, with a
 //! speed made up from it. A `SetPool` sets the pool the core cuts, which starts at
-//! [`SimConfig::pool`]. It has no flash, and connects once and never reboots, so both last the
+//! [`SimConfig::pool`]. A `SetWardriveEsp` sets the setting `Status` reports, off at the start; no
+//! phone links. It has no flash, and connects once and never reboots, so all three last the
 //! simulator's life, and the duty starts at full.
 
 use std::sync::Arc;
@@ -529,6 +530,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     let mut rng = Xorshift::new(0x0DD5_EED5);
     let mut cache = sim_cache();
     let mut fan_duty = FanDuty::FULL;
+    let mut wardrive_esp = false;
 
     while let Some(cmd) = plumbing.commands.recv().await {
         if !command_latency.is_zero() {
@@ -576,6 +578,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     // A host on USB, and no Bluetooth link to report.
                     bluetooth: BluetoothStatus {
                         owner: HostOwner::Usb,
+                        wardrive_esp,
                         ..BluetoothStatus::default()
                     },
                 };
@@ -631,6 +634,11 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 // Answered by the next `Status`, as the P4's is.
                 HostToBridge::SetFan { duty } => {
                     fan_duty = duty;
+                    None
+                }
+                // No phone ever links: the setting is kept for `Status` alone.
+                HostToBridge::SetWardriveEsp { on } => {
+                    wardrive_esp = on;
                     None
                 }
                 HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
