@@ -725,7 +725,7 @@ async fn wardrive_esp(args: WardriveEspArgs) -> Result<()> {
         crate::settle(&mut link, SETTING_SETTLE).await?;
     }
     let bluetooth = bluetooth_status(&mut link).await?;
-    println!("wardrive esp {}", wardrive_esp_text(&bluetooth));
+    println!("phones     {}", wardrive_esp_text(&bluetooth));
     if wanted.is_some_and(|on| on != bluetooth.wardrive_esp) {
         bail!("the bridge did not take the setting");
     }

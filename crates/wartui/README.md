@@ -1333,7 +1333,7 @@ scans Bluetooth:
 | `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
 | `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses, a phone among them |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
-| `wardrive esp on`                                                        | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
+| `phones  wardrive esp on`                                                | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
@@ -1449,7 +1449,7 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
-- **`host  …`**, **`pairing  …`** and **`wardrive esp  …`**, and the **`bluetooth host  …`**
+- **`host  …`**, **`pairing  …`** and **`phones  …`**, and the **`bluetooth host  …`**
   counters: the Bluetooth host link; see "The Bluetooth link".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
