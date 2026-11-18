@@ -2289,6 +2289,7 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
             last_disconnect: 0x13,
             ..BleCounters::default()
         },
+        wardrive_esp: false,
     };
     engine.handle(connected(), clock.at(1));
     let batch = engine.handle(
@@ -3763,6 +3764,59 @@ fn engine_sends_one_set_fan_and_a_status_poll_when_operator_sets_a_duty() {
     // The bridge keeps the duty, so nothing re-sends it.
     let later = engine.handle(Event::Tick, clock.at(30));
     assert!(!later.bulk.iter().any(|cmd| matches!(cmd, HostToBridge::SetFan { .. })));
+}
+
+#[test]
+fn engine_sends_set_wardrive_esp_then_get_status_when_commanded() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let batch = engine.handle(Event::Command(Command::SetWardriveEsp(true)), clock.at(1));
+
+    // The bridge stores the setting before it answers the poll, so the `Status` carries it.
+    assert_eq!(batch.bulk, [HostToBridge::SetWardriveEsp { on: true }, HostToBridge::GetStatus]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    // The bridge keeps the setting, so nothing re-sends it.
+    let later = engine.handle(Event::Tick, clock.at(30));
+    assert!(!later.bulk.iter().any(|cmd| matches!(cmd, HostToBridge::SetWardriveEsp { .. })));
+}
+
+/// A `Status` on the default pool with every slot present, reporting `wardrive_esp` as `on`.
+fn wardrive_esp_status(on: bool) -> Event {
+    let mut status = pool_status(ChannelPool::default());
+    if let Event::Link(LinkEvent::Message(BridgeToHost::Status { bluetooth, .. })) = &mut status {
+        bluetooth.wardrive_esp = on;
+    }
+    status
+}
+
+#[test]
+fn engine_reports_wardrive_esp_when_status_arrives() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(connected(), clock.at(0));
+    let shown = |engine: &FleetEngine| engine.snapshot(clock.at(1), StoreStats::default());
+
+    engine.handle(wardrive_esp_status(true), clock.at(1));
+    assert_eq!(shown(&engine).wardrive_esp, Some(true));
+
+    // Another bridge after a reconnect: the latest `Status` is what the view shows.
+    engine.handle(disconnected("unplugged"), clock.at(1));
+    engine.handle(connected(), clock.at(1));
+    engine.handle(wardrive_esp_status(false), clock.at(1));
+    assert_eq!(shown(&engine).wardrive_esp, Some(false));
+}
+
+#[test]
+fn engine_reports_no_wardrive_esp_when_no_status_has_arrived() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(connected(), clock.at(0));
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+
+    assert_eq!(snapshot.wardrive_esp, None, "off is the bridge's to say");
 }
 
 #[test]

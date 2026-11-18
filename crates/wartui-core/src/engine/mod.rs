@@ -24,6 +24,8 @@
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
 //! reaches the operator as [`Snapshot::power_answer`].
 //! [`Command::SetFanDuty`] sets the carrier's lid fan, whose duty the bridge keeps.
+//! [`Command::SetWardriveEsp`] sets whether a phone may link to the bridge as a WardriveESP
+//! board, which the bridge keeps too.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those

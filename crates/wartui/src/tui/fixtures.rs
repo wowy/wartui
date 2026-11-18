@@ -140,6 +140,7 @@ pub(super) fn busy() -> Snapshot {
         pool: Some(ChannelPool::All),
         scan: Some(ScanMode::Wifi),
         ble_slot: None,
+        wardrive_esp: Some(false),
         unreachable: ChannelSet::empty(),
         nodes: vec![
             assigned(0x84),
@@ -257,6 +258,7 @@ pub(super) fn empty() -> Snapshot {
         counters: Counters::default(),
         store: StoreStats::default(),
         bridge_status: None,
+        wardrive_esp: None,
         position: Fix::none(),
         ..busy()
     }

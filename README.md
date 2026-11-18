@@ -51,6 +51,12 @@ with some lightly modified firmware ended up as an entirely separate project.
 I wanted a way to motivate myself to relearn Rust, and a fun little TUI sounded like just the
 ticket. I hope you enjoy what I've built, modify it, and share with others!
 
+The bridge also speaks the Bluetooth protocol of RocketGod's
+[WardriveESP](https://rocketgod.dev/WardriveESP/), so the Wardrive Go phone app can read the fleet
+as one board. wartui's implementation is its own code, written from WardriveESP's MIT-licensed
+protocol document, which is vendored with its license in
+[`docs/vendor/wardrive-esp`](docs/vendor/wardrive-esp/README.md).
+
 ## Running it
 
 ### Simulated
@@ -170,15 +176,15 @@ the pop-up again if the run still waits.
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                  |
-|---------------------|-------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                             |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
-| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                               |
-| `ctrl-c`            | Quit                                                                          |
+| Key                 | What it does                                                                                |
+|---------------------|---------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                           |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)                          |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                             |
+| `ctrl-c`            | Quit                                                                                        |
 
 On the `excluded ssids` page:
 

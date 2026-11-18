@@ -2,12 +2,17 @@
 //! that paces the host stream down the C6 link.
 //!
 //! **One host owns the host queue**, and `wartui_proto::host_owner::Owner` decides which, so its
-//! rules are tested with `cargo test`. Its inputs are a central's subscription, as the C6's
-//! `BleState` reports it, and UART0's frames and silence (`src/host.rs`); [`own`] carries out
-//! what it returns. A central counts as subscribed only while its link is encrypted and it holds a
-//! stored bond. Bluetooth lets go on an unsubscribe, a disconnect or a C6 restart, and never on
-//! silence, since a subscription is the sign that someone reads. While it owns the queue the UART0
-//! writer sends nothing from it.
+//! rules are tested with `cargo test`. Its inputs are a central's or a phone's subscription, as
+//! the C6's `BleState` reports it, and UART0's frames and silence (`src/host.rs`); [`own`] carries
+//! out what it returns. A central counts as subscribed only while it reads the host stream
+//! (`Stream::Host`) on an encrypted link and holds a stored bond. A phone counts as subscribed
+//! while it reads the WardriveESP stream (`Stream::Phone`) and the setting is on
+//! (`src/wardrive_esp.rs`). The P4 keeps which of the two the last state was, so a change of the
+//! setting reads as the phone letting go. Either lets go on an unsubscribe, a disconnect or a C6
+//! restart, and never on silence, since a subscription is the sign that someone reads. While
+//! either holds the queue the UART0 writer sends nothing from it, and the stream goes down the C6
+//! link. After each input, a change in whether the C6 may admit a phone goes down in
+//! `Down::Bonds` (`src/bonds.rs`).
 //!
 //! **The stream's offsets never rewind**, across C6 lives too. `sent` is the wrapping offset of the
 //! next stream byte. Each attachment starts with a `Down::HostStart` at `sent`, and each
@@ -27,7 +32,8 @@
 //!
 //! **A central that loses the queue to USB is told why**: one `BridgeToHost::Error` goes down its
 //! stream ahead of anything else, from its own buffer, after the queue has moved. It waits for
-//! credit at most [`NOTICE_WAIT`], so a dead central holds nothing.
+//! credit at most [`NOTICE_WAIT`], so a dead central holds nothing. A phone is told nothing: the
+//! notice is a COBS frame, and each attachment drops one still owed.
 //!
 //! Frames a central writes arrive as `Up::HostBytes`, through their own accumulator, to the decode
 //! path UART0's reads take (`host::take_frame`), and only while Bluetooth owns the queue.
@@ -35,13 +41,13 @@
 use core::cell::{Cell, RefCell};
 
 use embassy_time::{Duration, Instant};
-use wartui_proto::host_owner::{Effect, Effects, Input};
+use wartui_proto::host_owner::{Effect, Effects, Holder, Input};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostOwner, LogStr, MAX_HOST_FRAME, USB_TOOK_BRIDGE,
     encode_frame,
 };
 use wartui_proto::radio_link::{
-    BleState, Down, HOST_BYTES_MAX, Packer, encode_down, host_bytes_fit, host_window,
+    BleState, Down, HOST_BYTES_MAX, Packer, Stream, encode_down, host_bytes_fit, host_window,
 };
 
 use crate::Shared;
@@ -84,10 +90,23 @@ impl Notice {
     }
 }
 
+/// What the C6's latest `BleState` was to the owner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    /// Neither a host nor a phone.
+    Neither,
+    /// A central that may hold the host queue ([`authorized`]).
+    Host,
+    /// A phone on the WardriveESP stream, while the setting is on.
+    Phone,
+}
+
 /// The Bluetooth host's state, as the link and the host futures see it.
 pub struct Ble {
     /// The C6's latest `BleState`.
     state: Cell<BleState>,
+    /// What that state was to the owner, as of when it arrived.
+    reader: Cell<Reader>,
     /// The wrapping stream offset of the next byte sent. It never rewinds.
     sent: Cell<u32>,
     /// The C6's latest `Up::Credit`: the stream offset it is done up to.
@@ -101,6 +120,7 @@ impl Ble {
     pub fn new(frames: &'static mut BleFrames) -> Self {
         Self {
             state: Cell::new(BleState::default()),
+            reader: Cell::new(Reader::Neither),
             sent: Cell::new(0),
             accounted: Cell::new(0),
             notice: RefCell::new(Notice::new()),
@@ -121,7 +141,18 @@ impl Ble {
 
 /// Whether `state` is a central that may hold the host queue.
 const fn authorized(state: BleState) -> bool {
-    state.subscribed && state.encrypted && state.bonded
+    matches!(state.stream, Stream::Host) && state.encrypted && state.bonded
+}
+
+/// What `state` is to the owner while the setting is `phones`.
+const fn reader(state: BleState, phones: bool) -> Reader {
+    if authorized(state) {
+        Reader::Host
+    } else if matches!(state.stream, Stream::Phone) && phones {
+        Reader::Phone
+    } else {
+        Reader::Neither
+    }
 }
 
 /// Feed `input` to the owner, and carry out what it returns, in order. Returns the effects, so a
@@ -139,23 +170,46 @@ pub fn own(shared: &Shared, input: Input) -> Effects {
             Effect::ReleaseUsb => crate::host::close(shared),
             Effect::NoticeCentral => notice(shared),
             Effect::ReadyOnUart => crate::host::owe_ready(shared),
+            Effect::AttachPhone => crate::wardrive_esp::attach(shared),
+            Effect::ReleasePhone => crate::wardrive_esp::release(shared),
         }
     }
+    crate::bonds::follow_admission(shared);
     effects
 }
 
-/// The C6's Bluetooth link, sent on a change and repeated every second. Only a change of
-/// [`authorized`] reaches the owner, so a repeat changes nothing here.
+/// The C6's Bluetooth link, sent on a change and repeated every second. Only a change of what it
+/// is to the owner ([`Reader`]) reaches the owner, the old one's end first, so a repeat changes
+/// nothing here.
 pub fn on_state(shared: &Shared, state: BleState) {
-    let was = authorized(shared.ble.state.replace(state));
-    match (was, authorized(state)) {
-        (false, true) => {
-            let _ = own(shared, Input::Subscribed);
+    let ble = &shared.ble;
+    ble.state.set(state);
+    let now = reader(state, shared.phone.enabled());
+    let was = ble.reader.replace(now);
+    if was != now {
+        let_go(shared, was);
+        match now {
+            Reader::Neither => {}
+            Reader::Host => {
+                let _ = own(shared, Input::Subscribed);
+            }
+            Reader::Phone => {
+                let _ = own(shared, Input::PhoneSubscribed);
+            }
         }
-        (true, false) => {
+    }
+}
+
+/// Tell the owner that `reader` let go.
+fn let_go(shared: &Shared, reader: Reader) {
+    match reader {
+        Reader::Neither => {}
+        Reader::Host => {
             let _ = own(shared, Input::Unsubscribed);
         }
-        _ => {}
+        Reader::Phone => {
+            let _ = own(shared, Input::PhoneUnsubscribed);
+        }
     }
 }
 
@@ -166,27 +220,31 @@ pub fn on_credit(shared: &Shared, accounted: u32) {
     shared.wake_link.signal(());
 }
 
-/// A new C6 life: its central is gone, and the bytes in flight died with the old C6. `sent` keeps
-/// counting, so nothing is in flight from here.
+/// A new C6 life: its central or phone is gone, and the bytes in flight died with the old C6.
+/// `sent` keeps counting, so nothing is in flight from here.
 pub fn on_new_life(shared: &Shared) {
     let ble = &shared.ble;
-    if authorized(ble.state.replace(BleState::default())) {
-        let _ = own(shared, Input::Unsubscribed);
-    }
+    ble.state.set(BleState::default());
+    let_go(shared, ble.reader.replace(Reader::Neither));
     ble.notice.borrow_mut().drop_it();
     ble.accounted.set(ble.sent.get());
 }
 
-/// Make Bluetooth the host: mark where its stream starts, clear the queue, and announce.
-fn take(shared: &Shared) {
+/// Begin an attachment's stream down the C6 link: drop a notice owed to an earlier one, and queue
+/// the `Down::HostStart` at `sent`.
+pub fn start_stream(shared: &Shared) {
     let ble = &shared.ble;
-    // Owed to an earlier attachment, not this one.
     ble.notice.borrow_mut().drop_it();
-    ble.frames.borrow_mut().reset();
     // Ahead of this attachment's bytes: the link's writer packs the down queue's records before
     // any host bytes, and none while a record is held (`Link::fill`). A full queue refuses it and
     // counts the refusal; the C6 then reads the bytes as following on from the last.
     let _ = shared.push_down(&Down::HostStart { at: ble.sent.get() });
+}
+
+/// Make Bluetooth the host: mark where its stream starts, clear the queue, and announce.
+fn take(shared: &Shared) {
+    shared.ble.frames.borrow_mut().reset();
+    start_stream(shared);
     shared.host_attached();
     shared.announce();
     shared.wake_link.signal(());
@@ -231,8 +289,8 @@ pub fn take_bytes(shared: &Shared, bytes: &[u8]) {
 }
 
 /// Pack the host stream's next bytes into the packet `packer` is filling, as far as its room and
-/// the window allow: the notice first, while one is owed, then the queue's, while Bluetooth owns
-/// it. `scratch` holds them on the way.
+/// the window allow: the notice first, while one is owed, then the queue's, while a central or a
+/// phone holds it. `scratch` holds them on the way.
 pub fn pack(shared: &Shared, packer: &mut Packer<'_>, scratch: &mut [u8; HOST_BYTES_MAX]) {
     let ble = &shared.ble;
     let room = |packer: &Packer<'_>| host_bytes_fit(packer.room()).min(ble.window());
@@ -255,7 +313,7 @@ pub fn pack(shared: &Shared, packer: &mut Packer<'_>, scratch: &mut [u8; HOST_BY
             notice.drop_it();
         }
     }
-    if shared.owner.get().owner() != HostOwner::Bluetooth {
+    if !matches!(shared.owner.get().holder(), Holder::Bluetooth | Holder::Phone) {
         return;
     }
     let max = room(packer).min(HOST_BYTES_MAX);

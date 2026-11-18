@@ -156,6 +156,45 @@ over_each_backing! {
         assert_eq!(got, want);
         assert_eq!(queue.fill(&mut []), 0);
     }
+
+    #[test]
+    fn host_queue_starts_next_chunk_with_newline_when_terminator_is_set() {
+        // A phone's text lines, one a record: a cut line ends at a `\n`.
+        let mut queue = queue::<1024, 16384>();
+        queue.set_terminator(b'\n');
+        assert!(queue.push(b"WD:AP ts=1 bssid=02:00:5E:10:44:C0\n", false));
+        let mut out = [0u8; 10];
+        assert_eq!(queue.fill(&mut out), 10);
+        queue.clear();
+        assert!(queue.push(b"WD:CAPS\n", true));
+        assert_eq!(chunk(&mut queue), b"\nWD:CAPS\n");
+        assert!(chunk(&mut queue).is_empty());
+    }
+
+    #[test]
+    fn host_queue_starts_next_chunk_with_zero_when_terminator_is_default() {
+        let mut queue = queue::<1024, 16384>();
+        assert!(queue.push(&[7u8; 30], false));
+        let mut out = [0u8; 10];
+        assert_eq!(queue.fill(&mut out), 10);
+        queue.clear();
+        assert!(queue.push(&[8u8; 3], false));
+        assert_eq!(chunk(&mut queue), [0x00, 8, 8, 8]);
+    }
+
+    #[test]
+    fn host_queue_keeps_bulk_under_limit_when_pushed_within() {
+        let mut queue = queue::<1024, 4096>();
+        for _ in 0..10 {
+            // 102 bytes each with its prefix: two fit under 250.
+            assert!(queue.push_bulk_within(&[5u8; 100], 250));
+        }
+        let [_, bulk] = queue.stats();
+        assert_eq!(bulk.high_water, 204);
+        assert_eq!(bulk.dropped, 8);
+        assert_eq!(chunk(&mut queue), [5u8; 200]);
+        assert!(!queue.push_bulk_within(&[5u8; 100], 101));
+    }
 }
 
 #[test]

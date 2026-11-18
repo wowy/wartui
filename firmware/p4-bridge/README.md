@@ -4,8 +4,8 @@ The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs
 talks to the host with wartui's link protocol over UART0, which the board's CH343 carries to the
 Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on the board's SDIO
 traces. The C6 runs a Bluetooth host link over it
-([`firmware/p4-radio`](../p4-radio/README.md)), so a bonded central can be the host instead
-(§ "Bluetooth hosts"). The host sees one bridge, reporting both chips' diagnostics. The queue
+([`firmware/p4-radio`](../p4-radio/README.md)), so a bonded central can be the host instead, or a
+phone on the WardriveESP service (§ "Bluetooth hosts"). The host sees one bridge, reporting both chips' diagnostics. The queue
 sizes are in `src/config.rs`.
 
 ```sh
@@ -29,8 +29,8 @@ It is also the SPI controller of two node buses; [`docs/node-bus.md`](../../docs
 the pins. It forwards every record a node sends to the host, heartbeats included, and queues what
 the host sends a node in that node's slot, answering each `Delivered` once the node acknowledges
 it, or `Undelivered` (`src/bus.rs`). Two transfers of records are out to a node at once, and the
-node takes them in order. It reads one kind of record, the heartbeat, for its fleet planner, and
-writes three: the planner's `Assign` and `Stop`, and the update chunks it builds from its node
+node takes them in order. It reads the heartbeat, for its fleet planner, and sighting batches
+while a phone is linked, and writes three: the planner's `Assign` and `Stop`, and the update chunks it builds from its node
 image cache, below.
 
 ## The fleet planner
@@ -217,6 +217,22 @@ One host owns the host queue at a time, by the rules of `wartui_proto::host_owne
 | 15 s without a UART0 frame while USB owns the queue | Bluetooth if a central waits, else no one |
 | The central unsubscribes or disconnects, or the C6 restarts | No one, or USB if it owns the queue |
 
+A phone holds the queue the same way while the `wardrive esp` setting is on (`src/wardrive_esp.rs`,
+[`docs/wardrive-esp.md`](../../docs/wardrive-esp.md)):
+
+| What happens | Who holds the queue after |
+| --- | --- |
+| A phone subscribes to the WardriveESP stream, with no owner | The phone. The P4 starts its session and the fleet's Wi-Fi scan |
+| A UART0 frame other than `Identify` | USB. The phone gets no notice; the C6 drops it and admits none while USB holds the queue |
+| An `Identify` on UART0 while a phone holds the queue | The phone. UART0 gets one `Ready` |
+| The phone unsubscribes or disconnects, the C6 restarts, or the setting goes off | No one. The scan stops |
+
+A phone reads as no host to the rest of the firmware: no link frame is queued for it, and
+`Status` reports no owner. The queue carries its session's text lines instead, one a record, cut
+with `\n`, down the same stream and credit window, with stream lines held to 16 KB. Its commands
+arrive from the C6 as their own record and never reach the host frame decoder, so none confirms
+an image on trial. Whether the C6 admits a phone rides `Down::Bonds`.
+
 So `wartui flash-bridge` over USB always gets in. Taking the queue clears it and announces the
 bridge to the new owner, as a USB host's first frame does. The P4 sends a central the host stream
 inside a 16 KB credit window, so a slow central backs it up in the host bulk ring rather than
@@ -234,10 +250,11 @@ the owner, the bonds, the window, the connected central and the C6's Bluetooth c
 
 ## Settings
 
-The P4 keeps two settings in the first sector of its `nvs` partition, on every board: the lid
-fan's duty and the channel pool. It reads them once at boot and runs them with no host present, or
-100 % and `All` with none stored. A host's `SetFan` or `SetPool` applies at once and is written
-only when the sector does not hold it. `Status` reports both (`src/settings.rs`). The scan mode is
+The P4 keeps three settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty, the channel pool and whether it offers the WardriveESP service. It reads them once at
+boot and runs them with no host present, or 100 %, `All` and off with none stored. A host's
+`SetFan`, `SetPool` or `SetWardriveEsp` applies at once and is written only when the sector does
+not hold it. `Status` reports all three (`src/settings.rs`). The scan mode is
 not stored, so the P4 boots stopped.
 
 ## The host link

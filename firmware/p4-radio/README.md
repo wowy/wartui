@@ -16,8 +16,16 @@ cargo build --release
 The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src/ble.rs`). It
 advertises `wartui XX:YY`, the bridge's last two octets, with the `wartui_proto::ble` service in its
 scan response. It notifies the P4's host stream on Up and forwards what a central writes on Down.
+Beside it sits the WardriveESP service, which a phone app reads with no pairing while the P4
+admits phones; the advertisement then carries that service and the scan response the name.
 
-- **Only a bonded, encrypted central reaches the stream.** It pairs by LE Secure Connections Just
+- **A phone reads the WardriveESP stream with no bond**, while the P4 admits phones
+  ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md)). A central reads one stream, the first
+  it subscribes to, and the other's subscription is refused. The phone's stream is the same ring
+  and credit, framed: one DATA frame a line, each ACK first. Its commands go to the P4 as their
+  own record. The C6 sends no Security Request, which a phone would answer with a pairing prompt:
+  a host starts its own pairing. It drops a linked phone once phones are not admitted.
+- **Only a bonded, encrypted central reaches the host stream.** It pairs by LE Secure Connections Just
   Works, inside the P4's pairing window. The P4 keeps the bonds and sends them down after each
   hello and every 5 s; the C6 keeps no flash state. A change to them stops the advertisement while
   TrouBLE loads them, and a connected central whose bond the P4 dropped is disconnected. So is a

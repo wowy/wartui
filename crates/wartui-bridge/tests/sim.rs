@@ -863,6 +863,29 @@ async fn sim_bridge_reports_pool_set_when_host_sets_pool() {
     assert_eq!(next_pool(&mut link).await, ChannelPool::Us);
 }
 
+/// The WardriveESP setting the next `Status` reports.
+async fn next_wardrive_esp(link: &mut LinkHandle) -> bool {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { bluetooth, .. }) =
+            link.recv().await.expect("running")
+        {
+            return bluetooth.wardrive_esp;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_wardrive_esp_when_set() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    assert!(!next_wardrive_esp(&mut link).await, "off by default");
+
+    link.send_bulk(HostToBridge::SetWardriveEsp { on: true }).expect("queued");
+    assert!(next_wardrive_esp(&mut link).await);
+    link.send_bulk(HostToBridge::SetWardriveEsp { on: false }).expect("queued");
+    assert!(!next_wardrive_esp(&mut link).await);
+}
+
 /// The mode and Bluetooth slot the next `Status` reports.
 async fn next_scan(link: &mut LinkHandle) -> (ScanMode, Option<Slot>) {
     link.send_bulk(HostToBridge::GetStatus).expect("queued");

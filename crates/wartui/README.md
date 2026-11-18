@@ -26,7 +26,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
-| `bluetooth`    | `pair` this PC with the bridge, or `forget` it; see "The Bluetooth link"            |
+| `bluetooth`    | `pair` this PC, `forget` it, or let phones link; see "The Bluetooth link"           |
 
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
 the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
@@ -857,15 +857,15 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                  |
-|---------------------|-------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                             |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
-| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                               |
-| `ctrl-c`            | Quit                                                                          |
+| Key                 | What it does                                                                                |
+|---------------------|---------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                           |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)                          |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                             |
+| `ctrl-c`            | Quit                                                                                        |
 
 On the `excluded ssids` page:
 
@@ -880,7 +880,9 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5; see
-"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `remember bridge` (`off`, `on`),
+"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `wardrive esp` (`off`, `on`; lets a
+phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
+`remember bridge` (`off`, `on`),
 `wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, and the
 `wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
 lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
@@ -890,10 +892,11 @@ the rows; edits to the rows stay pending. On the key row, letters type, so `h` `
 neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip while a key is entered.
 The key shows its last three characters, up to six bullets before them, and from ten characters its
 first one to three. `Enter` sends the rows to the engine and writes every row shown but the pool,
-the fan and `bluetooth` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and `[api-keys]`,
-whatever was there, and settings closes. The pool, the fan and `bluetooth` go to the bridge only
-when their rows moved, and none is written to `wartui.toml`. The bridge keeps the pool and the fan;
-the run keeps `bluetooth` and asks for it again when the bridge reboots. While the bridge reports
+the fan, `bluetooth` and `wardrive esp` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and
+`[api-keys]`, whatever was there, and settings closes. The pool, the fan, `bluetooth` and
+`wardrive esp` go to the bridge only when their rows moved, and none is written to `wartui.toml`.
+The bridge keeps the pool, the fan and `wardrive esp`; the run keeps `bluetooth` and asks for it
+again when the bridge reboots. While the bridge reports
 the scan stopped, `bluetooth` reads `scan stopped` and does not step, since the run starts the scan
 once the bridge answers. Before the bridge has reported a scan, it reads `off`, and the run starts
 the scan in the mode it holds. If the engine is not accepting commands, nothing is sent or written,
@@ -1224,8 +1227,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## The Bluetooth link
 
 **`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
-`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota` and `bluetooth forget`
-take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota`, `bluetooth forget`
+and `bluetooth wardrive-esp` take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
 over there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. Updates over
 Bluetooth are slower than over USB, and one that fails is recovered over USB ("Flashing the
 bridge"). Nothing scans for Bluetooth unless the link is Bluetooth. Every
@@ -1287,6 +1290,31 @@ bridge too, in its own Bluetooth settings, and pairs again. A Bluetooth host con
 bonds clear is disconnected, this PC too when `forget` runs over Bluetooth. With no bond, the
 bridge's window stays open until a host pairs. `forget` saves nothing to `wartui.toml` either.
 
+**`wartui bluetooth wardrive-esp on` lets a phone app read the bridge as a WardriveESP board,**
+with no pairing. `off` stops it, and no word prints the setting. The bridge keeps it, off by
+default, so a bridge set once serves a phone with no wartui host attached. The settings'
+`wardrive esp` row sets it too. [`docs/wardrive-esp.md`](../../docs/wardrive-esp.md) says what the
+app is sent.
+
+```sh
+wartui bluetooth wardrive-esp        # the setting now
+wartui bluetooth wardrive-esp on
+```
+
+- **It is open.** While it is on, any phone in range can link, hold the bridge's one Bluetooth
+  connection, and start or stop the scan.
+- **The phone is the host.** It starts the scan when it links and stops it when it lets go, and
+  the fleet scans Wi-Fi only. No capture is written: wartui's store sees none of it.
+- **USB takes the bridge from a phone**, as from a Bluetooth host. Any `wartui` command over USB
+  but `ports` drops the phone, and the app links again by itself 15 s after USB goes quiet.
+- **A linked phone keeps a Bluetooth wartui host out**, and the reverse: the bridge takes one
+  Bluetooth connection.
+- **A phone that has linked to the bridge keeps connecting** whenever its Bluetooth is on, with
+  the app closed too. With the setting off, or while USB holds the bridge, it is refused and
+  dropped 10 s later, or 30 s later while the pairing window is open, again and again, and it
+  holds the bridge's one connection meanwhile. `wartui bluetooth pair` then mostly fails to find
+  the bridge, so turn that phone's Bluetooth off before pairing a PC.
+
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
 apart from `bluetooth`, the node that scans Bluetooth. The link's details are from the bridge's
 latest status, and show only while the link is up:
@@ -1305,8 +1333,9 @@ scans Bluetooth:
 |--------------------------------------------------------------------------|-----------------------------------------------------------------|
 | `host  usb`                                                              | Who the bridge serves: `none`, `usb` or `bluetooth`             |
 | `host  bluetooth, encrypted and bonded, MTU 182, 2M PHY, 30 ms interval` | A Bluetooth host holds the bridge, and its link                 |
-| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses |
+| `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses, a phone among them |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
+| `phones  wardrive esp on`                                                | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
 | `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
@@ -1340,7 +1369,7 @@ names the last one when its wait runs out:
 | Says                                                                  | Do                                                                   |
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
-| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer                                    |
+| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer. Turn off Bluetooth on a phone that has linked to the bridge as a WardriveESP board |
 | `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
@@ -1422,8 +1451,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see
   "Bluetooth".
-- **`host  …`** and **`pairing  …`**, and the **`bluetooth host  …`** counters: the Bluetooth host
-  link; see "The Bluetooth link".
+- **`host  …`**, **`pairing  …`** and **`phones  …`**, and the **`bluetooth host  …`**
+  counters: the Bluetooth host link; see "The Bluetooth link".
 - **`slots  …`**: the slots the bridge hears a node in, by the carrier's silk names (`N1 N2 N8`),
   or `none`.
 - **`share  N1   21 channels  1,3,5,…`**: one line per node holding a share of the bridge's plan,

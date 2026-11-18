@@ -50,7 +50,7 @@ pub use hello::{Chip, HELLO_LEN, Hello};
 pub use inflow::{Accept, Inflow};
 pub use message::{
     BleCounters, BleState, Down, HOST_BYTES_MAX, Held, LINK_REVISION, Packer, RECORD_MAX,
-    RadioStatus, Up, WINDOW_UNTIL_BONDED, decode_down, decode_up, encode_down, encode_up,
+    RadioStatus, Stream, Up, WINDOW_UNTIL_BONDED, decode_down, decode_up, encode_down, encode_up,
     host_bytes_fit, records,
 };
 

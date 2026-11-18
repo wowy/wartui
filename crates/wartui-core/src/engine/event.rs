@@ -106,6 +106,14 @@ pub enum Command {
         /// The duty to run.
         duty: FanDuty,
     },
+
+    /// Ask the bridge to let a phone link to it as a WardriveESP board, with no pairing, when
+    /// `true`, and keep it across its reboots.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetFanDuty`] is, so
+    /// [`Snapshot::wardrive_esp`](super::Snapshot::wardrive_esp) shows the setting in force. The
+    /// bridge stores it, so the engine holds nothing and never sends it again.
+    SetWardriveEsp(bool),
 }
 
 /// What the engine wants done as a result.

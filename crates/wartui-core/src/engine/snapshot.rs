@@ -124,6 +124,9 @@ pub struct Snapshot {
     /// The slot the bridge's planner gave the Bluetooth scan. `None` for no node, and before its
     /// first `Status`.
     pub ble_slot: Option<Slot>,
+    /// Whether the bridge lets a phone link to it as a WardriveESP board, from its last `Status`.
+    /// `None` before its first.
+    pub wardrive_esp: Option<bool>,
     /// Channels of the pool no node can take, from the bridge's last plan. Empty before one.
     pub unreachable: ChannelSet,
     /// Every node, ordered by slot as the carrier lays them out, then the slotless ones by MAC, so
@@ -327,6 +330,7 @@ impl FleetEngine {
             pool: self.pool,
             scan: self.scan,
             ble_slot: self.ble_slot,
+            wardrive_esp: self.bridge_status.map(|status| status.bluetooth.wardrive_esp),
             unreachable: self
                 .fleet
                 .as_ref()

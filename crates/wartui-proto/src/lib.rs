@@ -2,15 +2,15 @@
 //! firmwares run, and the text form of the addresses that cross the wire.
 //!
 //! The host, the bridge firmware and the node firmware all compile this crate. Defining
-//! the wire types once keeps the three in step. The formats are wartui's own and
-//! interoperate with no other firmware.
+//! the wire types once keeps the three in step. The formats are wartui's own, except
+//! [`wardrive_esp`], the text protocol the bridge speaks to a phone app.
 //!
 //! The crate is `no_std` and allocation-free so the firmware can use it. Logic the
 //! firmware runs lives here too, such as [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
 //! ring, and [`host_queue`] queues link frames for the P4's host link, which [`host_owner`] says
-//! whose it is: USB's, a Bluetooth central's or no one's. [`radio_link`] is the
+//! whose it is: USB's, a Bluetooth central's, a phone's or no one's. [`radio_link`] is the
 //! link between a P4 bridge and the board's C6, and [`split`] holds the P4's
 //! decisions about that C6. [`ble`] is the GATT identity of the C6's Bluetooth host link.
 //! [`bus`] frames the SPI transfers between a P4 bridge and its nodes, and holds the messages a
@@ -49,6 +49,7 @@ pub mod reset;
 pub mod sector_log;
 pub mod settings;
 pub mod split;
+pub mod wardrive_esp;
 
 /// Re-exported so consumers can build link payloads without depending on
 /// `heapless` themselves, and can never end up on a mismatched version.

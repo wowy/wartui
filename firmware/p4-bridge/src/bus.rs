@@ -3,7 +3,9 @@
 //! five or seven on a carrier, and none without one.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the acknowledgment. The P4 checks
-//! framing, and reads only heartbeats, which its fleet planner takes (`src/fleet.rs`). Each record
+//! framing, and reads heartbeats, which its fleet planner takes (`src/fleet.rs`), and sighting
+//! batches while a phone is linked, which its session turns into lines (`src/wardrive_esp.rs`).
+//! Each record
 //! a node sends goes to the host as a `FromNode`, heartbeats included, and its transfer is
 //! acknowledged in the next one to that slot. Each `ToNode` the host sends, and each `Assign` and
 //! `Stop` the planner sends, waits in its slot's [`Downlink`] until a transfer carries it and the
@@ -958,8 +960,8 @@ impl Controller {
 }
 
 /// Send one record from the node in `slot` to the host, or count it dropped when it is longer
-/// than any node of this build sends. A heartbeat goes to the fleet planner too, and to the host
-/// unchanged.
+/// than any node of this build sends. A heartbeat goes to the fleet planner too, and a sighting
+/// batch to a phone's session, and each to the host unchanged.
 ///
 /// Out of line: a `FromNode` carries a kilobyte.
 #[inline(never)]
@@ -967,6 +969,8 @@ fn forward(shared: &Shared, slot: BusSlot, rx_us: u32, kind: u8, body: &[u8]) {
     let nodes = &shared.nodes;
     if kind == UpType::Heartbeat.as_u8() {
         fleet::on_heartbeat(shared, slot, body);
+    } else if kind == UpType::Sightings.as_u8() {
+        crate::wardrive_esp::on_sightings(shared, slot, body);
     }
     let Ok(body) = FromNodeBody::from_slice(body) else {
         nodes.rx_oversize.set(nodes.rx_oversize.get().wrapping_add(1));

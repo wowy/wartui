@@ -106,7 +106,7 @@ enum Command {
     FlashBridge(flash::bridge::Args),
     /// Update nodes' firmware through the bridge.
     Ota(ota::Args),
-    /// Pair this PC with the bridge over Bluetooth, or forget it.
+    /// Pair this PC with the bridge over Bluetooth, forget it, or let phones link to it.
     Bluetooth(bluetooth::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
@@ -879,6 +879,30 @@ mod tests {
         ] {
             let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
             assert!(matches!(cli.command, Some(Command::Bluetooth(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_accepts_bluetooth_wardrive_esp_when_given_on_off_or_nothing() {
+        for args in [
+            ["wartui", "bluetooth", "wardrive-esp"].as_slice(),
+            &["wartui", "bluetooth", "wardrive-esp", "on"],
+            &["wartui", "bluetooth", "wardrive-esp", "off", "--bridge", "44:C0", "--link", "usb"],
+            &["wartui", "bluetooth", "wardrive-esp", "--config", "w.toml"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Bluetooth(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_bluetooth_wardrive_esp_when_given_another_word() {
+        for args in [
+            ["wartui", "bluetooth", "wardrive-esp", "yes"].as_slice(),
+            &["wartui", "bluetooth", "wardrive-esp", "true"],
+            &["wartui", "bluetooth", "wardrive-esp", "on", "off"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
         }
     }
 

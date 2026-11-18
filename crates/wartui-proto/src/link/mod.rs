@@ -297,6 +297,13 @@ pub enum HostToBridge {
     /// No answer, as for [`HostToBridge::OpenPairing`]; a failed erase answers
     /// [`BridgeToHost::Error`].
     ClearBonds,
+    /// Offer the WardriveESP service to phones when `on`, and store it so the P4 boots into it
+    /// ([`crate::wardrive_esp`]). No answer: the next [`BridgeToHost::Status`] shows the setting
+    /// in force, and a failed save answers [`BridgeToHost::Error`].
+    SetWardriveEsp {
+        /// Whether phones may link.
+        on: bool,
+    },
 }
 
 /// How long [`HostToBridge::OpenPairing`] opens the pairing window.
@@ -467,6 +474,9 @@ pub struct BluetoothStatus {
     pub central: Option<Central>,
     /// The C6's counters, totals since it booted.
     pub counters: BleCounters,
+    /// Whether the bridge offers the WardriveESP service to phones: the setting, not whether a
+    /// phone is linked.
+    pub wardrive_esp: bool,
 }
 
 /// Which host the P4's host queue serves.

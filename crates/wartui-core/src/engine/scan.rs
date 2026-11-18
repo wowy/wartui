@@ -125,6 +125,10 @@ impl FleetEngine {
                 batch.bulk.push(HostToBridge::SetFan { duty });
                 batch.bulk.push(HostToBridge::GetStatus);
             }
+            Command::SetWardriveEsp(on) => {
+                batch.bulk.push(HostToBridge::SetWardriveEsp { on });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
             Command::SetPool { pool } => {
                 batch.bulk.push(HostToBridge::SetPool { pool });
                 batch.bulk.push(HostToBridge::GetStatus);

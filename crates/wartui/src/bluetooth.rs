@@ -1,4 +1,5 @@
-//! `wartui bluetooth` — pair this PC with the bridge over Bluetooth, or forget it.
+//! `wartui bluetooth` — pair this PC with the bridge over Bluetooth, forget it, or let phones
+//! link to it.
 //!
 //! **`pair` opens the window first, when it can.** The bridge lets a new host pair only inside its
 //! pairing window: 120 s after it powers up, while it holds no bond, and 120 s after an
@@ -34,7 +35,12 @@
 //! cannot reconnect on one (`docs/c6-ble-pairing-findings.md`, "Clearing the bridge's bonds
 //! strands every host"), so `forget` says each must forget the bridge too.
 //!
-//! **Neither saves `wartui.toml`.** Only `run` and `flash-bridge` save the bridge
+//! **`wardrive-esp` reads or sets whether phones may link** as to a WardriveESP board, with no
+//! pairing. The bridge keeps the setting on its own flash, as it keeps the pool, and is reached
+//! as `wartui pool` reaches it. Turning it on says what it costs: any phone in range can then hold
+//! the bridge's one Bluetooth connection and start or stop the scan.
+//!
+//! **None saves `wartui.toml`.** Only `run` and `flash-bridge` save the bridge
 //! ([`crate::memory`]). The next `run --link bluetooth` finds a paired bridge and remembers it.
 //! A remembered Bluetooth address BlueZ does not list, or one that does not answer, is followed by
 //! a scan (`wartui_bridge::ble`).
@@ -43,7 +49,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args as ClapArgs, Subcommand};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 #[cfg(any(target_os = "linux", test))]
 use wartui_bridge::DisconnectCause;
 use wartui_bridge::serial::{self, BridgeSpec, Probed};
@@ -58,13 +64,20 @@ use wartui_proto::mac::{self, Mac};
 use crate::config::Link;
 #[cfg(any(target_os = "linux", test))]
 use crate::status::bonds_text;
-use crate::status::{pairing_text, wait_for_ready, wait_for_status};
+use crate::status::{pairing_text, wait_for_ready, wait_for_status, wardrive_esp_text};
 
 /// How long the bridge has to answer a status request.
 const REPLY_TIMEOUT: Duration = crate::CONNECT_NOTICE_AFTER;
 
 /// How long `forget` listens for a fault once the bonds are cleared.
 const SETTLE: Duration = Duration::from_secs(1);
+
+/// How long `wardrive-esp` listens for a fault once the setting is sent, as `wartui pool` does.
+const SETTING_SETTLE: Duration = Duration::from_millis(500);
+
+/// What turning `wardrive-esp` on lets a stranger do.
+const PHONES_NOTICE: &str = "Any phone in range can now link to the bridge with no pairing, hold \
+                             its one Bluetooth connection, and start or stop the scan.";
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -80,6 +93,9 @@ enum Action {
     /// Clear every Bluetooth bond the bridge keeps, and forget it on this PC. Every other host
     /// that paired with it must forget it too.
     Forget(ForgetArgs),
+    /// Read or set whether phones may link to the bridge as a WardriveESP board, with no pairing.
+    /// The bridge keeps it across its reboots.
+    WardriveEsp(WardriveEspArgs),
 }
 
 #[derive(ClapArgs)]
@@ -118,10 +134,39 @@ struct ForgetArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(ClapArgs)]
+struct WardriveEspArgs {
+    /// `on` lets phones link, `off` does not. Without it, prints the setting.
+    #[arg(value_name = "on|off")]
+    state: Option<OnOff>,
+
+    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
+    /// if omitted.
+    #[arg(long, value_name = "PATH|MAC")]
+    bridge: Option<String>,
+
+    #[command(flatten)]
+    link_flag: crate::config::LinkFlag,
+
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load is no bridge remembered. Never written; see
+    /// `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
+
+/// A setting, as the command line spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
 pub async fn run(args: Args) -> Result<()> {
     match args.action {
         Action::Pair(args) => pair(args).await,
         Action::Forget(args) => forget(args).await,
+        Action::WardriveEsp(args) => wardrive_esp(args).await,
     }
 }
 
@@ -665,6 +710,28 @@ async fn forget(args: ForgetArgs) -> Result<()> {
         linux::forget_here(info.mac, address).await;
     }
     println!("{}", stranded_notice(&name));
+    Ok(())
+}
+
+async fn wardrive_esp(args: WardriveEspArgs) -> Result<()> {
+    let (mut link, info) =
+        crate::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
+            .await?;
+    let wanted = args.state.map(|state| state == OnOff::On);
+    if let Some(on) = wanted {
+        link.send_bulk(HostToBridge::SetWardriveEsp { on }).context("queueing the setting")?;
+        let state = if on { "on" } else { "off" };
+        println!("turning wardrive esp {state} on bridge {}", mac::full(&info.mac));
+        crate::settle(&mut link, SETTING_SETTLE).await?;
+    }
+    let bluetooth = bluetooth_status(&mut link).await?;
+    println!("phones     {}", wardrive_esp_text(&bluetooth));
+    if wanted.is_some_and(|on| on != bluetooth.wardrive_esp) {
+        bail!("the bridge did not take the setting");
+    }
+    if wanted == Some(true) {
+        println!("{PHONES_NOTICE}");
+    }
     Ok(())
 }
 

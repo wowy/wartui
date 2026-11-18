@@ -14,10 +14,17 @@
 //! The bulk ring's bytes are an array ([`HostQueue`]) or a slice handed over at boot
 //! ([`HostQueueIn::with_bulk`]), as the P4 hands it PSRAM.
 //!
+//! The queue also carries a phone's WardriveESP text lines ([`crate::wardrive_esp`]), one a
+//! record, cut with `\n` rather than `0x00` ([`HostQueueIn::set_terminator`]), since a phone
+//! splits its stream on `\n`. The P4 sets the terminator at each attachment, before it clears the
+//! queue, so the byte that ends a cut record is the new host's. [`HostQueueIn::push_bulk_within`]
+//! holds that stream's bulk under a bound of its own.
+//!
 //! # A new host
 //!
 //! The P4 queues nothing while no host is present, and [`HostQueueIn::clear`] empties both
-//! rings when one arrives, so a host never reads a backlog from before it attached.
+//! rings when one arrives, so a host never reads a backlog from before it attached. A record
+//! part-way out is cut off with the terminator, so the new host's reader starts clean.
 
 use crate::frame_ring::{FrameRing, FrameRingIn};
 use crate::link::{BridgeToHost, QueueId, QueueStat};
@@ -48,8 +55,10 @@ pub struct HostQueueIn<const P: usize, S> {
     priority: FrameRing<P>,
     bulk: FrameRingIn<S>,
     /// [`HostQueueIn::clear`] cut a frame off part-way out, so the next chunk starts with
-    /// a `0x00` that ends the fragment.
+    /// the terminator that ends the fragment.
     cut: bool,
+    /// The byte that ends a cut record: `0x00` for COBS frames.
+    terminator: u8,
 }
 
 /// Frames waiting to go to the host, `P` bytes of priority and `B` of bulk, in arrays.
@@ -73,7 +82,18 @@ impl<const P: usize, S> HostQueueIn<P, S> {
     /// An empty queue whose bulk ring is `bulk`.
     #[must_use]
     pub const fn with_bulk(bulk: S) -> Self {
-        Self { priority: FrameRing::new(), bulk: FrameRingIn::over(bulk), cut: false }
+        Self {
+            priority: FrameRing::new(),
+            bulk: FrameRingIn::over(bulk),
+            cut: false,
+            terminator: 0x00,
+        }
+    }
+
+    /// Set the byte [`HostQueueIn::fill`] writes after [`HostQueueIn::clear`] cut a record
+    /// part-way out: `0x00` unless set, `\n` for text lines.
+    pub const fn set_terminator(&mut self, byte: u8) {
+        self.terminator = byte;
     }
 }
 
@@ -91,11 +111,19 @@ impl<const P: usize, S: AsRef<[u8]> + AsMut<[u8]>> HostQueueIn<P, S> {
         if priority { self.priority.push(frame) } else { self.bulk.push(frame) }
     }
 
+    /// Queue `frame` as bulk, evicting the oldest bulk frames until the bulk ring holds at most
+    /// `limit` bytes ([`FrameRingIn::push_within`]).
+    ///
+    /// Returns `false` when the frame was refused.
+    pub fn push_bulk_within(&mut self, frame: &[u8], limit: usize) -> bool {
+        self.bulk.push_within(frame, limit)
+    }
+
     /// Discard everything queued, for a host that has just connected.
     ///
     /// What is queued was meant for nobody, or for a host that has gone. A frame part-way
-    /// out is cut off by a `0x00` at the head of the next chunk, so the new host's decoder
-    /// starts clean. Counts no drop: the drop counts mean congestion while a host reads.
+    /// out is cut off by the terminator at the head of the next chunk, so the new host's
+    /// decoder starts clean. Counts no drop: the drop counts mean congestion while a host reads.
     pub fn clear(&mut self) {
         self.cut |= self.priority.mid_frame() || self.bulk.mid_frame();
         self.priority.clear();
@@ -120,7 +148,7 @@ impl<const P: usize, S: AsRef<[u8]> + AsMut<[u8]>> HostQueueIn<P, S> {
         }
         if self.cut {
             self.cut = false;
-            out[0] = 0x00;
+            out[0] = self.terminator;
             filled = 1;
         }
         while filled < out.len() {

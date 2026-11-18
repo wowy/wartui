@@ -7,11 +7,12 @@ use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16}
 use wartui_proto::radio_link::{
     Accept, BODY_MAX, BleCounters, BleState, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN,
     HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, MAGIC, PAYLOAD_MAX,
-    Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
+    Packer, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Stream, Up, VerifyError,
     WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down, encode_packet, encode_up,
     host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
+use wartui_proto::wardrive_esp::command::COMMAND_MAX;
 
 fn log(text: &str) -> Up<'_> {
     Up::Log { message: text.try_into().unwrap() }
@@ -484,13 +485,18 @@ fn radio_link_largest_messages_fit_one_packet() {
     });
     let line = Up::Error { message: LogStr::try_from("x".repeat(96).as_str()).unwrap() };
     let stream = [0xFFu8; HOST_BYTES_MAX];
-    let state =
-        Up::BleState(BleState { subscribed: true, encrypted: true, bonded: true, mtu: u16::MAX });
+    let state = Up::BleState(BleState {
+        stream: Stream::Phone,
+        encrypted: true,
+        bonded: true,
+        mtu: u16::MAX,
+    });
     let bond = largest_bond();
     let added = Up::BondAdded(bond);
     let removed = Up::BondRemoved(bond.addr);
     let credit = Up::Credit { accounted: u32::MAX };
-    for up in [status, line, Up::HostBytes(&stream), credit, state, added, removed] {
+    let command = Up::WardriveEspCommand(&stream[..COMMAND_MAX]);
+    for up in [status, line, Up::HostBytes(&stream), credit, state, added, removed, command] {
         let len = encode_up(&up, &mut out).unwrap();
         assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
     }
@@ -499,6 +505,7 @@ fn radio_link_largest_messages_fit_one_packet() {
     let bonds = Down::Bonds {
         bonds: Vec::from_slice(&[bond; MAX_BONDS]).unwrap(),
         window_ms: WINDOW_UNTIL_BONDED,
+        wardrive_esp: true,
     };
     let len = encode_down(&bonds, &mut out).unwrap();
     assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
@@ -636,6 +643,18 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_up(&error, &mut out).unwrap();
     assert_eq!(out[..len], [2, 2, b'n', b'o'], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), error);
+
+    let command = Up::WardriveEspCommand(b"caps");
+    let len = encode_up(&command, &mut out).unwrap();
+    // Up::WardriveEspCommand, then the bytes, length first.
+    assert_eq!(out[..len], [8, 4, b'c', b'a', b'p', b's'], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), command);
+
+    let bonds = Down::Bonds { bonds: Vec::new(), window_ms: 0, wardrive_esp: true };
+    let len = encode_down(&bonds, &mut out).unwrap();
+    // Down::Bonds, no bonds, window_ms 0, phones admitted.
+    assert_eq!(out[..len], [3, 0, 0, 1], "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), bonds);
 }
 
 #[test]
@@ -667,12 +686,12 @@ fn radio_link_pins_host_stream_bytes_when_encoded() {
     assert_eq!(decode_up(&out[..len]).unwrap(), credit);
 
     let state =
-        Up::BleState(BleState { subscribed: true, encrypted: true, bonded: false, mtu: 247 });
+        Up::BleState(BleState { stream: Stream::Host, encrypted: true, bonded: false, mtu: 247 });
     let len = encode_up(&state, &mut out).unwrap();
     #[rustfmt::skip]
     let expected = [
         5,          // Up::BleState
-        1, 1, 0,    // subscribed, encrypted, bonded
+        1, 1, 0,    // Stream::Host, encrypted, bonded
         0xF7, 0x01, // mtu 247, varint
     ];
     assert_eq!(out[..len], expected, "{MSG}");
@@ -698,17 +717,23 @@ fn radio_link_pins_bond_bytes_when_encoded() {
         1,                                  // BondLevel::Authenticated
     ];
 
-    let down = Down::Bonds { bonds: Vec::from_slice(&[bond]).unwrap(), window_ms: 120_000 };
+    let down = Down::Bonds {
+        bonds: Vec::from_slice(&[bond]).unwrap(),
+        window_ms: 120_000,
+        wardrive_esp: false,
+    };
     let len = encode_down(&down, &mut out).unwrap();
     let mut expected = vec![3, 1]; // Down::Bonds, one bond
     expected.extend_from_slice(&bond_bytes);
     expected.extend_from_slice(&[0xC0, 0xA9, 0x07]); // window_ms 120000, varint
+    expected.push(0); // phones not admitted
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), down);
 
-    let until = Down::Bonds { bonds: Vec::new(), window_ms: WINDOW_UNTIL_BONDED };
+    let until =
+        Down::Bonds { bonds: Vec::new(), window_ms: WINDOW_UNTIL_BONDED, wardrive_esp: false };
     let len = encode_down(&until, &mut out).unwrap();
-    assert_eq!(out[..len], [3, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F], "{MSG}");
+    assert_eq!(out[..len], [3, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0], "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), until);
 
     let added = Up::BondAdded(bond);
@@ -722,6 +747,44 @@ fn radio_link_pins_bond_bytes_when_encoded() {
     let len = encode_up(&removed, &mut out).unwrap();
     assert_eq!(out[..len], [7, 1, 0x5A, 0x11, 0x22, 0x33, 0x44, 0x02], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), removed);
+}
+
+#[test]
+fn radio_link_round_trips_wardrive_command_when_encoded() {
+    let mut out = [0u8; RECORD_MAX];
+    let longest = [b'x'; COMMAND_MAX];
+    for text in [&b"wdstream start -wifi -ch 1,6,11"[..], &[0xFF, 0x00, b'\n'], &longest] {
+        let command = Up::WardriveEspCommand(text);
+        let len = encode_up(&command, &mut out).unwrap();
+        assert_eq!(decode_up(&out[..len]).unwrap(), command);
+    }
+}
+
+#[test]
+fn radio_link_encodes_each_stream_as_one_byte_when_state_is_built() {
+    let mut out = [0u8; 16];
+    for (stream, byte) in [(Stream::None, 0), (Stream::Host, 1), (Stream::Phone, 2)] {
+        let state = Up::BleState(BleState { stream, encrypted: false, bonded: false, mtu: 23 });
+        let len = encode_up(&state, &mut out).unwrap();
+        // Up::BleState, the stream, encrypted, bonded, mtu.
+        assert_eq!(out[..len], [5, byte, 0, 0, 23], "{stream:?}");
+        assert_eq!(decode_up(&out[..len]).unwrap(), state);
+    }
+    assert_eq!(BleState::default().stream, Stream::None);
+}
+
+#[test]
+fn radio_link_round_trips_bonds_when_phones_are_admitted() {
+    let mut out = [0u8; RECORD_MAX];
+    let bonds = Down::Bonds {
+        bonds: Vec::from_slice(&[largest_bond(); MAX_BONDS]).unwrap(),
+        window_ms: 120_000,
+        wardrive_esp: true,
+    };
+    let len = encode_down(&bonds, &mut out).unwrap();
+    // The flag is the record's last byte.
+    assert_eq!(out[len - 1], 1);
+    assert_eq!(decode_down(&out[..len]).unwrap(), bonds);
 }
 
 #[test]

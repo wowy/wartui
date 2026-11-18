@@ -113,14 +113,23 @@ impl<S: AsRef<[u8]> + AsMut<[u8]>> FrameRingIn<S> {
     /// Returns `false`, and counts a drop, when it cannot fit even in an empty ring or the
     /// frame being read blocks it. Each frame evicted counts one drop as well.
     pub fn push(&mut self, frame: &[u8]) -> bool {
+        self.push_within(frame, usize::MAX)
+    }
+
+    /// Queue `frame` as [`FrameRingIn::push`] does, evicting the oldest whole frames until the
+    /// ring's bytes with it are at most `limit`, or the capacity when that is less.
+    ///
+    /// Refusals and evictions count drops as [`FrameRingIn::push`]'s do, and the frame being
+    /// read counts against `limit`.
+    pub fn push_within(&mut self, frame: &[u8], limit: usize) -> bool {
         let need = PREFIX + frame.len();
-        let capacity = self.capacity();
+        let bound = limit.min(self.capacity());
         let pinned = if self.reading { self.head_size() } else { 0 };
-        if frame.len() > usize::from(u16::MAX) || need > capacity - pinned {
+        if frame.len() > usize::from(u16::MAX) || need > bound.saturating_sub(pinned) {
             self.dropped = self.dropped.saturating_add(1);
             return false;
         }
-        while capacity - self.len < need {
+        while self.len + need > bound {
             if self.reading {
                 self.evict_behind_head();
             } else {

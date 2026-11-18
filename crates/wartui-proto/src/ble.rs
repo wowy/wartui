@@ -1,10 +1,10 @@
 //! The Bluetooth host link's GATT identity, and the C6's buffer of what it has yet to notify.
 //!
-//! Over Bluetooth the C6 offers one GATT service, [`SERVICE_UUID`]. [`UP_UUID`] notifies the host
-//! stream a USB host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host
-//! frames, framed as on USB, in writes without response that end in a write request. The identity
-//! lives here so the C6 and every host read the same one; a change strands whichever end was not
-//! rebuilt.
+//! The host link is the GATT service [`SERVICE_UUID`]. [`UP_UUID`] notifies the host stream a USB
+//! host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host frames, framed as
+//! on USB, in writes without response that end in a write request. The identity lives here so the
+//! C6 and every host read the same one; a change strands whichever end was not rebuilt. Beside it
+//! the C6 offers a phone the WardriveESP service ([`crate::wardrive_esp::frame`]).
 //!
 //! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
 //! `--bridge` takes, so an operator picks the bridge by the same name over either link.
@@ -83,6 +83,15 @@ impl<const N: usize> ByteRing<N> {
         self.head = (self.head + n) % N;
         self.len -= n;
         n
+    }
+
+    /// Moves the oldest bytes into `out` up to and including the first `delim`, and returns how
+    /// many. Stops short of it at `out.len()` bytes or at all it holds.
+    pub fn take_through(&mut self, out: &mut [u8], delim: u8) -> usize {
+        let limit = out.len().min(self.len);
+        let n =
+            (0..limit).find(|&i| self.buf[(self.head + i) % N] == delim).map_or(limit, |i| i + 1);
+        self.take(&mut out[..n])
     }
 
     /// Discards everything held.
