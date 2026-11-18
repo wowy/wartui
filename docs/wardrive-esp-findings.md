@@ -64,7 +64,26 @@ window closed, 30 s with it open. The app then connects again. In 75 s with the 
 `not encrypted or bonded`.
 
 The bridge takes one connection, so a wartui host over Bluetooth can find it taken meanwhile.
-That was not tried. Turning the board off in the app, or the phone's Bluetooth, ends it.
+Tried on 2026-11-18 at `9926c16`, with the app running on the phone and the setting off:
+
+| Check | Result |
+| --- | --- |
+| The PC's stored bond, pairing window closed | `status --link bluetooth` was served on the first try, encrypted and bonded |
+| A fresh `wartui bluetooth pair` after `forget`, window open | Failed 3 of 3: `nothing advertised as wartui D0:1C over Bluetooth in 10s`. The phone held the connection 30 s at a time, and the bridge advertises only between its visits |
+| The same with `bluetoothctl scan on` running beside it | Paired and bonded on the first try |
+
+With the setting on and the phone linked, the PC is not served at all, which is the rule: the
+phone is the host. Turning the board off in the app, or the phone's Bluetooth, frees the bridge.
+
+## A pairing request on the phone
+
+Up to `e6907dc` the C6 sent a Security Request to an unbonded central whenever phones were not
+admitted. A phone that remembers the bridge connects then too, and Android answers the request
+with a pairing prompt: the Pixel 8 showed one each time `wartui status` ran over USB, which holds
+phones out for 15 s. From `9926c16` the C6 sends no Security Request. On that build the PC's
+stored bond resumed and a fresh pairing bonded (the table above), and through 14
+`unbonded_kicks` of the phone the bridge counted no pairing begun or failed. Whether the prompt
+is gone was not seen from the bench: it shows only on the phone.
 
 ## Not measured
 
