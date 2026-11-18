@@ -356,7 +356,7 @@ fn wardrive_line_formats_ap_when_ssid_is_not_utf8_and_full_length() {
 }
 
 #[test]
-fn wardrive_line_maps_each_security_to_vendor_token() {
+fn wardrive_line_maps_security_to_vendor_token_when_formatting_auth() {
     let cases = [
         (Security::Open, "OPEN"),
         (Security::Wep, "WEP"),
@@ -805,7 +805,7 @@ fn wardrive_session_resets_list_when_phone_subscribes_again() {
 }
 
 #[test]
-fn wardrive_session_classes_stream_lines_as_stream_and_answers_as_answer() {
+fn wardrive_session_classes_answers_apart_from_stream_when_scanning() {
     let (mut session, mut lines) = subscribed();
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_period(&mut lines);

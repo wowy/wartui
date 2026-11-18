@@ -12,7 +12,8 @@
 //! **`Down::Bonds` goes on every change and is repeated every [`REPEAT_EVERY_MS`]** while the
 //! pair bridges ([`repeat`]). The link never resends, so a lost one would leave the C6 serving
 //! bonds the P4 dropped until the next hello. The C6 takes a repeat that changes nothing as
-//! changing nothing. Only a change that finds the queue full says so; a repeat stays silent.
+//! changing nothing. Only a change to the bonds that finds the queue full says so; an admission
+//! change and a repeat stay silent.
 //!
 //! **`Down::Bonds` also says whether the C6 admits a phone** to the WardriveESP service:
 //! `host_owner::phones_admitted`, the setting and whether USB holds the queue
@@ -121,10 +122,11 @@ pub fn repeat(shared: &Shared) {
 }
 
 /// Send the bonds again when whether the C6 admits phones differs from what the latest
-/// `Down::Bonds` the down queue took said.
+/// `Down::Bonds` the down queue took said. Silent when it refuses them: this runs on every owner
+/// input, and the next call or [`repeat`] tries again.
 pub fn follow_admission(shared: &Shared) {
     if admits(shared) != shared.bonds.admitted.get() {
-        send(shared);
+        push(shared);
     }
 }
 

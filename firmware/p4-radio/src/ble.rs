@@ -462,7 +462,9 @@ pub struct Ble {
     pending_bond: Cell<Option<PendingBond>>,
     /// A phone may read the WardriveESP service: the P4 said so in its last `Down::Bonds`.
     admitted: Cell<bool>,
-    /// The id the phone's frames carry. It lives as long as the C6, not the connection.
+    /// The id the phone's frames carry. It lives as long as the C6, not the connection, as the
+    /// WardriveESP firmware keeps it, so a new phone's frames carry the last framed command's id
+    /// until it writes its own.
     inbound: Cell<Inbound>,
     /// The ids of the ACKs owed to the phone, oldest first. Cleared when the stream changes.
     acks: RefCell<Deque<u32, ACKS_MAX>>,
