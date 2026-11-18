@@ -138,6 +138,30 @@ company id and the `0x5744` UUID.
   linked central.
 - `wartui status` answered over Bluetooth and over USB afterwards, on the stored bond.
 
+## Bluetooth mode (2026-11-18)
+
+D0:1C with its ten nodes on 0.6.0, updated over the bus by `wartui ota`, all confirmed. N10 held
+the Bluetooth scan.
+
+**The node's record.** `wartui sniff` beside `wartui scan start --bluetooth`, 6.5 minutes: 172
+Bluetooth records, none undecodable, 12 with a name. The bridge's own advertisement was among
+them as `wartui D0:1C` at -19 dBm, read by a node on the same board. Complete names and shortened
+ones both arrived. Most advertisers in the room sent none in the advertisement itself, and a
+passive scan hears no scan response.
+
+**The phone's mode**, with the PC stand-in:
+
+| Check | Result |
+| --- | --- |
+| `bt on` while scanning Wi-Fi | `WD:MODE mode=bt`, `WD:STATUS aps=80 scans=0`, `WD:END reason=stop`, `WD:MODE mode=bt`, `WD:BEGIN type=bt interval=0 channel=auto`, in that order |
+| `WD:BT` lines | 101 in 15 s, the first 0.6 s after the switch; 9 named; `type=public` and `type=random`, `conn=0` and `conn=1`, `mfg=` empty and filled all seen |
+| `WD:STATUS` | `bt=90 scans=1 dropped=0`, then `bt=5 scans=2 dropped=0`, 5 s apart |
+| `status`, `bt` | `mode Bluetooth`, `bt 5 scans 2` |
+| `wdstream start -bt` in Bluetooth mode | `WD:MODE mode=bt`, nothing else |
+| `bt off` | `WD:MODE mode=wifi`, the last Bluetooth `WD:STATUS`, `WD:END`, then the six Wi-Fi header lines; `WD:STATUS aps=102 scans=1` 5 s later |
+| No `WD:AP` in Bluetooth mode, no `WD:BT` in Wi-Fi mode | held |
+| Status beacon while linked in Bluetooth mode | `57 07 80 59 00 …`: linked, scanning, mode 1, 89 devices |
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -145,6 +169,8 @@ company id and the `0x5744` UUID.
 - The status UUID in the linked board's advertisement, for the same reason, and its 1 s interval.
 - A first pairing beside the beacon's advertisement. The stored bond resumed.
 - The beacon read by a phone app: a second phone beside a linked one.
+- The app in Bluetooth mode: whether it sends `bt on` or `wdstream start -bt`, and what it shows.
+- `bt on` on a fleet of one node, refused in the session's tests only.
 - iOS.
 - `wartui ports` beside a linked phone, by the bridge's own counters. It was judged in the app,
   which showed no break.
