@@ -169,6 +169,12 @@ fw=1.7.3`, `WD:BOOT fw=1.7.3`, `info`'s `WardriveESP protocol 1.7.3`, and the fr
 `57 00 80 00 00 17 03 d0 1c`. Linking sent no `WD:CONN`, since the timing at the subscribe is the
 baseline, and the stand-in's link kept its 30 ms interval throughout, so none followed.
 
+**The app at 1.7.3** (Android, Pixel 8): it linked, showed the board as v1.7.3 and offered no
+firmware update. The bridge's beacon, read on the PC while the phone was linked, was `57 03 80 04
+00 17 03 d0 1c` and the six bytes of `Pixel8`: linked, scanning, Wi-Fi, an Android app, and a
+nickname. So the app sends `iam` at this level; it sent none in the 75 s watched at 1.6.0. The
+extras named every channel of the pool.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -177,7 +183,7 @@ baseline, and the stand-in's link kept its 30 ms interval throughout, so none fo
 - A first pairing beside the beacon's advertisement. The stored bond resumed.
 - The beacon read by a phone app: a second phone beside a linked one.
 - `WD:CONN` on a link whose timing changes: the stand-in's never did.
-- The app at level 1.7.3: whether it sends `iam` and `bye`, and whether it offers an update.
+- Whether the app sends `bye` when it lets the board go.
 - The app in Bluetooth mode: whether it sends `bt on` or `wdstream start -bt`, and what it shows.
 - `bt on` on a fleet of one node, refused in the session's tests only.
 - iOS.
