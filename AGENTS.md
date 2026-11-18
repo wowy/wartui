@@ -481,8 +481,8 @@ edit stops; follow the pointer before changing the rule.
   stream for 30 s. With `wardrive esp` on, any central subscribes to the WardriveESP stream and
   writes its commands, which reach only the phone's session. A central reads one stream, the
   first it subscribes to, and one central connects at a time, so a linked phone keeps a Bluetooth
-  host out and USB always gets in. While phones are admitted the C6 sends no Security Request,
-  which a phone would answer with a pairing prompt.
+  host out and USB always gets in. The C6 sends no Security Request, which a phone would answer
+  with a pairing prompt: a host starts its own pairing.
   → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`
 - **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
   the P4's own offsets, up to which the C6 is done, so every `HostStart` and `HostBytes`

@@ -93,7 +93,6 @@
 //!
 //! - the advertisement carries the WardriveESP service's UUID, which a phone app looks for, and
 //!   the scan response the name; a change of admission restarts the advertisement ([`accept`]);
-//! - no central gets a Security Request, which raises a pairing prompt on a phone;
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
 //!   a line, or part of one longer than the frame's room;
 //! - a write to RX or CTRL is read through `frame::Inbound`, and its command goes to the P4 as
@@ -104,11 +103,13 @@
 //! Outside admission a write request to RX or CTRL is refused and TX's CCCD cannot be enabled, and
 //! a phone still reading is disconnected at the next `Down::Bonds` ([`revoke`], [`events`]).
 //!
-//! **A central the C6 holds a bond for gets no Security Request.** Outside the window the request
-//! would say no bonding, and BlueZ 5.88 answers that by pairing again rather than encrypting with
-//! the key it holds, and is then disconnected as unbonded (`docs/c6-ble-pairing-findings.md`,
-//! "Two faults the bench found"). It encrypts on its own, or on the Insufficient Authentication
-//! answer, as a wartui host does while phones are admitted.
+//! **The C6 sends no Security Request.** A phone answers one with a pairing prompt, and a phone
+//! that remembers the bridge connects whether or not phones are admitted. BlueZ starts no first
+//! pairing on one, and answers one that says no bonding by pairing again rather than encrypting
+//! with the key it holds (`docs/c6-ble-pairing-findings.md`, "Two faults the bench found"). A
+//! wartui host starts its own pairing (`wartui bluetooth pair`), a bonded one encrypts on its own,
+//! and any central that touches the link's characteristics unencrypted is answered Insufficient
+//! Authentication.
 //!
 //! **TrouBLE accepts every pairing, so the window is the C6's to enforce.** A connection is
 //! bondable only when it is made inside the P4's pairing window. These centrals are disconnected
@@ -1074,18 +1075,9 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         "Bluetooth connected {}, {bonded}, pairing window {window}",
         mac::short(&session.peer)
     ));
-    // Before pairing starts, which the Security Request below prompts.
+    // Before a central can start pairing.
     if let Err(err) = raw.set_bondable(session.bondable) {
         shared.error(format_args!("Bluetooth could not set bondable: {err:?}"));
-    }
-    // A phone answers a Security Request with a pairing prompt, so none goes while phones are
-    // admitted: a wartui host then pairs on the Insufficient Authentication answer, or through
-    // BlueZ.
-    if !shared.ble.admitted()
-        && !raw.is_bonded_peer()
-        && let Err(err) = raw.request_security()
-    {
-        shared.log(format_args!("Bluetooth security not requested: {err:?}"));
     }
     // Each answered by an event if the central agrees; a refusal leaves the link as it is.
     if let Err(err) = raw.set_phy(stack, PhyKind::Le2M).await {
