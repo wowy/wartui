@@ -94,6 +94,30 @@ stored bond resumed and a fresh pairing bonded (the table above), and through 14
 `unbonded_kicks` of the phone the bridge counted no pairing begun or failed. The phone
 showed no prompt on that build.
 
+## Health and link lines (2026-11-18)
+
+D0:1C, both chips on the build that adds `WD:BOOT`, `WD:LINK`, `WD:HEALTH`, `link`, `drop` and
+`iam`, with the PC stand-in as the phone.
+
+| Check | Result |
+| --- | --- |
+| Scan header | `WD:CAPS`, `WD:BOOT fw=1.6.0 slot=ota_0 image=confirmed reset=software`, `WD:LINK conns=1 mtu=182 prev_disc=none`, `WD:MODE`, `WD:BEGIN`, `WD:PLAN`, in that order |
+| `WD:HEALTH` | arrived inside 15 s of linking: `up=30 heap=67524 heap_min=63452 mtu=182 txdrop=0` |
+| `link`, 2 s after linking | `connected to … for 0h 00m 02s`, `signal -51 dBm, MTU 182, interval 30 ms, timeout 420 ms`, `links since boot 1, no drops` |
+| `iam a <name>`, then `link` | `held by <name> (Android)`, a two-byte character intact |
+| `info` | ends with the `WD:BOOT` line |
+| `drop` | `disconnecting the phone` arrived, and the link ended 0.5 s later |
+| Link again after `drop`, twice | `WD:LINK conns=2 … prev_disc=0x216 prev_disc_ago=5s`, then `conns=3`; `link` named the drop as `0x16` |
+| `wartui status --link bluetooth` afterwards | answered, encrypted and bonded |
+
+**A bonded central's subscription outlives its connection.** The stand-in is bonded, for the
+wartui link, and TrouBLE keeps a bonded central's subscriptions across connections. On a build
+that read TX's as it stood, `drop` left it set: the next connection got the phone's stream before
+it asked for anything, its own requests then went unanswered, and BlueZ failed its subscribe 30 s
+later, on 4 connections of 4. The C6 counts a TX subscription only once the central writes it on
+the connection it holds, and the same sequence linked on both tries. A phone holds no bond, so the
+app never met this. Why the central's requests went unanswered was not traced.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -106,3 +130,5 @@ showed no prompt on that build.
 - A drive: the app's access point counts beside a wartui capture, a slow link, and the backlog's
   evictions.
 - A first pairing from a host other than Linux while the setting is on.
+- The app beside `WD:BOOT`, `WD:LINK` and `WD:HEALTH`, and whether it sends `iam` or `bye`: it sent
+  neither in the 75 s watched on 2026-11-17.

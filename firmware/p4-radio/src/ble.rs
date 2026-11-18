@@ -94,7 +94,9 @@
 //! - the advertisement carries the WardriveESP service's UUID, which a phone app looks for, and
 //!   the scan response the name; a change of admission restarts the advertisement ([`accept`]);
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
-//!   a line, or part of one longer than the frame's room;
+//!   a line, or part of one longer than the frame's room. TrouBLE keeps a bonded central's TX
+//!   subscription across its connections, so it counts only once the central writes it on the
+//!   connection it holds;
 //! - a write to RX or CTRL is read through `frame::Inbound`, and its command goes to the P4 as
 //!   `Up::WardriveEspCommand`, waiting for room as Down's writes do. A CMD's ACK is owed once its
 //!   command is queued, or at once when the command is empty, so a dropped command is never
@@ -1050,6 +1052,8 @@ struct Session {
     listed: Cell<bool>,
     /// The phone was disconnected because phones are not admitted ([`drop_phone`]).
     phone_dropped: Cell<bool>,
+    /// The central enabled TX's notifications on this connection, and has not disabled them.
+    tx_subscribed: Cell<bool>,
     /// Since when the central has read no stream, for [`IDLE_DEADLINE`]: when it connected,
     /// paired or last let go of one.
     idle_since: Cell<Instant>,
@@ -1112,6 +1116,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         lost: Cell::new(None),
         listed: Cell::new(false),
         phone_dropped: Cell::new(false),
+        tx_subscribed: Cell::new(false),
         idle_since: Cell::new(connected_at),
         idle_changed: Signal::new(),
         peer: bond_addr(&raw.peer_identity()).mac(),
@@ -1370,6 +1375,15 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                     GattEvent::Write(write) if phone.contains(&write.handle()) => {
                         phone_write(shared, write).await
                     }
+                    GattEvent::Write(write) if Some(write.handle()) == tx_cccd => {
+                        let on = enables_notify(&write);
+                        let reply = write.accept();
+                        // Set only by a write that took; cleared by any that turns them off.
+                        if !on || reply.is_ok() {
+                            session.tx_subscribed.set(on);
+                        }
+                        reply
+                    }
                     event => event.accept(),
                 };
                 // A reply that would not build is for a link already going.
@@ -1379,14 +1393,18 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
             }
             _ => {}
         }
-        // A bonded central's subscription outlives its connection in TrouBLE, so it is read
-        // only once the link is authorized again.
+        // A bonded central's subscriptions outlive its connection in TrouBLE. Up's is read only
+        // once the link is authorized again, and TX's only once the central writes it on this
+        // connection.
         let raw = conn.raw();
         let encrypted = raw.security_level().is_ok_and(|level| level.encrypted());
         let bonded = raw.is_bonded_peer();
         let stream = if encrypted && bonded && server.link.up.should_notify(conn) {
             Stream::Host
-        } else if ble.admitted() && server.wardrive_esp.tx.should_notify(conn) {
+        } else if ble.admitted()
+            && session.tx_subscribed.get()
+            && server.wardrive_esp.tx.should_notify(conn)
+        {
             Stream::Phone
         } else {
             Stream::None

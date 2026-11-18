@@ -64,7 +64,8 @@ advertises nothing while a central is connected.
 
 RX and CTRL are read alike. There is no OTA characteristic. The C6 serves an ATT MTU of 182.
 
-**Linking.** Subscribing to TX links the phone and starts the scan. A central reads one stream:
+**Linking.** Subscribing to TX links the phone and starts the scan. A subscription lasts for its
+connection only: a phone subscribes again each time it connects. A central reads one stream:
 the first subscription decides whether it is a phone or a wartui host, and the other stream's
 subscription is refused. A central that has subscribed to neither stream 10 s after it connects is
 disconnected, 30 s while the bridge's pairing window is open, and so is a phone that stays
