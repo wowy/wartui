@@ -14,6 +14,7 @@ use wartui_proto::bus::{
 };
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Report, ScanMode};
+use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome, ToNodeBody, Undelivered};
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -326,6 +327,28 @@ async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate()
         }
     }
     assert!(ble.len() > 10, "rotating BLE addresses should keep producing new sightings");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_sends_node_shaped_ble_records_when_holding_bluetooth_scan() {
+    // Every record carries a trailer a node would send, and some a name, so a run under
+    // `--sim` exercises both on the host.
+    let config = SimConfig { node_count: 2, ble_chance: 1.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    start(&link, true);
+
+    let (mut named, mut nameless, mut identified) = (0, 0, 0);
+    while named + nameless < 50 {
+        let rec = next_frame(&mut link).await;
+        let Ok(UpMsg::Sightings(batch)) = rec.msg() else { continue };
+        for (sighting, _) in batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble) {
+            let trailer = BleTrailer::decode(sighting.ext).expect("a node's trailer");
+            identified += usize::from(trailer.mfgr.is_some());
+            if sighting.ssid.is_empty() { nameless += 1 } else { named += 1 }
+        }
+    }
+    assert!(named > 0 && nameless > 0, "{named} named, {nameless} not");
+    assert!(identified > 0, "and some carry an identifier");
 }
 
 #[tokio::test(start_paused = true)]

@@ -489,6 +489,53 @@ fn engine_keeps_ble_sighting_when_name_matches_excluded_ssid() {
     assert_eq!(counters(&engine).observations, 1);
 }
 
+/// A BLE record as a node sends it: `name` as its SSID and `ext` as its trailer.
+fn ble_record<'a>(name: &'a [u8], ext: &'a [u8]) -> SightingMsg<'a> {
+    SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [0x02, 0x00, 0x00, 0x00, 0x01, 0x01],
+        channel: 0,
+        rssi: -60,
+        security: Security::Ble,
+        ssid: name,
+        ext,
+    }
+}
+
+#[test]
+fn engine_records_ble_name_and_mfgr_id_when_record_carries_them() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    introduce(&mut engine, &clock, NODE);
+    // Random, connectable, Apple's 0x004C.
+    let msg = ble_record(b"Tag", &[0x03, 0x4C, 0x00]);
+
+    let batch = engine.handle(sightings(NODE, &batch(1, &[msg])), clock.at(1));
+
+    let Record::Observation(obs) = &batch.records[1] else { panic!("expected an observation") };
+    assert_eq!(obs.kind, RecordKind::Ble);
+    assert_eq!(obs.ssid, b"Tag", "the advertised name rides in the SSID");
+    assert_eq!(obs.mfgr_id, Some(0x004C));
+    assert_eq!(obs.rcoi, None);
+}
+
+#[test]
+fn engine_records_ble_sighting_without_mfgr_id_when_trailer_does_not_decode() {
+    // Two bytes is no trailer of this build: the identifier is not guessed at, and the
+    // advertiser was still heard.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    introduce(&mut engine, &clock, NODE);
+    let msg = ble_record(b"Tag", &[0x4C, 0x00]);
+
+    let batch = engine.handle(sightings(NODE, &batch(1, &[msg])), clock.at(1));
+
+    let Record::Observation(obs) = &batch.records[1] else { panic!("expected an observation") };
+    assert_eq!(obs.mfgr_id, None);
+    assert_eq!(obs.ssid, b"Tag");
+    assert_eq!(counters(&engine).ble_observations, 1);
+}
+
 /// A sighting of `kind` on `channel` from `bssid_tail`, named `ssid`.
 fn sighting_on(kind: RecordKind, channel: u8, bssid_tail: u8, ssid: &[u8]) -> SightingMsg<'_> {
     SightingMsg {
@@ -607,7 +654,7 @@ fn engine_records_one_node_and_each_observation_when_batch_arrives() {
             rssi: -60,
             security: Security::Ble,
             ssid: b"",
-            ext: &[],
+            ext: &[0x00],
         },
     ];
     let frame = batch(1, &msgs);

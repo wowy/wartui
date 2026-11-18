@@ -2,6 +2,7 @@ use wartui_proto::bus::{
     ACK_TIMEOUT_MS, Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind,
     SightingBatch, SightingMsg, Slot, UpType,
 };
+use wartui_proto::hci::BleTrailer;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::index_of;
 
@@ -388,16 +389,13 @@ impl FleetEngine {
         if let Some(node) = self.nodes.get_mut(&src) {
             node.observations += 1;
         }
-        // The trailer's meaning depends on the kind: roaming consortium body for Wi-Fi, company
-        // identifier for BLE. A BLE trailer that is not two bytes cannot come from a well-formed
-        // batch of this build, so it is dropped rather than guessed at.
+        // The trailer's meaning depends on the kind: roaming consortium body for Wi-Fi, flags and
+        // company identifier for BLE. A BLE trailer that does not decode cannot come from a
+        // well-formed batch of this build, so its identifier is dropped rather than guessed at,
+        // and the sighting is still recorded.
         let (rcoi, mfgr_id) = match sighting.kind {
             RecordKind::Wifi => ((!sighting.ext.is_empty()).then(|| sighting.ext.to_vec()), None),
-            RecordKind::Ble => (
-                None,
-                (sighting.ext.len() == 2)
-                    .then(|| u16::from_le_bytes([sighting.ext[0], sighting.ext[1]])),
-            ),
+            RecordKind::Ble => (None, BleTrailer::decode(sighting.ext).and_then(|t| t.mfgr)),
         };
         let observation = Observation {
             node_mac: src,

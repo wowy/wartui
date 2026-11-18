@@ -241,12 +241,14 @@ is here rather than only in a `//!`.
   trees may meet as an undecodable frame rather than a named mismatch, which is stated where the
   constant is.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
-  it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
-  bytes of company identifier, or nothing. The split is made once, in the engine's
+  it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is a flags
+  byte (random address, connectable), then two bytes of company identifier when the advertiser
+  sent one. The split is made once, in the engine's
   sightings path, per record; keeping `bus` byte-transparent over the trailer is what lets a change
   to how an identifier is *read* cost a re-export rather than a reflash.
   → `crates/wartui-proto/src/bus/sighting.rs`, `SightingMsg::ext`;
-  `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
+  `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-proto/src/hci.rs`,
+  `BleTrailer`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it. Nothing decodes or drives a node on another major or minor: the P4 never

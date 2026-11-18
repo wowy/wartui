@@ -27,8 +27,9 @@
 //! node the scan to idle on.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
-//! all this firmware wants is an address and a signal strength, so the packets are
-//! built and read by `wartui_proto::hci` and this file is only the conversation.
+//! all this firmware wants is what a passive scan's advertising reports carry, so the
+//! packets are built and read by `wartui_proto::hci` and this file is only the
+//! conversation.
 
 use esp_hal::peripherals::BT;
 use esp_hal::time::{Duration, Instant};
@@ -87,10 +88,10 @@ const _: () = assert!(
 /// until the refresh.
 ///
 /// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
-/// report is twelve bytes with the manufacturer identifier: a by-value `Scanner`
-/// puts enough of the buffer on the stack of `Scanner::new` and of `main` to trip
-/// `clippy::large_stack_frames`, which `main.rs` denies. As a static, the reports and
-/// their index cost 2,192 bytes that no stack has to find room for.
+/// report is 44 bytes with its name: a by-value `Scanner` puts enough of the buffer on
+/// the stack of `Scanner::new` and of `main` to trip `clippy::large_stack_frames`, which
+/// `main.rs` denies. As a static, the reports and their index cost 6,284 bytes that no
+/// stack has to find room for.
 const REPORTS: usize = 128;
 
 /// Hash slots behind [`REPORTS`]: a power of two at least twice it, so the index is

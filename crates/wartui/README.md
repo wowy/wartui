@@ -139,7 +139,8 @@ a note says how many; see "Config file".
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
-row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
+row's `SSID` is the name the advertiser sent, blank when it sent none. A BLE row's `Frequency` is
+blank on purpose: that column is a Bluetooth "device type" code only an active
 inquiry produces, and the nodes never transmit while scanning. A row whose submitting sighting has
 a blank name takes a name heard elsewhere in its window: a hidden network names itself only in some
 probe responses, and a BLE advertiser only in some advertisements.

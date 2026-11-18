@@ -63,6 +63,7 @@ use wartui_proto::bus::{
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
+use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr, LoopPhase,
     NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX,
@@ -1421,17 +1422,21 @@ impl World {
     /// BLE advertisers use rotating private addresses, so every sighting is a
     /// new MAC and none of them ever dedup.
     fn ble_sighting(&self, rng: &mut Xorshift) -> Network {
-        Network {
-            bssid: rng.mac(),
-            ssid: String::new(),
-            security: Security::Ble,
-            channel: 0,
-            rssi: -40 - i8::try_from(rng.below(50)).unwrap_or(0),
-            // Half of them carry a manufacturer identifier — 76, which a
-            // person can check against the SIG company list — so both BLE
-            // trailer paths run too.
-            ext: if rng.below(2) == 0 { 76u16.to_le_bytes().to_vec() } else { Vec::new() },
-        }
+        let bssid = rng.mac();
+        let rssi = -40 - i8::try_from(rng.below(50)).unwrap_or(0);
+        // Half of them carry a manufacturer identifier — 76, which a person can check
+        // against the SIG company list — and a third a name, so every BLE trailer and
+        // name path runs too.
+        let trailer = BleTrailer {
+            random: true,
+            connectable: rng.below(2) == 0,
+            mfgr: (rng.below(2) == 0).then_some(76),
+        };
+        let ssid =
+            if rng.below(3) == 0 { format!("tag-{:02}", rng.below(100)) } else { String::new() };
+        let mut ext = [0; BleTrailer::MAX];
+        let len = trailer.encode(&mut ext);
+        Network { bssid, ssid, security: Security::Ble, channel: 0, rssi, ext: ext[..len].to_vec() }
     }
 }
 
@@ -1464,7 +1469,7 @@ struct Network {
     channel: u8,
     rssi: i8,
     /// The sighting's trailer, as bytes: the roaming consortium body for
-    /// Wi-Fi, the manufacturer identifier for BLE. Stored rendered so `as_msg`
+    /// Wi-Fi, the encoded `BleTrailer` for BLE. Stored rendered so `as_msg`
     /// needs no kind-dependent logic of its own.
     ext: Vec<u8>,
 }

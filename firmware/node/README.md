@@ -30,8 +30,9 @@ transfer carries records, one message each:
   chip's 3.3 V rail and die temperature, one byte each, and the bytes free in its heap.
 - **Sighting batch**: sent at the end of each dwell or scan, and acknowledged by the P4. A 3-byte
   header, then one 12-plus-SSID record per newly seen BSSID or advertiser, packed to fill 1024
-  bytes. A record's trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
-  advertiser's manufacturer identifier, when there are any.
+  bytes. A BLE record's SSID is the advertiser's name, when it sent one. A record's trailer carries
+  a Passpoint network's roaming consortium identifiers, when there are any, or a BLE advertiser's
+  address type and connectable flag, then its manufacturer identifier when it sent one.
 - **Assign**: the assignment.
 - **Stop**: drops the assignment and empties the dedup ring. The node idles at epoch 0, as at
   boot, and adopts the next assignment whatever its epoch.
@@ -285,7 +286,9 @@ tell, since capabilities carry no Bluetooth bit to withhold. A controller that r
 named on the console, and the node scans anyway.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe. This firmware wants
-only an address, a signal strength, and a manufacturer identifier when an advertiser offers one. So
+only what a passive scan's advertising reports carry: an address and its type, a signal strength,
+whether the advertisement is connectable, and a name and manufacturer identifier when an advertiser
+offers them. So
 the four commands and two events live in `wartui_proto::hci`, where they are unit-tested, and
 `src/ble.rs` is only the conversation.
 
