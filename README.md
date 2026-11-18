@@ -170,15 +170,15 @@ the pop-up again if the run still waits.
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                  |
-|---------------------|-------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                             |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
-| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                               |
-| `ctrl-c`            | Quit                                                                          |
+| Key                 | What it does                                                                                |
+|---------------------|---------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                           |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)                          |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                             |
+| `ctrl-c`            | Quit                                                                                        |
 
 On the `excluded ssids` page:
 

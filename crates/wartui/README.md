@@ -857,15 +857,15 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                  |
-|---------------------|-------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                             |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100           |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)            |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                    |
-| `Enter`             | Apply every row; pool, fan and bluetooth to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                               |
-| `ctrl-c`            | Quit                                                                          |
+| Key                 | What it does                                                                                |
+|---------------------|---------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                           |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)                          |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                             |
+| `ctrl-c`            | Quit                                                                                        |
 
 On the `excluded ssids` page:
 
@@ -880,7 +880,9 @@ On the `excluded ssids` page:
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5; see
-"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `remember bridge` (`off`, `on`),
+"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `wardrive esp` (`off`, `on`; lets a
+phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
+`remember bridge` (`off`, `on`),
 `wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, and the
 `wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
 lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
@@ -890,10 +892,11 @@ the rows; edits to the rows stay pending. On the key row, letters type, so `h` `
 neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip while a key is entered.
 The key shows its last three characters, up to six bullets before them, and from ten characters its
 first one to three. `Enter` sends the rows to the engine and writes every row shown but the pool,
-the fan and `bluetooth` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and `[api-keys]`,
-whatever was there, and settings closes. The pool, the fan and `bluetooth` go to the bridge only
-when their rows moved, and none is written to `wartui.toml`. The bridge keeps the pool and the fan;
-the run keeps `bluetooth` and asks for it again when the bridge reboots. While the bridge reports
+the fan, `bluetooth` and `wardrive esp` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and
+`[api-keys]`, whatever was there, and settings closes. The pool, the fan, `bluetooth` and
+`wardrive esp` go to the bridge only when their rows moved, and none is written to `wartui.toml`.
+The bridge keeps the pool, the fan and `wardrive esp`; the run keeps `bluetooth` and asks for it
+again when the bridge reboots. While the bridge reports
 the scan stopped, `bluetooth` reads `scan stopped` and does not step, since the run starts the scan
 once the bridge answers. Before the bridge has reported a scan, it reads `off`, and the run starts
 the scan in the mode it holds. If the engine is not accepting commands, nothing is sent or written,

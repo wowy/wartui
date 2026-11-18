@@ -7,11 +7,11 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
-//! The pool, fan and bluetooth rows are never written to `wartui.toml`. Each shows what the
-//! bridge last reported, and `Enter` sends it only when the row moved. The bridge stores the
-//! pool and fan and boots into them. It keeps no scan mode, so the bluetooth row is held by the
-//! run, which starts the scan in that mode again after the bridge reboots. The bridge picks
-//! which node scans Bluetooth.
+//! The pool, fan, bluetooth and wardrive esp rows are the bridge's, and are never written to
+//! `wartui.toml`. Each shows what the bridge last reported, and `Enter` sends it only when the
+//! row moved. The bridge stores the pool, fan and wardrive esp and boots into them. It keeps no
+//! scan mode, so the bluetooth row is held by the run, which starts the scan in that mode again
+//! after the bridge reboots. The bridge picks which node scans Bluetooth.
 //!
 //! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
 //! decides at launch whether it waits, so the row applies from the next launch. The
@@ -78,6 +78,7 @@ enum Field {
     Pool,
     Fan,
     Bluetooth,
+    WardriveEsp,
     RememberBridge,
     WaitForGps,
     ExcludedSsids,
@@ -85,10 +86,11 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 7] = [
+const FIELDS: [Field; 8] = [
     Field::Pool,
     Field::Fan,
     Field::Bluetooth,
+    Field::WardriveEsp,
     Field::RememberBridge,
     Field::WaitForGps,
     Field::ExcludedSsids,
@@ -128,8 +130,14 @@ pub(super) struct ConfigModal {
     bluetooth: Option<bool>,
     /// The bluetooth row as the modal opened, so `Enter` sends only a change.
     bluetooth_seed: Option<bool>,
-    /// Whether the link was up when the modal opened. While it is down, the pool and fan rows are
-    /// `None`: a value sent then would be dropped, not stored.
+    /// Whether the bridge lets a phone link as a WardriveESP board, or `None` while no bridge has
+    /// reported it.
+    wardrive_esp: Option<bool>,
+    /// The wardrive esp row as the bridge reported it when the modal opened, so `Enter` sends
+    /// only a change.
+    wardrive_esp_seed: Option<bool>,
+    /// Whether the link was up when the modal opened. While it is down, the pool, fan and wardrive
+    /// esp rows are `None`: a value sent then would be dropped, not stored.
     bridge_up: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
@@ -196,6 +204,7 @@ impl ConfigModal {
     /// | pool | one place in [`POOL_STEPS`]; none at `no bridge` |
     /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
     /// | bluetooth | flips; none at `scan stopped` |
+    /// | wardrive esp | flips; none at `no bridge` |
     /// | remember | flips |
     /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
@@ -207,6 +216,11 @@ impl ConfigModal {
             Field::Bluetooth => {
                 if delta != 0 {
                     self.bluetooth = self.bluetooth.map(|on| !on);
+                }
+            }
+            Field::WardriveEsp => {
+                if delta != 0 {
+                    self.wardrive_esp = self.wardrive_esp.map(|on| !on);
                 }
             }
             Field::RememberBridge => {
@@ -242,10 +256,11 @@ pub(super) enum ModalAction {
 impl ConfigModal {
     /// Open the modal, seeded from what is in force.
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
-        // The bridge holds these two, so they are what its last `Status` said, and nothing while
-        // the link is down.
+        // The bridge holds these three, so they are what its last `Status` said, and nothing
+        // while the link is down.
         let bridge_up = snapshot.link_up;
         let pool = snapshot.pool.filter(|_| bridge_up);
+        let wardrive_esp = snapshot.wardrive_esp.filter(|_| bridge_up);
         let fan = snapshot
             .bridge_status
             .and_then(|status| status.fan)
@@ -266,6 +281,8 @@ impl ConfigModal {
             fan_seed: fan,
             bluetooth,
             bluetooth_seed: bluetooth,
+            wardrive_esp,
+            wardrive_esp_seed: wardrive_esp,
             bridge_up,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
@@ -429,20 +446,29 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The pool, the fan and the bluetooth row go only when their rows moved: the bridge stores
-    // every pool and duty it is sent, and an unmoved bluetooth row would restate the scan.
+    // The bridge's rows go only when they moved: the bridge stores every pool, duty and wardrive
+    // esp setting it is sent, and an unmoved bluetooth row would restate the scan.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
     let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
-    let wanted =
-        usize::from(pool.is_some()) + usize::from(fan.is_some()) + usize::from(bluetooth.is_some());
+    let wardrive_esp = modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed);
+    let wanted = usize::from(pool.is_some())
+        + usize::from(fan.is_some())
+        + usize::from(bluetooth.is_some())
+        + usize::from(wardrive_esp.is_some());
     let Ok(mut permits) = commands.try_reserve_many(wanted) else {
         return Err(ENGINE_BUSY);
     };
     let pool_command = pool.map(|pool| Command::SetPool { pool });
     let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
     let bluetooth_command = bluetooth.map(Command::SetBluetooth);
-    for command in pool_command.into_iter().chain(fan_command).chain(bluetooth_command) {
+    let wardrive_esp_command = wardrive_esp.map(Command::SetWardriveEsp);
+    for command in pool_command
+        .into_iter()
+        .chain(fan_command)
+        .chain(bluetooth_command)
+        .chain(wardrive_esp_command)
+    {
         if let Some(permit) = permits.next() {
             permit.send(command);
         }
@@ -456,6 +482,13 @@ pub(super) fn apply(
     }
     if let Some(on) = bluetooth {
         text.push_str(if on { "; bluetooth on" } else { "; bluetooth off" });
+    }
+    if let Some(on) = wardrive_esp {
+        text.push_str(if on {
+            "; wardrive esp on sent to the bridge"
+        } else {
+            "; wardrive esp off sent to the bridge"
+        });
     }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
@@ -600,7 +633,7 @@ pub(super) fn link_written(
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 13, frame.area());
+    let area = centered_rect(48, 14, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -655,6 +688,14 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
             None => Line::from(Span::styled(
                 format!("{:<18}  scan stopped", "bluetooth"),
                 styled(Field::Bluetooth),
+            )),
+        },
+        match modal.wardrive_esp {
+            Some(on) => row("wardrive esp", &on_off(on), Field::WardriveEsp),
+            // Nothing to step, so no arrows.
+            None => Line::from(Span::styled(
+                format!("{:<18}  no bridge", "wardrive esp"),
+                styled(Field::WardriveEsp),
             )),
         },
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
@@ -822,6 +863,9 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("still open").selected, Field::Bluetooth);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("still open").selected, Field::WardriveEsp);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -2255,6 +2299,73 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(rx.try_recv().is_err(), "Esc leaves the bridge's duty alone");
+    }
+
+    #[test]
+    fn ui_sends_wardrive_esp_when_row_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::WardriveEsp, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Right), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetWardriveEsp(true));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("wardrive esp on sent to the bridge"), "{notice}");
+        let file = std::fs::read_to_string(&target).expect("the other rows were saved");
+        assert!(!file.contains("wardrive"), "the bridge keeps it, not the file: {file}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_wardrive_esp_row_unmoved() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::WardriveEsp, &mut ui, &snapshot, &tx);
+        // Out and back: the setting the bridge already holds.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetWardriveEsp");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("wardrive esp"), "{notice}");
+    }
+
+    #[test]
+    fn ui_keeps_wardrive_esp_row_still_when_bridge_has_not_reported() {
+        let snapshot = Snapshot { wardrive_esp: None, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::WardriveEsp, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").wardrive_esp, None);
+        let screen = modal_screen(&snapshot, &mut ui);
+        assert!(screen.contains("wardrive esp        no bridge"), "{screen}");
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetWardriveEsp");
+    }
+
+    #[test]
+    fn ui_draws_wardrive_esp_row_when_opened() {
+        let snapshot = Snapshot { wardrive_esp: Some(true), ..busy() };
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+
+        let screen = modal_screen(&snapshot, &mut ui);
+
+        assert!(screen.contains("wardrive esp      ◂ on ▸"), "{screen}");
+        // The modal grew a row, and the last still fits.
+        assert!(screen.contains("enter save · esc cancel"), "{screen}");
     }
 
     /// The settings modal drawn over the view, as text.
