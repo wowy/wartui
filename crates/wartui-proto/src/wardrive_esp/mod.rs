@@ -1,12 +1,14 @@
-//! The WardriveESP protocol: the text a phone app reads Wi-Fi sightings in, over Bluetooth.
+//! The WardriveESP protocol: the text a phone app reads Wi-Fi and Bluetooth sightings in, over
+//! Bluetooth.
 //!
 //! WardriveESP is by RocketGod, MIT licensed; the document is vendored at
 //! `docs/vendor/wardrive-esp/PROTOCOL.md`. Phone apps already speak it, so the bridge offers its
 //! GATT service and a phone reads the fleet as it reads one WardriveESP board.
 //!
-//! The bridge implements the baseline Bluetooth part: Wi-Fi access points only. It takes commands
-//! and sends the lines that start, describe, carry and stop a Wi-Fi scan, and answers every other
-//! mode as unsupported. Its advertisements carry the status beacon and advert extras.
+//! The bridge implements the baseline Bluetooth part and the Bluetooth mode: Wi-Fi access points
+//! and Bluetooth advertisers. It takes commands and sends the lines that start, describe, carry
+//! and stop a scan in either mode, and answers every other mode as unsupported. Its advertisements
+//! carry the status beacon and advert extras.
 //!
 //! | Module | What it does | Who runs it |
 //! |---|---|---|

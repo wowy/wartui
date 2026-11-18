@@ -284,7 +284,7 @@ is here rather than only in a `//!`.
   lets the fleet table and the store read a node's share as the plan's without asking who put it
   there. It has two inputs, both the bridge's: the pool, kept in NVS and set by `SetPool`, and the
   scan mode, set by `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session,
-  which scans Wi-Fi only, and kept nowhere. Which node scans
+  in Wi-Fi or Bluetooth mode, and kept nowhere. Which node scans
   Bluetooth is its pick, not an input. The host's `Command::SetPool`, `SetBluetooth` and
   `StopScan` only ask, and the engine believes what the next `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`

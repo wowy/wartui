@@ -3,6 +3,7 @@
 
 use wartui_proto::ChannelPool;
 use wartui_proto::bus::{RecordKind, Security, SightingMsg};
+use wartui_proto::hci::BleTrailer;
 use wartui_proto::plan::{SCAN_CHANNELS, index_of};
 use wartui_proto::radio_link::{LastDrop, PhoneLink};
 use wartui_proto::reset::ResetCause;
@@ -10,14 +11,14 @@ use wartui_proto::wardrive_esp::beacon::{
     self, Beacon, COMPANY, EXTRAS_CHANNELS, EXTRAS_UUID, LinkEnd, STATUS_MAX, channel_bits,
 };
 use wartui_proto::wardrive_esp::command::{
-    self, COMMAND_MAX, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels,
+    self, Bt, COMMAND_MAX, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels,
 };
 use wartui_proto::wardrive_esp::frame::{
     self, CTRL_UUID, HEADER_LEN, Inbound, RX_UUID, SERVICE_UUID, STATUS_UUID, TX_UUID, TYPE_ACK,
     TYPE_CMD, TYPE_DATA, Taken, Write,
 };
 use wartui_proto::wardrive_esp::line::{self, FW, FW_LEVEL, LINE_MAX, Line};
-use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
+use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Mode, Session, Sink};
 
 /// A framed write: the header with `version` and `flags`, then `payload`.
 fn framed(kind: u8, id: u32, payload: &[u8], version: u8, flags: u8) -> Vec<u8> {
@@ -181,35 +182,63 @@ fn wardrive_command_reads_stop_when_wdstream_contains_stop() {
 
 #[test]
 fn wardrive_command_reads_channels_when_wdstream_carries_ch() {
+    let wifi =
+        |channels| Command::Stream { channels, unsupported_mode: false, mode: Some(Mode::Wifi) };
     assert_eq!(
         command::parse(b"wdstream start -wifi -ch 1,6,11,36"),
-        Some(Command::Stream { channels: Some(b"1,6,11,36"), unsupported_mode: false })
+        Some(wifi(Some(b"1,6,11,36")))
     );
-    assert_eq!(
-        command::parse(b"wdstream start -ch 1,6 -wifi"),
-        Some(Command::Stream { channels: Some(b"1,6 -wifi"), unsupported_mode: false })
-    );
-    assert_eq!(
-        command::parse(b"wdstream start -wifi"),
-        Some(Command::Stream { channels: None, unsupported_mode: false })
-    );
+    assert_eq!(command::parse(b"wdstream start -ch 1,6 -wifi"), Some(wifi(Some(b"1,6 -wifi"))));
+    assert_eq!(command::parse(b"wdstream start -wifi"), Some(wifi(None)));
     // `-ch` with no space after it names no list.
+    assert_eq!(command::parse(b"wdstream start -wifi -ch"), Some(wifi(None)));
+    assert_eq!(command::parse(b"wdstream start -ch ,,, -wifi"), Some(wifi(Some(b",,, -wifi"))));
+}
+
+#[test]
+fn wardrive_command_flags_unsupported_mode_when_wdstream_asks_for_capture() {
+    for text in [&b"wdstream start -cap"[..], b"wdstream start -promisc", b"wdstream -bt -cap"] {
+        assert!(
+            matches!(command::parse(text), Some(Command::Stream { unsupported_mode: true, .. })),
+            "{}",
+            String::from_utf8_lossy(text)
+        );
+    }
+}
+
+#[test]
+fn wardrive_command_reads_mode_in_order_when_wdstream_names_one() {
+    let mode = |text: &[u8]| match command::parse(text) {
+        Some(Command::Stream { mode, unsupported_mode: false, .. }) => mode,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(mode(b"wdstream start -bt"), Some(Mode::Bluetooth));
+    // `-bt` wins over `-wifi`, wherever each is.
+    assert_eq!(mode(b"wdstream start -wifi -bt"), Some(Mode::Bluetooth));
+    assert_eq!(mode(b"wdstream -bt -wifi"), Some(Mode::Bluetooth));
+    assert_eq!(mode(b"wdstream start -wifi"), Some(Mode::Wifi));
+    assert_eq!(mode(b"wdstream start"), None);
+    assert_eq!(mode(b"wdstream"), None);
     assert_eq!(
-        command::parse(b"wdstream start -wifi -ch"),
-        Some(Command::Stream { channels: None, unsupported_mode: false })
-    );
-    assert_eq!(
-        command::parse(b"wdstream start -ch ,,, -wifi"),
-        Some(Command::Stream { channels: Some(b",,, -wifi"), unsupported_mode: false })
+        command::parse(b"wdstream -bt -ch 1,6"),
+        Some(Command::Stream {
+            channels: Some(b"1,6"),
+            unsupported_mode: false,
+            mode: Some(Mode::Bluetooth)
+        })
     );
 }
 
 #[test]
-fn wardrive_command_flags_mode_when_wdstream_asks_for_bluetooth() {
-    for text in [&b"wdstream start -bt"[..], b"wdstream start -cap", b"wdstream start -promisc"] {
+fn wardrive_command_reads_bt_forms_when_word_is_bt() {
+    assert_eq!(command::parse(b"bt on"), Some(Command::Bt(Bt::On)));
+    assert_eq!(command::parse(b"bt off"), Some(Command::Bt(Bt::Off)));
+    assert_eq!(command::parse(b"bt on \r\n"), Some(Command::Bt(Bt::On)));
+    // The rest must be exactly `on` or `off`; anything else shows the mode.
+    for text in [&b"bt"[..], b"bt maybe", b"bt on now", b"bt ON", b"bt  on"] {
         assert_eq!(
             command::parse(text),
-            Some(Command::Stream { channels: None, unsupported_mode: true }),
+            Some(Command::Bt(Bt::Show)),
             "{}",
             String::from_utf8_lossy(text)
         );
@@ -249,9 +278,7 @@ fn wardrive_command_is_silent_when_app_sends_hb_client_time() {
 
 #[test]
 fn wardrive_command_is_unsupported_when_word_names_a_missing_mode() {
-    for word in
-        ["bt", "cap on", "csi start ch=6", "coproc", "led test", "screen", "sd", "ota begin 9"]
-    {
+    for word in ["cap on", "csi start ch=6", "coproc", "led test", "screen", "sd", "ota begin 9"] {
         assert_eq!(command::parse(word.as_bytes()), Some(Command::Unsupported), "{word}");
     }
 }
@@ -397,7 +424,7 @@ fn wardrive_line_formats_caps_golden_when_pool_is_us() {
     assert!(line::caps(&mut out, ChannelPool::Us));
     assert_eq!(
         text(&out),
-        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui \
+        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
          board_name=wartui link=ble chans=1,2,3,4,5,6,7,8,9,10,11,36,40,44,48,52,56,60,64,100,\
          104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165\n"
     );
@@ -424,10 +451,16 @@ fn wardrive_line_formats_plan_status_end_err_golden_when_built() {
     assert_eq!(text(&out), "WD:END reason=stop\n");
     assert!(line::err(&mut out, "no_supported_channels"));
     assert_eq!(text(&out), "WD:ERR reason=no_supported_channels\n");
-    assert!(line::mode(&mut out));
+    assert!(line::mode(&mut out, Mode::Wifi));
     assert_eq!(text(&out), "WD:MODE mode=wifi\n");
-    assert!(line::begin(&mut out));
+    assert!(line::begin(&mut out, Mode::Wifi));
     assert_eq!(text(&out), "WD:BEGIN type=wifi interval=0 channel=auto\n");
+    assert!(line::mode(&mut out, Mode::Bluetooth));
+    assert_eq!(text(&out), "WD:MODE mode=bt\n");
+    assert!(line::begin(&mut out, Mode::Bluetooth));
+    assert_eq!(text(&out), "WD:BEGIN type=bt interval=0 channel=auto\n");
+    assert!(line::status_bt(&mut out, 12, 3, 0));
+    assert_eq!(text(&out), "WD:STATUS bt=12 scans=3 dropped=0\n");
     assert!(line::text(&mut out, format_args!("aps {} scans {}", 4, 5)));
     assert_eq!(text(&out), "aps 4 scans 5\n");
     // A line too long for `LINE_MAX` is dropped whole.
@@ -464,9 +497,10 @@ impl Lines {
 const ALL_CHANS: &str = "1,2,3,4,5,6,7,8,9,10,11,12,13,36,40,44,48,52,56,60,64,100,104,108,112,\
                          116,120,124,128,132,136,140,144,149,153,157,161,165,169,173,177";
 
-const HELP: [&str; 14] = [
+const HELP: [&str; 18] = [
     "wartui bridge, WardriveESP commands:\n",
     "  wdstream start -wifi [-ch 1,6,11]\n",
+    "  wdstream start -bt\n",
     "  wdstream stop\n",
     "  start\n",
     "  stop\n",
@@ -474,6 +508,9 @@ const HELP: [&str; 14] = [
     "  ch\n",
     "  ch 1,6,11\n",
     "  ch all\n",
+    "  bt\n",
+    "  bt on\n",
+    "  bt off\n",
     "  status\n",
     "  info\n",
     "  link\n",
@@ -510,7 +547,7 @@ const LINK: &str = "WD:LINK conns=3 mtu=182 prev_disc=0x213 prev_disc_ago=12s\n"
 
 fn caps_all() -> String {
     format!(
-        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui \
+        "WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
          board_name=wartui link=ble chans={ALL_CHANS}\n"
     )
 }
@@ -530,7 +567,7 @@ fn header(plan: &str) -> Vec<String> {
 fn subscribed() -> (Session, Lines) {
     let mut session = Session::new();
     let mut lines = Lines::default();
-    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
     lines.take();
     (session, lines)
 }
@@ -555,7 +592,7 @@ fn wardrive_session_sends_header_in_order_when_phone_subscribes() {
 fn wardrive_session_asks_scan_start_when_phone_subscribes() {
     let mut session = Session::new();
     assert!(!session.scanning());
-    assert_eq!(session.on_subscribe(&ctx(), &mut Lines::default()), Some(Ask::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut Lines::default()), Some(Ask::Start(Mode::Wifi)));
     assert!(session.scanning());
 }
 
@@ -577,7 +614,7 @@ fn wardrive_session_filters_ap_when_channel_is_off_the_list() {
         session.on_sighting(1, &sighting(channel, b"coffee"), &mut lines);
     }
     assert!(lines.take().is_empty());
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     assert_eq!(lines.take(), ["WD:STATUS aps=0 scans=1\n"]);
 }
 
@@ -612,7 +649,7 @@ fn wardrive_session_sends_no_ap_when_idle() {
     let mut session = Session::new();
     let mut lines = Lines::default();
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     assert!(lines.take().is_empty());
 }
 
@@ -622,9 +659,9 @@ fn wardrive_session_counts_aps_since_last_status_when_period_ends() {
     for _ in 0..3 {
         session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     }
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     session.on_sighting(2, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     let lines = lines.take();
     assert_eq!(lines[3], "WD:STATUS aps=3 scans=1\n");
     assert_eq!(lines[5], "WD:STATUS aps=1 scans=2\n");
@@ -635,7 +672,7 @@ fn wardrive_session_sends_status_then_end_when_stopped() {
     let (mut session, mut lines) = subscribed();
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     session.on_sighting(2, &sighting(6, b"coffee"), &mut lines);
     lines.take();
     assert_eq!(session.on_command(b"wdstream stop", &ctx(), &mut lines), Some(Ask::Stop));
@@ -663,7 +700,7 @@ fn wardrive_session_sends_header_again_when_started_after_stop() {
     let (mut session, mut lines) = subscribed();
     session.on_command(b"stop", &ctx(), &mut lines);
     lines.take();
-    assert_eq!(session.on_command(b"start", &ctx(), &mut lines), Some(Ask::Start));
+    assert_eq!(session.on_command(b"start", &ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
     assert_eq!(lines.take(), header(ALL_CHANS));
     // Already scanning: nothing to start, nothing said.
     assert_eq!(session.on_command(b"start", &ctx(), &mut lines), None);
@@ -675,15 +712,15 @@ fn wardrive_session_counts_from_zero_when_started_after_stop() {
     let (mut session, mut lines) = subscribed();
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     session.on_sighting(2, &sighting(6, b"coffee"), &mut lines);
     session.on_command(b"stop", &ctx(), &mut lines);
     session.on_command(b"start", &ctx(), &mut lines);
     lines.take();
     session.on_command(b"status", &ctx(), &mut lines);
-    assert_eq!(lines.take()[1], "aps 0 scans 0\n");
+    assert_eq!(lines.take()[2], "aps 0 scans 0\n");
     session.on_sighting(3, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     assert_eq!(lines.take().last().map(String::as_str), Some("WD:STATUS aps=1 scans=1\n"));
 }
 
@@ -750,7 +787,7 @@ fn wardrive_session_starts_anyway_when_channel_list_errs() {
     let mut session = Session::new();
     let mut lines = Lines::default();
     let scan = session.on_command(b"wdstream start -wifi -ch 14", &ctx(), &mut lines);
-    assert_eq!(scan, Some(Ask::Start));
+    assert_eq!(scan, Some(Ask::Start(Mode::Wifi)));
     let mut want = vec!["WD:ERR reason=no_supported_channels\n".to_owned()];
     want.extend(header(ALL_CHANS));
     assert_eq!(lines.take(), want);
@@ -760,7 +797,9 @@ fn wardrive_session_starts_anyway_when_channel_list_errs() {
 fn wardrive_session_answers_unsupported_when_mode_is_missing() {
     let mut session = Session::new();
     let mut lines = Lines::default();
-    for command in [&b"wdstream start -bt"[..], b"bt on", b"cap", b"ota begin 1000"] {
+    for command in
+        [&b"wdstream start -cap"[..], b"wdstream start -bt -promisc", b"cap", b"ota begin 1000"]
+    {
         assert_eq!(session.on_command(command, &ctx(), &mut lines), None);
         assert_eq!(lines.take_classed(), [(Class::Answer, "WD:ERR reason=unsupported\n".into())]);
     }
@@ -830,19 +869,19 @@ fn wardrive_session_resets_list_when_phone_subscribes_again() {
     let (mut session, mut lines) = subscribed();
     session.on_command(b"ch 1,6", &ctx(), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     lines.take();
-    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start));
+    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
     assert_eq!(lines.take(), header(ALL_CHANS));
     session.on_command(b"status", &ctx(), &mut lines);
-    assert_eq!(lines.take()[1], "aps 0 scans 0\n");
+    assert_eq!(lines.take()[2], "aps 0 scans 0\n");
 }
 
 #[test]
 fn wardrive_session_classes_answers_apart_from_stream_when_scanning() {
     let (mut session, mut lines) = subscribed();
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     assert!(lines.take_classed().iter().all(|(class, _)| *class == Class::Stream));
     let commands = [&b"caps"[..], b"status", b"info", b"link", b"drop", b"help", b"ch", b"ch 6"];
     for command in commands.into_iter().chain([&b"ch all"[..], b"x"]) {
@@ -861,13 +900,19 @@ fn wardrive_session_answers_status_and_info_when_asked() {
     session.on_command(b"ch 6,1", &ctx(), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
     lines.take();
     session.on_command(b"status", &ctx(), &mut lines);
     assert_eq!(
         lines.take(),
-        ["scanning on\n", "aps 2 scans 1\n", "channels 6,1\n", "mtu 182 dropped 2\n"]
+        [
+            "mode Wi-Fi\n",
+            "scanning on\n",
+            "aps 2 scans 1\n",
+            "channels 6,1\n",
+            "mtu 182 dropped 2\n"
+        ]
     );
     session.on_command(b"info", &ctx(), &mut lines);
     assert_eq!(
@@ -882,7 +927,7 @@ fn wardrive_session_answers_status_and_info_when_asked() {
     session.on_command(b"stop", &ctx(), &mut lines);
     lines.take();
     session.on_command(b"status", &ctx(), &mut lines);
-    assert_eq!(lines.take()[0], "scanning off\n");
+    assert_eq!(lines.take()[1], "scanning off\n");
 }
 
 #[test]
@@ -916,7 +961,7 @@ fn wardrive_session_takes_longest_command_when_240_bytes_of_channels() {
     }
     let mut session = Session::new();
     let mut lines = Lines::default();
-    assert_eq!(session.on_command(&command, &ctx(), &mut lines), Some(Ask::Start));
+    assert_eq!(session.on_command(&command, &ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
     let lines = lines.take();
     assert_eq!(lines.len(), 6);
     // The cut is mid-list, so the whole pool fits once, in the order given.
@@ -1137,6 +1182,7 @@ impl Sink for Discard {
 fn named_beacon() -> Beacon {
     Beacon {
         scanning: true,
+        bluetooth: false,
         count: 0x0102,
         iphone: true,
         nickname: wartui_proto::heapless::Vec::from_slice(b"Al").unwrap(),
@@ -1250,7 +1296,7 @@ fn wardrive_session_saturates_beacon_count_when_period_holds_over_u16() {
     for _ in 0..=u32::from(u16::MAX) {
         session.on_sighting(1, &sighting(6, b"coffee"), &mut Discard);
     }
-    session.on_period(&mut Discard);
+    session.on_period(&ctx(), &mut Discard);
     assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).count, u16::MAX);
 }
 
@@ -1269,7 +1315,7 @@ fn wardrive_session_fills_beacon_when_phone_names_itself_and_period_ends() {
     }
     // Counted only once the period ends.
     assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).count, 0);
-    session.on_period(&mut lines);
+    session.on_period(&ctx(), &mut lines);
     let beacon = session.beacon(ChannelPool::All, LinkEnd::None);
     assert_eq!((beacon.count, beacon.iphone, &beacon.nickname[..]), (3, true, &b"Al"[..]));
     session.on_command(b"ch 1,6,11", &ctx(), &mut lines);
@@ -1291,4 +1337,320 @@ fn wardrive_session_says_bye_when_app_sends_it() {
     session.on_command(b"bye", &ctx(), &mut lines);
     session.release();
     assert!(!session.said_bye());
+}
+
+/// An advertiser's address, MSB first.
+const BT_MAC: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+/// The trailer bytes for `trailer`.
+fn trailer_bytes(trailer: BleTrailer) -> Vec<u8> {
+    let mut out = [0; BleTrailer::MAX];
+    let len = trailer.encode(&mut out);
+    out[..len].to_vec()
+}
+
+/// A Bluetooth record from [`BT_MAC`] at -70 dBm, named `name`, with the trailer `ext`.
+fn ble_sighting<'a>(name: &'a [u8], ext: &'a [u8]) -> SightingMsg<'a> {
+    SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: BT_MAC,
+        channel: 0,
+        rssi: -70,
+        security: Security::Ble,
+        ssid: name,
+        ext,
+    }
+}
+
+/// The trailer of a random, connectable advertiser with company identifier `0x004C`.
+fn apple_trailer() -> Vec<u8> {
+    trailer_bytes(BleTrailer { random: true, connectable: true, mfgr: Some(0x004C) })
+}
+
+const BT_LINE: &str =
+    "WD:BT ts=61500 mac=02:11:22:33:44:55 type=random rssi=-70 name_hex=4d79 mfg=004C conn=1\n";
+
+/// The lines a Bluetooth scan starts with.
+fn bt_header() -> Vec<String> {
+    vec!["WD:MODE mode=bt\n".into(), "WD:BEGIN type=bt interval=0 channel=auto\n".into()]
+}
+
+/// A session the phone has subscribed to, switched to Bluetooth, and the lines that took,
+/// drained.
+fn bluetooth() -> (Session, Lines) {
+    let (mut session, mut lines) = subscribed();
+    assert_eq!(session.on_command(b"bt on", &ctx(), &mut lines), Some(Ask::Start(Mode::Bluetooth)));
+    lines.take();
+    (session, lines)
+}
+
+#[test]
+fn wardrive_line_formats_bt_golden_when_trailer_decodes() {
+    let mut out = Line::new();
+    let ext = apple_trailer();
+    let record = ble_sighting(b"My", &ext);
+    let trailer = BleTrailer::decode(record.ext).expect("decodes");
+    assert!(line::bt(&mut out, 61_500, &record, &trailer));
+    assert_eq!(text(&out), BT_LINE);
+    let bare = BleTrailer { random: false, connectable: false, mfgr: None };
+    let ext = trailer_bytes(bare);
+    assert!(line::bt(&mut out, 61_500, &ble_sighting(b"", &ext), &bare));
+    assert_eq!(
+        text(&out),
+        "WD:BT ts=61500 mac=02:11:22:33:44:55 type=public rssi=-70 name_hex= mfg= conn=0\n"
+    );
+}
+
+#[test]
+fn wardrive_line_fits_bt_when_name_is_longest() {
+    let mut out = Line::new();
+    let name = [0xFFu8; wartui_proto::hci::BLE_NAME_MAX];
+    let ext = apple_trailer();
+    let record = SightingMsg { rssi: -128, ..ble_sighting(&name, &ext) };
+    let trailer = BleTrailer::decode(&ext).expect("decodes");
+    assert!(line::bt(&mut out, u32::MAX, &record, &trailer));
+    assert!(out.len() <= LINE_MAX);
+}
+
+#[test]
+fn wardrive_session_switches_to_bluetooth_when_bt_on_while_scanning_wifi() {
+    let (mut session, mut lines) = subscribed();
+    session.on_sighting(1, &sighting(6, b"coffee"), &mut lines);
+    lines.take();
+    assert_eq!(session.on_command(b"bt on", &ctx(), &mut lines), Some(Ask::Start(Mode::Bluetooth)));
+    let mut want = vec![
+        (Class::Answer, "WD:MODE mode=bt\n".to_owned()),
+        (Class::Stream, "WD:STATUS aps=1 scans=0\n".into()),
+        (Class::Stream, "WD:END reason=stop\n".into()),
+    ];
+    want.extend(bt_header().into_iter().map(|line| (Class::Stream, line)));
+    assert_eq!(lines.take_classed(), want);
+    assert_eq!(session.mode(), Mode::Bluetooth);
+    assert!(session.scanning());
+}
+
+#[test]
+fn wardrive_session_switches_to_wifi_when_bt_off_while_scanning_bluetooth() {
+    let (mut session, mut lines) = bluetooth();
+    let ext = apple_trailer();
+    session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);
+    lines.take();
+    assert_eq!(session.on_command(b"bt off", &ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
+    let mut want = vec![
+        "WD:MODE mode=wifi\n".to_owned(),
+        "WD:STATUS bt=1 scans=0 dropped=0\n".into(),
+        "WD:END reason=stop\n".into(),
+    ];
+    want.extend(header(ALL_CHANS));
+    assert_eq!(lines.take(), want);
+    assert_eq!(session.mode(), Mode::Wifi);
+}
+
+#[test]
+fn wardrive_session_answers_mode_and_asks_nothing_when_bt_on_twice() {
+    let (mut session, mut lines) = bluetooth();
+    assert_eq!(session.on_command(b"bt on", &ctx(), &mut lines), None);
+    assert_eq!(lines.take_classed(), [(Class::Answer, "WD:MODE mode=bt\n".into())]);
+    assert!(session.scanning());
+}
+
+#[test]
+fn wardrive_session_starts_bluetooth_when_bt_on_while_stopped() {
+    let (mut session, mut lines) = subscribed();
+    session.on_command(b"stop", &ctx(), &mut lines);
+    lines.take();
+    assert_eq!(session.on_command(b"bt on", &ctx(), &mut lines), Some(Ask::Start(Mode::Bluetooth)));
+    assert_eq!(lines.take(), bt_header());
+    // A stop and a start keep the mode.
+    session.on_command(b"stop", &ctx(), &mut lines);
+    assert_eq!(lines.take(), ["WD:STATUS bt=0 scans=0 dropped=0\n", "WD:END reason=stop\n"]);
+    assert_eq!(session.on_command(b"start", &ctx(), &mut lines), Some(Ask::Start(Mode::Bluetooth)));
+    assert_eq!(
+        lines.take_classed(),
+        bt_header().into_iter().map(|l| (Class::Stream, l)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn wardrive_session_refuses_bluetooth_when_fleet_has_one_node() {
+    let (mut session, mut lines) = subscribed();
+    let lone = Ctx { nodes: 1, ..ctx() };
+    for command in [&b"bt on"[..], b"wdstream start -bt"] {
+        assert_eq!(session.on_command(command, &lone, &mut lines), None);
+        assert_eq!(
+            lines.take_classed(),
+            [(Class::Answer, "WD:ERR reason=bt_needs_two_nodes\n".into())]
+        );
+    }
+    assert_eq!(session.mode(), Mode::Wifi);
+    assert!(session.scanning());
+    // Stopped, it stays stopped.
+    session.on_command(b"stop", &lone, &mut lines);
+    lines.take();
+    assert_eq!(session.on_command(b"bt on", &lone, &mut lines), None);
+    assert!(!session.scanning());
+}
+
+#[test]
+fn wardrive_session_answers_mode_when_bt_has_no_on_or_off() {
+    let (mut session, mut lines) = subscribed();
+    for command in [&b"bt"[..], b"bt maybe"] {
+        assert_eq!(session.on_command(command, &ctx(), &mut lines), None);
+        assert_eq!(lines.take_classed(), [(Class::Answer, "mode Wi-Fi\n".into())]);
+    }
+    session.on_command(b"bt on", &ctx(), &mut lines);
+    lines.take();
+    session.on_command(b"bt", &ctx(), &mut lines);
+    assert_eq!(lines.take(), ["mode Bluetooth\n"]);
+}
+
+#[test]
+fn wardrive_session_starts_bluetooth_when_wdstream_asks_for_bt() {
+    let mut session = Session::new();
+    let mut lines = Lines::default();
+    let scan = session.on_command(b"wdstream start -bt", &ctx(), &mut lines);
+    assert_eq!(scan, Some(Ask::Start(Mode::Bluetooth)));
+    assert_eq!(lines.take(), bt_header());
+}
+
+#[test]
+fn wardrive_session_sets_list_then_switches_when_wdstream_has_bt_and_ch() {
+    let (mut session, mut lines) = subscribed();
+    let scan = session.on_command(b"wdstream -bt -ch 1,6", &ctx(), &mut lines);
+    assert_eq!(scan, Some(Ask::Start(Mode::Bluetooth)));
+    let mut want = vec![
+        "WD:PLAN chans=1,6\n".to_owned(),
+        "WD:MODE mode=bt\n".into(),
+        "WD:STATUS aps=0 scans=0\n".into(),
+        "WD:END reason=stop\n".into(),
+    ];
+    want.extend(bt_header());
+    assert_eq!(lines.take(), want);
+    session.on_command(b"ch", &ctx(), &mut lines);
+    assert_eq!(lines.take()[1], "scanning 1,6\n");
+}
+
+#[test]
+fn wardrive_session_switches_to_wifi_when_wdstream_asks_for_wifi_in_bluetooth() {
+    let (mut session, mut lines) = bluetooth();
+    let scan = session.on_command(b"wdstream start -wifi", &ctx(), &mut lines);
+    assert_eq!(scan, Some(Ask::Start(Mode::Wifi)));
+    let mut want = vec![
+        "WD:MODE mode=wifi\n".to_owned(),
+        "WD:STATUS bt=0 scans=0 dropped=0\n".into(),
+        "WD:END reason=stop\n".into(),
+    ];
+    want.extend(header(ALL_CHANS));
+    assert_eq!(lines.take(), want);
+}
+
+#[test]
+fn wardrive_session_changes_nothing_when_wdstream_asks_for_bt_and_capture() {
+    let (mut session, mut lines) = subscribed();
+    assert_eq!(session.on_command(b"wdstream start -bt -cap", &ctx(), &mut lines), None);
+    assert_eq!(lines.take_classed(), [(Class::Answer, "WD:ERR reason=unsupported\n".into())]);
+    assert_eq!(session.mode(), Mode::Wifi);
+    assert!(session.scanning());
+}
+
+#[test]
+fn wardrive_session_sends_only_mode_kind_when_records_arrive() {
+    let ext = apple_trailer();
+    let (mut session, mut lines) = bluetooth();
+    session.on_sighting(61_500, &sighting(6, b"coffee"), &mut lines);
+    assert!(lines.take().is_empty());
+    session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);
+    assert_eq!(lines.take_classed(), [(Class::Stream, BT_LINE.into())]);
+    // The channel list does not apply: a Bluetooth record's channel is 0.
+    session.on_command(b"ch 1,6", &ctx(), &mut lines);
+    lines.take();
+    session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);
+    assert_eq!(lines.take(), [BT_LINE]);
+    session.on_command(b"bt off", &ctx(), &mut lines);
+    lines.take();
+    session.on_sighting(61_500, &ble_sighting(b"My", &ext), &mut lines);
+    assert!(lines.take().is_empty());
+    session.on_sighting(61_500, &sighting(6, b"coffee"), &mut lines);
+    assert_eq!(lines.take(), [ap_line(61_500, 6)]);
+}
+
+#[test]
+fn wardrive_session_skips_bt_when_trailer_does_not_decode() {
+    let (mut session, mut lines) = bluetooth();
+    for ext in [&[0x03, 0x4C][..], &[], &[0x03, 0x4C, 0x00, 0x01]] {
+        session.on_sighting(1, &ble_sighting(b"My", ext), &mut lines);
+    }
+    assert!(lines.take().is_empty());
+    session.on_period(&ctx(), &mut lines);
+    assert_eq!(lines.take(), ["WD:STATUS bt=0 scans=1 dropped=0\n"]);
+}
+
+#[test]
+fn wardrive_session_reports_dropped_change_when_bluetooth_period_ends() {
+    let (mut session, mut lines) = bluetooth();
+    let ext = apple_trailer();
+    // The scan started at `ctx().dropped`, 2.
+    session.on_sighting(1, &ble_sighting(b"My", &ext), &mut lines);
+    session.on_sighting(1, &ble_sighting(b"My", &ext), &mut lines);
+    lines.take();
+    session.on_period(&Ctx { dropped: 5, ..ctx() }, &mut lines);
+    assert_eq!(
+        lines.take_classed(),
+        [(Class::Stream, "WD:STATUS bt=2 scans=1 dropped=3\n".into())]
+    );
+    session.on_period(&Ctx { dropped: 6, ..ctx() }, &mut lines);
+    assert_eq!(lines.take(), ["WD:STATUS bt=0 scans=2 dropped=1\n"]);
+    // A stop reports the change since the last period too.
+    session.on_command(b"stop", &Ctx { dropped: 10, ..ctx() }, &mut lines);
+    assert_eq!(lines.take(), ["WD:STATUS bt=0 scans=2 dropped=4\n", "WD:END reason=stop\n"]);
+}
+
+#[test]
+fn wardrive_session_returns_to_wifi_when_phone_subscribes_after_bluetooth() {
+    let (mut session, mut lines) = bluetooth();
+    assert_eq!(session.on_subscribe(&ctx(), &mut lines), Some(Ask::Start(Mode::Wifi)));
+    assert_eq!(lines.take(), header(ALL_CHANS));
+    assert_eq!(session.mode(), Mode::Wifi);
+    // A release resets it too.
+    session.on_command(b"bt on", &ctx(), &mut lines);
+    assert_eq!(session.release(), Some(Ask::Stop));
+    assert_eq!(session.mode(), Mode::Wifi);
+}
+
+#[test]
+fn wardrive_session_answers_status_with_bt_counts_when_in_bluetooth() {
+    let (mut session, mut lines) = bluetooth();
+    let ext = apple_trailer();
+    session.on_sighting(1, &ble_sighting(b"My", &ext), &mut lines);
+    session.on_period(&ctx(), &mut lines);
+    lines.take();
+    session.on_command(b"status", &ctx(), &mut lines);
+    assert_eq!(
+        lines.take(),
+        [
+            "mode Bluetooth\n",
+            "scanning on\n",
+            "bt 1 scans 1\n",
+            format!("channels {ALL_CHANS}\n").as_str(),
+            "mtu 182 dropped 2\n"
+        ]
+    );
+}
+
+#[test]
+fn wardrive_beacon_sets_mode_bits_when_session_is_bluetooth() {
+    let beacon = Beacon { scanning: true, bluetooth: true, ..Beacon::default() };
+    assert_eq!(status_bytes(&beacon, true)[1], 0x07);
+    let free = Beacon { bluetooth: true, ..Beacon::default() };
+    assert_eq!(status_bytes(&free, false)[1], 0x04);
+    let (mut session, mut lines) = subscribed();
+    assert!(!session.beacon(ChannelPool::All, LinkEnd::None).bluetooth);
+    session.on_command(b"bt on", &ctx(), &mut lines);
+    let beacon = session.beacon(ChannelPool::All, LinkEnd::None);
+    assert!(beacon.bluetooth && beacon.scanning);
+    // The count is the last period's `WD:BT` lines.
+    let ext = apple_trailer();
+    session.on_sighting(1, &ble_sighting(b"My", &ext), &mut lines);
+    session.on_period(&ctx(), &mut lines);
+    assert_eq!(session.beacon(ChannelPool::All, LinkEnd::None).count, 1);
 }

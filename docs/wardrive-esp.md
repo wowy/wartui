@@ -1,8 +1,8 @@
 # The WardriveESP service
 
 The bridge can present its fleet to a phone app as one WardriveESP board. The app links to the
-bridge's C6 over Bluetooth, with no pairing, and reads the access points the nodes hear as text
-lines. The service is off until the operator turns it on.
+bridge's C6 over Bluetooth, with no pairing, and reads the access points or Bluetooth devices the
+nodes hear as text lines. The service is off until the operator turns it on.
 
 WardriveESP is by RocketGod and MIT licensed. Its protocol document is vendored, unmodified, at
 [`vendor/wardrive-esp/PROTOCOL.md`](vendor/wardrive-esp/PROTOCOL.md), with its license and
@@ -61,9 +61,9 @@ The status is manufacturer data under company id `0xFFFF`:
 | Byte | The bridge sends |
 | --- | --- |
 | 0 | `W` |
-| 1 | bit 0 a central is connected, bit 1 the phone's session scans, bit 7 the connected app said it is an iPhone. The mode is Wi-Fi; the USB, GPS and updating bits are clear |
+| 1 | bit 0 a central is connected, bit 1 the phone's session scans, bits 2-3 its mode (`0` Wi-Fi, `1` Bluetooth), bit 7 the connected app said it is an iPhone. The USB, GPS and updating bits are clear |
 | 2 | `0x80`: the temperature is unknown |
-| 3-4 | the `WD:AP` lines in the last finished 5 s period, little-endian, at most `0xFFFF`; 0 with no phone |
+| 3-4 | the `WD:AP` or `WD:BT` lines in the last finished 5 s period, little-endian, at most `0xFFFF`; 0 with no phone |
 | 5-6 | `0x16`, `0x00`: protocol level 1.6.0, as `WD:CAPS` names it |
 | 7-8 | the bridge's last two octets, as in the name |
 | 9+ | while a central is connected, the nickname from `iam`; nothing without one |
@@ -97,8 +97,8 @@ The advert extras are 6 bytes of service data under `0x5744`, frame A and frame 
 
 RX and CTRL are read alike. There is no OTA characteristic. The C6 serves an ATT MTU of 182.
 
-**Linking.** Subscribing to TX links the phone and starts the scan. A subscription lasts for its
-connection only: a phone subscribes again each time it connects. A central reads one stream:
+**Linking.** Subscribing to TX links the phone and starts the scan, in Wi-Fi. A subscription lasts
+for its connection only: a phone subscribes again each time it connects. A central reads one stream:
 the first subscription decides whether it is a phone or a wartui host, and the other stream's
 subscription is refused. A central that has subscribed to neither stream 10 s after it connects is
 disconnected, 30 s while the bridge's pairing window is open, and so is a phone that stays
@@ -134,23 +134,46 @@ A command is cut to 240 bytes and trimmed. Its first word picks it.
 
 | Command | Effect |
 | --- | --- |
-| `wdstream start -wifi [-ch 1,6,11,36]` | sets the channel list when given, then starts the scan, or answers `WD:MODE` when it runs already |
+| `wdstream start -wifi [-ch 1,6,11,36]` | sets the channel list when given, then switches to Wi-Fi |
+| `wdstream start -bt` | switches to Bluetooth |
+| `wdstream start` | starts the scan in the session's mode, or answers `WD:MODE` when it runs already |
 | `wdstream stop`, `stop` | stops the scan: a last `WD:STATUS`, then `WD:END`. Nothing when it is stopped |
-| `start` | starts the scan with the list as it is. Nothing when it runs already |
+| `start` | starts the scan in the session's mode, with the list as it is. Nothing when it runs already |
+| `bt on`, `bt off` | switches to Bluetooth or to Wi-Fi |
+| `bt`, or `bt` with anything but `on` or `off` | `mode Wi-Fi` or `mode Bluetooth` |
 | `caps` | `WD:CAPS` |
 | `ch`, `ch 1,6,11`, `ch all` | shows, sets or resets the channel list |
-| `status`, `info`, `help` | plain text lines, in wartui's own wording; `info` ends with `WD:BOOT` |
+| `status`, `info`, `help` | plain text lines, in wartui's own wording; `status` starts with the mode, and `info` ends with `WD:BOOT` |
 | `link` | plain text lines about the Bluetooth link: the phone's address and time linked, its `iam` name, signal, MTU, interval and timeout, and the links and last drop since the C6 booted |
 | `drop` | `disconnecting the phone`, then the bridge disconnects the phone, which stops the scan |
 | `iam a <nickname>`, `iam i <nickname>` | kept until the phone links again or lets go, and shown by `link`: Android or iPhone, and the nickname cut to 18 bytes on a character boundary. Answered with nothing |
 | `bye` | answered with nothing; the advert extras then say the link was released when the phone lets go |
 | `hb`, `client`, `time …`, and any other `iam` | taken, and answered with nothing |
-| `bt`, `cap`, `csi`, `coproc`, `led`, `screen`, `sd`, `ota`, and `wdstream` with `-bt`, `-cap` or `-promisc` | `WD:ERR reason=unsupported`, and nothing changes |
+| `cap`, `csi`, `coproc`, `led`, `screen`, `sd`, `ota`, and `wdstream` with `-cap` or `-promisc` | `WD:ERR reason=unsupported`, and nothing changes |
 | anything else | `unknown command '<word>'`, then the help list |
 
-`wdstream` reads its arguments as the WardriveESP firmware does: `stop`, `-ch `, `-bt`, `-cap`
-and `-promisc` count anywhere after the word, and `start` is optional. A channel list is the text
-after `-ch ` or `ch `: numbers between commas or spaces, ending at the first other byte.
+`wdstream` reads its arguments as the WardriveESP firmware does: each counts anywhere after the
+word, and `start` is optional. They are read in this order:
+
+1. `stop` stops the scan, and nothing else is read.
+2. `-cap` or `-promisc` is refused as unsupported, and nothing changes.
+3. `-ch ` sets the channel list, or answers `WD:ERR reason=no_supported_channels`.
+4. `-bt` switches to Bluetooth.
+5. Else `-wifi` switches to Wi-Fi.
+6. Else the scan starts in the session's mode.
+
+A channel list is the text after `-ch ` or `ch `: numbers between commas or spaces, ending at the
+first other byte.
+
+Switching to a mode, by `bt on`, `bt off`, `-bt` or `-wifi`:
+
+- Bluetooth with fewer than two fleet members is refused with `WD:ERR reason=bt_needs_two_nodes`,
+  and nothing changes.
+- The mode the session is in answers `WD:MODE` while scanning, and starts the scan while stopped.
+- Another mode answers `WD:MODE` with the new mode while scanning, ends the scan as `stop` does,
+  and starts the new mode's. A stopped session starts in the new mode.
+
+The mode resets to Wi-Fi when the phone links or lets go.
 
 `reboot` is unknown on purpose: the service takes commands from any phone in range, so none of
 them restarts the bridge. `drop` and `link` touch only the phone that sends them.
@@ -159,20 +182,22 @@ them restarts the bridge. `drop` and `link` touch only the phone that sends them
 
 | Line | Sent |
 | --- | --- |
-| `WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui board_name=wartui link=ble chans=…` | at scan start and on `caps` |
-| `WD:BOOT fw=1.6.0 slot=<ota_0\|ota_1\|?> image=<trial\|confirmed> reset=<key>` | at scan start, and at the end of `info` |
-| `WD:LINK conns=<n> mtu=<n> prev_disc=<0x2NN\|none> [prev_disc_ago=<n>s]` | at scan start |
-| `WD:MODE mode=wifi` | at scan start, and to a `wdstream start` while scanning |
-| `WD:BEGIN type=wifi interval=0 channel=auto` | at scan start |
-| `WD:PLAN chans=…` | at scan start, and when the channel list changes while scanning |
+| `WD:CAPS fw=1.6.0 chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui board_name=wartui link=ble chans=…` | at a Wi-Fi scan's start and on `caps` |
+| `WD:BOOT fw=1.6.0 slot=<ota_0\|ota_1\|?> image=<trial\|confirmed> reset=<key>` | at a Wi-Fi scan's start, and at the end of `info` |
+| `WD:LINK conns=<n> mtu=<n> prev_disc=<0x2NN\|none> [prev_disc_ago=<n>s]` | at a Wi-Fi scan's start |
+| `WD:MODE mode=<wifi\|bt>` | at scan start, and to a switch while scanning |
+| `WD:BEGIN type=<wifi\|bt> interval=0 channel=auto` | at scan start |
+| `WD:PLAN chans=…` | at a Wi-Fi scan's start, and when the channel list changes while scanning |
 | `WD:AP ts=<ms> bssid=AA:BB:CC:DD:EE:FF ssid_hex=<hex> rssi=<dBm> ch=<n> auth=<token> hidden=<0\|1>` | per sighting |
-| `WD:STATUS aps=<n> scans=<n>` | every 5 s while scanning, and before `WD:END` |
+| `WD:BT ts=<ms> mac=AA:BB:CC:DD:EE:FF type=<public\|random> rssi=<dBm> name_hex=<hex> mfg=<id> conn=<0\|1>` | per Bluetooth sighting, in Bluetooth mode |
+| `WD:STATUS aps=<n> scans=<n>` | in Wi-Fi mode, every 5 s while scanning, and before `WD:END` |
+| `WD:STATUS bt=<n> scans=<n> dropped=<n>` | in Bluetooth mode, every 5 s while scanning, and before `WD:END` |
 | `WD:END reason=stop` | when the scan stops |
-| `WD:ERR reason=<unsupported\|no_supported_channels>` | a command refused |
+| `WD:ERR reason=<unsupported\|no_supported_channels\|bt_needs_two_nodes>` | a command refused |
 | `WD:HEALTH up=<s> heap=<bytes> heap_min=<bytes> mtu=<n> txdrop=<n>` | every 15 s while the phone is linked, scanning or not |
 
-A scan starts with `WD:CAPS`, `WD:BOOT`, `WD:LINK`, `WD:MODE`, `WD:BEGIN` and `WD:PLAN`, in that
-order. `WD:HEALTH` is queued as a command's answer is, so a backlog of stream lines never holds
+A Wi-Fi scan starts with `WD:CAPS`, `WD:BOOT`, `WD:LINK`, `WD:MODE`, `WD:BEGIN` and `WD:PLAN`, in
+that order; a Bluetooth scan with `WD:MODE` and `WD:BEGIN`. `WD:HEALTH` is queued as a command's answer is, so a backlog of stream lines never holds
 it.
 
 - `fw=` names the level of the protocol document, not the bridge's firmware version, which
@@ -182,6 +207,12 @@ it.
 - `auth` is `OPEN`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2_WPA3` or `UNKNOWN`. WPA2 Enterprise and
   mixed WPA/WPA2 read as `WPA2`; WAPI, OWE and anything unnamed read as `UNKNOWN`.
 - `hidden=1` goes with an empty `ssid_hex=`.
+- `WD:BT`: `mac` is the advertiser's address, most significant byte first, and `type` whether it
+  is random. `name_hex` is the advertised name as lower-case hex, empty when the advertisement
+  carried none. `mfg` is the company identifier from its manufacturer data, as 4 upper-case hex
+  digits, or empty. `conn=1` when the advertisement is connectable.
+- `WD:STATUS` in Bluetooth mode: `bt` is the `WD:BT` lines since the last one, `scans` counts the
+  periods, and `dropped` the lines dropped from the phone's queue since the last one.
 - `WD:BOOT` describes the P4's image: `slot` is the running app slot, `image=trial` until a
   wartui host confirms an update, and `reset` is `power_on`, `software`, `watchdog`, `brownout`,
   `reset_pin` or `other`. The document's `boots`, `prev_fw`, `prev_stage` and `rolled_back` are
@@ -203,12 +234,18 @@ it.
   `WD:ERR reason=no_supported_channels`, and the list stays as it was. The list resets when the
   phone links or lets go.
 - **Starting a scan stops the fleet first**, so every node starts with nothing reported and the
-  phone hears each access point afresh. The scan is Wi-Fi only.
-- **A node reports an access point once**, then again after 5 minutes or when it is 5 dB
-  stronger (`wartui_proto::dedup`). A WardriveESP board reports every access point on every
-  sweep, so a phone sees fewer lines for the same neighborhood from the bridge.
-- **There is no sweep to count.** `WD:STATUS` goes every 5 s from the scan's start: `aps` is the
-  `WD:AP` lines since the last one, and `scans` counts those periods.
+  phone hears each device afresh.
+- **In Bluetooth mode one node scans Bluetooth**, the planner's pick, and the others keep
+  scanning Wi-Fi, which the phone is not sent. A fleet of one refuses the mode, since the planner
+  gives Bluetooth to no node below two members. The channel list filters Wi-Fi only.
+- **The Bluetooth scan is passive**, so a `WD:BT` carries a name only when the advertisement
+  itself carried one.
+- **A node reports a device once**, then again after 5 minutes or when it is 5 dB stronger
+  (`wartui_proto::dedup`). A WardriveESP board reports every access point on every sweep, and
+  every Bluetooth device once per 10 s window, so a phone sees fewer lines for the same
+  neighborhood from the bridge.
+- **There is no sweep or window to count.** `WD:STATUS` goes every 5 s from the scan's start, in
+  either mode: `aps` or `bt` is the lines since the last one, and `scans` counts those periods.
 - **The phone lets go, the fleet stops.** An unsubscribe, a disconnect, a `drop`, the setting
   turned off or USB taking the bridge each stop the scan.
 - **A slow phone loses the oldest lines.** The bridge holds 16 KB of stream lines for the phone
@@ -218,8 +255,7 @@ it.
 
 ## What is not implemented
 
-Everything the document marks as a later version or another transport: Bluetooth scanning
-(`WD:BT`), capture, GPS, firmware updates, the USB protocol, `WD:CRASH` and `WD:CONN`, CSI, the
+Everything the document marks as a later version or another transport: capture, GPS, firmware updates, the USB protocol, `WD:CRASH` and `WD:CONN`, CSI, the
 LED ring, the screen, microSD runs and the co-processor.
 
 What the bench measured is in [`wardrive-esp-findings.md`](wardrive-esp-findings.md).

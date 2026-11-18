@@ -6,8 +6,11 @@
 //!
 //! **`WD:CAPS` names `board=wartui`.** An app that does not know a `board=` treats the board as
 //! partner hardware and offers it no firmware update, and `ota=0` says the same: the bridge is
-//! updated by wartui, never by the phone. Every other capability is `0` but the two bands, since
-//! the bridge offers only Wi-Fi.
+//! updated by wartui, never by the phone. Every other capability is `0` but the two bands and
+//! `bt`, since the bridge offers Wi-Fi and Bluetooth scans alone.
+//!
+//! **`WD:BT` reads the record's trailer** ([`BleTrailer`]) for `type`, `mfg` and `conn`, and its
+//! SSID field for the name. A record whose trailer does not decode sends no line.
 //!
 //! **`WD:BOOT`, `WD:LINK` and `WD:HEALTH` carry only the keys the bridge has a figure for.**
 //! The document's `boots`, `prev_fw`, `prev_stage` and `rolled_back` are left out of `WD:BOOT`,
@@ -19,8 +22,9 @@
 use core::fmt::{self, Write as _};
 
 use super::command::ChannelList;
-use super::session::Boot;
+use super::session::{Boot, Mode};
 use crate::bus::{Security, SightingMsg};
+use crate::hci::BleTrailer;
 use crate::plan::ChannelPool;
 use crate::radio_link::PhoneLink;
 use crate::reset::ResetCause;
@@ -68,7 +72,7 @@ pub fn caps(out: &mut Line, pool: ChannelPool) -> bool {
     build(out, |out| {
         write!(
             out,
-            "WD:CAPS fw={FW} chip=esp32c5 bands=2g,5g ota=0 bt=0 gps=0 cap=0 usb=0 board=wartui \
+            "WD:CAPS fw={FW} chip=esp32c5 bands=2g,5g ota=0 bt=1 gps=0 cap=0 usb=0 board=wartui \
              board_name=wartui link=ble chans={}",
             Commas(list.channels())
         )
@@ -115,19 +119,32 @@ pub fn health(out: &mut Line, up_s: u32, link: &PhoneLink, mtu: u16, dropped: u3
     })
 }
 
-/// `WD:MODE`: the bridge scans Wi-Fi.
-pub fn mode(out: &mut Line) -> bool {
-    build(out, |out| out.write_str("WD:MODE mode=wifi"))
+/// The token `WD:MODE` and `WD:BEGIN` name `mode` by.
+const fn mode_token(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Wifi => "wifi",
+        Mode::Bluetooth => "bt",
+    }
 }
 
-/// `WD:BEGIN`: a scan started.
-pub fn begin(out: &mut Line) -> bool {
-    build(out, |out| out.write_str("WD:BEGIN type=wifi interval=0 channel=auto"))
+/// `WD:MODE`: the session's mode.
+pub fn mode(out: &mut Line, mode: Mode) -> bool {
+    build(out, |out| write!(out, "WD:MODE mode={}", mode_token(mode)))
+}
+
+/// `WD:BEGIN`: a scan in `mode` started.
+pub fn begin(out: &mut Line, mode: Mode) -> bool {
+    build(out, |out| write!(out, "WD:BEGIN type={} interval=0 channel=auto", mode_token(mode)))
 }
 
 /// `WD:PLAN`: the channels `list` holds.
 pub fn plan(out: &mut Line, list: &ChannelList) -> bool {
     build(out, |out| write!(out, "WD:PLAN chans={}", Commas(list.channels())))
+}
+
+/// `bytes` as lower-case hex.
+fn hex(out: &mut Line, bytes: &[u8]) -> fmt::Result {
+    bytes.iter().try_for_each(|byte| write!(out, "{byte:02x}"))
 }
 
 /// `WD:AP`: one access point, heard `ts_ms` after the bridge booted.
@@ -136,9 +153,7 @@ pub fn ap(out: &mut Line, ts_ms: u32, sighting: &SightingMsg<'_>) -> bool {
         let [a, b, c, d, e, f] = sighting.bssid;
         write!(out, "WD:AP ts={ts_ms} bssid={a:02X}:{b:02X}:{c:02X}:{d:02X}:{e:02X}:{f:02X} ")?;
         out.write_str("ssid_hex=")?;
-        for byte in sighting.ssid {
-            write!(out, "{byte:02x}")?;
-        }
+        hex(out, sighting.ssid)?;
         write!(
             out,
             " rssi={} ch={} auth={} hidden={}",
@@ -150,9 +165,36 @@ pub fn ap(out: &mut Line, ts_ms: u32, sighting: &SightingMsg<'_>) -> bool {
     })
 }
 
+/// `WD:BT`: one Bluetooth advertiser, heard `ts_ms` after the bridge booted, with its record's
+/// `trailer`.
+pub fn bt(out: &mut Line, ts_ms: u32, sighting: &SightingMsg<'_>, trailer: &BleTrailer) -> bool {
+    build(out, |out| {
+        let [a, b, c, d, e, f] = sighting.bssid;
+        let kind = if trailer.random { "random" } else { "public" };
+        write!(
+            out,
+            "WD:BT ts={ts_ms} mac={a:02X}:{b:02X}:{c:02X}:{d:02X}:{e:02X}:{f:02X} type={kind} \
+             rssi={} name_hex=",
+            sighting.rssi
+        )?;
+        hex(out, sighting.ssid)?;
+        out.write_str(" mfg=")?;
+        if let Some(id) = trailer.mfgr {
+            write!(out, "{id:04X}")?;
+        }
+        write!(out, " conn={}", u8::from(trailer.connectable))
+    })
+}
+
 /// `WD:STATUS`: `aps` heard since the last one, after `scans` periods.
 pub fn status(out: &mut Line, aps: u32, scans: u32) -> bool {
     build(out, |out| write!(out, "WD:STATUS aps={aps} scans={scans}"))
+}
+
+/// `WD:STATUS` in Bluetooth mode: `bt` advertisers sent since the last one, after `scans`
+/// periods, and the lines `dropped` from the phone's queue since the last one.
+pub fn status_bt(out: &mut Line, bt: u32, scans: u32, dropped: u32) -> bool {
+    build(out, |out| write!(out, "WD:STATUS bt={bt} scans={scans} dropped={dropped}"))
 }
 
 /// `WD:END`: the scan stopped.

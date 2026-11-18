@@ -11,8 +11,9 @@
 //!
 //! **The fields the bridge has no figure for are fixed**: the temperature is unknown, the board is
 //! generic, there is no battery gauge, screen or co-processor, and the USB, GPS and updating bits
-//! are clear, since the phone never updates the bridge. The mode is Wi-Fi, the only one it offers.
-//! The level bytes are the protocol level `WD:CAPS` names ([`FW_LEVEL`]).
+//! are clear, since the phone never updates the bridge. The mode bits say Wi-Fi or Bluetooth, the
+//! session's mode; the bridge offers no other. The level bytes are the protocol level `WD:CAPS`
+//! names ([`FW_LEVEL`]).
 //!
 //! **The channel bits index the document's table** ([`EXTRAS_CHANNELS`]), not the scan table, so a
 //! change to the scan table cannot move them.
@@ -59,7 +60,9 @@ const NO_BATTERY: u8 = 0xFF;
 pub struct Beacon {
     /// The phone's session scans.
     pub scanning: bool,
-    /// `WD:AP` lines in the last finished period.
+    /// The phone's session is in Bluetooth mode, else Wi-Fi.
+    pub bluetooth: bool,
+    /// `WD:AP` or `WD:BT` lines in the last finished period.
     pub count: u16,
     /// The app said it is an iPhone.
     pub iphone: bool,
@@ -91,8 +94,10 @@ pub fn status(
     bridge: [u8; 2],
     connected: bool,
 ) -> usize {
+    // Bits 2-3 are the mode: 0 Wi-Fi, 1 Bluetooth.
     let flags = u8::from(connected)
         | u8::from(beacon.scanning) << 1
+        | u8::from(beacon.bluetooth) << 2
         | u8::from(connected && beacon.iphone) << 7;
     let [count_lo, count_hi] = beacon.count.to_le_bytes();
     let (major, minor, patch) = FW_LEVEL;

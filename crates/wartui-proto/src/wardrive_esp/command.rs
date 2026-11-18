@@ -5,8 +5,11 @@
 //! sends to describe itself or keep the link are [`Command::Silent`]: they ask for no reply.
 //!
 //! **`wdstream` reads its arguments as the WardriveESP firmware does.** `stop`, `-ch `, `-bt`,
-//! `-cap` and `-promisc` match anywhere after the word, and the word `start` is not required. The
-//! app is closed, so the bridge takes what that firmware takes.
+//! `-wifi`, `-cap` and `-promisc` match anywhere after the word, and the word `start` is not
+//! required. `stop` wins over the rest, and `-bt` over `-wifi`. The app is closed, so the bridge
+//! takes what that firmware takes.
+//!
+//! **`bt` switches the mode only when the rest is exactly `on` or `off`**; anything else shows it.
 //!
 //! **`reboot` alone is unknown on purpose.** The service takes commands from any phone in range,
 //! with no bond and no encryption, so a command that restarts the bridge is one any passer-by
@@ -23,6 +26,7 @@
 //! A command is cut to [`COMMAND_MAX`] bytes before it is read, so the reply naming an unknown
 //! word always fits a line.
 
+use super::session::Mode;
 use crate::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS, index_of};
 
 /// The most bytes of a command that are read.
@@ -54,6 +58,17 @@ pub enum Channels<'a> {
     Set(&'a [u8]),
 }
 
+/// What `bt` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bt {
+    /// `bt` with anything but `on` or `off`: show the mode.
+    Show,
+    /// `bt on`: scan Bluetooth.
+    On,
+    /// `bt off`: scan Wi-Fi.
+    Off,
+}
+
 /// One command, as its text reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
@@ -61,8 +76,10 @@ pub enum Command<'a> {
     Stream {
         /// The channel list's text: after `-ch `, to the end of the command.
         channels: Option<&'a [u8]>,
-        /// The command asks for a mode the bridge lacks: Bluetooth, capture or promiscuous.
+        /// The command asks for a mode the bridge lacks: capture or promiscuous.
         unsupported_mode: bool,
+        /// The mode asked: Bluetooth for `-bt`, else Wi-Fi for `-wifi`, else none.
+        mode: Option<Mode>,
     },
     /// `stop`, or `wdstream` with `stop` in it.
     Stop,
@@ -89,6 +106,8 @@ pub enum Command<'a> {
     },
     /// `ch`, in its three forms.
     Channels(Channels<'a>),
+    /// `bt`, in its three forms.
+    Bt(Bt),
     /// `bye`: the app is about to let go on purpose.
     Bye,
     /// A command the bridge takes and answers with nothing.
@@ -145,9 +164,14 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
         b"wdstream" if contains(rest, b"stop") => Command::Stop,
         b"wdstream" => Command::Stream {
             channels: ch_argument(rest),
-            unsupported_mode: [&b"-bt"[..], b"-cap", b"-promisc"]
-                .iter()
-                .any(|flag| contains(rest, flag)),
+            unsupported_mode: contains(rest, b"-cap") || contains(rest, b"-promisc"),
+            mode: if contains(rest, b"-bt") {
+                Some(Mode::Bluetooth)
+            } else if contains(rest, b"-wifi") {
+                Some(Mode::Wifi)
+            } else {
+                None
+            },
         },
         b"stop" => Command::Stop,
         b"start" => Command::Start,
@@ -166,11 +190,14 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
                 argument => Channels::Set(argument),
             })
         }
+        b"bt" => Command::Bt(match rest {
+            b"on" => Bt::On,
+            b"off" => Bt::Off,
+            _ => Bt::Show,
+        }),
         b"bye" => Command::Bye,
         b"hb" | b"client" | b"time" => Command::Silent,
-        b"bt" | b"cap" | b"csi" | b"coproc" | b"led" | b"screen" | b"sd" | b"ota" => {
-            Command::Unsupported
-        }
+        b"cap" | b"csi" | b"coproc" | b"led" | b"screen" | b"sd" | b"ota" => Command::Unsupported,
         word => Command::Unknown(word),
     })
 }

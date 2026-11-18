@@ -524,6 +524,7 @@ fn radio_link_largest_messages_fit_one_packet() {
     assert!(len <= RECORD_MAX, "{bonds:?} is {len} bytes");
     let beacon = Down::Beacon(Beacon {
         scanning: true,
+        bluetooth: true,
         count: u16::MAX,
         iphone: true,
         nickname: Vec::from_slice(&[0xFF; NICKNAME_MAX]).unwrap(),
@@ -686,6 +687,7 @@ fn radio_link_revision_golden_bytes() {
 
     let beacon = Down::Beacon(Beacon {
         scanning: true,
+        bluetooth: true,
         count: 300,
         iphone: true,
         nickname: Vec::from_slice(b"Al").unwrap(),
@@ -697,6 +699,7 @@ fn radio_link_revision_golden_bytes() {
     let expected = [
         5,                // Down::Beacon
         1,                // scanning
+        1,                // bluetooth
         0xAC, 0x02,       // count 300, varint
         1,                // iphone
         2, b'A', b'l',    // nickname, length first
@@ -709,7 +712,7 @@ fn radio_link_revision_golden_bytes() {
     let none = Down::Beacon(Beacon::default());
     let len = encode_down(&none, &mut out).unwrap();
     // Every field zero, the nickname empty and `LinkEnd::None`.
-    assert_eq!(out[..len], [5, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(out[..len], [5, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
     assert_eq!(decode_down(&out[..len]).unwrap(), none);
 
     let link = Up::PhoneLink(PhoneLink {

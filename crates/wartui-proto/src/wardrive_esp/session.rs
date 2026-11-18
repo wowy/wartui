@@ -2,17 +2,23 @@
 //! sends.
 //!
 //! Pure: the P4 passes in the time and its own state ([`Ctx`]), and sends what [`Sink`] is given.
-//! An [`Ask`] returned asks the P4 to start or stop the fleet's Wi-Fi scan for the phone, or to
-//! drop the phone's link.
+//! An [`Ask`] returned asks the P4 to start the fleet's scan for the phone in a [`Mode`], to stop
+//! it, or to drop the phone's link.
+//!
+//! **A session has a mode** ([`Mode`]), Wi-Fi from every subscribe and release. The fleet scans
+//! Wi-Fi in either, and in Bluetooth mode one node scans Bluetooth beside it; the session sends
+//! only the mode's kind, `WD:AP` or `WD:BT`. A switch ends the running scan's lines as `stop` does
+//! and starts the new mode's. Bluetooth is refused below two fleet members, since the planner
+//! gives it to no node there and the mode would hear nothing. The channel list filters Wi-Fi only.
 //!
 //! **Lines come in two classes** ([`Class`]), because the P4 queues them differently.
-//! [`Class::Stream`] lines are the scan's own, `WD:AP` among them, and keep their order with it:
-//! an app reads `WD:END` as the last line of a scan. [`Class::Answer`] lines reply to a command
-//! and may overtake a backlog of stream lines, so a busy scan still answers. `WD:HEALTH` is an
-//! answer too, so a backlog never holds it.
+//! [`Class::Stream`] lines are the scan's own, `WD:AP` and `WD:BT` among them, and keep their
+//! order with it: an app reads `WD:END` as the last line of a scan. [`Class::Answer`] lines reply
+//! to a command and may overtake a backlog of stream lines, so a busy scan still answers.
+//! `WD:HEALTH` is an answer too, so a backlog never holds it.
 //!
-//! The channel list, the app's `iam` and its `bye` are the session's: a list of `None` means every
-//! channel of the pool. They last until the phone subscribes again or lets go
+//! The mode, the channel list, the app's `iam` and its `bye` are the session's: a list of `None`
+//! means every channel of the pool. They last until the phone subscribes again or lets go
 //! ([`Session::release`]), so a stop and a start keep them. The P4 reads [`Session::said_bye`]
 //! before the release, for how the link ended, and [`Session::beacon`] for what the status beacon
 //! says. The free-text replies are wartui's own wording.
@@ -20,9 +26,10 @@
 use heapless::Vec;
 
 use super::beacon::{Beacon, LinkEnd, channel_bits};
-use super::command::{self, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels};
+use super::command::{self, Bt, ChannelList, Channels, Command, NICKNAME_MAX, parse_channels};
 use super::line::{self, Commas, FW, Line};
 use crate::bus::{RecordKind, SightingMsg};
+use crate::hci::BleTrailer;
 use crate::plan::ChannelPool;
 use crate::radio_link::PhoneLink;
 use crate::reset::ResetCause;
@@ -32,8 +39,27 @@ use crate::reset::ResetCause;
 pub enum Class {
     /// A reply to a command, or `WD:HEALTH`: may overtake stream lines.
     Answer,
-    /// A line of the scan: keeps its order with the `WD:AP` lines.
+    /// A line of the scan: keeps its order with the `WD:AP` and `WD:BT` lines.
     Stream,
+}
+
+/// What a session scans for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Access points, sent as `WD:AP`.
+    Wifi,
+    /// Bluetooth advertisers, sent as `WD:BT`.
+    Bluetooth,
+}
+
+impl Mode {
+    /// The mode's name in a plain text answer.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Wifi => "Wi-Fi",
+            Self::Bluetooth => "Bluetooth",
+        }
+    }
 }
 
 /// Where a session's lines go.
@@ -45,8 +71,8 @@ pub trait Sink {
 /// What a session asks of the bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
-    /// Start scanning Wi-Fi.
-    Start,
+    /// Start scanning in a mode.
+    Start(Mode),
     /// Stop scanning.
     Stop,
     /// Drop the phone's link.
@@ -112,14 +138,17 @@ impl core::fmt::Display for Signal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     scanning: bool,
+    mode: Mode,
     /// The channels the phone asked for, or `None` for every channel.
     list: Option<ChannelList>,
-    /// `WD:AP` lines since the last period.
-    aps: u32,
+    /// `WD:AP` or `WD:BT` lines since the last period.
+    sent: u32,
     /// Periods since the scan started.
     scans: u32,
-    /// `aps` at the last period.
-    last_aps: u32,
+    /// `sent` at the last period.
+    last_sent: u32,
+    /// [`Ctx::dropped`] at the last period, or at the scan's start.
+    dropped_at: u32,
     /// The app's latest `iam`, or `None` before one.
     iam: Option<Iam>,
     /// The app sent `bye`.
@@ -143,9 +172,10 @@ fn answer(sink: &mut impl Sink, lines: &[core::fmt::Arguments<'_>]) {
 
 /// The help list.
 fn help(sink: &mut impl Sink) {
-    const LINES: [&str; 14] = [
+    const LINES: [&str; 18] = [
         "wartui bridge, WardriveESP commands:",
         "  wdstream start -wifi [-ch 1,6,11]",
+        "  wdstream start -bt",
         "  wdstream stop",
         "  start",
         "  stop",
@@ -153,6 +183,9 @@ fn help(sink: &mut impl Sink) {
         "  ch",
         "  ch 1,6,11",
         "  ch all",
+        "  bt",
+        "  bt on",
+        "  bt off",
         "  status",
         "  info",
         "  link",
@@ -165,16 +198,32 @@ fn help(sink: &mut impl Sink) {
 }
 
 impl Session {
-    /// No phone, not scanning, every channel.
+    /// No phone, not scanning, Wi-Fi, every channel.
     #[must_use]
     pub const fn new() -> Self {
-        Self { scanning: false, list: None, aps: 0, scans: 0, last_aps: 0, iam: None, bye: false }
+        Self {
+            scanning: false,
+            mode: Mode::Wifi,
+            list: None,
+            sent: 0,
+            scans: 0,
+            last_sent: 0,
+            dropped_at: 0,
+            iam: None,
+            bye: false,
+        }
     }
 
     /// Whether the session is scanning.
     #[must_use]
     pub const fn scanning(&self) -> bool {
         self.scanning
+    }
+
+    /// The session's mode.
+    #[must_use]
+    pub const fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// Whether the app sent `bye`.
@@ -191,7 +240,8 @@ impl Session {
             self.iam.as_ref().map_or((false, Vec::new()), |iam| (iam.iphone, iam.nickname.clone()));
         Beacon {
             scanning: self.scanning,
-            count: u16::try_from(self.last_aps).unwrap_or(u16::MAX),
+            bluetooth: self.mode == Mode::Bluetooth,
+            count: u16::try_from(self.last_sent).unwrap_or(u16::MAX),
             iphone,
             nickname,
             link_end,
@@ -218,15 +268,18 @@ impl Session {
                 emit(sink, Class::Answer, |out| line::err(out, "unsupported"));
                 None
             }
-            Command::Stream { channels, .. } => {
+            Command::Stream { channels, mode, .. } => {
                 if let Some(text) = channels {
                     self.set_channels(text, ctx, sink);
                 }
-                if self.scanning {
-                    emit(sink, Class::Answer, line::mode);
-                    None
-                } else {
-                    self.start(ctx, sink)
+                match mode {
+                    Some(mode) => self.switch(mode, ctx, sink),
+                    None if self.scanning => {
+                        let mode = self.mode;
+                        emit(sink, Class::Answer, |out| line::mode(out, mode));
+                        None
+                    }
+                    None => self.start(ctx, sink),
                 }
             }
             Command::Start => {
@@ -236,7 +289,13 @@ impl Session {
                     self.start(ctx, sink)
                 }
             }
-            Command::Stop => self.stop(sink),
+            Command::Stop => self.stop(ctx, sink),
+            Command::Bt(Bt::On) => self.switch(Mode::Bluetooth, ctx, sink),
+            Command::Bt(Bt::Off) => self.switch(Mode::Wifi, ctx, sink),
+            Command::Bt(Bt::Show) => {
+                answer(sink, &[format_args!("mode {}", self.mode.name())]);
+                None
+            }
             Command::Caps => {
                 emit(sink, Class::Answer, |out| line::caps(out, ctx.pool));
                 None
@@ -273,11 +332,16 @@ impl Session {
             Command::Status => {
                 let list = self.list(ctx.pool);
                 let state = if self.scanning { "on" } else { "off" };
+                let kind = match self.mode {
+                    Mode::Wifi => "aps",
+                    Mode::Bluetooth => "bt",
+                };
                 answer(
                     sink,
                     &[
+                        format_args!("mode {}", self.mode.name()),
                         format_args!("scanning {state}"),
-                        format_args!("aps {} scans {}", self.last_aps, self.scans),
+                        format_args!("{kind} {} scans {}", self.last_sent, self.scans),
                         format_args!("channels {}", Commas(list.channels())),
                         format_args!("mtu {} dropped {}", ctx.mtu, ctx.dropped),
                     ],
@@ -326,28 +390,37 @@ impl Session {
 
     /// A node heard `sighting`, `ts_ms` after the bridge booted.
     ///
-    /// Sent only while scanning, only for an access point, and only on a listed channel.
+    /// Sent only while scanning, and only for the mode's kind: in Wi-Fi an access point on a
+    /// listed channel, in Bluetooth an advertiser whose trailer decodes.
     pub fn on_sighting(&mut self, ts_ms: u32, sighting: &SightingMsg<'_>, sink: &mut impl Sink) {
-        if !self.scanning || sighting.kind != RecordKind::Wifi {
+        if !self.scanning {
             return;
         }
-        if self.list.as_ref().is_some_and(|list| !list.contains(sighting.channel)) {
-            return;
+        match (self.mode, sighting.kind) {
+            (Mode::Wifi, RecordKind::Wifi) => {
+                if self.list.as_ref().is_some_and(|list| !list.contains(sighting.channel)) {
+                    return;
+                }
+                emit(sink, Class::Stream, |out| line::ap(out, ts_ms, sighting));
+            }
+            (Mode::Bluetooth, RecordKind::Ble) => {
+                let Some(trailer) = BleTrailer::decode(sighting.ext) else { return };
+                emit(sink, Class::Stream, |out| line::bt(out, ts_ms, sighting, &trailer));
+            }
+            _ => return,
         }
-        emit(sink, Class::Stream, |out| line::ap(out, ts_ms, sighting));
-        self.aps = self.aps.saturating_add(1);
+        self.sent = self.sent.saturating_add(1);
     }
 
-    /// A scan period ended: `WD:STATUS` with the access points sent in it.
-    pub fn on_period(&mut self, sink: &mut impl Sink) {
+    /// A scan period ended: the mode's `WD:STATUS` with the lines sent in it.
+    pub fn on_period(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) {
         if !self.scanning {
             return;
         }
         self.scans = self.scans.saturating_add(1);
-        let (aps, scans) = (self.aps, self.scans);
-        emit(sink, Class::Stream, |out| line::status(out, aps, scans));
-        self.last_aps = aps;
-        self.aps = 0;
+        self.status(ctx, sink);
+        self.last_sent = self.sent;
+        self.sent = 0;
     }
 
     /// `WD:HEALTH`, an answer, scanning or not.
@@ -407,32 +480,71 @@ impl Session {
         }
     }
 
-    /// Start scanning from zero counts and send the header.
+    /// Start scanning in the session's mode from zero counts, and send the mode's header.
     fn start(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) -> Option<Ask> {
         self.scanning = true;
-        self.aps = 0;
+        self.sent = 0;
         self.scans = 0;
-        self.last_aps = 0;
-        let list = self.list(ctx.pool);
-        emit(sink, Class::Stream, |out| line::caps(out, ctx.pool));
-        emit(sink, Class::Stream, |out| line::boot(out, &ctx.boot));
-        emit(sink, Class::Stream, |out| line::link(out, &ctx.link, ctx.mtu));
-        emit(sink, Class::Stream, line::mode);
-        emit(sink, Class::Stream, line::begin);
-        emit(sink, Class::Stream, |out| line::plan(out, &list));
-        Some(Ask::Start)
+        self.last_sent = 0;
+        self.dropped_at = ctx.dropped;
+        let mode = self.mode;
+        if mode == Mode::Wifi {
+            emit(sink, Class::Stream, |out| line::caps(out, ctx.pool));
+            emit(sink, Class::Stream, |out| line::boot(out, &ctx.boot));
+            emit(sink, Class::Stream, |out| line::link(out, &ctx.link, ctx.mtu));
+        }
+        emit(sink, Class::Stream, |out| line::mode(out, mode));
+        emit(sink, Class::Stream, |out| line::begin(out, mode));
+        if mode == Mode::Wifi {
+            let list = self.list(ctx.pool);
+            emit(sink, Class::Stream, |out| line::plan(out, &list));
+        }
+        Some(Ask::Start(mode))
     }
 
     /// Stop scanning: the last `WD:STATUS`, then `WD:END`. Nothing while idle.
-    fn stop(&mut self, sink: &mut impl Sink) -> Option<Ask> {
+    fn stop(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) -> Option<Ask> {
         if !self.scanning {
             return None;
         }
         self.scanning = false;
-        let (aps, scans) = (self.aps, self.scans);
-        emit(sink, Class::Stream, |out| line::status(out, aps, scans));
+        self.status(ctx, sink);
         emit(sink, Class::Stream, line::end);
         Some(Ask::Stop)
+    }
+
+    /// The mode's `WD:STATUS` for the lines sent since the last period; Bluetooth's also counts
+    /// the lines dropped since then.
+    fn status(&mut self, ctx: &Ctx<'_>, sink: &mut impl Sink) {
+        let (sent, scans) = (self.sent, self.scans);
+        match self.mode {
+            Mode::Wifi => emit(sink, Class::Stream, |out| line::status(out, sent, scans)),
+            Mode::Bluetooth => {
+                let dropped = ctx.dropped.wrapping_sub(self.dropped_at);
+                emit(sink, Class::Stream, |out| line::status_bt(out, sent, scans, dropped));
+            }
+        }
+        self.dropped_at = ctx.dropped;
+    }
+
+    /// Switch to `mode`: refused below two members for Bluetooth; else `WD:MODE`, then a running
+    /// scan in another mode stops and the new one starts. A stopped session starts.
+    fn switch(&mut self, mode: Mode, ctx: &Ctx<'_>, sink: &mut impl Sink) -> Option<Ask> {
+        if mode == Mode::Bluetooth && ctx.nodes < 2 {
+            emit(sink, Class::Answer, |out| line::err(out, "bt_needs_two_nodes"));
+            return None;
+        }
+        if !self.scanning {
+            self.mode = mode;
+            return self.start(ctx, sink);
+        }
+        emit(sink, Class::Answer, |out| line::mode(out, mode));
+        if mode == self.mode {
+            return None;
+        }
+        self.stop(ctx, sink);
+        self.mode = mode;
+        self.start(ctx, sink)
     }
 
     /// Replace the list with the one `text` names, saying whether it named one.

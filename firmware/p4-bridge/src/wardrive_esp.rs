@@ -1,5 +1,5 @@
-//! A phone on the WardriveESP service, through the C6: its session, the fleet's Wi-Fi scan it
-//! starts and stops, and the `WD:AP` lines the fleet's sightings become.
+//! A phone on the WardriveESP service, through the C6: its session, the fleet's scan it starts
+//! and stops, and the `WD:AP` and `WD:BT` lines the fleet's sightings become.
 //! `wartui_proto::wardrive_esp::session` is the session itself, tested with `cargo test`.
 //!
 //! **The phone counts as the host, and holds the queue alone** (`wartui_proto::host_owner`).
@@ -15,11 +15,13 @@
 //! place. Past the bound the oldest stream line is evicted first. Answers go in the priority
 //! ring, so a busy scan still answers a command.
 //!
-//! **The scan is the fleet's.** A start stops the fleet, then starts it on Wi-Fi alone. Each pumps
-//! itself, so the `Stop` lands ahead of the `Assign` (delivery toward a node is in order), and
-//! every node's dedup ring starts empty, so the phone hears each access point afresh. A stop, and
-//! a phone that lets go while scanning, stop the fleet. The phone lets go on an unsubscribe, a
-//! disconnect, a new C6 life, the setting turned off, or USB taking the queue.
+//! **The scan is the fleet's.** A start stops the fleet, then starts it on Wi-Fi, with Bluetooth
+//! beside it in the session's Bluetooth mode. Each pumps itself, so the `Stop` lands ahead of the
+//! `Assign` (delivery toward a node is in order), and every node's dedup ring starts empty, so the
+//! phone hears each device afresh. Every sighting record goes to the session, which sends only
+//! its mode's kind. A stop, and a phone that lets go while scanning, stop the fleet. The phone
+//! lets go on an unsubscribe, a disconnect, a new C6 life, the setting turned off, or USB taking
+//! the queue.
 //!
 //! **A scan period is [`PERIOD`], counted from the scan's start**: the fleet has no single sweep,
 //! and a node's assigned beat is the same 5 s. Each ends in a `WD:STATUS`, so the first lands
@@ -58,7 +60,7 @@ use wartui_proto::host_owner::Holder;
 use wartui_proto::radio_link::{Down, PhoneLink};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
-use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Session, Sink};
+use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Mode, Session, Sink};
 
 use crate::{Shared, now_ms};
 
@@ -182,9 +184,9 @@ fn ctx(shared: &Shared) -> Ctx<'static> {
 /// Carry out what the session asked of the bridge.
 fn apply(shared: &Shared, ask: Option<Ask>) {
     match ask {
-        Some(Ask::Start) => {
+        Some(Ask::Start(mode)) => {
             crate::fleet::stop(shared);
-            crate::fleet::start(shared, false);
+            crate::fleet::start(shared, mode == Mode::Bluetooth);
             shared.phone.restart.signal(());
         }
         Some(Ask::Stop) => crate::fleet::stop(shared),
@@ -264,7 +266,7 @@ pub fn on_command(shared: &Shared, text: &[u8]) {
     follow_beacon(shared);
 }
 
-/// A `Sightings` record from the node in `slot`: each access point in it to the phone, while the
+/// A `Sightings` record from the node in `slot`: each sighting in it to the session, while the
 /// phone holds the queue and scans and the slot is a member. A body that does not decode is
 /// skipped whole.
 #[inline(never)]
@@ -294,8 +296,7 @@ pub async fn run(shared: &Shared) -> ! {
             Either3::First(()) => {
                 period = Instant::now() + PERIOD;
                 if holds(shared) {
-                    shared.phone.session.borrow_mut().on_period(&mut Lines(shared));
-                    follow_beacon(shared);
+                    end_period(shared);
                 }
             }
             Either3::Second(()) => {
@@ -307,6 +308,14 @@ pub async fn run(shared: &Shared) -> ! {
             Either3::Third(()) => period = Instant::now() + PERIOD,
         }
     }
+}
+
+/// End the session's scan period. Out of line, as the other session calls are.
+#[inline(never)]
+fn end_period(shared: &Shared) {
+    let ctx = ctx(shared);
+    shared.phone.session.borrow_mut().on_period(&ctx, &mut Lines(shared));
+    follow_beacon(shared);
 }
 
 /// Send the phone `WD:HEALTH`. Out of line, as the other session calls are.
