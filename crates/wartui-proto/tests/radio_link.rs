@@ -753,6 +753,12 @@ fn radio_link_revision_golden_bytes() {
 }
 
 #[test]
+fn radio_link_phone_link_none_matches_default_when_built() {
+    // The P4 starts from `NONE` in a const context, where `Default` is not callable.
+    assert_eq!(PhoneLink::NONE, PhoneLink::default());
+}
+
+#[test]
 fn radio_link_pins_host_stream_bytes_when_encoded() {
     const MSG: &str = "Up/Down encoding changed: re-pin these bytes";
     let mut out = [0u8; 128];

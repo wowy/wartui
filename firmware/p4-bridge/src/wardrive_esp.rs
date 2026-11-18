@@ -42,10 +42,12 @@
 //! session's scan, count, `iam` and channel list, or a fresh session's while no phone holds the
 //! queue, and how the last phone link ended. A release ends it as `Released` when the app sent
 //! `bye` first, else as `Lost`; it is `None` until a phone has held the queue since boot.
-//! `Down::Beacon` goes when what it says differs from the last the down queue took, after each
-//! hello answer, since a C6 that has just said hello holds none, and every [`BEACON_EVERY`]
-//! beside the bonds' repeat. A full down queue drops it silently, and the repeat covers it. The
-//! C6 encodes it.
+//! `Down::Beacon` goes when a session event (an attach, a release, a command or a period) leaves
+//! it saying something other than the last the down queue took, after each hello answer, since a
+//! C6 that has just said hello holds none, and [`BEACON_EVERY`] after the last attempt, beside the
+//! bonds' repeat. The repeat covers what no session event follows, such as a pool change. A push
+//! the full down queue refuses is counted with its other refusals and sent again at the repeat.
+//! The C6 encodes it.
 //!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
@@ -97,7 +99,7 @@ pub struct Phone {
     link_end: Cell<LinkEnd>,
     /// The latest `Down::Beacon` the down queue took, or `None` before one.
     beacon: RefCell<Option<Beacon>>,
-    /// P4 milliseconds when it took it.
+    /// P4 milliseconds of the last attempt to queue it, taken or refused.
     beacon_at: Cell<u64>,
 }
 
@@ -109,18 +111,7 @@ impl Phone {
             session: RefCell::new(Session::new()),
             dropped_at: Cell::new(0),
             restart: Signal::new(),
-            link: Cell::new(PhoneLink {
-                peer: [0; 2],
-                connections: 0,
-                connected_s: 0,
-                rssi: None,
-                interval_us: 0,
-                latency: 0,
-                timeout_ms: 0,
-                last_drop: None,
-                heap_free: 0,
-                heap_least: 0,
-            }),
+            link: Cell::new(PhoneLink::NONE),
             link_at: Cell::new(Instant::from_ticks(0)),
             reset,
             link_end: Cell::new(LinkEnd::None),
@@ -353,13 +344,10 @@ fn follow_beacon(shared: &Shared) {
     }
 }
 
-/// Send the beacon when it differs from the last the down queue took, or [`BEACON_EVERY`] has
-/// passed since it took one.
+/// Send the beacon, changed or not, once [`BEACON_EVERY`] has passed since the last attempt.
 pub fn repeat_beacon(shared: &Shared) {
     if now_ms().saturating_sub(shared.phone.beacon_at.get()) >= BEACON_EVERY {
         push_beacon(shared, beacon(shared));
-    } else {
-        follow_beacon(shared);
     }
 }
 
@@ -368,10 +356,12 @@ pub fn send_beacon(shared: &Shared) {
     push_beacon(shared, beacon(shared));
 }
 
-/// Queue `beacon` as `Down::Beacon`. A full down queue drops it silently: the repeat sends it.
+/// Queue `beacon` as `Down::Beacon`, and stamp the attempt. A refused push leaves the last
+/// beacon taken as it was, so the next session event still sees the difference, and the repeat
+/// sends it again.
 fn push_beacon(shared: &Shared, beacon: Beacon) {
     if shared.push_down(&Down::Beacon(beacon.clone())) {
         shared.phone.beacon.replace(Some(beacon));
-        shared.phone.beacon_at.set(now_ms());
     }
+    shared.phone.beacon_at.set(now_ms());
 }

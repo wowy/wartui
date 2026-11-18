@@ -184,6 +184,22 @@ pub struct PhoneLink {
     pub heap_least: u32,
 }
 
+impl PhoneLink {
+    /// No link: every figure zero, and no signal or drop.
+    pub const NONE: Self = Self {
+        peer: [0; 2],
+        connections: 0,
+        connected_s: 0,
+        rssi: None,
+        interval_us: 0,
+        latency: 0,
+        timeout_ms: 0,
+        last_drop: None,
+        heap_free: 0,
+        heap_least: 0,
+    };
+}
+
 /// A disconnection, as [`PhoneLink`] reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastDrop {

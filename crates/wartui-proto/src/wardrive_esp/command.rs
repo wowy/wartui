@@ -1,6 +1,7 @@
 //! A phone's command text, read into a [`Command`], and the channel lists `-ch` and `ch` carry.
 //!
-//! The first word picks the command, matched exactly. Words the bridge has no mode for are
+//! The first word picks the command, matched exactly, and every space after it is skipped, as the
+//! WardriveESP firmware does. Words the bridge has no mode for are
 //! [`Command::Unsupported`], so the app hears a refusal rather than a help list. Words an app
 //! sends to describe itself or keep the link are [`Command::Silent`]: they ask for no reply.
 //!
@@ -157,9 +158,10 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
         return None;
     }
     let (word, rest) = match text.iter().position(|&b| b == b' ') {
-        Some(at) => (&text[..at], &text[at + 1..]),
+        Some(at) => (&text[..at], &text[at..]),
         None => (text, &[][..]),
     };
+    let rest = &rest[rest.iter().position(|&b| b != b' ').unwrap_or(rest.len())..];
     Some(match word {
         b"wdstream" if contains(rest, b"stop") => Command::Stop,
         b"wdstream" => Command::Stream {
@@ -182,14 +184,11 @@ pub fn parse(text: &[u8]) -> Option<Command<'_>> {
         b"link" => Command::Link,
         b"drop" => Command::Drop,
         b"iam" => iam(rest),
-        b"ch" => {
-            let start = rest.iter().position(|&b| b != b' ').unwrap_or(rest.len());
-            Command::Channels(match &rest[start..] {
-                b"" => Channels::Show,
-                b"all" => Channels::All,
-                argument => Channels::Set(argument),
-            })
-        }
+        b"ch" => Command::Channels(match rest {
+            b"" => Channels::Show,
+            b"all" => Channels::All,
+            argument => Channels::Set(argument),
+        }),
         b"bt" => Command::Bt(match rest {
             b"on" => Bt::On,
             b"off" => Bt::Off,

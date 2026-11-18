@@ -130,7 +130,8 @@ The document leaves these open, and the bridge settles them so:
 
 ## Commands
 
-A command is cut to 240 bytes and trimmed. Its first word picks it.
+A command is cut to 240 bytes and trimmed. Its first word picks it, and the spaces after the
+word are skipped.
 
 | Command | Effect |
 | --- | --- |

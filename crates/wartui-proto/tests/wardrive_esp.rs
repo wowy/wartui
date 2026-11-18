@@ -235,7 +235,7 @@ fn wardrive_command_reads_bt_forms_when_word_is_bt() {
     assert_eq!(command::parse(b"bt off"), Some(Command::Bt(Bt::Off)));
     assert_eq!(command::parse(b"bt on \r\n"), Some(Command::Bt(Bt::On)));
     // The rest must be exactly `on` or `off`; anything else shows the mode.
-    for text in [&b"bt"[..], b"bt maybe", b"bt on now", b"bt ON", b"bt  on"] {
+    for text in [&b"bt"[..], b"bt maybe", b"bt on now", b"bt ON", b"bt o n"] {
         assert_eq!(
             command::parse(text),
             Some(Command::Bt(Bt::Show)),
@@ -243,6 +243,21 @@ fn wardrive_command_reads_bt_forms_when_word_is_bt() {
             String::from_utf8_lossy(text)
         );
     }
+}
+
+#[test]
+fn wardrive_command_skips_spaces_when_several_follow_the_word() {
+    // The WardriveESP firmware skips every space after the first word.
+    assert_eq!(command::parse(b"bt  on"), Some(Command::Bt(Bt::On)));
+    assert_eq!(
+        command::parse(b"iam  a Pixel"),
+        Some(Command::Iam { iphone: false, nickname: b"Pixel" })
+    );
+    assert_eq!(command::parse(b"ch   1,6"), Some(Command::Channels(Channels::Set(b"1,6"))));
+    assert_eq!(
+        command::parse(b"wdstream   -ch 1,6"),
+        Some(Command::Stream { channels: Some(b"1,6"), unsupported_mode: false, mode: None })
+    );
 }
 
 #[test]

@@ -1100,18 +1100,17 @@ async fn accept<'d>(
             Either3::Third(()) if !shared.ble.admitted() => {}
             Either3::Third(()) => {
                 let Some((name, bridge)) = free else { continue };
-                let updated = match free_payload(name, bridge, shared) {
-                    Some(payload) => peripheral.update_adv_data(payload.advertisement()).await,
-                    None => Err(BleHostError::BleHost(Error::InvalidValue)),
-                };
-                if let Err(err) = updated {
-                    beacon_failed(
-                        &mut failed,
-                        "refresh the WardriveESP advertisement",
-                        &err,
-                        shared,
-                    );
-                }
+                let payload = free_payload(name, bridge, shared);
+                let what = "refresh the WardriveESP advertisement";
+                refresh_beacon(
+                    peripheral,
+                    payload,
+                    Payload::advertisement,
+                    what,
+                    &mut failed,
+                    shared,
+                )
+                .await;
             }
         }
     }
@@ -1158,15 +1157,30 @@ async fn linked(
                 break;
             }
             let payload = Payload::linked(&ble.beacon.borrow(), bridge, frame_b());
-            let updated = match payload {
-                Some(payload) => peripheral.update_adv_data(payload.beacon()).await,
-                None => Err(BleHostError::BleHost(Error::InvalidValue)),
-            };
-            if let Err(err) = updated {
-                beacon_failed(&mut failed, "refresh the WardriveESP status beacon", &err, shared);
-            }
+            let what = "refresh the WardriveESP status beacon";
+            refresh_beacon(peripheral, payload, Payload::beacon, what, &mut failed, shared).await;
         }
         // `_advertiser` drops here, and TrouBLE's runner stops the beacon.
+    }
+}
+
+/// Give the controller `payload` in place of the running advertisement's, handed over as `kind`
+/// builds it. A payload that did not encode, or a refresh that fails, is logged as `what` through
+/// [`beacon_failed`].
+async fn refresh_beacon(
+    peripheral: &mut Peripheral<'_, Controller<'_>, DefaultPacketPool>,
+    payload: Option<Payload>,
+    kind: fn(&Payload) -> Advertisement<'_>,
+    what: &str,
+    failed: &mut bool,
+    shared: &Shared,
+) {
+    let updated = match &payload {
+        Some(payload) => peripheral.update_adv_data(kind(payload)).await,
+        None => Err(BleHostError::BleHost(Error::InvalidValue)),
+    };
+    if let Err(err) = updated {
+        beacon_failed(failed, what, &err, shared);
     }
 }
 
