@@ -268,6 +268,9 @@ On the throwaway build, one `pair` straight after `forget` failed with BlueZ's
 `ConnectionAttemptFailed: Page Timeout` and passed on the next try, as on 2026-11-17
 ([A pairing that did not connect](#a-pairing-that-did-not-connect)).
 
+**The app beside two sets.** Wardrive Go on a Pixel 8 found the bridge at once on that build and
+received data.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -291,7 +294,7 @@ On the throwaway build, one `pair` straight after `forget` failed with BlueZ's
 - The app beside the wider `chans=`: whether its channel picker offers 12, 13 and 169 to 177, and
   what list it sends.
 - A list shorter than the fleet in a drive, where the doubled nodes' extra lines meet a slow link.
-- The Wardrive Go app beside two advertising sets, on Android and iOS.
+- The Wardrive Go app beside two advertising sets on iOS.
 - A bonded central on a resolvable address resuming beside two sets.
 - A scan for the id from a PC whose adapter holds no other connection.
 - The two sets' raw advertisement bytes.
