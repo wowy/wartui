@@ -6,8 +6,16 @@
 //! C6 and every host read the same one; a change strands whichever end was not rebuilt. Beside it
 //! the C6 offers a phone the WardriveESP service ([`crate::wardrive_esp::frame`]).
 //!
-//! The C6 advertises [`NAME_PREFIX`] and the bridge's last two octets (`wartui 96:C4`), the form
-//! `--bridge` takes, so an operator picks the bridge by the same name over either link.
+//! **A host finds a bridge by its id, not its name.** The id is service data under [`ID_UUID`]
+//! carrying the bridge's last two octets, the form `--bridge` takes ([`advertised_octets`]). The
+//! name, [`NAME_PREFIX`] and the same octets (`wartui 96:C4`), is a label a person reads.
+//!
+//! **The id is in both of the C6's pairs.** While it admits phones, the C6 advertises the wartui
+//! pair and the WardriveESP pair as two sets from one address. A Linux central's controller
+//! filters duplicates by address, and BlueZ restarts that filter only every 10 s, so a scan can
+//! hear either set alone. The phones' scan response has 4 bytes spare, room for an empty service
+//! data and no more, so there the id is empty and the octets are the WardriveESP status's
+//! ([`crate::wardrive_esp::beacon::bridge_octets`]).
 //!
 //! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
 //! [`DOWN_VALUE_MAX`] value bytes, and a central's own stack keeps to it. wartui's transport caps
@@ -24,8 +32,25 @@ pub const SERVICE_UUID: u128 = 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877;
 pub const UP_UUID: u128 = 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877;
 /// The service's Down characteristic, written with or without response: the host's frames.
 pub const DOWN_UUID: u128 = 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877;
-/// What the C6 advertises ahead of the bridge's last two octets: `wartui 96:C4`.
+/// What the C6 names itself ahead of the bridge's last two octets: `wartui 96:C4`.
 pub const NAME_PREFIX: &str = "wartui ";
+/// The 16-bit UUID of the service data that marks a bridge and carries its last two octets.
+pub const ID_UUID: u16 = 0x5754;
+
+/// The bridge's last two octets from one advertisement, or `None` for a device that is not a
+/// bridge. `id` is its service data under [`ID_UUID`], `status` its manufacturer data under
+/// the WardriveESP status's company id ([`COMPANY`](crate::wardrive_esp::beacon::COMPANY)).
+///
+/// An `id` of two bytes is the octets: the wartui pair. An empty one points at the status: the
+/// phones' pair.
+#[must_use]
+pub fn advertised_octets(id: Option<&[u8]>, status: Option<&[u8]>) -> Option<[u8; 2]> {
+    match id? {
+        &[first, second] => Some([first, second]),
+        [] => crate::wardrive_esp::beacon::bridge_octets(status?),
+        _ => None,
+    }
+}
 
 /// The ATT MTU the C6 serves.
 ///

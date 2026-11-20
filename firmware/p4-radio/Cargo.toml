@@ -34,6 +34,13 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
 ] }
 # The executor and time driver, and the scheduler the radio runs on.
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
+# TrouBLE's own copies, named for what its API does not re-export: `bt-hci` for
+# `LeSetExtAdvEnable`, the command that stops every advertising set when a central connects, and
+# with `embedded-io` and `embedded-io-async` for the traits `src/hci.rs`'s transport implements.
+# Each is held at the version `trouble-host` resolves, so none adds a copy.
+bt-hci = "0.10.1"
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"
@@ -63,9 +70,11 @@ static_cell = "2.1.1"
 #
 # `security` brings LE Secure Connections pairing and bonds, with `legacy-pairing` left off so
 # nothing pairs below LE Secure Connections. It seeds its RNG from the controller's LeRand.
+# `extended-advertising` brings the advertising sets, one per protocol a central connects on.
 trouble-host = { version = "0.8.0", default-features = false, features = [
   "default-packet-pool",
   "derive",
+  "extended-advertising",
   "gatt",
   "peripheral",
   "security",

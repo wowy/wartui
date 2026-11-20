@@ -1,6 +1,9 @@
 //! The Bluetooth host link's GATT identity and the C6's notify buffer.
 
-use wartui_proto::ble::{ByteRing, DOWN_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID};
+use wartui_proto::ble::{
+    ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID, advertised_octets,
+};
+use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
 
 #[test]
 fn ble_uuids_stay_pinned_when_built() {
@@ -9,6 +12,54 @@ fn ble_uuids_stay_pinned_when_built() {
     assert_eq!(UP_UUID, 0xf241_0002_d870_4eb6_a5a0_ed64_5732_a877);
     assert_eq!(DOWN_UUID, 0xf241_0003_d870_4eb6_a5a0_ed64_5732_a877);
     assert_eq!(NAME_PREFIX, "wartui ");
+    assert_eq!(ID_UUID, 0x5754);
+}
+
+/// The free board's status bytes for the bridge `44:C0`.
+fn free_status() -> Vec<u8> {
+    let mut out = [0; STATUS_MAX];
+    let len = beacon::status(&mut out, &Beacon::default(), [0x44, 0xC0], false);
+    out[..len].to_vec()
+}
+
+#[test]
+fn advertised_octets_reads_id_when_it_holds_two_bytes() {
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0]), None), Some([0x44, 0xC0]));
+    // The id outranks a status beside it.
+    let status = free_status();
+    assert_eq!(advertised_octets(Some(&[0x96, 0xC4]), Some(&status)), Some([0x96, 0xC4]));
+}
+
+#[test]
+fn advertised_octets_reads_status_when_id_is_empty() {
+    // The phones' pair: an empty id beside the status's fixed bytes.
+    let status = free_status();
+    assert_eq!(advertised_octets(Some(&[]), Some(&status)), Some([0x44, 0xC0]));
+}
+
+#[test]
+fn advertised_octets_finds_none_when_empty_id_has_no_status() {
+    assert_eq!(advertised_octets(Some(&[]), None), None);
+    let status = free_status();
+    assert_eq!(advertised_octets(Some(&[]), Some(&status[..8])), None);
+    let mut unmarked = status.clone();
+    unmarked[0] = b'X';
+    assert_eq!(advertised_octets(Some(&[]), Some(&unmarked)), None);
+}
+
+#[test]
+fn advertised_octets_finds_none_when_id_is_absent() {
+    // A WardriveESP board that is not a bridge carries the status and no id.
+    let status = free_status();
+    assert_eq!(advertised_octets(None, Some(&status)), None);
+    assert_eq!(advertised_octets(None, None), None);
+}
+
+#[test]
+fn advertised_octets_finds_none_when_id_is_another_length() {
+    let status = free_status();
+    assert_eq!(advertised_octets(Some(&[0x44]), Some(&status)), None);
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0, 0x01]), Some(&status)), None);
 }
 
 #[test]

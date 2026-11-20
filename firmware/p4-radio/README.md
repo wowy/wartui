@@ -14,11 +14,11 @@ cargo build --release
 ## Bluetooth host link
 
 The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src/ble.rs`). It
-advertises `wartui XX:YY`, the bridge's last two octets, with the `wartui_proto::ble` service in its
-scan response. It notifies the P4's host stream on Up and forwards what a central writes on Down.
-Beside it sits the WardriveESP service, which a phone app reads with no pairing while the P4
-admits phones; the advertisement then carries that service and the scan response the name, and
-while a central is connected the C6 advertises the WardriveESP status beacon.
+advertises the `wartui_proto::ble` service and the bridge's id, its last two octets, with the name
+`wartui XX:YY` in its scan response. It notifies the P4's host stream on Up and forwards what a
+central writes on Down. Beside it sits the WardriveESP service, which a phone app reads with no
+pairing while the P4 admits phones; that service's pair is then a second advertising set beside
+the first, and while a central is connected the C6 advertises the WardriveESP status beacon.
 
 - **A phone reads the WardriveESP stream with no bond**, while the P4 admits phones
   ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md)). A central reads one stream, the first
@@ -47,15 +47,16 @@ while a central is connected the C6 advertises the WardriveESP status beacon.
 - **The heap is 96 KB:** 64 KB of reclaimed bootloader RAM and 32 KB more. The Bluetooth controller
   and the scheduler under it are all that allocate.
 
-Two upstream bugs shape the build, each worked around without a patch
+Three upstream bugs shape the build, each worked around without a patch
 ([`c6-ble-host-findings.md`](../../docs/c6-ble-host-findings.md#workarounds-a-production-build-needs)):
 
 | Workaround | Why |
 | --- | --- |
 | TrouBLE's packet pool is 186 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in `.cargo/config.toml`), so the ATT MTU is 182 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
 | `trouble-host`'s `connection-params-update` stays off | bt-hci 0.10.1 panics on the reply to a central's connection parameter request; off, the controller answers it itself |
+| Commands go to the controller through bt-hci's sync encoder (`src/hci.rs`) | bt-hci 0.10.1's async encoder writes a byte slice's length one too long, so the controller refuses the extended advertising data commands |
 
-The ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`) works around a third. esp-radio
+The ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`) works around a fourth. esp-radio
 1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer of a received ACL packet that
 arrives as a chain, and the controller chains a packet of 193 to 198 bytes, its 4-byte header
 included. The packet reaches TrouBLE short, its host stops, and the C6 restarts. On that MTU a
@@ -157,8 +158,9 @@ and 0.25.
 `trouble-host` 0.8.0 is the newest release, and is outside the family: nothing in `esp-radio`
 depends on it. It builds on `bt-hci` 0.10, and `esp-radio` on 0.9, so `bt-hci` resolves twice.
 Both are plain types with no global symbols, and the controller plugs in through
-`bt-hci-transport` 0.1, which both share. `Cargo.toml` names its two workaround features
-([above](#bluetooth-host-link)).
+`bt-hci-transport` 0.1, which both share. The C6 names `bt-hci` 0.10, `embedded-io` 0.7 and
+`embedded-io-async` 0.7 itself, each at the version `trouble-host` resolves. `Cargo.toml` names
+its two workaround features ([above](#bluetooth-host-link)).
 
 ### Crates that double
 

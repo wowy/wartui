@@ -42,17 +42,20 @@ A linked phone counts as the bridge's host and holds it alone.
 ## What a phone sees
 
 **Advertising.** A legacy advertisement holds 31 bytes and cannot carry two 128-bit UUIDs and the
-name, so what it carries depends on the setting and on whether a central is connected.
+name, so the bridge advertises one set per service, and what each carries depends on the setting
+and on whether a central is connected.
 
 | State | Advertisement | Scan response |
 | --- | --- | --- |
-| on, no central | connectable, every 100 ms: flags, the WardriveESP service UUID, the advert extras | the name, `wartui XX:YY`, and status bytes 0-8 |
+| on, no central | the wartui set as off, and the WardriveESP set, connectable, every 100 ms: flags, the WardriveESP service UUID, the advert extras | the wartui set's as off; the WardriveESP set's the name, `wartui XX:YY`, status bytes 0-8 and empty service data under `0x5754` |
 | on, a central connected | not connectable, about once a second: flags, the status UUID, the advert extras | the status, with the nickname |
-| off, no central | connectable, every 100 ms: flags, the name | the wartui link's service UUID |
+| off, no central | the wartui set: connectable, every 100 ms: flags, the wartui link's service UUID, the bridge's last two octets as service data under `0x5754` | the name |
 | off, a central connected | nothing | nothing |
 
 "On" is the setting on and USB not holding the bridge. The name is `wartui XX:YY`, the bridge's
-last two octets, which is how a wartui host finds the bridge. The status UUID is
+last two octets, which is how a wartui host finds the bridge. Both sets carry service data under
+`0x5754`, the bridge's id: its last two octets in the wartui set, and empty in the WardriveESP set,
+whose status bytes 7-8 carry them. The status UUID is
 `0547686F-7374-4553-5042-726964675354`. It replaces the service UUID while a central is connected,
 whether a phone or a wartui host, so an app does not try a bridge that is taken.
 
