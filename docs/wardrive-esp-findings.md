@@ -269,14 +269,16 @@ On the throwaway build, one `pair` straight after `forget` failed with BlueZ's
 ([A pairing that did not connect](#a-pairing-that-did-not-connect)).
 
 **The app beside two sets.** Wardrive Go on a Pixel 8 found the bridge at once on that build and
-received data.
+received data. On the build with the id in the status beacon (`8060bb7`), a day later, it
+connected and listed access points.
 
 **A scan beside the status beacon.** On that build the beacon's scan response carried no id. With
 the PC's BlueZ connected to the bridge and the beacon heard, `wartui status --link bluetooth
 --bridge D0:1C` failed 3 of 3 with `bridge D0:1C did not advertise over Bluetooth in 12s`: BlueZ
 held the beacon's service data in place of the id's. With the empty id in the beacon's scan
 response, the same sequence linked 3 of 3, in 2.4 s, 10.4 s and 15.6 s from the command's start:
-the two slow ones first heard the beacon's advertisement without its scan response.
+the two slow ones first heard the beacon's advertisement without its scan response. The Pixel 8's
+Bluetooth was on through both runs, with the bridge remembered by the app.
 
 ## Not measured
 
