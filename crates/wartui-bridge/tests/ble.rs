@@ -1,4 +1,4 @@
-//! The Bluetooth transport's pure parts: naming, where it looks, writes, and what a subscription
+//! The Bluetooth transport's pure parts: matching the advertised id, where it looks, writes, and what a subscription
 //! admits.
 //!
 //! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
@@ -7,8 +7,9 @@
 use std::time::{Duration, Instant};
 
 use wartui_bridge::ble::{
-    DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, advertised_name, choose,
-    dropped_as_unbonded, is_remembered, is_takeover, look, names_bridge, refused_for_bonding,
+    Advertiser, DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, choose,
+    dropped_as_unbonded, is_remembered, is_takeover, look, matches_octets, named_octets,
+    refused_for_bonding,
 };
 use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
@@ -73,33 +74,43 @@ fn events(heard: Vec<Heard>) -> Vec<LinkEvent> {
 }
 
 #[test]
-fn ble_name_carries_last_two_octets_when_bridge_is_named_by_address_or_tail() {
-    assert_eq!(advertised_name(&spec("02:00:5E:10:44:C0")).as_deref(), Some("wartui 44:C0"));
-    assert_eq!(advertised_name(&spec("44:C0")).as_deref(), Some("wartui 44:C0"));
-    assert_eq!(advertised_name(&spec("10:44:C0")).as_deref(), Some("wartui 44:C0"));
+fn ble_octets_are_last_two_when_bridge_is_named_by_address_or_tail() {
+    assert_eq!(named_octets(&spec("02:00:5E:10:44:C0")), Some([0x44, 0xC0]));
+    assert_eq!(named_octets(&spec("44:C0")), Some([0x44, 0xC0]));
+    assert_eq!(named_octets(&spec("10:44:C0")), Some([0x44, 0xC0]));
 }
 
 #[test]
-fn ble_name_is_none_when_spec_gives_fewer_than_two_octets_or_a_path() {
-    assert_eq!(advertised_name(&spec("C0")), None);
-    assert_eq!(advertised_name(&spec("/dev/ttyACM0")), None);
+fn ble_octets_are_none_when_spec_gives_fewer_than_two_octets_or_a_path() {
+    assert_eq!(named_octets(&spec("C0")), None);
+    assert_eq!(named_octets(&spec("/dev/ttyACM0")), None);
 }
 
 #[test]
-fn ble_name_matches_bridge_when_spec_names_its_octets() {
-    assert!(names_bridge(Some(&spec("44:C0")), "wartui 44:C0"));
-    assert!(names_bridge(Some(&spec("02:00:5E:10:44:C0")), "wartui 44:C0"));
-    assert!(names_bridge(Some(&spec("C0")), "wartui 44:C0"), "one octet matches the last");
-    assert!(names_bridge(None, "wartui 96:C4"), "unnamed takes any bridge");
+fn ble_octets_match_bridge_when_spec_names_them() {
+    assert!(matches_octets(Some(&spec("44:C0")), [0x44, 0xC0]));
+    assert!(matches_octets(Some(&spec("02:00:5E:10:44:C0")), [0x44, 0xC0]));
+    assert!(matches_octets(Some(&spec("C0")), [0x44, 0xC0]), "one octet matches the last");
+    assert!(matches_octets(None, [0x96, 0xC4]), "no spec takes any bridge");
 }
 
 #[test]
-fn ble_name_refuses_bridge_when_octets_differ_or_name_is_not_a_bridge() {
-    assert!(!names_bridge(Some(&spec("44:C0")), "wartui 44:C1"));
-    assert!(!names_bridge(None, "wartui"));
-    assert!(!names_bridge(None, "Pixel 8"));
-    assert!(!names_bridge(None, "wartui 4:C0"));
-    assert!(!names_bridge(Some(&spec("/dev/ttyACM0")), "wartui 44:C0"));
+fn ble_octets_refuse_bridge_when_they_differ_or_spec_is_a_path() {
+    assert!(!matches_octets(Some(&spec("44:C0")), [0x44, 0xC1]));
+    assert!(!matches_octets(Some(&spec("C1")), [0x44, 0xC0]));
+    assert!(!matches_octets(Some(&spec("/dev/ttyACM0")), [0x44, 0xC0]));
+}
+
+#[test]
+fn ble_advertiser_label_is_name_when_os_heard_one_else_its_octets() {
+    let named = Advertiser {
+        octets: [0x44, 0xC0],
+        name: Some("wartui 44:C0".to_owned()),
+        address: ADDRESS.to_owned(),
+    };
+    assert_eq!(named.label(), "wartui 44:C0");
+    let unnamed = Advertiser { name: None, ..named };
+    assert_eq!(unnamed.label(), "bridge 44:C0");
 }
 
 /// A `ToNode` whose body is `len` bytes.
@@ -366,7 +377,7 @@ fn ble_inbound_reports_disconnect_then_same_life_when_usb_takes_and_returns_brid
 }
 
 #[test]
-fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_name() {
+fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_octets() {
     let other = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
     let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));
     let heard = inbound.feed(&frame(&ready(other, 500)), Instant::now());
@@ -461,22 +472,37 @@ fn ble_look_scans_for_named_bridge_only_when_it_is_not_the_remembered_one() {
     assert_eq!(look(None, None, None, false), Look { direct: None, preferred: None });
 }
 
-fn heard(name: &str, live: bool) -> (String, bool, String) {
-    (name.to_owned(), live, name.to_owned())
+fn heard(octets: [u8; 2], live: bool) -> ([u8; 2], bool, [u8; 2]) {
+    (octets, live, octets)
 }
 
 #[test]
 fn ble_choose_takes_advertising_bridge_when_another_is_only_listed() {
     // BlueZ lists a bonded bridge it has not heard.
-    let found = choose(vec![heard("wartui 44:C0", false), heard("wartui A1:B0", true)], None);
-    assert_eq!(found.unwrap(), "wartui A1:B0");
+    let found = choose(vec![heard([0x44, 0xC0], false), heard([0xA1, 0xB0], true)], None);
+    assert_eq!(found.unwrap(), [0xA1, 0xB0]);
 }
 
 #[test]
 fn ble_choose_takes_preferred_bridge_when_several_advertise() {
-    let both = vec![heard("wartui 44:C0", true), heard("wartui A1:B0", true)];
+    let both = vec![heard([0xA1, 0xB0], true), heard([0x44, 0xC0], true)];
     let found = choose(both.clone(), Some(&BridgeSpec::Mac(OTHER)));
-    assert_eq!(found.unwrap(), "wartui A1:B0");
+    assert_eq!(found.unwrap(), [0xA1, 0xB0]);
     let refused = choose(both, None).unwrap_err().to_string();
-    assert!(refused.contains("wartui 44:C0, wartui A1:B0"), "{refused}");
+    assert_eq!(
+        refused,
+        "several bridges advertise over Bluetooth (44:C0, A1:B0); name one with --bridge XX:YY"
+    );
+}
+
+#[test]
+fn ble_error_names_bridge_by_octets_when_none_advertised() {
+    let named = TransportError::NotFound { bridge: Some("44:C0".to_owned()), secs: 12 };
+    assert_eq!(
+        named.to_string(),
+        "bridge 44:C0 did not advertise over Bluetooth in 12s; check the bridge is powered and \
+         in range"
+    );
+    let any = TransportError::NotFound { bridge: None, secs: 12 }.to_string();
+    assert!(any.starts_with("no bridge advertised over Bluetooth in 12s"), "{any}");
 }

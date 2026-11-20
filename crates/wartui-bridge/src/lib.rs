@@ -6,8 +6,10 @@
 //! in.
 //!
 //! A real bridge is reached two ways: over USB through its CH343 ([`serial`]), or over Bluetooth
-//! through its C6 ([`ble`]). Both admit what the bridge sends through one rule, that a connection
-//! starts at its first `Ready` (`gate`). They differ where the links do. Both ask with `Identify`
+//! through its C6 ([`ble`]). A Bluetooth scan finds a bridge by the id it advertises, its last two
+//! octets, and never by its name, which is a label for a person and free to change. Both admit
+//! what the bridge sends through one rule, that a connection starts at its first `Ready`
+//! (`gate`). They differ where the links do. Both ask with `Identify`
 //! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
 //! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
 //! so Bluetooth sends none. A Bluetooth write is a fragment of the stream, so each connection's
@@ -227,22 +229,23 @@ pub enum TransportError {
          Bluetooth service is running"
     )]
     NoAdapter,
-    /// Nothing advertised the bridge's name within the scan.
+    /// No bridge the spec names advertised its id within the scan.
     #[error(
-        "nothing advertised as `{name}` over Bluetooth in {secs}s; check the bridge is powered \
-         and in range"
+        "{} over Bluetooth in {secs}s; check the bridge is powered and in range",
+        not_advertised(.bridge.as_deref())
     )]
     NotFound {
-        /// The name scanned for.
-        name: String,
+        /// The bridge scanned for: its octets, or the spec as written when it gives one octet.
+        /// `None` for any bridge.
+        bridge: Option<String>,
         /// How long the scan ran.
         secs: u64,
     },
     /// Several bridges advertise, and nothing says which is meant.
-    #[error("several bridges advertise over Bluetooth ({names}); name one with --bridge XX:YY")]
+    #[error("several bridges advertise over Bluetooth ({bridges}); name one with --bridge XX:YY")]
     SeveralAdvertising {
-        /// Their advertised names.
-        names: String,
+        /// Their octets, `XX:YY`.
+        bridges: String,
     },
     /// The bridge refused this host's link, which is not encrypted with a bond it holds.
     #[error(
@@ -266,6 +269,14 @@ pub enum TransportError {
     /// The Bluetooth stack failed, in its own words.
     #[error("Bluetooth: {0}")]
     Bluetooth(String),
+}
+
+/// What [`TransportError::NotFound`] says did not advertise: the `bridge` named, or any.
+fn not_advertised(bridge: Option<&str>) -> String {
+    bridge.map_or_else(
+        || "no bridge advertised".to_owned(),
+        |bridge| format!("bridge {bridge} did not advertise"),
+    )
 }
 
 /// Why a command could not be queued.
