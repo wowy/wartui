@@ -108,11 +108,12 @@ own.
   bonds the P4 keeps for its C6, and their records), `host_owner` (who holds the P4's host queue:
   USB, a Bluetooth central, a phone or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
-  GATT identity of the C6's Bluetooth host link), `wardrive_esp` (the WardriveESP protocol a phone
-  app reads the bridge in: its frames, commands, lines and session), `mac` (the `Mac` type and its text form), `plan`
-  (channel pools and the round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the cut, the Bluetooth pick and the
-  records that tell each node), `node` (a node's timings and sweep cursor), `pending` (the buffers
-  sightings wait in on a node),
+  GATT identity of the C6's Bluetooth host link, and the id a host finds a bridge by),
+  `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
+  lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
+  round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
+  cut, the Bluetooth pick and the records that tell each node), `node` (a node's timings and
+  sweep cursor), `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
@@ -150,7 +151,7 @@ own.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
-  the P4 admits one.
+  the P4 admits one. Each service advertises as its own set.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   and owns the channel (`firmware/node/README.md` § "What it does differently"). Hops from one
   assigned channel to the next, reporting each dwell over the node bus, and idles servicing the
@@ -508,6 +509,24 @@ edit stops; follow the pointer before changing the rule.
   builds from that directory, and `src/ble.rs` fails a build whose pool disagrees. wartui's
   transport caps its writes at 179 whatever the MTU, so it updates a C6 that serves more.
   → `crates/wartui-proto/src/ble.rs`, `ATT_MTU`
+- **A host matches the bridge's advertised id, never its name, and the id is in both of the C6's
+  pairs.** A Linux central hears one set per scan, because its controller filters duplicates by
+  address and both sets share one. → `crates/wartui-proto/src/ble.rs` `//!`, `advertised_octets`;
+  `crates/wartui-bridge/src/ble.rs` `//!`
+- **Every C6 advertisement goes through the extended advertising commands, and the C6 stops every
+  set itself when a central connects.** A controller that has taken an extended command refuses
+  the legacy ones. TrouBLE stops no set on a connection, and a set left enabled ends its runner at
+  the next resolving-list load, which restarts the C6. → `firmware/p4-radio/src/ble.rs` `//!`,
+  `stop_sets`
+- **HCI commands reach the C6's controller through bt-hci's sync encoder.** bt-hci 0.10.1's async
+  encoder writes a byte slice's length one too long, and the controller refuses the extended
+  advertising data commands. The C6 names `bt-hci`, `embedded-io` and `embedded-io-async` itself,
+  each held at the version `trouble-host` resolves. → `firmware/p4-radio/src/hci.rs` `//!`,
+  `firmware/p4-radio/README.md` § "Dependency versions"
+- **Where the Bluetooth code picks a protocol, it matches every `Stream`, `Holder` or
+  `HostOwner`.** An `if phone … else host` gives a third stream the host's arm with no compile
+  error. → `crates/wartui-proto/src/radio_link/message.rs`, `Stream::terminator`;
+  `crates/wartui-proto/src/host_owner.rs`, `Holder::through_c6`
 - **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
   long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
   to it. `close_all` waits for every Bluetooth transport before `main` returns, so no command path

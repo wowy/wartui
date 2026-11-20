@@ -34,10 +34,10 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
 ] }
 # The executor and time driver, and the scheduler the radio runs on.
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
-# TrouBLE's own copies, named for what its API does not re-export: `bt-hci` for
-# `LeSetExtAdvEnable`, the command that stops every advertising set when a central connects, and
-# with `embedded-io` and `embedded-io-async` for the traits `src/hci.rs`'s transport implements.
-# Each is held at the version `trouble-host` resolves, so none adds a copy.
+# TrouBLE's own copies, named for what its API does not re-export. `bt-hci` brings
+# `LeSetExtAdvEnable`, the command that stops every advertising set when a central connects.
+# `bt-hci`, `embedded-io` and `embedded-io-async` bring the traits `src/hci.rs`'s transport
+# implements. Each is held at the version `trouble-host` resolves, so none adds a copy.
 bt-hci = "0.10.1"
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"

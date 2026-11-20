@@ -1252,10 +1252,11 @@ A Linux build links the system's libdbus, so building needs its headers: `dbus-d
 Bluetooth settings show, `wartui XX:YY`, is a label and matched by nothing. `--bridge XX:YY`, or
 the whole address, names the same board over either link, and no other bridge is taken. Without
 one, wartui connects straight to the Bluetooth address it remembers, and otherwise scans for 12 s
-and takes the one bridge it hears; several are refused. A remembered bridge that does not answer is tried once
-that way: after that wartui scans, takes the remembered bridge when it hears it, and another only
-while it does not. Once a bridge has answered, the run stays with it. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
-remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
+and takes the one bridge it hears; several are refused. A remembered bridge that does not answer
+is tried once that way: after that wartui scans, takes the remembered bridge when it hears it, and
+another only while it does not. Once a bridge has answered, the run stays with it. `reset` never
+scans for an unnamed bridge: it needs `--bridge` or a remembered Bluetooth address, and sends its
+`Reset` once the bridge has announced itself.
 
 **The PC pairs with the bridge once, with `wartui bluetooth pair`.** The bridge serves only a
 paired, encrypted host. An unpaired PC is refused with `the bridge XX:YY refused this PC over
