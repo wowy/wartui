@@ -1121,3 +1121,11 @@ fn radio_link_held_fills_packet_exactly_when_record_is_record_max() {
     assert!(!held.is_empty(), "the record that did not fit is held");
     assert_eq!(pack_packet(&mut held, &mut ring), [vec![8; RECORD_MAX]]);
 }
+
+#[test]
+fn radio_link_stream_terminator_ends_frame_or_line_when_stream_is_host_or_phone() {
+    // A host reads COBS frames and a phone text lines; nothing is held for `None`.
+    assert_eq!(Stream::None.terminator(), 0x00);
+    assert_eq!(Stream::Host.terminator(), 0x00);
+    assert_eq!(Stream::Phone.terminator(), b'\n');
+}

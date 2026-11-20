@@ -1248,13 +1248,15 @@ exit.
 A Linux build links the system's libdbus, so building needs its headers: `dbus-devel` on Fedora,
 `libdbus-1-dev` on Debian and Ubuntu.
 
-**The bridge advertises `wartui XX:YY`, its last two octets.** `--bridge XX:YY`, or the whole
-address, names the same board over either link, and no other bridge is taken. Without one, wartui
-connects straight to the Bluetooth address it remembers, and otherwise scans for 10 s and takes the
-one bridge it hears; several are refused. A remembered bridge that does not answer is tried once
-that way: after that wartui scans, takes the remembered bridge when it hears it, and another only
-while it does not. Once a bridge has answered, the run stays with it. `reset` never scans for an unnamed bridge: it needs `--bridge` or a
-remembered Bluetooth address, and sends its `Reset` once the bridge has announced itself.
+**wartui finds the bridge by the id it advertises, its last two octets.** The name the OS's
+Bluetooth settings show, `wartui XX:YY`, is a label and matched by nothing. `--bridge XX:YY`, or
+the whole address, names the same board over either link, and no other bridge is taken. Without
+one, wartui connects straight to the Bluetooth address it remembers, and otherwise scans for 12 s
+and takes the one bridge it hears; several are refused. A remembered bridge that does not answer
+is tried once that way: after that wartui scans, takes the remembered bridge when it hears it, and
+another only while it does not. Once a bridge has answered, the run stays with it. `reset` never
+scans for an unnamed bridge: it needs `--bridge` or a remembered Bluetooth address, and sends its
+`Reset` once the bridge has announced itself.
 
 **The PC pairs with the bridge once, with `wartui bluetooth pair`.** The bridge serves only a
 paired, encrypted host. An unpaired PC is refused with `the bridge XX:YY refused this PC over
@@ -1272,11 +1274,12 @@ wartui bluetooth pair --bridge 44:C0
    after it powers up, while it holds no bond, and 120 s after a host on USB opens it. When the
    bridge answers on USB, `pair` opens it there. Otherwise, pair within 120 s of powering the
    bridge up.
-2. **It scans for `wartui XX:YY` and pairs through BlueZ.** The pairing is Just Works: nothing to
+2. **It scans for the bridge's id and pairs through BlueZ.** The pairing is Just Works: nothing to
    type, nothing to confirm.
 3. **It proves the bond.** It connects once and asks the bridge whether this PC is encrypted and
-   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`. Over USB first, the
-   bridge serves it 15 s after the USB link goes quiet.
+   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`, naming the bridge as it
+   advertises, or `bridge XX:YY` when the OS heard no name. Over USB first, the bridge serves it
+   15 s after the USB link goes quiet.
 
 A PC BlueZ already lists as paired is checked first. When the bridge refuses it as not paired,
 `pair` removes the pairing and pairs again, since BlueZ never does. A pairing the bridge refuses is
@@ -1379,7 +1382,7 @@ names the last one when its wait runs out:
 | Says                                                                  | Do                                                                   |
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
-| `nothing advertised as wartui XX:YY over Bluetooth in 10s`            | Power the bridge, and come closer. Turn off Bluetooth on a phone that has linked to the bridge as a WardriveESP board |
+| `bridge XX:YY did not advertise over Bluetooth in 12s`, or `no bridge advertised` | Power the bridge, and come closer. Turn off Bluetooth on a phone that has linked to the bridge as a WardriveESP board |
 | `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |

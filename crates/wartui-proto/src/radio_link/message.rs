@@ -145,6 +145,19 @@ pub enum Stream {
     Phone,
 }
 
+impl Stream {
+    /// The byte that ends a record in this stream, which resynchronizes its reader after a torn
+    /// one: `0x00` ends a host's COBS frame, and `\n` a phone's line. Nothing is held for
+    /// [`Stream::None`], so its byte cuts nothing.
+    #[must_use]
+    pub const fn terminator(self) -> u8 {
+        match self {
+            Self::None | Self::Host => 0x00,
+            Self::Phone => b'\n',
+        }
+    }
+}
+
 /// The C6's Bluetooth link, as [`Up::BleState`] reports it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BleState {

@@ -391,8 +391,8 @@ fn open_remembered(
 /// wait for its `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
 ///
 /// Over USB it resolves as `wartui reset` does ([`reset::board_to_reset`]). Over Bluetooth the
-/// transport refuses a name several bridges advertise, and the `Ready` names the board before
-/// anything is sent.
+/// transport refuses a `named` that several advertising bridges match, and the `Ready` names the
+/// board before anything is sent.
 async fn connect_one(
     named: Option<&str>,
     flag: Option<Link>,
@@ -660,8 +660,7 @@ fn listing_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>)
     let mut bridges = devices
         .iter()
         .filter(|device| {
-            let name = device.name.as_deref();
-            name.is_some_and(|name| wartui_bridge::ble::names_bridge(named.as_ref(), name))
+            device.octets.is_some_and(|o| wartui_bridge::ble::matches_octets(named.as_ref(), o))
         })
         .peekable();
     if bridges.peek().is_none() {
@@ -1127,7 +1126,7 @@ mod tests {
     #[test]
     fn cli_diagnostics_names_usb_holder_when_bluetooth_bridge_is_silent() {
         let notice = bluetooth_silence_text(Some("44:C0"), Listing::Absent);
-        assert!(notice.contains("as 44:C0 over Bluetooth after 15s"), "{notice}");
+        assert!(notice.contains("as 44:C0 over Bluetooth after 17s"), "{notice}");
         assert!(notice.contains("a USB host holds the bridge"), "{notice}");
         // Nothing about ports: none was opened.
         assert!(!notice.contains("CH343"), "{notice}");
@@ -1154,14 +1153,15 @@ mod tests {
         assert!(!notice.contains("not paired"), "{notice}");
     }
 
-    /// A device BlueZ lists, advertising `name`.
+    /// A device BlueZ lists, advertising `octets`.
     #[cfg(target_os = "linux")]
-    fn listed(name: &str, paired: bool) -> wartui_bridge::bluez::Device {
+    fn listed(octets: Option<[u8; 2]>, paired: bool) -> wartui_bridge::bluez::Device {
         wartui_bridge::bluez::Device {
             path: "/org/bluez/hci0/dev_02_00_5E_10_44_C0".to_owned(),
             adapter: "/org/bluez/hci0".to_owned(),
             address: "02:00:5E:10:44:C0".to_owned(),
-            name: Some(name.to_owned()),
+            name: Some("wartui 44:C0".to_owned()),
+            octets,
             paired,
         }
     }
@@ -1169,7 +1169,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cli_diagnostics_reads_bridge_as_unpaired_when_named_by_one_octet_or_a_path() {
-        let devices = [listed("wartui 44:C0", false)];
+        let devices = [listed(Some([0x44, 0xC0]), false)];
         let listing = |bridge| super::listing_among(&devices, Some(bridge));
         assert_eq!(listing("C0"), Listing::Unpaired, "one octet names it");
         assert_eq!(listing("44:C0"), Listing::Unpaired);
@@ -1180,10 +1180,19 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cli_diagnostics_reads_bridge_as_paired_when_any_entry_for_it_is_paired() {
-        let devices = [listed("wartui 44:C0", false), listed("wartui 44:C0", true)];
+        let devices = [listed(Some([0x44, 0xC0]), false), listed(Some([0x44, 0xC0]), true)];
         assert_eq!(super::listing_among(&devices, Some("C0")), Listing::Paired);
         assert_eq!(super::listing_among(&devices[1..], None), Listing::Paired);
         assert_eq!(super::listing_among(&[], None), Listing::Absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_diagnostics_reads_bridge_as_absent_when_listed_device_holds_no_id() {
+        // The name is a label: a device BlueZ holds no service data for is matched by nothing.
+        let devices = [listed(None, true)];
+        assert_eq!(super::listing_among(&devices, None), Listing::Absent);
+        assert_eq!(super::listing_among(&devices, Some("44:C0")), Listing::Absent);
     }
 
     #[test]

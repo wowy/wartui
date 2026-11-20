@@ -66,7 +66,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use wartui_proto::bus::{SightingBatch, Slot};
 use wartui_proto::host_owner::Holder;
-use wartui_proto::radio_link::{Down, PhoneLink};
+use wartui_proto::radio_link::{Down, PhoneLink, Stream};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
 use wartui_proto::wardrive_esp::session::{Ask, Boot, Class, Ctx, Mode, Session, Sink};
@@ -245,7 +245,7 @@ pub fn attach(shared: &Shared) {
     crate::ble::start_stream(shared);
     {
         let mut host = shared.host.borrow_mut();
-        host.set_terminator(b'\n');
+        host.set_terminator(Stream::Phone.terminator());
         host.clear();
     }
     shared.phone.dropped_at.set(dropped(shared));

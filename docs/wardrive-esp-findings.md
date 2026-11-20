@@ -206,6 +206,80 @@ run of each, about an hour apart.
   channels in shares of four and three. After the stand-in unlinked, `wartui status` showed the
   scan stopped and the pool still US.
 
+## Advertising sets and the bridge's id (2026-11-19)
+
+D0:1C, carrier-10, ten nodes, with the bench PC as central through BlueZ. The PC was bonded for
+the wartui link, and two other LE devices were connected to its adapter throughout.
+
+**The controller and the encoder.** `LeReadNumberOfSupportedAdvSets` answered 2, with
+`multi_adv_instances` at 1. The first `advertise_ext` of one legacy-PDU set failed with Invalid
+HCI Command Parameters (0x12). A probe sent each command alone:
+
+| Command | Answer |
+| --- | --- |
+| `LeSetExtAdvParams` at 10 dBm | accepted; the controller answered 10 dBm |
+| `LeSetExtAdvData` | refused with 0x12, with either fragment preference |
+| `LeSetExtScanResponseData` | refused with 0x12, with either fragment preference |
+| `LeSetExtAdvEnable`, on and off | accepted |
+
+With every command encoded by bt-hci's sync encoder, all five were accepted and the set started.
+The cause is bt-hci 0.10.1's async encoder, which writes a byte slice's length plus one.
+
+**Two sets**, on a throwaway build that counted each call:
+
+| Check | Result |
+| --- | --- |
+| Starts of two sets | 14, none refused |
+| Starts of one set | 11, none refused |
+| Stops of every set on a connection | 14, none refused |
+| The status beacon started beside a connection it was due on | 9 of 9 |
+| In-place refreshes of the WardriveESP set, both sets running | 70, none refused |
+| Least free heap | 61,352 bytes; 68.9 KB free at rest |
+| Signal at the PC, same bench position | -70 to -52 dBm on the build before; -68 to -55 dBm with the sets at 10 dBm |
+
+**What BlueZ makes of two sets under one address:**
+
+- `UUIDs` accumulated both services' UUIDs, and the 16-bit UUIDs of the service data.
+- With `DuplicateData` on, as btleplug scans, each advertisement reported replaced `ServiceData`
+  and raised a change. With it off, the entries merged.
+- Reports came at a scan's start and again about every 10.5 s, BlueZ's discovery cycle, not per
+  advertisement. A service-UUID discovery filter did not change that.
+
+| Where the id was | Scans | Heard |
+| --- | --- | --- |
+| the wartui pair only | 8 | the wartui set in the first cycle in 4; only the WardriveESP set until the next in 4 |
+| both pairs, 12 s scans | 12 | the id within 0.3 s in 10; at 10.4 s and 10.8 s in 2 |
+| both pairs, `wardrive esp` off | 3 | the id within 0.2 s in 3 |
+
+**The build as committed** (firmware `fad42cb`, host `b40b53c`):
+
+| Check | Result |
+| --- | --- |
+| PC stand-in on WardriveESP, phones admitted | linked 3 of 3; 104 to 115 `WD:AP` lines in 8 s; a subscription to the wartui link's Up refused with ATT `0xFC` |
+| Bonded PC on the wartui link, phones admitted | `wartui status --link bluetooth --bridge D0:1C` 6 of 6, about 3 s each; with no bridge named 3 of 3, about 5 s |
+| `wartui bluetooth pair --fresh`, then a bonded resume | passed |
+| `wartui bluetooth forget`, then `pair` | passed; `forget` removed the PC's BlueZ entry by the id |
+| USB host while the stand-in was linked | the stand-in was dropped at once; both sets ran again once USB fell silent |
+| `wardrive esp` off | only the wartui set on air; the bonded PC linked |
+| `flash-bridge --link bluetooth`, twice, no bridge remembered | `installed and confirmed` both times, the link dropping and reconnecting by the id; 125 s each, the build included |
+| Faults | no host stop, no failed pairing, no kick, no refused start, stop or refresh |
+
+On the throwaway build, one `pair` straight after `forget` failed with BlueZ's
+`ConnectionAttemptFailed: Page Timeout` and passed on the next try, as on 2026-11-17
+([A pairing that did not connect](#a-pairing-that-did-not-connect)).
+
+**The app beside two sets.** Wardrive Go on a Pixel 8 found the bridge at once on that build and
+received data. On the build with the id in the status beacon (`8060bb7`), a day later, it
+connected and listed access points.
+
+**A scan beside the status beacon.** On that build the beacon's scan response carried no id. With
+the PC's BlueZ connected to the bridge and the beacon heard, `wartui status --link bluetooth
+--bridge D0:1C` failed 3 of 3 with `bridge D0:1C did not advertise over Bluetooth in 12s`: BlueZ
+held the beacon's service data in place of the id's. With the empty id in the beacon's scan
+response, the same sequence linked 3 of 3, in 2.4 s, 10.4 s and 15.6 s from the command's start:
+the two slow ones first heard the beacon's advertisement without its scan response. The Pixel 8's
+Bluetooth was on through both runs, with the bridge remembered by the app.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
@@ -229,3 +303,7 @@ run of each, about an hour apart.
 - The app beside the wider `chans=`: whether its channel picker offers 12, 13 and 169 to 177, and
   what list it sends.
 - A list shorter than the fleet in a drive, where the doubled nodes' extra lines meet a slow link.
+- The Wardrive Go app beside two advertising sets on iOS.
+- A bonded central on a resolvable address resuming beside two sets.
+- A scan for the id from a PC whose adapter holds no other connection.
+- The two sets' raw advertisement bytes.

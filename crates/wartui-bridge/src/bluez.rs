@@ -22,15 +22,19 @@
 //!
 //! **The calls block**, on libdbus, so callers run them off the async runtime.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use dbus::arg::{PropMap, prop_cast};
+use btleplug::api::bleuuid::uuid_from_u16;
+use dbus::arg::{PropMap, RefArg, Variant, cast, prop_cast};
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::ObjectManager;
 use dbus::message::MessageType;
 use dbus::strings::ErrorName;
 use dbus::{Message, Path};
 use thiserror::Error;
+use wartui_proto::ble::{ID_UUID, advertised_octets};
+use wartui_proto::wardrive_esp::beacon::COMPANY;
 
 const BLUEZ: &str = "org.bluez";
 const DEVICE: &str = "org.bluez.Device1";
@@ -74,8 +78,11 @@ pub struct Device {
     pub adapter: String,
     /// Its address, as BlueZ writes it.
     pub address: String,
-    /// The name it advertised, if BlueZ heard one.
+    /// The name it advertised, if BlueZ heard one: a label, never matched.
     pub name: Option<String>,
+    /// The bridge's last two octets, when the service data BlueZ holds carries its id. BlueZ
+    /// holds none for a device it has not heard since it started.
+    pub octets: Option<[u8; 2]>,
     /// Whether this PC holds a pairing with it.
     pub paired: bool,
 }
@@ -108,7 +115,27 @@ fn device_of(path: &Path<'_>, props: &PropMap) -> Option<Device> {
     let adapter = prop_cast::<Path<'static>>(props, "Adapter")?.to_string();
     let name = prop_cast::<String>(props, "Name").cloned();
     let paired = prop_cast::<bool>(props, "Paired").copied().unwrap_or(false);
-    Some(Device { path: path.to_string(), adapter, address, name, paired })
+    Some(Device {
+        path: path.to_string(),
+        adapter,
+        address,
+        name,
+        octets: octets_of(props),
+        paired,
+    })
+}
+
+/// The bridge's octets from a `Device1`'s `ServiceData` (`a{sv}`, keyed by UUID) and
+/// `ManufacturerData` (`a{qv}`), through [`advertised_octets`].
+fn octets_of(props: &PropMap) -> Option<[u8; 2]> {
+    let bytes = |value: &Variant<Box<dyn RefArg>>| cast::<Vec<u8>>(&value.0).cloned();
+    let key = uuid_from_u16(ID_UUID).to_string();
+    let services = prop_cast::<HashMap<String, Variant<Box<dyn RefArg>>>>(props, "ServiceData")?;
+    let id = services.iter().find(|(uuid, _)| uuid.eq_ignore_ascii_case(&key)).map(|(_, v)| v);
+    let id = bytes(id?)?;
+    let makers = prop_cast::<HashMap<u16, Variant<Box<dyn RefArg>>>>(props, "ManufacturerData");
+    let status = makers.and_then(|makers| bytes(makers.get(&COMPANY)?));
+    advertised_octets(Some(&id), status.as_deref())
 }
 
 /// Forget `device` on this PC: its pairing and everything BlueZ knows of it.
@@ -267,7 +294,51 @@ fn failed(error: dbus::Error) -> BluezError {
 
 #[cfg(test)]
 mod tests {
+    use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
+
     use super::*;
+
+    fn bytes(value: Vec<u8>) -> Variant<Box<dyn RefArg>> {
+        Variant(Box::new(value))
+    }
+
+    /// `Device1` properties with `service_data` under the id's UUID, as BlueZ spells it, and
+    /// `status` under the WardriveESP company id.
+    fn props(service_data: Option<Vec<u8>>, status: Option<Vec<u8>>) -> PropMap {
+        let mut props = PropMap::new();
+        if let Some(data) = service_data {
+            let key = "00005754-0000-1000-8000-00805F9B34FB".to_owned();
+            let services: HashMap<String, Variant<Box<dyn RefArg>>> =
+                HashMap::from([(key, bytes(data))]);
+            props.insert("ServiceData".to_owned(), Variant(Box::new(services)));
+        }
+        if let Some(status) = status {
+            let makers: HashMap<u16, Variant<Box<dyn RefArg>>> =
+                HashMap::from([(COMPANY, bytes(status))]);
+            props.insert("ManufacturerData".to_owned(), Variant(Box::new(makers)));
+        }
+        props
+    }
+
+    #[test]
+    fn bluez_reads_octets_when_service_data_carries_the_id() {
+        assert_eq!(octets_of(&props(Some(vec![0x44, 0xC0]), None)), Some([0x44, 0xC0]));
+    }
+
+    #[test]
+    fn bluez_reads_octets_from_status_when_id_is_empty() {
+        let mut status = [0; STATUS_MAX];
+        let len = beacon::status(&mut status, &Beacon::default(), [0x44, 0xC0], false);
+        let listed = props(Some(Vec::new()), Some(status[..len].to_vec()));
+        assert_eq!(octets_of(&listed), Some([0x44, 0xC0]));
+    }
+
+    #[test]
+    fn bluez_reads_no_octets_when_device_holds_no_id() {
+        // A BlueZ that restarted lists a paired bridge with no service data until it hears it.
+        assert_eq!(octets_of(&props(None, None)), None);
+        assert_eq!(octets_of(&props(Some(Vec::new()), None)), None);
+    }
 
     #[test]
     fn bluez_reads_pairing_as_rejected_when_bridge_ends_it() {

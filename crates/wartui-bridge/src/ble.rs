@@ -1,10 +1,13 @@
 //! Talking to a real bridge over Bluetooth, through its C6's GATT service
 //! (`wartui_proto::ble`), with `btleplug` on the tokio runtime the crate already runs.
 //!
-//! **Finding the bridge.** The C6 advertises `wartui XX:YY`, the bridge's last two octets, so a
-//! bridge is found by scanning for that name, for at most [`SCAN_FOR`]. The name carries two
-//! octets, so the first `Ready` is checked against the whole spec, and a bridge that only shares
-//! the name is refused. The rule is the serial transport's ([`look`]):
+//! **Finding the bridge.** The C6 advertises the bridge's id: service data under
+//! `wartui_proto::ble::ID_UUID` that carries its last two octets
+//! (`wartui_proto::ble::advertised_octets`). A scan matches the id, for at most [`SCAN_FOR`]. The
+//! advertised name is a label for a person, which the OS shows and the C6 may word as it likes,
+//! so nothing matches it. The id carries two octets, so the first `Ready` is checked against the
+//! whole spec, and a bridge that only shares the octets is refused. The rule is the serial
+//! transport's ([`look`]):
 //!
 //! - **A bridge named with `--bridge` is the only one taken**, remembered or not.
 //! - **A remembered bridge is tried first**, as the serial sweep opens its CH343 first: its
@@ -18,16 +21,19 @@
 //!
 //! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
-//! discovered or heard again: once it has a name, and at most [`NAME_READS`] times while it has
-//! none, since each read is a serial D-Bus round trip. A bridge is read again until it is heard
-//! advertising, because BlueZ first replays every device it knows as discovered, so a bonded
-//! bridge is read before the scan has heard it. A scan ends at once only on a bridge heard
-//! advertising whose whole advertised name the spec gives. Any other listens [`UNNAMED_LISTEN`]
-//! and lets [`choose`] decide, so a second bridge advertising nearby is seen rather than passed
-//! over, and a bonded bridge that is off is not taken while one that answers advertises. At the
-//! end of that listen it reads the OS's listing once, for a bridge that raised no event: one BlueZ
-//! lists as bonded and has not heard, or one that was advertising before the scan began. A bridge
-//! listed and never heard is still tried when it is the only one, since one BlueZ still holds a
+//! discovered or heard again, at most [`ID_READS`] times while they carry no id, since each read
+//! is a serial D-Bus round trip. A device left alone that way is read again whenever the adapter
+//! reports service data under the id from it, since that is the bridge being heard: a Linux
+//! central hears only one of the bridge's two pairs per 10 s discovery cycle, and BlueZ keeps no
+//! service data across its own restart, so the id can come late. A bridge is read again until it
+//! is heard advertising, because BlueZ first replays every device it knows as discovered, so a
+//! bonded bridge is read before the scan has heard it. A scan ends at once only on a bridge heard
+//! advertising whose two octets the spec gives. Any other listens [`LISTEN_FOR`] and lets
+//! [`choose`] decide, so a second bridge advertising nearby is seen rather than passed over, and a
+//! bonded bridge that is off is not taken while one that answers advertises. At the end of that
+//! listen it reads the OS's listing once, for a bridge that raised no event: one BlueZ lists as
+//! bonded and has not heard, or one that was advertising before the scan began. A bridge listed
+//! and never heard is still tried when it is the only one, since one BlueZ still holds a
 //! connection to does not advertise.
 //!
 //! **The P4 serves a central only once it owns the host queue**, which it takes on a subscription
@@ -116,19 +122,21 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
+use btleplug::api::bleuuid::uuid_from_u16;
 use btleplug::api::{
-    BDAddr, Central as _, CentralEvent, Characteristic, Manager as _, Peripheral as _, ScanFilter,
-    WriteType,
+    BDAddr, Central as _, CentralEvent, Characteristic, Manager as _, Peripheral as _,
+    PeripheralProperties, ScanFilter, WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures_util::StreamExt;
 use tokio::time::{Interval, MissedTickBehavior};
-use wartui_proto::ble::{ATT_MTU, DOWN_UUID, DOWN_VALUE_MAX, NAME_PREFIX, UP_UUID};
+use wartui_proto::ble::{ATT_MTU, DOWN_UUID, DOWN_VALUE_MAX, ID_UUID, UP_UUID, advertised_octets};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
     USB_TOOK_BRIDGE, decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::wardrive_esp::beacon::COMPANY;
 
 use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
@@ -138,12 +146,16 @@ use crate::{
     link_pair_awaited,
 };
 
-/// How long a scan looks for the bridge's name before giving up.
-pub const SCAN_FOR: Duration = Duration::from_secs(10);
+/// How long a scan looks for the bridge's id before giving up.
+///
+/// BlueZ restarts its discovery, and with it the controller's duplicate filter, every 10.24 s, so
+/// a bridge whose advertisement the first cycle missed is reported only in the second. On D0:1C
+/// 2 scans of 12 heard the id only at 10.4 s and 10.8 s, so a scan reaches into that second cycle.
+pub const SCAN_FOR: Duration = Duration::from_secs(12);
 
-/// How long an unnamed scan listens before taking the bridges it has heard, so a second one
-/// advertising nearby is seen rather than passed over.
-const UNNAMED_LISTEN: Duration = Duration::from_secs(2);
+/// How long a scan listens before taking the bridges it has heard, unless the spec gives both of
+/// one bridge's octets, so a second one advertising nearby is seen rather than passed over.
+const LISTEN_FOR: Duration = Duration::from_secs(2);
 
 /// How long a connect, a service discovery or the subscription may take. The subscription can
 /// wait on the link's encryption, which the C6's refusal of an unencrypted one prompts.
@@ -157,8 +169,8 @@ const CANCEL_WITHIN: Duration = Duration::from_secs(2);
 /// write that waits there past a second.
 const WRITE_WITHIN: Duration = Duration::from_secs(5);
 
-/// How many times a scan reads a device that has no name before it reads it no more.
-const NAME_READS: u8 = 3;
+/// How many times a scan reads a device that carries no id before it leaves it alone.
+const ID_READS: u8 = 3;
 
 /// How long a subscription waits for its `Ready` before warning that a USB host may hold the
 /// bridge. Past the P4's handback ([`HOST_SILENCE_SECS`]), so a USB host that just let go is not
@@ -272,47 +284,49 @@ impl BleTransport {
     }
 }
 
-/// The name the C6 advertises for the bridge `spec` names, when the spec gives both octets.
+/// The two octets the bridge `spec` names advertises, when the spec gives both.
 #[must_use]
-pub fn advertised_name(spec: &BridgeSpec) -> Option<String> {
+pub fn named_octets(spec: &BridgeSpec) -> Option<[u8; 2]> {
     let tail = match spec {
         BridgeSpec::Mac(mac) => &mac[4..],
         BridgeSpec::Tail(tail) if tail.len() >= 2 => &tail[tail.len() - 2..],
         BridgeSpec::Tail(_) | BridgeSpec::Path(_) => return None,
     };
-    Some(format!("{NAME_PREFIX}{}", mac::octets(tail)))
+    Some([tail[0], tail[1]])
 }
 
-/// The two octets an advertised `wartui XX:YY` carries, or `None` for any other name.
-fn advertised_tail(name: &str) -> Option<[u8; 2]> {
-    let rest = name.strip_prefix(NAME_PREFIX)?;
-    let (high, low) = rest.split_once(':')?;
-    Some([mac::pair(high)?, mac::pair(low)?])
-}
-
-/// Whether an advertised `name` is a bridge `spec` could name: any bridge without a spec.
+/// Whether a bridge advertising `octets` is one `spec` could name: any bridge without a spec.
 #[must_use]
-pub fn names_bridge(spec: Option<&BridgeSpec>, name: &str) -> bool {
-    let Some(tail) = advertised_tail(name) else { return false };
+pub fn matches_octets(spec: Option<&BridgeSpec>, octets: [u8; 2]) -> bool {
     match spec {
         None => true,
         Some(BridgeSpec::Path(_)) => false,
-        Some(BridgeSpec::Mac(mac)) => mac[4..] == tail,
+        Some(BridgeSpec::Mac(mac)) => mac[4..] == octets,
         Some(BridgeSpec::Tail(wanted)) => {
             let n = wanted.len().min(2);
-            wanted[wanted.len() - n..] == tail[2 - n..]
+            wanted[wanted.len() - n..] == octets[2 - n..]
         }
     }
 }
 
-/// A bridge a scan heard: the name it advertises, and the address the OS knows it by, or on
-/// macOS the identifier CoreBluetooth gives it.
+/// A bridge a scan heard: the octets it advertises, its name, and the address the OS knows it
+/// by, or on macOS the identifier CoreBluetooth gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advertiser {
-    /// Its advertised `wartui XX:YY`.
-    pub name: String,
+    /// The last two octets its id carries.
+    pub octets: [u8; 2],
+    /// The name it advertises, when the OS heard one: a label, never matched.
+    pub name: Option<String>,
     /// Its address, as [`crate::remember::BridgeMemory::on_bluetooth`] takes it.
     pub address: String,
+}
+
+impl Advertiser {
+    /// The bridge, for messages: its advertised name, else `bridge XX:YY`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.name.clone().unwrap_or_else(|| format!("bridge {}", mac::octets(&self.octets)))
+    }
 }
 
 /// Scan for up to [`SCAN_FOR`] for the bridge `spec` names, preferring one `preferred` names,
@@ -326,8 +340,8 @@ pub async fn find_advertiser(
     preferred: Option<&BridgeSpec>,
 ) -> Result<Advertiser, TransportError> {
     let adapter = open_adapter().await?;
-    let (name, peripheral) = scan(&adapter, spec, preferred).await?;
-    Ok(Advertiser { name, address: address_of(&peripheral) })
+    let (octets, name, peripheral) = scan(&adapter, spec, preferred).await?;
+    Ok(Advertiser { octets, name, address: address_of(&peripheral) })
 }
 
 /// Whether `msg` is the P4's notice that a USB host took the queue from this central.
@@ -396,28 +410,29 @@ pub fn look(
     Look { direct, preferred }
 }
 
-/// The one bridge among those `heard`, which holds at least one, each with its advertised name
+/// The one bridge among those `heard`, which holds at least one, each with its advertised octets
 /// and whether it is advertising now: those advertising when any is, since BlueZ also lists the
 /// bridges it has bonded, heard or not; then those `preferred` names when any is.
 ///
 /// # Errors
 /// [`TransportError::SeveralAdvertising`] when that leaves more than one.
 pub fn choose<P>(
-    mut heard: Vec<(String, bool, P)>,
+    mut heard: Vec<([u8; 2], bool, P)>,
     preferred: Option<&BridgeSpec>,
 ) -> Result<P, TransportError> {
     if heard.iter().any(|(_, live, _)| *live) {
         heard.retain(|(_, live, _)| *live);
     }
-    if heard.iter().any(|(name, _, _)| names_bridge(preferred, name)) {
-        heard.retain(|(name, _, _)| names_bridge(preferred, name));
+    if heard.iter().any(|(octets, _, _)| matches_octets(preferred, *octets)) {
+        heard.retain(|(octets, _, _)| matches_octets(preferred, *octets));
     }
     if let [_] = heard.as_slice() {
         return Ok(heard.remove(0).2);
     }
-    let mut names: Vec<String> = heard.into_iter().map(|(name, _, _)| name).collect();
-    names.sort();
-    Err(TransportError::SeveralAdvertising { names: names.join(", ") })
+    let mut octets: Vec<[u8; 2]> = heard.into_iter().map(|(octets, _, _)| octets).collect();
+    octets.sort_unstable();
+    let bridges: Vec<String> = octets.iter().map(|o| mac::octets(o).to_string()).collect();
+    Err(TransportError::SeveralAdvertising { bridges: bridges.join(", ") })
 }
 
 /// Whether a peripheral at `address`, with the OS identifier `id`, is the `remembered` one.
@@ -507,7 +522,7 @@ pub enum Heard {
     Event(LinkEvent),
     /// This connection's first `Ready`, naming the bridge it proves: remember it.
     Proved(Mac),
-    /// A `Ready` from a bridge the spec does not name, which shares only its advertised name.
+    /// A `Ready` from a bridge the spec does not name, which shares only its advertised octets.
     WrongBridge(Mac),
 }
 
@@ -714,11 +729,34 @@ fn bluetooth(error: btleplug::Error) -> TransportError {
     TransportError::Bluetooth(error.to_string())
 }
 
-/// The name a peripheral advertises, if any.
-async fn name_of(peripheral: &Peripheral) -> Option<(String, bool)> {
-    let props = peripheral.properties().await.ok()??;
-    let live = props.rssi.is_some();
-    props.local_name.or(props.advertisement_name).map(|name| (name, live))
+/// What one read of a peripheral's properties found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Read {
+    /// The bridge's last two octets, when it carries the id.
+    octets: Option<[u8; 2]>,
+    /// The name it advertises, when the OS heard one: a label only.
+    name: Option<String>,
+    /// Whether it is advertising now.
+    live: bool,
+}
+
+impl Read {
+    /// What `props` say: the id from their service data under [`ID_UUID`] and the WardriveESP
+    /// status beside it ([`advertised_octets`]).
+    fn of(props: PeripheralProperties) -> Self {
+        let id = props.service_data.get(&uuid_from_u16(ID_UUID));
+        let status = props.manufacturer_data.get(&COMPANY);
+        Self {
+            octets: advertised_octets(id.map(Vec::as_slice), status.map(Vec::as_slice)),
+            name: props.local_name.or(props.advertisement_name),
+            live: props.rssi.is_some(),
+        }
+    }
+}
+
+/// Read a peripheral's properties, if the OS has them.
+async fn read_of(peripheral: &Peripheral) -> Option<Read> {
+    peripheral.properties().await.ok()?.map(Read::of)
 }
 
 /// How a peripheral is remembered: its address, or the OS's identifier where the address is
@@ -729,7 +767,7 @@ fn address_of(peripheral: &Peripheral) -> String {
 }
 
 /// The peripheral to connect to, by [`look`]: the remembered one when the OS lists it and no
-/// connection straight to it has failed, else the one a scan hears advertising the name. `true`
+/// connection straight to it has failed, else the one a scan hears advertising the id. `true`
 /// beside it when it is the remembered one, reached without a scan.
 async fn find(
     adapter: &Adapter,
@@ -748,113 +786,155 @@ async fn find(
             return Ok((known, true));
         }
     }
-    Ok((scan(adapter, spec, preferred.as_ref()).await?.1, false))
+    Ok((scan(adapter, spec, preferred.as_ref()).await?.2, false))
+}
+
+/// A bridge a scan heard, as [`choose`] takes it: its octets, whether it is advertising, and its
+/// name beside the peripheral.
+type Bridge<P> = ([u8; 2], bool, (Option<String>, P));
+
+/// A bridge one scan has heard.
+#[derive(Debug)]
+struct Kept<I, P> {
+    id: I,
+    octets: [u8; 2],
+    name: Option<String>,
+    /// Whether it has been heard advertising.
+    live: bool,
+    peripheral: P,
 }
 
 /// The bridges one scan has heard, by the OS's identifier `I` for each peripheral `P`, with their
-/// names and whether each has been heard advertising.
+/// octets and whether each has been heard advertising.
 struct Hearing<'a, I, P> {
     spec: Option<&'a BridgeSpec>,
-    bridges: Vec<(I, String, bool, P)>,
-    /// Peripherals not read again: named and not a bridge, or unnamed after [`NAME_READS`].
-    done: HashSet<I>,
-    /// How many times each peripheral still unnamed has been read.
-    unnamed: HashMap<I, u8>,
+    bridges: Vec<Kept<I, P>>,
+    /// Bridges `spec` does not name, never read again.
+    others: HashSet<I>,
+    /// Peripherals read [`ID_READS`] times with no id, read again only when heard with one.
+    left_alone: HashSet<I>,
+    /// How many times each peripheral not yet identified has been read.
+    unidentified: HashMap<I, u8>,
 }
 
 impl<'a, I: Clone + Eq + Hash, P> Hearing<'a, I, P> {
     fn new(spec: Option<&'a BridgeSpec>) -> Self {
-        Self { spec, bridges: Vec::new(), done: HashSet::new(), unnamed: HashMap::new() }
-    }
-
-    /// Whether the scan can end before [`UNNAMED_LISTEN`]: the spec gives a whole advertised name,
-    /// so it names one bridge, and that bridge has been heard advertising.
-    fn settled(&self) -> bool {
-        self.spec.and_then(advertised_name).is_some()
-            && self.bridges.iter().any(|(_, _, live, _)| *live)
-    }
-
-    /// Whether a hearing of `id` is worth reading its properties for: any device not done with,
-    /// except a bridge already heard advertising.
-    fn wants(&self, id: &I) -> bool {
-        match self.bridges.iter().find(|(heard, ..)| heard == id) {
-            Some((_, _, live, _)) => !live,
-            None => !self.done.contains(id),
+        Self {
+            spec,
+            bridges: Vec::new(),
+            others: HashSet::new(),
+            left_alone: HashSet::new(),
+            unidentified: HashMap::new(),
         }
     }
 
-    /// Take what a read of `peripheral` found: its name and whether it is advertising, if it has
-    /// a name. A bridge `spec` names is kept, and one already kept is marked advertising once a
-    /// read says so.
-    fn noted(&mut self, id: I, peripheral: P, read: Option<(String, bool)>) {
-        if let Some((_, _, live, _)) = self.bridges.iter_mut().find(|(heard, ..)| *heard == id) {
-            *live |= read.is_some_and(|(_, now)| now);
+    /// Whether the scan can end before [`LISTEN_FOR`]: the spec gives both octets, so it names
+    /// one bridge, and that bridge has been heard advertising.
+    fn settled(&self) -> bool {
+        self.spec.and_then(named_octets).is_some() && self.bridges.iter().any(|kept| kept.live)
+    }
+
+    /// Whether a hearing of `id` is worth reading its properties for: any device but a bridge
+    /// already heard advertising and one `spec` does not name, and not one left alone unless it
+    /// was `heard_with_id`.
+    fn wants(&self, id: &I, heard_with_id: bool) -> bool {
+        match self.bridges.iter().find(|kept| kept.id == *id) {
+            Some(kept) => !kept.live,
+            None => !self.others.contains(id) && (heard_with_id || !self.left_alone.contains(id)),
+        }
+    }
+
+    /// Take what a read of `peripheral` found. A bridge `spec` names is kept, and one already
+    /// kept is marked advertising once a read says so. A read with no id counts towards
+    /// [`ID_READS`].
+    fn noted(&mut self, id: I, peripheral: P, read: Option<Read>) {
+        if let Some(kept) = self.bridges.iter_mut().find(|kept| kept.id == id) {
+            if let Some(read) = read {
+                kept.live |= read.live;
+                kept.name = kept.name.take().or(read.name);
+            }
             return;
         }
-        let Some((name, live)) = read else {
-            let reads = self.unnamed.entry(id.clone()).or_default();
-            *reads += 1;
-            if *reads >= NAME_READS {
-                self.unnamed.remove(&id);
-                self.done.insert(id);
+        let Some((octets, read)) = read.and_then(|read| Some((read.octets?, read))) else {
+            if !self.left_alone.contains(&id) {
+                let reads = self.unidentified.entry(id.clone()).or_default();
+                *reads += 1;
+                if *reads >= ID_READS {
+                    self.unidentified.remove(&id);
+                    self.left_alone.insert(id);
+                }
             }
             return;
         };
-        self.unnamed.remove(&id);
-        if names_bridge(self.spec, &name) {
-            self.bridges.push((id, name, live, peripheral));
+        self.unidentified.remove(&id);
+        self.left_alone.remove(&id);
+        if matches_octets(self.spec, octets) {
+            let Read { name, live, .. } = read;
+            self.bridges.push(Kept { id, octets, name, live, peripheral });
         } else {
-            self.done.insert(id);
+            self.others.insert(id);
         }
     }
 
-    /// The bridges heard, as [`choose`] takes them.
-    fn into_bridges(self) -> Vec<(String, bool, P)> {
+    /// The bridges heard, as [`choose`] takes them, each with its name.
+    fn into_bridges(self) -> Vec<Bridge<P>> {
         self.bridges
             .into_iter()
-            .map(|(_, name, live, peripheral)| (name, live, peripheral))
+            .map(|kept| (kept.octets, kept.live, (kept.name, kept.peripheral)))
             .collect()
     }
 }
 
 /// Scan for up to [`SCAN_FOR`] for a bridge `spec` names, preferring one `preferred` names, and
-/// return its advertised name beside it.
+/// return its octets and name beside it.
 async fn scan(
     adapter: &Adapter,
     spec: Option<&BridgeSpec>,
     preferred: Option<&BridgeSpec>,
-) -> Result<(String, Peripheral), TransportError> {
+) -> Result<([u8; 2], Option<String>, Peripheral), TransportError> {
     // Opened before the scan starts, so nothing it hears goes by unreported.
     let mut events = adapter.events().await.map_err(bluetooth)?;
     adapter.start_scan(ScanFilter::default()).await.map_err(bluetooth)?;
     let heard = listen(adapter, &mut events, spec).await;
     let _ = adapter.stop_scan().await;
-    let heard = heard?.into_iter().map(|(name, live, p)| (name.clone(), live, (name, p)));
+    let heard =
+        heard?.into_iter().map(|(octets, live, (name, p))| (octets, live, (octets, name, p)));
     choose(heard.collect(), preferred)
 }
 
-/// Read `peripheral`'s name, when `hearing` wants it, and note what the read found.
-async fn note(hearing: &mut Hearing<'_, PeripheralId, Peripheral>, peripheral: Peripheral) {
+/// Read `peripheral`'s properties, when `hearing` wants them, and note what the read found. A
+/// peripheral `heard_with_id` is read even once left alone.
+async fn note(
+    hearing: &mut Hearing<'_, PeripheralId, Peripheral>,
+    peripheral: Peripheral,
+    heard_with_id: bool,
+) {
     let id = peripheral.id();
-    if hearing.wants(&id) {
-        let read = name_of(&peripheral).await;
+    if hearing.wants(&id, heard_with_id) {
+        let read = read_of(&peripheral).await;
         hearing.noted(id, peripheral, read);
     }
 }
 
-/// Read the adapter's events until a bridge `spec` names is heard: at once when the spec gives its
-/// whole advertised name and it is heard advertising ([`Hearing::settled`]), else once
-/// [`UNNAMED_LISTEN`] has passed. At that point the OS's listing is read once, for a bridge that
-/// raised no event.
+/// The bridge `spec` names, for the message when none is found: its octets when the spec gives
+/// both, else the spec as written.
+fn sought(spec: &BridgeSpec) -> String {
+    named_octets(spec).map_or_else(|| spec.to_string(), |octets| mac::octets(&octets).to_string())
+}
+
+/// Read the adapter's events until a bridge `spec` names is heard: at once when the spec gives
+/// both its octets and it is heard advertising ([`Hearing::settled`]), else once [`LISTEN_FOR`]
+/// has passed. At that point the OS's listing is read once, for a bridge that raised no event.
 async fn listen(
     adapter: &Adapter,
     events: &mut Events,
     spec: Option<&BridgeSpec>,
-) -> Result<Vec<(String, bool, Peripheral)>, TransportError> {
+) -> Result<Vec<Bridge<Peripheral>>, TransportError> {
     let started = tokio::time::Instant::now();
-    let (listened, give_up) = (started + UNNAMED_LISTEN, started + SCAN_FOR);
+    let (listened, give_up) = (started + LISTEN_FOR, started + SCAN_FOR);
     let mut hearing = Hearing::new(spec);
     let mut listed = false;
+    let id_key = uuid_from_u16(ID_UUID);
     loop {
         if hearing.settled() {
             break;
@@ -862,7 +942,7 @@ async fn listen(
         if !listed && tokio::time::Instant::now() >= listened {
             listed = true;
             for peripheral in adapter.peripherals().await.map_err(bluetooth)? {
-                note(&mut hearing, peripheral).await;
+                note(&mut hearing, peripheral, false).await;
             }
         }
         if listed && !hearing.bridges.is_empty() {
@@ -870,9 +950,7 @@ async fn listen(
         }
         if tokio::time::Instant::now() >= give_up {
             return Err(TransportError::NotFound {
-                name: spec
-                    .and_then(advertised_name)
-                    .unwrap_or_else(|| format!("{NAME_PREFIX}XX:YY")),
+                bridge: spec.map(sought),
                 secs: SCAN_FOR.as_secs(),
             });
         }
@@ -885,10 +963,19 @@ async fn listen(
                     | CentralEvent::DeviceUpdated(id)
                     | CentralEvent::RssiUpdate { id, .. },
                 ) => {
-                    if hearing.wants(&id)
+                    if hearing.wants(&id, false)
                         && let Ok(peripheral) = adapter.peripheral(&id).await
                     {
-                        note(&mut hearing, peripheral).await;
+                        note(&mut hearing, peripheral, false).await;
+                    }
+                }
+                // The bridge heard: BlueZ reports its service data on every advertisement.
+                Some(CentralEvent::ServiceDataAdvertisement { id, service_data }) => {
+                    let with_id = service_data.contains_key(&id_key);
+                    if hearing.wants(&id, with_id)
+                        && let Ok(peripheral) = adapter.peripheral(&id).await
+                    {
+                        note(&mut hearing, peripheral, with_id).await;
                     }
                 }
                 Some(_) => {}
@@ -906,10 +993,8 @@ async fn listen(
 
 /// The bridge as the operator names it, for the messages: its advertised octets.
 async fn label_of(peripheral: &Peripheral, transport: &BleTransport) -> String {
-    if let Some((name, _)) = name_of(peripheral).await
-        && let Some(tail) = advertised_tail(&name)
-    {
-        return mac::octets(&tail).to_string();
+    if let Some(octets) = read_of(peripheral).await.and_then(|read| read.octets) {
+        return mac::octets(&octets).to_string();
     }
     match (&transport.spec, transport.memory.recall()) {
         (Some(spec), _) => spec.to_string(),
@@ -1271,10 +1356,14 @@ fn refusal(label: &str, error: &btleplug::Error) -> Option<Failure> {
 
 #[cfg(test)]
 mod tests {
+    use btleplug::api::PeripheralProperties;
+    use btleplug::api::bleuuid::uuid_from_u16;
     use tokio::time::Instant;
+    use wartui_proto::ble::ID_UUID;
+    use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, STATUS_MAX};
 
     use super::{
-        BridgeSpec, CONNECT_WITHIN, End, Hearing, IDENTIFY_EVERY, NAME_READS, asker, choose,
+        BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, Read, asker, choose,
         subscribe, unless_closed,
     };
     use crate::link_pair;
@@ -1285,50 +1374,123 @@ mod tests {
 
     const BRIDGE: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
 
-    /// A read that found `name`, advertising now or not.
-    fn read(name: &str, live: bool) -> Option<(String, bool)> {
-        Some((name.to_owned(), live))
+    /// A read that found the bridge `octets`, advertising now or not.
+    fn read(octets: [u8; 2], live: bool) -> Option<Read> {
+        Some(Read { octets: Some(octets), name: None, live })
+    }
+
+    /// A read of a device that carries no id.
+    fn unidentified(live: bool) -> Option<Read> {
+        Some(Read { octets: None, name: Some("Pixel 8".to_owned()), live })
+    }
+
+    #[test]
+    fn ble_read_takes_octets_when_service_data_carries_the_id() {
+        let mut props = PeripheralProperties {
+            local_name: Some("wartui 44:C0".to_owned()),
+            rssi: Some(-60),
+            ..PeripheralProperties::default()
+        };
+        props.service_data.insert(uuid_from_u16(ID_UUID), vec![0x44, 0xC0]);
+        let want =
+            Read { octets: Some([0x44, 0xC0]), name: Some("wartui 44:C0".to_owned()), live: true };
+        assert_eq!(Read::of(props), want);
+    }
+
+    #[test]
+    fn ble_read_takes_octets_from_status_when_id_is_empty() {
+        // The phones' pair: an empty id beside the WardriveESP status.
+        let mut status = [0; STATUS_MAX];
+        let len = beacon::status(&mut status, &Beacon::default(), [0x44, 0xC0], false);
+        let mut props = PeripheralProperties::default();
+        props.service_data.insert(uuid_from_u16(ID_UUID), Vec::new());
+        props.manufacturer_data.insert(COMPANY, status[..len].to_vec());
+        assert_eq!(Read::of(props).octets, Some([0x44, 0xC0]));
+    }
+
+    #[test]
+    fn ble_read_finds_no_octets_when_only_the_name_says_bridge() {
+        // A BlueZ restarted since it last heard the bridge lists the name and no service data.
+        let props = PeripheralProperties {
+            local_name: Some("wartui 44:C0".to_owned()),
+            ..PeripheralProperties::default()
+        };
+        assert_eq!(Read::of(props).octets, None);
     }
 
     #[test]
     fn ble_hearing_marks_bridge_live_when_heard_again_after_a_listed_read() {
         // BlueZ replays a bonded bridge as discovered before the scan has heard it.
         let mut hearing = Hearing::new(None);
-        hearing.noted(1, "remembered", read("wartui 44:C0", false));
-        hearing.noted(2, "other", read("wartui A1:B0", true));
-        assert!(hearing.wants(&1), "a bridge not heard advertising is read again");
-        hearing.noted(1, "remembered", read("wartui 44:C0", true));
-        assert!(!hearing.wants(&1), "nor once it has been");
+        hearing.noted(1, "remembered", read([0x44, 0xC0], false));
+        hearing.noted(2, "other", read([0xA1, 0xB0], true));
+        assert!(hearing.wants(&1, false), "a bridge not heard advertising is read again");
+        hearing.noted(1, "remembered", read([0x44, 0xC0], true));
+        assert!(!hearing.wants(&1, false), "nor once it has been");
+        assert!(!hearing.wants(&1, true), "even when heard with the id");
         let chosen = choose(hearing.into_bridges(), Some(&BridgeSpec::Mac(BRIDGE)));
-        assert_eq!(chosen.expect("one bridge"), "remembered");
+        assert_eq!(chosen.expect("one bridge").1, "remembered");
     }
 
     #[test]
-    fn ble_hearing_reads_device_no_more_when_named_or_unnamed_past_the_cap() {
+    fn ble_hearing_leaves_device_alone_when_reads_without_id_reach_the_cap() {
         let mut hearing: Hearing<'_, u8, ()> = Hearing::new(None);
-        hearing.noted(1, (), read("Pixel 8", true));
-        assert!(!hearing.wants(&1), "named and not a bridge");
-        for _ in 1..NAME_READS {
-            hearing.noted(2, (), None);
-            assert!(hearing.wants(&2));
+        for _ in 1..ID_READS {
+            hearing.noted(1, (), unidentified(true));
+            assert!(hearing.wants(&1, false));
         }
-        hearing.noted(2, (), None);
-        assert!(!hearing.wants(&2), "unnamed after {NAME_READS} reads");
+        hearing.noted(1, (), unidentified(true));
+        assert!(!hearing.wants(&1, false), "left alone after {ID_READS} reads");
+        assert!(hearing.wants(&1, true), "but read when heard with the id");
     }
 
     #[test]
-    fn ble_hearing_keeps_bridge_when_it_is_named_on_a_later_read() {
+    fn ble_hearing_keeps_bridge_when_it_is_identified_on_a_later_read() {
         let mut hearing = Hearing::new(None);
-        hearing.noted(1, "late", None);
-        hearing.noted(1, "late", read("wartui 44:C0", true));
-        assert_eq!(hearing.into_bridges(), [("wartui 44:C0".to_owned(), true, "late")]);
+        hearing.noted(1, "late", unidentified(true));
+        hearing.noted(1, "late", read([0x44, 0xC0], true));
+        assert_eq!(hearing.into_bridges(), [([0x44, 0xC0], true, (None, "late"))]);
+    }
+
+    #[test]
+    fn ble_hearing_keeps_bridge_when_service_data_event_follows_reads_that_ran_out() {
+        // A Linux central hears one of the bridge's two pairs per 10 s cycle, so the id can
+        // arrive after the reads ran out.
+        let mut hearing = Hearing::new(None);
+        for _ in 0..ID_READS {
+            hearing.noted(1, "late", unidentified(false));
+        }
+        assert!(!hearing.wants(&1, false));
+        assert!(hearing.wants(&1, true), "the service-data event reads it");
+        hearing.noted(1, "late", read([0x44, 0xC0], true));
+        assert_eq!(hearing.into_bridges(), [([0x44, 0xC0], true, (None, "late"))]);
+    }
+
+    #[test]
+    fn ble_hearing_drops_bridge_when_spec_names_another_bridges_octets() {
+        let named = spec("44:C0");
+        let mut hearing: Hearing<'_, u8, ()> = Hearing::new(Some(&named));
+        hearing.noted(1, (), read([0xA1, 0xB0], true));
+        assert!(!hearing.wants(&1, false), "another bridge is not read again");
+        assert!(!hearing.wants(&1, true), "even when heard with the id");
+        assert!(hearing.into_bridges().is_empty());
+    }
+
+    #[test]
+    fn ble_hearing_keeps_name_when_a_later_read_gives_one() {
+        let mut hearing = Hearing::new(None);
+        hearing.noted(1, (), read([0x44, 0xC0], false));
+        let named = Read { octets: None, name: Some("wartui 44:C0".to_owned()), live: true };
+        hearing.noted(1, (), Some(named));
+        let name = Some("wartui 44:C0".to_owned());
+        assert_eq!(hearing.into_bridges(), [([0x44, 0xC0], true, (name, ()))]);
     }
 
     #[test]
     fn ble_hearing_settles_when_bridge_named_in_full_is_heard_advertising() {
         let named = spec("44:C0");
         let mut hearing = Hearing::new(Some(&named));
-        hearing.noted(1, (), read("wartui 44:C0", true));
+        hearing.noted(1, (), read([0x44, 0xC0], true));
         assert!(hearing.settled());
     }
 
@@ -1337,25 +1499,25 @@ mod tests {
         // BlueZ replays a bonded bridge that is off as discovered, with no RSSI.
         let named = spec("02:00:5E:10:44:C0");
         let mut hearing = Hearing::new(Some(&named));
-        hearing.noted(1, (), read("wartui 44:C0", false));
+        hearing.noted(1, (), read([0x44, 0xC0], false));
         assert!(!hearing.settled());
     }
 
     #[test]
-    fn ble_hearing_waits_for_listing_when_partial_name_matches_one_live_bridge() {
+    fn ble_hearing_waits_for_listing_when_one_octet_matches_one_live_bridge() {
         // `C0` names every bridge ending in it, so `choose` has to see them all.
         let named = spec("C0");
         let mut hearing = Hearing::new(Some(&named));
-        hearing.noted(1, (), read("wartui 44:C0", true));
+        hearing.noted(1, (), read([0x44, 0xC0], true));
         assert!(!hearing.settled());
     }
 
     #[tokio::test(start_paused = true)]
     async fn ble_subscribe_fails_when_bridge_does_not_answer_in_time() {
         let start = Instant::now();
-        let failed = subscribe(std::future::pending(), "wartui 44:C0").await.err();
+        let failed = subscribe(std::future::pending(), "44:C0").await.err();
         let failure = failed.expect("an unanswered subscription fails");
-        assert_eq!(failure.reason, "wartui 44:C0 did not answer the subscription");
+        assert_eq!(failure.reason, "44:C0 did not answer the subscription");
         assert_eq!(start.elapsed(), CONNECT_WITHIN);
     }
 
@@ -1364,7 +1526,7 @@ mod tests {
         // A quit while the C6 has yet to answer: the connection lets the bridge go at once.
         let (handle, plumbing) = link_pair();
         let start = Instant::now();
-        let subscribing = subscribe(std::future::pending(), "wartui 44:C0");
+        let subscribing = subscribe(std::future::pending(), "44:C0");
         drop(handle);
         let end = unless_closed(subscribing, &plumbing, false).await;
         assert!(matches!(end, Some(End::HandleDropped)));

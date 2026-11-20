@@ -41,20 +41,37 @@ A linked phone counts as the bridge's host and holds it alone.
 
 ## What a phone sees
 
-**Advertising.** A legacy advertisement holds 31 bytes and cannot carry two 128-bit UUIDs and the
-name, so what it carries depends on the setting and on whether a central is connected.
+**Advertising.** A legacy advertisement holds 31 bytes and cannot carry two 128-bit UUIDs, so the
+bridge advertises one set per service, all from its one address.
 
-| State | Advertisement | Scan response |
+| State | Sets on air |
+| --- | --- |
+| on, no central | the wartui set and the WardriveESP set, connectable, every 100 ms |
+| on, a central connected | the status beacon, not connectable, about once a second |
+| off, no central | the wartui set, connectable, every 100 ms |
+| off, a central connected | none |
+
+"On" is the setting on and USB not holding the bridge.
+
+| Set | Advertisement | Scan response |
 | --- | --- | --- |
-| on, no central | connectable, every 100 ms: flags, the WardriveESP service UUID, the advert extras | the name, `wartui XX:YY`, and status bytes 0-8 |
-| on, a central connected | not connectable, about once a second: flags, the status UUID, the advert extras | the status, with the nickname |
-| off, no central | connectable, every 100 ms: flags, the name | the wartui link's service UUID |
-| off, a central connected | nothing | nothing |
+| wartui | flags, the wartui link's service UUID, the id with the bridge's last two octets | the name, `wartui XX:YY` |
+| WardriveESP | flags, the WardriveESP service UUID, the advert extras | the name, status bytes 0-8, an empty id |
+| status beacon | flags, the status UUID, the advert extras | the status, with the nickname, then an empty id when the nickname is 14 bytes or shorter |
 
-"On" is the setting on and USB not holding the bridge. The name is `wartui XX:YY`, the bridge's
-last two octets, which is how a wartui host finds the bridge. The status UUID is
-`0547686F-7374-4553-5042-726964675354`. It replaces the service UUID while a central is connected,
-whether a phone or a wartui host, so an app does not try a bridge that is taken.
+The WardriveESP scan response is exactly full with the 12-character name.
+
+The id is service data under `0x5754` that marks the bridge. In the wartui set it carries the
+bridge's last two octets; in the WardriveESP set and the status beacon it is empty, and status
+bytes 7-8 carry them. A wartui host finds the bridge by the id, and the name is a label
+([`crates/wartui/README.md` § "The Bluetooth link"](../crates/wartui/README.md#the-bluetooth-link)).
+The beacon carries it because BlueZ replaces a device's service data with each advertisement it
+reports: a host connected to the bridge, or once connected, finds it by what it heard last, the
+beacon included.
+
+The status UUID is `0547686F-7374-4553-5042-726964675354`. It replaces the service UUID while a
+central is connected, whether a phone or a wartui host, so an app does not try a bridge that is
+taken.
 
 The status is manufacturer data under company id `0xFFFF`:
 

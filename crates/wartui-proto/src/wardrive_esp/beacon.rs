@@ -5,9 +5,12 @@
 //! C6 encodes it into its advertisement and scan response while it admits phones.
 //!
 //! **The status** is manufacturer data under [`COMPANY`] ([`status`]). The free board's scan
-//! response carries its fixed 9 bytes beside the name; while a central is connected the scan
-//! response carries it alone, with the app's nickname. **The extras** are 6 bytes of service data
-//! under [`EXTRAS_UUID`] in the advertisement, in two frames swapped every 5 s ([`extras`]).
+//! response carries its fixed 9 bytes between the name and an empty
+//! [`ID_UUID`](crate::ble::ID_UUID) service data, which tells a wartui host to read the bridge's
+//! octets from the status ([`bridge_octets`]). While a central is connected the scan response
+//! carries the status with the app's nickname, then the empty id when the nickname leaves room
+//! (14 bytes at most). **The extras** are 6 bytes of service data under [`EXTRAS_UUID`] in the
+//! advertisement, in two frames swapped every 5 s ([`extras`]).
 //!
 //! **The fields the bridge has no figure for are fixed**: the temperature is unknown, the board is
 //! generic, there is no battery gauge, screen or co-processor, and the USB, GPS and updating bits
@@ -45,6 +48,9 @@ pub const EXTRAS_CHANNELS: [u8; 42] = [
 
 /// The status's first byte.
 const MARK: u8 = b'W';
+
+/// Where the bridge's last two octets sit in the status.
+const BRIDGE_AT: usize = 7;
 
 /// The status's temperature byte: unknown.
 const TEMPERATURE_UNKNOWN: u8 = 0x80;
@@ -119,6 +125,17 @@ pub fn status(
     let nickname = &beacon.nickname;
     out[fixed.len()..fixed.len() + nickname.len()].copy_from_slice(nickname);
     fixed.len() + nickname.len()
+}
+
+/// The bridge's last two octets from status bytes (after the company id), or `None` for bytes
+/// that are not a status: shorter than its fixed bytes, or not led by its mark.
+#[must_use]
+pub fn bridge_octets(status: &[u8]) -> Option<[u8; 2]> {
+    if status.first() != Some(&MARK) {
+        return None;
+    }
+    let octets = status.get(BRIDGE_AT..BRIDGE_AT + 2)?;
+    Some([octets[0], octets[1]])
 }
 
 /// One extras frame (after the UUID): frame B when `second`.
