@@ -588,13 +588,8 @@ impl Ble {
     }
 }
 
-/// The byte that ends a torn piece of `stream`: `0x00` ends a COBS frame, and `\n` a phone's line.
-fn resync_byte(stream: Stream) -> u8 {
-    if stream == Stream::Phone { b'\n' } else { 0 }
-}
-
-/// A central took the host queue, and its first byte is at `at`: clear the ring, lead it with a
-/// resync byte, and credit up to `at`.
+/// A central took the host queue, and its first byte is at `at`: clear the ring, lead it with its
+/// stream's terminator ([`Stream::terminator`]), and credit up to `at`.
 pub fn host_start(shared: &Shared, at: u32) {
     let ble = &shared.ble;
     let mut inflow = ble.inflow.get();
@@ -604,7 +599,7 @@ pub fn host_start(shared: &Shared, at: u32) {
     let mut outbox = ble.outbox.borrow_mut();
     outbox.clear();
     // A cleared ring has room for it.
-    outbox.push_resync(resync_byte(ble.stream()));
+    outbox.push_resync(ble.stream().terminator());
     drop(outbox);
     credit(shared, true);
     ble.ready.signal(());
@@ -630,7 +625,7 @@ pub fn host_bytes(shared: &Shared, at: u32, bytes: &[u8]) {
     let mut outbox = ble.outbox.borrow_mut();
     // Without room, the central resynchronizes at the next terminator instead.
     if gap > 0 {
-        outbox.push_resync(resync_byte(ble.stream()));
+        outbox.push_resync(ble.stream().terminator());
     }
     let lost = bytes.len() - outbox.push(bytes);
     drop(outbox);
@@ -1314,6 +1309,20 @@ fn authorized(conn: &Conn<'_, '_>) -> bool {
     raw.security_level().is_ok_and(|level| level.encrypted()) && raw.is_bonded_peer()
 }
 
+/// Whether a central reading `stream` needs no bond: a phone reads an open service.
+const fn excused_from_bonding(stream: Stream) -> bool {
+    match stream {
+        Stream::Phone => true,
+        Stream::None | Stream::Host => false,
+    }
+}
+
+/// Whether the central already reads a stream other than `mine`: a central reads one stream, the
+/// first it subscribes to.
+fn reads_another(stream: Stream, mine: Stream) -> bool {
+    stream != Stream::None && stream != mine
+}
+
 /// Disconnect a central that holds no bond, count it in `unbonded_kicks`, and say why.
 fn kick(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
     shared.ble.count(|c| c.unbonded_kicks = c.unbonded_kicks.wrapping_add(1));
@@ -1506,7 +1515,7 @@ async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
 async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     let limit = if session.bondable { PAIR_DEADLINE } else { UNBONDABLE_DEADLINE };
     Timer::at(session.connected_at + limit).await;
-    if !authorized(conn) && shared.ble.stream() != Stream::Phone {
+    if !authorized(conn) && !excused_from_bonding(shared.ble.stream()) {
         kick(conn, session, shared, "not bonded and encrypted in time after connecting");
         core::future::pending::<()>().await;
     }
@@ -1610,14 +1619,14 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                     GattEvent::Write(write)
                         if Some(write.handle()) == up_cccd
                             && enables_notify(&write)
-                            && ble.stream() == Stream::Phone =>
+                            && reads_another(ble.stream(), Stream::Host) =>
                     {
                         write.reject(taken)
                     }
                     GattEvent::Write(write)
                         if Some(write.handle()) == tx_cccd
                             && enables_notify(&write)
-                            && (!ble.admitted() || ble.stream() == Stream::Host) =>
+                            && (!ble.admitted() || reads_another(ble.stream(), Stream::Phone)) =>
                     {
                         write.reject(taken)
                     }
@@ -1823,25 +1832,26 @@ fn owe_ack(ble: &Ble, ack: Option<u32>) {
 async fn notify(conn: &Conn<'_, '_>, server: &Server<'_>, shared: &Shared) -> ! {
     let ble = &shared.ble;
     let mut chunk = [0; VALUE_MAX];
-    loop {
-        let stream = ble.stream();
-        let idle = match stream {
-            Stream::None => true,
-            Stream::Host => ble.outbox.borrow().is_empty(),
-            Stream::Phone => ble.outbox.borrow().is_empty() && ble.acks.borrow().is_empty(),
-        };
-        if idle {
-            ble.ready.wait().await;
-            continue;
-        }
-        // An MTU exchange raises no event, so the notifier is where a change shows.
+    // An MTU exchange raises no event, so the notifier is where a change shows.
+    let mtu = || {
         let mtu = conn.raw().att_mtu();
         set_state(shared, |state| state.mtu = mtu);
-        let (characteristic, n) = if stream == Stream::Phone {
-            (&server.wardrive_esp.tx, phone_chunk(ble, mtu, &mut chunk))
-        } else {
-            let room = usize::from(mtu.saturating_sub(3)).min(VALUE_MAX);
-            (&server.link.up, ble.outbox.borrow_mut().take(&mut chunk[..room]))
+        mtu
+    };
+    loop {
+        let (characteristic, n) = match ble.stream() {
+            Stream::Host if !ble.outbox.borrow().is_empty() => {
+                let room = usize::from(mtu().saturating_sub(3)).min(VALUE_MAX);
+                (&server.link.up, ble.outbox.borrow_mut().take(&mut chunk[..room]))
+            }
+            Stream::Phone if !ble.outbox.borrow().is_empty() || !ble.acks.borrow().is_empty() => {
+                (&server.wardrive_esp.tx, phone_chunk(ble, mtu(), &mut chunk))
+            }
+            // Nothing to send, or no stream to send it on.
+            Stream::None | Stream::Host | Stream::Phone => {
+                ble.ready.wait().await;
+                continue;
+            }
         };
         // TrouBLE frees its packets inside its runner and offers nothing to wait on, so a full
         // pool is waited out with a back-off.

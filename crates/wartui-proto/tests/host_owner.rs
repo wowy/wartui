@@ -318,3 +318,11 @@ fn host_owner_admits_no_phone_when_setting_is_off() {
         assert!(!phones_admitted(false, holder));
     }
 }
+
+#[test]
+fn host_owner_reads_through_c6_when_holder_is_bluetooth_or_phone() {
+    assert!(Holder::Bluetooth.through_c6());
+    assert!(Holder::Phone.through_c6());
+    assert!(!Holder::None.through_c6());
+    assert!(!Holder::Usb.through_c6());
+}

@@ -124,7 +124,7 @@ use wartui_proto::ota::SECTOR;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, BleCounters, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held,
-    PacketReader, RECORD_MAX, RTS_THRESHOLD, WIRE_MAX, encode_down,
+    PacketReader, RECORD_MAX, RTS_THRESHOLD, Stream, WIRE_MAX, encode_down,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
@@ -358,11 +358,11 @@ impl Shared {
     }
 
     /// A host took the queue, on UART0 or over Bluetooth: clear what was queued for another. A
-    /// record part-way out is cut with `0x00`, which COBS ends a frame with, whatever a phone
-    /// before it was cut with.
+    /// record part-way out is cut with the host stream's terminator, which COBS ends a frame with,
+    /// whatever a phone before it was cut with.
     fn host_attached(&self) {
         let mut host = self.host.borrow_mut();
-        host.set_terminator(0x00);
+        host.set_terminator(Stream::Host.terminator());
         host.clear();
     }
 
@@ -377,20 +377,17 @@ impl Shared {
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
-        let owner = self.owner.get().owner();
-        if owner == HostOwner::None {
-            return;
-        }
+        // Each writer waits on its own signal: a central's is the C6 link's.
+        let writer = match self.owner.get().owner() {
+            HostOwner::None => return,
+            HostOwner::Usb => &self.pushed,
+            HostOwner::Bluetooth => &self.wake_link,
+        };
         let mut frame = [0; MAX_FRAME];
         // Every `BridgeToHost` fits `MAX_FRAME`.
         let Ok(len) = encode_frame(msg, &mut frame) else { return };
         self.host.borrow_mut().push(&frame[..len], is_priority(msg));
-        // Each writer waits on its own signal: a central's is the C6 link's.
-        if owner == HostOwner::Bluetooth {
-            self.wake_link.signal(());
-        } else {
-            self.pushed.signal(());
-        }
+        writer.signal(());
     }
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.

@@ -41,7 +41,7 @@
 use core::cell::{Cell, RefCell};
 
 use embassy_time::{Duration, Instant};
-use wartui_proto::host_owner::{Effect, Effects, Holder, Input};
+use wartui_proto::host_owner::{Effect, Effects, Input};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostOwner, LogStr, MAX_HOST_FRAME, USB_TOOK_BRIDGE,
     encode_frame,
@@ -146,12 +146,10 @@ const fn authorized(state: BleState) -> bool {
 
 /// What `state` is to the owner while the setting is `phones`.
 const fn reader(state: BleState, phones: bool) -> Reader {
-    if authorized(state) {
-        Reader::Host
-    } else if matches!(state.stream, Stream::Phone) && phones {
-        Reader::Phone
-    } else {
-        Reader::Neither
+    match state.stream {
+        Stream::Host if authorized(state) => Reader::Host,
+        Stream::Phone if phones => Reader::Phone,
+        Stream::None | Stream::Host | Stream::Phone => Reader::Neither,
     }
 }
 
@@ -313,7 +311,7 @@ pub fn pack(shared: &Shared, packer: &mut Packer<'_>, scratch: &mut [u8; HOST_BY
             notice.drop_it();
         }
     }
-    if !matches!(shared.owner.get().holder(), Holder::Bluetooth | Holder::Phone) {
+    if !shared.owner.get().holder().through_c6() {
         return;
     }
     let max = room(packer).min(HOST_BYTES_MAX);

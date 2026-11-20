@@ -100,6 +100,18 @@ pub enum Holder {
     Phone,
 }
 
+impl Holder {
+    /// Whether the holder reads the queue through the C6, down the radio link, rather than on
+    /// UART0 or not at all.
+    #[must_use]
+    pub const fn through_c6(self) -> bool {
+        match self {
+            Self::Bluetooth | Self::Phone => true,
+            Self::None | Self::Usb => false,
+        }
+    }
+}
+
 /// Whether the C6 may admit a phone: the setting is on and USB does not hold the queue.
 #[must_use]
 pub const fn phones_admitted(enabled: bool, holder: Holder) -> bool {
