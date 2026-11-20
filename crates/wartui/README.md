@@ -1277,8 +1277,9 @@ wartui bluetooth pair --bridge 44:C0
 2. **It scans for the bridge's id and pairs through BlueZ.** The pairing is Just Works: nothing to
    type, nothing to confirm.
 3. **It proves the bond.** It connects once and asks the bridge whether this PC is encrypted and
-   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`. Over USB first, the
-   bridge serves it 15 s after the USB link goes quiet.
+   bonded, then prints `wartui XX:YY paired and bonded, N bonds stored`, naming the bridge as it
+   advertises, or `bridge XX:YY` when the OS heard no name. Over USB first, the bridge serves it
+   15 s after the USB link goes quiet.
 
 A PC BlueZ already lists as paired is checked first. When the bridge refuses it as not paired,
 `pair` removes the pairing and pairs again, since BlueZ never does. A pairing the bridge refuses is

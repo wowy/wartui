@@ -10,11 +10,13 @@
 //! carrying the bridge's last two octets, the form `--bridge` takes ([`advertised_octets`]). The
 //! name, [`NAME_PREFIX`] and the same octets (`wartui 96:C4`), is a label a person reads.
 //!
-//! **The id is in both of the C6's pairs.** While it admits phones, the C6 advertises the wartui
-//! pair and the WardriveESP pair as two sets from one address. A Linux central's controller
+//! **The id is in everything the C6 advertises.** While it admits phones, the C6 advertises the
+//! wartui pair and the WardriveESP pair as two sets from one address. A Linux central's controller
 //! filters duplicates by address, and BlueZ restarts that filter only every 10 s, so a scan can
-//! hear either set alone. The phones' scan response has 4 bytes spare, room for an empty service
-//! data and no more, so there the id is empty and the octets are the WardriveESP status's
+//! hear either set alone. BlueZ also replaces a device's service data with each advertisement it
+//! reports, so a central connected to the bridge, or once connected, still finds it by the status
+//! beacon. The phones' scan response, and the beacon's when the app's nickname leaves room, carry
+//! an empty service data, and there the octets are the WardriveESP status's
 //! ([`crate::wardrive_esp::beacon::bridge_octets`]).
 //!
 //! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
@@ -42,7 +44,7 @@ pub const ID_UUID: u16 = 0x5754;
 /// the WardriveESP status's company id ([`COMPANY`](crate::wardrive_esp::beacon::COMPANY)).
 ///
 /// An `id` of two bytes is the octets: the wartui pair. An empty one points at the status: the
-/// phones' pair.
+/// phones' pair or the status beacon.
 #[must_use]
 pub fn advertised_octets(id: Option<&[u8]>, status: Option<&[u8]>) -> Option<[u8; 2]> {
     match id? {

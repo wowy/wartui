@@ -509,9 +509,10 @@ edit stops; follow the pointer before changing the rule.
   builds from that directory, and `src/ble.rs` fails a build whose pool disagrees. wartui's
   transport caps its writes at 179 whatever the MTU, so it updates a C6 that serves more.
   → `crates/wartui-proto/src/ble.rs`, `ATT_MTU`
-- **A host matches the bridge's advertised id, never its name, and the id is in both of the C6's
-  pairs.** A Linux central hears one set per scan, because its controller filters duplicates by
-  address and both sets share one. → `crates/wartui-proto/src/ble.rs` `//!`, `advertised_octets`;
+- **A host matches the bridge's advertised id, never its name, and the id is in everything the C6
+  advertises.** A Linux central hears one set per scan, because its controller filters duplicates
+  by address and both sets share one, and BlueZ keeps only the service data it heard last, the
+  status beacon's included. → `crates/wartui-proto/src/ble.rs` `//!`, `advertised_octets`;
   `crates/wartui-bridge/src/ble.rs` `//!`
 - **Every C6 advertisement goes through the extended advertising commands, and the C6 stops every
   set itself when a central connects.** A controller that has taken an extended command refuses

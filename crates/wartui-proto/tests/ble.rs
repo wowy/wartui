@@ -38,6 +38,18 @@ fn advertised_octets_reads_status_when_id_is_empty() {
 }
 
 #[test]
+fn advertised_octets_reads_status_when_empty_id_is_beside_linked_status() {
+    // The status beacon while a central is connected: the status carries the app's nickname.
+    let mut nickname = heapless::Vec::new();
+    nickname.extend_from_slice(b"Pixel 8 pocket").unwrap();
+    let linked = Beacon { nickname, ..Beacon::default() };
+    let mut out = [0; STATUS_MAX];
+    let len = beacon::status(&mut out, &linked, [0x44, 0xC0], true);
+    assert_eq!(len, 9 + 14);
+    assert_eq!(advertised_octets(Some(&[]), Some(&out[..len])), Some([0x44, 0xC0]));
+}
+
+#[test]
 fn advertised_octets_finds_none_when_empty_id_has_no_status() {
     assert_eq!(advertised_octets(Some(&[]), None), None);
     let status = free_status();

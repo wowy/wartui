@@ -8,8 +8,9 @@
 //! response carries its fixed 9 bytes between the name and an empty
 //! [`ID_UUID`](crate::ble::ID_UUID) service data, which tells a wartui host to read the bridge's
 //! octets from the status ([`bridge_octets`]). While a central is connected the scan response
-//! carries the status alone, with the app's nickname. **The extras** are 6 bytes of service data
-//! under [`EXTRAS_UUID`] in the advertisement, in two frames swapped every 5 s ([`extras`]).
+//! carries the status with the app's nickname, then the empty id when the nickname leaves room
+//! (14 bytes at most). **The extras** are 6 bytes of service data under [`EXTRAS_UUID`] in the
+//! advertisement, in two frames swapped every 5 s ([`extras`]).
 //!
 //! **The fields the bridge has no figure for are fixed**: the temperature is unknown, the board is
 //! generic, there is no battery gauge, screen or co-processor, and the USB, GPS and updating bits

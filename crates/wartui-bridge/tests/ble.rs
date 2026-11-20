@@ -1,5 +1,5 @@
-//! The Bluetooth transport's pure parts: matching the advertised id, where it looks, writes, and what a subscription
-//! admits.
+//! The Bluetooth transport's pure parts: matching the advertised id, where it looks, writes, and
+//! what a subscription admits.
 //!
 //! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
 //! are checked on the bench.

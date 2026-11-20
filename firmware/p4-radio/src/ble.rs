@@ -100,7 +100,7 @@
 //! - while a central is connected, whatever it reads, the C6 advertises the status beacon beside
 //!   it as one set ([`linked`]): not connectable, about once a second, under the status UUID in
 //!   place of the service's, so an app looking for the service does not try a board that is
-//!   taken, with the whole status in the scan response;
+//!   taken, with the whole status in the scan response, and an empty id when it fits;
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
 //!   a line, or part of one longer than the frame's room. TrouBLE keeps a bonded central's TX
 //!   subscription across its connections, so it counts only once the central writes it on the
@@ -122,11 +122,14 @@
 //! controller that has taken one refuses the legacy ones. Their data commands reach the
 //! controller through `src/hci.rs`, which encodes them right.
 //!
-//! - **Both pairs carry the bridge's id** (`wartui_proto::ble::ID_UUID`). Both sets share the
-//!   bridge's address, a Linux central's controller filters duplicates by address, and BlueZ
-//!   restarts that filter only every 10 s, so a scan hears one set: of 8 scans on D0:1C, 4 heard
-//!   the wartui set in their first cycle. The wartui pair carries the octets as the id; the
-//!   phones' pair has room for an empty id alone, beside the status that carries them.
+//! - **Every advertisement carries the bridge's id** (`wartui_proto::ble::ID_UUID`), the status
+//!   beacon's when the nickname leaves room. Both sets share the bridge's address, a Linux
+//!   central's controller filters duplicates by address, and BlueZ restarts that filter only every
+//!   10 s, so a scan hears one set: of 8 scans on D0:1C, 4 heard the wartui set in their first
+//!   cycle. BlueZ also replaces a device's service data with each advertisement it reports, so a
+//!   central that is connected, or was, finds the bridge only by what it heard last, the beacon
+//!   included. The wartui pair carries the octets as the id; the phones' pair and the beacon have
+//!   room for an empty id alone, beside the status that carries them.
 //! - **The C6 stops every set itself once a central connects** ([`stop_sets`]). TrouBLE's
 //!   `accept` marks advertising idle and stops nothing, so the other set stays enabled. TrouBLE
 //!   loads its resolving list whenever it believes advertising is idle, the controller refuses
@@ -927,7 +930,8 @@ async fn advertise(
     let mut solo = false;
     loop {
         let admitted = shared.ble.admitted();
-        let phones = if admitted && !core::mem::take(&mut solo) {
+        let alone = core::mem::take(&mut solo);
+        let phones = if admitted && !alone {
             let phones = free_payload(name.as_bytes(), bridge, shared);
             if phones.is_none() {
                 shared.error(format_args!(
@@ -976,7 +980,7 @@ async fn advertise(
             }
             Err(err) if phones.is_some() => {
                 shared.error(format_args!(
-                    "Bluetooth advertises wartui alone: the WardriveESP set would not start: {err:?}"
+                    "Bluetooth advertises wartui alone: a start of both sets failed: {err:?}"
                 ));
                 solo = true;
                 // TrouBLE's runner is given the failed start to cancel first.
@@ -1097,16 +1101,17 @@ impl Payload {
 
     /// The status beacon while a central is connected: the status UUID in place of the service's,
     /// so an app looking for the service does not try a board that is taken, and the whole
-    /// status, nickname included, in the scan response.
+    /// status, nickname included, in the scan response. An empty id follows the status when it
+    /// fits: 13 bytes of status, the nickname and 4 of id leave room for a nickname of 14 bytes.
     fn linked(beacon: &Beacon, bridge: [u8; 2], second: bool) -> Option<Self> {
         let status_uuid = [frame::STATUS_UUID.to_le_bytes()];
         let extras = beacon::extras(beacon, second);
         let mut status = [0; STATUS_MAX];
         let len = beacon::status(&mut status, beacon, bridge, true);
-        Self::encode(
-            &[flags(), AdStructure::CompleteServiceUuids128(&status_uuid), extras_data(&extras)],
-            &[status_data(&status[..len])],
-        )
+        let adv =
+            [flags(), AdStructure::CompleteServiceUuids128(&status_uuid), extras_data(&extras)];
+        let status = status_data(&status[..len]);
+        Self::encode(&adv, &[status, id_data(&[])]).or_else(|| Self::encode(&adv, &[status]))
     }
 
     fn encode(adv: &[AdStructure<'_>], scan: &[AdStructure<'_>]) -> Option<Self> {
