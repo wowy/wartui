@@ -578,7 +578,8 @@ advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s
   its pairing dialog, whose button is Connect, and the transport gives up at its 10 s
   (`CONNECT_WITHIN`). The pairing completes regardless. It happened on both first pairings. The
   C6 gives an unbonded central 30 s while the window is open, so a longer subscription deadline
-  inside the window would fit a click into one command (not tried).
+  inside the window fits a click into one command: see
+  [The pairing dialog inside one command](#the-pairing-dialog-inside-one-command).
 - **A Mac holding a bond the bridge dropped cannot connect,** and reads `could not connect to
   D0:1C in 10s; check the bridge is powered and in range`. On Linux `pair` reads BlueZ and names
   that case; on macOS nothing does.
@@ -592,6 +593,21 @@ advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s
 - **Two wartui processes on one Mac share one connection.** A `status --link bluetooth` started
   beside a run went through the run's connection, and was served in 10 s. A `reset` the same way
   reset the bridge, on the host before the fix, and stranded both.
+
+### The pairing dialog inside one command
+
+Measured later on 2026-11-20, on the same Mac and bridge, with the host giving the subscription
+30 s off Linux (`PAIR_WITHIN`) and announcing the wait 3 s in (`DisconnectCause::AwaitingPairing`).
+
+| Check | Result |
+| --- | --- |
+| `status --link bluetooth` on the bond | Served with no notice, 4.0 s in all from a debug build |
+| First pairing: `bluetooth forget --link usb`, the bridge forgotten in System Settings, `bluetooth pair` over USB, then one `status --link bluetooth` | The notice 6.4 s into the command, 4.4 s after connecting. Connect clicked on purpose late. Subscribed 22.2 s after connecting and served at once, `encrypted and bonded`, `pairings 1`, `failed_pairings 0`. One command, 23.6 s in all |
+
+- **The click landed past the 10 s the transport gave before,** and inside the C6's 30 s.
+- **Connecting to the subscription's start took about 1.4 s,** so the notice came 4.4 s after
+  connecting.
+- **A dialog left unclicked was not measured.**
 
 ## What this settles
 
