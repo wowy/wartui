@@ -413,8 +413,8 @@ impl ConnectionParamsRequest {
     ) -> Result<(), BleHostError<C::Error>>
     where
         C: crate::Controller
-            + ControllerCmdAsync<LeRemoteConnectionParameterRequestReply>
-            + ControllerCmdAsync<LeRemoteConnectionParameterRequestNegativeReply>,
+            + ControllerCmdSync<LeRemoteConnectionParameterRequestReply>
+            + ControllerCmdSync<LeRemoteConnectionParameterRequestNegativeReply>,
     {
         self.responded = true;
 
@@ -439,7 +439,7 @@ impl ConnectionParamsRequest {
                     let timeout: bt_hci::param::Duration<10_000> = bt_hci_duration(params.supervision_timeout);
                     stack
                         .host()
-                        .async_command(LeRemoteConnectionParameterRequestReply::new(
+                        .command(LeRemoteConnectionParameterRequestReply::new(
                             self.handle,
                             interval_min,
                             interval_max,
@@ -449,6 +449,7 @@ impl ConnectionParamsRequest {
                             bt_hci_duration(params.max_event_length),
                         ))
                         .await
+                        .map(|_| ())
                 }
             }
             Err(BleHostError::BleHost(crate::Error::Hci(bt_hci::param::Error::UNKNOWN_CONN_IDENTIFIER))) => {
@@ -467,7 +468,7 @@ impl ConnectionParamsRequest {
     /// Reject the connection parameters update request
     pub async fn reject<C, P: PacketPool>(mut self, stack: &Stack<'_, C, P>) -> Result<(), BleHostError<C::Error>>
     where
-        C: crate::Controller + ControllerCmdAsync<LeRemoteConnectionParameterRequestNegativeReply>,
+        C: crate::Controller + ControllerCmdSync<LeRemoteConnectionParameterRequestNegativeReply>,
     {
         self.responded = true;
         if self.l2cap {
@@ -476,11 +477,12 @@ impl ConnectionParamsRequest {
         } else {
             stack
                 .host()
-                .async_command(LeRemoteConnectionParameterRequestNegativeReply::new(
+                .command(LeRemoteConnectionParameterRequestNegativeReply::new(
                     self.handle,
                     RemoteConnectionParamsRejectReason::UnacceptableConnParameters,
                 ))
                 .await
+                .map(|_| ())
         }
     }
 }
@@ -951,14 +953,14 @@ impl<'stack, P: PacketPool> Connection<'stack, P> {
         spacing_types: SpacingTypes,
     ) -> Result<(), BleHostError<T::Error>>
     where
-        T: ControllerCmdSync<LeFrameSpaceUpdate>,
+        T: ControllerCmdAsync<LeFrameSpaceUpdate>,
     {
         let handle = self.handle();
         let frame_space_min_dur = bt_hci_duration(frame_space_min);
         let frame_space_max_dur = bt_hci_duration(frame_space_max);
         match stack
             .host()
-            .command(LeFrameSpaceUpdate::new(
+            .async_command(LeFrameSpaceUpdate::new(
                 handle,
                 frame_space_min_dur,
                 frame_space_max_dur,

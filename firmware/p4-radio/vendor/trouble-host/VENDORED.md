@@ -16,7 +16,7 @@ reasoning.
 | SHA-256 of `trouble-host-0.8.0.crate` | `19a566cc37ceaff5cc2a6ff8cc02debd1ee6b95d59ced8830d005da8b080cbe9`, the checksum `firmware/p4-radio/Cargo.lock` held for it |
 | Left out | the crate's `Cargo.lock` and cargo's own `.cargo-ok` marker |
 | Added | `LICENSE-MIT` and `LICENSE-APACHE`, from the repository at tag `trouble-host-v0.8.0`, and this file |
-| Changes | none |
+| Changes | the `host/` part of upstream commit `44f91293e618008b8d85369376a1ac97f5f6e728` ("chore: update bt-hci to 0.11", embassy-rs/trouble), in `Cargo.toml` (with `Cargo.toml.orig`), `src/connection.rs`, `src/host.rs` and `src/lib.rs`; its `Disconnect` call in `ControlRunner::run` keeps 0.8.0's shape |
 
 ## License
 

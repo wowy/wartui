@@ -208,7 +208,7 @@ version = "0.8.2"
 optional = true
 
 [dependencies.bt-hci]
-version = "0.10"
+version = "0.11"
 features = ["uuid"]
 
 [dependencies.cmac]
