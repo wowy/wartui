@@ -262,7 +262,7 @@ optional = true
 default-features = false
 
 [dependencies.rand_chacha]
-version = "0.3"
+version = "0.10"
 optional = true
 default-features = false
 
