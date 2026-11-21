@@ -443,13 +443,19 @@ works with the held versions.
   ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)).
 
   D0:1C took the image by `flash-bridge` over USB. The C6 restarted on it, logged no error and
-  ran 4 min 41 s without a restart, to the last reading. A central connected within seconds, on
+  ran 9 min 33 s without a restart, to the last reading. A central connected within seconds, on
   the 2M PHY, and a Mac's scan matched the bridge by the id in its advertising data, which the
-  controller takes only through the extended advertising data commands. No host stream ran over
-  Bluetooth and no phone session: another central held the one connection throughout. It
-  connected under a new address about every 10 s and was disconnected each time as neither
-  bonded nor encrypted, 18 times in those minutes, as it had on the image before, 318 times in
-  56 min. The Mac's three connects found the bridge taken or not advertising.
+  controller takes only through the extended advertising data commands.
+
+  The Mac's first three connects found the bridge taken or not advertising: another central
+  held the one connection. It connected under a new address about every 10 s and was
+  disconnected each time as neither bonded nor encrypted, 37 times in 8 min, as it had on the
+  image before, 318 times in 56 min. The C6 restarted on none of them. They stopped when a
+  Pixel 8's Bluetooth was turned off, so that was the central (inferred). The Mac then
+  connected on the bond it already held, with no new pairing: encrypted, ATT MTU 182, the 2M
+  PHY, a 30 ms interval. `status` answered over the link, and 45 s of `sniff` carried 431
+  heartbeats from the ten nodes, 43 or 44 each, with no resynced byte and no dropped write. No
+  phone ran a WardriveESP session.
 - **`connection-params-update` stays off, now by choice.** The panic is fixed, so nothing forces
   it. On, the controller waits for the host's answer to each central's request, and the host can
   miss one three ways: TrouBLE drops a request for a connection it has yet to accept, it drops
