@@ -10,14 +10,9 @@
 //! carrying the bridge's last two octets, the form `--bridge` takes ([`advertised_octets`]). The
 //! name, [`NAME_PREFIX`] and the same octets (`wartui 96:C4`), is a label a person reads.
 //!
-//! **The id is in everything the C6 advertises.** While it admits phones, the C6 advertises the
-//! wartui pair and the WardriveESP pair as two sets from one address. A Linux central's controller
-//! filters duplicates by address, and BlueZ restarts that filter only every 10 s, so a scan can
-//! hear either set alone. BlueZ also replaces a device's service data with each advertisement it
-//! reports, so a central connected to the bridge, or once connected, still finds it by the status
-//! beacon. The phones' scan response, and the beacon's when the app's nickname leaves room, carry
-//! an empty service data, and there the octets are the WardriveESP status's
-//! ([`crate::wardrive_esp::beacon::bridge_octets`]).
+//! **The id is in the wartui pair alone.** That pair advertises from [`link_address`], apart from
+//! the phones' pair and the status beacon on the public address, because a phone that has linked
+//! reconnects by address and would otherwise land on the wartui pair.
 //!
 //! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
 //! [`DOWN_VALUE_MAX`] value bytes, and a central's own stack keeps to it. wartui's transport caps
@@ -27,6 +22,8 @@
 //! The C6 holds the stream it has yet to notify in a [`ByteRing`] of
 //! [`HOST_WINDOW_BYTES`](crate::radio_link::HOST_WINDOW_BYTES), which the P4's credit window
 //! never overfills.
+
+use crate::mac::Mac;
 
 /// The "wartui link" GATT service.
 pub const SERVICE_UUID: u128 = 0xf241_0001_d870_4eb6_a5a0_ed64_5732_a877;
@@ -39,19 +36,24 @@ pub const NAME_PREFIX: &str = "wartui ";
 /// The 16-bit UUID of the service data that marks a bridge and carries its last two octets.
 pub const ID_UUID: u16 = 0x5754;
 
-/// The bridge's last two octets from one advertisement, or `None` for a device that is not a
-/// bridge. `id` is its service data under [`ID_UUID`], `status` its manufacturer data under
-/// the WardriveESP status's company id ([`COMPANY`](crate::wardrive_esp::beacon::COMPANY)).
-///
-/// An `id` of two bytes is the octets: the wartui pair. An empty one points at the status: the
-/// phones' pair or the status beacon.
+/// The bridge's last two octets from one advertisement's service data under [`ID_UUID`], or
+/// `None` for a device that is not a bridge: an id that is absent or not two bytes.
 #[must_use]
-pub fn advertised_octets(id: Option<&[u8]>, status: Option<&[u8]>) -> Option<[u8; 2]> {
+pub fn advertised_octets(id: Option<&[u8]>) -> Option<[u8; 2]> {
     match id? {
         &[first, second] => Some([first, second]),
-        [] => crate::wardrive_esp::beacon::bridge_octets(status?),
         _ => None,
     }
+}
+
+/// The address the wartui pair advertises from: a static random address made from the bridge's
+/// MAC, so it is the same on every boot and a host's bond stays good. Display order, as [`Mac`].
+#[must_use]
+pub const fn link_address(mac: &Mac) -> Mac {
+    let mut address = *mac;
+    // The top two bits of the first octet mark a static random address.
+    address[0] |= 0xC0;
+    address
 }
 
 /// The ATT MTU the C6 serves.

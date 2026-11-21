@@ -15,10 +15,12 @@ cargo build --release
 
 The C6 runs TrouBLE 0.8 as a GATT peripheral over `esp-radio`'s controller (`src/ble.rs`). It
 advertises the `wartui_proto::ble` service and the bridge's id, its last two octets, with the name
-`wartui XX:YY` in its scan response. It notifies the P4's host stream on Up and forwards what a
-central writes on Down. Beside it sits the WardriveESP service, which a phone app reads with no
-pairing while the P4 admits phones; that service's pair is then a second advertising set beside
-the first, and while a central is connected the C6 advertises the WardriveESP status beacon.
+`wartui XX:YY` in its scan response. That set advertises from its own static random address, made
+from the bridge's MAC, because a phone that has linked reconnects by address. It notifies the P4's
+host stream on Up and forwards what a central writes on Down. Beside it sits the WardriveESP
+service, which a phone app reads with no pairing while the P4 admits phones; that service's pair
+is then a second advertising set beside the first, and while a central is connected the C6
+advertises the WardriveESP status beacon.
 
 - **A phone reads the WardriveESP stream with no bond**, while the P4 admits phones
   ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md)). A central reads one stream, the first

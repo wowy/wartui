@@ -96,12 +96,12 @@
 //!
 //! - the phones' pair runs as its own set beside the wartui pair (below). Its advertisement
 //!   carries the WardriveESP service's UUID, which a phone app looks for, and the advert extras,
-//!   and its scan response the name, the status beacon's fixed bytes and an empty id. A change of
-//!   admission restarts advertising ([`accept`]);
+//!   and its scan response the name and the status beacon's fixed bytes. A change of admission
+//!   restarts advertising ([`accept`]);
 //! - while a central is connected, whatever it reads, the C6 advertises the status beacon beside
 //!   it as one set ([`linked`]): not connectable, about once a second, under the status UUID in
 //!   place of the service's, so an app looking for the service does not try a board that is
-//!   taken, with the whole status in the scan response, and an empty id when it fits;
+//!   taken, with the whole status in the scan response;
 //! - a phone subscribed to TX reads the stream in frames: each owed ACK first, then one DATA frame
 //!   a line, or part of one longer than the frame's room. TrouBLE keeps a bonded central's TX
 //!   subscription across its connections, so it counts only once the central writes it on the
@@ -122,14 +122,15 @@
 //! advertising goes through the extended commands, the status beacon's included, because a
 //! controller that has taken one refuses the legacy ones.
 //!
-//! - **Every advertisement carries the bridge's id** (`wartui_proto::ble::ID_UUID`), the status
-//!   beacon's when the nickname leaves room. Both sets share the bridge's address, a Linux
-//!   central's controller filters duplicates by address, and BlueZ restarts that filter only every
-//!   10 s, so a scan hears one set: of 8 scans on D0:1C, 4 heard the wartui set in their first
-//!   cycle. BlueZ also replaces a device's service data with each advertisement it reports, so a
-//!   central that is connected, or was, finds the bridge only by what it heard last, the beacon
-//!   included. The wartui pair carries the octets as the id; the phones' pair and the beacon have
-//!   room for an empty id alone, beside the status that carries them.
+//! - **The wartui set advertises from its own address** ([`link_address`]). A phone that has
+//!   linked reconnects by address, with its app closed too, and on a shared address it lands on
+//!   the wartui set and holds the C6's one connection. On its own address the wartui set is one
+//!   the phone does not know, so the phone finds only the phones' set.
+//! - **The set that pairs is the one on the stack's address.** TrouBLE's pairing computes with
+//!   the stack's one address, so the stack holds the wartui set's ([`run`]), and the phones' set
+//!   and the status beacon name the public address in their parameters.
+//! - **The id is in the wartui pair alone** (`wartui_proto::ble::ID_UUID`), so a host connects to
+//!   no other device.
 //! - **The C6 stops every set itself once a central connects** ([`stop_sets`]). TrouBLE's
 //!   `accept` marks advertising idle and stops nothing, so the other set stays enabled. TrouBLE
 //!   loads its resolving list whenever it believes advertising is idle, the controller refuses
@@ -220,7 +221,7 @@ use esp_radio::ble::Config;
 use esp_radio::ble::controller::{BleConnector, BleConnectorError};
 use trouble_host::att::AttClient;
 use trouble_host::prelude::*;
-use wartui_proto::ble::{ByteRing, ID_UUID, NAME_PREFIX, SERVICE_UUID};
+use wartui_proto::ble::{ByteRing, ID_UUID, NAME_PREFIX, SERVICE_UUID, link_address};
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
 use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
@@ -848,8 +849,12 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
         ADV_SETS,
         BONDS,
     > = HostResources::new();
+    // The wartui set's own address (module docs), least significant byte first as TrouBLE holds it.
+    let mut address = link_address(mac);
+    address.reverse();
     // No display and no input: Just Works.
     let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(Address::random(address))
         .set_io_capabilities(IoCapabilities::NoInputNoOutput)
         .build();
     let mut runner = stack.runner();
@@ -897,12 +902,14 @@ async fn advertise(
         shared.error(format_args!("the wartui advertisement would not encode"));
         core::future::pending().await
     };
+    // The wartui set takes the stack's address; the phones' names the public one (module docs).
     let params = AdvertisementParameters {
         interval_min: ADVERTISE_EVERY,
         interval_max: ADVERTISE_EVERY,
         tx_power: ADV_POWER,
         ..Default::default()
     };
+    let phone_params = AdvertisementParameters { own_addr_kind: Some(AddrKind::PUBLIC), ..params };
 
     // Polled: `bonds_changed` is `accept`'s to wait on, and this runs once, at boot.
     let waited = Instant::now();
@@ -941,7 +948,8 @@ async fn advertise(
         } else {
             None
         };
-        let advertised = start_sets(peripheral, &wartui, phones.as_ref(), params).await;
+        let advertised =
+            start_sets(peripheral, &wartui, phones.as_ref(), params, phone_params).await;
         let conn = match advertised {
             Ok((advertiser, handles)) => {
                 if !shared.ble.advertising.replace(true) {
@@ -950,7 +958,7 @@ async fn advertise(
                 let free = phones.map(|_| PhoneSet {
                     name: name.as_bytes(),
                     bridge,
-                    running: Running { params, handle: handles[PHONE_SET] },
+                    running: Running { params: phone_params, handle: handles[PHONE_SET] },
                 });
                 let Some(accepted) =
                     accept(advertiser, peripheral, stack, shared, admitted, free).await
@@ -1016,19 +1024,21 @@ async fn advertise(
     }
 }
 
-/// Start the wartui link's set, and the phones' beside it when `phones` holds their pair, in one
-/// start. Returns the advertiser and the sets' handles, by place: [`LINK_SET`], then
-/// [`PHONE_SET`], which only a start of both runs.
+/// Start the wartui link's set on `params`, and the phones' beside it on `phone_params` when
+/// `phones` holds their pair, in one start. Returns the advertiser and the sets' handles, by
+/// place: [`LINK_SET`], then [`PHONE_SET`], which only a start of both runs.
 async fn start_sets<'d, 'c>(
     peripheral: &mut Peripheral<'d, Controller<'c>, DefaultPacketPool>,
     wartui: &Payload,
     phones: Option<&Payload>,
     params: AdvertisementParameters,
+    phone_params: AdvertisementParameters,
 ) -> Result<(Advertiser<'d, Controller<'c>, DefaultPacketPool>, [AdvSet; ADV_SETS]), HostError> {
     let link = AdvertisementSet { params, data: wartui.advertisement(), address: None };
     let mut sets = [link.clone(), link];
     let mut count = LINK_SET + 1;
     if let Some(phones) = phones {
+        sets[PHONE_SET].params = phone_params;
         sets[PHONE_SET].data = phones.advertisement();
         count = ADV_SETS;
     }
@@ -1084,9 +1094,7 @@ impl Payload {
 
     /// The phones' pair while no central is connected. A phone app finds a board by its service
     /// UUID in the advertisement, so the name moves to the scan response, beside the status's
-    /// fixed bytes and an empty id, which point a wartui host at the octets in the status; the
-    /// extras' frame B when `second`. The scan response is full: 14 bytes of name, 13 of status
-    /// and 4 of id.
+    /// fixed bytes: 14 bytes of name and 13 of status. The extras' frame B when `second`.
     fn free(name: &[u8], beacon: &Beacon, bridge: [u8; 2], second: bool) -> Option<Self> {
         let service = [frame::SERVICE_UUID.to_le_bytes()];
         let extras = beacon::extras(beacon, second);
@@ -1094,23 +1102,22 @@ impl Payload {
         let len = beacon::status(&mut status, beacon, bridge, false);
         Self::encode(
             &[flags(), AdStructure::CompleteServiceUuids128(&service), extras_data(&extras)],
-            &[AdStructure::CompleteLocalName(name), status_data(&status[..len]), id_data(&[])],
+            &[AdStructure::CompleteLocalName(name), status_data(&status[..len])],
         )
     }
 
     /// The status beacon while a central is connected: the status UUID in place of the service's,
     /// so an app looking for the service does not try a board that is taken, and the whole
-    /// status, nickname included, in the scan response. An empty id follows the status when it
-    /// fits: 13 bytes of status, the nickname and 4 of id leave room for a nickname of 14 bytes.
+    /// status, nickname included, in the scan response.
     fn linked(beacon: &Beacon, bridge: [u8; 2], second: bool) -> Option<Self> {
         let status_uuid = [frame::STATUS_UUID.to_le_bytes()];
         let extras = beacon::extras(beacon, second);
         let mut status = [0; STATUS_MAX];
         let len = beacon::status(&mut status, beacon, bridge, true);
-        let adv =
-            [flags(), AdStructure::CompleteServiceUuids128(&status_uuid), extras_data(&extras)];
-        let status = status_data(&status[..len]);
-        Self::encode(&adv, &[status, id_data(&[])]).or_else(|| Self::encode(&adv, &[status]))
+        Self::encode(
+            &[flags(), AdStructure::CompleteServiceUuids128(&status_uuid), extras_data(&extras)],
+            &[status_data(&status[..len])],
+        )
     }
 
     fn encode(adv: &[AdStructure<'_>], scan: &[AdStructure<'_>]) -> Option<Self> {
@@ -1142,9 +1149,8 @@ fn flags() -> AdStructure<'static> {
     AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED)
 }
 
-/// The bridge's id, as service data: its last two octets, or empty where the status carries
-/// them.
-fn id_data(octets: &[u8]) -> AdStructure<'_> {
+/// The bridge's id, as service data: its last two octets.
+fn id_data(octets: &[u8; 2]) -> AdStructure<'_> {
     AdStructure::ServiceData16 { uuid: ID_UUID.to_le_bytes(), data: octets }
 }
 
@@ -1252,6 +1258,7 @@ async fn linked(
         interval_min,
         interval_max,
         tx_power: ADV_POWER,
+        own_addr_kind: Some(AddrKind::PUBLIC),
         ..Default::default()
     };
     let mut failed = false;

@@ -108,7 +108,8 @@ own.
   bonds the P4 keeps for its C6, and their records), `host_owner` (who holds the P4's host queue:
   USB, a Bluetooth central, a phone or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
-  GATT identity of the C6's Bluetooth host link, and the id a host finds a bridge by),
+  GATT identity of the C6's Bluetooth host link, the id a host finds a bridge by, and the address
+  its set advertises from),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
   lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
   round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
@@ -511,11 +512,12 @@ edit stops; follow the pointer before changing the rule.
   builds from that directory, and `src/ble.rs` fails a build whose pool disagrees. wartui's
   transport caps its writes at 179 whatever the MTU, so it updates a C6 that serves more.
   → `crates/wartui-proto/src/ble.rs`, `ATT_MTU`
-- **A host matches the bridge's advertised id, never its name, and the id is in everything the C6
-  advertises.** A Linux central hears one set per scan, because its controller filters duplicates
-  by address and both sets share one, and BlueZ keeps only the service data it heard last, the
-  status beacon's included. → `crates/wartui-proto/src/ble.rs` `//!`, `advertised_octets`;
-  `crates/wartui-bridge/src/ble.rs` `//!`
+- **A host matches the bridge's advertised id, never its name or address, and the wartui set
+  advertises from its own static random address.** A phone that has linked reconnects by address,
+  so on a shared address it lands on the wartui set and holds the C6's one connection. The set
+  that pairs is the one on TrouBLE's stack address, so the phones' set and the status beacon name
+  the public address in their parameters. → `crates/wartui-proto/src/ble.rs` `//!`,
+  `link_address`; `firmware/p4-radio/src/ble.rs` `//!`
 - **Every C6 advertisement goes through the extended advertising commands, and the C6 stops every
   set itself when a central connects.** A controller that has taken an extended command refuses
   the legacy ones. TrouBLE stops no set on a connection, and a set left enabled ends its runner at

@@ -2,8 +2,8 @@
 
 use wartui_proto::ble::{
     ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID, advertised_octets,
+    link_address,
 };
-use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
 
 #[test]
 fn ble_uuids_stay_pinned_when_built() {
@@ -15,63 +15,28 @@ fn ble_uuids_stay_pinned_when_built() {
     assert_eq!(ID_UUID, 0x5754);
 }
 
-/// The free board's status bytes for the bridge `44:C0`.
-fn free_status() -> Vec<u8> {
-    let mut out = [0; STATUS_MAX];
-    let len = beacon::status(&mut out, &Beacon::default(), [0x44, 0xC0], false);
-    out[..len].to_vec()
-}
-
 #[test]
 fn advertised_octets_reads_id_when_it_holds_two_bytes() {
-    assert_eq!(advertised_octets(Some(&[0x44, 0xC0]), None), Some([0x44, 0xC0]));
-    // The id outranks a status beside it.
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[0x96, 0xC4]), Some(&status)), Some([0x96, 0xC4]));
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0])), Some([0x44, 0xC0]));
 }
 
 #[test]
-fn advertised_octets_reads_status_when_id_is_empty() {
-    // The phones' pair: an empty id beside the status's fixed bytes.
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[]), Some(&status)), Some([0x44, 0xC0]));
+fn advertised_octets_finds_none_when_id_is_absent_or_another_length() {
+    assert_eq!(advertised_octets(None), None);
+    assert_eq!(advertised_octets(Some(&[])), None);
+    assert_eq!(advertised_octets(Some(&[0x44])), None);
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0, 0x01])), None);
 }
 
 #[test]
-fn advertised_octets_reads_status_when_empty_id_is_beside_linked_status() {
-    // The status beacon while a central is connected: the status carries the app's nickname.
-    let mut nickname = heapless::Vec::new();
-    nickname.extend_from_slice(b"Pixel 8 pocket").unwrap();
-    let linked = Beacon { nickname, ..Beacon::default() };
-    let mut out = [0; STATUS_MAX];
-    let len = beacon::status(&mut out, &linked, [0x44, 0xC0], true);
-    assert_eq!(len, 9 + 14);
-    assert_eq!(advertised_octets(Some(&[]), Some(&out[..len])), Some([0x44, 0xC0]));
-}
-
-#[test]
-fn advertised_octets_finds_none_when_empty_id_has_no_status() {
-    assert_eq!(advertised_octets(Some(&[]), None), None);
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[]), Some(&status[..8])), None);
-    let mut unmarked = status.clone();
-    unmarked[0] = b'X';
-    assert_eq!(advertised_octets(Some(&[]), Some(&unmarked)), None);
-}
-
-#[test]
-fn advertised_octets_finds_none_when_id_is_absent() {
-    // A WardriveESP board that is not a bridge carries the status and no id.
-    let status = free_status();
-    assert_eq!(advertised_octets(None, Some(&status)), None);
-    assert_eq!(advertised_octets(None, None), None);
-}
-
-#[test]
-fn advertised_octets_finds_none_when_id_is_another_length() {
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[0x44]), Some(&status)), None);
-    assert_eq!(advertised_octets(Some(&[0x44, 0xC0, 0x01]), Some(&status)), None);
+fn link_address_sets_static_random_bits_when_built_from_mac() {
+    // The top two bits of the first octet mark a static random address.
+    assert_eq!(
+        link_address(&[0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0]),
+        [0xC2, 0x00, 0x5E, 0x10, 0x44, 0xC0]
+    );
+    // It ends in the bridge's own octets whatever the first octet holds.
+    assert_eq!(link_address(&[0xD8, 1, 2, 3, 0x96, 0xC4]), [0xD8, 1, 2, 3, 0x96, 0xC4]);
 }
 
 #[test]

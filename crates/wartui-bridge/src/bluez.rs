@@ -34,7 +34,6 @@ use dbus::strings::ErrorName;
 use dbus::{Message, Path};
 use thiserror::Error;
 use wartui_proto::ble::{ID_UUID, advertised_octets};
-use wartui_proto::wardrive_esp::beacon::COMPANY;
 
 const BLUEZ: &str = "org.bluez";
 const DEVICE: &str = "org.bluez.Device1";
@@ -125,17 +124,14 @@ fn device_of(path: &Path<'_>, props: &PropMap) -> Option<Device> {
     })
 }
 
-/// The bridge's octets from a `Device1`'s `ServiceData` (`a{sv}`, keyed by UUID) and
-/// `ManufacturerData` (`a{qv}`), through [`advertised_octets`].
+/// The bridge's octets from a `Device1`'s `ServiceData` (`a{sv}`, keyed by UUID), through
+/// [`advertised_octets`].
 fn octets_of(props: &PropMap) -> Option<[u8; 2]> {
-    let bytes = |value: &Variant<Box<dyn RefArg>>| cast::<Vec<u8>>(&value.0).cloned();
     let key = uuid_from_u16(ID_UUID).to_string();
     let services = prop_cast::<HashMap<String, Variant<Box<dyn RefArg>>>>(props, "ServiceData")?;
     let id = services.iter().find(|(uuid, _)| uuid.eq_ignore_ascii_case(&key)).map(|(_, v)| v);
-    let id = bytes(id?)?;
-    let makers = prop_cast::<HashMap<u16, Variant<Box<dyn RefArg>>>>(props, "ManufacturerData");
-    let status = makers.and_then(|makers| bytes(makers.get(&COMPANY)?));
-    advertised_octets(Some(&id), status.as_deref())
+    let id = cast::<Vec<u8>>(&id?.0)?;
+    advertised_octets(Some(id))
 }
 
 /// Forget `device` on this PC: its pairing and everything BlueZ knows of it.
@@ -294,7 +290,7 @@ fn failed(error: dbus::Error) -> BluezError {
 
 #[cfg(test)]
 mod tests {
-    use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
+    use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, STATUS_MAX};
 
     use super::*;
 
@@ -326,11 +322,11 @@ mod tests {
     }
 
     #[test]
-    fn bluez_reads_octets_from_status_when_id_is_empty() {
+    fn bluez_reads_no_octets_when_device_carries_a_status_and_no_id() {
+        // The phones' pair and the status beacon carry the WardriveESP status and no id.
         let mut status = [0; STATUS_MAX];
         let len = beacon::status(&mut status, &Beacon::default(), [0x44, 0xC0], false);
-        let listed = props(Some(Vec::new()), Some(status[..len].to_vec()));
-        assert_eq!(octets_of(&listed), Some([0x44, 0xC0]));
+        assert_eq!(octets_of(&props(None, Some(status[..len].to_vec()))), None);
     }
 
     #[test]
