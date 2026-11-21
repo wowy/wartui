@@ -128,3 +128,46 @@ plug it in before boot or with the Pi off.
 
 Not measured: whether the fault is the RP1 silicon or the kernel's xHCI short-packet handling,
 whether a powered hub or another kernel behaves differently, and whether a Pi 4 does the same.
+
+## A Mac host behind a dock's hub chain stalls an image send
+
+Measured on 2026-11-21 on a MacBook Pro (`Mac15,10`, macOS 27.2.1, Apple's CDC ACM driver, the
+CH343 at full speed) against bridge `D0:1C` on the 10-node carrier, ten nodes idling, scan
+stopped. Each send was `wartui flash-bridge --link usb` with a 1.0 MB image, alternating two
+images that differ in one log string. A clean send takes about 20 s, 10 s of it sending.
+
+| Path from the Mac | Hubs | Sends | Installed | Stalled |
+| --- | --- | --- | --- | --- |
+| A dock's hub (`1d5c:5801`), then two 4-port hubs (`0bda:5483`) | 3 | 11 | 3 | 8 |
+| One USB 2.0 hub (`1a40:0101`) on a Mac port | 1 | 10 | 10 | 0 |
+| Straight into a Mac port | 0 | 14 | 14 | 0 |
+
+The dock's last hub also carried a high-speed HID, and its sibling a keyboard, a trackpad, an
+audio device and two more hubs.
+
+What a stall is:
+
+- The host's writes to the port stop draining, between 6% and 69% of the image. The writer
+  thread sits in `write(2)`.
+- Only host→bridge stops. With the reader left running, the bridge's 5 s log bursts kept
+  arriving for 10 s into two stalls.
+- The bridge is unharmed: its uptime runs on, it keeps its image, and it answers the next host
+  that opens the port.
+- The kernel logs nothing when the writes stop, at `debug`, from its USB, serial or ACM
+  drivers. At a close that got through, it aborted 14 pending requests on the bulk OUT endpoint
+  and a `SET_CONTROL_LINE_STATE` request returned aborted.
+- The log burst is not the trigger. In one stall the progress stopped about 2 s before the next
+  burst, with only the short per-sector statuses going toward the host.
+
+What the host does at a stall:
+
+| Host | Stalls | What happened |
+| --- | --- | --- |
+| Joining its port threads | 6 | No error printed, and no process exited on its own. Three left within seconds of `TERM`. Three sat in `ps` state `E` through `TERM`, two of them through `KILL`, holding the port until the data cable was replugged |
+| Leaving them behind after 2 s | 2 | The error printed about 12 s after the writes stopped, then the held port's line. One process exited on its own with the port free for the next command; the other sat in state `E` until the replug |
+
+Replugging the bridge's USB data cable frees a held port at once, and the bridge stays up
+through it. Over Bluetooth the same board took seven of seven images that day.
+
+Not measured: which of the dock's hubs does it, whether the other devices on them matter, and
+whether a Linux host stalls on the same path.
