@@ -17,7 +17,18 @@
 //! - **Once a connection straight to it has failed, every later try scans**, as the sweep moves
 //!   on to the other CH343s. The scan still prefers the remembered bridge while it advertises, so
 //!   one that is off or out of range blocks no other bridge, and one that answers is taken back.
-//! - **A connection that announced a bridge settles the run on it**, and no other is looked for.
+//! - **A connection that announced a bridge settles the run on that bridge's address**, and no
+//!   other is looked for. Every later try reconnects to its peripheral, and the first `Ready` is
+//!   checked against the settled address, which already matched the spec ([`settled_spec`]).
+//!
+//! **Each try takes a fresh handle on macOS.** btleplug's CoreBluetooth backend drops a
+//! peripheral from its own table on every disconnect, and keeps it in the adapter's. So
+//! `peripheral(&id)`, `peripherals()` and a rescan all hand back a handle whose connect fails or
+//! whose notifications go nowhere (`docs/ble-host-link-findings.md` § "macOS"). Asking for the
+//! peripheral by its identifier (`retrieve_peripherals`) builds a live handle for one a disconnect
+//! dropped, as long as no rescan has re-added it to the backend's table, so a settled try asks
+//! that way first ([`fresh`]), and a try that scans clears both of btleplug's tables before it
+//! does. BlueZ keeps its device object across a disconnect, so Linux needs neither.
 //!
 //! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
@@ -105,8 +116,8 @@
 //!   first.
 //!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
-//! connection that announced a bridge settles the run on that peripheral. A P4 reboot resets its
-//! C6 and drops the link, which is an ordinary reconnect.
+//! connection that announced a bridge settles the run on that bridge. A P4 reboot resets its C6
+//! and drops the link, which is an ordinary reconnect.
 //!
 //! **Closing.** Once the handle is gone the connection unsubscribes from Up and disconnects, and a
 //! scan, a connect, a service discovery, the subscription or a write under way stops, so the
@@ -122,6 +133,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use btleplug::api::RetrievePeripheralsOptions;
 use btleplug::api::bleuuid::uuid_from_u16;
 use btleplug::api::{
     BDAddr, Central as _, CentralEvent, Characteristic, Manager as _, Peripheral as _,
@@ -410,6 +423,16 @@ pub fn look(
     Look { direct, preferred }
 }
 
+/// The bridge a connection's first `Ready` must name: the one the run `settled` on, once it has,
+/// since that already matched `spec`, else the bridge `spec` names.
+#[must_use]
+pub fn settled_spec(spec: Option<&BridgeSpec>, settled: Option<Mac>) -> Option<BridgeSpec> {
+    match settled {
+        Some(mac) => Some(BridgeSpec::Mac(mac)),
+        None => spec.cloned(),
+    }
+}
+
 /// The one bridge among those `heard`, which holds at least one, each with its advertised octets
 /// and whether it is advertising now: those advertising when any is, since BlueZ also lists the
 /// bridges it has bonded, heard or not; then those `preferred` names when any is.
@@ -619,13 +642,19 @@ impl Failure {
     }
 }
 
+/// The bridge a run settled on, once a connection announced it, and its peripheral.
+struct Settled {
+    mac: Mac,
+    peripheral: Peripheral,
+}
+
 /// Keep a link up: find the bridge, serve the connection, report the failure, try again.
 async fn supervise(transport: BleTransport, mut plumbing: LinkPlumbing) {
     let mut previous: Option<String> = None;
     let mut delay = transport.reconnect_delay;
     let mut adapter: Option<Adapter> = None;
-    // The peripheral this run settled on, once it announced a bridge; never another after.
-    let mut settled: Option<Peripheral> = None;
+    // The bridge this run settled on, once a connection announced it; never another after.
+    let mut settled: Option<Settled> = None;
     // A connection straight to the remembered address failed, so every later try scans.
     let mut direct_failed = false;
     loop {
@@ -685,7 +714,7 @@ async fn attempt(
     transport: &BleTransport,
     plumbing: &mut LinkPlumbing,
     adapter: &mut Option<Adapter>,
-    (settled, direct_failed): (&mut Option<Peripheral>, &mut bool),
+    (settled, direct_failed): (&mut Option<Settled>, &mut bool),
     unreported: bool,
 ) -> End {
     let central = match adapter {
@@ -696,8 +725,19 @@ async fn attempt(
         },
     };
     let peripheral = match settled {
-        Some(peripheral) => peripheral.clone(),
+        Some(Settled { peripheral, .. }) => peripheral.clone(),
         None => {
+            // A scan's discovery builds a live handle only for a peripheral btleplug holds none
+            // for (§ "Each try takes a fresh handle").
+            #[cfg(target_os = "macos")]
+            tokio::select! {
+                cleared = central.clear_peripherals() => {
+                    if let Err(e) = cleared {
+                        tracing::debug!(error = %e, "could not clear the Bluetooth peripherals");
+                    }
+                }
+                () = plumbing.events.closed() => return End::HandleDropped,
+            }
             let found = tokio::select! {
                 found = find(&central, transport, *direct_failed) => found,
                 () = plumbing.events.closed() => {
@@ -714,7 +754,38 @@ async fn attempt(
             }
         }
     };
+    let peripheral = tokio::select! {
+        peripheral = fresh(&central, peripheral) => peripheral,
+        () = plumbing.events.closed() => return End::HandleDropped,
+    };
     connect(&central, &peripheral, transport, plumbing, settled, unreported).await
+}
+
+/// A live handle for `peripheral`. On macOS, CoreBluetooth is asked for it by its identifier:
+/// that returns the same handle while it is live, and a new one once a disconnect has dropped it,
+/// unless a rescan has re-added it (§ "Each try takes a fresh handle"). Elsewhere, and when
+/// CoreBluetooth returns none, it is `peripheral` itself.
+async fn fresh(adapter: &Adapter, peripheral: Peripheral) -> Peripheral {
+    #[cfg(target_os = "macos")]
+    {
+        let id = peripheral.id();
+        let options =
+            RetrievePeripheralsOptions { identifiers: Some(vec![id.clone()]), services: None };
+        match adapter.retrieve_peripherals(options).await {
+            // btleplug's handles carry no identity to compare, so every retrieval is logged.
+            Ok(retrieved) => match retrieved.into_iter().find(|p| p.id() == id) {
+                Some(found) => {
+                    tracing::debug!(%id, "took the bridge's peripheral from CoreBluetooth");
+                    return found;
+                }
+                None => tracing::debug!(%id, "CoreBluetooth does not know the bridge's peripheral"),
+            },
+            Err(e) => tracing::debug!(error = %e, "could not retrieve the bridge's peripheral"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = adapter;
+    peripheral
 }
 
 /// The first Bluetooth adapter the OS has.
@@ -1009,7 +1080,7 @@ async fn connect(
     peripheral: &Peripheral,
     transport: &BleTransport,
     plumbing: &mut LinkPlumbing,
-    settled: &mut Option<Peripheral>,
+    settled: &mut Option<Settled>,
     unreported: bool,
 ) -> End {
     // Retrying a failure already reported is not news; `RUST_LOG=debug` keeps them.
@@ -1077,7 +1148,7 @@ async fn serve(
     peripheral: &Peripheral,
     transport: &BleTransport,
     plumbing: &mut LinkPlumbing,
-    settled: &mut Option<Peripheral>,
+    settled: &mut Option<Settled>,
     label: &str,
 ) -> End {
     let discovered = discover(peripheral.discover_services(), label);
@@ -1168,12 +1239,14 @@ async fn pump(
     peripheral: &Peripheral,
     (transport, label): (&BleTransport, &str),
     plumbing: &mut LinkPlumbing,
-    settled: &mut Option<Peripheral>,
+    settled: &mut Option<Settled>,
     (up, down): (&Characteristic, &Characteristic),
     (notes, events): (&mut Notes, &mut Events),
 ) -> End {
     let id = peripheral.id();
-    let mut inbound = Inbound::new(transport.spec.clone());
+    // Once settled, only the settled bridge is taken (§ "Finding the bridge").
+    let wanted = settled_spec(transport.spec.as_ref(), settled.as_ref().map(|s| s.mac));
+    let mut inbound = Inbound::new(wanted.clone());
     let mut writer = DownWriter::new(peripheral.mtu());
     let mut alive = tokio::time::interval(ALIVE_EVERY);
     alive.reset();
@@ -1198,11 +1271,11 @@ async fn pump(
                     match heard {
                         Heard::Proved(mac) => {
                             ever_announced = true;
-                            *settled = Some(peripheral.clone());
+                            *settled = Some(Settled { mac, peripheral: peripheral.clone() });
                             transport.memory.remember_bluetooth(mac, address_of(peripheral));
                         }
                         Heard::WrongBridge(mac) => {
-                            let named = transport.spec.as_ref().map(ToString::to_string);
+                            let named = wanted.as_ref().map(ToString::to_string);
                             return End::failed(format!(
                                 "the bridge that answered is {}, not {}",
                                 mac::full(&mac),
