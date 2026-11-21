@@ -67,16 +67,19 @@
 //! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
 //! an accepted one shows in `BleCounters`' `phy` and `interval_us`, and a refusal as no change.
 //!
-//! **Three upstream bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
+//! **Two esp-radio bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
 //! production build needs"). The packet pool holds 186 bytes, so the C6 serves an ATT MTU of
 //! [`ATT_MTU_MAX`], 182, and a notification carries at most [`VALUE_MAX`], 179 bytes. That keeps
 //! every notification in one ACL packet, so none fragments (`Cargo.toml`). It is also the
 //! workaround for the chained packet: esp-radio copies only the first buffer of a received packet
 //! the controller hands over as a chain, which it does from 193 bytes, and the short packet stops
 //! the host. A central on that MTU sends no packet over 190 bytes
-//! (`docs/ble-host-link-findings.md`, "The host stop, found"). `trouble-host`'s
-//! `connection-params-update` stays off, so a central's parameter request never reaches the
-//! host, and the interval request goes out over L2CAP.
+//! (`docs/ble-host-link-findings.md`, "The host stop, found").
+//!
+//! **A central's parameter request never reaches the host.** `trouble-host`'s
+//! `connection-params-update` stays off, by choice, so the controller answers the request itself
+//! and the C6's own interval request goes out over L2CAP. On, every request waits on the host's
+//! answer, and one TrouBLE drops ends the link 40 s later (`Cargo.toml`).
 //!
 //! **Only a bonded, encrypted central reaches the host stream**, by LE Secure Connections Just
 //! Works pairing (`docs/c6-ble-pairing-findings.md`). Up's CCCD and Down's writes require
@@ -1704,9 +1707,7 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
             }
             // Never raised: without trouble-host's `connection-params-update` the controller
             // keeps the remote parameter request event masked and answers a central's
-            // LL_CONNECTION_PARAM_REQ itself. Accepting it through bt-hci 0.10.1 panics: its
-            // LE Remote Connection Parameter Request Reply declares no return, and the
-            // controller returns the connection handle.
+            // LL_CONNECTION_PARAM_REQ itself.
             GattConnectionEvent::RequestConnectionParams(_) => {}
             GattConnectionEvent::PairingComplete { security_level, bond } => {
                 paired(conn, session, shared, security_level, bond.as_ref());
