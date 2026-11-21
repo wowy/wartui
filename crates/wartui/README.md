@@ -1299,13 +1299,14 @@ pairing: click Connect if macOS shows a dialog for XX:YY
 ```
 
 It waits up to 30 s for the click, so one command pairs and is served: run `wartui bluetooth pair`
-over USB, then `wartui status --link bluetooth`. A dialog left unclicked ends with the bridge
-dropping the Mac 30 s after it connected, as `refused this PC over Bluetooth because they are not
-paired`: run the command again inside the window, and click. A bonded Mac sees no dialog and no
-notice. A Mac that still holds a bond the bridge has dropped cannot connect at all, and reads
-`could not connect to XX:YY in 10s`: forget the bridge in System
-Settings → Bluetooth, then pair again inside the window. Every disconnect on macOS logs `Shouldn't
-get anything but Ok!` from btleplug at error level; it is harmless.
+over USB, then `wartui status --link bluetooth`. Once the click lands, the command prints
+`waiting for XX:YY to answer`, and `run` shows it as its footer line until the bridge answers. A
+dialog left unclicked ends with the bridge dropping the Mac 30 s after it connected, as `refused
+this PC over Bluetooth because they are not paired`: run the command again inside the window, and
+click. A bonded Mac sees no dialog and no notice. A Mac that still holds a bond the bridge has
+dropped cannot connect at all, and reads `could not connect to XX:YY in 10s`: forget the bridge in
+System Settings → Bluetooth, then pair again inside the window. Every disconnect on macOS logs
+`Shouldn't get anything but Ok!` from btleplug at error level; it is harmless.
 
 On a desktop with a Bluetooth agent, the first `--link bluetooth` connection inside the pairing
 window may raise the desktop's own pairing prompt. Accepting it pairs the PC. `wartui bluetooth
@@ -1378,9 +1379,11 @@ is red and its footer says, plain rather than in the fault box, since nothing is
 
 `sniff` prints `# link down: the USB host took the bridge`, then `# bridge …, firmware …` once the
 bridge hands it back. The pairing notice is a plain footer line of its own too, while the OS's
-dialog waits on the operator, and `sniff` prints it as `# pairing: …`. A Bluetooth connection with
-no answer after 20 s logs that a USB host may hold the bridge, and keeps waiting. `wartui ports`
-and `--bridge` lookups over USB never take the bridge from a Bluetooth host.
+dialog waits on the operator, and `sniff` prints it as `# pairing: …`. After the click and until
+the bridge answers, the footer and `sniff` show `waiting for XX:YY to answer` the same way. A
+Bluetooth connection with no answer after 20 s logs that a USB host may hold the bridge, and keeps
+waiting. `wartui ports` and `--bridge` lookups over USB never take the bridge from a Bluetooth
+host.
 
 **A host other than wartui ends each write group with a write request**, and writes the rest
 without response. A group is the frames the host has queued together, cut into writes, at most 7
@@ -1407,7 +1410,9 @@ names the last one when its wait runs out:
 | `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair`. When BlueZ holds a pairing the bridge may have forgotten, it says so: `wartui bluetooth pair --fresh` |
 | `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
 | `pairing: click Connect if macOS shows a dialog for XX:YY`            | Click Connect within 30 s of connecting, inside the pairing window   |
+| `waiting for XX:YY to answer`                                         | Nothing: the bridge answers at once, or 15 s after a USB host goes quiet |
 | `no answer after waiting on the OS's pairing dialog`                  | Run the command again, inside the pairing window                     |
+| `the bridge did not answer after the pairing`                         | Quit the USB program, or wait 15 s after it goes quiet, then run the command again |
 | A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
 
 `status --link bluetooth` proves the link both ways. In its `bluetooth host` line,

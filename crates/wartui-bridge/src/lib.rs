@@ -153,6 +153,10 @@ pub enum DisconnectCause {
     /// The subscription waits on the OS, which can show a pairing dialog. The transport is
     /// still connected and waiting, and a `Connected` or another `Disconnected` follows.
     AwaitingPairing,
+    /// The subscription that waited on the OS's pairing is through, and the bridge has not
+    /// announced itself: a USB host may hold it. The transport stays subscribed, and a
+    /// `Connected` or another `Disconnected` follows.
+    AwaitingReady,
     /// The bridge refused this host's subscription or write request with an ATT authentication or
     /// encryption error: it holds no bond for this host. [`TransportError::NotBonded`] words it.
     NotBonded,

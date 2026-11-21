@@ -614,6 +614,12 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
   error the transport reads as the C6's refusal, so the cause is `NotBonded`, where timing alone
   would have read `MaybeNotBonded`. The command ended 32.2 s in. The bridge kept no bond and its
   window stayed open.
+- **The click shows as a line of its own.** With the host also announcing a subscription that
+  waited on the pairing once it is through (`DisconnectCause::AwaitingReady`), a first pairing
+  under `sniff --link bluetooth` printed `# pairing: click Connect …` 6.5 s in, 4.4 s after
+  connecting. `# waiting for D0:1C to answer` came at the click 3.5 s later, and `# bridge …`
+  1 ms after it. USB had been quiet over a minute, so the wait behind a USB host was not
+  measured.
 
 ## What this settles
 

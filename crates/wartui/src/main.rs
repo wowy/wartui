@@ -452,10 +452,12 @@ fn describe(event: &LinkEvent) -> Option<String> {
         LinkEvent::Connected(info) => {
             Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
         }
-        // The transport is connected and waits on the OS's pairing dialog: its notice alone.
-        LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing } => {
-            Some(reason.clone())
-        }
+        // The transport is connected and waits on the OS's pairing dialog, or past it on the
+        // bridge's answer: its notice alone.
+        LinkEvent::Disconnected {
+            reason,
+            cause: DisconnectCause::AwaitingPairing | DisconnectCause::AwaitingReady,
+        } => Some(reason.clone()),
         LinkEvent::Disconnected { reason, .. } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
@@ -784,6 +786,16 @@ mod tests {
             cause: DisconnectCause::AwaitingPairing,
         };
         assert_eq!(describe(&pairing).as_deref(), Some(notice));
+    }
+
+    #[test]
+    fn describe_prints_notice_alone_when_subscription_is_through() {
+        let notice = "waiting for 44:C0 to answer";
+        let through = LinkEvent::Disconnected {
+            reason: notice.to_owned(),
+            cause: DisconnectCause::AwaitingReady,
+        };
+        assert_eq!(describe(&through).as_deref(), Some(notice));
     }
 
     #[test]

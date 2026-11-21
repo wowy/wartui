@@ -120,7 +120,10 @@
 //! waits on the operator's answer. So it is given [`PAIR_WITHIN`], the C6's deadline for a
 //! central that connects inside the window, and one still unanswered [`PAIRING_NOTICE_AFTER`] in
 //! is announced once as [`LinkEvent::Disconnected`] with [`DisconnectCause::AwaitingPairing`].
-//! The event is what reaches the operator: transport logs reach only `--log-file`. The host's
+//! The event is what reaches the operator: transport logs reach only `--log-file`. A caller keeps
+//! that cause until another event, and a USB host that holds the queue keeps the `Ready` back
+//! until 15 s after its last frame. So a subscription that announced the wait and then succeeds
+//! is announced once more, as `Disconnected` with [`DisconnectCause::AwaitingReady`]. The host's
 //! deadline starts after the C6's, so a dialog left unanswered ends with the C6's drop.
 //! CoreBluetooth then fails the subscription with an ATT authentication or encryption error,
 //! which reads as [`DisconnectCause::NotBonded`] (D0:1C, 2026-11-20). A run that has settled
@@ -283,6 +286,12 @@ fn pairing_notice(label: &str, macos: bool) -> String {
     } else {
         format!("pairing: accept the dialog if the OS shows one for {label}")
     }
+}
+
+/// The operator's notice that the subscription that waited on the OS's pairing for `label` is
+/// through, and the bridge's `Ready` has not come.
+fn ready_notice(label: &str) -> String {
+    format!("waiting for {label} to answer")
 }
 
 /// The most bytes one write carries at ATT MTU `mtu`: the MTU less its header, capped at
@@ -1272,7 +1281,8 @@ async fn discover(
 /// Wait for `subscribing`, the subscription to Up, for [`subscribe_within`]. When the OS `pairs`
 /// on the connection and the subscription is unanswered [`PAIRING_NOTICE_AFTER`] in, one
 /// [`DisconnectCause::AwaitingPairing`] goes to `events` and the wait goes on. It is logged at
-/// info only while the failure is `unreported`. The C6's refusal for want of a bond is
+/// info only while the failure is `unreported`. A subscription that sent that notice and then
+/// succeeds sends one [`DisconnectCause::AwaitingReady`]. The C6's refusal for want of a bond is
 /// [`refusal`]'s.
 async fn subscribe(
     subscribing: impl Future<Output = btleplug::Result<()>>,
@@ -1285,6 +1295,8 @@ async fn subscribe(
     let notice = tokio::time::sleep(PAIRING_NOTICE_AFTER);
     tokio::pin!(notice);
     let mut noticed = !pairs;
+    // `noticed` starts set where the OS pairs beforehand, so it cannot say a notice went out.
+    let mut sent = false;
     let answered = loop {
         tokio::select! {
             // An answer on the poll the notice falls due is no wait to announce.
@@ -1304,11 +1316,22 @@ async fn subscribe(
                 };
                 // A dropped handle ends the wait in `unless_closed`.
                 let _ = events.send(waiting).await;
+                sent = true;
             }
         }
     };
     match answered {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => {
+            if sent {
+                let through = LinkEvent::Disconnected {
+                    reason: ready_notice(label),
+                    cause: DisconnectCause::AwaitingReady,
+                };
+                // A dropped handle ends the connection in `unless_closed`.
+                let _ = events.send(through).await;
+            }
+            Ok(())
+        }
         Ok(Err(e)) => Err(refusal(label, &e)
             .unwrap_or_else(|| Failure::other(format!("could not subscribe to {label}: {e}")))),
         Err(_) => Err(Failure::other(format!("{label} did not answer the subscription"))),
@@ -1540,7 +1563,7 @@ mod tests {
     use super::{
         BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, PAIR_WITHIN,
         PAIRING_NOTICE_AFTER, Read, asker, awaits_pairing, choose, notice_allowance,
-        pairing_notice, subscribe, subscribe_within, unless_closed,
+        pairing_notice, ready_notice, subscribe, subscribe_within, unless_closed,
     };
     use crate::{DisconnectCause, LinkEvent, link_pair};
 
@@ -1744,6 +1767,32 @@ mod tests {
         assert!(heard.try_recv().is_err());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn ble_subscribe_reports_awaiting_ready_when_answer_comes_after_notice() {
+        // The operator clicked Connect; the bridge's `Ready` is still to come.
+        let (events, mut heard) = mpsc::channel(4);
+        let answered = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(())
+        };
+        assert!(subscribe(answered, ("44:C0", true), true, &events).await.is_ok());
+        let Ok(LinkEvent::Disconnected { cause, .. }) = heard.try_recv() else {
+            panic!("no pairing notice");
+        };
+        assert_eq!(cause, DisconnectCause::AwaitingPairing);
+        let Ok(LinkEvent::Disconnected { reason, cause }) = heard.try_recv() else {
+            panic!("no ready notice");
+        };
+        assert_eq!(reason, ready_notice("44:C0"));
+        assert_eq!(cause, DisconnectCause::AwaitingReady);
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn ble_ready_notice_names_bridge_when_subscription_is_through() {
+        assert_eq!(ready_notice("44:C0"), "waiting for 44:C0 to answer");
+    }
+
     #[test]
     fn ble_awaits_pairing_when_os_pairs_on_connection_and_run_has_not_settled() {
         assert!(awaits_pairing(true, false));
@@ -1813,6 +1862,13 @@ mod tests {
             let shown: String = line.chars().take(58).collect();
             assert!(shown.contains(instruction), "{shown}");
         }
+    }
+
+    #[test]
+    fn ble_ready_notice_fits_footer_line_when_terminal_is_58_columns() {
+        // The view draws it unwrapped, so the whole line fits the smallest screen.
+        let line = format!("  {}", ready_notice("02:00:5E:10:44:C0"));
+        assert!(line.chars().count() <= 58, "{line}");
     }
 
     #[tokio::test(start_paused = true)]
