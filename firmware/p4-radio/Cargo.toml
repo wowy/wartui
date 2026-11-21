@@ -2,6 +2,7 @@
 # different toolchain pin and a lockfile that must not be resolved together with the
 # host crates.
 [workspace]
+exclude = ["vendor"]
 
 [package]
 name = "wartui-p4-radio-fw"
@@ -34,13 +35,10 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
 ] }
 # The executor and time driver, and the scheduler the radio runs on.
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
-# TrouBLE's own copies, named for what its API does not re-export. `bt-hci` brings
-# `LeSetExtAdvEnable`, the command that stops every advertising set when a central connects.
-# `bt-hci`, `embedded-io` and `embedded-io-async` bring the traits `src/hci.rs`'s transport
-# implements. Each is held at the version `trouble-host` resolves, so none adds a copy.
-bt-hci = "0.10.1"
-embedded-io = "0.7.1"
-embedded-io-async = "0.7.0"
+# TrouBLE's own copy, named for what its API does not re-export: `LeSetExtAdvEnable`, the
+# command that stops every advertising set when a central connects, and its `AdvSet`. Held at
+# the version `trouble-host` resolves, so it adds no copy.
+bt-hci = "0.11.0"
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"
@@ -49,24 +47,27 @@ embassy-time = "0.5.1"
 # atomics as persistable.
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
-# The Bluetooth host. 0.8 builds on `bt-hci` 0.10, whose transport trait lives in
-# `bt-hci-transport`, the crate `esp-radio`'s `BleConnector` implements it from, so the
-# connector plugs in as it is. `bt-hci` resolves twice, 0.9 for `esp-radio` and 0.10 here:
-# plain types with no global symbols.
+# The Bluetooth host: 0.8.0, vendored and moved to `bt-hci` 0.11 (the `[patch.crates-io]`
+# entry at the end of this file, `vendor/trouble-host/VENDORED.md`). Its transport trait lives in
+# `bt-hci-transport`, the crate `esp-radio`'s `BleConnector` implements it from, so the connector
+# plugs in as it is. `bt-hci` resolves twice, 0.9 for `esp-radio` and 0.11 here: plain types with
+# no global symbols.
 #
-# Two settings work around three bugs, each until a release the held set accepts fixes it:
+# The packet pool works around two esp-radio bugs, until a release the held set accepts fixes
+# them. It holds an L2CAP PDU of 186 bytes, an ATT MTU of 182, set by
+# `TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in `.cargo/config.toml`. At most 251, every notification
+# fits one ACL packet at data length 251: esp-radio 1.0.0-beta.1 zeroes the high byte of every
+# outgoing ACL header, which marks each fragment a start, so a central drops a fragmented
+# notification and the stream stalls (`docs/c6-ble-host-findings.md`, "Workarounds a production
+# build needs"). At 186, no central's packet reaches the 193 bytes the controller hands over as a
+# chain, of which esp-radio copies only the first buffer (`docs/ble-host-link-findings.md`, "The
+# host stop, found").
 #
-# - The packet pool holds an L2CAP PDU of 186 bytes, an ATT MTU of 182, set by
-#   `TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in `.cargo/config.toml`. It serves two bugs. At most
-#   251, every notification fits one ACL packet at data length 251: esp-radio 1.0.0-beta.1 zeroes
-#   the high byte of every outgoing ACL header, which marks each fragment a start, so a central
-#   drops a fragmented notification and the stream stalls (`docs/c6-ble-host-findings.md`,
-#   "Workarounds a production build needs"). At 186, no central's packet reaches the 193 bytes the
-#   controller hands over as a chain, of which esp-radio copies only the first buffer
-#   (`docs/ble-host-link-findings.md`, "The host stop, found").
-# - `connection-params-update` stays off. bt-hci 0.10.1 declares no return for the LE Remote
-#   Connection Parameter Request replies, and the controller returns the connection handle, so
-#   a central's parameter request would panic the C6. Off, the controller answers it itself.
+# `connection-params-update` stays off, by choice. Off, the controller answers a central's
+# parameter request itself and never waits on the host. On, the host must answer every one, and
+# TrouBLE drops a request that reaches a connection it has yet to accept or whose event queue is
+# full, which ends the link at the link layer's 40 s timeout (`README.md` § "Bluetooth host
+# link").
 #
 # `security` brings LE Secure Connections pairing and bonds, with `legacy-pairing` left off so
 # nothing pairs below LE Secure Connections. It seeds its RNG from the controller's LeRand.
@@ -109,3 +110,8 @@ opt-level = 3
 
 [profile.release.package.postcard]
 opt-level = 3
+
+# `trouble-host` 0.8.0 with upstream's move to `bt-hci` 0.11 applied, until a release
+# builds on it. `vendor/trouble-host/VENDORED.md` has its provenance and when it goes.
+[patch.crates-io]
+trouble-host = { path = "vendor/trouble-host" }

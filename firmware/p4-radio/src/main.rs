@@ -24,7 +24,6 @@
 
 mod ble;
 mod config;
-mod hci;
 mod last_panic;
 mod link;
 

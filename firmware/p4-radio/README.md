@@ -47,19 +47,17 @@ the first, and while a central is connected the C6 advertises the WardriveESP st
 - **The heap is 96 KB:** 64 KB of reclaimed bootloader RAM and 32 KB more. The Bluetooth controller
   and the scheduler under it are all that allocate.
 
-Three upstream bugs shape the build, each worked around without a patch
-([`c6-ble-host-findings.md`](../../docs/c6-ble-host-findings.md#workarounds-a-production-build-needs)):
+Two esp-radio bugs shape the build, both worked around by one setting and neither patched
+([`c6-ble-host-findings.md`](../../docs/c6-ble-host-findings.md#workarounds-a-production-build-needs)).
+TrouBLE's packet pool is 186 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in
+`.cargo/config.toml`), so the ATT MTU is 182 (`wartui_proto::ble::ATT_MTU`).
 
-| Workaround | Why |
-| --- | --- |
-| TrouBLE's packet pool is 186 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU` in `.cargo/config.toml`), so the ATT MTU is 182 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops a fragmented notification and the stream stalls |
-| `trouble-host`'s `connection-params-update` stays off | bt-hci 0.10.1 panics on the reply to a central's connection parameter request; off, the controller answers it itself |
-| Commands go to the controller through bt-hci's sync encoder (`src/hci.rs`) | bt-hci 0.10.1's async encoder writes a byte slice's length one too long, so the controller refuses the extended advertising data commands |
+The first is that esp-radio 1.0.0-beta.1 marks every ACL fragment as a start, so a central drops
+a fragmented notification and the stream stalls. At 186 bytes no notification fragments.
 
-The ATT MTU of 182 (`wartui_proto::ble::ATT_MTU`) works around a fourth. esp-radio
-1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer of a received ACL packet that
-arrives as a chain, and the controller chains a packet of 193 to 198 bytes, its 4-byte header
-included. The packet reaches TrouBLE short, its host stops, and the C6 restarts. On that MTU a
+The second is that esp-radio 1.0.0-beta.1's `ble_hs_rx_data` copies only the first buffer of a
+received ACL packet that arrives as a chain, and the controller chains a packet of 193 to 198
+bytes, its 4-byte header included. The packet reaches TrouBLE short, its host stops, and the C6 restarts. On that MTU a
 central writes at most 179 value bytes to Down, and no packet it sends passes 190 bytes
 ([`ble-host-link-findings.md`](../../docs/ble-host-link-findings.md#the-host-stop-found)).
 Build from this directory, whose `.cargo/config.toml` sizes the pool; `src/ble.rs` fails the
@@ -70,6 +68,20 @@ The central picks the connection interval unless the build names one.
 latency 0 and a 4 s supervision timeout, over L2CAP. Each bound is a multiple of 1.25 ms from
 7.5 ms, under 2 s. A central that refuses changes nothing. An iOS central wants a minimum of at
 least 15 ms (`src/config.rs`).
+
+The controller answers a central's own parameter request, and the host never sees it:
+`trouble-host`'s `connection-params-update` stays off, by choice. With it on the controller
+waits for the host's answer to every request, and the host has three ways to miss one:
+
+- TrouBLE drops a request for a connection it has yet to accept, and the C6 stops polling the
+  accept while it refreshes the WardriveESP advertisement;
+- TrouBLE drops an event that finds a connection's queue full, and the queue holds 2;
+- TrouBLE's `accept` issues an LE Connection Update before its reply, which NimBLE's open link
+  layer answers with LMP Collision on a peripheral, and TrouBLE then refuses the central.
+
+An unanswered request ends the link at the link layer's 40 s timeout. All three are read from
+the sources and none is measured. The feature buys only the C6's interval request taking the
+link layer's procedure before L2CAP.
 
 The C6 keeps its last panic's text in RTC memory across the reset, and sends it to the P4 as
 `Error` lines once the link is up (`src/last_panic.rs`).
@@ -156,11 +168,24 @@ The C5's PAC resolves twice in the node, and that is known: `esp-hal 1.2.2` buil
 and 0.25.
 
 `trouble-host` 0.8.0 is the newest release, and is outside the family: nothing in `esp-radio`
-depends on it. It builds on `bt-hci` 0.10, and `esp-radio` on 0.9, so `bt-hci` resolves twice.
-Both are plain types with no global symbols, and the controller plugs in through
-`bt-hci-transport` 0.1, which both share. The C6 names `bt-hci` 0.10, `embedded-io` 0.7 and
-`embedded-io-async` 0.7 itself, each at the version `trouble-host` resolves. `Cargo.toml` names
-its two workaround features ([above](#bluetooth-host-link)).
+depends on it. The release builds on `bt-hci` 0.10, and two of that version's bugs reached the
+C6: its async encoder wrote a byte slice's length one too long, so the controller refused the
+extended advertising data commands, and it declared no return for the replies to a central's
+connection parameter request, so answering one panicked. `bt-hci` 0.11 fixes both, and no
+`trouble-host` release builds on it yet.
+
+So the C6 builds the copy in [`vendor/trouble-host`](vendor/trouble-host/VENDORED.md): the
+published 0.8.0 with the one upstream commit that moves TrouBLE to `bt-hci` 0.11, and nothing
+else of TrouBLE's `main`. `Cargo.toml` points `[patch.crates-io]` at it, and the workspace
+excludes it, so it is neither linted nor formatted as this firmware's. Delete it, and the patch
+entry, when a `trouble-host` release builds on `bt-hci` 0.11 or later. Dependabot's pull request
+for that release is the signal; until then it ignores `bt-hci`'s minor and major releases, since
+one above what `trouble-host` builds on is a second copy whose types TrouBLE's API does not take.
+
+`esp-radio` builds on `bt-hci` 0.9, so `bt-hci` resolves twice, 0.9 and 0.11. Both are plain
+types with no global symbols, and the controller plugs in through `bt-hci-transport` 0.1, which
+both share. The C6 names `bt-hci` 0.11 itself, at the version the vendored `trouble-host`
+resolves, for the command that stops its advertising sets.
 
 ### Crates that double
 

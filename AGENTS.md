@@ -519,11 +519,12 @@ edit stops; follow the pointer before changing the rule.
   the legacy ones. TrouBLE stops no set on a connection, and a set left enabled ends its runner at
   the next resolving-list load, which restarts the C6. → `firmware/p4-radio/src/ble.rs` `//!`,
   `stop_sets`
-- **HCI commands reach the C6's controller through bt-hci's sync encoder.** bt-hci 0.10.1's async
-  encoder writes a byte slice's length one too long, and the controller refuses the extended
-  advertising data commands. The C6 names `bt-hci`, `embedded-io` and `embedded-io-async` itself,
-  each held at the version `trouble-host` resolves. → `firmware/p4-radio/src/hci.rs` `//!`,
-  `firmware/p4-radio/README.md` § "Dependency versions"
+- **The C6's `trouble-host` is the vendored 0.8.0 with one upstream commit, the move to bt-hci
+  0.11, and takes no other change.** The release builds on bt-hci 0.10, whose encoder and
+  parameter-request replies are wrong. The C6 names `bt-hci` itself, held at the version
+  `trouble-host` resolves, and the copy goes when a release builds on 0.11.
+  → `firmware/p4-radio/vendor/trouble-host/VENDORED.md`, `firmware/p4-radio/README.md`
+  § "Dependency versions"
 - **Where the Bluetooth code picks a protocol, it matches every `Stream`, `Holder` or
   `HostOwner`.** An `if phone … else host` gives a third stream the host's arm with no compile
   error. → `crates/wartui-proto/src/radio_link/message.rs`, `Stream::terminator`;

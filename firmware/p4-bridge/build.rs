@@ -34,6 +34,7 @@ const RADIO_INPUTS: &[&str] = &[
     "../p4-radio/partitions.csv",
     "../p4-radio/rust-toolchain.toml",
     "../p4-radio/.cargo",
+    "../p4-radio/vendor",
     "../common/src",
     "../common/Cargo.toml",
     "../../crates/wartui-proto/src",
