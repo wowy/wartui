@@ -24,10 +24,11 @@
 //! **Each try takes a fresh handle on macOS.** btleplug's CoreBluetooth backend drops a
 //! peripheral from its own table on every disconnect, and keeps it in the adapter's. So
 //! `peripheral(&id)`, `peripherals()` and a rescan all hand back a handle whose connect fails or
-//! whose notifications go nowhere: a run stranded on one after the bridge reset (D0:1C,
-//! 2026-11-20). Each try therefore asks CoreBluetooth for the peripheral by its identifier first
-//! (`retrieve_peripherals`), which builds a live handle for one it dropped ([`fresh`]). BlueZ keeps
-//! its device object across a disconnect, so Linux needs none.
+//! whose notifications go nowhere (`docs/ble-host-link-findings.md` § "macOS"). Asking for the
+//! peripheral by its identifier (`retrieve_peripherals`) builds a live handle for one a disconnect
+//! dropped, as long as no rescan has re-added it to the backend's table, so a settled try asks
+//! that way first ([`fresh`]), and a try that scans clears both of btleplug's tables before it
+//! does. BlueZ keeps its device object across a disconnect, so Linux needs neither.
 //!
 //! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
@@ -726,6 +727,17 @@ async fn attempt(
     let peripheral = match settled {
         Some(Settled { peripheral, .. }) => peripheral.clone(),
         None => {
+            // A scan's discovery builds a live handle only for a peripheral btleplug holds none
+            // for (§ "Each try takes a fresh handle").
+            #[cfg(target_os = "macos")]
+            tokio::select! {
+                cleared = central.clear_peripherals() => {
+                    if let Err(e) = cleared {
+                        tracing::debug!(error = %e, "could not clear the Bluetooth peripherals");
+                    }
+                }
+                () = plumbing.events.closed() => return End::HandleDropped,
+            }
             let found = tokio::select! {
                 found = find(&central, transport, *direct_failed) => found,
                 () = plumbing.events.closed() => {
@@ -742,14 +754,17 @@ async fn attempt(
             }
         }
     };
-    let peripheral = fresh(&central, peripheral).await;
+    let peripheral = tokio::select! {
+        peripheral = fresh(&central, peripheral) => peripheral,
+        () = plumbing.events.closed() => return End::HandleDropped,
+    };
     connect(&central, &peripheral, transport, plumbing, settled, unreported).await
 }
 
 /// A live handle for `peripheral`. On macOS, CoreBluetooth is asked for it by its identifier:
-/// that returns the same handle while it is live, and a new one once a disconnect has dropped it
-/// (§ "Each try takes a fresh handle"). Elsewhere, and when CoreBluetooth returns none, it is
-/// `peripheral` itself.
+/// that returns the same handle while it is live, and a new one once a disconnect has dropped it,
+/// unless a rescan has re-added it (§ "Each try takes a fresh handle"). Elsewhere, and when
+/// CoreBluetooth returns none, it is `peripheral` itself.
 async fn fresh(adapter: &Adapter, peripheral: Peripheral) -> Peripheral {
     #[cfg(target_os = "macos")]
     {

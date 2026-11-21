@@ -564,6 +564,11 @@ advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s
   now settles on the bridge's address, and checks each connection's first `Ready` against it.
   Linux is unchanged. With it, the reset, the takeover and Bluetooth off and on above all
   recovered.
+- **A try that scans clears btleplug's tables first.** A rescan can re-add a dropped peripheral
+  to the backend's table, and a retrieval after that returns nothing, so that path could still
+  meet the dead handle; whether it does is a race (from reading btleplug). A link that dropped
+  before its `Ready`, with USB holding the bridge and a `reset` over USB, recovered on the host
+  before the clear and after it: served 15.4 s after USB let go, both times.
 - **The resume run lost 206 frames, 16 sighting batches among them,** across its three outages:
   15 s of takeover, a reset with 15 s of USB holding the bridge, and about 10 s with Bluetooth off.
 
