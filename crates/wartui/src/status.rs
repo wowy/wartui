@@ -420,6 +420,8 @@ pub(crate) async fn wait_for_ready_or_why(
                 eprintln!("{notice}");
                 until = pairing_deadline(until, tokio::time::Instant::now());
             }
+            // The pairing already stretched the deadline.
+            Taken::Through(notice) => eprintln!("{notice}"),
             Taken::Ended(ready) => return ReadyWaited { ready: ready.map(Some), garbled },
         }
     }
@@ -458,7 +460,8 @@ fn ready_ran_out() -> String {
 /// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
 /// the transport's pairing window; a later one returns no notice. A
 /// [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
-/// the bridge's `Ready`. A wait that runs out names a failure that is retried, else the bridge's
+/// the bridge's `Ready`; the first is the operator's notice that the click landed, and a later
+/// one returns no notice. A wait that runs out names a failure that is retried, else the bridge's
 /// silence once the subscription went through, else the pairing wait once it was announced.
 #[derive(Debug)]
 struct ReadyWait {
@@ -469,6 +472,9 @@ struct ReadyWait {
     pairing: bool,
     /// Whether the subscription went through since the pairing wait last began.
     through: bool,
+    /// Whether the subscription going through has been announced. `through` resets when a
+    /// pairing wait begins again, so it cannot say this.
+    through_said: bool,
 }
 
 /// What one link event does to a [`ReadyWait`].
@@ -478,13 +484,16 @@ enum Taken {
     Waiting,
     /// The transport waits on the OS's pairing dialog: this notice says so, and the wait goes on.
     Pairing(String),
+    /// The subscription that waited on the pairing is through: this notice says so, and the wait
+    /// goes on.
+    Through(String),
     /// The wait is over, with the announcement or the reason.
     Ended(Result<BridgeInfo, String>),
 }
 
 impl ReadyWait {
     const fn new(over: crate::config::Link) -> Self {
-        Self { over, retried: None, pairing: false, through: false }
+        Self { over, retried: None, pairing: false, through: false, through_said: false }
     }
 
     /// What `event` does to the wait.
@@ -505,11 +514,15 @@ impl ReadyWait {
                 self.retried = Some(reason);
                 Taken::Waiting
             }
-            Some(LinkEvent::Disconnected { cause: DisconnectCause::AwaitingReady, .. }) => {
+            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingReady }) => {
                 // The failures before it came before a subscription that went through.
                 self.through = true;
                 self.retried = None;
-                Taken::Waiting
+                if std::mem::replace(&mut self.through_said, true) {
+                    Taken::Waiting
+                } else {
+                    Taken::Through(reason)
+                }
             }
             Some(LinkEvent::Disconnected { reason, .. }) => Taken::Ended(Err(reason)),
             Some(_) => Taken::Waiting,
@@ -1011,13 +1024,15 @@ mod tests {
     }
 
     #[test]
-    fn ready_wait_keeps_waiting_when_subscription_is_through() {
+    fn ready_wait_returns_ready_notice_once_when_subscription_is_through() {
         // Without its own arm, the first pairing of a one-shot command would fail at the click.
         let mut wait = ReadyWait::new(Link::Bluetooth);
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
         let ready = "waiting for 44:C0 to answer";
-        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+        let through = DisconnectCause::AwaitingReady;
+        assert_eq!(wait.take(down(ready, through)), Taken::Through(ready.to_owned()));
+        assert_eq!(wait.take(down(ready, through)), Taken::Waiting, "said once");
     }
 
     #[test]
@@ -1028,7 +1043,10 @@ mod tests {
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
         let ready = "waiting for 44:C0 to answer";
-        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+        assert!(matches!(
+            wait.take(down(ready, DisconnectCause::AwaitingReady)),
+            Taken::Through(_)
+        ));
         assert_eq!(
             wait.timed_out().as_deref(),
             Some(
@@ -1044,7 +1062,10 @@ mod tests {
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
         let ready = "waiting for 44:C0 to answer";
-        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+        assert!(matches!(
+            wait.take(down(ready, DisconnectCause::AwaitingReady)),
+            Taken::Through(_)
+        ));
         let failed = "the bridge disconnected";
         assert_eq!(wait.take(down(failed, DisconnectCause::Other)), Taken::Waiting);
         assert_eq!(wait.timed_out().as_deref(), Some(failed));

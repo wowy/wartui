@@ -1299,14 +1299,14 @@ pairing: click Connect if macOS shows a dialog for XX:YY
 ```
 
 It waits up to 30 s for the click, so one command pairs and is served: run `wartui bluetooth pair`
-over USB, then `wartui status --link bluetooth`. Once the click lands, `run`'s footer line changes
-to `waiting for XX:YY to answer` until the bridge answers. A dialog left unclicked ends with the
-bridge dropping the Mac 30 s after it connected, as `refused this PC over Bluetooth because they
-are not paired`: run the command again inside the window, and click. A bonded Mac sees no dialog
-and no notice. A Mac that still holds a bond the bridge has dropped cannot connect at all, and
-reads `could not connect to XX:YY in 10s`: forget the bridge in System Settings → Bluetooth, then
-pair again inside the window. Every disconnect on macOS logs `Shouldn't get anything but Ok!` from
-btleplug at error level; it is harmless.
+over USB, then `wartui status --link bluetooth`. Once the click lands, the command prints
+`waiting for XX:YY to answer`, and `run` shows it as its footer line until the bridge answers. A
+dialog left unclicked ends with the bridge dropping the Mac 30 s after it connected, as `refused
+this PC over Bluetooth because they are not paired`: run the command again inside the window, and
+click. A bonded Mac sees no dialog and no notice. A Mac that still holds a bond the bridge has
+dropped cannot connect at all, and reads `could not connect to XX:YY in 10s`: forget the bridge in
+System Settings → Bluetooth, then pair again inside the window. Every disconnect on macOS logs
+`Shouldn't get anything but Ok!` from btleplug at error level; it is harmless.
 
 On a desktop with a Bluetooth agent, the first `--link bluetooth` connection inside the pairing
 window may raise the desktop's own pairing prompt. Accepting it pairs the PC. `wartui bluetooth
