@@ -108,8 +108,8 @@ own.
   bonds the P4 keeps for its C6, and their records), `host_owner` (who holds the P4's host queue:
   USB, a Bluetooth central, a phone or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
   `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
-  GATT identity of the C6's Bluetooth host link, the id a host finds a bridge by, and the address
-  its set advertises from),
+  GATT identity of the C6's Bluetooth host link, the id a host finds a bridge by, the address its
+  set advertises from, and the rest of the phones' set after a silent central),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
   lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
   round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
@@ -490,8 +490,11 @@ edit stops; follow the pointer before changing the rule.
   writes its commands, which reach only the phone's session. A central reads one stream, the
   first it subscribes to, and one central connects at a time, so a linked phone keeps a Bluetooth
   host out and USB always gets in. The C6 sends no Security Request, which a phone would answer
-  with a pairing prompt: a host starts its own pairing.
-  → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`
+  with a pairing prompt: a host starts its own pairing. A central silent for 3 s after connecting
+  is dropped, and while phones are admitted the phones' set rests after it, up to
+  `ble::REST_MAX_MS`.
+  → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`; `crates/wartui-proto/src/ble.rs`,
+  `Rest`
 - **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
   the P4's own offsets, up to which the C6 is done, so every `HostStart` and `HostBytes`
   resynchronizes it and a restart of either chip cannot skew it. A sum kept from the C6's boot

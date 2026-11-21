@@ -1,4 +1,5 @@
-//! The Bluetooth host link's GATT identity, and the C6's buffer of what it has yet to notify.
+//! The Bluetooth host link's GATT identity, the phones' rest, and the C6's buffer of what it has
+//! yet to notify.
 //!
 //! The host link is the GATT service [`SERVICE_UUID`]. [`UP_UUID`] notifies the host stream a USB
 //! host reads, split across notifications anywhere, and [`DOWN_UUID`] takes host frames, framed as
@@ -13,6 +14,12 @@
 //! **The id is in the wartui pair alone.** That pair advertises from [`link_address`], apart from
 //! the phones' pair and the status beacon on the public address, because a phone that has linked
 //! reconnects by address and would otherwise land on the wartui pair.
+//!
+//! **The phones' set rests after a silent central** ([`Rest`]). A phone that has linked connects
+//! on the phones' set with its app closed, says nothing, and is back as soon as it is dropped. So
+//! the C6 drops it and stops advertising the phones' set for a while, and the wartui set stays
+//! reachable meanwhile. Each silent central in a row doubles the rest, up to [`REST_MAX_MS`]: the
+//! longest an opened app waits to link.
 //!
 //! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
 //! [`DOWN_VALUE_MAX`] value bytes, and a central's own stack keeps to it. wartui's transport caps
@@ -54,6 +61,49 @@ pub const fn link_address(mac: &Mac) -> Mac {
     // The top two bits of the first octet mark a static random address.
     address[0] |= 0xC0;
     address
+}
+
+/// The first rest, in ms.
+pub const REST_FIRST_MS: u64 = 5_000;
+/// The longest rest, in ms: how long an opened app may wait to link.
+pub const REST_MAX_MS: u64 = 30_000;
+
+/// When the phones' set rests: [`REST_FIRST_MS`] after the first silent central, doubled for each
+/// one in a row after it, up to [`REST_MAX_MS`]. Times are the caller's uptime, in ms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rest {
+    /// Silent centrals dropped in a row.
+    kicks: u8,
+    /// When the last rest ends, or `None` before one.
+    ends: Option<u64>,
+}
+
+impl Rest {
+    /// No rest has run.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { kicks: 0, ends: None }
+    }
+
+    /// A silent central was dropped at `now_ms`: start the next rest and return its length in ms.
+    pub fn begin(&mut self, now_ms: u64) -> u64 {
+        // Past a shift of 3 the length is the cap; 8 keeps the product far inside a `u64`.
+        let length = (REST_FIRST_MS << self.kicks.min(8)).min(REST_MAX_MS);
+        self.kicks = self.kicks.saturating_add(1);
+        self.ends = Some(now_ms.saturating_add(length));
+        length
+    }
+
+    /// When the rest ends, while one runs at `now_ms`.
+    #[must_use]
+    pub fn until(&self, now_ms: u64) -> Option<u64> {
+        self.ends.filter(|&ends| now_ms < ends)
+    }
+
+    /// A phone reads its stream: the next rest is the first again, and none runs.
+    pub const fn clear(&mut self) {
+        *self = Self::new();
+    }
 }
 
 /// The ATT MTU the C6 serves.

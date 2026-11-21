@@ -49,6 +49,7 @@ one. A phone that has linked reconnects by address, so it never lands on the war
 | State | Sets on air |
 | --- | --- |
 | on, no central | the wartui set and the WardriveESP set, connectable, every 100 ms |
+| on, no central, resting (below) | the wartui set, connectable, every 100 ms |
 | on, a central connected | the status beacon, not connectable, about once a second |
 | off, no central | the wartui set, connectable, every 100 ms |
 | off, a central connected | none |
@@ -116,6 +117,11 @@ the first subscription decides whether it is a phone or a wartui host, and the o
 subscription is refused. A central that has subscribed to neither stream 10 s after it connects is
 disconnected, 30 s while the bridge's pairing window is open, and so is a phone that stays
 unsubscribed for 30 s.
+
+A central that says nothing for 3 s after it connects is disconnected sooner, as a phone that has
+linked does when it reconnects with its app closed. The WardriveESP set then rests: it is off the
+air for 5 s, doubled for each silent central in a row up to 30 s, while the wartui set runs. An app
+opened during a rest links when the rest ends.
 
 ## Frames
 

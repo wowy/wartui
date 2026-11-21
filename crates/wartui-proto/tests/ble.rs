@@ -1,8 +1,8 @@
-//! The Bluetooth host link's GATT identity and the C6's notify buffer.
+//! The Bluetooth host link's GATT identity, the phones' rest and the C6's notify buffer.
 
 use wartui_proto::ble::{
-    ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID, advertised_octets,
-    link_address,
+    ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, REST_FIRST_MS, REST_MAX_MS, Rest, SERVICE_UUID,
+    UP_UUID, advertised_octets, link_address,
 };
 
 #[test]
@@ -37,6 +37,37 @@ fn link_address_sets_static_random_bits_when_built_from_mac() {
     );
     // It ends in the bridge's own octets whatever the first octet holds.
     assert_eq!(link_address(&[0xD8, 1, 2, 3, 0x96, 0xC4]), [0xD8, 1, 2, 3, 0x96, 0xC4]);
+}
+
+#[test]
+fn rest_doubles_up_to_its_cap_when_silent_kicks_repeat() {
+    let mut rest = Rest::new();
+    let lengths: Vec<u64> = (0..6).map(|_| rest.begin(0)).collect();
+    assert_eq!(lengths, [5_000, 10_000, 20_000, 30_000, 30_000, 30_000]);
+    // Far past the cap, the shift never overflows.
+    for _ in 0..300 {
+        assert_eq!(rest.begin(0), REST_MAX_MS);
+    }
+}
+
+#[test]
+fn rest_runs_until_its_end_when_begun() {
+    let mut rest = Rest::new();
+    assert_eq!(rest.until(1_000), None);
+    assert_eq!(rest.begin(1_000), REST_FIRST_MS);
+    assert_eq!(rest.until(1_000), Some(6_000));
+    assert_eq!(rest.until(5_999), Some(6_000));
+    assert_eq!(rest.until(6_000), None);
+}
+
+#[test]
+fn rest_starts_over_when_cleared() {
+    let mut rest = Rest::new();
+    rest.begin(0);
+    rest.begin(0);
+    rest.clear();
+    assert_eq!(rest.until(1), None);
+    assert_eq!(rest.begin(0), REST_FIRST_MS);
 }
 
 #[test]
