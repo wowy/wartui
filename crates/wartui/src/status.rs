@@ -446,8 +446,10 @@ const PAIRING_RAN_OUT: &str =
 /// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
 /// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once. The
 /// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
-/// the transport's pairing window; a later one changes nothing. A wait that runs out after the
-/// notice names the pairing wait, unless a failure is retried.
+/// the transport's pairing window; a later one returns no notice. A
+/// [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
+/// the bridge's `Ready`. A wait that runs out after the notice names the pairing wait, unless a
+/// failure is retried or the subscription went through since.
 #[derive(Debug)]
 struct ReadyWait {
     over: crate::config::Link,
@@ -455,6 +457,8 @@ struct ReadyWait {
     retried: Option<String>,
     /// Whether the transport's wait on the OS's pairing has been announced.
     pairing: bool,
+    /// Whether the subscription went through since the pairing wait last began.
+    through: bool,
 }
 
 /// What one link event does to a [`ReadyWait`].
@@ -470,7 +474,7 @@ enum Taken {
 
 impl ReadyWait {
     const fn new(over: crate::config::Link) -> Self {
-        Self { over, retried: None, pairing: false }
+        Self { over, retried: None, pairing: false, through: false }
     }
 
     /// What `event` does to the wait.
@@ -478,6 +482,7 @@ impl ReadyWait {
         match event {
             Some(LinkEvent::Connected(info)) => Taken::Ended(Ok(info)),
             Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing }) => {
+                self.through = false;
                 if std::mem::replace(&mut self.pairing, true) {
                     Taken::Waiting
                 } else {
@@ -490,6 +495,12 @@ impl ReadyWait {
                 self.retried = Some(reason);
                 Taken::Waiting
             }
+            Some(LinkEvent::Disconnected { cause: DisconnectCause::AwaitingReady, .. }) => {
+                // The failures before it are behind the subscription that went through.
+                self.through = true;
+                self.retried = None;
+                Taken::Waiting
+            }
             Some(LinkEvent::Disconnected { reason, .. }) => Taken::Ended(Err(reason)),
             Some(_) => Taken::Waiting,
             None => Taken::Ended(Err("the link closed".to_owned())),
@@ -497,9 +508,10 @@ impl ReadyWait {
     }
 
     /// Why the wait ran out: the last failure the transport was retrying, else the pairing wait
-    /// once it was announced, if either.
+    /// once it was announced and while the subscription has not gone through, if either.
     fn timed_out(self) -> Option<String> {
-        self.retried.or_else(|| self.pairing.then(|| PAIRING_RAN_OUT.to_owned()))
+        let pairing = self.pairing && !self.through;
+        self.retried.or_else(|| pairing.then(|| PAIRING_RAN_OUT.to_owned()))
     }
 }
 
@@ -980,6 +992,28 @@ mod tests {
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
         assert_eq!(wait.timed_out(), Some("timed out".to_owned()));
+    }
+
+    #[test]
+    fn ready_wait_keeps_waiting_when_subscription_is_through() {
+        // Without its own arm, the first pairing of a one-shot command would fail at the click.
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+        let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+    }
+
+    #[test]
+    fn ready_wait_names_nothing_when_it_runs_out_after_subscription_is_through() {
+        // The caller falls through to its usual no-bridge notice.
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+        let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+        assert_eq!(wait.timed_out(), None);
     }
 
     #[test]

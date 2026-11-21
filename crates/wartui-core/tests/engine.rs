@@ -2395,6 +2395,33 @@ fn engine_keeps_disconnect_cause_until_link_returns_when_usb_takes_bridge() {
 }
 
 #[test]
+fn engine_replaces_pairing_cause_when_subscription_is_through() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let down = |reason: &str, cause| {
+        Event::Link(LinkEvent::Disconnected { reason: reason.to_owned(), cause })
+    };
+    let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+    engine.handle(
+        down(
+            "pairing: click Connect if macOS shows a dialog for 44:C0",
+            DisconnectCause::AwaitingPairing,
+        ),
+        clock.at(1),
+    );
+    engine.handle(down(ready, DisconnectCause::AwaitingReady), clock.at(2));
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    assert_eq!(snapshot.link_cause, Some(DisconnectCause::AwaitingReady));
+    assert_eq!(snapshot.link_error.as_deref(), Some(ready));
+    assert!(!snapshot.link_up);
+
+    engine.handle(connected(), clock.at(4));
+    let snapshot = engine.snapshot(clock.at(5), StoreStats::default());
+    assert_eq!(snapshot.link_cause, None);
+    assert_eq!(snapshot.link_error, None);
+}
+
+#[test]
 fn engine_records_host_frames_when_status_reply_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);

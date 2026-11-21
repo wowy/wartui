@@ -402,8 +402,11 @@ fn served_by(event: &LinkEvent) -> Served<'_> {
         LinkEvent::Connected(_) => Served::Yes,
         LinkEvent::Disconnected { cause: DisconnectCause::NotBonded, .. } => Served::Refused,
         LinkEvent::Disconnected { cause: DisconnectCause::MaybeNotBonded, .. } => Served::Dropped,
-        // Still connected, and waiting on the OS.
-        LinkEvent::Disconnected { cause: DisconnectCause::AwaitingPairing, .. } => Served::Waiting,
+        // Still connected, and waiting on the OS or, past it, on the bridge.
+        LinkEvent::Disconnected {
+            cause: DisconnectCause::AwaitingPairing | DisconnectCause::AwaitingReady,
+            ..
+        } => Served::Waiting,
         LinkEvent::Disconnected { reason, .. } => Served::Failed(reason),
         LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
     }
@@ -900,6 +903,7 @@ mod tests {
         assert_eq!(served_by(&down(DisconnectCause::Other)), Served::Failed("gone"));
         assert_eq!(served_by(&down(DisconnectCause::UsbTookBridge)), Served::Failed("gone"));
         assert_eq!(served_by(&down(DisconnectCause::AwaitingPairing)), Served::Waiting);
+        assert_eq!(served_by(&down(DisconnectCause::AwaitingReady)), Served::Waiting);
     }
 
     #[test]

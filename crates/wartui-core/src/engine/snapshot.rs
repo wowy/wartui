@@ -114,8 +114,9 @@ pub struct Snapshot {
     pub link_error: Option<String>,
     /// What the transport knew of why it went down, beside [`Self::link_error`]'s words. `None`
     /// while it is up. The view reads [`DisconnectCause::UsbTookBridge`] as the bridge serving
-    /// another host, and [`DisconnectCause::AwaitingPairing`] as an OS dialog to answer, not as
-    /// faults.
+    /// another host, [`DisconnectCause::AwaitingPairing`] as an OS dialog to answer, and
+    /// [`DisconnectCause::AwaitingReady`] as subscribed and waiting for the bridge to answer, not
+    /// as faults.
     pub link_cause: Option<DisconnectCause>,
     /// The channel pool the bridge reports, which its planner cuts. `None` before its first
     /// `Status`.
