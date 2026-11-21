@@ -15,7 +15,8 @@ transport, a command that resets the C6 alone, and a C6 build setting that disca
 
 No phone ran that day. The Pixel and the iPad ran on 2026-11-15: see [The phones](#the-phones).
 A drive from a HackberryPi followed the same day: see [A first drive](#a-first-drive). Updates
-over Bluetooth ran the same day too: see [Updates over Bluetooth](#updates-over-bluetooth).
+over Bluetooth ran the same day too: see [Updates over Bluetooth](#updates-over-bluetooth). A Mac
+ran the bench on 2026-11-20: see [macOS](#macos).
 
 ## Results
 
@@ -518,6 +519,75 @@ The production image then ran on the same bench:
   line.
 - **Not run:** a phone on the MTU of 182, and a central that sends more than the MTU it agreed.
 
+## macOS
+
+Measured on 2026-11-20 on D0:1C with its ten nodes, from a Mac: macOS 27.2.1, its built-in Apple
+controller (BCM4388), and no other device connected to it. The firmware is `main` at `75ce526`
+on both chips and every node (0.6.0). The host is `75ce526`, and from the resume checks on, with
+the reconnect fix below. CoreBluetooth chose MTU 182, the 2M PHY and a 30 ms interval on every
+connection. No load branch ran, so the saturated rate was not measured.
+
+| Check | Result |
+| --- | --- |
+| No bond, window closed | Refused at 10 s: `refused this PC over Bluetooth because they are not paired`. One `unbonded_kicks`, reason `0x16`, no failed pairing |
+| First pairing, `bluetooth pair` over USB then `status --link bluetooth` | macOS raised its own dialog. The first command gave up at 10 s, `did not answer the subscription`; the pairing completed, and the next was served, 2 bonds stored |
+| `status --link bluetooth` on the bond | 1.6 to 2.5 s in all, about 1 s from connecting to subscribed |
+| 10-minute scan, ten nodes | 1,414 frames received by the bridge and 1,414 read by the host. 0 batches lost, 119 or 120 heartbeats from every node, one connection |
+| Lag behind the bridge | 25 ms at the median, 39 ms at p95, 77 ms at worst |
+| `wartui ports` during a run | Nothing lost or logged |
+| USB takeover (`status --link usb`) | Served again 15.00 s after USB let go |
+| `reset --link usb` | Subscribed 2.0 s after the link dropped, served 15.0 s after it |
+| The Mac's Bluetooth off for about 4 s, then on | Served about 10 s after it went off, with no prompt |
+| `flash-bridge --link bluetooth`, both chips changed | Installed and confirmed: about 80 s sending (12.6 KB/s), 13.1 s from the install, 95 s in all. The C6's update is inferred from that time, which is Linux's for both chips |
+| `flash-bridge --link bluetooth`, back to `main` | Installed and confirmed: about 83 s sending, 97 s in all. Over USB then `already runs this image` |
+| `ota --link bluetooth`, ten nodes, forced | Cache upload 71.2 s (12.5 KB/s), all ten `done 0.6.0 (confirmed)`, 162 s in all |
+| `bluetooth forget --link usb`, then pair again | Bonds cleared. The Mac, still bonded, could not connect; once forgotten in System Settings it paired as the first time did |
+
+### A run that lost its link never got it back
+
+**On the host as built, a run whose link dropped stayed down for good.** After `wartui reset`, the
+link dropped as the C6 restarted, and every try after it failed at once with `could not connect to
+D0:1C: Runtime Error: Peripheral no longer available`, backing off to every 10 s while the bridge
+advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s.
+
+- **btleplug's CoreBluetooth backend keeps a dead handle.** A disconnect drops the peripheral from
+  the backend's own table, and with it the task that carries its notifications, but leaves it in
+  the adapter's (`btleplug 0.13.5`, `corebluetooth/internal.rs`, `on_peripheral_disconnect`;
+  `corebluetooth/adapter.rs`, the `DeviceDisconnected` arm). The adapter then never builds another
+  for that identifier. So `peripheral(&id)`, `peripherals()` and a rescan all hand back the dead
+  handle: its connect fails, or it connects and its notifications go nowhere.
+- **The transport kept that handle for the run's life.** A run settled on the peripheral that
+  announced a bridge, and reused it on every try. BlueZ keeps its device object across a
+  disconnect, so Linux never saw it.
+- **The fix takes a fresh handle each try on macOS**, by its identifier
+  (`retrieve_peripherals`), which builds a live one for a peripheral the backend dropped. The run
+  now settles on the bridge's address, and checks each connection's first `Ready` against it.
+  Linux is unchanged. With it, the reset, the takeover and Bluetooth off and on above all
+  recovered.
+- **The resume run lost 206 frames, 16 sighting batches among them,** across its three outages:
+  15 s of takeover, a reset with 15 s of USB holding the bridge, and about 10 s with Bluetooth off.
+
+### What else differs from Linux
+
+- **The first connection inside the window always fails.** CoreBluetooth's subscription waits on
+  its pairing dialog, whose button is Connect, and the transport gives up at its 10 s
+  (`CONNECT_WITHIN`). The pairing completes regardless. It happened on both first pairings. The
+  C6 gives an unbonded central 30 s while the window is open, so a longer subscription deadline
+  inside the window would fit a click into one command (not tried).
+- **A Mac holding a bond the bridge dropped cannot connect,** and reads `could not connect to
+  D0:1C in 10s; check the bridge is powered and in range`. On Linux `pair` reads BlueZ and names
+  that case; on macOS nothing does.
+- **A command exits at once.** No 2 s disconnect at exit, as BlueZ has.
+- **Sending toward the bridge is about 20% slower:** 12.5 to 12.6 KB/s for both updates and the
+  cache, against 15.3 to 17.1 KB/s from the bench PC on the same MTU, PHY and interval. Where
+  CoreBluetooth spends the time was not measured.
+- **Every disconnect logs `Shouldn't get anything but Ok!` at error level,** from btleplug, which
+  gets a reply it does not expect to a disconnect and carries on (`corebluetooth/peripheral.rs`,
+  `disconnect`). It is harmless.
+- **Two wartui processes on one Mac share one connection.** A `status --link bluetooth` started
+  beside a run went through the run's connection, and was served in 10 s. A `reset` the same way
+  reset the bridge, on the host before the fix, and stranded both.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -540,6 +610,9 @@ The production image then ran on the same bench:
   esp-radio passes on only its first buffer. The C6 serves an ATT MTU of 182, so no packet a
   conforming central sends reaches that size, and wartui caps its own writes at 179 value bytes.
 - An ATT MTU of 182 costs about 4% of the saturated rate toward the bench PC.
+- A Mac pairs from its own dialog, scans ten nodes for 10 minutes with nothing lost, recovers
+  from a takeover, a reset and its own Bluetooth going off, and runs both updates, with the
+  reconnect fix.
 
 ## What this does not settle
 
@@ -561,4 +634,5 @@ The production image then ran on the same bench:
   upper level through a later session of runs.
 - **The saturated rate on the 1M PHY.** The drive needed a few KB/s of it.
 - **Why a first connection sometimes times out.**
-- **macOS.** The transport builds there and is untested.
+- **macOS's saturated rate,** and a phone or a second LE device beside the Mac.
+- **Why sending from a Mac is about 20% slower** than from the bench PC.

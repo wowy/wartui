@@ -8,8 +8,10 @@
 //!
 //! **Then the OS pairs, because BlueZ never would.** On Linux `pair` scans for the id the bridge
 //! advertises and pairs through BlueZ's D-Bus API (`wartui_bridge::bluez` has why). Other
-//! OSes pair on their own on the first `--link bluetooth` connection inside the window, which is
-//! untested, so `pair` says so there and stops after the window.
+//! OSes pair on their own on the first `--link bluetooth` connection inside the window, so `pair`
+//! says so there and stops after the window. macOS raises a dialog for it, and that connection's
+//! subscription waits on the click, mostly past the transport's 10 s; the pairing completes
+//! anyway, and the next connection is served (`docs/ble-host-link-findings.md` § "macOS").
 //!
 //! **A pairing is proved, never assumed.** Outside the window the bridge accepts the pairing and
 //! then drops the host as unbonded, so a pairing BlueZ reports done can be one the bridge did not
@@ -654,7 +656,8 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 const OS_PAIRS: &str = "On this OS, wartui does not pair itself: the OS pairs on the first \
      `--link bluetooth` connection made inside the bridge's pairing window, such as \
-     `wartui status --link bluetooth`. That path is untested.";
+     `wartui status --link bluetooth`. On macOS, click Connect in the dialog it raises; that \
+     command may give up before the click, and the next one is served.";
 
 #[cfg(not(target_os = "linux"))]
 async fn pair_with(

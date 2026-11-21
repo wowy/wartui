@@ -1289,7 +1289,15 @@ proves nothing about the bond: `pair` removes nothing, says `A USB host may hold
 asks for another try. When the bridge has forgotten this PC, `pair --fresh` removes this PC's
 pairing first and pairs again; on other OSes, remove it in the system's Bluetooth settings. `pair` saves nothing to `wartui.toml`; the next `run --link bluetooth`
 remembers the bridge. On other OSes `pair` opens the window and stops: the OS pairs on the first
-`--link bluetooth` connection inside it, which is untested.
+`--link bluetooth` connection inside it.
+
+**On macOS that connection raises a pairing dialog; click Connect.** The command gives up 10 s
+in, mostly before the click, with `did not answer the subscription`, but the pairing completes,
+and the next `--link bluetooth` command is served. Run `wartui bluetooth pair` over USB first, then
+`wartui status --link bluetooth` twice. A Mac that still holds a bond the bridge has dropped
+cannot connect at all, and reads `could not connect to XX:YY in 10s`: forget the bridge in System
+Settings → Bluetooth, then pair again inside the window. Every disconnect on macOS logs `Shouldn't
+get anything but Ok!` from btleplug at error level; it is harmless.
 
 On a desktop with a Bluetooth agent, the first `--link bluetooth` connection inside the pairing
 window may raise the desktop's own pairing prompt. Accepting it pairs the PC. `wartui bluetooth
