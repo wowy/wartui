@@ -408,7 +408,7 @@ the recipe.
 | Workaround | Why | Where on `spike/c6-ble-host` | Drop it when |
 | --- | --- | --- | --- |
 | Cap TrouBLE's packet pool at 251 bytes (`TROUBLE_HOST_DEFAULT_PACKET_POOL_MTU = "251"`, ATT MTU 247), and ask for data length 251 | esp-radio 1.0.0-beta.1 marks every ACL fragment as a start; any notification longer than one ACL packet is dropped by the central and the stream stalls | `8b40dd5`, `firmware/p4-radio/.cargo/config.toml` | esp-radio's `send_packet` (`ble/npl.rs`) stops zeroing the ACL header's high byte |
-| Leave `trouble-host`'s `connection-params-update` feature off | bt-hci 0.10.1 declares no return for LE Remote Connection Parameter Request Reply and Negative Reply; a central's LL_CONNECTION_PARAM_REQ panics the C6 (the Pixel 8 sent one on every connection; the Flip 8 ran only after the fix) | `02b12ca` | bt-hci declares `Return = ConnHandle` for opcodes 0x2020 and 0x2021, in a release `trouble-host` accepts |
+| Leave `trouble-host`'s `connection-params-update` feature off | bt-hci 0.10.1 declares no return for LE Remote Connection Parameter Request Reply and Negative Reply; a central's LL_CONNECTION_PARAM_REQ panics the C6 (the Pixel 8 sent one on every connection; the Flip 8 ran only after the fix) | `02b12ca` | bt-hci declares `Return = ConnHandle` for opcodes 0x2020 and 0x2021, in a release `trouble-host` accepts. Met on 2026-11-21 by bt-hci 0.11, and the feature stays off by choice ([below](#upstream-status-checked-2026-11-12)) |
 | Ask for a connection interval through `update_connection_params`, which goes out as an L2CAP request without that feature | the feature above is what TrouBLE would use for the link-layer procedure | `0473202` | as above |
 | A phone app requests an MTU after connecting | Android stays at MTU 23 until the app asks: 20 bytes a notification, ~6.8 KB/s on the Pixel 8 | — | never: it is how Android works |
 | A phone app starts each write to Down with a `0x00` | a frame that arrives without its terminator merges with the next, and both are lost; a leading `0x00` ends any partial frame first | — | never: it costs one byte |
@@ -434,6 +434,22 @@ works with the held versions.
   chained ACL packet, which stops TrouBLE's host. The workaround is an ATT MTU of 182, so no
   write carries more than 179 value bytes
   ([`ble-host-link-findings.md`](ble-host-link-findings.md#the-c6-serves-an-att-mtu-of-182)).
+- **The C6 moved to bt-hci 0.11 on 2026-11-21, built and not yet benched.** trouble-host 0.8.0
+  was still the newest release, and trouble's `main` reaches bt-hci 0.11 only after its move to
+  `embassy-crypto`, which is unpublished and changes the pairing crypto. So the C6 builds the
+  published 0.8.0 with the one upstream commit that moves it to bt-hci 0.11, vendored in
+  `firmware/p4-radio/vendor/trouble-host`. It built against the held esp-radio as inferred
+  above. Commands take bt-hci's async encoder again, with no sync encoder in the path
+  ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)). No board has run it: the extended
+  advertising data commands are the check that matters.
+- **`connection-params-update` stays off, now by choice.** The panic is fixed, so nothing forces
+  it. On, the controller waits for the host's answer to each central's request, and the host can
+  miss one three ways: TrouBLE drops a request for a connection it has yet to accept, it drops
+  an event that finds a connection's queue of 2 full, and its `accept` issues an LE Connection
+  Update before the reply, which NimBLE's open link layer answers with LMP Collision (0x23) on a
+  peripheral, after which TrouBLE sends the negative reply. An unanswered request ends the link
+  at the 40 s timeout. Read from TrouBLE's and NimBLE's sources, not measured on the C6's
+  controller. Off, the controller answers by itself, as the Pixel 8 run above measured.
 
 Four design points the spike leaves for production:
 

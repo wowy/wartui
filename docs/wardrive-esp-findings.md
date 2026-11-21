@@ -223,7 +223,9 @@ HCI Command Parameters (0x12). A probe sent each command alone:
 | `LeSetExtAdvEnable`, on and off | accepted |
 
 With every command encoded by bt-hci's sync encoder, all five were accepted and the set started.
-The cause is bt-hci 0.10.1's async encoder, which writes a byte slice's length plus one.
+The cause is bt-hci 0.10.1's async encoder, which writes a byte slice's length plus one. bt-hci
+0.11 writes the length itself, and the C6 has built on it since 2026-11-21 with no sync encoder
+in the path; that build has not repeated this bench.
 
 **Two sets**, on a throwaway build that counted each call:
 
