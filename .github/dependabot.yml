@@ -34,6 +34,13 @@ updates:
   # `trouble-host` itself is deliberately not ignored — a pull request there is
   # the signal that the two can move, and that the copy vendored in
   # `firmware/p4-radio/vendor/trouble-host` can go.
+  # The six crates that copy's `security` feature names are held with it: `aes`,
+  # `cmac`, `p256`, `rand`, `rand_chacha` and `rand_core`. Dependabot reads the
+  # copy's `Cargo.toml` as one of the C6's manifests, so a minor or major release
+  # of one arrives as an edit to a copy that takes no change. Its source is
+  # written against the versions it names: `rand_chacha` 0.10 implements
+  # `rand_core` 0.10's traits, and the copy's security manager asks for 0.6's.
+  # Drop these six entries with the copy.
   # `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
@@ -49,7 +56,11 @@ updates:
     # firmware's CI job counts the versions before it builds. Those
     # are worth taking — an `esp-hal` patch release is a fix this firmware can have.
     ignore:
+      - dependency-name: "aes"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "bt-hci"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "cmac"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "embassy-executor"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
@@ -74,6 +85,14 @@ updates:
       - dependency-name: "esp-sync"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-wifi-sys-*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "p256"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "rand_chacha"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "rand_core"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
