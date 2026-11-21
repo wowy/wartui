@@ -443,7 +443,7 @@ works with the held versions.
   ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)).
 
   D0:1C took the image by `flash-bridge` over USB. The C6 restarted on it, logged no error and
-  ran 9 min 33 s without a restart, to the last reading. A central connected within seconds, on
+  ran 12 min 5 s without a restart, to the last reading. A central connected within seconds, on
   the 2M PHY, and a Mac's scan matched the bridge by the id in its advertising data, which the
   controller takes only through the extended advertising data commands.
 
@@ -454,8 +454,11 @@ works with the held versions.
   Pixel 8's Bluetooth was turned off, so that was the central (inferred). The Mac then
   connected on the bond it already held, with no new pairing: encrypted, ATT MTU 182, the 2M
   PHY, a 30 ms interval. `status` answered over the link, and 45 s of `sniff` carried 431
-  heartbeats from the ten nodes, 43 or 44 each, with no resynced byte and no dropped write. No
-  phone ran a WardriveESP session.
+  heartbeats from the ten nodes, 43 or 44 each, with no resynced byte and no dropped write.
+
+  The Pixel 8 then ran a WardriveESP session, which its operator reported working. The bridge
+  showed it linked with no bond, at ATT MTU 182 on the 2M PHY with a 48.75 ms interval, and
+  counted no further disconnect. No Linux host ran.
 - **`connection-params-update` stays off, now by choice.** The panic is fixed, so nothing forces
   it. On, the controller waits for the host's answer to each central's request, and the host can
   miss one three ways: TrouBLE drops a request for a connection it has yet to accept, it drops
