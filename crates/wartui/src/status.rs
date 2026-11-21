@@ -33,8 +33,8 @@ use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, HostOwner, HostToBridge, PairWindow, QueueStat,
-    QueueStats, RadioInfo, RadioLinkStats,
+    BluetoothStatus, BridgeToHost, Central, HOST_SILENCE_SECS, HostOwner, HostToBridge, PairWindow,
+    QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
 use wartui_proto::mac;
 use wartui_proto::radio_link::BleCounters;
@@ -440,6 +440,16 @@ fn pairing_deadline(
 const PAIRING_RAN_OUT: &str =
     "no answer after waiting on the OS's pairing dialog; run the command again";
 
+/// Why a wait ran out after the subscription that waited on the pairing went through, when no
+/// failure is retried. The pairing stretched the deadline, so the usual no-bridge notice's wait
+/// would understate it.
+fn ready_ran_out() -> String {
+    format!(
+        "the bridge did not answer after the pairing. A USB host may hold it: it serves this PC \
+         {HOST_SILENCE_SECS} s after its USB link goes quiet; run the command again"
+    )
+}
+
 /// A wait for the bridge's announcement, fed one link event at a time.
 ///
 /// Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
@@ -448,8 +458,8 @@ const PAIRING_RAN_OUT: &str =
 /// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
 /// the transport's pairing window; a later one returns no notice. A
 /// [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
-/// the bridge's `Ready`. A wait that runs out after the notice names the pairing wait, unless a
-/// failure is retried or the subscription went through since.
+/// the bridge's `Ready`. A wait that runs out names a failure that is retried, else the bridge's
+/// silence once the subscription went through, else the pairing wait once it was announced.
 #[derive(Debug)]
 struct ReadyWait {
     over: crate::config::Link,
@@ -496,7 +506,7 @@ impl ReadyWait {
                 Taken::Waiting
             }
             Some(LinkEvent::Disconnected { cause: DisconnectCause::AwaitingReady, .. }) => {
-                // The failures before it are behind the subscription that went through.
+                // The failures before it came before a subscription that went through.
                 self.through = true;
                 self.retried = None;
                 Taken::Waiting
@@ -507,11 +517,17 @@ impl ReadyWait {
         }
     }
 
-    /// Why the wait ran out: the last failure the transport was retrying, else the pairing wait
-    /// once it was announced and while the subscription has not gone through, if either.
+    /// Why the wait ran out: the last failure the transport was retrying, else the bridge's
+    /// silence once the subscription went through, else the pairing wait once it was announced,
+    /// if any.
     fn timed_out(self) -> Option<String> {
-        let pairing = self.pairing && !self.through;
-        self.retried.or_else(|| pairing.then(|| PAIRING_RAN_OUT.to_owned()))
+        if self.retried.is_some() {
+            self.retried
+        } else if self.through {
+            Some(ready_ran_out())
+        } else {
+            self.pairing.then(|| PAIRING_RAN_OUT.to_owned())
+        }
     }
 }
 
@@ -1000,20 +1016,38 @@ mod tests {
         let mut wait = ReadyWait::new(Link::Bluetooth);
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+        let ready = "waiting for 44:C0 to answer";
         assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
     }
 
     #[test]
-    fn ready_wait_names_nothing_when_it_runs_out_after_subscription_is_through() {
-        // The caller falls through to its usual no-bridge notice.
+    fn ready_wait_names_bridge_wait_when_it_runs_out_after_subscription_is_through() {
+        // The failure before the subscription went through is not why the wait ran out.
         let mut wait = ReadyWait::new(Link::Bluetooth);
         assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
         let pairing = DisconnectCause::AwaitingPairing;
         assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+        let ready = "waiting for 44:C0 to answer";
         assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
-        assert_eq!(wait.timed_out(), None);
+        assert_eq!(
+            wait.timed_out().as_deref(),
+            Some(
+                "the bridge did not answer after the pairing. A USB host may hold it: it serves \
+                 this PC 15 s after its USB link goes quiet; run the command again"
+            )
+        );
+    }
+
+    #[test]
+    fn ready_wait_names_retried_failure_when_it_runs_out_after_subscription_is_through() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+        let ready = "waiting for 44:C0 to answer";
+        assert_eq!(wait.take(down(ready, DisconnectCause::AwaitingReady)), Taken::Waiting);
+        let failed = "the bridge disconnected";
+        assert_eq!(wait.take(down(failed, DisconnectCause::Other)), Taken::Waiting);
+        assert_eq!(wait.timed_out().as_deref(), Some(failed));
     }
 
     #[test]

@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn view_shows_ready_wait_as_its_own_line_not_fault_when_subscription_is_through() {
-        let notice = "waiting for 02:00:5E:10:44:C0 to answer; a USB host may hold the bridge";
+        let notice = "waiting for 02:00:5E:10:44:C0 to answer";
         let mut snapshot = busy();
         snapshot.link_up = false;
         snapshot.link_error = Some(notice.to_owned());
@@ -493,8 +493,7 @@ mod tests {
         assert!(waiting_line(&snapshot).is_some_and(|line| line.chars().count() <= 80));
         assert_eq!(takeover_line(&snapshot), None);
         let screen = rendered(&snapshot);
-        assert!(screen.contains("waiting for"), "{screen}");
-        assert!(screen.contains("a USB host may hold the bridge"), "{screen}");
+        assert!(screen.contains("waiting for 02:00:5E:10:44:C0 to answer"), "{screen}");
 
         // Any other cause is a fault.
         snapshot.link_cause = Some(DisconnectCause::Other);

@@ -2401,7 +2401,7 @@ fn engine_replaces_pairing_cause_when_subscription_is_through() {
     let down = |reason: &str, cause| {
         Event::Link(LinkEvent::Disconnected { reason: reason.to_owned(), cause })
     };
-    let ready = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+    let ready = "waiting for 44:C0 to answer";
     engine.handle(
         down(
             "pairing: click Connect if macOS shows a dialog for 44:C0",

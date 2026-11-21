@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn describe_prints_notice_alone_when_subscription_is_through() {
-        let notice = "waiting for 44:C0 to answer; a USB host may hold the bridge";
+        let notice = "waiting for 44:C0 to answer";
         let through = LinkEvent::Disconnected {
             reason: notice.to_owned(),
             cause: DisconnectCause::AwaitingReady,

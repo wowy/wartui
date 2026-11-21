@@ -288,10 +288,10 @@ fn pairing_notice(label: &str, macos: bool) -> String {
     }
 }
 
-/// The operator's notice that the subscription waited on the OS's pairing for `label`, is
-/// through, and waits for the bridge's `Ready`, which a USB host can hold back.
+/// The operator's notice that the subscription that waited on the OS's pairing for `label` is
+/// through, and the bridge's `Ready` has not come.
 fn ready_notice(label: &str) -> String {
-    format!("waiting for {label} to answer; a USB host may hold the bridge")
+    format!("waiting for {label} to answer")
 }
 
 /// The most bytes one write carries at ATT MTU `mtu`: the MTU less its header, capped at
@@ -1789,11 +1789,8 @@ mod tests {
     }
 
     #[test]
-    fn ble_ready_notice_names_bridge_and_usb_host() {
-        assert_eq!(
-            ready_notice("44:C0"),
-            "waiting for 44:C0 to answer; a USB host may hold the bridge"
-        );
+    fn ble_ready_notice_names_bridge_when_subscription_is_through() {
+        assert_eq!(ready_notice("44:C0"), "waiting for 44:C0 to answer");
     }
 
     #[test]
@@ -1865,6 +1862,13 @@ mod tests {
             let shown: String = line.chars().take(58).collect();
             assert!(shown.contains(instruction), "{shown}");
         }
+    }
+
+    #[test]
+    fn ble_ready_notice_fits_footer_line_when_terminal_is_58_columns() {
+        // The view draws it unwrapped, so the whole line fits the smallest screen.
+        let line = format!("  {}", ready_notice("02:00:5E:10:44:C0"));
+        assert!(line.chars().count() <= 58, "{line}");
     }
 
     #[tokio::test(start_paused = true)]
