@@ -182,6 +182,11 @@ entry, when a `trouble-host` release builds on `bt-hci` 0.11 or later. Dependabo
 for that release is the signal; until then it ignores `bt-hci`'s minor and major releases, since
 one above what `trouble-host` builds on is a second copy whose types TrouBLE's API does not take.
 
+Dependabot reads the copy's `Cargo.toml` as one of this firmware's manifests. So it also ignores
+the minor and major releases of the six crates the copy's `security` feature names: `aes`, `cmac`,
+`p256`, `rand`, `rand_chacha` and `rand_core`. One of those arrives as an edit to the copy, whose
+source is written against the versions it names. Those six entries go when the copy does.
+
 `esp-radio` builds on `bt-hci` 0.9, so `bt-hci` resolves twice, 0.9 and 0.11. Both are plain
 types with no global symbols, and the controller plugs in through `bt-hci-transport` 0.1, which
 both share. The C6 names `bt-hci` 0.11 itself, at the version the vendored `trouble-host`
