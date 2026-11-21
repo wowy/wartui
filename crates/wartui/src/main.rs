@@ -26,7 +26,7 @@ use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
+use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
 use wartui_proto::link::{BridgeToHost, LoopPhase};
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
@@ -451,6 +451,10 @@ fn describe(event: &LinkEvent) -> Option<String> {
         LinkEvent::Connected(info) => {
             Some(format!("bridge {}, firmware {}", mac::full(&info.mac), info.fw_version))
         }
+        // The transport is connected and waits on the OS's pairing dialog: its notice alone.
+        LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing } => {
+            Some(reason.clone())
+        }
         LinkEvent::Disconnected { reason, .. } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
@@ -748,9 +752,11 @@ fn silence_notice(bridge: Option<&str>, bridges: &[PortCandidate]) -> String {
 mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
+    use wartui_bridge::{DisconnectCause, LinkEvent};
+
     use super::{
-        BridgeInfo, BridgeSpec, Command, Link, Listing, bluetooth_silence_text, last_reset_line,
-        link_for, no_boards_notice, parse, silence_notice, spec,
+        BridgeInfo, BridgeSpec, Command, Link, Listing, bluetooth_silence_text, describe,
+        last_reset_line, link_for, no_boards_notice, parse, silence_notice, spec,
     };
     use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
@@ -758,6 +764,25 @@ mod tests {
     /// A P4 bridge's CH343 as the OS lists it.
     fn p4_bridge(device: &str) -> PortCandidate {
         candidate(device, Some(CH343_VID), Some(CH343_PID), Some("5CF7153520"))
+    }
+
+    #[test]
+    fn describe_prints_link_down_when_link_goes_down() {
+        let down = LinkEvent::Disconnected {
+            reason: "could not open".to_owned(),
+            cause: DisconnectCause::Other,
+        };
+        assert_eq!(describe(&down).as_deref(), Some("link down: could not open"));
+    }
+
+    #[test]
+    fn describe_prints_notice_alone_when_transport_awaits_pairing() {
+        let notice = "pairing: macOS may be showing a dialog for 44:C0; click Connect";
+        let pairing = LinkEvent::Disconnected {
+            reason: notice.to_owned(),
+            cause: DisconnectCause::AwaitingPairing,
+        };
+        assert_eq!(describe(&pairing).as_deref(), Some(notice));
     }
 
     #[test]

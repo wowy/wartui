@@ -37,7 +37,7 @@ use wartui_proto::plan::ChannelPool;
 
 use blocks::draw_blocks;
 use chart::draw_chart;
-use footer::{buffer_full_line, draw_footer, fault_lines, faults, takeover_line};
+use footer::{buffer_full_line, draw_footer, fault_lines, faults, pairing_line, takeover_line};
 use gps::draw_gps_modal;
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
@@ -154,8 +154,13 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     let buffer_full = u16::from(buffer_full_line(&snapshot.counters).is_some());
     let upload = u16::from(ui.upload().status().is_some());
     let takeover = u16::from(takeover_line(snapshot).is_some());
-    let footer_height =
-        1 + buffer_full + takeover + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
+    let pairing = u16::from(pairing_line(snapshot).is_some());
+    let footer_height = 1
+        + buffer_full
+        + takeover
+        + pairing
+        + upload
+        + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let area = frame.area();
     let body = Rect { height: area.height.saturating_sub(HEADER_H + footer_height), ..area };
     let wide = body.width >= WIDE_AT;

@@ -405,7 +405,7 @@ pub(crate) async fn wait_for_ready_or_why(
     over: crate::config::Link,
     within: Duration,
 ) -> ReadyWaited {
-    let until = tokio::time::Instant::now() + within;
+    let mut until = tokio::time::Instant::now() + within;
     let mut wait = ReadyWait::new(over);
     let mut garbled = false;
     loop {
@@ -414,42 +414,78 @@ pub(crate) async fn wait_for_ready_or_why(
             return ReadyWaited { ready, garbled };
         };
         garbled |= matches!(event, Some(LinkEvent::Garbled(_)));
-        if let Some(ready) = wait.take(event) {
-            return ReadyWaited { ready: ready.map(Some), garbled };
+        match wait.take(event) {
+            Taken::Waiting => {}
+            Taken::Pairing(notice) => {
+                eprintln!("{notice}");
+                until = pairing_deadline(until, tokio::time::Instant::now());
+            }
+            Taken::Ended(ready) => return ReadyWaited { ready: ready.map(Some), garbled },
         }
     }
+}
+
+/// The wait's deadline once the transport, at `now`, waits on the OS's pairing dialog: `until`,
+/// or the transport's own deadline for the subscription when that is later.
+fn pairing_deadline(
+    until: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> tokio::time::Instant {
+    until.max(now + wartui_bridge::ble::PAIR_WITHIN)
 }
 
 /// A wait for the bridge's announcement, fed one link event at a time.
 ///
 /// Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
 /// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
-/// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once.
+/// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once. The
+/// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
+/// the transport's pairing window; a later one changes nothing.
 #[derive(Debug)]
 struct ReadyWait {
     over: crate::config::Link,
     /// The last failure the transport is retrying.
     retried: Option<String>,
+    /// Whether the transport's wait on the OS's pairing has been announced.
+    pairing: bool,
+}
+
+/// What one link event does to a [`ReadyWait`].
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    /// The wait goes on.
+    Waiting,
+    /// The transport waits on the OS's pairing dialog: this notice says so, and the wait goes on.
+    Pairing(String),
+    /// The wait is over, with the announcement or the reason.
+    Ended(Result<BridgeInfo, String>),
 }
 
 impl ReadyWait {
     const fn new(over: crate::config::Link) -> Self {
-        Self { over, retried: None }
+        Self { over, retried: None, pairing: false }
     }
 
-    /// What `event` does to the wait: `Some` once it ends, with the announcement or the reason.
-    fn take(&mut self, event: Option<LinkEvent>) -> Option<Result<BridgeInfo, String>> {
+    /// What `event` does to the wait.
+    fn take(&mut self, event: Option<LinkEvent>) -> Taken {
         match event {
-            Some(LinkEvent::Connected(info)) => Some(Ok(info)),
+            Some(LinkEvent::Connected(info)) => Taken::Ended(Ok(info)),
+            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing }) => {
+                if std::mem::replace(&mut self.pairing, true) {
+                    Taken::Waiting
+                } else {
+                    Taken::Pairing(reason)
+                }
+            }
             Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::Other })
                 if self.over == crate::config::Link::Bluetooth =>
             {
                 self.retried = Some(reason);
-                None
+                Taken::Waiting
             }
-            Some(LinkEvent::Disconnected { reason, .. }) => Some(Err(reason)),
-            Some(_) => None,
-            None => Some(Err("the link closed".to_owned())),
+            Some(LinkEvent::Disconnected { reason, .. }) => Taken::Ended(Err(reason)),
+            Some(_) => Taken::Waiting,
+            None => Taken::Ended(Err("the link closed".to_owned())),
         }
     }
 
@@ -543,10 +579,12 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, ReadyWait, Report, ScanMode, awaited, ble_text, board_line, counters_line,
-        diagnostic_lines, fan_text, host_text, human_uptime, pairing_text, plan_lines, radio_line,
-        scan_text, silence_note, slots_text, wardrive_esp_text,
+        Awaited, ReadyWait, Report, ScanMode, Taken, awaited, ble_text, board_line, counters_line,
+        diagnostic_lines, fan_text, host_text, human_uptime, pairing_deadline, pairing_text,
+        plan_lines, radio_line, scan_text, silence_note, slots_text, wardrive_esp_text,
     };
+    use std::time::Duration;
+
     use crate::config::Link;
     use wartui_bridge::{DisconnectCause, LinkEvent};
     use wartui_proto::ble::ATT_MTU;
@@ -884,14 +922,14 @@ mod tests {
     fn ready_wait_ends_on_first_disconnect_when_over_usb() {
         let mut wait = ReadyWait::new(Link::Usb);
         let ended = wait.take(down("could not open", DisconnectCause::Other));
-        assert_eq!(ended, Some(Err("could not open".to_owned())));
+        assert_eq!(ended, Taken::Ended(Err("could not open".to_owned())));
     }
 
     #[test]
     fn ready_wait_keeps_waiting_and_names_last_failure_when_bluetooth_retries() {
         let mut wait = ReadyWait::new(Link::Bluetooth);
-        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), None);
-        assert_eq!(wait.take(down("not found", DisconnectCause::Other)), None);
+        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
+        assert_eq!(wait.take(down("not found", DisconnectCause::Other)), Taken::Waiting);
         assert_eq!(wait.timed_out(), Some("not found".to_owned()));
     }
 
@@ -903,8 +941,28 @@ mod tests {
             DisconnectCause::UsbTookBridge,
         ] {
             let mut wait = ReadyWait::new(Link::Bluetooth);
-            assert_eq!(wait.take(down("refused", cause)), Some(Err("refused".to_owned())));
+            assert_eq!(wait.take(down("refused", cause)), Taken::Ended(Err("refused".to_owned())));
         }
+    }
+
+    #[test]
+    fn ready_wait_returns_pairing_notice_once_when_transport_awaits_pairing() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        let notice = "pairing: macOS may be showing a dialog for 44:C0; click Connect";
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert_eq!(wait.take(down(notice, pairing)), Taken::Pairing(notice.to_owned()));
+        assert_eq!(wait.take(down(notice, pairing)), Taken::Waiting, "said once");
+        // The notice is no failure the transport retries.
+        assert_eq!(wait.timed_out(), None);
+    }
+
+    #[test]
+    fn ready_wait_keeps_last_failure_when_pairing_notice_follows_it() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+        assert_eq!(wait.timed_out(), Some("timed out".to_owned()));
     }
 
     #[test]
@@ -912,8 +970,26 @@ mod tests {
         let mut wait = ReadyWait::new(Link::Bluetooth);
         assert_eq!(
             wait.take(Some(LinkEvent::Garbled(wartui_proto::link::LinkError::Corrupt))),
-            None
+            Taken::Waiting
         );
         assert_eq!(wait.timed_out(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_wait_stretches_to_pairing_window_when_notice_comes_before_deadline() {
+        // A one-shot command's 17 s wait, and the transport's notice 3 s in.
+        let start = tokio::time::Instant::now();
+        let until = start + Duration::from_secs(17);
+        let now = start + Duration::from_secs(3);
+        let stretched = pairing_deadline(until, now);
+        assert_eq!(stretched, now + wartui_bridge::ble::PAIR_WITHIN);
+        assert!(stretched > until);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_wait_keeps_deadline_when_it_is_past_pairing_window() {
+        let now = tokio::time::Instant::now();
+        let until = now + wartui_bridge::ble::PAIR_WITHIN + Duration::from_secs(1);
+        assert_eq!(pairing_deadline(until, now), until);
     }
 }

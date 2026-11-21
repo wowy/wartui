@@ -4,7 +4,9 @@
 //!
 //! A Bluetooth link the bridge let go because a USB host took it is down, but nothing is broken:
 //! the bridge serves one host, USB first, and hands the link back once USB goes quiet. So its
-//! reason is a plain line of its own ([`takeover_line`]) rather than a fault.
+//! reason is a plain line of its own ([`takeover_line`]) rather than a fault. So is the
+//! transport's notice that it waits on the OS's pairing dialog ([`pairing_line`]): the link is
+//! connected, and the operator has a dialog to answer.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -72,6 +74,11 @@ pub(super) fn draw_footer(
         lines.push(Line::from(takeover));
     }
 
+    // Its own line too, since a pairing dialog waiting on the operator is no fault.
+    if let Some(pairing) = pairing_line(snapshot) {
+        lines.push(Line::from(pairing));
+    }
+
     // Its own line for the same reason. It stays after the upload ends, until the
     // next `u`.
     if let Some(status) = ui.upload().status() {
@@ -106,15 +113,29 @@ fn taken_by_usb(snapshot: &Snapshot) -> bool {
     !snapshot.link_up && snapshot.link_cause == Some(DisconnectCause::UsbTookBridge)
 }
 
+/// The transport's notice that it waits on the OS's pairing dialog, or `None`. The transport
+/// words it to fit an 80-column terminal, since the line is not wrapped.
+pub(super) fn pairing_line(snapshot: &Snapshot) -> Option<String> {
+    let error = snapshot.link_error.as_ref().filter(|_| awaiting_pairing(snapshot))?;
+    Some(format!("  {error}"))
+}
+
+/// Whether the link waits on the OS's pairing dialog.
+fn awaiting_pairing(snapshot: &Snapshot) -> bool {
+    !snapshot.link_up && snapshot.link_cause == Some(DisconnectCause::AwaitingPairing)
+}
+
 /// Every fault so far, most urgent first. Empty on a clean run.
 pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     let c = snapshot.counters;
     let mut faults = Vec::new();
     // First, because with the link down nothing else here updates.
-    // A takeover is the bridge serving USB, said by `takeover_line`.
+    // A takeover is the bridge serving USB, said by `takeover_line`, and a pairing dialog is
+    // said by `pairing_line`.
     if let Some(error) = &snapshot.link_error
         && !snapshot.link_up
         && !taken_by_usb(snapshot)
+        && !awaiting_pairing(snapshot)
     {
         faults.push(format!("link down: {error}"));
     }
@@ -430,6 +451,26 @@ mod tests {
         // Any other cause is a fault.
         snapshot.link_cause = Some(DisconnectCause::Other);
         assert_eq!(takeover_line(&snapshot), None);
+        assert!(faults(&snapshot)[0].starts_with("link down: "));
+    }
+
+    #[test]
+    fn view_shows_pairing_notice_as_its_own_line_not_fault_when_transport_awaits_pairing() {
+        let notice = "pairing: macOS may be showing a dialog for 02:00:5E:10:44:C0; click Connect";
+        let mut snapshot = busy();
+        snapshot.link_up = false;
+        snapshot.link_error = Some(notice.to_owned());
+        snapshot.link_cause = Some(DisconnectCause::AwaitingPairing);
+        assert!(!faults(&snapshot).iter().any(|fault| fault.contains("pairing")));
+        assert_eq!(pairing_line(&snapshot), Some(format!("  {notice}")));
+        assert!(pairing_line(&snapshot).is_some_and(|line| line.chars().count() <= 80));
+        assert_eq!(takeover_line(&snapshot), None);
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("click Connect"), "{screen}");
+
+        // Any other cause is a fault.
+        snapshot.link_cause = Some(DisconnectCause::Other);
+        assert_eq!(pairing_line(&snapshot), None);
         assert!(faults(&snapshot)[0].starts_with("link down: "));
     }
 

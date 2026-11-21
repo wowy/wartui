@@ -115,6 +115,15 @@
 //!   to a P4 reset or to range drops the same way, so `wartui bluetooth pair` acts only on the
 //!   first.
 //!
+//! **Waiting on the OS's pairing.** Off Linux the OS pairs on the first connection inside the
+//! bridge's pairing window, behind a dialog of its own (Connect, on macOS), and the subscription
+//! waits on the operator's answer. So it is given [`PAIR_WITHIN`], the C6's deadline for a
+//! central that connects inside the window, and one still unanswered [`PAIRING_NOTICE_AFTER`] in
+//! is announced once as [`LinkEvent::Disconnected`] with [`DisconnectCause::AwaitingPairing`].
+//! The event is what reaches the operator: transport logs reach only `--log-file`. The host's
+//! deadline starts after the C6's, so a dialog left unanswered normally ends with the C6's drop,
+//! which reads as [`DisconnectCause::MaybeNotBonded`].
+//!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that bridge. A P4 reboot resets its C6
 //! and drops the link, which is an ordinary reconnect.
@@ -124,7 +133,8 @@
 //! bridge never serves a process that has exited. The transport counts as running until then,
 //! which `crate::close_all` waits for. A write the C6 does not answer within [`WRITE_WITHIN`], or
 //! a subscription within [`CONNECT_WITHIN`], ends the connection, so neither waits out BlueZ's
-//! 30 s ATT timeout.
+//! 30 s ATT timeout. Where the OS pairs on the connection the subscription has [`PAIR_WITHIN`]
+//! (§ "Waiting on the OS's pairing").
 //!
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
@@ -142,6 +152,7 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use tokio::time::{Interval, MissedTickBehavior};
 use wartui_proto::ble::{ATT_MTU, DOWN_UUID, DOWN_VALUE_MAX, ID_UUID, UP_UUID, advertised_octets};
 use wartui_proto::link::{
@@ -170,9 +181,23 @@ pub const SCAN_FOR: Duration = Duration::from_secs(12);
 /// one bridge's octets, so a second one advertising nearby is seen rather than passed over.
 const LISTEN_FOR: Duration = Duration::from_secs(2);
 
-/// How long a connect, a service discovery or the subscription may take. The subscription can
-/// wait on the link's encryption, which the C6's refusal of an unencrypted one prompts.
+/// How long a connect, a service discovery or, where the OS pairs beforehand, the subscription
+/// may take. The subscription can wait on the link's encryption, which the C6's refusal of an
+/// unencrypted one prompts.
 const CONNECT_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long the subscription may take where the OS pairs on the connection, behind its own
+/// dialog. It mirrors the C6's `PAIR_DEADLINE` (`firmware/p4-radio/src/ble.rs`), how long the C6
+/// gives a central that connects inside the pairing window to bond.
+pub const PAIR_WITHIN: Duration = Duration::from_secs(30);
+
+/// How long the subscription waits before it announces the wait on the OS's pairing dialog. A
+/// bonded Mac subscribes about 1 s after connecting, so a resumed bond never reaches it.
+const PAIRING_NOTICE_AFTER: Duration = Duration::from_secs(3);
+
+/// Whether the OS pairs on the first connection, behind a dialog of its own. BlueZ pairs
+/// beforehand, through `wartui bluetooth pair`.
+const OS_PAIRS_ON_CONNECT: bool = !cfg!(target_os = "linux");
 
 /// How long the disconnect that cancels a timed-out connect may take.
 const CANCEL_WITHIN: Duration = Duration::from_secs(2);
@@ -219,6 +244,22 @@ const C6_WRITE_QUEUE: usize = 8;
 
 /// The most writes one group takes: one fewer than the C6 queues.
 const GROUP_WRITES: usize = C6_WRITE_QUEUE - 1;
+
+/// How long the subscription may take: [`PAIR_WITHIN`] when the OS `pairs` on the connection,
+/// else [`CONNECT_WITHIN`].
+const fn subscribe_within(pairs: bool) -> Duration {
+    if pairs { PAIR_WITHIN } else { CONNECT_WITHIN }
+}
+
+/// The operator's notice that the subscription waits on the OS's pairing dialog for `label`,
+/// worded for macOS when `macos`.
+fn pairing_notice(label: &str, macos: bool) -> String {
+    if macos {
+        format!("pairing: macOS may be showing a dialog for {label}; click Connect")
+    } else {
+        format!("pairing: the OS may be showing a dialog for {label}; accept it")
+    }
+}
 
 /// The most bytes one write carries at ATT MTU `mtu`: the MTU less its header, capped at
 /// [`DOWN_VALUE_MAX`] (`wartui_proto::ble`), and at least [`MIN_WRITE`].
@@ -1168,7 +1209,8 @@ async fn serve(
         Ok(events) => events,
         Err(e) => return End::failed(bluetooth(e).to_string()),
     };
-    let subscribed = subscribe(peripheral.subscribe(&up), label);
+    let subscribed =
+        subscribe(peripheral.subscribe(&up), label, OS_PAIRS_ON_CONNECT, &plumbing.events);
     if let Some(end) = unless_closed(subscribed, plumbing, false).await {
         return end;
     }
@@ -1202,13 +1244,37 @@ async fn discover(
     }
 }
 
-/// Wait for `subscribing`, the subscription to Up, for up to [`CONNECT_WITHIN`]. The C6's refusal
+/// Wait for `subscribing`, the subscription to Up, for [`subscribe_within`]. When the OS `pairs`
+/// on the connection and the subscription is unanswered [`PAIRING_NOTICE_AFTER`] in, one
+/// [`DisconnectCause::AwaitingPairing`] goes to `events` and the wait goes on. The C6's refusal
 /// for want of a bond is [`refusal`]'s.
 async fn subscribe(
     subscribing: impl Future<Output = btleplug::Result<()>>,
     label: &str,
+    pairs: bool,
+    events: &mpsc::Sender<LinkEvent>,
 ) -> Result<(), Failure> {
-    match tokio::time::timeout(CONNECT_WITHIN, subscribing).await {
+    let subscribing = tokio::time::timeout(subscribe_within(pairs), subscribing);
+    tokio::pin!(subscribing);
+    let notice = tokio::time::sleep(PAIRING_NOTICE_AFTER);
+    tokio::pin!(notice);
+    let mut noticed = !pairs;
+    let answered = loop {
+        tokio::select! {
+            answered = &mut subscribing => break answered,
+            () = &mut notice, if !noticed => {
+                noticed = true;
+                tracing::info!(bridge = %label, "the subscription waits on the OS's pairing");
+                let waiting = LinkEvent::Disconnected {
+                    reason: pairing_notice(label, cfg!(target_os = "macos")),
+                    cause: DisconnectCause::AwaitingPairing,
+                };
+                // A dropped handle ends the wait in `unless_closed`.
+                let _ = events.send(waiting).await;
+            }
+        }
+    };
+    match answered {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(refusal(label, &e)
             .unwrap_or_else(|| Failure::other(format!("could not subscribe to {label}: {e}")))),
@@ -1429,17 +1495,21 @@ fn refusal(label: &str, error: &btleplug::Error) -> Option<Failure> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use btleplug::api::PeripheralProperties;
     use btleplug::api::bleuuid::uuid_from_u16;
+    use tokio::sync::mpsc;
     use tokio::time::Instant;
     use wartui_proto::ble::ID_UUID;
     use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, STATUS_MAX};
 
     use super::{
-        BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, Read, asker, choose,
-        subscribe, unless_closed,
+        BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, PAIR_WITHIN,
+        PAIRING_NOTICE_AFTER, Read, asker, choose, pairing_notice, subscribe, subscribe_within,
+        unless_closed,
     };
-    use crate::link_pair;
+    use crate::{DisconnectCause, LinkEvent, link_pair};
 
     fn spec(text: &str) -> BridgeSpec {
         text.parse().unwrap_or_else(|never| match never {})
@@ -1587,11 +1657,82 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn ble_subscribe_fails_when_bridge_does_not_answer_in_time() {
+        let (events, mut heard) = mpsc::channel(4);
         let start = Instant::now();
-        let failed = subscribe(std::future::pending(), "44:C0").await.err();
+        let failed = subscribe(std::future::pending(), "44:C0", false, &events).await.err();
         let failure = failed.expect("an unanswered subscription fails");
         assert_eq!(failure.reason, "44:C0 did not answer the subscription");
         assert_eq!(start.elapsed(), CONNECT_WITHIN);
+        assert!(heard.try_recv().is_err(), "no notice where the OS pairs beforehand");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_subscribe_waits_the_pairing_window_when_os_pairs_on_connection() {
+        let (events, mut heard) = mpsc::channel(4);
+        let start = Instant::now();
+        let subscribing = subscribe(std::future::pending(), "44:C0", true, &events);
+        tokio::pin!(subscribing);
+        let notice = tokio::select! {
+            notice = heard.recv() => notice,
+            _ = &mut subscribing => panic!("the subscription ended before its notice"),
+        };
+        assert_eq!(start.elapsed(), PAIRING_NOTICE_AFTER);
+        let Some(LinkEvent::Disconnected { cause, .. }) = notice else {
+            panic!("not a link event: {notice:?}");
+        };
+        assert_eq!(cause, DisconnectCause::AwaitingPairing);
+        let failed = subscribing.await.err();
+        let failure = failed.expect("an unanswered subscription fails");
+        assert_eq!(failure.reason, "44:C0 did not answer the subscription");
+        assert_eq!(start.elapsed(), PAIR_WITHIN);
+        assert!(heard.try_recv().is_err(), "the notice is sent once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_subscribe_sends_no_notice_when_bond_resumes_before_it_is_due() {
+        // A bonded Mac subscribes about a second after connecting.
+        let (events, mut heard) = mpsc::channel(4);
+        let resumed = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(())
+        };
+        assert!(subscribe(resumed, "44:C0", true, &events).await.is_ok());
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn ble_subscribe_within_gives_pairing_window_when_os_pairs_on_connection() {
+        assert_eq!(subscribe_within(true), PAIR_WITHIN);
+    }
+
+    #[test]
+    fn ble_subscribe_within_gives_connect_deadline_when_os_pairs_beforehand() {
+        assert_eq!(subscribe_within(false), CONNECT_WITHIN);
+    }
+
+    #[test]
+    fn ble_pairing_notice_names_connect_when_on_macos() {
+        assert_eq!(
+            pairing_notice("44:C0", true),
+            "pairing: macOS may be showing a dialog for 44:C0; click Connect"
+        );
+    }
+
+    #[test]
+    fn ble_pairing_notice_names_the_os_when_not_on_macos() {
+        assert_eq!(
+            pairing_notice("44:C0", false),
+            "pairing: the OS may be showing a dialog for 44:C0; accept it"
+        );
+    }
+
+    #[test]
+    fn ble_pairing_notice_fits_footer_line_when_label_is_a_full_address() {
+        // The view draws it as a line of its own, unwrapped.
+        for macos in [true, false] {
+            let line = format!("  {}", pairing_notice("02:00:5E:10:44:C0", macos));
+            assert!(line.chars().count() <= 80, "{line}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1599,7 +1740,7 @@ mod tests {
         // A quit while the C6 has yet to answer: the connection lets the bridge go at once.
         let (handle, plumbing) = link_pair();
         let start = Instant::now();
-        let subscribing = subscribe(std::future::pending(), "44:C0");
+        let subscribing = subscribe(std::future::pending(), "44:C0", true, &plumbing.events);
         drop(handle);
         let end = unless_closed(subscribing, &plumbing, false).await;
         assert!(matches!(end, Some(End::HandleDropped)));
