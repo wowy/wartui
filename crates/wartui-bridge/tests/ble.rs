@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use wartui_bridge::ble::{
     Advertiser, DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, choose,
     dropped_as_unbonded, is_remembered, is_takeover, look, matches_octets, named_octets,
-    refused_for_bonding,
+    refused_for_bonding, settled_spec,
 };
 use wartui_bridge::serial::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
@@ -382,6 +382,36 @@ fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_octets() {
     let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));
     let heard = inbound.feed(&frame(&ready(other, 500)), Instant::now());
     assert_eq!(heard, [Heard::WrongBridge(other)]);
+}
+
+#[test]
+fn ble_settled_spec_names_settled_bridge_when_run_has_settled() {
+    // The settled bridge already matched the operator's spec, and names it whole.
+    assert_eq!(settled_spec(Some(&spec("44:C0")), Some(BRIDGE)), Some(BridgeSpec::Mac(BRIDGE)));
+    assert_eq!(settled_spec(None, Some(BRIDGE)), Some(BridgeSpec::Mac(BRIDGE)));
+}
+
+#[test]
+fn ble_settled_spec_passes_spec_through_when_nothing_has_settled() {
+    assert_eq!(settled_spec(Some(&spec("44:C0")), None), Some(spec("44:C0")));
+    assert_eq!(settled_spec(None, None), None);
+}
+
+#[test]
+fn ble_inbound_refuses_other_bridge_when_run_settled_on_one_sharing_its_octets() {
+    // The run was started with no spec, and settled on `BRIDGE`.
+    let other = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
+    let mut inbound = Inbound::new(settled_spec(None, Some(BRIDGE)));
+    let heard = inbound.feed(&frame(&ready(other, 500)), Instant::now());
+    assert_eq!(heard, [Heard::WrongBridge(other)]);
+}
+
+#[test]
+fn ble_inbound_admits_settled_bridge_when_it_reconnects() {
+    let mut inbound = Inbound::new(settled_spec(Some(&spec("44:C0")), Some(BRIDGE)));
+    let heard = inbound.feed(&frame(&ready(BRIDGE, 500)), Instant::now());
+    assert_eq!(heard[0], Heard::Proved(BRIDGE));
+    assert!(matches!(events(heard)[..], [LinkEvent::Connected(_)]));
 }
 
 #[test]
