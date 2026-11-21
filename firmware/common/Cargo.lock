@@ -112,7 +112,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd93fd2c1b27acd030440c9dbd9d14c1122aad622374fe05a670b67a4bc034be"
 dependencies = [
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "thiserror",
 ]
 
@@ -366,7 +366,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
- "heapless 0.9.3",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -881,9 +881,9 @@ dependencies = [
 
 [[package]]
 name = "heapless"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
 dependencies = [
  "hash32",
  "serde_core",
@@ -1474,7 +1474,7 @@ name = "wartui-proto"
 version = "0.1.0"
 dependencies = [
  "cobs 0.5.1",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "nb 1.1.0",
  "postcard",
  "serde",
