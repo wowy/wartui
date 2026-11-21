@@ -956,7 +956,7 @@ mod tests {
     #[test]
     fn ready_wait_returns_pairing_notice_once_when_transport_awaits_pairing() {
         let mut wait = ReadyWait::new(Link::Bluetooth);
-        let notice = "pairing: macOS may be showing a dialog for 44:C0; click Connect";
+        let notice = "pairing: click Connect if macOS shows a dialog for 44:C0";
         let pairing = DisconnectCause::AwaitingPairing;
         assert_eq!(wait.take(down(notice, pairing)), Taken::Pairing(notice.to_owned()));
         assert_eq!(wait.take(down(notice, pairing)), Taken::Waiting, "said once");

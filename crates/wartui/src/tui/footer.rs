@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn view_shows_pairing_notice_as_its_own_line_not_fault_when_transport_awaits_pairing() {
-        let notice = "pairing: macOS may be showing a dialog for 02:00:5E:10:44:C0; click Connect";
+        let notice = "pairing: click Connect if macOS shows a dialog for 02:00:5E:10:44:C0";
         let mut snapshot = busy();
         snapshot.link_up = false;
         snapshot.link_error = Some(notice.to_owned());

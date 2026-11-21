@@ -279,9 +279,9 @@ const fn subscribe_within(pairs: bool) -> Duration {
 /// worded for macOS when `macos`.
 fn pairing_notice(label: &str, macos: bool) -> String {
     if macos {
-        format!("pairing: macOS may be showing a dialog for {label}; click Connect")
+        format!("pairing: click Connect if macOS shows a dialog for {label}")
     } else {
-        format!("pairing: the OS may be showing a dialog for {label}; accept it")
+        format!("pairing: accept the dialog if the OS shows one for {label}")
     }
 }
 
@@ -1784,7 +1784,7 @@ mod tests {
     fn ble_pairing_notice_names_connect_when_on_macos() {
         assert_eq!(
             pairing_notice("44:C0", true),
-            "pairing: macOS may be showing a dialog for 44:C0; click Connect"
+            "pairing: click Connect if macOS shows a dialog for 44:C0"
         );
     }
 
@@ -1792,7 +1792,7 @@ mod tests {
     fn ble_pairing_notice_names_the_os_when_not_on_macos() {
         assert_eq!(
             pairing_notice("44:C0", false),
-            "pairing: the OS may be showing a dialog for 44:C0; accept it"
+            "pairing: accept the dialog if the OS shows one for 44:C0"
         );
     }
 
@@ -1802,6 +1802,16 @@ mod tests {
         for macos in [true, false] {
             let line = format!("  {}", pairing_notice("02:00:5E:10:44:C0", macos));
             assert!(line.chars().count() <= 80, "{line}");
+        }
+    }
+
+    #[test]
+    fn ble_pairing_notice_keeps_instruction_when_terminal_is_58_columns() {
+        // A cut at the edge of a small screen costs the label, never what to do.
+        for (macos, instruction) in [(true, "click Connect"), (false, "accept the dialog")] {
+            let line = format!("  {}", pairing_notice("44:C0", macos));
+            let shown: String = line.chars().take(58).collect();
+            assert!(shown.contains(instruction), "{shown}");
         }
     }
 

@@ -150,7 +150,7 @@ pub enum DisconnectCause {
     /// A USB host took the bridge from this Bluetooth central, which stays subscribed for the
     /// handback.
     UsbTookBridge,
-    /// The subscription waits on the OS, which may be showing a pairing dialog. The transport is
+    /// The subscription waits on the OS, which can show a pairing dialog. The transport is
     /// still connected and waiting, and a `Connected` or another `Disconnected` follows.
     AwaitingPairing,
     /// The bridge refused this host's subscription or write request with an ATT authentication or

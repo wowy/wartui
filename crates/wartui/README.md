@@ -1295,7 +1295,7 @@ remembers the bridge. On other OSes `pair` opens the window and stops: the OS pa
 a few seconds into the command, the command says so:
 
 ```
-pairing: macOS may be showing a dialog for XX:YY; click Connect
+pairing: click Connect if macOS shows a dialog for XX:YY
 ```
 
 It waits up to 30 s for the click, so one command pairs and is served: run `wartui bluetooth pair`
@@ -1406,7 +1406,7 @@ names the last one when its wait runs out:
 | `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |
 | `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair`. When BlueZ holds a pairing the bridge may have forgotten, it says so: `wartui bluetooth pair --fresh` |
 | `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
-| `pairing: macOS may be showing a dialog for XX:YY; click Connect`     | Click Connect within 30 s of connecting, inside the pairing window   |
+| `pairing: click Connect if macOS shows a dialog for XX:YY`            | Click Connect within 30 s of connecting, inside the pairing window   |
 | `no answer after waiting on the OS's pairing dialog`                  | Run the command again, inside the pairing window                     |
 | A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
 

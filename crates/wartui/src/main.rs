@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn describe_prints_notice_alone_when_transport_awaits_pairing() {
-        let notice = "pairing: macOS may be showing a dialog for 44:C0; click Connect";
+        let notice = "pairing: click Connect if macOS shows a dialog for 44:C0";
         let pairing = LinkEvent::Disconnected {
             reason: notice.to_owned(),
             cause: DisconnectCause::AwaitingPairing,
