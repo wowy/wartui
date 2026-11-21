@@ -393,13 +393,15 @@ edit stops; follow the pointer before changing the rule.
   `--bridge` that is not a listed CH343 may be a node, and a node that is not reading its USB
   endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output queue
   through a `close` that no signal can interrupt — 30 s measured against a node, during which the
-  process cannot exit. Once proven, a USB connection that has written nothing for 10 s sends a
-  `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s. Over Bluetooth
+  process cannot exit. The transport leaves a thread held in `write` or `close` behind after 2 s,
+  and `main` names the port it holds. Once proven, a USB connection that has written nothing for
+  10 s sends a `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s.
+  Over Bluetooth
   a connection asks every second once its notifications are open, because a bonded central's
   subscription outlives its connection and the bridge's `Ready` can go by before the transport
   listens, and it sends no keepalive, since that gate never closes on silence.
   → `crates/wartui-bridge/src/lib.rs` `//!`, `src/gate.rs` `//!`; `src/serial.rs`, `connect`'s
-  `identify` arm and `KEEPALIVE`; `src/ble.rs` `//!`, `IDENTIFY_EVERY`
+  `identify` arm, `KEEPALIVE` and `PORT_CLOSE_WITHIN`; `src/ble.rs` `//!`, `IDENTIFY_EVERY`
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
   real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one

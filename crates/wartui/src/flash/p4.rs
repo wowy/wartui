@@ -442,6 +442,11 @@ impl<'a> Update<'a> {
             match self.sender.stage() {
                 Stage::Sending => progress.show(self.sender.percent()),
                 Stage::Installed => return Ok(()),
+                // The link wrote nothing for the pacing's stall bound: over USB, a port that
+                // stopped draining, not a receiver that stopped answering.
+                Stage::Failed(Failure::Silent) if self.sender.is_stalled() => {
+                    bail!("{}", port_stall_text(self.sender.percent()))
+                }
                 Stage::Failed(failure) => bail!("{}", self.failed(failure)),
             }
             tokio::select! {
@@ -971,6 +976,15 @@ fn judge(
     }
 }
 
+/// Why the update stopped when the link stopped writing it at `percent`, and what fixes it.
+fn port_stall_text(percent: u8) -> String {
+    format!(
+        "the bridge's port stopped taking the image at {percent}%. The bridge keeps its image. \
+         If this command does not return, unplug and replug the bridge's USB data cable. \
+         `flash-bridge --link bluetooth` carries the update"
+    )
+}
+
 /// Why the update stopped, and what fixes it.
 fn failure_text(failure: Failure, image_known: bool) -> String {
     match failure {
@@ -1345,6 +1359,16 @@ mod tests {
         let text = failure_text(Failure::Silent, false);
         assert!(text.contains("another tree") && text.contains(FIRST_FLASH), "{text}");
         assert!(!failure_text(Failure::Silent, true).contains("another tree"));
+    }
+
+    #[test]
+    fn flash_p4_names_port_stall_when_sender_goes_silent_on_unwritten_ops() {
+        // A port that stops draining is not a receiver that stopped answering: the remedy is
+        // the cable, and the command itself may not return.
+        let text = port_stall_text(42);
+        assert!(text.contains("stopped taking the image at 42%"), "{text}");
+        assert!(text.contains("replug the bridge's USB data cable"), "{text}");
+        assert!(text.contains("`flash-bridge --link bluetooth`"), "{text}");
     }
 
     #[test]

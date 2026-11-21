@@ -1,10 +1,11 @@
 //! An update's ops, paced to the link that carries them.
 //!
 //! A [`Sender`] re-sends the op it asked after [`REPLY_WAIT_MS`] of silence. That wait is for the
-//! receiver's answer, so it has to start when the op is written, not when it is queued. Over USB
-//! the two are the same moment. Over Bluetooth each write group waits for the C6's answer, about
-//! 60 ms or more, so a sector's ops can sit queued past the wait: timed from the queue, the sender
-//! re-sends into the backlog it timed out behind, and the queue fills.
+//! receiver's answer, so it has to start when the op is written, not when it is queued. Each
+//! transport counts a command done once it is written: over USB once its writer thread has
+//! written its bytes, over Bluetooth once the C6 answers its write group, about 60 ms or more. A
+//! sector's ops can sit queued past the wait: timed from the queue, the sender re-sends into the
+//! backlog it timed out behind, and the queue fills.
 //!
 //! [`PacedSender`] asks its sender for nothing until the link has written the last op it queued,
 //! then reports the write ([`Sender::written`]), so the wait runs from there. So at most one
@@ -15,11 +16,13 @@
 //!
 //! **A link that takes no commands stalls the pacing, not the update.** A transport reads none
 //! between connections: serial after a pulled cable, Bluetooth while its link is down or a USB host
-//! holds the bridge. Its count never moves, so a sender held on it would wait forever, and its own
+//! holds the bridge. A USB write that does not drain takes none either, its writer thread held in
+//! `write`. Its count never moves, so a sender held on it would wait forever, and its own
 //! silence timeout would never run. Once the last op has gone unwritten for [`STALL_MS`], past
 //! anything a working link takes, the sender runs on its own timers until the link's backlog is
-//! empty again, and its silence fails the update. Past [`STALL_OPS`] queued in that state, an op
-//! is dropped as a refused one is: the sender counts it sent.
+//! empty again, and its silence fails the update ([`PacedSender::is_stalled`] says so). Past
+//! [`STALL_OPS`] queued in that state, an op is dropped as a refused one is: the sender counts it
+//! sent.
 //!
 //! [`REPLY_WAIT_MS`]: wartui_proto::radio_link::update::REPLY_WAIT_MS
 
@@ -112,6 +115,13 @@ impl<'a> PacedSender<'a> {
     #[must_use]
     pub fn is_waiting(&self) -> bool {
         self.owed.is_some()
+    }
+
+    /// Whether it holds ops the link has left unwritten for [`STALL_MS`], so a silence that
+    /// fails the update is the link's rather than the receiver's.
+    #[must_use]
+    pub fn is_stalled(&self) -> bool {
+        self.owed.is_some_and(|owed| owed.stalled.is_some())
     }
 
     /// Take a status from the receiver ([`Sender::on_status`]).
@@ -405,6 +415,37 @@ mod tests {
         let bound = Duration::from_millis(STALL_MS + u64::from(TRIES) * REPLY_WAIT_MS);
         assert!(took <= bound + Duration::from_secs(1), "failed after {took:?}");
         assert!(chunks(&log, second).is_empty(), "the stalled chunk was never written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paced_sender_reports_stall_when_link_writes_nothing_for_stall_ms() {
+        // `flash-bridge` names a port that stopped taking the image apart from a receiver that
+        // stopped answering, and this is how it tells them apart.
+        let image = image();
+        let sha256: [u8; 32] = Sha256::digest(&image).into();
+        let (mut link, plumbing) = link_pair();
+        let second = u32::try_from(SECTOR).unwrap();
+        transport(plumbing, Duration::from_millis(100), move |sent| {
+            if sent == Sent::Chunk(second) {
+                return Fate::Stall(Duration::from_secs(3_600));
+            }
+            Fate::Write
+        });
+        let mut paced = PacedSender::new(Sender::new(&image, sha256, &DIGEST));
+        assert!(!paced.is_stalled());
+        assert_eq!(drive(&mut link, &mut paced).await, Err(Failure::Silent));
+        assert!(paced.is_stalled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paced_sender_reports_no_stall_when_the_link_writes_everything() {
+        let image = image();
+        let sha256: [u8; 32] = Sha256::digest(&image).into();
+        let (mut link, plumbing) = link_pair();
+        transport(plumbing, Duration::from_millis(100), |_| Fate::Write);
+        let mut paced = PacedSender::new(Sender::new(&image, sha256, &DIGEST));
+        drive(&mut link, &mut paced).await.expect("the update installs");
+        assert!(!paced.is_stalled());
     }
 
     #[tokio::test(start_paused = true)]
