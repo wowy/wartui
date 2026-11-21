@@ -115,6 +115,22 @@
 //!   to a P4 reset or to range drops the same way, so `wartui bluetooth pair` acts only on the
 //!   first.
 //!
+//! **A bond only this host holds is a timeout on macOS.** CoreBluetooth's connect never
+//! completes and reports no failure, so the transport's timeout at [`CONNECT_WITHIN`] is the only
+//! sign, though the C6 sees links of about half a second meanwhile (D0:1C, 2026-11-20,
+//! `docs/ble-host-link-findings.md` § "A bond only the Mac holds"). A try whose scan heard the
+//! bridge advertising has shown it powered and near, so on macOS that timeout's text gives range
+//! first and then the stale bond's fix, short enough for the view's fault box at 80 columns
+//! ([`connect_timeout_text`]). The bond is an "if" there: a weak signal times out the same way,
+//! and with `wardrive esp` on, a bridge another central holds still advertises its status beacon,
+//! which carries the id and is not connectable, so it is heard too. That is read from the C6
+//! (`firmware/p4-radio/src/ble.rs`, `linked`), not benched. A Mac that forgets a bridge still
+//! holding its bond cannot pair again until the window opens, which is why range goes first. The
+//! cause stays [`DisconnectCause::Other`], so a caller keeps retrying. A try that makes no scan, a
+//! settled one or one straight to the remembered address, keeps the power-and-range wording. On
+//! Linux BlueZ connects in this state and the bridge drops it, which `wartui`'s silence notice
+//! names, so Linux keeps the power-and-range wording too.
+//!
 //! **Waiting on the OS's pairing.** Off Linux the OS pairs on the first connection inside the
 //! bridge's pairing window, behind a dialog of its own (Connect, on macOS), and the subscription
 //! waits on the operator's answer. So it is given [`PAIR_WITHIN`], the C6's deadline for a
@@ -288,6 +304,24 @@ fn pairing_notice(label: &str, macos: bool) -> String {
     }
 }
 
+/// Why a connect to `label` timed out, for the operator. A connect that never completes is how
+/// macOS meets a bond only this host holds, and a scan that `heard` the bridge advertising has
+/// shown it powered and near, so on `macos` that pair gives range first and then the stale
+/// bond's fix, briefly enough for the view's fault box (§ "A bond only this host holds is a
+/// timeout on macOS").
+fn connect_timeout_text(label: &str, heard: bool, macos: bool) -> String {
+    let secs = CONNECT_WITHIN.as_secs();
+    if heard && macos {
+        format!(
+            "could not connect to {label} in {secs}s, though it advertises. Come closer, or \
+             forget it in System Settings → Bluetooth if the bridge dropped this Mac's bond, then \
+             pair again."
+        )
+    } else {
+        format!("could not connect to {label} in {secs}s; check the bridge is powered and in range")
+    }
+}
+
 /// The operator's notice that the subscription that waited on the OS's pairing for `label` is
 /// through, and the bridge's `Ready` has not come.
 fn ready_notice(label: &str) -> String {
@@ -427,7 +461,7 @@ pub async fn find_advertiser(
     preferred: Option<&BridgeSpec>,
 ) -> Result<Advertiser, TransportError> {
     let adapter = open_adapter().await?;
-    let (octets, name, peripheral) = scan(&adapter, spec, preferred).await?;
+    let (octets, name, peripheral, _) = scan(&adapter, spec, preferred).await?;
     Ok(Advertiser { octets, name, address: address_of(&peripheral) })
 }
 
@@ -798,8 +832,8 @@ async fn attempt(
             Err(e) => return End::failed(e.to_string()),
         },
     };
-    let peripheral = match settled {
-        Some(Settled { peripheral, .. }) => peripheral.clone(),
+    let (peripheral, heard) = match settled {
+        Some(Settled { peripheral, .. }) => (peripheral.clone(), false),
         None => {
             // A scan's discovery builds a live handle only for a peripheral btleplug holds none
             // for (§ "Each try takes a fresh handle").
@@ -820,9 +854,9 @@ async fn attempt(
                 }
             };
             match found {
-                Ok((peripheral, direct)) => {
+                Ok(Found { peripheral, direct, heard }) => {
                     *direct_failed |= direct;
-                    peripheral
+                    (peripheral, heard)
                 }
                 Err(e) => return End::failed(e.to_string()),
             }
@@ -832,7 +866,7 @@ async fn attempt(
         peripheral = fresh(&central, peripheral) => peripheral,
         () = plumbing.events.closed() => return End::HandleDropped,
     };
-    connect(&central, &peripheral, transport, plumbing, settled, unreported).await
+    connect(&central, &peripheral, transport, plumbing, settled, unreported, heard).await
 }
 
 /// A live handle for `peripheral`. On macOS, CoreBluetooth is asked for it by its identifier:
@@ -911,14 +945,22 @@ fn address_of(peripheral: &Peripheral) -> String {
     if address == BDAddr::default() { peripheral.id().to_string() } else { address.to_string() }
 }
 
+/// The peripheral a try connects to ([`find`]).
+struct Found {
+    peripheral: Peripheral,
+    /// Whether it is the remembered one, reached without a scan.
+    direct: bool,
+    /// Whether the scan that found it heard it advertising.
+    heard: bool,
+}
+
 /// The peripheral to connect to, by [`look`]: the remembered one when the OS lists it and no
-/// connection straight to it has failed, else the one a scan hears advertising the id. `true`
-/// beside it when it is the remembered one, reached without a scan.
+/// connection straight to it has failed, else the one a scan hears advertising the id.
 async fn find(
     adapter: &Adapter,
     transport: &BleTransport,
     direct_failed: bool,
-) -> Result<(Peripheral, bool), TransportError> {
+) -> Result<Found, TransportError> {
     let spec = transport.spec.as_ref();
     let Look { direct, preferred } =
         look(spec, transport.memory.recall(), transport.memory.recall_bluetooth(), direct_failed);
@@ -928,10 +970,11 @@ async fn find(
             .into_iter()
             .find(|p| is_remembered(&remembered, &p.address().to_string(), &p.id().to_string()))
         {
-            return Ok((known, true));
+            return Ok(Found { peripheral: known, direct: true, heard: false });
         }
     }
-    Ok((scan(adapter, spec, preferred.as_ref()).await?.2, false))
+    let (_, _, peripheral, heard) = scan(adapter, spec, preferred.as_ref()).await?;
+    Ok(Found { peripheral, direct: false, heard })
 }
 
 /// A bridge a scan heard, as [`choose`] takes it: its octets, whether it is advertising, and its
@@ -1031,19 +1074,19 @@ impl<'a, I: Clone + Eq + Hash, P> Hearing<'a, I, P> {
 }
 
 /// Scan for up to [`SCAN_FOR`] for a bridge `spec` names, preferring one `preferred` names, and
-/// return its octets and name beside it.
+/// return its octets and name beside it, and whether it was heard advertising.
 async fn scan(
     adapter: &Adapter,
     spec: Option<&BridgeSpec>,
     preferred: Option<&BridgeSpec>,
-) -> Result<([u8; 2], Option<String>, Peripheral), TransportError> {
+) -> Result<([u8; 2], Option<String>, Peripheral, bool), TransportError> {
     // Opened before the scan starts, so nothing it hears goes by unreported.
     let mut events = adapter.events().await.map_err(bluetooth)?;
     adapter.start_scan(ScanFilter::default()).await.map_err(bluetooth)?;
     let heard = listen(adapter, &mut events, spec).await;
     let _ = adapter.stop_scan().await;
     let heard =
-        heard?.into_iter().map(|(octets, live, (name, p))| (octets, live, (octets, name, p)));
+        heard?.into_iter().map(|(octets, live, (name, p))| (octets, live, (octets, name, p, live)));
     choose(heard.collect(), preferred)
 }
 
@@ -1156,6 +1199,7 @@ async fn connect(
     plumbing: &mut LinkPlumbing,
     settled: &mut Option<Settled>,
     unreported: bool,
+    heard: bool,
 ) -> End {
     // Retrying a failure already reported is not news; `RUST_LOG=debug` keeps them.
     macro_rules! progress {
@@ -1185,10 +1229,7 @@ async fn connect(
                 // it, and BlueZ arms its 2 s disconnect timer only for a connected device, so no
                 // later connection inherits it.
                 let _ = tokio::time::timeout(CANCEL_WITHIN, peripheral.disconnect()).await;
-                return End::failed(format!(
-                    "could not connect to {label} in {}s; check the bridge is powered and in range",
-                    CONNECT_WITHIN.as_secs()
-                ));
+                return End::failed(connect_timeout_text(&label, heard, cfg!(target_os = "macos")));
             }
         }
     }
@@ -1562,8 +1603,8 @@ mod tests {
 
     use super::{
         BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, PAIR_WITHIN,
-        PAIRING_NOTICE_AFTER, Read, asker, awaits_pairing, choose, notice_allowance,
-        pairing_notice, ready_notice, subscribe, subscribe_within, unless_closed,
+        PAIRING_NOTICE_AFTER, Read, asker, awaits_pairing, choose, connect_timeout_text,
+        notice_allowance, pairing_notice, ready_notice, subscribe, subscribe_within, unless_closed,
     };
     use crate::{DisconnectCause, LinkEvent, link_pair};
 
@@ -1827,6 +1868,44 @@ mod tests {
     #[test]
     fn ble_subscribe_within_gives_connect_deadline_when_os_pairs_beforehand() {
         assert_eq!(subscribe_within(false), CONNECT_WITHIN);
+    }
+
+    #[test]
+    fn ble_connect_timeout_names_stale_bond_when_bridge_was_heard_on_macos() {
+        assert_eq!(
+            connect_timeout_text("44:C0", true, true),
+            "could not connect to 44:C0 in 10s, though it advertises. Come closer, or forget it \
+             in System Settings → Bluetooth if the bridge dropped this Mac's bond, then pair \
+             again."
+        );
+    }
+
+    #[test]
+    fn ble_connect_timeout_fits_fault_box_when_terminal_is_80_columns() {
+        // The view's fault box draws 3 lines of the width less 2 (`footer::fault_lines` in
+        // `wartui`).
+        for label in ["44:C0", "02:00:5E:10:44:C0"] {
+            let line = format!("link down: {}", connect_timeout_text(label, true, true));
+            assert!(line.chars().count() <= 3 * 78, "{line}");
+        }
+    }
+
+    #[test]
+    fn ble_connect_timeout_says_power_and_range_when_bridge_was_not_heard() {
+        assert_eq!(
+            connect_timeout_text("44:C0", false, true),
+            "could not connect to 44:C0 in 10s; check the bridge is powered and in range"
+        );
+    }
+
+    #[test]
+    fn ble_connect_timeout_says_power_and_range_when_not_on_macos() {
+        for heard in [true, false] {
+            assert_eq!(
+                connect_timeout_text("44:C0", heard, false),
+                "could not connect to 44:C0 in 10s; check the bridge is powered and in range"
+            );
+        }
     }
 
     #[test]
