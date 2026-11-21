@@ -1300,9 +1300,10 @@ pairing: macOS may be showing a dialog for XX:YY; click Connect
 
 It waits up to 30 s for the click, so one command pairs and is served: run `wartui bluetooth pair`
 over USB, then `wartui status --link bluetooth`. A dialog left unclicked ends with the bridge
-dropping the Mac 30 s after it connected, as `dropped this PC over Bluetooth before serving it`.
-A bonded Mac sees no dialog and no notice. A Mac that still holds a bond the bridge has dropped
-cannot connect at all, and reads `could not connect to XX:YY in 10s`: forget the bridge in System
+dropping the Mac 30 s after it connected, as `refused this PC over Bluetooth because they are not
+paired`: run the command again inside the window, and click. A bonded Mac sees no dialog and no
+notice. A Mac that still holds a bond the bridge has dropped cannot connect at all, and reads
+`could not connect to XX:YY in 10s`: forget the bridge in System
 Settings → Bluetooth, then pair again inside the window. Every disconnect on macOS logs `Shouldn't
 get anything but Ok!` from btleplug at error level; it is harmless.
 

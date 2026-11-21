@@ -121,8 +121,9 @@
 //! central that connects inside the window, and one still unanswered [`PAIRING_NOTICE_AFTER`] in
 //! is announced once as [`LinkEvent::Disconnected`] with [`DisconnectCause::AwaitingPairing`].
 //! The event is what reaches the operator: transport logs reach only `--log-file`. The host's
-//! deadline starts after the C6's, so a dialog left unanswered normally ends with the C6's drop,
-//! which reads as [`DisconnectCause::MaybeNotBonded`].
+//! deadline starts after the C6's, so a dialog left unanswered ends with the C6's drop.
+//! CoreBluetooth then fails the subscription with an ATT authentication or encryption error,
+//! which reads as [`DisconnectCause::NotBonded`] (D0:1C, 2026-11-20).
 //!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that bridge. A P4 reboot resets its C6

@@ -607,7 +607,13 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
 - **The click landed past the 10 s the transport gave before,** and inside the C6's 30 s.
 - **Connecting to the subscription's start took about 1.4 s,** so the notice came 4.4 s after
   connecting.
-- **A dialog left unclicked was not measured.**
+- **A dialog left unclicked ends as a refusal, not as a drop.** The same steps with no click: the
+  notice 4.6 s after connecting, then `refused this PC over Bluetooth because they are not
+  paired` 30.2 s after connecting, as the C6 dropped the Mac (`unbonded_kicks 1`,
+  `last_disconnect 0x16`, `failed_pairings 0`). CoreBluetooth fails the subscription with an
+  error the transport reads as the C6's refusal, so the cause is `NotBonded`, where timing alone
+  would have read `MaybeNotBonded`. The command ended 32.2 s in. The bridge kept no bond and its
+  window stayed open.
 
 ## What this settles
 
