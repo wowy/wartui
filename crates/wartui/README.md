@@ -1291,8 +1291,8 @@ pairing first and pairs again; on other OSes, remove it in the system's Bluetoot
 remembers the bridge. On other OSes `pair` opens the window and stops: the OS pairs on the first
 `--link bluetooth` connection inside it.
 
-**On macOS that connection raises a pairing dialog; click Connect.** About 3 s in, the command
-says so:
+**On macOS that connection raises a pairing dialog; click Connect.** About 3 s after it connects,
+a few seconds into the command, the command says so:
 
 ```
 pairing: macOS may be showing a dialog for XX:YY; click Connect
@@ -1407,6 +1407,7 @@ names the last one when its wait runs out:
 | `nothing has identified itself as a bridge … over Bluetooth after …`  | A USB host holds the bridge, or it is starting. Quit the USB program, or wait 15 s after it goes quiet. When this PC is not paired with the bridge, the message says so first: `wartui bluetooth pair`. When BlueZ holds a pairing the bridge may have forgotten, it says so: `wartui bluetooth pair --fresh` |
 | `link down: the USB host took the bridge`                             | Nothing: the bridge comes back 15 s after USB goes quiet             |
 | `pairing: macOS may be showing a dialog for XX:YY; click Connect`     | Click Connect within 30 s of connecting, inside the pairing window   |
+| `no answer after waiting on the OS's pairing dialog`                  | Run the command again, inside the pairing window                     |
 | A desktop pairing prompt                                              | Accept it, or decline it and run `wartui bluetooth pair`             |
 
 `status --link bluetooth` proves the link both ways. In its `bluetooth host` line,

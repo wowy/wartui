@@ -426,13 +426,19 @@ pub(crate) async fn wait_for_ready_or_why(
 }
 
 /// The wait's deadline once the transport, at `now`, waits on the OS's pairing dialog: `until`,
-/// or the transport's own deadline for the subscription when that is later.
+/// or when that is sooner, the transport's own deadline for the subscription and the usual wait
+/// for a `Ready` behind it. The notice comes a few seconds into the subscription, so its
+/// deadline alone leaves the bridge little time to announce itself.
 fn pairing_deadline(
     until: tokio::time::Instant,
     now: tokio::time::Instant,
 ) -> tokio::time::Instant {
-    until.max(now + wartui_bridge::ble::PAIR_WITHIN)
+    until.max(now + wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER)
 }
+
+/// Why a wait that announced the OS's pairing dialog ran out, when no failure is retried.
+const PAIRING_RAN_OUT: &str =
+    "no answer after waiting on the OS's pairing dialog; run the command again";
 
 /// A wait for the bridge's announcement, fed one link event at a time.
 ///
@@ -440,7 +446,8 @@ fn pairing_deadline(
 /// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
 /// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once. The
 /// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
-/// the transport's pairing window; a later one changes nothing.
+/// the transport's pairing window; a later one changes nothing. A wait that runs out after the
+/// notice names the pairing wait, unless a failure is retried.
 #[derive(Debug)]
 struct ReadyWait {
     over: crate::config::Link,
@@ -489,9 +496,10 @@ impl ReadyWait {
         }
     }
 
-    /// Why the wait ran out: the last failure the transport was retrying, if any.
+    /// Why the wait ran out: the last failure the transport was retrying, else the pairing wait
+    /// once it was announced, if either.
     fn timed_out(self) -> Option<String> {
-        self.retried
+        self.retried.or_else(|| self.pairing.then(|| PAIRING_RAN_OUT.to_owned()))
     }
 }
 
@@ -952,12 +960,21 @@ mod tests {
         let pairing = DisconnectCause::AwaitingPairing;
         assert_eq!(wait.take(down(notice, pairing)), Taken::Pairing(notice.to_owned()));
         assert_eq!(wait.take(down(notice, pairing)), Taken::Waiting, "said once");
-        // The notice is no failure the transport retries.
-        assert_eq!(wait.timed_out(), None);
     }
 
     #[test]
-    fn ready_wait_keeps_last_failure_when_pairing_notice_follows_it() {
+    fn ready_wait_names_pairing_wait_when_it_runs_out_after_notice() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        let pairing = DisconnectCause::AwaitingPairing;
+        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+        assert_eq!(
+            wait.timed_out().as_deref(),
+            Some("no answer after waiting on the OS's pairing dialog; run the command again")
+        );
+    }
+
+    #[test]
+    fn ready_wait_names_retried_failure_when_it_runs_out_after_notice() {
         let mut wait = ReadyWait::new(Link::Bluetooth);
         assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
         let pairing = DisconnectCause::AwaitingPairing;
@@ -982,14 +999,16 @@ mod tests {
         let until = start + Duration::from_secs(17);
         let now = start + Duration::from_secs(3);
         let stretched = pairing_deadline(until, now);
-        assert_eq!(stretched, now + wartui_bridge::ble::PAIR_WITHIN);
+        // The subscription's deadline, and room for the `Ready` behind it.
+        assert_eq!(stretched, now + wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER);
         assert!(stretched > until);
     }
 
     #[tokio::test(start_paused = true)]
     async fn ready_wait_keeps_deadline_when_it_is_past_pairing_window() {
         let now = tokio::time::Instant::now();
-        let until = now + wartui_bridge::ble::PAIR_WITHIN + Duration::from_secs(1);
+        let window = wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER;
+        let until = now + window + Duration::from_secs(1);
         assert_eq!(pairing_deadline(until, now), until);
     }
 }

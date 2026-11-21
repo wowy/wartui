@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use wartui_bridge::ble::{BleTransport, SCAN_FOR};
+use wartui_bridge::ble::{BleTransport, SCAN_FOR, pairing_notice_allowance};
 use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
@@ -332,11 +332,12 @@ fn link_for(flag: Option<Link>, bridge: Option<&str>, saved: Option<Link>) -> Re
 }
 
 /// How long a command waits for the bridge to announce itself over `link`: over Bluetooth, the
-/// scan that finds it comes first.
+/// scan that finds it comes first, and where the OS pairs on the connection, the subscription's
+/// wait before its pairing notice, which stretches the wait ([`status::wait_for_ready`]).
 fn connect_wait(link: Link) -> Duration {
     match link {
         Link::Usb => CONNECT_NOTICE_AFTER,
-        Link::Bluetooth => SCAN_FOR + CONNECT_NOTICE_AFTER,
+        Link::Bluetooth => SCAN_FOR + CONNECT_NOTICE_AFTER + pairing_notice_allowance(),
     }
 }
 
@@ -755,8 +756,8 @@ mod tests {
     use wartui_bridge::{DisconnectCause, LinkEvent};
 
     use super::{
-        BridgeInfo, BridgeSpec, Command, Link, Listing, bluetooth_silence_text, describe,
-        last_reset_line, link_for, no_boards_notice, parse, silence_notice, spec,
+        BridgeInfo, BridgeSpec, Command, Link, Listing, bluetooth_silence_text, connect_wait,
+        describe, last_reset_line, link_for, no_boards_notice, parse, silence_notice, spec,
     };
     use wartui_proto::link::LoopPhase;
     use wartui_proto::reset::ResetCause;
@@ -1151,7 +1152,9 @@ mod tests {
     #[test]
     fn cli_diagnostics_names_usb_holder_when_bluetooth_bridge_is_silent() {
         let notice = bluetooth_silence_text(Some("44:C0"), Listing::Absent);
-        assert!(notice.contains("as 44:C0 over Bluetooth after 17s"), "{notice}");
+        let seconds = connect_wait(Link::Bluetooth).as_secs();
+        let after = format!("as 44:C0 over Bluetooth after {seconds}s");
+        assert!(notice.contains(&after), "{notice}");
         assert!(notice.contains("a USB host holds the bridge"), "{notice}");
         // Nothing about ports: none was opened.
         assert!(!notice.contains("CH343"), "{notice}");

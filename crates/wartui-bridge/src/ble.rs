@@ -123,7 +123,9 @@
 //! The event is what reaches the operator: transport logs reach only `--log-file`. The host's
 //! deadline starts after the C6's, so a dialog left unanswered ends with the C6's drop.
 //! CoreBluetooth then fails the subscription with an ATT authentication or encryption error,
-//! which reads as [`DisconnectCause::NotBonded`] (D0:1C, 2026-11-20).
+//! which reads as [`DisconnectCause::NotBonded`] (D0:1C, 2026-11-20). A run that has settled
+//! heard a `Ready` from this bridge, so this host is bonded, and its subscription keeps
+//! [`CONNECT_WITHIN`] and sends no notice ([`awaits_pairing`]).
 //!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that bridge. A P4 reboot resets its C6
@@ -245,6 +247,27 @@ const C6_WRITE_QUEUE: usize = 8;
 
 /// The most writes one group takes: one fewer than the C6 queues.
 const GROUP_WRITES: usize = C6_WRITE_QUEUE - 1;
+
+/// Whether a subscription waits on the OS's pairing dialog: where the OS pairs on the connection,
+/// and only until the run has `settled`, since a bridge that answered a `Ready` holds this
+/// host's bond.
+const fn awaits_pairing(os_pairs: bool, settled: bool) -> bool {
+    os_pairs && !settled
+}
+
+/// How much longer than [`SCAN_FOR`] and the connect a first `Ready` may take where the OS
+/// `pairs` on the connection: the subscription's wait before its notice.
+const fn notice_allowance(pairs: bool) -> Duration {
+    if pairs { PAIRING_NOTICE_AFTER } else { Duration::ZERO }
+}
+
+/// How much a command's first wait over Bluetooth needs beyond the scan and the connect to hear
+/// the pairing notice on this OS: [`PAIRING_NOTICE_AFTER`] where the OS pairs on the connection,
+/// else nothing.
+#[must_use]
+pub const fn pairing_notice_allowance() -> Duration {
+    notice_allowance(OS_PAIRS_ON_CONNECT)
+}
 
 /// How long the subscription may take: [`PAIR_WITHIN`] when the OS `pairs` on the connection,
 /// else [`CONNECT_WITHIN`].
@@ -1160,7 +1183,7 @@ async fn connect(
             }
         }
     }
-    let end = serve(adapter, peripheral, transport, plumbing, settled, &label).await;
+    let end = serve(adapter, peripheral, transport, plumbing, settled, (&label, unreported)).await;
     let end = match end {
         // The C6 drops an unbonded central about 10 s after it connects, and the timing is all
         // that says so.
@@ -1191,7 +1214,7 @@ async fn serve(
     transport: &BleTransport,
     plumbing: &mut LinkPlumbing,
     settled: &mut Option<Settled>,
-    label: &str,
+    (label, unreported): (&str, bool),
 ) -> End {
     let discovered = discover(peripheral.discover_services(), label);
     if let Some(end) = unless_closed(discovered, plumbing, false).await {
@@ -1210,8 +1233,9 @@ async fn serve(
         Ok(events) => events,
         Err(e) => return End::failed(bluetooth(e).to_string()),
     };
+    let pairs = awaits_pairing(OS_PAIRS_ON_CONNECT, settled.is_some());
     let subscribed =
-        subscribe(peripheral.subscribe(&up), label, OS_PAIRS_ON_CONNECT, &plumbing.events);
+        subscribe(peripheral.subscribe(&up), (label, unreported), pairs, &plumbing.events);
     if let Some(end) = unless_closed(subscribed, plumbing, false).await {
         return end;
     }
@@ -1247,11 +1271,12 @@ async fn discover(
 
 /// Wait for `subscribing`, the subscription to Up, for [`subscribe_within`]. When the OS `pairs`
 /// on the connection and the subscription is unanswered [`PAIRING_NOTICE_AFTER`] in, one
-/// [`DisconnectCause::AwaitingPairing`] goes to `events` and the wait goes on. The C6's refusal
-/// for want of a bond is [`refusal`]'s.
+/// [`DisconnectCause::AwaitingPairing`] goes to `events` and the wait goes on. It is logged at
+/// info only while the failure is `unreported`. The C6's refusal for want of a bond is
+/// [`refusal`]'s.
 async fn subscribe(
     subscribing: impl Future<Output = btleplug::Result<()>>,
-    label: &str,
+    (label, unreported): (&str, bool),
     pairs: bool,
     events: &mpsc::Sender<LinkEvent>,
 ) -> Result<(), Failure> {
@@ -1262,10 +1287,17 @@ async fn subscribe(
     let mut noticed = !pairs;
     let answered = loop {
         tokio::select! {
+            // An answer on the poll the notice falls due is no wait to announce.
+            biased;
             answered = &mut subscribing => break answered,
             () = &mut notice, if !noticed => {
                 noticed = true;
-                tracing::info!(bridge = %label, "the subscription waits on the OS's pairing");
+                // Retrying a failure already reported is not news, as in `connect`.
+                if unreported {
+                    tracing::info!(bridge = %label, "the subscription waits on the OS's pairing");
+                } else {
+                    tracing::debug!(bridge = %label, "the subscription waits on the OS's pairing");
+                }
                 let waiting = LinkEvent::Disconnected {
                     reason: pairing_notice(label, cfg!(target_os = "macos")),
                     cause: DisconnectCause::AwaitingPairing,
@@ -1507,8 +1539,8 @@ mod tests {
 
     use super::{
         BridgeSpec, CONNECT_WITHIN, End, Hearing, ID_READS, IDENTIFY_EVERY, PAIR_WITHIN,
-        PAIRING_NOTICE_AFTER, Read, asker, choose, pairing_notice, subscribe, subscribe_within,
-        unless_closed,
+        PAIRING_NOTICE_AFTER, Read, asker, awaits_pairing, choose, notice_allowance,
+        pairing_notice, subscribe, subscribe_within, unless_closed,
     };
     use crate::{DisconnectCause, LinkEvent, link_pair};
 
@@ -1660,7 +1692,7 @@ mod tests {
     async fn ble_subscribe_fails_when_bridge_does_not_answer_in_time() {
         let (events, mut heard) = mpsc::channel(4);
         let start = Instant::now();
-        let failed = subscribe(std::future::pending(), "44:C0", false, &events).await.err();
+        let failed = subscribe(std::future::pending(), ("44:C0", true), false, &events).await.err();
         let failure = failed.expect("an unanswered subscription fails");
         assert_eq!(failure.reason, "44:C0 did not answer the subscription");
         assert_eq!(start.elapsed(), CONNECT_WITHIN);
@@ -1671,7 +1703,7 @@ mod tests {
     async fn ble_subscribe_waits_the_pairing_window_when_os_pairs_on_connection() {
         let (events, mut heard) = mpsc::channel(4);
         let start = Instant::now();
-        let subscribing = subscribe(std::future::pending(), "44:C0", true, &events);
+        let subscribing = subscribe(std::future::pending(), ("44:C0", true), true, &events);
         tokio::pin!(subscribing);
         let notice = tokio::select! {
             notice = heard.recv() => notice,
@@ -1697,8 +1729,45 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(())
         };
-        assert!(subscribe(resumed, "44:C0", true, &events).await.is_ok());
+        assert!(subscribe(resumed, ("44:C0", true), true, &events).await.is_ok());
         assert!(heard.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ble_subscribe_sends_no_notice_when_answer_comes_as_notice_falls_due() {
+        let (events, mut heard) = mpsc::channel(4);
+        let answered = async {
+            tokio::time::sleep(PAIRING_NOTICE_AFTER).await;
+            Ok(())
+        };
+        assert!(subscribe(answered, ("44:C0", true), true, &events).await.is_ok());
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn ble_awaits_pairing_when_os_pairs_on_connection_and_run_has_not_settled() {
+        assert!(awaits_pairing(true, false));
+    }
+
+    #[test]
+    fn ble_awaits_no_pairing_when_run_has_settled() {
+        // A bridge that answered a `Ready` holds this host's bond.
+        assert!(!awaits_pairing(true, true));
+    }
+
+    #[test]
+    fn ble_awaits_no_pairing_when_os_pairs_beforehand() {
+        assert!(!awaits_pairing(false, false));
+    }
+
+    #[test]
+    fn ble_notice_allowance_gives_notice_delay_when_os_pairs_on_connection() {
+        assert_eq!(notice_allowance(true), PAIRING_NOTICE_AFTER);
+    }
+
+    #[test]
+    fn ble_notice_allowance_gives_nothing_when_os_pairs_beforehand() {
+        assert_eq!(notice_allowance(false), Duration::ZERO);
     }
 
     #[test]
@@ -1741,7 +1810,8 @@ mod tests {
         // A quit while the C6 has yet to answer: the connection lets the bridge go at once.
         let (handle, plumbing) = link_pair();
         let start = Instant::now();
-        let subscribing = subscribe(std::future::pending(), "44:C0", true, &plumbing.events);
+        let subscribing =
+            subscribe(std::future::pending(), ("44:C0", true), true, &plumbing.events);
         drop(handle);
         let end = unless_closed(subscribing, &plumbing, false).await;
         assert!(matches!(end, Some(End::HandleDropped)));
