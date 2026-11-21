@@ -582,7 +582,8 @@ advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s
   [The pairing dialog inside one command](#the-pairing-dialog-inside-one-command).
 - **A Mac holding a bond the bridge dropped cannot connect,** and reads `could not connect to
   D0:1C in 10s; check the bridge is powered and in range`. On Linux `pair` reads BlueZ and names
-  that case; on macOS nothing does: see [A bond only the Mac holds](#a-bond-only-the-mac-holds).
+  that case; on macOS nothing did at this bench.
+  [A bond only the Mac holds](#a-bond-only-the-mac-holds) benches the wording that does.
 - **A command exits at once.** No 2 s disconnect at exit, as BlueZ has.
 - **Sending toward the bridge is about 20% slower:** 12.5 to 12.6 KB/s for both updates and the
   cache, against 15.3 to 17.1 KB/s from the bench PC on the same MTU, PHY and interval. Where

@@ -1304,8 +1304,8 @@ over USB, then `wartui status --link bluetooth`. Once the click lands, the comma
 dialog left unclicked ends with the bridge dropping the Mac 30 s after it connected, as `refused
 this PC over Bluetooth because they are not paired`: run the command again inside the window, and
 click. A bonded Mac sees no dialog and no notice. A Mac that still holds a bond the bridge has
-dropped cannot connect at all, and reads `could not connect to XX:YY in 10s, though it was heard
-advertising`, a message that names the fix: forget the bridge in System Settings → Bluetooth, then
+dropped cannot connect at all, and reads `could not connect to XX:YY in 10s, though it
+advertises`, a message that names the fix: forget the bridge in System Settings → Bluetooth, then
 pair again inside the window. Every disconnect on macOS logs `Shouldn't get anything but Ok!` from
 btleplug at error level; it is harmless.
 
@@ -1405,6 +1405,7 @@ names the last one when its wait runs out:
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
 | `bridge XX:YY did not advertise over Bluetooth in 12s`, or `no bridge advertised` | Power the bridge, and come closer. Turn off Bluetooth on a phone that has linked to the bridge as a WardriveESP board |
 | `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
+| `could not connect to XX:YY in 10s, though it advertises`             | On a Mac. Come closer. If the bridge dropped this Mac's bond, as after `forget`, forget the bridge in System Settings → Bluetooth, then pair again inside the pairing window |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
 | `dropped this PC over Bluetooth before serving it`                    | Try again: an unpaired PC, a P4 reset and a weak signal read the same. Then `pair` |

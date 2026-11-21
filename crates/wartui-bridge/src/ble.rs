@@ -119,14 +119,17 @@
 //! completes and reports no failure, so the transport's timeout at [`CONNECT_WITHIN`] is the only
 //! sign, though the C6 sees links of about half a second meanwhile (D0:1C, 2026-11-20,
 //! `docs/ble-host-link-findings.md` § "A bond only the Mac holds"). A try whose scan heard the
-//! bridge advertising has shown it powered and in range, so on macOS that timeout names the stale
-//! bond and its fix ([`connect_timeout_text`]). It says "may": with `wardrive esp` on, a bridge
-//! another central holds still advertises its status beacon, which carries the id and is not
-//! connectable, so it is heard too. That is read from the C6 (`firmware/p4-radio/src/ble.rs`,
-//! `linked`), not benched. The cause stays [`DisconnectCause::Other`], so a caller keeps retrying.
-//! A try that makes no scan, a settled one or one straight to the remembered address, keeps the
-//! power-and-range wording. On Linux BlueZ connects in this state and the bridge drops it, which
-//! `wartui`'s silence notice names, so Linux keeps the power-and-range wording too.
+//! bridge advertising has shown it powered and near, so on macOS that timeout's text gives range
+//! first and then the stale bond's fix, short enough for the view's fault box at 80 columns
+//! ([`connect_timeout_text`]). The bond is an "if" there: a weak signal times out the same way,
+//! and with `wardrive esp` on, a bridge another central holds still advertises its status beacon,
+//! which carries the id and is not connectable, so it is heard too. That is read from the C6
+//! (`firmware/p4-radio/src/ble.rs`, `linked`), not benched. A Mac that forgets a bridge still
+//! holding its bond cannot pair again until the window opens, which is why range goes first. The
+//! cause stays [`DisconnectCause::Other`], so a caller keeps retrying. A try that makes no scan, a
+//! settled one or one straight to the remembered address, keeps the power-and-range wording. On
+//! Linux BlueZ connects in this state and the bridge drops it, which `wartui`'s silence notice
+//! names, so Linux keeps the power-and-range wording too.
 //!
 //! **Waiting on the OS's pairing.** Off Linux the OS pairs on the first connection inside the
 //! bridge's pairing window, behind a dialog of its own (Connect, on macOS), and the subscription
@@ -303,16 +306,16 @@ fn pairing_notice(label: &str, macos: bool) -> String {
 
 /// Why a connect to `label` timed out, for the operator. A connect that never completes is how
 /// macOS meets a bond only this host holds, and a scan that `heard` the bridge advertising has
-/// shown it powered and in range, so on `macos` that pair names the stale bond and its fix
-/// (§ "A bond only this host holds is a timeout on macOS").
+/// shown it powered and near, so on `macos` that pair gives range first and then the stale
+/// bond's fix, briefly enough for the view's fault box (§ "A bond only this host holds is a
+/// timeout on macOS").
 fn connect_timeout_text(label: &str, heard: bool, macos: bool) -> String {
     let secs = CONNECT_WITHIN.as_secs();
     if heard && macos {
         format!(
-            "could not connect to {label} in {secs}s, though it was heard advertising. This Mac \
-             may hold a bond the bridge no longer has, as after `wartui bluetooth forget`: forget \
-             the bridge in System Settings → Bluetooth, then connect again inside its pairing \
-             window."
+            "could not connect to {label} in {secs}s, though it advertises. Come closer, or \
+             forget it in System Settings → Bluetooth if the bridge dropped this Mac's bond, then \
+             pair again."
         )
     } else {
         format!("could not connect to {label} in {secs}s; check the bridge is powered and in range")
@@ -1871,10 +1874,20 @@ mod tests {
     fn ble_connect_timeout_names_stale_bond_when_bridge_was_heard_on_macos() {
         assert_eq!(
             connect_timeout_text("44:C0", true, true),
-            "could not connect to 44:C0 in 10s, though it was heard advertising. This Mac may \
-             hold a bond the bridge no longer has, as after `wartui bluetooth forget`: forget the \
-             bridge in System Settings → Bluetooth, then connect again inside its pairing window."
+            "could not connect to 44:C0 in 10s, though it advertises. Come closer, or forget it \
+             in System Settings → Bluetooth if the bridge dropped this Mac's bond, then pair \
+             again."
         );
+    }
+
+    #[test]
+    fn ble_connect_timeout_fits_fault_box_when_terminal_is_80_columns() {
+        // The view's fault box draws 3 lines of the width less 2 (`footer::fault_lines` in
+        // `wartui`).
+        for label in ["44:C0", "02:00:5E:10:44:C0"] {
+            let line = format!("link down: {}", connect_timeout_text(label, true, true));
+            assert!(line.chars().count() <= 3 * 78, "{line}");
+        }
     }
 
     #[test]
