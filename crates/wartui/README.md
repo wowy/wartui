@@ -543,6 +543,11 @@ The run fails, and the P4 keeps the image it ran, when:
   firmware from another tree. Flash it once by hand.
 - The P4 refuses the update: it has no second app slot, as on espflash's default partition table.
   Flash it once by hand with its own table.
+- The bridge's port stops taking the image: the run says at what percent, then that the port has
+  not closed. If the command does not return, unplug and replug the bridge's USB data cable.
+  `flash-bridge --link bluetooth` carries the update. A Mac does this behind a dock's chained
+  hubs, and not from its own port or through one USB 2.0 hub
+  (`docs/p4-host-uart-findings.md` § "A Mac host behind a dock's hub chain").
 
 The run also fails when the P4 came back on the new image but did not report it confirmed within
 3 s. The image is then still on trial and rolls back unless a host confirms it: run `flash-bridge`

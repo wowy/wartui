@@ -7,11 +7,11 @@
 //! Two threads and a pair of channels are simpler and more predictable.
 
 use std::io::{ErrorKind, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
     decode_frame, encode_host_frame,
@@ -80,6 +80,12 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 ///
 /// [`HOST_SILENCE_SECS`]: wartui_proto::link::HOST_SILENCE_SECS
 const KEEPALIVE: Duration = Duration::from_secs(10);
+
+/// How long a connection's end waits for its port's handles to close.
+///
+/// A healthy port's threads end within one [`READ_TIMEOUT`]. One the kernel holds in `write`
+/// or `close` is left behind after this ([`connect`]).
+const PORT_CLOSE_WITHIN: Duration = Duration::from_secs(2);
 
 /// Slowest retry after a sweep that opened several boards and found no bridge.
 ///
@@ -724,6 +730,108 @@ struct Attempt {
     drains: bool,
 }
 
+/// Every port this process has opened to connect, until each of its handles has closed.
+///
+/// A thread the kernel holds in `write` or `close` keeps its handle past the connection, which
+/// [`connect`] leaves behind rather than join. The port stays held until the cable is replugged,
+/// and [`held_ports`] is how `main` learns which to name.
+static OPEN_PORTS: Mutex<Vec<OpenPort>> = Mutex::new(Vec::new());
+
+/// One port in [`OPEN_PORTS`].
+#[derive(Debug)]
+struct OpenPort {
+    path: String,
+    /// Ends once every [`PortHold`] on the port is dropped.
+    closed: watch::Receiver<()>,
+}
+
+/// Held beside each handle on one port, and dropped only after that handle: the reader's, the
+/// writer's and [`Shutdown`]'s. The port is closed once every clone is gone.
+#[derive(Debug, Clone)]
+struct PortHold {
+    _closes: Arc<watch::Sender<()>>,
+}
+
+/// Enter `path` in `registry`, dropping the entries already closed, and return the hold its
+/// handles share and the signal that ends once they are all closed.
+fn register_in(registry: &Mutex<Vec<OpenPort>>, path: &str) -> (PortHold, watch::Receiver<()>) {
+    let (tx, closed) = watch::channel(());
+    let mut open = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    open.retain(|port| !is_closed(&port.closed));
+    open.push(OpenPort { path: path.to_owned(), closed: closed.clone() });
+    (PortHold { _closes: Arc::new(tx) }, closed)
+}
+
+/// Whether every hold on the port behind `closed` is gone.
+fn is_closed(closed: &watch::Receiver<()>) -> bool {
+    closed.has_changed().is_err()
+}
+
+/// Wait up to `within` for the port behind `closed` to close, and say whether it did.
+async fn port_closed(mut closed: watch::Receiver<()>, within: Duration) -> bool {
+    // Nothing sends, so `changed` ends only when the last hold is dropped.
+    let wait = async { while closed.changed().await.is_ok() {} };
+    tokio::time::timeout(within, wait).await.is_ok()
+}
+
+/// Wait up to `within` for every port this process opened to close, and return the paths of
+/// those still held: a thread on each is in the kernel, and replugging the cable frees it.
+pub async fn held_ports(within: Duration) -> Vec<String> {
+    held_in(&OPEN_PORTS, within).await
+}
+
+/// [`held_ports`], over `registry`.
+async fn held_in(registry: &Mutex<Vec<OpenPort>>, within: Duration) -> Vec<String> {
+    let waits: Vec<_> = registry
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|port| port_closed(port.closed.clone(), within))
+        .collect();
+    futures_util::future::join_all(waits).await;
+    let mut open = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    open.retain(|port| !is_closed(&port.closed));
+    open.iter().map(|port| port.path.clone()).collect()
+}
+
+/// One command for the writer thread.
+#[derive(Debug)]
+struct Outgoing {
+    cmd: HostToBridge,
+    /// It came from the link handle, which is owed a `done` for it. `connect`'s own `Identify`
+    /// and keepalive were never counted.
+    counted: bool,
+}
+
+/// The link handle's commands [`connect`] handed its writer thread, against those the writer has
+/// reported finished with.
+///
+/// Each is counted done exactly once (`crate` docs): on the writer's report, or at the
+/// connection's end for any it abandoned or never reached.
+#[derive(Debug, Default)]
+struct Tally {
+    handed: u64,
+    reported: u64,
+}
+
+impl Tally {
+    /// One more command handed over, or lost with a writer that has stopped.
+    fn hand(&mut self) {
+        self.handed += 1;
+    }
+
+    /// The writer has finished with `n` more.
+    fn report(&mut self, commands: &mut crate::CommandRx, n: u64) {
+        self.reported += n;
+        commands.done(n);
+    }
+
+    /// The connection is over: count done every command handed over and not reported.
+    fn settle(self, commands: &mut crate::CommandRx) {
+        commands.done(self.handed.saturating_sub(self.reported));
+    }
+}
+
 /// One candidate's turn. `Err` carries a reason to show the user.
 ///
 /// `patience` is the whole difference between a probe and settling on a board: the
@@ -765,6 +873,7 @@ async fn connect(
     // A third handle, given to the guard below so that the cleanup it does is
     // owned by a value rather than by a code path.
     let flush = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
+    let (hold, closed) = register_in(&OPEN_PORTS, path);
 
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
     // Unbounded, and deliberately so. The biased select below arbitrates when a
@@ -774,7 +883,11 @@ async fn connect(
     // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
     // Two bounded channels and a condvar in `write_loop` is the fix if that ever
     // changes.
-    let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
+    let (write_tx, write_rx) = std::sync::mpsc::channel::<Outgoing>();
+    // The writer's word that it is done with a handle command, so the handle counts it done
+    // when it is written rather than when it is queued (`crate::pace`).
+    let (report_tx, mut report_rx) = mpsc::unbounded_channel::<()>();
+    let mut tally = Tally::default();
 
     let reader = std::thread::Builder::new()
         .name(format!("wartui-serial-rx {path}"))
@@ -782,8 +895,11 @@ async fn connect(
             let events = plumbing.events.clone();
             let state = Arc::clone(state);
             let memory = memory.clone();
+            let hold = hold.clone();
             move || {
+                // Takes the port, and closes it on return, before the hold goes.
                 let reason = read_loop(port, &events, &state, &memory);
+                drop(hold);
                 let _ = dead_tx.blocking_send(reason);
             }
         })
@@ -792,13 +908,17 @@ async fn connect(
     // Before the second spawn, not after both: a `?` there would otherwise
     // return with the reader thread still running on a port nobody will ever
     // stop, while `supervise` reopens the same path every `reconnect_delay`.
-    let shutdown = Shutdown { state: Arc::clone(state), port: flush };
+    let shutdown = Shutdown { state: Arc::clone(state), handle: Some((flush, hold.clone())) };
 
     let writer_thread = std::thread::Builder::new()
         .name(format!("wartui-serial-tx {path}"))
         .spawn({
             let state = Arc::clone(state);
-            move || write_loop(writer, &write_rx, &state.stop)
+            move || {
+                // As the reader: the port closes on return, before the hold goes.
+                write_loop(writer, &write_rx, &state.stop, &report_tx);
+                drop(hold);
+            }
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
@@ -821,6 +941,11 @@ async fn connect(
     // in the kernel, and because a process cannot exit while one of its threads is in there,
     // `wartui status` pointed at a node hung for half a minute after printing its answer. One
     // frame, the `Identify` behind a lone `0x00` (`encode_for_wire`), never reaches that.
+    //
+    // **A CH343's writes can stop draining too**, mid-image, on a Mac behind a dock's chained
+    // hubs (`docs/p4-host-uart-findings.md`). No ask avoids that, so the end of a connection
+    // never waits on its threads: one the kernel holds in `write` or `close` is left behind
+    // after `PORT_CLOSE_WITHIN`, and the port stays in `OPEN_PORTS` for `main` to name.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
     let mut keepalive =
@@ -874,22 +999,30 @@ async fn connect(
                 // goes as soon as the port is open. See above for which ports are asked
                 // again.
                 if asks_on_tick(waited, state.drains)
-                    && write_tx.send(HostToBridge::Identify).is_err()
+                    && write_tx.send(Outgoing { cmd: HostToBridge::Identify, counted: false })
+                        .is_err()
                 {
                     break Err("writer stopped".to_owned());
                 }
             }
             _ = keepalive.tick(), if state.announced.load(Ordering::Relaxed) => {
-                if write_tx.send(HostToBridge::GetStatus).is_err() {
+                let keep = Outgoing { cmd: HostToBridge::GetStatus, counted: false };
+                if write_tx.send(keep).is_err() {
                     break Err("writer stopped".to_owned());
                 }
             }
+            Some(()) = report_rx.recv() => {
+                let mut n = 1;
+                while report_rx.try_recv().is_ok() {
+                    n += 1;
+                }
+                tally.report(&mut plumbing.commands, n);
+            }
             cmd = plumbing.commands.recv() => match cmd {
                 Some(cmd) => {
-                    let handed = write_tx.send(cmd);
-                    // Handed to the writer thread, or lost with it: done either way.
-                    plumbing.commands.done(1);
-                    if handed.is_err() {
+                    // Counted done on the writer's report, or at the end if it never comes.
+                    tally.hand();
+                    if write_tx.send(Outgoing { cmd, counted: true }).is_err() {
                         break Err("writer stopped".to_owned());
                     }
                     keepalive.reset();
@@ -899,13 +1032,24 @@ async fn connect(
         }
     };
 
-    // Explicitly, because the joins below wait on threads that only stop once
-    // it has run. On the path where this task is dropped instead, the same work
-    // happens without this line being reached at all.
+    // Explicitly, because the wait below is on threads that only stop once it has run. On the
+    // path where this task is dropped instead, the same work happens without this line being
+    // reached at all.
     drop(shutdown);
     drop(write_tx);
-    let _ = reader.join();
-    let _ = writer_thread.join();
+    // Reports after this are not read: what the writer has not reported is counted here.
+    drop(report_rx);
+    tally.settle(&mut plumbing.commands);
+    // Awaited, never joined: a join blocks this runtime worker for as long as the kernel holds
+    // a thread, and the process's exit with it. Dropping the handles detaches the threads.
+    drop((reader, writer_thread));
+    if !port_closed(closed, PORT_CLOSE_WITHIN).await {
+        tracing::warn!(
+            port = %path,
+            within = ?PORT_CLOSE_WITHIN,
+            "the port did not close; its threads are left behind"
+        );
+    }
     outcome
 }
 
@@ -924,16 +1068,30 @@ async fn connect(
 /// It does **not** make that close safe, and cannot: a `tcflush` empties the tty's
 /// own queue, and the packet the USB layer has already accepted is past it. Not
 /// writing a second packet is what keeps the close short, which is why [`connect`]
-/// asks a port that is not a CH343 only once.
+/// asks a port that is not a CH343 only once. A CH343 whose writes stop draining is past
+/// it too (`docs/p4-host-uart-findings.md`).
+///
+/// So its own handle is closed on a short-lived thread of its own, never on the runtime
+/// worker that drops it: the last close of a wedged tty blocks in the kernel, and a worker
+/// held there stalls the runtime and the process's exit. The [`PortHold`] goes with the
+/// handle, so the port counts as closed only once that close returns.
 struct Shutdown {
     state: Arc<Attempt>,
-    port: Box<dyn serialport::SerialPort>,
+    /// Taken by the drop. Always `Some` until then.
+    handle: Option<(Box<dyn serialport::SerialPort>, PortHold)>,
 }
 
 impl Drop for Shutdown {
     fn drop(&mut self) {
         self.state.stop.store(true, Ordering::Relaxed);
-        let _ = self.port.clear(serialport::ClearBuffer::Output);
+        let Some((port, hold)) = self.handle.take() else { return };
+        let _ = port.clear(serialport::ClearBuffer::Output);
+        // A spawn that fails drops the closure here, closing the handle inline.
+        let _ =
+            std::thread::Builder::new().name("wartui-serial-close".to_owned()).spawn(move || {
+                drop(port);
+                drop(hold);
+            });
     }
 }
 
@@ -1083,22 +1241,33 @@ fn read_frames<R: Read>(
     }
 }
 
-/// Blocking write loop.
-fn write_loop(
-    mut port: Box<dyn serialport::SerialPort>,
-    commands: &std::sync::mpsc::Receiver<HostToBridge>,
+/// Blocking write loop. Each handle command it finishes with, written whole or dropped
+/// unencoded, is reported on `finished`; one abandoned mid-write is left to [`Tally::settle`].
+///
+/// Generic over the port only so a test can stand in for one.
+fn write_loop<W: Write>(
+    mut port: W,
+    commands: &std::sync::mpsc::Receiver<Outgoing>,
     stop: &AtomicBool,
+    finished: &mpsc::UnboundedSender<()>,
 ) {
     let mut buf = [0u8; MAX_HOST_FRAME + 1];
     let mut first = true;
-    while let Ok(cmd) = commands.recv() {
+    while let Ok(Outgoing { cmd, counted }) = commands.recv() {
         if stop.load(Ordering::Relaxed) {
             return;
         }
+        // Nobody reads a report once the connection has ended, which `connect` settles.
+        let report = || {
+            if counted {
+                let _ = finished.send(());
+            }
+        };
         let Ok(n) = encode_for_wire(&cmd, first, &mut buf) else {
             // Only reachable if a command outgrew MAX_HOST_FRAME, which the
             // const assertion in wartui-proto is there to prevent.
             tracing::error!("command did not fit in a frame; dropping it");
+            report();
             continue;
         };
         first = false;
@@ -1125,6 +1294,7 @@ fn write_loop(
                 }
             }
         }
+        report();
     }
 }
 
@@ -1203,7 +1373,7 @@ fn patience(alone: bool) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
@@ -1215,8 +1385,9 @@ mod tests {
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        Attempt, PROBE_TICKS, SETTLE_TICKS, asks_on_tick, describe_garbled, encode_for_wire,
-        identify, is_a_new_life, is_remembered_port, patience, read_loop, silence_disowns_it,
+        Attempt, Outgoing, PORT_CLOSE_WITHIN, PROBE_TICKS, SETTLE_TICKS, Tally, asks_on_tick,
+        describe_garbled, encode_for_wire, held_in, identify, is_a_new_life, is_remembered_port,
+        patience, port_closed, read_loop, register_in, silence_disowns_it, write_loop,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
@@ -1673,5 +1844,138 @@ mod tests {
     fn serial_probe_returns_none_when_nothing_answers() {
         let mut port = FakePort::answering(frame(&rx(40)));
         assert_eq!(identify(&mut port, WAIT, WAIT), None);
+    }
+
+    /// What the writer saw, in order: bytes it took, and reports `write_loop` had sent by then.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Seen {
+        Wrote(usize),
+        Reported,
+    }
+
+    /// Takes at most four bytes a call, and notes before each the reports sent so far.
+    struct Watching {
+        reports: tokio::sync::mpsc::UnboundedReceiver<()>,
+        seen: Vec<Seen>,
+    }
+
+    impl Watching {
+        fn note_reports(&mut self) {
+            while self.reports.try_recv().is_ok() {
+                self.seen.push(Seen::Reported);
+            }
+        }
+    }
+
+    impl std::io::Write for Watching {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.note_reports();
+            let n = buf.len().min(4);
+            self.seen.push(Seen::Wrote(n));
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// How many bytes the writer had taken at each report.
+    fn written_at_reports(seen: &[Seen]) -> Vec<usize> {
+        let mut total = 0;
+        let mut at = Vec::new();
+        for entry in seen {
+            match entry {
+                Seen::Wrote(n) => total += n,
+                Seen::Reported => at.push(total),
+            }
+        }
+        at
+    }
+
+    #[test]
+    fn serial_link_counts_command_done_when_writer_has_written_it() {
+        // `PacedSender` waits on the done count to know a USB write went out. Counted on the
+        // hand-over, a write the port never drains reads as written, and its stall path never
+        // runs. `Identify` is `connect`'s own, and the handle never counted it.
+        let (report_tx, report_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (queue, commands) = std::sync::mpsc::channel();
+        queue.send(Outgoing { cmd: HostToBridge::Identify, counted: false }).unwrap();
+        queue.send(Outgoing { cmd: HostToBridge::GetStatus, counted: true }).unwrap();
+        drop(queue);
+        let mut port = Watching { reports: report_rx, seen: Vec::new() };
+        write_loop(&mut port, &commands, &AtomicBool::new(false), &report_tx);
+        port.note_reports();
+
+        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let identify = encode_for_wire(&HostToBridge::Identify, true, &mut buf).unwrap();
+        let status = encode_for_wire(&HostToBridge::GetStatus, false, &mut buf).unwrap();
+        assert_eq!(written_at_reports(&port.seen), [identify + status], "{:?}", port.seen);
+    }
+
+    #[test]
+    fn serial_link_counts_queued_commands_done_when_connection_ends() {
+        // A writer that stops, or never reaches its queue, leaves commands unreported. A sender
+        // waiting on the count would wait on them forever, so the end counts them, and only
+        // them: one the writer reported is not counted again.
+        let (handle, mut plumbing) = crate::link_pair();
+        for _ in 0..3 {
+            handle.send_bulk(HostToBridge::GetStatus).unwrap();
+        }
+        let mut tally = Tally::default();
+        for _ in 0..3 {
+            assert!(plumbing.commands.try_recv().is_some());
+            tally.hand();
+        }
+        tally.report(&mut plumbing.commands, 1);
+        assert_eq!((handle.written_count(), handle.backlog()), (1, 2));
+
+        tally.settle(&mut plumbing.commands);
+        assert_eq!((handle.written_count(), handle.backlog()), (3, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn serial_link_ends_connection_when_writer_never_returns() {
+        // A thread the kernel holds in `write` or `close` never ends, and joining it blocks a
+        // runtime worker for good. A thread parked on a channel stands in for it.
+        let registry = std::sync::Mutex::new(Vec::new());
+        let (held, closed) = register_in(&registry, "/dev/ttyACM0");
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let wedged = std::thread::spawn(move || {
+            let _ = parked.recv();
+            drop(held);
+        });
+
+        let started = tokio::time::Instant::now();
+        assert!(!port_closed(closed.clone(), PORT_CLOSE_WITHIN).await);
+        assert_eq!(started.elapsed(), PORT_CLOSE_WITHIN);
+
+        release.send(()).unwrap();
+        wedged.join().unwrap();
+        assert!(port_closed(closed, PORT_CLOSE_WITHIN).await, "closes once the thread lets go");
+    }
+
+    #[tokio::test]
+    async fn serial_link_lists_port_as_held_when_a_handle_stays_open() {
+        // `main` names the port so the operator knows to replug it.
+        let registry = std::sync::Mutex::new(Vec::new());
+        let (held, _) = register_in(&registry, "/dev/ttyACM0");
+        let (other, _) = register_in(&registry, "/dev/ttyACM1");
+        drop(other);
+        assert_eq!(held_in(&registry, Duration::from_millis(20)).await, ["/dev/ttyACM0"]);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn serial_link_lists_no_port_as_held_when_every_handle_closes() {
+        let registry = std::sync::Mutex::new(Vec::new());
+        let (held, _) = register_in(&registry, "/dev/ttyACM0");
+        let closing = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drop(held);
+        });
+        assert!(held_in(&registry, Duration::from_secs(2)).await.is_empty());
+        assert!(registry.lock().unwrap().is_empty(), "a closed port's entry goes");
+        closing.await.unwrap();
     }
 }

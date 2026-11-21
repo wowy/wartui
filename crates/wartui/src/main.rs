@@ -15,6 +15,13 @@
 //! view reads it as a key. Watching installs tokio's handler for the rest of the process, and
 //! `flash-bridge`'s download or build blocks its task, so it watches only once the link is open;
 //! until then a ctrl-c ends the process at once.
+//!
+//! **A command's error is printed the moment it returns, and nothing at exit waits unbounded.**
+//! A serial port thread the kernel holds in `write` or `close` never ends (`serial` § `connect`),
+//! and a runtime dropped at the end of a `#[tokio::main]` waits for every worker before std prints
+//! the error. So `main` builds its runtime by hand, prints the error itself, names each port still
+//! held after 2 s (`serial::held_ports`) so the operator knows to replug it, and shuts the
+//! runtime down without waiting on it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -114,12 +121,41 @@ enum Command {
     Bench(bench::Args),
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("starting the async runtime")
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let code = runtime.block_on(command(cli));
+    // Not waited on: the command has returned and its links are closed, so what is left is a
+    // blocking call nobody awaits, such as the read of an answer a ctrl-c interrupted.
+    runtime.shutdown_background();
+    code
+}
+
+/// The longest `main` waits for a serial port's handles to close before naming it held.
+const PORTS_CLOSE_WITHIN: Duration = Duration::from_secs(2);
+
+/// Run the command, report how it ended, and let its links go.
+async fn command(cli: Cli) -> std::process::ExitCode {
     // Held for the whole process: dropping the guard stops the writer thread,
     // and the last thing logged before an exit is usually the interesting one.
-    let log = logging(cli.log_file.as_deref())?;
+    let log = match logging(cli.log_file.as_deref()) {
+        Ok(log) => log,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let outcome = match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`,
         // `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read a broken one as no
@@ -144,17 +180,32 @@ async fn main() -> Result<()> {
         Some(Command::Bluetooth(args)) => interruptible(bluetooth::run(args)).await,
         Some(Command::Bench(args)) => bench::run(args).await,
     };
+    // Printed now, in the form std prints for a `main` returning `anyhow::Result`: what follows
+    // can wait on a port the kernel holds, and the reason must not wait with it.
+    let code = match &outcome {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        // A ctrl-c says nothing, as a shell's own interrupt does.
+        Err(error) if error.is::<Interrupted>() => std::process::ExitCode::from(INTERRUPTED_EXIT),
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    };
     // The command's links went with it; a Bluetooth one is let go of here.
     wartui_bridge::close_all(wartui_bridge::CLOSE_WITHIN).await;
-    if outcome.as_ref().is_err_and(|error| error.is::<Interrupted>()) {
-        drop(log);
-        std::process::exit(INTERRUPTED_EXIT);
+    for path in serial::held_ports(PORTS_CLOSE_WITHIN).await {
+        // The exit that follows can still free it: the kernel lets some held ports go there.
+        eprintln!(
+            "{path} has not closed. If this command does not return, unplug and replug the \
+             bridge's USB data cable"
+        );
     }
-    outcome
+    drop(log);
+    code
 }
 
 /// The exit status after a ctrl-c: 128 plus `SIGINT`, as a shell reports one.
-const INTERRUPTED_EXIT: i32 = 130;
+const INTERRUPTED_EXIT: u8 = 130;
 
 /// A command stopped by ctrl-c.
 #[derive(Debug)]

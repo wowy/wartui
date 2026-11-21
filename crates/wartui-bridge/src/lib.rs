@@ -29,8 +29,9 @@
 //! ([`CommandRx::done`], [`CommandRx::discard`]). [`LinkHandle::written_count`] is that count and
 //! [`LinkHandle::backlog`] what is queued past it, so a sender that waits on it ([`pace`]) waits
 //! for the link rather than a timer, and never hangs on a command the transport let go. Serial
-//! is done with a command once its writer thread has it, the simulator once it has handled one,
-//! and Bluetooth once the write group carrying it is answered or has failed. Bluetooth also drops
+//! is done with a command once its writer thread has written it, or at the connection's end for
+//! one it never wrote, the simulator once it has handled one, and Bluetooth once the write group
+//! carrying it is answered or has failed. Bluetooth also drops
 //! what was queued before a connection's `Ready`, as the gate drops what decodes before it: a
 //! command queued during a gap would reach the next connection stale. USB keeps it, since
 //! `wartui reset` writes before any `Ready`.
