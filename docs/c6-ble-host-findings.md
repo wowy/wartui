@@ -434,14 +434,22 @@ works with the held versions.
   chained ACL packet, which stops TrouBLE's host. The workaround is an ATT MTU of 182, so no
   write carries more than 179 value bytes
   ([`ble-host-link-findings.md`](ble-host-link-findings.md#the-c6-serves-an-att-mtu-of-182)).
-- **The C6 moved to bt-hci 0.11 on 2026-11-21, built and not yet benched.** trouble-host 0.8.0
+- **The C6 moved to bt-hci 0.11 on 2026-11-21, with a first run on D0:1C.** trouble-host 0.8.0
   was still the newest release, and trouble's `main` reaches bt-hci 0.11 only after its move to
   `embassy-crypto`, which is unpublished and changes the pairing crypto. So the C6 builds the
   published 0.8.0 with the one upstream commit that moves it to bt-hci 0.11, vendored in
   `firmware/p4-radio/vendor/trouble-host`. It built against the held esp-radio as inferred
   above. Commands take bt-hci's async encoder again, with no sync encoder in the path
-  ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)). No board has run it: the extended
-  advertising data commands are the check that matters.
+  ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)).
+
+  D0:1C took the image by `flash-bridge` over USB. The C6 restarted on it, logged no error and
+  ran 4 min 41 s without a restart, to the last reading. A central connected within seconds, on
+  the 2M PHY, and a Mac's scan matched the bridge by the id in its advertising data, which the
+  controller takes only through the extended advertising data commands. No host stream ran over
+  Bluetooth and no phone session: another central held the one connection throughout. It
+  connected under a new address about every 10 s and was disconnected each time as neither
+  bonded nor encrypted, 18 times in those minutes, as it had on the image before, 318 times in
+  56 min. The Mac's three connects found the bridge taken or not advertising.
 - **`connection-params-update` stays off, now by choice.** The panic is fixed, so nothing forces
   it. On, the controller waits for the host's answer to each central's request, and the host can
   miss one three ways: TrouBLE drops a request for a connection it has yet to accept, it drops
