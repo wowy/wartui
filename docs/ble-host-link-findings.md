@@ -582,7 +582,7 @@ advertised. One run stayed so for 5.5 min, to its end. Linux reconnects in 2.1 s
   [The pairing dialog inside one command](#the-pairing-dialog-inside-one-command).
 - **A Mac holding a bond the bridge dropped cannot connect,** and reads `could not connect to
   D0:1C in 10s; check the bridge is powered and in range`. On Linux `pair` reads BlueZ and names
-  that case; on macOS nothing does.
+  that case; on macOS nothing does: see [A bond only the Mac holds](#a-bond-only-the-mac-holds).
 - **A command exits at once.** No 2 s disconnect at exit, as BlueZ has.
 - **Sending toward the bridge is about 20% slower:** 12.5 to 12.6 KB/s for both updates and the
   cache, against 15.3 to 17.1 KB/s from the bench PC on the same MTU, PHY and interval. Where
@@ -620,6 +620,37 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
   connecting. `# waiting for D0:1C to answer` came at the click 3.5 s later, and `# bridge …`
   1 ms after it.
 
+### A bond only the Mac holds
+
+Measured later still on 2026-11-20, on the same Mac and bridge, with the host at `4573543`, which
+words a connect that timed out against a bridge it heard advertising. `wardrive esp` was on. The
+Mac held the bridge's one bond, so the `forget` stranded no other host.
+
+| Check | Result |
+| --- | --- |
+| `status --link bluetooth` on the bond | Served, `encrypted and bonded`, `1 bond stored` |
+| `bluetooth forget --link usb` | `open until a host pairs, no bond stored` |
+| `status --link bluetooth`, the Mac still bonded, four runs | Each ended 20.0 s in: `could not connect to D0:1C in 10s, though it was heard advertising. This Mac may hold a bond the bridge no longer has, …`. The first connect of each timed out at 10.0 s |
+| The C6's log during one of them (`sniff --verbose --link usb`) | Four links, each `connected, not bonded, pairing window open`, then `disconnected: reason 0x16` 0.46 to 0.53 s later. Three came 5.2, 5.8 and 8.7 s into the first connect, and one in the second |
+| The C6's counters across the four runs | `pairings 3`, `failed_pairings 0` and `unbonded_kicks 1`, all unchanged. `last_disconnect 0x16` |
+| The bridge forgotten in System Settings → Bluetooth | It reappeared at once after the first forget, and a second removed it |
+| `status --link bluetooth`, the dialog left unclicked | The connect completed. The notice came 4.5 s after connecting, then the refusal 30.1 s after connecting, 32.2 s in all. `unbonded_kicks 2`, no bond |
+| `status --link bluetooth` again, Connect clicked | Subscribed 3.0 s after connecting, with no notice. Served `encrypted and bonded`, 5.2 s in all, `pairings 4`, `1 bond stored` |
+
+- **The C6 sees a link on every try, and CoreBluetooth reports none.** Each lasts about half a
+  second, and the Mac makes several inside one connect. The transport's connect stays pending
+  through all of them, to its 10 s.
+- **What ends each link was not traced.** The C6 logged none of its own disconnects, no lost bond
+  and no failed pairing, and counted no kick. The reason it logged, `0x16`, is HCI's for a
+  connection the local host ended.
+- **No link came after the command ended,** in the 13 s the C6's log was watched.
+- **The transport began connecting 2.0 s into three of the four runs.** It took 4.3 s in the one
+  that started as the USB `sniff` attached and the C6 restarted its advertising for wartui alone.
+- **Forgetting the bridge is the fix.** The next connect completed, its notice came 4.5 s after
+  connecting, as on a first pairing, and the click paired the Mac.
+- **Not run:** a Mac connecting to a bridge a phone holds. The C6 was read, and with `wardrive
+  esp` on it advertises its status beacon through a connection, with the bridge's id.
+
 ## What this settles
 
 - The production link passes every check the PC can run, on D0:1C with its ten nodes.
@@ -645,6 +676,8 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
 - A Mac pairs from its own dialog, scans ten nodes for 10 minutes with nothing lost, recovers
   from a takeover, a reset and its own Bluetooth going off, and runs both updates, with the
   reconnect fix.
+- A Mac holding a bond the bridge dropped is told so, and pairs again once it forgets the bridge.
+  The C6 sees each of its links, for about half a second.
 
 ## What this does not settle
 
@@ -668,3 +701,6 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
 - **Why a first connection sometimes times out.**
 - **macOS's saturated rate,** and a phone or a second LE device beside the Mac.
 - **Why sending from a Mac is about 20% slower** than from the bench PC.
+- **What ends each link from a Mac holding a bond the bridge dropped,** at the C6 with reason
+  `0x16`.
+- **A Mac connecting to a bridge a phone holds,** with `wardrive esp` on.

@@ -117,15 +117,16 @@
 //!
 //! **A bond only this host holds is a timeout on macOS.** CoreBluetooth's connect never
 //! completes and reports no failure, so the transport's timeout at [`CONNECT_WITHIN`] is the only
-//! sign (D0:1C, 2026-11-20). A try whose scan heard the bridge advertising has shown it powered and
-//! in range, so on macOS that timeout names the stale bond and its fix ([`connect_timeout_text`]).
-//! It says "may": with `wardrive esp` on, a bridge another central holds still advertises its
-//! status beacon, which carries the id and is not connectable, so it is heard too. That is read
-//! from the C6 (`firmware/p4-radio/src/ble.rs`, `linked`), not benched. The cause stays
-//! [`DisconnectCause::Other`], so a caller keeps retrying. A try that makes no scan, a settled one
-//! or one straight to the remembered address, keeps the power-and-range wording. On Linux BlueZ
-//! connects in this state and the bridge drops it, which `wartui`'s silence notice names, so Linux
-//! keeps the power-and-range wording too.
+//! sign, though the C6 sees links of about half a second meanwhile (D0:1C, 2026-11-20,
+//! `docs/ble-host-link-findings.md` § "A bond only the Mac holds"). A try whose scan heard the
+//! bridge advertising has shown it powered and in range, so on macOS that timeout names the stale
+//! bond and its fix ([`connect_timeout_text`]). It says "may": with `wardrive esp` on, a bridge
+//! another central holds still advertises its status beacon, which carries the id and is not
+//! connectable, so it is heard too. That is read from the C6 (`firmware/p4-radio/src/ble.rs`,
+//! `linked`), not benched. The cause stays [`DisconnectCause::Other`], so a caller keeps retrying.
+//! A try that makes no scan, a settled one or one straight to the remembered address, keeps the
+//! power-and-range wording. On Linux BlueZ connects in this state and the bridge drops it, which
+//! `wartui`'s silence notice names, so Linux keeps the power-and-range wording too.
 //!
 //! **Waiting on the OS's pairing.** Off Linux the OS pairs on the first connection inside the
 //! bridge's pairing window, behind a dialog of its own (Connect, on macOS), and the subscription
