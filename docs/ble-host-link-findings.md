@@ -618,8 +618,7 @@ Measured later on 2026-11-20, on the same Mac and bridge, with the host giving t
   waited on the pairing once it is through (`DisconnectCause::AwaitingReady`), a first pairing
   under `sniff --link bluetooth` printed `# pairing: click Connect …` 6.5 s in, 4.4 s after
   connecting. `# waiting for D0:1C to answer` came at the click 3.5 s later, and `# bridge …`
-  1 ms after it. USB had been quiet over a minute, so the wait behind a USB host was not
-  measured.
+  1 ms after it.
 
 ## What this settles
 
