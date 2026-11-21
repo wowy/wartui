@@ -125,7 +125,8 @@ pub struct BridgeInfo {
 pub enum LinkEvent {
     /// A bridge came up and its protocol version was accepted.
     Connected(BridgeInfo),
-    /// The link went away. The transport keeps trying to reconnect.
+    /// The link went away, or is up and not serving this host ([`DisconnectCause`] says which).
+    /// The transport keeps trying to reconnect.
     Disconnected {
         /// Why, in terms fit to show a user.
         reason: String,
@@ -140,7 +141,7 @@ pub enum LinkEvent {
     Garbled(LinkError),
 }
 
-/// Why a link went down, as far as the transport can tell. Only the Bluetooth transport names a
+/// Why a link is down, as far as the transport can tell. Only the Bluetooth transport names a
 /// cause other than [`DisconnectCause::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectCause {
@@ -149,6 +150,9 @@ pub enum DisconnectCause {
     /// A USB host took the bridge from this Bluetooth central, which stays subscribed for the
     /// handback.
     UsbTookBridge,
+    /// The subscription waits on the OS, which can show a pairing dialog. The transport is
+    /// still connected and waiting, and a `Connected` or another `Disconnected` follows.
+    AwaitingPairing,
     /// The bridge refused this host's subscription or write request with an ATT authentication or
     /// encryption error: it holds no bond for this host. [`TransportError::NotBonded`] words it.
     NotBonded,

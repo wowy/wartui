@@ -402,6 +402,8 @@ fn served_by(event: &LinkEvent) -> Served<'_> {
         LinkEvent::Connected(_) => Served::Yes,
         LinkEvent::Disconnected { cause: DisconnectCause::NotBonded, .. } => Served::Refused,
         LinkEvent::Disconnected { cause: DisconnectCause::MaybeNotBonded, .. } => Served::Dropped,
+        // Still connected, and waiting on the OS.
+        LinkEvent::Disconnected { cause: DisconnectCause::AwaitingPairing, .. } => Served::Waiting,
         LinkEvent::Disconnected { reason, .. } => Served::Failed(reason),
         LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
     }
@@ -656,8 +658,8 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 const OS_PAIRS: &str = "On this OS, wartui does not pair itself: the OS pairs on the first \
      `--link bluetooth` connection made inside the bridge's pairing window, such as \
-     `wartui status --link bluetooth`. On macOS, click Connect in the dialog it raises; that \
-     command may give up before the click, and the next one is served.";
+     `wartui status --link bluetooth`. On macOS, click Connect in the dialog it raises. The \
+     command says when the dialog may be up, and waits up to 30 s for the click.";
 
 #[cfg(not(target_os = "linux"))]
 async fn pair_with(
@@ -897,6 +899,7 @@ mod tests {
         assert_eq!(served_by(&down(DisconnectCause::MaybeNotBonded)), Served::Dropped);
         assert_eq!(served_by(&down(DisconnectCause::Other)), Served::Failed("gone"));
         assert_eq!(served_by(&down(DisconnectCause::UsbTookBridge)), Served::Failed("gone"));
+        assert_eq!(served_by(&down(DisconnectCause::AwaitingPairing)), Served::Waiting);
     }
 
     #[test]
