@@ -1878,8 +1878,8 @@ mod tests {
 
     #[test]
     fn ble_connect_timeout_fits_fault_box_when_terminal_is_80_columns() {
-        // The view's fault box draws 3 lines of the width less 2 (`footer::fault_lines` in
-        // `wartui`).
+        // At 80 columns the view's fault box takes 3 lines of the width less 2, wrapped on words
+        // (`footer::fault_lines` in `wartui`).
         for label in ["44:C0", "02:00:5E:10:44:C0"] {
             let line = format!("link down: {}", connect_timeout_text(label, true, true));
             assert!(line.chars().count() <= 3 * 78, "{line}");

@@ -1450,7 +1450,7 @@ over in a sweep is kept; being slower than its neighbor proves nothing. With `re
 (settings, or `[bridge] remember = false`), `run` drops both, saves no bridge, and sweeps on every
 start.
 
-The header's `waiting for bridge` has three causes; the fault box names it:
+The header's `waiting for bridge` has four causes; the fault box names it:
 
 - **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
@@ -1459,6 +1459,8 @@ The header's `waiting for bridge` has three causes; the fault box names it:
   the port, such as `cat`, is reading its answers. A P4 that is still booting misses the one
   question; the next attempt asks again.
 - **`swept N boards and none answered`**: no attached CH343 answered.
+- **`no bridge found, as no CH343 is attached`**: attach the bridge, or name a bridge on another
+  port with `--bridge PATH`.
 
 With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A power cycle is
 the fallback for a bridge that answers nothing.

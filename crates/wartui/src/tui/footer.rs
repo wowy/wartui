@@ -258,24 +258,33 @@ fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
     reason.map(str::to_owned)
 }
 
-/// The most lines the fault box takes before it summarizes, so the node blocks keep
-/// their room.
-const MAX_FAULT_LINES: usize = 3;
+/// The width under which the fault box takes a line more.
+const NARROW_COLUMNS: usize = 60;
 
-/// Wrap faults to the terminal width rather than let it clip them.
+/// The most lines the fault box takes at `width` before it summarizes, so the node blocks keep
+/// their room.
+///
+/// Under [`NARROW_COLUMNS`] it takes 4 rather than 3: a small screen's lines hold less, and the
+/// reason that names a fix is the longest.
+fn max_fault_lines(width: usize) -> usize {
+    if width < NARROW_COLUMNS { 4 } else { 3 }
+}
+
+/// Wrap faults on words to the terminal width rather than let it clip them.
 ///
 /// The most important fault is usually the longest, because it carries an OS error.
 /// Clipped, it would be the one that disappears.
 pub(super) fn fault_lines(faults: &[String], width: u16) -> Vec<String> {
     // Nobody reads a terminal this narrow, but the arithmetic must still terminate.
     let width = usize::from(width).max(8);
+    let max = max_fault_lines(width);
     let (mut lines, ends) = pack(faults, width);
-    if lines.len() <= MAX_FAULT_LINES {
+    if lines.len() <= max {
         return lines;
     }
     // Drop whole lines, never part of one. "+2 more" glued onto half of "Permission
     // denied (os error 13)" looks complete and says something else.
-    let kept = MAX_FAULT_LINES - 1;
+    let kept = max - 1;
     // A fault the cut splits counts as hidden.
     let hidden = ends.iter().filter(|end| **end >= kept).count();
     lines.truncate(kept);
@@ -318,15 +327,36 @@ fn marker(hidden: usize, width: usize) -> String {
     count.chars().take(width).collect()
 }
 
-/// One fault, split across as many lines as its length needs.
+/// One fault, wrapped on words across as many lines as it needs.
+///
+/// A word joins the line while it fits, and the space at a break is dropped. A word wider than
+/// the line is split at the line's end, so nothing is wider than the frame.
 fn chunks(fault: &str, width: usize) -> Vec<String> {
     let room = width.saturating_sub(2).max(1);
+    let indent = |line: &[char]| format!("  {}", line.iter().collect::<String>());
     let mut out = Vec::new();
-    let mut rest: Vec<char> = fault.chars().collect();
-    while !rest.is_empty() {
-        let take = rest.len().min(room);
-        let line: String = rest.drain(..take).collect();
-        out.push(format!("  {line}"));
+    let mut line: Vec<char> = Vec::new();
+    for word in fault.split_whitespace() {
+        let word: Vec<char> = word.chars().collect();
+        if !line.is_empty() && line.len() + 1 + word.len() <= room {
+            line.push(' ');
+            line.extend(word);
+            continue;
+        }
+        if !line.is_empty() {
+            out.push(indent(&line));
+            line.clear();
+        }
+        let mut rest = word.as_slice();
+        while rest.len() > room {
+            let (head, tail) = rest.split_at(room);
+            out.push(indent(head));
+            rest = tail;
+        }
+        line.extend_from_slice(rest);
+    }
+    if !line.is_empty() {
+        out.push(indent(&line));
     }
     out
 }
@@ -335,6 +365,7 @@ fn chunks(fault: &str, width: usize) -> Vec<String> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use wartui_bridge::TransportError;
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
     use wartui_proto::fan::{FanDuty, FanStats};
@@ -359,6 +390,11 @@ mod tests {
 
     const BUSY: &str = "could not open /dev/cu.usbmodem101: Device or resource busy";
 
+    /// The lines' text without their indent, joined as the words of one sentence.
+    fn rejoined(lines: &[String]) -> String {
+        lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")
+    }
+
     #[test]
     fn fault_lines_wraps_long_message_when_fault_exceeds_terminal_width() {
         // Unwrapped, a narrow terminal would show only the first clause.
@@ -366,8 +402,87 @@ mod tests {
         let lines = fault_lines(std::slice::from_ref(&fault), 40);
         assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
         assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:?}");
-        let rejoined: String = lines.iter().map(|l| l.trim_start()).collect();
-        assert_eq!(rejoined, fault, "every character of it is on screen somewhere");
+        assert_eq!(rejoined(&lines), fault, "every word of it is on screen somewhere");
+    }
+
+    #[test]
+    fn fault_lines_shows_whole_link_down_reason_when_terminal_is_58_columns() {
+        // The HackberryPi's width. `Forbidden` and the listing reasons grow with their paths and
+        // labels, so this pins the usual ones.
+        let reasons = [
+            TransportError::NoBridgeFound,
+            TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() },
+            TransportError::NotBonded { bridge: "44:C0".to_owned() },
+            TransportError::Forbidden { port: "/dev/ttyACM0".to_owned() },
+            TransportError::NoAdapter,
+            TransportError::NotFound { bridge: Some("44:C0".to_owned()), secs: 12 },
+            TransportError::NotFound { bridge: None, secs: 12 },
+            TransportError::SeveralAdvertising { bridges: "44:C0, A1:B0".to_owned() },
+            TransportError::AmbiguousBridge { boards: "/dev/ttyACM0, /dev/ttyACM1".to_owned() },
+            TransportError::NoSuchBridge { spec: "44:C0".to_owned() },
+            TransportError::AmbiguousName {
+                spec: "44:C0".to_owned(),
+                boards: "02:00:5E:10:44:C0, 02:00:5E:11:44:C0".to_owned(),
+            },
+        ];
+        for reason in reasons {
+            let fault = format!("link down: {reason}");
+            let lines = fault_lines(std::slice::from_ref(&fault), 58);
+            assert!(lines.iter().all(|l| l.chars().count() <= 58), "{lines:?}");
+            assert!(!lines.iter().any(|l| l.trim().starts_with('+')), "cut: {lines:?}");
+            assert_eq!(rejoined(&lines), fault, "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn fault_lines_keeps_link_down_fix_when_second_fault_cuts_reason() {
+        // Each reason leads with its fix, so the cut costs the explanation. The second fault is
+        // too long to share the reason's last line, so it always overflows the box.
+        let second = "gps: 300 unreadable lines and no fix from the bridge's receiver".to_owned();
+        let cases = [
+            (
+                TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() },
+                "`wartui bluetooth pair --bridge 44:C0`",
+            ),
+            (TransportError::NoBridgeFound, "--bridge PATH"),
+        ];
+        for (reason, fix) in cases {
+            let faults = [format!("link down: {reason}"), second.clone()];
+            for width in [58_u16, 80] {
+                let lines = fault_lines(&faults, width);
+                let (last, shown) = lines.split_last().expect("a line");
+                assert_eq!(last, "  +2 more", "at {width}: {lines:?}");
+                assert!(rejoined(shown).contains(fix), "at {width}: {lines:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fault_lines_takes_four_lines_when_terminal_is_under_60_columns() {
+        let fault =
+            format!("link down: {}", TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() });
+        let narrow = fault_lines(std::slice::from_ref(&fault), 59);
+        assert_eq!(narrow.len(), 4, "{narrow:?}");
+        assert_eq!(rejoined(&narrow), fault, "whole: {narrow:?}");
+
+        let wide = fault_lines(std::slice::from_ref(&fault), 60);
+        assert_eq!(wide.len(), 3, "{wide:?}");
+        assert_eq!(wide.last().map(String::as_str), Some("  +1 more"), "{wide:?}");
+    }
+
+    #[test]
+    fn fault_lines_breaks_at_spaces_when_fault_wraps() {
+        let fault = "the bridge answered nothing within the window, so the port was closed";
+        let lines = fault_lines(&[fault.to_owned()], 40);
+        assert!(lines.len() > 1, "{lines:?}");
+        let words: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(words, fault.split(' ').collect::<Vec<_>>(), "no word is split: {lines:?}");
+
+        // A word wider than the line is split at the line's end, every character kept.
+        let path = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7B-if00";
+        let lines = fault_lines(&[path.to_owned()], 20);
+        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
+        assert_eq!(lines.iter().map(|l| l.trim()).collect::<String>(), path, "{lines:?}");
     }
 
     #[test]
@@ -380,7 +495,11 @@ mod tests {
     fn fault_lines_appends_overflow_count_when_faults_exceed_footer_capacity() {
         let faults: Vec<String> = (0..12).map(|n| format!("fault number {n} of twelve")).collect();
         let lines = fault_lines(&faults, 40);
-        assert_eq!(lines.len(), MAX_FAULT_LINES, "the fleet table keeps the rest of the screen");
+        assert_eq!(
+            lines.len(),
+            max_fault_lines(40),
+            "the fleet table keeps the rest of the screen"
+        );
         assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:?}");
         let last = lines.last().expect("a line");
         assert!(last.contains("more"), "how many are not shown: {last}");
@@ -388,14 +507,14 @@ mod tests {
 
     #[test]
     fn fault_lines_appends_truncated_indicator_when_single_fault_exceeds_box_capacity() {
-        // Three lines of twenty columns cannot hold this, and the half that names
+        // Four lines of twenty columns cannot hold this, and the half that names
         // the fix is the half that goes.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 20);
-        assert_eq!(lines.len(), MAX_FAULT_LINES, "{lines:?}");
-        let last = lines.last().expect("a line");
+        assert_eq!(lines.len(), max_fault_lines(20), "{lines:?}");
+        let (last, shown) = lines.split_last().expect("a line");
         assert_eq!(last, "  +1 more", "the operator is told the reason is cut short");
-        let shown: String = lines[..MAX_FAULT_LINES - 1].iter().map(|l| l.trim_start()).collect();
+        let shown = rejoined(shown);
         assert!(fault.starts_with(&shown), "what is shown is really the start of it: {shown}");
     }
 
@@ -403,15 +522,16 @@ mod tests {
     fn fault_lines_preserves_preceding_messages_when_overflow_notice_is_added() {
         // The marker takes its own line. Taking its room from the last fault would
         // leave a sentence that looks complete and says something the OS never said.
+        // At 25 columns the first fault alone fills the box, and the second overflows it.
         let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
-        let lines = fault_lines(&faults, 30);
-        let last = lines.last().expect("a line");
+        let lines = fault_lines(&faults, 25);
+        let (last, shown) = lines.split_last().expect("a line");
         assert_eq!(last, "  +2 more", "both faults are cut, and it says so: {lines:?}");
         assert!(
-            lines[..MAX_FAULT_LINES - 1].iter().all(|l| !l.contains('+')),
+            shown.iter().all(|l| !l.contains('+')),
             "no fault shares a line with the notice: {lines:?}"
         );
-        let shown: String = lines[..MAX_FAULT_LINES - 1].iter().map(|l| l.trim_start()).collect();
+        let shown = rejoined(shown);
         assert!(faults[0].starts_with(&shown), "{shown}");
     }
 
@@ -438,6 +558,17 @@ mod tests {
         assert!(screen.contains("link down"), "{screen}");
         // The tail of the reason names the fix.
         assert!(screen.contains("busy"), "{screen}");
+    }
+
+    #[test]
+    fn view_displays_first_flash_pointer_when_no_bridge_is_found_at_58_columns() {
+        // The HackberryPi's screen. The pointer is the reason's last sentence.
+        let mut snapshot = empty();
+        snapshot.link_error = Some(TransportError::NoBridgeFound.to_string());
+        let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("First flash"), "{screen}");
     }
 
     #[test]
@@ -570,7 +701,7 @@ mod tests {
     /// A capture whose only fault is the bridge dropping frames.
     ///
     /// The other counters are cleared. The bridge's fault is pushed last, and the footer
-    /// summarizes past `MAX_FAULT_LINES`, so `busy()`'s other seven faults would test
+    /// summarizes past [`max_fault_lines`], so `busy()`'s other seven faults would test
     /// the packing rather than this branch.
     fn with_bridge_drops(dropped_since_attach: u32) -> Snapshot {
         let mut snapshot = busy();
