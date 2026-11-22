@@ -38,10 +38,10 @@ pub struct Selection {
     db: Option<PathBuf>,
 
     /// How long a network's sightings fold into one row, in seconds. One
-    /// hour by default, the leaderboard's scan cooldown; `0` writes one row
-    /// per network.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_RECAPTURE_SECS)]
-    recapture: u64,
+    /// hour by default, WDGWars' scan cooldown; an upload to WiGLE takes 5
+    /// seconds unless this is given. `0` writes one row per network.
+    #[arg(long, value_name = "SECONDS")]
+    recapture: Option<u64>,
 
     /// Read settings from this file instead of the default `wartui.toml`. Never
     /// written; see `crates/wartui/README.md` § "Config file".
@@ -73,10 +73,16 @@ impl Selection {
         Ok((config::load(self.config.as_deref())?, config::path(self.config.as_deref())))
     }
 
-    /// The rows `--recapture` asks for, leaving out `config`'s excluded SSIDs.
+    /// The window `--recapture` gives, if it was given.
+    pub(crate) fn recapture(&self) -> Option<u64> {
+        self.recapture
+    }
+
+    /// The rows `--recapture` asks for, an hour's windows when it was not given, leaving out
+    /// `config`'s excluded SSIDs.
     pub(crate) fn filter(&self, config: &Config) -> ExportFilter {
         ExportFilter {
-            recapture_secs: self.recapture,
+            recapture_secs: self.recapture.unwrap_or(DEFAULT_RECAPTURE_SECS),
             after_uploads: None,
             excluded_ssids: config::excluded_ssid_bytes(&config.excluded_ssids).collect(),
         }
@@ -589,7 +595,7 @@ mod tests {
         // An empty file of its own, so the operator's `wartui.toml` plays no part.
         let config = dir.path().join("wartui.toml");
         std::fs::write(&config, "").unwrap();
-        let selection = Selection { db: Some(db), recapture: 0, config: Some(config) };
+        let selection = Selection { db: Some(db), recapture: Some(0), config: Some(config) };
         let args = Args { selection, out: Some(out.clone()) };
         super::run(args).unwrap();
         let csv = std::fs::read_to_string(&out).unwrap();

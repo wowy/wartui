@@ -1,15 +1,7 @@
-//! `wartui upload` — send a capture to the WDGWars leaderboard.
+//! `wartui upload` — send a capture to WDGWars and WiGLE.
 //!
-//! It uses the v2 CSV queue: one POST hands over the file and gets a job back, and the
-//! import is then polled for. The POST returns once the bytes have landed, so a slow
-//! uplink in a car park cannot run into a server-side request timeout while the
-//! leaderboard imports, and the queue accepts the CSV gzipped, which is several times
-//! smaller over a phone's tether.
-//!
-//! The site's JSON upload is not used. It would re-express what the WiGLE export already
-//! decides — recapture windows, which sighting submits, how identifiers are written — in a
-//! second schema that could drift from the first. Its HMAC signature adds nothing over TLS
-//! and the key already in the header.
+//! Each site is its own module: [`wdgwars`] and [`wigle`] know their endpoints, their answers
+//! and their limits. What both share is here.
 //!
 //! What is uploaded is the capture, not a CSV file. The store is the system of record, and
 //! building the CSV in memory from it means no CSV on disk can be stale: an upload after a
@@ -17,55 +9,56 @@
 //! capture that is still being written is safe for the reason exporting one is: WAL gives
 //! the read a consistent snapshot.
 //!
-//! Once submit returns a job id, the upload has happened. A script that sees a non-zero exit
-//! retries, and a retry sends a duplicate, so nothing after that point exits non-zero except
-//! a job the site reports as failed. A poll that errors is retried until the give-up time; a
-//! poll the site will not answer (a redirect to its login page, or a 401 or 403), and running
-//! out of time, end the wait as "cannot follow" and exit zero: the profile on the site shows
-//! the result. Redirects are not followed, because an API that redirects is not answering as
-//! the API, and following one reads an HTML page as JSON.
-//!
-//! The wait gives up after 30 seconds. A person sits at the terminal for it, and nothing
-//! needs the result to finish: the job's URL and the profile on the site show it later. Each
-//! poll has its own short deadline and no sleep crosses the give-up time, so one hung poll
-//! cannot stretch the wait. Sending the body has no deadline: a large file over a slow tether
-//! takes as long as it takes.
+//! An upload goes to every site with credentials, or to the one `--to` names. A site with half
+//! its credentials (a WiGLE name and no token) is refused by name rather than read as unset,
+//! since it is a mistake worth seeing, and the other site still goes. Each site gets its own
+//! body, because each folds rows over its own recapture window unless `--recapture` sets one
+//! for both.
 //!
 //! Nothing is sent without the operator seeing what will go and saying yes, because an
-//! upload cannot be taken back. Without a terminal to ask on, that is known before the body
-//! is built, so it is refused first.
+//! upload cannot be taken back. One question covers every site. Without a terminal to ask on,
+//! that is known before any body is built, so it is refused first.
 //!
-//! The capture records each upload, so a repeat sends only what came after the last one. The
-//! cutoff is the last sighting the upload covered, in the order the capture stored them, read
-//! in the same snapshot as the CSV, so it is exactly what was considered and a capture still
-//! being written loses nothing to it. The record is written once the site has queued the job,
-//! because that is when the upload has happened. The capture is opened for writing before
-//! anything is sent, so one this user cannot write is refused with nothing uploaded rather
-//! than uploaded and left unrecorded. A job the site reports failed imported nothing and is
-//! no cutoff. `--resend` ignores the record and sends everything,
-//! which is what a decoder fix needs: an upload then sends what `export` would write now.
+//! The capture records each upload per site, so a repeat sends a site only what came after its
+//! last one, and an upload to one site is no cutoff for the other. The cutoff is the last
+//! sighting the upload covered, in the order the capture stored them, read in the same snapshot
+//! as the CSV, so it is exactly what was considered and a capture still being written loses
+//! nothing to it. The record is written once the site has queued the upload, because that is
+//! when the upload has happened. The capture is opened for writing before anything is sent, so
+//! one this user cannot write is refused with nothing uploaded rather than uploaded and left
+//! unrecorded. An upload the site reports failed imported nothing and is no cutoff. `--resend`
+//! ignores the record and sends everything, which is what a decoder fix needs: an upload then
+//! sends what `export` would write now.
 //!
-//! A capture of test data — made with `--sim` or `--lat`/`--lon` — is refused whatever the
-//! flags say: invented networks or a fixed position would be published as real, WDGWars and
-//! WiGLE ban both, and an upload cannot be taken back. The capture records that it holds test
-//! data, so the refusal holds for `upload` and for the fleet view.
+//! Every ready site is sent to, whatever happened to the other. A script that sees a non-zero
+//! exit retries, so the exit is non-zero only when a site was refused before it queued the
+//! upload, or WDGWars reports its import failed. The retry is safe: a site that queued reads
+//! "nothing new".
 //!
-//! The steps are separate functions — [`prepare`], [`send`], [`wait`], [`finish`] — and the
-//! wait reports through a callback rather than printing, so something other than this command
-//! can drive them.
+//! A capture of test data — made with `--sim` or `--lat`/`--lon` — is refused for every site
+//! whatever the flags say: invented networks or a fixed position would be published as real,
+//! WDGWars and WiGLE ban both, and an upload cannot be taken back. The capture records that it
+//! holds test data, so the refusal holds for `upload` and for the fleet view.
+//!
+//! The steps are separate functions — [`prepare`], [`send`], [`wdgwars::wait`], [`finish`] —
+//! and the wait reports through a callback rather than printing, so something other than this
+//! command can drive them.
 
+pub(crate) mod wdgwars;
+pub(crate) mod wigle;
+
+use std::collections::HashSet;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use clap::Args as ClapArgs;
+use clap::{Args as ClapArgs, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde_json::{Map, Value};
-use ureq::unversioned::multipart::{Form, Part};
-use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
+use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
     Connection, UploadRecord, UploadSite, is_simulated, last_upload, open_readonly, open_readwrite,
     record_upload, set_upload_result,
@@ -77,26 +70,11 @@ use crate::export::{
 };
 use crate::text::thousands;
 
-/// The leaderboard.
-pub(crate) const BASE: &str = "https://wdgwars.pl";
-
-/// The largest CSV the queue accepts, counted before compression. The site counts a gzipped
-/// file by its decompressed size and says 40 MB; the decimal reading is the smaller, so it is
-/// the safe one.
-const MAX_CSV: usize = 40_000_000;
-
-/// How long to wait before the first poll, and the ceiling the wait grows to.
-const FIRST_POLL: Duration = Duration::from_secs(2);
-const MAX_POLL: Duration = Duration::from_secs(10);
-
-/// How long to keep asking before leaving the job to the site.
-pub(crate) const GIVE_UP: Duration = Duration::from_secs(30);
+/// Every site, in the order an upload goes to them.
+pub(crate) const SITES: [UploadSite; 2] = [UploadSite::Wdgwars, UploadSite::Wigle];
 
 /// How long to wait for a response's headers, and then for its body.
 const RECV_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// How long one poll may take, start to finish.
-const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How much of an unexpected answer to quote back.
 const QUOTE_CHARS: usize = 200;
@@ -105,6 +83,10 @@ const QUOTE_CHARS: usize = 200;
 pub struct Args {
     #[command(flatten)]
     selection: Selection,
+
+    /// Send to this site only. Every site with credentials by default.
+    #[arg(long, value_name = "SITE")]
+    to: Option<To>,
 
     /// Upload without asking first.
     #[arg(long, short = 'y')]
@@ -115,98 +97,292 @@ pub struct Args {
     resend: bool,
 }
 
+/// A site `--to` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum To {
+    Wdgwars,
+    Wigle,
+}
+
+impl To {
+    fn site(self) -> UploadSite {
+        match self {
+            Self::Wdgwars => UploadSite::Wdgwars,
+            Self::Wigle => UploadSite::Wigle,
+        }
+    }
+}
+
+/// What the bin crate says of a site.
+pub(crate) trait Site {
+    /// The site's name, as the operator reads it.
+    fn label(self) -> &'static str;
+    /// What the site calls an upload it queued.
+    fn job(self) -> &'static str;
+    /// How long a network's sightings fold into one row when `--recapture` is not given.
+    fn recapture_secs(self) -> u64;
+    /// Refuse a body over the site's limit: `csv_bytes` before compression, `file_bytes` as
+    /// sent. One exactly at the limit goes.
+    fn check_size(self, csv_bytes: usize, file_bytes: usize) -> Result<()>;
+}
+
+impl Site for UploadSite {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Wdgwars => "WDGWars",
+            Self::Wigle => "WiGLE",
+        }
+    }
+
+    fn job(self) -> &'static str {
+        match self {
+            Self::Wdgwars => "job",
+            Self::Wigle => "transaction",
+        }
+    }
+
+    fn recapture_secs(self) -> u64 {
+        match self {
+            // The leaderboard's scan cooldown.
+            Self::Wdgwars => DEFAULT_RECAPTURE_SECS,
+            Self::Wigle => wigle::RECAPTURE_SECS,
+        }
+    }
+
+    fn check_size(self, csv_bytes: usize, file_bytes: usize) -> Result<()> {
+        match self {
+            Self::Wdgwars if csv_bytes > wdgwars::MAX_CSV => bail!(
+                "the upload's CSV is {} before compression, over WDGWars' limit of {}",
+                size(csv_bytes),
+                size(wdgwars::MAX_CSV)
+            ),
+            Self::Wigle if file_bytes > wigle::MAX_FILE => bail!(
+                "the upload is {} compressed, over WiGLE's limit of 180 MiB",
+                size(file_bytes)
+            ),
+            Self::Wdgwars | Self::Wigle => Ok(()),
+        }
+    }
+}
+
 pub fn run(args: Args) -> Result<()> {
     let (config, config_path) = args.selection.config()?;
     let db = args.selection.capture("reading")?;
     if !args.yes && !std::io::stdin().is_terminal() {
         bail!("standard input is not a terminal, so nothing can answer; pass --yes to upload");
     }
-    let filter = args.selection.filter(&config);
-    let prepared = match prepare(&config, config_path.as_deref(), &db, filter, args.resend)? {
-        Prepare::Ready(prepared) => prepared,
-        Prepare::NothingNew { previous, summary } => {
-            eprintln!(
-                "everything in {} was uploaded (job {}, {}); --resend sends it again",
-                db.display(),
-                previous.job,
-                utc_minute(previous.uploaded_at_ms)
-            );
-            note_unpositioned(&summary);
-            note_unknown_kind(&summary);
-            note_excluded(&summary);
-            note_quality(&summary);
-            return Ok(());
-        }
-        Prepare::NoRows(summary) => {
-            eprintln!("{} has no rows to upload", db.display());
-            note_unpositioned(&summary);
-            note_unknown_kind(&summary);
-            note_excluded(&summary);
-            note_quality(&summary);
-            return Ok(());
-        }
+    let options = Options {
+        to: args.to.map(To::site),
+        recapture: args.selection.recapture(),
+        resend: args.resend,
+        excluded_ssids: args.selection.filter(&config).excluded_ssids,
     };
+    let outcomes = prepare(&config, config_path.as_deref(), &db, &options)?;
 
-    eprint!("{}", prepared.describe());
-    note_unpositioned(&prepared.summary);
-    note_unknown_kind(&prepared.summary);
-    note_excluded(&prepared.summary);
-    note_quality(&prepared.summary);
-
-    if !args.yes && !confirm()? {
+    let mut failed = Vec::new();
+    let mut ready = Vec::new();
+    for (at, (site, outcome)) in outcomes.into_iter().enumerate() {
+        if at > 0 {
+            eprintln!();
+        }
+        let label = site.label();
+        match outcome {
+            Prepare::Ready(prepared) => {
+                eprint!("{label}: {}", prepared.describe());
+                notes(&prepared.summary);
+                ready.push(prepared);
+            }
+            Prepare::NothingNew { previous, summary } => {
+                eprintln!(
+                    "{label}: everything in {} was uploaded ({} {}, {}); --resend sends it again",
+                    db.display(),
+                    site.job(),
+                    previous.job,
+                    utc_minute(previous.uploaded_at_ms)
+                );
+                notes(&summary);
+            }
+            Prepare::NoRows(summary) => {
+                eprintln!("{label}: {} has no rows to upload", db.display());
+                notes(&summary);
+            }
+            Prepare::Refused(error) => {
+                eprintln!("not uploaded to {label}: {error:#}");
+                failed.push(site);
+            }
+        }
+    }
+    if ready.is_empty() {
+        return failures(&failed);
+    }
+    let labels: Vec<&str> = ready.iter().map(|prepared| prepared.site().label()).collect();
+    if !args.yes && !confirm(&labels.join(" and "))? {
         eprintln!("not uploaded");
-        return Ok(());
+        return failures(&failed);
     }
 
-    let client = Client::new(BASE, prepared.key.clone());
-    let sent = send(&client, &prepared, &db)?;
-    let job = sent.job;
-    eprintln!("uploaded; WDGWars queued it as job {job}");
-    let started = Instant::now();
-    let waited = wait(
-        job,
-        GIVE_UP,
-        || client.poll(job),
-        std::thread::sleep,
-        || started.elapsed(),
-        on_stderr(job),
-    );
-    finish(&sent, &waited)?;
-    match waited? {
-        Waited::Done(result) => print!("{}", outcome(&result)),
-        Waited::Unfollowed(reason) => eprintln!(
-            "WDGWars accepted the upload as job {job}. Its import carries on; check {} or your \
-             profile on wdgwars.pl for the result. wartui stopped following it: {reason}.",
-            client.job_url(job)
-        ),
+    let mut follow = None;
+    for prepared in &ready {
+        let site = prepared.site();
+        match send(prepared, &db, wdgwars::BASE, wigle::BASE) {
+            Ok(Sent::Wdgwars { client, job }) => {
+                eprintln!("uploaded; WDGWars queued it as job {}", job.id);
+                follow = Some((client, job));
+            }
+            Ok(Sent::Wigle(queued)) => {
+                eprintln!(
+                    "uploaded; WiGLE queued it as transaction {}. Its import carries on; check \
+                     https://wigle.net/uploads for the result.",
+                    queued.trans_id
+                );
+                if let Some(warning) = queued.warning {
+                    eprintln!("WiGLE warns: {warning}");
+                }
+            }
+            Err(error) => {
+                eprintln!("{} upload failed: {error:#}", site.label());
+                failed.push(site);
+            }
+        }
     }
-    Ok(())
+    if let Some((client, job)) = follow
+        && !follow_wdgwars(&client, &job)
+    {
+        failed.push(UploadSite::Wdgwars);
+    }
+    failures(&failed)
 }
 
-/// What is ready to send.
+/// Follow WDGWars' `job` on standard error and record how it ended. False when the import
+/// failed or its end could not be recorded.
+fn follow_wdgwars(client: &wdgwars::Client, job: &Job) -> bool {
+    let id = job.id;
+    let started = Instant::now();
+    let waited = wdgwars::wait(
+        id,
+        wdgwars::GIVE_UP,
+        || client.poll(id),
+        std::thread::sleep,
+        || started.elapsed(),
+        wdgwars::on_stderr(id),
+    );
+    let recorded = finish(job, &waited);
+    let imported = match &waited {
+        Ok(wdgwars::Waited::Done(result)) => {
+            print!("{}", wdgwars::outcome(result));
+            true
+        }
+        Ok(wdgwars::Waited::Unfollowed(reason)) => {
+            eprintln!(
+                "WDGWars accepted the upload as job {id}. Its import carries on; check {} or \
+                 your profile on wdgwars.pl for the result. wartui stopped following it: \
+                 {reason}.",
+                client.job_url(id)
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!("{error:#}");
+            false
+        }
+    };
+    if let Err(error) = &recorded {
+        eprintln!("{error:#}");
+    }
+    imported && recorded.is_ok()
+}
+
+/// An error naming every site in `failed`, or `Ok` when it is empty.
+fn failures(failed: &[UploadSite]) -> Result<()> {
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let labels: Vec<&str> = failed.iter().map(|site| site.label()).collect();
+    bail!("the upload to {} failed", labels.join(" and "))
+}
+
+/// What `export` says of the rows a summary left out.
+fn notes(summary: &ExportSummary) {
+    note_unpositioned(summary);
+    note_unknown_kind(summary);
+    note_excluded(summary);
+    note_quality(summary);
+}
+
+/// What an upload covers, beside the capture.
+#[derive(Debug, Default)]
+pub(crate) struct Options {
+    /// The one site to send to; every site with credentials when `None`.
+    pub(crate) to: Option<UploadSite>,
+    /// The recapture window for every site, in seconds; each site's own when `None`.
+    pub(crate) recapture: Option<u64>,
+    /// Send everything, ignoring what earlier uploads sent.
+    pub(crate) resend: bool,
+    /// Wi-Fi SSIDs left out.
+    pub(crate) excluded_ssids: HashSet<Vec<u8>>,
+}
+
+/// What a site signs in with.
+pub(crate) enum Credentials {
+    Wdgwars { key: String },
+    Wigle { name: String, token: String },
+}
+
+impl Credentials {
+    fn site(&self) -> UploadSite {
+        match self {
+            Self::Wdgwars { .. } => UploadSite::Wdgwars,
+            Self::Wigle { .. } => UploadSite::Wigle,
+        }
+    }
+}
+
+/// What is ready to send to one site.
 pub(crate) struct Prepared {
-    pub(crate) key: String,
+    credentials: Credentials,
     pub(crate) body: Vec<u8>,
-    /// The CSV's length before compression, the size the site's limit counts.
+    /// The CSV's length before compression, the size WDGWars' limit counts.
     pub(crate) csv_bytes: usize,
     pub(crate) summary: ExportSummary,
-    /// The upload this one follows on from. `None` with `--resend`, which follows on from
-    /// nothing.
+    /// The upload to this site this one follows on from. `None` with `--resend`, which follows
+    /// on from nothing.
     pub(crate) previous: Option<UploadRecord>,
 }
 
 impl Prepared {
+    /// The site it goes to.
+    pub(crate) fn site(&self) -> UploadSite {
+        self.credentials.site()
+    }
+
     /// What the operator is asked to send: the row count, the summary's details, the CSV's
     /// size, its compressed size and the upload this one follows on from, a line each.
     pub(crate) fn describe(&self) -> String {
-        let mut text =
-            format!("{} rows to upload\n{}", thousands(self.summary.rows), details(&self.summary));
-        text.push_str(&format!("  {:<11}{}\n", "csv", size(self.csv_bytes)));
+        let mut text = self.rows_line();
+        text.push_str(&details(&self.summary));
+        text.push_str(&self.sizes());
+        text
+    }
+
+    /// [`Self::describe`] without the summary's details, for a confirm that shows two sites.
+    pub(crate) fn brief(&self) -> String {
+        let mut text = self.rows_line();
+        text.push_str(&self.sizes());
+        text
+    }
+
+    fn rows_line(&self) -> String {
+        format!("{} rows to upload\n", thousands(self.summary.rows))
+    }
+
+    fn sizes(&self) -> String {
+        let mut text = format!("  {:<11}{}\n", "csv", size(self.csv_bytes));
         text.push_str(&format!("  {:<11}{}\n", "compressed", size(self.body.len())));
         if let Some(previous) = &self.previous {
             text.push_str(&format!(
-                "  {:<11}job {}, {}; sending what came after\n",
+                "  {:<11}{} {}, {}; sending what came after\n",
                 "previously",
+                self.site().job(),
                 previous.job,
                 utc_minute(previous.uploaded_at_ms)
             ));
@@ -215,8 +391,8 @@ impl Prepared {
     }
 }
 
-/// What [`prepare`] found. It prints nothing, so the fleet view can drive it; the caller
-/// says why nothing is sent.
+/// What [`prepare`] found for one site. It prints nothing, so the fleet view can drive it; the
+/// caller says why nothing is sent.
 pub(crate) enum Prepare {
     Ready(Prepared),
     /// Every row was covered by `previous`.
@@ -226,55 +402,133 @@ pub(crate) enum Prepare {
     },
     /// No positioned row, and no upload before this one.
     NoRows(ExportSummary),
+    /// The site cannot be sent to, and why: half its credentials, or a body over its limit.
+    Refused(anyhow::Error),
 }
 
-/// Check the key, then build the body from what came after the last upload, or from
-/// everything when `resend`. Contacts nothing, so every refusal here costs no request.
+/// The sites `config` holds credentials for, whole or half, in [`SITES`] order.
+pub(crate) fn involved(config: &Config) -> Vec<UploadSite> {
+    let keys = &config.api_keys;
+    SITES
+        .into_iter()
+        .filter(|site| match site {
+            UploadSite::Wdgwars => !keys.wdgwars.trim().is_empty(),
+            UploadSite::Wigle => {
+                !keys.wigle_name.trim().is_empty() || !keys.wigle_token.trim().is_empty()
+            }
+        })
+        .collect()
+}
+
+/// What `config` holds for `site`, or why it cannot sign in. `file` is where the config lives.
+fn credentials(config: &Config, site: UploadSite, file: &str) -> Result<Credentials> {
+    let keys = &config.api_keys;
+    match site {
+        UploadSite::Wdgwars => {
+            let key = keys.wdgwars.trim();
+            if key.is_empty() {
+                bail!(
+                    "no WDGWars API key; paste one in the settings modal (`c`) or set `wdgwars` \
+                     under `[api-keys]` in {file}"
+                );
+            }
+            Ok(Credentials::Wdgwars { key: key.to_owned() })
+        }
+        UploadSite::Wigle => {
+            let (name, token) = (keys.wigle_name.trim(), keys.wigle_token.trim());
+            let missing = match (name.is_empty(), token.is_empty()) {
+                (false, false) => {
+                    return Ok(Credentials::Wigle {
+                        name: name.to_owned(),
+                        token: token.to_owned(),
+                    });
+                }
+                (true, true) => bail!(
+                    "no WiGLE API name and token; paste them in the settings modal (`c`) or set \
+                     `wigle-name` and `wigle-token` under `[api-keys]` in {file}"
+                ),
+                (false, true) => ("token", "wigle-token"),
+                (true, false) => ("name", "wigle-name"),
+            };
+            bail!(
+                "WiGLE needs both an API name and an API token; paste the {} in the settings \
+                 modal (`c`) or set `{}` under `[api-keys]` in {file}",
+                missing.0,
+                missing.1
+            )
+        }
+    }
+}
+
+/// Check the credentials, then build each site's body from what came after its last upload, or
+/// from everything with `resend`. One outcome per site, in [`SITES`] order. Contacts nothing, so
+/// every refusal here costs no request. An error refuses the whole upload: no site has
+/// credentials, or the capture holds test data or cannot be read.
 pub(crate) fn prepare(
     config: &Config,
     config_path: Option<&Path>,
     db: &Path,
-    mut filter: ExportFilter,
-    resend: bool,
-) -> Result<Prepare> {
-    let key = config.api_keys.wdgwars.trim();
-    if key.is_empty() {
-        let file =
-            config_path.map_or_else(|| "wartui.toml".to_owned(), |p| p.display().to_string());
+    options: &Options,
+) -> Result<Vec<(UploadSite, Prepare)>> {
+    let file = config_path.map_or_else(|| "wartui.toml".to_owned(), |p| p.display().to_string());
+    let sites = options.to.map_or_else(|| involved(config), |site| vec![site]);
+    if sites.is_empty() {
         bail!(
-            "no WDGWars API key; paste one in the settings modal (`c`) or set `wdgwars` \
-             under `[api-keys]` in {file}"
+            "no upload credentials; paste a WDGWars API key or a WiGLE API name and token in the \
+             settings modal (`c`), or set `wdgwars`, or `wigle-name` and `wigle-token`, under \
+             `[api-keys]` in {file}"
         );
     }
-    filter.after_uploads = (!resend).then_some(UploadSite::Wdgwars);
-    let Body { gz, csv_bytes, summary, previous } = body(db, &filter)?;
+    let signed: Vec<(UploadSite, Result<Credentials>)> =
+        sites.into_iter().map(|site| (site, credentials(config, site, &file))).collect();
+    if signed.iter().all(|(_, credentials)| credentials.is_err()) {
+        let refused = signed.into_iter().filter_map(|(site, credentials)| {
+            credentials.err().map(|error| (site, Prepare::Refused(error)))
+        });
+        return Ok(refused.collect());
+    }
+    let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
+    if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
+        return Err(Simulated { db: db.to_owned() }.into());
+    }
+    signed
+        .into_iter()
+        .map(|(site, credentials)| {
+            let outcome = match credentials {
+                Ok(credentials) => prepare_site(&conn, credentials, options)?,
+                Err(error) => Prepare::Refused(error),
+            };
+            Ok((site, outcome))
+        })
+        .collect()
+}
+
+/// [`prepare`] for the site `credentials` signs in to.
+fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) -> Result<Prepare> {
+    let site = credentials.site();
+    let filter = ExportFilter {
+        recapture_secs: options.recapture.unwrap_or_else(|| site.recapture_secs()),
+        after_uploads: (!options.resend).then_some(site),
+        excluded_ssids: options.excluded_ssids.clone(),
+    };
+    let Body { gz, csv_bytes, summary, previous } = body(conn, &filter)?;
     if summary.rows == 0 {
         return Ok(match previous {
             Some(previous) => Prepare::NothingNew { previous, summary },
             None => Prepare::NoRows(summary),
         });
     }
-    check_size(csv_bytes, MAX_CSV)?;
-    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body: gz, csv_bytes, summary, previous }))
-}
-
-/// Refuse a CSV of `csv_bytes` over `limit`. One exactly at the limit goes.
-fn check_size(csv_bytes: usize, limit: usize) -> Result<()> {
-    if csv_bytes > limit {
-        bail!(
-            "the upload's CSV is {} before compression, over WDGWars' limit of {}",
-            size(csv_bytes),
-            size(limit)
-        );
+    if let Err(error) = site.check_size(csv_bytes, gz.len()) {
+        return Ok(Prepare::Refused(error));
     }
-    Ok(())
+    Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous }))
 }
 
 /// What [`body`] built.
 struct Body {
     /// The capture's WiGLE CSV, gzipped.
     gz: Vec<u8>,
-    /// The CSV's length before compression, which the site's limit counts.
+    /// The CSV's length before compression, which WDGWars' limit counts.
     csv_bytes: usize,
     /// What went into it.
     summary: ExportSummary,
@@ -300,18 +554,13 @@ impl<W: Write> Write for Counted<W> {
     }
 }
 
-/// The capture's WiGLE CSV, gzipped in memory, with its uncompressed length. [`Simulated`] for a
-/// capture of test data, before anything is built.
-fn body(db: &Path, filter: &ExportFilter) -> Result<Body> {
-    let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
-    if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
-        return Err(Simulated { db: db.to_owned() }.into());
-    }
+/// The capture's WiGLE CSV, gzipped in memory, with its uncompressed length.
+fn body(conn: &Connection, filter: &ExportFilter) -> Result<Body> {
     let mut csv = Counted { inner: GzEncoder::new(Vec::new(), Compression::default()), bytes: 0 };
-    let summary = wigle_csv(&conn, filter, &mut csv, env!("CARGO_PKG_VERSION"))?;
+    let summary = wigle_csv(conn, filter, &mut csv, env!("CARGO_PKG_VERSION"))?;
     let gz = csv.inner.finish().context("compressing the upload")?;
     let previous = match filter.after_uploads {
-        Some(site) => last_upload(&conn, site)?,
+        Some(site) => last_upload(conn, site)?,
         None => None,
     };
     Ok(Body { gz, csv_bytes: csv.bytes, summary, previous })
@@ -335,42 +584,66 @@ impl std::fmt::Display for Simulated {
 
 impl std::error::Error for Simulated {}
 
-/// An upload the site queued.
-pub(crate) struct Sent {
-    pub(crate) job: u64,
-    /// The capture's record of it.
+/// An upload a site queued.
+pub(crate) enum Sent {
+    /// WDGWars queued a job, which [`wdgwars::wait`] follows and [`finish`] records the end of.
+    Wdgwars { client: wdgwars::Client, job: Job },
+    /// WiGLE queued a transaction, recorded as `queued`.
+    Wigle(wigle::Queued),
+}
+
+/// A WDGWars job, and the capture's record of it.
+pub(crate) struct Job {
+    pub(crate) id: u64,
     record: i64,
     /// The capture, open for writing since before the upload went.
     conn: Connection,
 }
 
-/// Open `db` for writing, hand `prepared` to the site, then record that the site queued it.
-pub(crate) fn send(client: &Client, prepared: &Prepared, db: &Path) -> Result<Sent> {
+/// Open `db` for writing, hand `prepared` to its site at `wdgwars_base` or `wigle_base`, then
+/// record that the site queued it.
+pub(crate) fn send(
+    prepared: &Prepared,
+    db: &Path,
+    wdgwars_base: &str,
+    wigle_base: &str,
+) -> Result<Sent> {
     let conn = open_readwrite(db).with_context(|| format!("opening {}", db.display()))?;
-    let job = client.submit(&prepared.body, &filename(db))?;
+    let filename = filename(db);
     let through = prepared.summary.last_id.expect("a capture with rows has a last sighting");
     let now = Utc::now().timestamp_millis();
-    let record = record_upload(
-        &conn,
-        UploadSite::Wdgwars,
-        through,
-        now,
-        &job.to_string(),
-        prepared.summary.rows,
-    )
-    .with_context(|| format!("recording job {job} in {}", db.display()))?;
-    Ok(Sent { job, record, conn })
+    let rows = prepared.summary.rows;
+    match &prepared.credentials {
+        Credentials::Wdgwars { key } => {
+            let client = wdgwars::Client::new(wdgwars_base, key.clone());
+            let id = client.submit(&prepared.body, &filename)?;
+            let record =
+                record_upload(&conn, UploadSite::Wdgwars, through, now, &id.to_string(), rows)
+                    .with_context(|| format!("recording job {id} in {}", db.display()))?;
+            Ok(Sent::Wdgwars { client, job: Job { id, record, conn } })
+        }
+        Credentials::Wigle { name, token } => {
+            let client = wigle::Client::new(wigle_base, name, token);
+            let queued = client.submit(&prepared.body, &filename)?;
+            let id = &queued.trans_id;
+            let record = record_upload(&conn, UploadSite::Wigle, through, now, id, rows)
+                .with_context(|| format!("recording transaction {id} in {}", db.display()))?;
+            set_upload_result(&conn, record, "queued")
+                .with_context(|| format!("recording transaction {id} as queued"))?;
+            Ok(Sent::Wigle(queued))
+        }
+    }
 }
 
-/// Record how the wait for `sent` ended.
-pub(crate) fn finish(sent: &Sent, waited: &Result<Waited>) -> Result<()> {
+/// Record how the wait for WDGWars' `job` ended.
+pub(crate) fn finish(job: &Job, waited: &Result<wdgwars::Waited>) -> Result<()> {
     let result = match waited {
-        Ok(Waited::Done(_)) => "done",
-        Ok(Waited::Unfollowed(_)) => "unfollowed",
+        Ok(wdgwars::Waited::Done(_)) => "done",
+        Ok(wdgwars::Waited::Unfollowed(_)) => "unfollowed",
         Err(_) => "failed",
     };
-    set_upload_result(&sent.conn, sent.record, result)
-        .with_context(|| format!("recording how job {} ended", sent.job))?;
+    set_upload_result(&job.conn, job.record, result)
+        .with_context(|| format!("recording how job {} ended", job.id))?;
     Ok(())
 }
 
@@ -386,143 +659,17 @@ fn filename(db: &Path) -> String {
     format!("{stem}.csv.gz")
 }
 
-/// Ask on the terminal. `run` has already refused when standard input is not one.
-fn confirm() -> Result<bool> {
-    eprint!("Upload to WDGWars? [y/N] ");
+/// Ask on the terminal whether to upload to `sites`. `run` has already refused when standard
+/// input is not one.
+fn confirm(sites: &str) -> Result<bool> {
+    eprint!("Upload to {sites}? [y/N] ");
     std::io::stderr().flush().context("writing the question")?;
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer).context("reading the answer")?;
     Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
-/// The site reports `job` failed, with its reason.
-#[derive(Debug)]
-pub(crate) struct JobFailed {
-    pub(crate) job: u64,
-    pub(crate) message: String,
-}
-
-impl std::fmt::Display for JobFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WDGWars could not import job {}: {}", self.job, self.message)
-    }
-}
-
-impl std::error::Error for JobFailed {}
-
-/// How a wait for a job ended, short of the job failing.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Waited {
-    /// Imported, with the counts the site sent.
-    Done(Map<String, Value>),
-    /// Not followed to the end, and why. The upload stands.
-    Unfollowed(String),
-}
-
-/// What a wait has to report while it polls.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Progress {
-    /// The job is `queued` or `processing`.
-    State(&'static str),
-    /// A poll failed, and the wait carries on.
-    PollError(String),
-}
-
-/// Poll `job` until it ends or `give_up` has passed on `elapsed`, sleeping between polls
-/// with `sleep` but never past `give_up`, and telling `say` of every poll that did not end
-/// it. An error only when the site reports the job failed.
-pub(crate) fn wait(
-    job: u64,
-    give_up: Duration,
-    mut poll: impl FnMut() -> Result<JobStatus>,
-    mut sleep: impl FnMut(Duration),
-    elapsed: impl Fn() -> Duration,
-    mut say: impl FnMut(Progress),
-) -> Result<Waited> {
-    let mut delay = FIRST_POLL;
-    let mut said = None;
-    loop {
-        sleep(delay.min(give_up.saturating_sub(elapsed())));
-        match poll() {
-            Ok(JobStatus::Done(result)) => return Ok(Waited::Done(result)),
-            Ok(JobStatus::Unreadable(reason)) => return Ok(Waited::Unfollowed(reason)),
-            Ok(JobStatus::Failed(message)) => return Err(JobFailed { job, message }.into()),
-            Ok(state) => {
-                let name = if state == JobStatus::Queued { "queued" } else { "processing" };
-                said = Some(name);
-                say(Progress::State(name));
-            }
-            Err(error) => say(Progress::PollError(format!("{error:#}"))),
-        }
-        if elapsed() >= give_up {
-            let state = said.map_or_else(String::new, |name| format!("; it is still {name}"));
-            return Ok(Waited::Unfollowed(format!(
-                "no answer within {} seconds{state}",
-                give_up.as_secs()
-            )));
-        }
-        delay = next_delay(delay);
-    }
-}
-
-/// A `say` for [`wait`] that prints each change of state and each distinct poll error.
-fn on_stderr(job: u64) -> impl FnMut(Progress) {
-    let mut said = None;
-    let mut last_error = None;
-    move |progress| match progress {
-        Progress::State(name) => {
-            if said != Some(name) {
-                eprintln!("job {job}: {name}");
-                said = Some(name);
-            }
-        }
-        Progress::PollError(message) => {
-            if last_error.as_ref() != Some(&message) {
-                eprintln!("job {job}: asking after it failed ({message}); trying again");
-                last_error = Some(message);
-            }
-        }
-    }
-}
-
-/// The wait after `delay`: half as long again, up to [`MAX_POLL`].
-fn next_delay(delay: Duration) -> Duration {
-    delay.mul_f64(1.5).min(MAX_POLL)
-}
-
-/// A finished job's counts as `(key, value)`, `imported`, `captured` and `updated` first,
-/// then the rest in the order the site's JSON sorts into.
-pub(crate) fn counts(result: &Map<String, Value>) -> Vec<(String, String)> {
-    const FIRST: [&str; 3] = ["imported", "captured", "updated"];
-    let ordered = FIRST
-        .iter()
-        .filter_map(|key| result.get_key_value(*key))
-        .chain(result.iter().filter(|(key, _)| !FIRST.contains(&key.as_str())));
-    ordered
-        .map(|(key, value)| {
-            let value = match value {
-                Value::Number(n) => n.as_u64().map_or_else(|| n.to_string(), thousands),
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            (key.clone(), value)
-        })
-        .collect()
-}
-
-/// A finished job's [`counts`], a line each.
-fn outcome(result: &Map<String, Value>) -> String {
-    let mut text = String::new();
-    for (key, value) in counts(result) {
-        text.push_str(&format!("{key:<10} {value}\n"));
-    }
-    if text.is_empty() {
-        text.push_str("done; WDGWars sent no counts\n");
-    }
-    text
-}
-
-/// `bytes` in decimal units, the ones [`MAX_CSV`] is given in.
+/// `bytes` in decimal units, the ones [`wdgwars::MAX_CSV`] is given in.
 pub(crate) fn size(bytes: usize) -> String {
     const MB: usize = 1_000_000;
     if bytes >= MB {
@@ -532,148 +679,27 @@ pub(crate) fn size(bytes: usize) -> String {
     }
 }
 
-/// Where an import job stands.
-#[derive(Debug, PartialEq)]
-pub enum JobStatus {
-    Queued,
-    Processing,
-    /// Imported, with the counts the site sent.
-    Done(Map<String, Value>),
-    /// Refused, with the site's reason.
-    Failed(String),
-    /// Not said to an API key, and why: the site sent it to the login page or refused it.
-    Unreadable(String),
+/// An agent for a site's API. Statuses are mapped by each client rather than by `ureq`, so a
+/// refusal is reported in the site's own words, and redirects reach the client rather than
+/// being followed. Sending the body has no deadline: a large file over a slow tether takes as
+/// long as it takes.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(RECV_TIMEOUT))
+        .timeout_recv_body(Some(RECV_TIMEOUT))
+        .build()
+        .into()
 }
 
-/// The site redirected a request to its login page: it wants a logged-in session, not the
-/// API key.
-#[derive(Debug)]
-struct LoginRequired {
-    location: String,
-}
-
-impl std::fmt::Display for LoginRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "WDGWars redirected to its login page ({}): the endpoint wants a logged-in \
-             session rather than the API key",
-            self.location
-        )
-    }
-}
-
-impl std::error::Error for LoginRequired {}
-
-/// The site answered 401 or 403, with its reason when it gave one.
-#[derive(Debug)]
-struct KeyRejected {
-    reason: Option<String>,
-}
-
-impl std::fmt::Display for KeyRejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.reason {
-            Some(reason) => write!(f, "WDGWars rejected the API key: {reason}"),
-            None => write!(f, "WDGWars rejected the API key"),
-        }
-    }
-}
-
-impl std::error::Error for KeyRejected {}
-
-/// The leaderboard's CSV queue.
-pub struct Client {
-    base: String,
-    key: String,
-    agent: ureq::Agent,
-}
-
-impl Client {
-    /// A client for the site at `base`. Statuses are mapped here rather than by `ureq`,
-    /// so a refusal is reported in the site's own words, and redirects reach [`answer`]
-    /// rather than being followed.
-    pub fn new(base: &str, key: String) -> Self {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(RECV_TIMEOUT))
-            .timeout_recv_body(Some(RECV_TIMEOUT))
-            .build()
-            .into();
-        Self { base: base.trim_end_matches('/').to_owned(), key, agent }
-    }
-
-    /// Hand over `body` as `filename` and return the job it was queued as.
-    pub fn submit(&self, body: &[u8], filename: &str) -> Result<u64> {
-        let url = format!("{}/api/v2/upload-csv", self.base);
-        let part = Part::bytes(body).file_name(filename).mime_str("application/gzip")?;
-        let form = Form::new().part("file", part);
-        let response = self
-            .agent
-            .post(&url)
-            .header("X-API-Key", &self.key)
-            .send(form)
-            .with_context(|| format!("sending the upload to {url}"))?;
-        parse_submit(&answer(response)?)
-    }
-
-    /// Ask where `job` stands. A redirect to the login page, or a refused key, is
-    /// [`JobStatus::Unreadable`]: the job exists, and the site will not tell an API key
-    /// about it.
-    pub fn poll(&self, job: u64) -> Result<JobStatus> {
-        let url = self.job_url(job);
-        let response = self
-            .agent
-            .get(&url)
-            .header("X-API-Key", &self.key)
-            .config()
-            .timeout_global(Some(POLL_TIMEOUT))
-            .build()
-            .call()
-            .with_context(|| format!("reaching {url}"))?;
-        match answer(response) {
-            Ok(text) => parse_job(&text),
-            Err(error) if error.is::<LoginRequired>() || error.is::<KeyRejected>() => {
-                Ok(JobStatus::Unreadable(error.to_string()))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn job_url(&self, job: u64) -> String {
-        format!("{}/api/v2/upload-job/{job}", self.base)
-    }
-}
-
-/// A response's body, or why its status means it has none worth reading. The status decides
-/// first: a refusal's body is read only to quote, so one that cannot be read or is not UTF-8
-/// still gives the status's message. A redirect's body is not read: it is the page being
-/// redirected from, not an answer.
-fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String> {
-    let status = response.status();
-    if status.is_redirection() {
-        let location = response
-            .headers()
-            .get(ureq::http::header::LOCATION)
-            .map_or_else(|| "nowhere".to_owned(), |l| String::from_utf8_lossy(l.as_bytes()).into());
-        if location.contains("/login") {
-            return Err(LoginRequired { location }.into());
-        }
-        bail!("WDGWars redirected to {location}");
-    }
-    let body = response.body_mut().with_config().limit(1024 * 1024).read_to_vec();
-    if status.is_success() {
-        let bytes = body.context("reading WDGWars' answer")?;
-        return String::from_utf8(bytes).context("WDGWars' answer is not UTF-8");
-    }
-    let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-    match status.as_u16() {
-        401 | 403 => Err(KeyRejected { reason: site_reason(&text) }.into()),
-        413 => bail!("WDGWars refused the upload as too large"),
-        code => bail!("WDGWars answered {code}: {}", quote(&text)),
-    }
+/// Where a redirect points.
+fn location(response: &ureq::http::Response<ureq::Body>) -> String {
+    response
+        .headers()
+        .get(ureq::http::header::LOCATION)
+        .map_or_else(|| "nowhere".to_owned(), |l| String::from_utf8_lossy(l.as_bytes()).into())
 }
 
 /// The site's reason in a refusal's body: its `error` or `message`, or the quoted text.
@@ -694,54 +720,16 @@ fn quote(text: &str) -> String {
     }
 }
 
-/// The job a submit was queued as.
-fn parse_submit(text: &str) -> Result<u64> {
-    let object = object(text)?;
-    refused(&object, text)?;
-    object
-        .get("job_id")
-        .and_then(Value::as_u64)
-        .with_context(|| format!("WDGWars accepted the upload but named no job: {}", quote(text)))
-}
-
-/// Where a job stands, from a poll's answer.
-fn parse_job(text: &str) -> Result<JobStatus> {
-    let object = object(text)?;
-    refused(&object, text)?;
-    match object.get("status").and_then(Value::as_str) {
-        Some("queued") => Ok(JobStatus::Queued),
-        Some("processing") => Ok(JobStatus::Processing),
-        Some("done") => {
-            let result = match object.get("result") {
-                Some(Value::Object(result)) => result.clone(),
-                _ => Map::new(),
-            };
-            Ok(JobStatus::Done(result))
-        }
-        Some("failed") => {
-            let result = object.get("result").and_then(Value::as_object);
-            let message =
-                reason(&object).or_else(|| result.and_then(reason)).unwrap_or_else(|| quote(text));
-            Ok(JobStatus::Failed(message))
-        }
-        _ => bail!("WDGWars sent a job status this build does not know: {}", quote(text)),
-    }
-}
-
-/// `text` as a JSON object.
-fn object(text: &str) -> Result<Map<String, Value>> {
+/// `text` as a JSON object, from `site`.
+fn object(site: UploadSite, text: &str) -> Result<Map<String, Value>> {
     match serde_json::from_str(text) {
         Ok(Value::Object(object)) => Ok(object),
-        _ => bail!("WDGWars answered with something other than a JSON object: {}", quote(text)),
+        _ => bail!(
+            "{} answered with something other than a JSON object: {}",
+            site.label(),
+            quote(text)
+        ),
     }
-}
-
-/// Refuse an answer that says `"ok": false`, in its own words.
-fn refused(object: &Map<String, Value>, text: &str) -> Result<()> {
-    if object.get("ok").and_then(Value::as_bool) == Some(false) {
-        bail!("WDGWars refused: {}", reason(object).unwrap_or_else(|| quote(text)));
-    }
-    Ok(())
 }
 
 /// The site's explanation, under `error` or `message`.
@@ -753,9 +741,9 @@ fn reason(object: &Map<String, Value>) -> Option<String> {
 mod tests {
     use std::io::Read;
     use std::net::TcpListener;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::path::{Path, PathBuf};
 
+    use clap::Parser;
     use flate2::read::GzDecoder;
     use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
     use wartui_core::store::{
@@ -763,18 +751,42 @@ mod tests {
     };
 
     use super::{
-        Client, GIVE_UP, JobStatus, Prepare, Prepared, Sent, Waited, body, check_size, finish,
-        next_delay, outcome, parse_job, parse_submit, prepare, send, size, wait,
+        Credentials, Job, Options, Prepare, Prepared, Sent, Site, To, body, finish, prepare, send,
+        size, wdgwars, wigle,
     };
     use crate::config::Config;
-    use crate::testing::{
-        EPOCH_MS, capture, capture_simulated, serve_once, serve_once_with, sighting,
-    };
+    use crate::testing::{EPOCH_MS, capture, capture_simulated, serve_once, sighting};
 
     fn keyed() -> Config {
         let mut config = Config::default();
         config.api_keys.wdgwars = "secret".to_owned();
         config
+    }
+
+    /// [`keyed`], with a WiGLE name and token too.
+    fn both() -> Config {
+        let mut config = keyed();
+        config.api_keys.wigle_name = "AIDexamplename".to_owned();
+        config.api_keys.wigle_token = "exampletoken789".to_owned();
+        config
+    }
+
+    /// `prepare` with `options`, as a list of outcomes.
+    fn outcomes_of(config: &Config, db: &Path, options: &Options) -> Vec<(UploadSite, Prepare)> {
+        prepare(config, None, db, options).unwrap()
+    }
+
+    /// `prepare` with the default options, for the one site `config` names.
+    fn prepare_one(config: &Config, db: &Path, resend: bool) -> Prepare {
+        let options = Options { resend, ..Options::default() };
+        let mut outcomes = outcomes_of(config, db, &options);
+        assert_eq!(outcomes.len(), 1);
+        outcomes.remove(0).1
+    }
+
+    /// `site`'s outcome in `outcomes`.
+    fn outcome(outcomes: Vec<(UploadSite, Prepare)>, site: UploadSite) -> Prepare {
+        outcomes.into_iter().find(|(s, _)| *s == site).expect("an outcome for the site").1
     }
 
     #[test]
@@ -787,13 +799,13 @@ mod tests {
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
-        let built = body(&db, &ExportFilter::default()).unwrap();
+        let conn = open_readonly(&db).unwrap();
+        let built = body(&conn, &ExportFilter::default()).unwrap();
         assert_eq!(built.summary.rows, 2);
 
         let mut csv = Vec::new();
         GzDecoder::new(built.gz.as_slice()).read_to_end(&mut csv).unwrap();
         let mut expected = Vec::new();
-        let conn = open_readonly(&db).unwrap();
         wigle_csv(&conn, &ExportFilter::default(), &mut expected, env!("CARGO_PKG_VERSION"))
             .unwrap();
         assert_eq!(csv, expected);
@@ -809,68 +821,104 @@ mod tests {
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
-        let built = body(&db, &ExportFilter::default()).unwrap();
+        let built = body(&open_readonly(&db).unwrap(), &ExportFilter::default()).unwrap();
         let mut csv = Vec::new();
         GzDecoder::new(built.gz.as_slice()).read_to_end(&mut csv).unwrap();
         assert_eq!(built.csv_bytes, csv.len());
     }
 
-    #[test]
-    fn upload_describe_shows_csv_and_compressed_sizes_when_prepared() {
-        // The limit counts the CSV, so the operator sees that size beside the one sent.
-        let prepared = Prepared {
-            key: "secret".to_owned(),
+    /// A prepared WDGWars upload of two rows, following on from `previous`.
+    fn ready(previous: Option<wartui_core::store::UploadRecord>) -> Prepared {
+        Prepared {
+            credentials: Credentials::Wdgwars { key: "secret".to_owned() },
             body: vec![0; 412_345],
             csv_bytes: 3_343_178,
             summary: ExportSummary { rows: 2, ..Default::default() },
-            previous: None,
-        };
-        let text = prepared.describe();
+            previous,
+        }
+    }
+
+    #[test]
+    fn upload_describe_shows_csv_and_compressed_sizes_when_prepared() {
+        // The limit counts the CSV, so the operator sees that size beside the one sent.
+        let text = ready(None).describe();
         assert!(text.contains("  csv        3.3 MB\n"), "{text}");
         assert!(text.contains("  compressed 413 KB\n"), "{text}");
     }
 
     #[test]
-    fn upload_check_size_refuses_when_csv_over_limit() {
+    fn upload_brief_drops_details_when_prepared() {
+        let previous = wartui_core::store::UploadRecord {
+            job: "20261122-00017".to_owned(),
+            uploaded_at_ms: EPOCH_MS,
+            rows: 1,
+        };
+        let mut prepared = ready(Some(previous));
+        prepared.credentials = Credentials::Wigle {
+            name: "AIDexamplename".to_owned(),
+            token: "exampletoken789".to_owned(),
+        };
+        assert_eq!(
+            prepared.brief(),
+            "2 rows to upload\n  csv        3.3 MB\n  compressed 413 KB\n  previously \
+             transaction 20261122-00017, 2026-05-01 13:34 UTC; sending what came after\n"
+        );
+    }
+
+    #[test]
+    fn upload_check_size_refuses_when_csv_over_wdgwars_limit() {
         // WDGWars counts a gzipped file by its decompressed size, so a CSV over the limit is
         // refused however well it compresses.
-        let error = check_size(41, 40).unwrap_err().to_string();
-        assert!(error.contains("before compression"), "{error}");
+        let error = UploadSite::Wdgwars.check_size(wdgwars::MAX_CSV + 1, 10).unwrap_err();
+        assert!(error.to_string().contains("before compression"), "{error}");
+        assert!(UploadSite::Wdgwars.check_size(wdgwars::MAX_CSV, wdgwars::MAX_CSV * 2).is_ok());
     }
 
     #[test]
-    fn upload_check_size_accepts_when_csv_exactly_at_limit() {
-        assert!(check_size(40, 40).is_ok());
+    fn upload_check_size_counts_gzipped_file_when_site_is_wigle() {
+        // WiGLE's limit is on the file sent, so a CSV that compresses under it goes.
+        assert!(UploadSite::Wigle.check_size(wigle::MAX_FILE * 3, wigle::MAX_FILE).is_ok());
+        let error = UploadSite::Wigle.check_size(10, wigle::MAX_FILE + 1).unwrap_err();
+        assert!(error.to_string().contains("over WiGLE's limit of 180 MiB"), "{error}");
     }
 
     #[test]
-    fn upload_refuses_without_contacting_server_when_key_empty() {
+    fn upload_refuses_without_contacting_server_when_no_credentials() {
         // `prepare` takes no client, so a refusal here cannot have sent anything; the
         // capture does not even exist.
         let error = prepare(
             &Config::default(),
             Some(Path::new("/home/op/.config/wartui/wartui.toml")),
             Path::new("/nonexistent/wartui.db"),
-            ExportFilter::default(),
-            false,
+            &Options::default(),
         )
         .err()
         .unwrap()
         .to_string();
-        assert!(error.contains("no WDGWars API key"), "{error}");
+        assert!(error.starts_with("no upload credentials; "), "{error}");
+        assert!(error.contains("settings modal (`c`)"), "{error}");
         assert!(error.contains("/home/op/.config/wartui/wartui.toml"), "{error}");
     }
 
     #[test]
-    fn upload_refuses_when_capture_simulated() {
+    fn upload_refuses_named_site_when_it_has_no_credentials() {
+        let options = Options { to: Some(UploadSite::Wdgwars), ..Options::default() };
+        let outcomes =
+            outcomes_of(&Config::default(), Path::new("/nonexistent/wartui.db"), &options);
+        let [(UploadSite::Wdgwars, Prepare::Refused(error))] = outcomes.as_slice() else {
+            panic!("not refused")
+        };
+        assert!(error.to_string().starts_with("no WDGWars API key; "), "{error}");
+    }
+
+    #[test]
+    fn upload_refuses_every_site_when_capture_simulated() {
         let dir = tempfile::tempdir().unwrap();
         let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
         let db = capture_simulated(&dir, records, true);
         for resend in [false, true] {
-            let error = prepare(&keyed(), None, &db, ExportFilter::default(), resend)
-                .err()
-                .expect("refused")
-                .to_string();
+            let options = Options { resend, ..Options::default() };
+            let error = prepare(&both(), None, &db, &options).err().expect("refused").to_string();
             assert_eq!(
                 error,
                 format!(
@@ -885,8 +933,7 @@ mod tests {
     fn upload_sends_nothing_when_capture_has_no_positioned_rows() {
         let dir = tempfile::tempdir().unwrap();
         let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
-        let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
-        assert!(matches!(prepared, Prepare::NoRows(_)));
+        assert!(matches!(prepare_one(&keyed(), &db, false), Prepare::NoRows(_)));
     }
 
     #[test]
@@ -901,15 +948,97 @@ mod tests {
         );
         // `sighting` stores every network as `example`.
         let excluded_ssids = std::collections::HashSet::from([b"example".to_vec()]);
-        let filter = ExportFilter { excluded_ssids, ..ExportFilter::default() };
-        let prepared = prepare(&keyed(), None, &db, filter, false).unwrap();
-        let Prepare::NoRows(summary) = prepared else { panic!("rows to upload") };
+        let options = Options { excluded_ssids, ..Options::default() };
+        let outcomes = outcomes_of(&keyed(), &db, &options);
+        let Prepare::NoRows(summary) = outcome(outcomes, UploadSite::Wdgwars) else {
+            panic!("rows to upload")
+        };
         assert_eq!(summary.excluded_ssid, 2);
     }
 
-    /// Three networks heard a minute apart, positioned, with an upload recorded through
+    #[test]
+    fn upload_prepare_covers_every_configured_site_when_none_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let outcomes = outcomes_of(&both(), &db, &Options::default());
+        let sites: Vec<UploadSite> = outcomes.iter().map(|(site, _)| *site).collect();
+        assert_eq!(sites, [UploadSite::Wdgwars, UploadSite::Wigle]);
+        assert!(outcomes.iter().all(|(_, outcome)| matches!(outcome, Prepare::Ready(_))));
+    }
+
+    #[test]
+    fn upload_prepare_covers_only_named_site_when_to_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let options = Options { to: Some(UploadSite::Wigle), ..Options::default() };
+        let outcomes = outcomes_of(&both(), &db, &options);
+        let [(UploadSite::Wigle, Prepare::Ready(prepared))] = outcomes.as_slice() else {
+            panic!("not WiGLE alone")
+        };
+        assert_eq!(prepared.site(), UploadSite::Wigle);
+    }
+
+    #[test]
+    fn upload_prepare_refuses_wigle_when_token_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let mut config = both();
+        config.api_keys.wigle_token = "  ".to_owned();
+        let outcomes = outcomes_of(&config, &db, &Options::default());
+        let [(UploadSite::Wdgwars, Prepare::Ready(_)), (UploadSite::Wigle, Prepare::Refused(e))] =
+            outcomes.as_slice()
+        else {
+            panic!("WDGWars not ready or WiGLE not refused")
+        };
+        let error = e.to_string();
+        assert!(
+            error.starts_with("WiGLE needs both an API name and an API token; paste the token"),
+            "{error}"
+        );
+        assert!(error.contains("`wigle-token`"), "{error}");
+    }
+
+    #[test]
+    fn upload_prepare_folds_each_site_over_its_window_when_no_recapture_given() {
+        // One network seen twice, 10 s apart: past WiGLE's 5 s, inside WDGWars' hour.
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(
+            &dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
+            ],
+        );
+        let mut outcomes = outcomes_of(&both(), &db, &Options::default());
+        let Prepare::Ready(wigle) = outcomes.pop().unwrap().1 else { panic!("WiGLE not ready") };
+        let Prepare::Ready(wdgwars) = outcomes.pop().unwrap().1 else {
+            panic!("WDGWars not ready")
+        };
+        assert_eq!((wdgwars.summary.rows, wigle.summary.rows), (1, 2));
+    }
+
+    #[test]
+    fn upload_prepare_folds_every_site_over_given_window_when_recapture_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(
+            &dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
+            ],
+        );
+        for (recapture, rows) in [(3_600, 1), (1, 2)] {
+            let options = Options { recapture: Some(recapture), ..Options::default() };
+            for (site, outcome) in outcomes_of(&both(), &db, &options) {
+                let Prepare::Ready(prepared) = outcome else { panic!("{site:?} not ready") };
+                assert_eq!(prepared.summary.rows, rows, "{site:?} at {recapture} s");
+            }
+        }
+    }
+
+    /// Three networks heard a minute apart, positioned, with a WDGWars upload recorded through
     /// the second.
-    fn uploaded_through_second(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    fn uploaded_through_second(dir: &tempfile::TempDir) -> PathBuf {
         let db = capture(
             dir,
             vec![
@@ -932,21 +1061,32 @@ mod tests {
     }
 
     #[test]
+    fn upload_prepare_sends_wigle_every_row_when_only_wdgwars_has_uploaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = uploaded_through_second(&dir);
+        let outcomes = outcomes_of(&both(), &db, &Options::default());
+        let Prepare::Ready(wigle) = outcome(outcomes, UploadSite::Wigle) else {
+            panic!("WiGLE not ready")
+        };
+        assert_eq!(wigle.summary.rows, 3);
+        assert_eq!(wigle.previous, None);
+    }
+
+    #[test]
     fn upload_records_job_and_cutoff_when_submit_accepted() {
         let dir = tempfile::tempdir().unwrap();
         let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
-        let prepared =
-            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        let prepared = prepare_one(&keyed(), &db, false).ready();
         assert_eq!(prepared.previous, None);
 
         let (base, server) = serve_once("202 Accepted", r#"{"ok":true,"job_id":42}"#);
-        let sent = send(&Client::new(&base, prepared.key.clone()), &prepared, &db).unwrap();
+        let sent = send(&prepared, &db, &base, "http://127.0.0.1:9").unwrap();
         server.join().unwrap();
-        assert_eq!(sent.job, 42);
+        let Sent::Wdgwars { job, .. } = sent else { panic!("not a WDGWars job") };
+        assert_eq!(job.id, 42);
 
         // Everything went, so a repeat has nothing to send, and the record names the job.
-        let again = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
-        assert!(matches!(again, Prepare::NothingNew { .. }));
+        assert!(matches!(prepare_one(&keyed(), &db, false), Prepare::NothingNew { .. }));
         let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
             .unwrap()
             .expect("a record");
@@ -954,11 +1094,45 @@ mod tests {
     }
 
     #[test]
+    fn upload_records_wigle_transaction_as_queued_when_wigle_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let options = Options { to: Some(UploadSite::Wigle), ..Options::default() };
+        let prepared = outcome(outcomes_of(&both(), &db, &options), UploadSite::Wigle).ready();
+
+        let (base, server) = serve_once(
+            "200 OK",
+            r#"{"success":true,"results":{"transids":[{"transId":"20261122-00017"}]}}"#,
+        );
+        let sent = send(&prepared, &db, "http://127.0.0.1:9", &base).unwrap();
+        let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
+        assert!(request.contains("filename=\"wartui.csv.gz\""), "{request}");
+        let Sent::Wigle(queued) = sent else { panic!("not a WiGLE transaction") };
+        assert_eq!(queued.trans_id, "20261122-00017");
+
+        let conn = open_readonly(&db).unwrap();
+        let (site, job, result): (String, String, Option<String>) = conn
+            .query_row("SELECT site, job, result FROM upload", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((site.as_str(), job.as_str()), ("wigle", "20261122-00017"));
+        assert_eq!(result.as_deref(), Some("queued"));
+        // WiGLE has it all now, and WDGWars still has nothing.
+        let outcomes = outcomes_of(&both(), &db, &Options::default());
+        let Prepare::NothingNew { previous, .. } = outcome(outcomes, UploadSite::Wigle) else {
+            panic!("WiGLE has something new")
+        };
+        assert_eq!(previous.job, "20261122-00017");
+        let outcomes = outcomes_of(&both(), &db, &Options::default());
+        assert!(matches!(outcome(outcomes, UploadSite::Wdgwars), Prepare::Ready(_)));
+    }
+
+    #[test]
     fn upload_sends_nothing_when_capture_not_writable() {
         let dir = tempfile::tempdir().unwrap();
         let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
-        let prepared =
-            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        let prepared = prepare_one(&keyed(), &db, false).ready();
         let mut permissions = std::fs::metadata(&db).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&db, permissions).unwrap();
@@ -969,8 +1143,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let client = Client::new(&base, prepared.key.clone());
-        let error = send(&client, &prepared, &db).err().expect("refused");
+        let error = send(&prepared, &db, &base, &base).err().expect("refused");
         assert!(format!("{error:#}").contains("cannot be written"), "{error:#}");
         listener.set_nonblocking(true).unwrap();
         let accepted = listener.accept();
@@ -981,8 +1154,7 @@ mod tests {
     fn upload_sends_only_new_sightings_when_repeated() {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(&dir);
-        let prepared =
-            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        let prepared = prepare_one(&keyed(), &db, false).ready();
         assert_eq!(macs(&prepared.body), ["10:00:00:00:00:03"]);
         assert_eq!(prepared.previous.map(|p| p.job).as_deref(), Some("7"));
     }
@@ -991,7 +1163,7 @@ mod tests {
     fn upload_sends_everything_when_resend() {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(&dir);
-        let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), true).unwrap().ready();
+        let prepared = prepare_one(&keyed(), &db, true).ready();
         assert_eq!(prepared.summary.rows, 3);
         assert_eq!(prepared.previous, None);
     }
@@ -1004,166 +1176,12 @@ mod tests {
         let conn = open_readwrite(&db).unwrap();
         let record =
             record_upload(&conn, UploadSite::Wdgwars, 3, EPOCH_MS + 150_000, "8", 1).unwrap();
-        finish(&Sent { job: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
+        finish(&Job { id: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
 
         let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
             .unwrap()
             .expect("a record");
         assert_eq!(previous.job, "7");
-    }
-
-    #[test]
-    fn upload_parser_reads_job_id_when_submit_returns_accepted() {
-        let id = parse_submit(r#"{"ok":true,"job_id":42,"poll_url":"/api/v2/upload-job/42"}"#);
-        assert_eq!(id.unwrap(), 42);
-    }
-
-    #[test]
-    fn upload_parser_returns_queued_when_job_waiting() {
-        let status = parse_job(r#"{"ok":true,"job_id":42,"status":"queued"}"#).unwrap();
-        assert_eq!(status, JobStatus::Queued);
-    }
-
-    #[test]
-    fn upload_parser_returns_processing_when_job_running() {
-        let status = parse_job(r#"{"ok":true,"job_id":42,"status":"processing"}"#).unwrap();
-        assert_eq!(status, JobStatus::Processing);
-    }
-
-    #[test]
-    fn upload_parser_returns_done_with_result_when_job_finished() {
-        let status = parse_job(
-            r#"{"ok":true,"job_id":42,"status":"done",
-                "result":{"updated":3,"imported":1200,"captured":17,"skipped":4}}"#,
-        )
-        .unwrap();
-        let JobStatus::Done(result) = status else { panic!("{status:?}") };
-        assert_eq!(result.get("imported").and_then(|v| v.as_u64()), Some(1200));
-        assert_eq!(
-            outcome(&result),
-            "imported   1,200\ncaptured   17\nupdated    3\nskipped    4\n"
-        );
-    }
-
-    #[test]
-    fn upload_parser_returns_failed_with_message_when_job_failed() {
-        let status = parse_job(r#"{"ok":true,"job_id":42,"status":"failed","error":"bad header"}"#);
-        assert_eq!(status.unwrap(), JobStatus::Failed("bad header".to_owned()));
-        let status = parse_job(r#"{"ok":true,"job_id":42,"status":"failed","message":"no rows"}"#);
-        assert_eq!(status.unwrap(), JobStatus::Failed("no rows".to_owned()));
-        // With neither, the operator gets the raw answer rather than nothing.
-        let raw = r#"{"ok":true,"job_id":42,"status":"failed"}"#;
-        assert_eq!(parse_job(raw).unwrap(), JobStatus::Failed(raw.to_owned()));
-    }
-
-    #[test]
-    fn upload_backoff_grows_to_cap_when_polling() {
-        assert_eq!(next_delay(Duration::from_secs(2)), Duration::from_secs(3));
-        assert_eq!(next_delay(Duration::from_secs(8)), Duration::from_secs(10));
-        assert_eq!(next_delay(Duration::from_secs(10)), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn upload_client_sends_api_key_and_multipart_file_when_submitting() {
-        let (base, server) = serve_once(
-            "202 Accepted",
-            r#"{"ok":true,"job_id":42,"poll_url":"/api/v2/upload-job/42"}"#,
-        );
-        let client = Client::new(&base, "secret".to_owned());
-        let job = client.submit(b"gzipped bytes", "wartui-2026-09-30-19-02-11.csv.gz").unwrap();
-        assert_eq!(job, 42);
-
-        let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
-        assert!(request.starts_with("POST /api/v2/upload-csv "), "{request}");
-        assert!(request.to_ascii_lowercase().contains("x-api-key: secret\r\n"), "{request}");
-        assert!(request.contains("name=\"file\""), "{request}");
-        assert!(request.contains("filename=\"wartui-2026-09-30-19-02-11.csv.gz\""), "{request}");
-        assert!(request.contains("gzipped bytes"), "{request}");
-    }
-
-    #[test]
-    fn upload_client_reports_key_rejected_when_server_returns_401() {
-        let (base, server) = serve_once("401 Unauthorized", r#"{"ok":false,"error":"bad key"}"#);
-        let client = Client::new(&base, "wrong".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("rejected the API key"), "{error}");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn upload_client_quotes_answer_when_server_returns_unexpected_status() {
-        let (base, server) = serve_once("500 Internal Server Error", "it broke");
-        let client = Client::new(&base, "secret".to_owned());
-        let error = client.poll(42).unwrap_err().to_string();
-        assert!(error.contains("WDGWars answered 500: it broke"), "{error}");
-        let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
-        assert!(request.starts_with("GET /api/v2/upload-job/42 "), "{request}");
-    }
-
-    #[test]
-    fn upload_client_reports_login_required_when_poll_redirects_to_login() {
-        let location = "/login/?next=%2Fendpoint%2Fv2%2Fupload-job%2F42";
-        let (base, server) =
-            serve_once_with("302 Found", &format!("Location: {location}\r\n"), b"");
-        let client = Client::new(&base, "secret".to_owned());
-        let status = client.poll(42).unwrap();
-        let JobStatus::Unreadable(reason) = status else { panic!("{status:?}") };
-        assert!(reason.contains(location), "{reason}");
-        // `serve_once` panics, failing the join, if the redirect was followed.
-        let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
-        assert!(request.starts_with("GET /api/v2/upload-job/42 "), "{request}");
-    }
-
-    #[test]
-    fn upload_client_reports_redirect_when_submit_redirects() {
-        let (base, server) = serve_once_with("302 Found", "Location: /elsewhere\r\n", b"");
-        let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("WDGWars redirected to /elsewhere"), "{error}");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn upload_client_reports_login_required_when_submit_redirects_to_login() {
-        // Unlike a poll, a submit sent to the login page uploaded nothing.
-        let (base, server) = serve_once_with("302 Found", "Location: /login/\r\n", b"");
-        let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("wants a logged-in session"), "{error}");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn upload_client_includes_site_reason_when_submit_returns_401() {
-        let (base, server) =
-            serve_once("401 Unauthorized", r#"{"ok":false,"error":"key revoked"}"#);
-        let client = Client::new(&base, "wrong".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WDGWars rejected the API key: key revoked");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn upload_client_reports_unreadable_when_poll_returns_403() {
-        // The upload already happened, so a poll the key may not make is "cannot follow",
-        // not a failure.
-        let (base, server) = serve_once("403 Forbidden", r#"{"ok":false,"message":"no scope"}"#);
-        let client = Client::new(&base, "secret".to_owned());
-        let status = client.poll(42).unwrap();
-        assert_eq!(
-            status,
-            JobStatus::Unreadable("WDGWars rejected the API key: no scope".to_owned())
-        );
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn upload_client_reports_status_when_error_body_is_not_utf8() {
-        let (base, server) = serve_once_with("413 Payload Too Large", "", b"\xff\xfe too big");
-        let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("refused the upload as too large"), "{error}");
-        server.join().unwrap();
     }
 
     #[test]
@@ -1174,75 +1192,21 @@ mod tests {
         assert_eq!(size(1_000), "1 KB");
     }
 
-    /// `wait` on a fake clock that advances only by what it sleeps, answering each poll
-    /// from `answers` in turn.
-    fn wait_on(
-        give_up: Duration,
-        answers: Vec<anyhow::Result<JobStatus>>,
-    ) -> anyhow::Result<Waited> {
-        let clock = std::cell::Cell::new(Duration::ZERO);
-        let mut answers = answers.into_iter();
-        wait(
-            42,
-            give_up,
-            || answers.next().unwrap_or(Ok(JobStatus::Processing)),
-            |delay| clock.set(clock.get() + delay),
-            || clock.get(),
-            |_| {},
-        )
-    }
-
     #[test]
-    fn upload_wait_returns_done_when_transient_error_precedes_done() {
-        let waited = wait_on(
-            Duration::from_secs(900),
-            vec![
-                Ok(JobStatus::Queued),
-                Err(anyhow::anyhow!("WDGWars answered 502: bad gateway")),
-                Err(anyhow::anyhow!("WDGWars answered 502: bad gateway")),
-                Ok(JobStatus::Done(serde_json::Map::new())),
-            ],
-        );
-        assert_eq!(waited.unwrap(), Waited::Done(serde_json::Map::new()));
-    }
-
-    #[test]
-    fn upload_wait_returns_unfollowed_when_give_up_reached() {
-        let waited = wait_on(GIVE_UP, vec![Ok(JobStatus::Queued)]).unwrap();
-        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
-        assert_eq!(reason, "no answer within 30 seconds; it is still processing");
-    }
-
-    #[test]
-    fn upload_wait_sleeps_no_longer_than_give_up_when_job_never_ends() {
-        for secs in [1, 3, 29, 30, 31, 47] {
-            let give_up = Duration::from_secs(secs);
-            let slept = std::cell::Cell::new(Duration::ZERO);
-            let waited = wait(
-                42,
-                give_up,
-                || Ok(JobStatus::Queued),
-                |delay| slept.set(slept.get() + delay),
-                || slept.get(),
-                |_| {},
-            );
-            assert!(matches!(waited, Ok(Waited::Unfollowed(_))), "{waited:?}");
-            assert!(slept.get() <= give_up, "{secs}s: slept {:?}", slept.get());
+    fn upload_args_take_to_when_site_named() {
+        for (name, to) in [("wdgwars", To::Wdgwars), ("wigle", To::Wigle)] {
+            let cli = crate::Cli::try_parse_from(["wartui", "upload", "--to", name]).unwrap();
+            let Some(crate::Command::Upload(args)) = cli.command else { panic!("not upload") };
+            assert_eq!(args.to, Some(to));
+            assert_eq!(args.selection.recapture(), None);
         }
+        let cli = crate::Cli::try_parse_from(["wartui", "upload"]).unwrap();
+        let Some(crate::Command::Upload(args)) = cli.command else { panic!("not upload") };
+        assert_eq!(args.to, None);
     }
 
     #[test]
-    fn upload_wait_returns_unfollowed_when_only_errors_until_give_up() {
-        let errors = (0..100).map(|_| Err(anyhow::anyhow!("timed out"))).collect();
-        let waited = wait_on(Duration::from_secs(60), errors).unwrap();
-        assert!(matches!(waited, Waited::Unfollowed(_)), "{waited:?}");
-    }
-
-    #[test]
-    fn upload_wait_fails_when_job_failed() {
-        let error = wait_on(Duration::from_secs(60), vec![Ok(JobStatus::Failed("bad".to_owned()))])
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "WDGWars could not import job 42: bad");
+    fn upload_args_refuse_to_when_site_unknown() {
+        assert!(crate::Cli::try_parse_from(["wartui", "upload", "--to", "openwifi"]).is_err());
     }
 }

@@ -89,7 +89,7 @@ enum Command {
     Export(export::Args),
     /// Summarize a capture: what it holds and what it lost on the way in.
     Analyze(analyze::Args),
-    /// Upload a capture to the WDGWars leaderboard.
+    /// Upload a capture to WDGWars and WiGLE.
     Upload(upload::Args),
     /// Print every frame the bridge hears.
     Sniff(sniff::Args),

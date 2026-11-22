@@ -238,7 +238,11 @@ pub async fn run(args: Args) -> Result<()> {
         && args.lat.is_none()
         && (gps.is_some() || (bridge_gps.is_some() && args.sim.is_none()));
     let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
-    let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
+    let upload = tui::UploadTarget {
+        db: db.clone(),
+        wdgwars_base: upload::wdgwars::BASE.to_owned(),
+        wigle_base: upload::wigle::BASE.to_owned(),
+    };
     let settings = tui::Settings {
         config_path,
         saved: config,
