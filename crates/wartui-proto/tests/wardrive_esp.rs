@@ -1388,12 +1388,6 @@ fn wardrive_beacon_sends_status_with_nickname_golden_when_connected() {
 }
 
 #[test]
-fn wardrive_beacon_reads_bridge_octets_when_status_carries_nickname() {
-    assert_eq!(beacon::bridge_octets(&status_bytes(&named_beacon(), true)), Some([0x44, 0xC0]));
-    assert_eq!(beacon::bridge_octets(&status_bytes(&named_beacon(), false)), Some([0x44, 0xC0]));
-}
-
-#[test]
 fn wardrive_beacon_fills_status_max_when_nickname_is_whole() {
     let nickname = wartui_proto::heapless::Vec::from_slice(&[b'n'; NICKNAME_MAX]).unwrap();
     let beacon = Beacon { nickname, ..Beacon::default() };

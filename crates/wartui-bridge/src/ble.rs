@@ -34,9 +34,8 @@
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
 //! discovered or heard again, at most [`ID_READS`] times while they carry no id, since each read
 //! is a serial D-Bus round trip. A device left alone that way is read again whenever the adapter
-//! reports service data under the id from it, since that is the bridge being heard: a Linux
-//! central hears only one of the bridge's two pairs per 10 s discovery cycle, and BlueZ keeps no
-//! service data across its own restart, so the id can come late. A bridge is read again until it
+//! reports service data under the id from it, since that is the bridge being heard: BlueZ keeps
+//! no service data across its own restart, so the id can come late. A bridge is read again until it
 //! is heard advertising, because BlueZ first replays every device it knows as discovered, so a
 //! bonded bridge is read before the scan has heard it. A scan ends at once only on a bridge heard
 //! advertising whose two octets the spec gives. Any other listens [`LISTEN_FOR`] and lets
@@ -121,15 +120,13 @@
 //! `docs/ble-host-link-findings.md` § "A bond only the Mac holds"). A try whose scan heard the
 //! bridge advertising has shown it powered and near, so on macOS that timeout's text gives range
 //! first and then the stale bond's fix, short enough for the view's fault box at 80 columns
-//! ([`connect_timeout_text`]). The bond is an "if" there: a weak signal times out the same way,
-//! and with `wardrive esp` on, a bridge another central holds still advertises its status beacon,
-//! which carries the id and is not connectable, so it is heard too. That is read from the C6
-//! (`firmware/p4-radio/src/ble.rs`, `linked`), not benched. A Mac that forgets a bridge still
-//! holding its bond cannot pair again until the window opens, which is why range goes first. The
-//! cause stays [`DisconnectCause::Other`], so a caller keeps retrying. A try that makes no scan, a
-//! settled one or one straight to the remembered address, keeps the power-and-range wording. On
-//! Linux BlueZ connects in this state and the bridge drops it, which `wartui`'s silence notice
-//! names, so Linux keeps the power-and-range wording too.
+//! ([`connect_timeout_text`]). The bond is an "if" there: a weak signal times out the same way.
+//! A bridge another central holds advertises no wartui set, so it reads as not advertising. A Mac
+//! that forgets a bridge still holding its bond cannot pair again until the window opens, which
+//! is why range goes first. The cause stays [`DisconnectCause::Other`], so a caller keeps
+//! retrying. A try that makes no scan, a settled one or one straight to the remembered address,
+//! keeps the power-and-range wording. On Linux BlueZ connects in this state and the bridge drops
+//! it, which `wartui`'s silence notice names, so Linux keeps the power-and-range wording too.
 //!
 //! **Waiting on the OS's pairing.** Off Linux the OS pairs on the first connection inside the
 //! bridge's pairing window, behind a dialog of its own (Connect, on macOS), and the subscription
@@ -182,7 +179,6 @@ use wartui_proto::link::{
     USB_TOOK_BRIDGE, decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::wardrive_esp::beacon::COMPANY;
 
 use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
@@ -195,8 +191,10 @@ use crate::{
 /// How long a scan looks for the bridge's id before giving up.
 ///
 /// BlueZ restarts its discovery, and with it the controller's duplicate filter, every 10.24 s, so
-/// a bridge whose advertisement the first cycle missed is reported only in the second. On D0:1C
-/// 2 scans of 12 heard the id only at 10.4 s and 10.8 s, so a scan reaches into that second cycle.
+/// a bridge whose advertisement the first cycle missed is reported only in the second, and a scan
+/// reaches into that second cycle. The wartui set is off the air while a central holds the
+/// bridge's one connection, as a phone that knocks does for 3 s at a time. On D0:1C beside such a
+/// phone, 12 scans of 12 heard the id within [`LISTEN_FOR`] (`docs/wardrive-esp-findings.md`).
 pub const SCAN_FOR: Duration = Duration::from_secs(12);
 
 /// How long a scan listens before taking the bridges it has heard, unless the spec gives both of
@@ -920,13 +918,12 @@ struct Read {
 }
 
 impl Read {
-    /// What `props` say: the id from their service data under [`ID_UUID`] and the WardriveESP
-    /// status beside it ([`advertised_octets`]).
+    /// What `props` say: the id from their service data under [`ID_UUID`]
+    /// ([`advertised_octets`]).
     fn of(props: PeripheralProperties) -> Self {
         let id = props.service_data.get(&uuid_from_u16(ID_UUID));
-        let status = props.manufacturer_data.get(&COMPANY);
         Self {
-            octets: advertised_octets(id.map(Vec::as_slice), status.map(Vec::as_slice)),
+            octets: advertised_octets(id.map(Vec::as_slice)),
             name: props.local_name.or(props.advertisement_name),
             live: props.rssi.is_some(),
         }
@@ -1638,14 +1635,13 @@ mod tests {
     }
 
     #[test]
-    fn ble_read_takes_octets_from_status_when_id_is_empty() {
-        // The phones' pair: an empty id beside the WardriveESP status.
+    fn ble_read_finds_no_octets_when_device_carries_a_status_and_no_id() {
+        // The phones' pair and the status beacon carry the WardriveESP status and no id.
         let mut status = [0; STATUS_MAX];
         let len = beacon::status(&mut status, &Beacon::default(), [0x44, 0xC0], false);
         let mut props = PeripheralProperties::default();
-        props.service_data.insert(uuid_from_u16(ID_UUID), Vec::new());
         props.manufacturer_data.insert(COMPANY, status[..len].to_vec());
-        assert_eq!(Read::of(props).octets, Some([0x44, 0xC0]));
+        assert_eq!(Read::of(props).octets, None);
     }
 
     #[test]
@@ -1694,8 +1690,8 @@ mod tests {
 
     #[test]
     fn ble_hearing_keeps_bridge_when_service_data_event_follows_reads_that_ran_out() {
-        // A Linux central hears one of the bridge's two pairs per 10 s cycle, so the id can
-        // arrive after the reads ran out.
+        // BlueZ lists a bonded bridge before it has heard its service data, so the id can arrive
+        // after the reads ran out.
         let mut hearing = Hearing::new(None);
         for _ in 0..ID_READS {
             hearing.noted(1, "late", unidentified(false));

@@ -1,9 +1,9 @@
-//! The Bluetooth host link's GATT identity and the C6's notify buffer.
+//! The Bluetooth host link's GATT identity, the phones' rest and the C6's notify buffer.
 
 use wartui_proto::ble::{
-    ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, SERVICE_UUID, UP_UUID, advertised_octets,
+    ByteRing, DOWN_UUID, ID_UUID, NAME_PREFIX, REST_FIRST_MS, REST_MAX_MS, Rest, SERVICE_UUID,
+    UP_UUID, advertised_octets, link_address,
 };
-use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
 
 #[test]
 fn ble_uuids_stay_pinned_when_built() {
@@ -15,63 +15,71 @@ fn ble_uuids_stay_pinned_when_built() {
     assert_eq!(ID_UUID, 0x5754);
 }
 
-/// The free board's status bytes for the bridge `44:C0`.
-fn free_status() -> Vec<u8> {
-    let mut out = [0; STATUS_MAX];
-    let len = beacon::status(&mut out, &Beacon::default(), [0x44, 0xC0], false);
-    out[..len].to_vec()
-}
-
 #[test]
 fn advertised_octets_reads_id_when_it_holds_two_bytes() {
-    assert_eq!(advertised_octets(Some(&[0x44, 0xC0]), None), Some([0x44, 0xC0]));
-    // The id outranks a status beside it.
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[0x96, 0xC4]), Some(&status)), Some([0x96, 0xC4]));
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0])), Some([0x44, 0xC0]));
 }
 
 #[test]
-fn advertised_octets_reads_status_when_id_is_empty() {
-    // The phones' pair: an empty id beside the status's fixed bytes.
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[]), Some(&status)), Some([0x44, 0xC0]));
+fn advertised_octets_finds_none_when_id_is_absent_or_another_length() {
+    assert_eq!(advertised_octets(None), None);
+    assert_eq!(advertised_octets(Some(&[])), None);
+    assert_eq!(advertised_octets(Some(&[0x44])), None);
+    assert_eq!(advertised_octets(Some(&[0x44, 0xC0, 0x01])), None);
 }
 
 #[test]
-fn advertised_octets_reads_status_when_empty_id_is_beside_linked_status() {
-    // The status beacon while a central is connected: the status carries the app's nickname.
-    let mut nickname = heapless::Vec::new();
-    nickname.extend_from_slice(b"Pixel 8 pocket").unwrap();
-    let linked = Beacon { nickname, ..Beacon::default() };
-    let mut out = [0; STATUS_MAX];
-    let len = beacon::status(&mut out, &linked, [0x44, 0xC0], true);
-    assert_eq!(len, 9 + 14);
-    assert_eq!(advertised_octets(Some(&[]), Some(&out[..len])), Some([0x44, 0xC0]));
+fn link_address_sets_static_random_bits_when_built_from_mac() {
+    // The top two bits of the first octet mark a static random address.
+    assert_eq!(
+        link_address(&[0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0]),
+        [0xC2, 0x00, 0x5E, 0x10, 0x44, 0xC0]
+    );
+    // It ends in the bridge's own octets whatever the first octet holds.
+    assert_eq!(link_address(&[0xDA, 1, 2, 3, 0x96, 0xC4]), [0xDA, 1, 2, 3, 0x96, 0xC4]);
 }
 
 #[test]
-fn advertised_octets_finds_none_when_empty_id_has_no_status() {
-    assert_eq!(advertised_octets(Some(&[]), None), None);
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[]), Some(&status[..8])), None);
-    let mut unmarked = status.clone();
-    unmarked[0] = b'X';
-    assert_eq!(advertised_octets(Some(&[]), Some(&unmarked)), None);
+fn rest_doubles_up_to_its_cap_when_silent_kicks_repeat() {
+    let mut rest = Rest::new();
+    let lengths: Vec<u64> = (0..6).map(|_| rest.begin(0)).collect();
+    assert_eq!(lengths, [5_000, 10_000, 20_000, 30_000, 30_000, 30_000]);
+    // Far past the cap, the shift never overflows.
+    for _ in 0..300 {
+        assert_eq!(rest.begin(0), REST_MAX_MS);
+    }
 }
 
 #[test]
-fn advertised_octets_finds_none_when_id_is_absent() {
-    // A WardriveESP board that is not a bridge carries the status and no id.
-    let status = free_status();
-    assert_eq!(advertised_octets(None, Some(&status)), None);
-    assert_eq!(advertised_octets(None, None), None);
+fn rest_runs_until_its_end_when_begun() {
+    let mut rest = Rest::new();
+    assert_eq!(rest.until(1_000), None);
+    assert_eq!(rest.begin(1_000), REST_FIRST_MS);
+    assert_eq!(rest.until(1_000), Some(6_000));
+    assert_eq!(rest.until(5_999), Some(6_000));
+    assert_eq!(rest.until(6_000), None);
 }
 
 #[test]
-fn advertised_octets_finds_none_when_id_is_another_length() {
-    let status = free_status();
-    assert_eq!(advertised_octets(Some(&[0x44]), Some(&status)), None);
-    assert_eq!(advertised_octets(Some(&[0x44, 0xC0, 0x01]), Some(&status)), None);
+fn rest_starts_over_when_cleared() {
+    let mut rest = Rest::new();
+    rest.begin(0);
+    rest.begin(0);
+    rest.clear();
+    assert_eq!(rest.until(1), None);
+    assert_eq!(rest.begin(0), REST_FIRST_MS);
+}
+
+#[test]
+fn rest_starts_over_when_silent_run_has_ended() {
+    let mut rest = Rest::new();
+    assert_eq!(rest.begin(0), 5_000);
+    // Dropped again 6 s after that rest's end: still the run.
+    assert_eq!(rest.begin(11_000), 10_000);
+    // That rest ends at 21 s; exactly REST_MAX_MS past it is still the run.
+    assert_eq!(rest.begin(21_000 + REST_MAX_MS), 20_000);
+    // That one ends at 71 s; later than REST_MAX_MS past it starts over.
+    assert_eq!(rest.begin(71_000 + REST_MAX_MS + 1), REST_FIRST_MS);
 }
 
 #[test]

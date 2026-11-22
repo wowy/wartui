@@ -457,6 +457,13 @@ mod linux {
     /// room.
     const PROVE_WITHIN: Duration = Duration::from_secs(40);
 
+    /// How many times `pair` asks BlueZ to pair while BlueZ does not reach the bridge.
+    const PAIR_TRIES: u32 = 2;
+
+    /// How long `pair` waits before its second try. The bridge restarts its advertising when its
+    /// bonds or its pairing window change, and a connect BlueZ sends then is lost.
+    const SECOND_TRY_AFTER: Duration = Duration::from_secs(1);
+
     /// What the bridge said of this PC once connected.
     enum Proof {
         /// Encrypted and bonded, beside these bonds.
@@ -506,8 +513,8 @@ mod linux {
         }
         println!("pairing with {}", found.label());
         let pairing = {
-            let device = device.clone();
-            blocking(move || bluez::pair(&device)).await?
+            let (device, label) = (device.clone(), found.label());
+            blocking(move || try_pairing(|| bluez::pair(&device), SECOND_TRY_AFTER, &label)).await?
         };
         match pairing {
             Ok(()) => {}
@@ -515,7 +522,9 @@ mod linux {
                 remove_quietly(device).await;
                 bail!("{}", not_kept(window, &why));
             }
-            Err(BluezError::Failed(why)) => bail!("{}", pair_failed(&found, &why)),
+            Err(BluezError::Failed(why) | BluezError::NotReached(why)) => {
+                bail!("{}", pair_failed(&found, &why));
+            }
             Err(error) => bail!("{error}"),
         }
         match prove(&found, window).await? {
@@ -528,6 +537,26 @@ mod linux {
                 bail!("{}", not_kept(window, "it refused this PC as unbonded"))
             }
             Proof::Unserved { dropped } => bail!("{}", unserved(&found, dropped)),
+        }
+    }
+
+    /// Pair through `pair`, and once more `pause` later when BlueZ does not reach the bridge
+    /// `label` names. Any other outcome, and the second try's, is returned as it is.
+    fn try_pairing(
+        mut pair: impl FnMut() -> Result<(), BluezError>,
+        pause: Duration,
+        label: &str,
+    ) -> Result<(), BluezError> {
+        let mut tries = 1;
+        loop {
+            match pair() {
+                Err(BluezError::NotReached(_)) if tries < PAIR_TRIES => {
+                    println!("BlueZ did not reach {label}; trying once more");
+                    std::thread::sleep(pause);
+                    tries += 1;
+                }
+                outcome => return outcome,
+            }
         }
     }
 
@@ -654,6 +683,63 @@ mod linux {
     /// Run a blocking BlueZ call off the async runtime.
     async fn blocking<T: Send + 'static>(call: impl FnOnce() -> T + Send + 'static) -> Result<T> {
         tokio::task::spawn_blocking(call).await.context("a BlueZ call panicked")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use wartui_bridge::bluez::BluezError;
+
+        use super::try_pairing;
+
+        const PAGE_TIMEOUT: &str = "ConnectionAttemptFailed: Page Timeout";
+
+        /// Pair through [`try_pairing`] with no pause, BlueZ answering `outcomes` in turn: what it
+        /// returns, and how many times it asked.
+        fn paired(outcomes: &[Result<(), BluezError>]) -> (Result<(), BluezError>, usize) {
+            let mut calls = 0;
+            let outcome = try_pairing(
+                || {
+                    calls += 1;
+                    outcomes[calls - 1].clone()
+                },
+                Duration::ZERO,
+                "bridge 44:C0",
+            );
+            (outcome, calls)
+        }
+
+        fn not_reached() -> Result<(), BluezError> {
+            Err(BluezError::NotReached(PAGE_TIMEOUT.to_owned()))
+        }
+
+        #[test]
+        fn bluetooth_pair_pairs_on_second_try_when_bluez_first_does_not_reach_the_bridge() {
+            assert_eq!(paired(&[not_reached(), Ok(())]), (Ok(()), 2));
+        }
+
+        #[test]
+        fn bluetooth_pair_returns_second_failure_when_bluez_never_reaches_the_bridge() {
+            assert_eq!(paired(&[not_reached(), not_reached(), Ok(())]), (not_reached(), 2));
+        }
+
+        #[test]
+        fn bluetooth_pair_tries_once_when_bridge_rejects_the_pairing() {
+            let rejected = Err(BluezError::Rejected("AuthenticationCanceled".to_owned()));
+            assert_eq!(paired(&[rejected.clone(), Ok(())]), (rejected, 1));
+        }
+
+        #[test]
+        fn bluetooth_pair_tries_once_when_bluez_fails_otherwise() {
+            let failed = Err(BluezError::Failed("InProgress: In Progress".to_owned()));
+            assert_eq!(paired(&[failed.clone(), Ok(())]), (failed, 1));
+        }
+
+        #[test]
+        fn bluetooth_pair_tries_once_when_pairing_succeeds() {
+            assert_eq!(paired(&[Ok(()), not_reached()]), (Ok(()), 1));
+        }
     }
 }
 

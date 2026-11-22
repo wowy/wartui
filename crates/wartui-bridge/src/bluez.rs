@@ -34,7 +34,6 @@ use dbus::strings::ErrorName;
 use dbus::{Message, Path};
 use thiserror::Error;
 use wartui_proto::ble::{ID_UUID, advertised_octets};
-use wartui_proto::wardrive_esp::beacon::COMPANY;
 
 const BLUEZ: &str = "org.bluez";
 const DEVICE: &str = "org.bluez.Device1";
@@ -56,7 +55,7 @@ pub const PAIR_WITHIN: Duration = Duration::from_secs(40);
 const POP_EVERY: Duration = Duration::from_millis(250);
 
 /// Why a call to BlueZ failed.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum BluezError {
     /// The system bus or BlueZ on it did not answer.
     #[error("BlueZ did not answer over D-Bus ({0}); check the bluetooth service is running")]
@@ -64,6 +63,9 @@ pub enum BluezError {
     /// The bridge ended the pairing.
     #[error("the bridge refused the pairing ({0})")]
     Rejected(String),
+    /// BlueZ never reached the device, so the pairing did not start.
+    #[error("BlueZ: {0}")]
+    NotReached(String),
     /// Anything else, in BlueZ's words.
     #[error("BlueZ: {0}")]
     Failed(String),
@@ -125,17 +127,14 @@ fn device_of(path: &Path<'_>, props: &PropMap) -> Option<Device> {
     })
 }
 
-/// The bridge's octets from a `Device1`'s `ServiceData` (`a{sv}`, keyed by UUID) and
-/// `ManufacturerData` (`a{qv}`), through [`advertised_octets`].
+/// The bridge's octets from a `Device1`'s `ServiceData` (`a{sv}`, keyed by UUID), through
+/// [`advertised_octets`].
 fn octets_of(props: &PropMap) -> Option<[u8; 2]> {
-    let bytes = |value: &Variant<Box<dyn RefArg>>| cast::<Vec<u8>>(&value.0).cloned();
     let key = uuid_from_u16(ID_UUID).to_string();
     let services = prop_cast::<HashMap<String, Variant<Box<dyn RefArg>>>>(props, "ServiceData")?;
     let id = services.iter().find(|(uuid, _)| uuid.eq_ignore_ascii_case(&key)).map(|(_, v)| v);
-    let id = bytes(id?)?;
-    let makers = prop_cast::<HashMap<u16, Variant<Box<dyn RefArg>>>>(props, "ManufacturerData");
-    let status = makers.and_then(|makers| bytes(makers.get(&COMPANY)?));
-    advertised_octets(Some(&id), status.as_deref())
+    let id = cast::<Vec<u8>>(&id?.0)?;
+    advertised_octets(Some(id))
 }
 
 /// Forget `device` on this PC: its pairing and everything BlueZ knows of it.
@@ -153,7 +152,8 @@ pub fn remove(device: &Device) -> Result<(), BluezError> {
 /// when BlueZ takes one. A device already paired is a success.
 ///
 /// # Errors
-/// [`BluezError::Rejected`] when the bridge ended the pairing, else [`BluezError`].
+/// [`BluezError::Rejected`] when the bridge ended the pairing, [`BluezError::NotReached`] when
+/// BlueZ never reached it, else [`BluezError`].
 pub fn pair(device: &Device) -> Result<(), BluezError> {
     let conn = Connection::new_system().map_err(unreachable)?;
     let agent = register_agent(&conn);
@@ -231,7 +231,8 @@ fn call_pair(conn: &Connection, device: &Device) -> Result<(), BluezError> {
 /// not a refusal.
 ///
 /// # Errors
-/// [`BluezError::Rejected`] when the bridge ended the pairing, else [`BluezError::Failed`].
+/// [`BluezError::Rejected`] when the bridge ended the pairing, [`BluezError::NotReached`] when
+/// BlueZ never reached it, else [`BluezError::Failed`].
 pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
     let short = name.strip_prefix("org.bluez.Error.").unwrap_or(name);
     let said = if text.is_empty() { short.to_owned() } else { format!("{short}: {text}") };
@@ -241,6 +242,7 @@ pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
         | "AuthenticationRejected"
         | "AuthenticationCanceled"
         | "AuthenticationTimeout" => Err(BluezError::Rejected(said)),
+        "ConnectionAttemptFailed" => Err(BluezError::NotReached(said)),
         _ => Err(BluezError::Failed(said)),
     }
 }
@@ -294,7 +296,7 @@ fn failed(error: dbus::Error) -> BluezError {
 
 #[cfg(test)]
 mod tests {
-    use wartui_proto::wardrive_esp::beacon::{self, Beacon, STATUS_MAX};
+    use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, STATUS_MAX};
 
     use super::*;
 
@@ -326,11 +328,11 @@ mod tests {
     }
 
     #[test]
-    fn bluez_reads_octets_from_status_when_id_is_empty() {
+    fn bluez_reads_no_octets_when_device_carries_a_status_and_no_id() {
+        // The phones' pair and the status beacon carry the WardriveESP status and no id.
         let mut status = [0; STATUS_MAX];
         let len = beacon::status(&mut status, &Beacon::default(), [0x44, 0xC0], false);
-        let listed = props(Some(Vec::new()), Some(status[..len].to_vec()));
-        assert_eq!(octets_of(&listed), Some([0x44, 0xC0]));
+        assert_eq!(octets_of(&props(None, Some(status[..len].to_vec()))), None);
     }
 
     #[test]
@@ -349,10 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn bluez_reads_pairing_as_failed_when_bluez_never_reached_the_bridge() {
+    fn bluez_reads_pairing_as_not_reached_when_bluez_never_reached_the_bridge() {
         let outcome = pair_outcome("org.bluez.Error.ConnectionAttemptFailed", "Page Timeout");
         let said = "ConnectionAttemptFailed: Page Timeout".to_owned();
-        assert_eq!(outcome, Err(BluezError::Failed(said)));
+        assert_eq!(outcome, Err(BluezError::NotReached(said)));
     }
 
     #[test]
