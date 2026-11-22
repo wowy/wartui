@@ -259,7 +259,7 @@ fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
 }
 
 /// The width under which the fault box takes a line more.
-const NARROW_COLUMNS: usize = 60;
+const NARROW_COLUMNS: usize = 80;
 
 /// The most lines the fault box takes at `width` before it summarizes, so the node blocks keep
 /// their room.
@@ -406,9 +406,11 @@ mod tests {
     }
 
     #[test]
-    fn fault_lines_shows_whole_link_down_reason_when_terminal_is_58_columns() {
-        // The HackberryPi's width. `Forbidden` and the listing reasons grow with their paths and
-        // labels, so this pins the usual ones.
+    fn fault_lines_shows_whole_link_down_reason_when_terminal_is_58_columns_or_wider() {
+        // From the HackberryPi's width up. `Forbidden` and the listing reasons grow with their
+        // paths and labels, so this pins the usual ones. It leaves out a reason that carries an
+        // OS error (`Open`) or a sweep's list of boards, which have no bound, and the connect
+        // timeout, whose wording is private to `wartui-bridge`.
         let reasons = [
             TransportError::NoBridgeFound,
             TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() },
@@ -427,10 +429,16 @@ mod tests {
         ];
         for reason in reasons {
             let fault = format!("link down: {reason}");
-            let lines = fault_lines(std::slice::from_ref(&fault), 58);
-            assert!(lines.iter().all(|l| l.chars().count() <= 58), "{lines:?}");
-            assert!(!lines.iter().any(|l| l.trim().starts_with('+')), "cut: {lines:?}");
-            assert_eq!(rejoined(&lines), fault, "{lines:?}");
+            for width in 58..=140_u16 {
+                let lines = fault_lines(std::slice::from_ref(&fault), width);
+                let room = usize::from(width);
+                assert!(lines.iter().all(|l| l.chars().count() <= room), "at {width}: {lines:?}");
+                assert!(
+                    !lines.iter().any(|l| l.trim().starts_with('+')),
+                    "cut at {width}: {lines:?}"
+                );
+                assert_eq!(rejoined(&lines), fault, "at {width}: {lines:?}");
+            }
         }
     }
 
@@ -448,7 +456,8 @@ mod tests {
         ];
         for (reason, fix) in cases {
             let faults = [format!("link down: {reason}"), second.clone()];
-            for width in [58_u16, 80] {
+            // At 70 both reasons take 4 lines alone.
+            for width in [58_u16, 70, 80] {
                 let lines = fault_lines(&faults, width);
                 let (last, shown) = lines.split_last().expect("a line");
                 assert_eq!(last, "  +2 more", "at {width}: {lines:?}");
@@ -458,14 +467,20 @@ mod tests {
     }
 
     #[test]
-    fn fault_lines_takes_four_lines_when_terminal_is_under_60_columns() {
-        let fault =
-            format!("link down: {}", TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() });
-        let narrow = fault_lines(std::slice::from_ref(&fault), 59);
+    fn fault_lines_takes_four_lines_when_terminal_is_under_80_columns() {
+        // A sweep of three silent CH343s, as `serial` words it, takes 4 lines at 79 and at 80.
+        let silent: Vec<String> = (0..3)
+            .map(|n| format!("nothing on /dev/ttyACM{n} answered the link protocol in 3000ms"))
+            .collect();
+        let fault = format!(
+            "link down: swept 3 boards and none answered the link protocol: {}",
+            silent.join("; ")
+        );
+        let narrow = fault_lines(std::slice::from_ref(&fault), 79);
         assert_eq!(narrow.len(), 4, "{narrow:?}");
         assert_eq!(rejoined(&narrow), fault, "whole: {narrow:?}");
 
-        let wide = fault_lines(std::slice::from_ref(&fault), 60);
+        let wide = fault_lines(std::slice::from_ref(&fault), 80);
         assert_eq!(wide.len(), 3, "{wide:?}");
         assert_eq!(wide.last().map(String::as_str), Some("  +1 more"), "{wide:?}");
     }
@@ -568,6 +583,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let screen = terminal.backend().to_string();
+        assert!(screen.contains("First flash"), "{screen}");
+    }
+
+    #[test]
+    fn view_keeps_node_blocks_when_no_bridge_is_found_at_58_columns() {
+        // The 4-line reason takes the HackberryPi's rows from the fleet, and leaves it some.
+        let mut snapshot = quiet();
+        snapshot.link_up = false;
+        snapshot.link_error = Some(TransportError::NoBridgeFound.to_string());
+        assert_eq!(faults(&snapshot).len(), 1, "{:?}", faults(&snapshot));
+        let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("┌ N8 "), "a node block's title: {screen}");
+        assert!(screen.contains("340 sightings"), "a node block's body: {screen}");
         assert!(screen.contains("First flash"), "{screen}");
     }
 
