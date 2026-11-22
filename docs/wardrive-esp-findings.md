@@ -84,6 +84,9 @@ paired and bonded in 3 of 3 tries.
 With the setting on and the phone linked, the PC is not served at all, which is the rule: the
 phone is the host. Turning the board off in the app, or the phone's Bluetooth, frees the bridge.
 
+From the build of 2026-11-21 the phone finds nothing at its address while the setting is off
+([The wartui set on its own address](#the-wartui-set-on-its-own-address-2026-11-21)).
+
 ## A pairing request on the phone
 
 Up to `e6907dc` the C6 sent a Security Request to an unbonded central whenever phones were not
@@ -283,6 +286,53 @@ held the beacon's service data in place of the id's. With the empty id in the be
 response, the same sequence linked 3 of 3, in 2.4 s, 10.4 s and 15.6 s from the command's start:
 the two slow ones first heard the beacon's advertisement without its scan response. The Pixel 8's
 Bluetooth was on through both runs, with the bridge remembered by the app.
+
+## The wartui set on its own address (2026-11-21)
+
+D0:1C, carrier-10, ten nodes, the bench PC as central through BlueZ, and a Pixel 8 beside it with
+its Bluetooth on and the Wardrive Go app remembering the bridge. From this build the wartui set
+advertises from a static random address and the WardriveESP set and the status beacon from the
+public one, a central that asks nothing of either service is dropped 3 s after it connects, and
+the WardriveESP set rests after it ([`wardrive-esp.md`](wardrive-esp.md#what-a-phone-sees)). Every host
+bonded before it pairs again, once.
+
+**Two addresses** (firmware `5ee771f`). One scan heard two devices: the wartui pair with the id on
+the address ending D0:1C, and the WardriveESP pair on the public one, ending D0:1D. The stand-in
+linked at the public address and ran a session, and the status beacon beside it read as not
+connectable. `forget`, then `pair`, bonded on the new address.
+
+**What the phone does.** Before the app was opened that day the phone made no connection: on the
+build before, where both sets shared the public address, `unbonded_kicks` stood at 0 after
+1 h 21 m. The app was then opened, linked, and closed. It kept its session: through the two
+minutes watched next, the beacon read linked and scanning, with the app's nickname. A `status`
+over USB took the bridge from it. From then the phone knocked: it connected 0.4 s after the
+WardriveESP set returned, kept the default MTU, never encrypted and never subscribed.
+
+| Build | What a knock came to |
+| --- | --- |
+| `5ee771f`, where any GATT request counted as speaking | dropped after 10.2 to 10.4 s and back 0.1 to 1.2 s later, six times in 65 s; no rest began; `unbonded_kicks` rose from 0 to 31 in under six minutes |
+| `54655d1`, where only a request to one of the bridge's two services counts | dropped after about 3 s; the rests watched ran 20 s, then 30 s each time; the phone connected within about 3 s of each return |
+
+So the phone's own Bluetooth stack sends requests on connecting, and none of them is to the
+bridge's services. At the longest rest a knock holds the bridge for about 3 s in every 34 s.
+
+**The bonded PC beside the knocking phone**, no bridge named, so each run scans:
+
+| Check | Result |
+| --- | --- |
+| `wardrive esp` off, watched for 10 minutes | nothing heard on the public address; `unbonded_kicks` unchanged |
+| `status --link bluetooth`, setting off | 10 of 10 on the first try, 5 to 9 s |
+| `status --link bluetooth`, setting on | 22 of 22 on the first try. Ten timed end to end took 5 to 6 s. In the other 12 the connect began 2.0 to 2.1 s after the command's start, so the id was heard inside the scan's 2 s listen each time. `unbonded_kicks` rose by one for each knock |
+| `status --link bluetooth` while the app held its session | `could not connect to D0:1C in 10s`, once: the phone is the host |
+| `forget`, then `wartui bluetooth pair`, setting on | 18 of 20, in 16.9 to 17.9 s, 15 s of it the wait for USB to fall silent; with the setting off 2 of 2 |
+| `forget`, 20 s, then a pairing through `bluetoothctl`, so no USB frame held phones out | 5 of 5, in 1.2 to 1.6 s |
+| `flash-bridge --link bluetooth --bridge D0:1C`, setting off | `installed and confirmed` in 123 s |
+
+The two pairings that failed ended within 0.6 s in BlueZ's `ConnectionAttemptFailed: Page
+Timeout`, each straight after a `forget`, as on 2026-11-17 and 2026-11-19
+([A pairing that did not connect](#a-pairing-that-did-not-connect)). `wartui bluetooth pair` opens
+the pairing window over USB, which holds phones out for 15 s, so the phone was not on the air for
+those.
 
 ## Not measured
 

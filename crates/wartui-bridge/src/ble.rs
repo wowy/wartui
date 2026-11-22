@@ -191,8 +191,10 @@ use crate::{
 /// How long a scan looks for the bridge's id before giving up.
 ///
 /// BlueZ restarts its discovery, and with it the controller's duplicate filter, every 10.24 s, so
-/// a bridge whose advertisement the first cycle missed is reported only in the second. On D0:1C
-/// 2 scans of 12 heard the id only at 10.4 s and 10.8 s, so a scan reaches into that second cycle.
+/// a bridge whose advertisement the first cycle missed is reported only in the second, and a scan
+/// reaches into that second cycle. The wartui set is off the air while a central holds the
+/// bridge's one connection, as a phone that knocks does for 3 s at a time. On D0:1C beside such a
+/// phone, 12 scans of 12 heard the id within [`LISTEN_FOR`] (`docs/wardrive-esp-findings.md`).
 pub const SCAN_FOR: Duration = Duration::from_secs(12);
 
 /// How long a scan listens before taking the bridges it has heard, unless the spec gives both of
