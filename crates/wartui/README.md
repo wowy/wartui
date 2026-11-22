@@ -288,7 +288,7 @@ The sites differ in three ways:
 |                | WDGWars                                             | WiGLE                                                                |
 |----------------|-----------------------------------------------------|----------------------------------------------------------------------|
 | Default window | 1 hour: it scores a network once an hour per user   | 5 seconds: it places a network from every observation                |
-| Size limit     | 40 MB (40,000,000 bytes) of CSV, before compression | 180 MiB of the gzipped file                                          |
+| Size limit     | 40 MB (40,000,000 bytes) of CSV, before compression | 180 MiB (188,743,680 bytes) of the gzipped file                      |
 | Once it queues | `upload` polls the job until the import ends        | `upload` records the transaction; wigle.net/uploads shows the result |
 
 A site over its limit is refused before anything is sent to it, and the other site still goes.
@@ -302,11 +302,11 @@ writes the capture to record each upload, and refuses before sending if it canno
 within the recapture width on both sides of the last upload gets a second row, which WDGWars skips
 when scoring. A sighting with no position counts as sent once an upload has covered it.
 
-Every site with something to send is sent to, WDGWars first, whatever happened to the other. Each
-error is printed and names its site. `upload` exits non-zero when a site is refused before it
-queues the upload, or WDGWars reports the import failed, and the last line names each such site
-(`the upload to WiGLE failed`). A rerun is safe: a site that queued the upload reads as everything
-uploaded.
+Every site with something to send is sent to, WDGWars first, whatever happened to the other.
+WDGWars' job is followed before the WiGLE send starts. Each error is printed and names its site.
+`upload` exits non-zero when a site is refused before it queues the upload, or WDGWars reports the
+import failed, and the last line names each such site (`the upload to WiGLE failed`). A rerun is
+safe: a site that queued the upload reads as everything uploaded.
 
 #### WDGWars
 

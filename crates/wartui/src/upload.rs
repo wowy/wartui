@@ -30,10 +30,12 @@
 //! ignores the record and sends everything, which is what a decoder fix needs: an upload then
 //! sends what `export` would write now.
 //!
-//! Every ready site is sent to, whatever happened to the other. A script that sees a non-zero
-//! exit retries, so the exit is non-zero only when a site was refused before it queued the
-//! upload, or WDGWars reports its import failed. The retry is safe: a site that queued reads
-//! "nothing new".
+//! Every ready site is sent to, whatever happened to the other. `upload` finishes each before
+//! starting the next, so WDGWars' job is followed before WiGLE's send starts, which has no
+//! deadline. A script that sees a non-zero exit retries, so the exit is non-zero only when a site
+//! was refused before it queued the upload, or WDGWars reports its import failed. A WiGLE upload
+//! whose `queued` result cannot be written is no failure: its row is written, and is a cutoff.
+//! The retry is safe: a site that queued reads "nothing new".
 //!
 //! A capture of test data — made with `--sim` or `--lat`/`--lon` — is refused for every site
 //! whatever the flags say: invented networks or a fixed position would be published as real,
@@ -157,8 +159,9 @@ impl Site for UploadSite {
                 size(wdgwars::MAX_CSV)
             ),
             Self::Wigle if file_bytes > wigle::MAX_FILE => bail!(
-                "the upload is {} compressed, over WiGLE's limit of 180 MiB",
-                size(file_bytes)
+                "the upload is {} compressed, over WiGLE's limit of {} (180 MiB)",
+                size(file_bytes),
+                size(wigle::MAX_FILE)
             ),
             Self::Wdgwars | Self::Wigle => Ok(()),
         }
@@ -221,15 +224,18 @@ pub fn run(args: Args) -> Result<()> {
         return failures(&failed);
     }
 
-    let mut follow = None;
+    // In `SITES` order, each finished before the next starts, so WDGWars' job is followed
+    // without waiting on WiGLE's send, which has no deadline.
     for prepared in &ready {
         let site = prepared.site();
         match send(prepared, &db, wdgwars::BASE, wigle::BASE) {
             Ok(Sent::Wdgwars { client, job }) => {
                 eprintln!("uploaded; WDGWars queued it as job {}", job.id);
-                follow = Some((client, job));
+                if !follow_wdgwars(&client, &job) {
+                    failed.push(site);
+                }
             }
-            Ok(Sent::Wigle(queued)) => {
+            Ok(Sent::Wigle { queued, unrecorded }) => {
                 eprintln!(
                     "uploaded; WiGLE queued it as transaction {}. Its import carries on; check \
                      https://wigle.net/uploads for the result.",
@@ -238,17 +244,16 @@ pub fn run(args: Args) -> Result<()> {
                 if let Some(warning) = queued.warning {
                     eprintln!("WiGLE warns: {warning}");
                 }
+                // WiGLE has the file and the row is a cutoff, so this is no failed upload.
+                if let Some(error) = unrecorded {
+                    eprintln!("{error:#}");
+                }
             }
             Err(error) => {
                 eprintln!("{} upload failed: {error:#}", site.label());
                 failed.push(site);
             }
         }
-    }
-    if let Some((client, job)) = follow
-        && !follow_wdgwars(&client, &job)
-    {
-        failed.push(UploadSite::Wdgwars);
     }
     failures(&failed)
 }
@@ -588,8 +593,9 @@ impl std::error::Error for Simulated {}
 pub(crate) enum Sent {
     /// WDGWars queued a job, which [`wdgwars::wait`] follows and [`finish`] records the end of.
     Wdgwars { client: wdgwars::Client, job: Job },
-    /// WiGLE queued a transaction, recorded as `queued`.
-    Wigle(wigle::Queued),
+    /// WiGLE queued a transaction, recorded as `queued`. `unrecorded` is why that result could
+    /// not be written; the row is written all the same, so it is still a cutoff.
+    Wigle { queued: wigle::Queued, unrecorded: Option<anyhow::Error> },
 }
 
 /// A WDGWars job, and the capture's record of it.
@@ -628,9 +634,10 @@ pub(crate) fn send(
             let id = &queued.trans_id;
             let record = record_upload(&conn, UploadSite::Wigle, through, now, id, rows)
                 .with_context(|| format!("recording transaction {id} in {}", db.display()))?;
-            set_upload_result(&conn, record, "queued")
-                .with_context(|| format!("recording transaction {id} as queued"))?;
-            Ok(Sent::Wigle(queued))
+            let unrecorded = set_upload_result(&conn, record, "queued")
+                .with_context(|| format!("recording transaction {id} as queued"))
+                .err();
+            Ok(Sent::Wigle { queued, unrecorded })
         }
     }
 }
@@ -879,7 +886,10 @@ mod tests {
         // WiGLE's limit is on the file sent, so a CSV that compresses under it goes.
         assert!(UploadSite::Wigle.check_size(wigle::MAX_FILE * 3, wigle::MAX_FILE).is_ok());
         let error = UploadSite::Wigle.check_size(10, wigle::MAX_FILE + 1).unwrap_err();
-        assert!(error.to_string().contains("over WiGLE's limit of 180 MiB"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "the upload is 188.7 MB compressed, over WiGLE's limit of 188.7 MB (180 MiB)"
+        );
     }
 
     #[test]
@@ -1107,7 +1117,9 @@ mod tests {
         let sent = send(&prepared, &db, "http://127.0.0.1:9", &base).unwrap();
         let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
         assert!(request.contains("filename=\"wartui.csv.gz\""), "{request}");
-        let Sent::Wigle(queued) = sent else { panic!("not a WiGLE transaction") };
+        let Sent::Wigle { queued, unrecorded: None } = sent else {
+            panic!("not a recorded WiGLE transaction")
+        };
         assert_eq!(queued.trans_id, "20261122-00017");
 
         let conn = open_readonly(&db).unwrap();
@@ -1126,6 +1138,48 @@ mod tests {
         assert_eq!(previous.job, "20261122-00017");
         let outcomes = outcomes_of(&both(), &db, &Options::default());
         assert!(matches!(outcome(outcomes, UploadSite::Wdgwars), Prepare::Ready(_)));
+    }
+
+    /// Make every later write of an upload's result fail on `db`, as a full disk would.
+    fn refuse_result_writes(db: &Path) {
+        open_readwrite(db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_result BEFORE UPDATE ON upload \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn upload_returns_wigle_success_with_error_when_queued_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let options = Options { to: Some(UploadSite::Wigle), ..Options::default() };
+        let prepared = outcome(outcomes_of(&both(), &db, &options), UploadSite::Wigle).ready();
+        refuse_result_writes(&db);
+
+        let (base, server) = serve_once(
+            "200 OK",
+            r#"{"success":true,"results":{"transids":[{"transId":"20261122-00017"}]}}"#,
+        );
+        let sent = send(&prepared, &db, "http://127.0.0.1:9", &base).unwrap();
+        server.join().unwrap();
+        let Sent::Wigle { queued, unrecorded: Some(error) } = sent else {
+            panic!("not a WiGLE transaction with an unrecorded result")
+        };
+        assert_eq!(queued.trans_id, "20261122-00017");
+        let error = format!("{error:#}");
+        assert!(error.starts_with("recording transaction 20261122-00017 as queued"), "{error}");
+
+        // WiGLE has the file, and the row is still its cutoff.
+        let conn = open_readonly(&db).unwrap();
+        let (site, job, result): (String, String, Option<String>) = conn
+            .query_row("SELECT site, job, result FROM upload", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((site.as_str(), job.as_str(), result), ("wigle", "20261122-00017", None));
     }
 
     #[test]

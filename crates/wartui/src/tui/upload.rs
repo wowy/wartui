@@ -313,7 +313,13 @@ fn upload(prepared: &Prepared, target: &UploadTarget, say: impl Fn(String)) {
     let label = prepared.site().label();
     match send(prepared, &target.db, &target.wdgwars_base, &target.wigle_base) {
         Err(error) => say(format!("upload: {label} failed: {error:#}")),
-        Ok(Sent::Wigle(queued)) => say(queued_line(&queued)),
+        Ok(Sent::Wigle { queued, unrecorded }) => {
+            let mut line = queued_line(&queued);
+            if let Some(error) = unrecorded {
+                line.push_str(&format!("; {error:#}"));
+            }
+            say(line);
+        }
         Ok(Sent::Wdgwars { client, job }) => follow(&client, &job, say),
     }
 }
@@ -636,6 +642,43 @@ mod tests {
         wdgwars.join().unwrap();
         let request = String::from_utf8_lossy(&wigle.join().unwrap()).into_owned();
         assert!(request.starts_with("POST /api/v3/upload "), "{request}");
+    }
+
+    #[test]
+    fn upload_footer_appends_error_when_wigle_result_cannot_be_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = two_rows(&dir);
+        // Every write of an upload's result fails, as on a full disk.
+        wartui_core::store::open_readwrite(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_result BEFORE UPDATE ON upload \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let (base, server) = crate::testing::serve_once(
+            "200 OK",
+            r#"{"success":true,"results":{"transids":[{"transId":"20261122-00017"}]}}"#,
+        );
+        let mut saved = both(true);
+        saved.api_keys.wdgwars = String::new();
+        let snapshot = busy();
+        let mut ui = view(db, saved, NOWHERE, &base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload().confirming());
+        press_y(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| has_line(ui, "upload: WiGLE queued"));
+
+        let lines = ui.upload().status_lines();
+        let [line] = lines.as_slice() else { panic!("{lines:?}") };
+        assert!(
+            line.starts_with(
+                "upload: WiGLE queued as 20261122-00017; see wigle.net/uploads; recording \
+                 transaction 20261122-00017 as queued: "
+            ),
+            "{line}"
+        );
+        server.join().unwrap();
     }
 
     #[test]
