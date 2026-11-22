@@ -1348,8 +1348,8 @@ wartui bluetooth wardrive-esp on
 - **A phone that has linked to the bridge looks for it** whenever its Bluetooth is on, with the
   app closed too, at the address the WardriveESP service advertises from. With the setting off,
   or while USB holds the bridge, nothing advertises there and it cannot connect. With the setting
-  on it connects, says nothing, and is dropped after 3 s. The WardriveESP service then rests, 5 s
-  at first and up to 30 s, while the wartui link stays reachable. An app opened during a rest
+  on it connects, asks for nothing, and is dropped after 3 s. The WardriveESP service then rests,
+  5 s at first and up to 30 s, while the wartui link stays reachable. An app opened during a rest
   links when the rest ends.
 
 **The view's header names the host link** after the bridge, as `wartui status` names it, and
@@ -1410,7 +1410,7 @@ names the last one when its wait runs out:
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `no Bluetooth adapter is available`                                   | Turn the PC's Bluetooth on, and check its Bluetooth service runs     |
 | `bridge XX:YY did not advertise over Bluetooth in 12s`, or `no bridge advertised` | Power the bridge, and come closer. Another host, or a linked phone, may hold the bridge's one connection: USB takes it from a phone |
-| `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard |
+| `could not connect to XX:YY in 10s`                                   | Power the bridge, and come closer: a paired bridge is tried even when it is not heard. Another host, or a linked phone, may hold the bridge's one connection: USB takes it from a phone |
 | `could not connect to XX:YY in 10s, though it advertises`             | On a Mac. Come closer. If the bridge dropped this Mac's bond, as after `forget`, forget the bridge in System Settings → Bluetooth, then pair again inside the pairing window |
 | `several bridges advertise over Bluetooth`                            | Name one: `--bridge XX:YY`                                           |
 | `refused this PC over Bluetooth because they are not paired`          | `wartui bluetooth pair`; after `forget`, or a bridge that forgot this PC, `pair --fresh` |
@@ -1425,12 +1425,12 @@ names the last one when its wait runs out:
 
 `status --link bluetooth` proves the link both ways. In its `bluetooth host` line,
 `resynced_bytes` above 0 is host frames lost between the P4 and the C6, `dropped_writes` above 0 is
-this host's writes lost on the C6, and `unbonded_kicks` is a host with no bond, or one silent after
-connecting, being dropped: often a phone or another PC. `last_disconnect` is an HCI code: `0x08`
-the link was lost to range or RF, `0x13` the host closed it, as every command does at exit, `0x16`
-the C6 closed it, and `0x3d` the encryption failed, as with a bond out of step. A capture keeps
-every status's Bluetooth host link, and `wartui analyze` names the link and any of those counts
-that rose.
+this host's writes lost on the C6, and `unbonded_kicks` is a host with no bond, or one that asked
+for nothing after connecting, being dropped: often a phone or another PC. `last_disconnect` is an
+HCI code: `0x08` the link was lost to range or RF, `0x13` the host closed it, as every command does
+at exit, `0x16` the C6 closed it, and `0x3d` the encryption failed, as with a bond out of step. A
+capture keeps every status's Bluetooth host link, and `wartui analyze` names the link and any of
+those counts that rose.
 
 ## When nothing arrives
 

@@ -118,10 +118,12 @@ subscription is refused. A central that has subscribed to neither stream 10 s af
 disconnected, 30 s while the bridge's pairing window is open, and so is a phone that stays
 unsubscribed for 30 s.
 
-A central that says nothing for 3 s after it connects is disconnected sooner, as a phone that has
-linked does when it reconnects with its app closed. The WardriveESP set then rests: it is off the
-air for 5 s, doubled for each silent central in a row up to 30 s, while the wartui set runs. An app
-opened during a rest links when the rest ends.
+A silent central is disconnected sooner: one that, 3 s after it connects, has asked nothing of
+either service and not begun to pair, as a phone that has linked is when it reconnects with its
+app closed. Discovering the services does not count: a phone's own Bluetooth stack does that by
+itself. The WardriveESP set then rests: it is off the air for 5 s, doubled for each silent central
+in a row up to 30 s, while the wartui set runs. An app opened during a rest links when the rest
+ends.
 
 ## Frames
 

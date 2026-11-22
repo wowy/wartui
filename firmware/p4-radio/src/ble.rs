@@ -170,8 +170,10 @@
 //! and counted in `unbonded_kicks`, so none holds the only connection without a bond or a phone's
 //! stream:
 //!
-//! - one silent [`QUIET_DEADLINE`] after connecting: no request, no pairing, no stream and no MTU
-//!   exchange;
+//! - one silent [`QUIET_DEADLINE`] after connecting: it has asked nothing of the bridge's two
+//!   services, begun no pairing, read no stream and exchanged no MTU. A phone's own Bluetooth
+//!   stack discovers the services by itself on connecting, so discovery does not count
+//!   ([`asks_of_services`]);
 //! - one encrypted without a stored bond on a connection made outside the window;
 //! - one that lost its bond, outside the window;
 //! - one neither bonded and encrypted nor reading the phone's stream [`PAIR_DEADLINE`] after
@@ -183,13 +185,13 @@
 //! ([`deadline`]).
 //!
 //! **A silent central rests the phones' set** (`wartui_proto::ble::Rest`). A phone that has linked
-//! connects with its app closed, says nothing, and is back as soon as it is dropped. So while
-//! phones are admitted, dropping a silent central also starts a rest: the phones' set is not
-//! started until it ends, and the wartui set runs through it alone, so a host reaches the bridge.
-//! [`accept`] wakes at the rest's end and starts both sets again. Each silent central in a row
-//! lengthens the next rest, up to `wartui_proto::ble::REST_MAX_MS`, and a phone that reads its
-//! stream starts them over. The C6 cannot tell which set a central connected on, so a silent one
-//! on the wartui set rests the phones' set too.
+//! connects with its app closed, asks nothing of either service, and is back as soon as it is
+//! dropped. So while phones are admitted, dropping a silent central also starts a rest: the
+//! phones' set is not started until it ends, and the wartui set runs through it alone, so a host
+//! reaches the bridge. [`accept`] wakes at the rest's end and starts both sets again. Each silent
+//! central in a row lengthens the next rest, up to `wartui_proto::ble::REST_MAX_MS`, and a phone
+//! that reads its stream starts them over. The C6 cannot tell which set a central connected on,
+//! so a silent one on the wartui set rests the phones' set too.
 //!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM** (`wartui_proto::bonds`). It
 //! waits up to [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the
@@ -357,8 +359,9 @@ const BONDS_POLL: Duration = Duration::from_millis(20);
 /// connection, by when the controller has already failed to resolve that central's address.
 const RESOLVING_SETTLE: Duration = Duration::from_millis(50);
 
-/// How long a central may say nothing after connecting. A wartui host encrypts or discovers the
-/// services within a second; a phone with its app closed never does.
+/// How long a central may stay silent after connecting: ask nothing of the bridge's two services
+/// and begin no pairing. A wartui host encrypts or reads the wartui service within a second; a
+/// phone with its app closed does neither.
 const QUIET_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The ATT MTU a link has before an exchange: a central that has asked for none.
@@ -1506,7 +1509,8 @@ struct Session {
     idle_since: Cell<Instant>,
     /// Raised when the stream or `idle_since` changes, for [`deadline`].
     idle_changed: Signal<NoopRawMutex, ()>,
-    /// The central has made a request or begun to pair, for [`QUIET_DEADLINE`].
+    /// The central has asked something of the bridge's two services or begun to pair, for
+    /// [`QUIET_DEADLINE`] ([`asks_of_services`]).
     alive: Cell<bool>,
     /// The central's address, in display order, for the log.
     peer: Mac,
@@ -1767,19 +1771,37 @@ async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! 
     }
 }
 
+/// Whether `event` asks something of the bridge's two services: a read, a write or a refused
+/// request on a characteristic of the wartui link or the WardriveESP service, or on a
+/// subscription to one. Discovery, MTU exchange and reads of the generic services are
+/// [`GattEvent::Other`] or name other handles, and never count: a phone's own Bluetooth stack
+/// sends them on connecting.
+fn asks_of_services(event: &GattEvent<'_, '_, DefaultPacketPool>, server: &Server<'_>) -> bool {
+    let handle = match event {
+        GattEvent::Read(read) => read.handle(),
+        GattEvent::Write(write) => write.handle(),
+        GattEvent::NotAllowed(refused) => refused.handle(),
+        GattEvent::Other(_) => return false,
+    };
+    let (link, phone) = (&server.link, &server.wardrive_esp);
+    let values = [link.up, link.down, phone.rx, phone.tx, phone.ctrl].map(|c| c.handle);
+    values.contains(&handle) || [link.up.cccd_handle, phone.tx.cccd_handle].contains(&Some(handle))
+}
+
 /// Handle the connection's events until it ends.
 async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, shared: &Shared) {
     let ble = &shared.ble;
     loop {
         let event = conn.next().await;
-        if matches!(
-            event,
-            GattConnectionEvent::Gatt { .. }
-                | GattConnectionEvent::PairingComplete { .. }
-                | GattConnectionEvent::PairingFailed(_)
-                | GattConnectionEvent::Encrypted { .. }
-                | GattConnectionEvent::BondLost
-        ) {
+        let alive = match &event {
+            GattConnectionEvent::Gatt { event } => asks_of_services(event, server),
+            GattConnectionEvent::PairingComplete { .. }
+            | GattConnectionEvent::PairingFailed(_)
+            | GattConnectionEvent::Encrypted { .. }
+            | GattConnectionEvent::BondLost => true,
+            _ => false,
+        };
+        if alive {
             session.alive.set(true);
         }
         match event {
