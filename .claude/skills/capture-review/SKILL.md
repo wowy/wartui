@@ -47,9 +47,10 @@ Then look at what the capture produced for the user, which the survey does not o
   rows. Check the formatting of each column (precision, empty fields, channel and
   frequency, odd SSIDs), and that the row count matches `analyze`. A capture is only useful once
   exported, so a defect here reaches WiGLE and WDGWars.
-- **Uploads.** The survey lists the `upload` rows. When the uploaded row count differs from
-  today's export, explain the difference, because the build that uploaded may have exported
-  differently. Report and leave it: never upload, retry or query the site.
+- **Uploads.** The survey lists the `upload` rows per site, WDGWars and WiGLE. When a site's
+  uploaded row count differs from today's export, explain the difference, because the build that
+  uploaded may have exported differently. Report and leave it: never upload, retry or query
+  either site.
 - **Code paths behind a finding.** When a finding points at a function, read it. A discarded
   return value, an unchecked status field or a column that is never written is often the real
   finding.
@@ -90,7 +91,7 @@ Drop these, they are settled policy:
   1.0, and the fix for another schema version's file is a new `--db`.
 - Safeguards for more than fourteen nodes (`plan::MAX_NODES`), one per node-bus slot.
 - `--lat/--lon` as a GPS fallback. It is test-only, and it marks a capture as test data.
-- Uploading. A review never runs `wartui upload` or touches the WDGWars endpoints.
+- Uploading. A review never runs `wartui upload` or touches the WDGWars or WiGLE endpoints.
 
 ## 4. Report
 

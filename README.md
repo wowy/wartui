@@ -99,7 +99,7 @@ be omitted.
 ```sh
 wartui run      # captures to wartui-2026-10-01-21-30-15.db
 wartui export   # writes wartui-2026-10-01-21-30-15.csv beside it
-wartui upload   # sends it to WDGWars, after confirming
+wartui upload   # sends it to WDGWars and WiGLE, after confirming
 ```
 
 Each run creates a new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the working directory, named for the
@@ -159,7 +159,7 @@ have no README; their `//!` module docs hold the detail.
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
-| `u`                    | Upload this capture to WDGWars, after asking                                 |
+| `u`                    | Upload this capture to WDGWars and WiGLE, after asking                       |
 | `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
 ### While waiting for GPS
@@ -205,8 +205,8 @@ next `run` restarts it clean. No key or flag assigns channels to a node. The set
 row only adds Bluetooth to the scan or takes it off; the bridge picks the node and shares that
 node's channels among the rest.
 
-`u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
-capture running.
+`u` asks before it uploads to WDGWars and WiGLE, sends each site only what is new since its last
+upload, and leaves the capture running.
 
 A node's `channels` line ends in `…` until its heartbeat, every 5 seconds once a node is assigned,
 says it holds its share.

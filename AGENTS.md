@@ -59,10 +59,11 @@ octets only for bridges, USB-attached boards and nodes with no slot; `wartui por
 attached board by its address, and `crates/wartui/README.md` § "Telling the boards apart" says why
 that works.
 
-**Never upload to WDGWars without asking the user directly first, every time.** That covers
-`wartui upload`, with or without `--yes`, and any request to its upload endpoints, such as curl.
-An upload publishes to the user's profile and cannot be taken back. Approval for one upload is
-not approval for the next. Tests use a local listener, never the real site.
+**Never upload to WDGWars or WiGLE without asking the user directly first, every time.** That
+covers `wartui upload`, with or without `--yes` or `--to`, and any request to either site's upload
+endpoints (`wdgwars.pl`, `api.wigle.net`), such as curl. An upload publishes to the user's profile
+and cannot be taken back. Approval for one upload, or for one site, is not approval for the next.
+Tests use a local listener, never the real sites.
 
 Each firmware, and `firmware/common` beside them, is a **separate workspace**
 (`exclude = ["firmware"]`): different target, own toolchain pin, own lockfile. `cargo test --workspace` never touches them.

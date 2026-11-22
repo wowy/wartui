@@ -14,7 +14,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `run`          | Capture a fleet into the store and watch it live                                    |
 | `export`       | Write a WiGLE CSV from a capture                                                    |
 | `analyze`      | Summarize a capture and what it lost; see "Analyzing a capture"                     |
-| `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
+| `upload`       | Upload a capture to WDGWars and WiGLE; see "Uploading"                              |
 | `sniff`        | Print every record the bridge's nodes send, decoded, a line per sighting            |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
@@ -250,46 +250,70 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 of its own, so a lost one is not counted. A restart is the node's sweep counter falling by half its
 range or more, which resets the `buffer full` baseline.
 
-### Uploading to WDGWars
+### Uploading
 
-`upload` sends a capture to the [WDGWars](https://wdgwars.pl) leaderboard. It builds the same CSV
-`export` would, gzips it in memory, and writes nothing to disk. Paste the site's API key in settings
-(`c`), or set `wdgwars` under `[api-keys]` in `wartui.toml`; see "Config file".
+`upload` sends a capture to every site it has credentials for: the [WDGWars](https://wdgwars.pl)
+leaderboard and [WiGLE](https://wigle.net). `--to` names one site. It builds the same CSV `export`
+would, gzips it in memory, and writes nothing to disk. Each site is sent the file under the
+capture's name, as `wartui-2026-09-18-14-30-07.csv.gz`.
+
+Paste the credentials in settings (`c`), or set them under `[api-keys]` in `wartui.toml`; see
+"Config file". WDGWars takes its API key (`wdgwars`). WiGLE takes the API Name and API Token its
+account page gives (`wigle-name`, `wigle-token`).
 
 ```sh
-wartui upload                     # the newest capture in this directory
+wartui upload                     # the newest capture, to every site with credentials
+wartui upload --to wigle          # to WiGLE only
 wartui upload --db tonight.db -y  # another capture, without asking
 ```
 
-| Flag                  | Default                  | What it is                    |
-|-----------------------|--------------------------|-------------------------------|
-| `--db PATH`           | newest in this directory | The capture to read           |
-| `--recapture SECONDS` | `3600`                   | How wide each row's window is |
-| `--config PATH`       | per-OS path              | Where to read the settings    |
-| `--yes`, `-y`         | off                      | Upload without asking         |
-| `--resend`            | off                      | Send everything, not just new |
+| Flag                  | Default                     | What it is                                               |
+|-----------------------|-----------------------------|----------------------------------------------------------|
+| `--db PATH`           | newest in this directory    | The capture to read                                      |
+| `--to SITE`           | every site with credentials | `wdgwars` or `wigle`: send to this site only             |
+| `--recapture SECONDS` | `3600`, or `5` for WiGLE    | How wide each row's window is; given, it is every site's |
+| `--config PATH`       | per-OS path                 | Where to read the settings                               |
+| `--yes`, `-y`         | off                         | Upload without asking                                    |
+| `--resend`            | off                         | Send everything, not just new                            |
 
-It prints the same counts as `export`, plus the CSV's size and its compressed size, then asks
-`Upload to WDGWars? [y/N]`. Without a terminal to ask on, it refuses before building the upload
-unless given `--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim`
-or `--lat`/`--lon` is never uploaded; `export` warns about such a capture too. The site takes at
-most 40 MB (40,000,000 bytes) of CSV, counted by the CSV's size rather than the compressed one, so a
-larger capture is refused before sending. Sizes are printed in decimal units.
+It prints each site's summary under the site's name: the same counts as `export`, plus the CSV's
+size and its compressed size. Then it asks once for every site with something to send:
+`Upload to WDGWars and WiGLE? [y/N]`, or the one site's name. Without a terminal to ask on, it
+refuses before building anything unless given `--yes`. A site with no positioned rows is not sent.
+A capture made with `--sim` or `--lat`/`--lon` is never uploaded to any site; `export` warns about
+such a capture too. Sizes are printed in decimal units.
 
-A repeat upload sends only sightings stored since the last upload the site queued. The cutoff is the
-last sighting that upload covered, in the order the capture stored them, so uploading a capture that
-is still running loses nothing. A job the site reports failed does not count. `upload` needs to
-write the capture to record the upload, and refuses before sending if it cannot. The confirm summary
-names the last job (`previously`), and `--resend` sends everything again, which a decoder fix needs.
-A network heard within the recapture width on both sides of the last upload gets a second row, which
-WDGWars skips when scoring. A sighting with no position counts as sent once an upload has covered
-it.
+The sites differ in three ways:
 
-The site queues the file and imports it later. `upload` polls until the import ends, saying each
-change of state, then prints the site's counts (`imported`, `captured`, `updated`, and any others).
+|                | WDGWars                                             | WiGLE                                                                |
+|----------------|-----------------------------------------------------|----------------------------------------------------------------------|
+| Default window | 1 hour: it scores a network once an hour per user   | 5 seconds: it places a network from every observation                |
+| Size limit     | 40 MB (40,000,000 bytes) of CSV, before compression | 180 MiB of the gzipped file                                          |
+| Once it queues | `upload` polls the job until the import ends        | `upload` records the transaction; wigle.net/uploads shows the result |
 
-Once the site has queued the job, the upload has happened, so `upload` exits zero unless the site
-reports the import failed. Rerunning it would send a duplicate.
+A site over its limit is refused before anything is sent to it, and the other site still goes.
+
+A repeat upload sends a site only the sightings stored since its own last upload. An upload to one
+site is no cutoff for the other. The cutoff is the last sighting that upload covered, in the order
+the capture stored them, so uploading a capture that is still running loses nothing. An upload the
+site reports failed does not count. The summary names the site's last upload (`previously`, with
+its job or transaction), and `--resend` sends everything again, which a decoder fix needs. `upload`
+writes the capture to record each upload, and refuses before sending if it cannot. A network heard
+within the recapture width on both sides of the last upload gets a second row, which WDGWars skips
+when scoring. A sighting with no position counts as sent once an upload has covered it.
+
+Every site with something to send is sent to, WDGWars first, whatever happened to the other. Each
+error is printed and names its site. `upload` exits non-zero when a site is refused before it
+queues the upload, or WDGWars reports the import failed, and the last line names each such site
+(`the upload to WiGLE failed`). A rerun is safe: a site that queued the upload reads as everything
+uploaded.
+
+#### WDGWars
+
+The site queues the file as a job and imports it later. `upload` prints
+`uploaded; WDGWars queued it as job 42`, polls until the import ends, saying each change of state,
+then prints the site's counts (`imported`, `captured`, `updated`, and any others). Once the site
+has queued the job, the upload has happened, so only a failed import makes the exit non-zero.
 
 | After queuing                                          | What `upload` does                                 |
 |--------------------------------------------------------|----------------------------------------------------|
@@ -300,17 +324,63 @@ reports the import failed. Rerunning it would send a duplicate.
 
 When it stops early the import carries on; the job's URL or your profile on wdgwars.pl shows the
 result. The wait is short because someone sits at the terminal for it and nothing needs the result
-to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused key (with the site's reason), an oversized file and any other
-error status are reported in plain words and exit non-zero. Redirects are not followed.
+to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused
+key (with the site's reason), an oversized file and any other error status are reported in plain
+words and exit non-zero. Redirects are not followed.
+
+#### WiGLE
+
+`upload` posts the file to WiGLE's v3 upload endpoint, `https://api.wigle.net/api/v3/upload`,
+signed in with HTTP Basic: the API Name as the user, the API Token as the password. WiGLE's answer
+names a transaction, and `upload` prints it:
+
+```text
+uploaded; WiGLE queued it as transaction 20261122-00017. Its import carries on; check https://wigle.net/uploads for the result.
+```
+
+WiGLE's API names no states for an import, so `upload` does not follow it, and the capture records
+the transaction as `queued`. A warning in WiGLE's answer is printed as `WiGLE warns: …`. Sending
+the file has no time limit, and redirects are not followed.
+
+| WiGLE answers      | What `upload` says                                                             |
+|--------------------|--------------------------------------------------------------------------------|
+| 401                | `WiGLE rejected the API name and token`, with WiGLE's message when it sent one |
+| 429                | `WiGLE has taken too many uploads today`, with WiGLE's message                 |
+| `"success": false` | `WiGLE refused:` and WiGLE's message                                           |
+| A redirect         | `WiGLE redirected to` and where                                                |
+| Any other status   | `WiGLE answered 400:` and WiGLE's message, or its answer quoted                |
+
+A WiGLE name without a token, or a token without a name, is refused by name
+(`WiGLE needs both an API name and an API token; …`), and WDGWars still goes.
 
 #### From the fleet view
 
-`u` uploads the capture `run` is writing, with the key in settings when `u` is pressed. It shows
-the same summary in a box; `y` sends and any other key cancels. The capture keeps running
-throughout. The footer follows the upload on a line of its own (`upload: sending 1.2 MB`,
-`upload: job 42 queued`, the site's counts or why it stopped), which stays until the next `u`. A
-second `u` while one is under way is refused. Quitting abandons an upload still being sent, and the
-site queues nothing; one the site already queued is recorded in the capture.
+`u` uploads the capture `run` is writing to every site with credentials in settings when `u` is
+pressed. With none, it shows `no upload credentials; paste a key in settings (c)`. It prepares
+every site (`upload: preparing…`), then shows one box:
+
+- With one site, the box is that site's summary, titled ` upload to WDGWars ` or ` upload to WiGLE `.
+- With two, it is titled ` upload `, with a compact section per site under the site's name: rows,
+  sizes and the last upload. A site with nothing new or no positioned rows gets one line saying so.
+  A site that cannot upload gets `cannot upload; see the footer`, and its reason is on the footer.
+
+`y` sends to every site with something to send (`y upload both` when there are two) and any other
+key cancels. The capture keeps running throughout. The footer follows each site on a line of its
+own, WDGWars first, and each stays until the next `u`:
+
+| Footer line                                                          | What it means                                |
+|----------------------------------------------------------------------|----------------------------------------------|
+| `upload: WDGWars sending 1.2 MB`                                     | Sending the file                             |
+| `upload: WDGWars job 42 queued`, `… job 42 processing`               | Where the job stands                         |
+| `upload: WDGWars job 42 imported 1,204  captured 3`                  | The import ended, with the site's counts     |
+| `upload: WDGWars job 42 queued; check wdgwars.pl for the result (…)` | wartui stopped following the job             |
+| `upload: WDGWars job 42 failed: …`                                   | The import failed                            |
+| `upload: WiGLE sending 655 KB`                                       | Sending the file                             |
+| `upload: WiGLE queued as 20261122-00017; see wigle.net/uploads`      | Queued; `; WiGLE warns: …` follows a warning |
+| `upload: WiGLE failed: …`, `upload: WDGWars failed: …`               | Refused, or not queued                       |
+
+A second `u` while one is under way is refused. Quitting abandons an upload still being sent, and
+the site queues nothing; one a site already queued is recorded in the capture.
 
 ### Config file
 
@@ -835,7 +905,7 @@ assigned"), the settings' `bluetooth` row toggles Bluetooth, and quitting stops 
 | `c`                    | Open config (settings)                                                       |
 | `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `p`                    | Power-cycle the selected node through the carrier board, after asking        |
-| `u`                    | Upload this capture to WDGWars, after asking                                 |
+| `u`                    | Upload this capture to WDGWars and WiGLE, after asking                       |
 | `q` / `Esc` / `ctrl-c` | Quit: stop the bridge's scan and commit the last batch                       |
 
 ### While waiting for GPS
@@ -857,8 +927,8 @@ gps` in settings turns it back on.
 Only `c`, `p` and the pop-up's `Enter` reach the engine, and no key sets channels; the bridge
 authors every share.
 
-`u` asks before it sends, sends only what is new since the last upload, and leaves the capture
-running; see "Uploading to WDGWars".
+`u` asks before it sends, sends each site only what is new since its last upload, and leaves the
+capture running; see "Uploading".
 
 `p` asks before it power-cycles the selected node, and works on a node that has stopped
 heartbeating, as long as it has a slot. A bridge with no carrier refuses it, and so does a
