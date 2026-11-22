@@ -471,7 +471,8 @@ fn ble_error_words_weak_case_apart_when_bridge_only_dropped_this_pc() {
     assert!(refused.contains("refused this PC over Bluetooth because they are not paired"));
     let dropped = TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() }.to_string();
     assert!(dropped.contains("dropped this PC over Bluetooth before serving it"), "{dropped}");
-    assert!(dropped.contains("if they are not paired"), "{dropped}");
+    // The fix leads, so a fault box that cuts the reason short keeps it.
+    assert!(dropped.starts_with("if this PC is not paired"), "{dropped}");
 }
 
 const OTHER: [u8; 6] = [0x02, 0x00, 0x5E, 0x10, 0xA1, 0xB0];

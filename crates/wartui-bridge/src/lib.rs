@@ -179,8 +179,8 @@ pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware is a CH343 that does not
 pub enum TransportError {
     /// No CH343 is attached. A bridge on any other port is reached only by its path.
     #[error(
-        "no bridge found: no CH343 is attached, and a bridge on any other port is reached \
-         only by its path: --bridge PATH. {}",
+        "name a bridge on any other port by its path, --bridge PATH: no bridge found, as no \
+         CH343 is attached. {}",
         NO_FIRMWARE_P4
     )]
     NoBridgeFound,
@@ -267,9 +267,9 @@ pub enum TransportError {
     },
     /// The bridge dropped this host before serving it, when it drops a host it holds no bond for.
     #[error(
-        "the bridge {bridge} dropped this PC over Bluetooth before serving it, as it drops a PC \
-         it is not paired with; if they are not paired, pair once with \
-         `wartui bluetooth pair --bridge {bridge}`"
+        "if this PC is not paired, pair once with `wartui bluetooth pair --bridge {bridge}`: the \
+         bridge {bridge} dropped this PC over Bluetooth before serving it, as it drops a PC it is \
+         not paired with"
     )]
     MaybeNotBonded {
         /// The bridge, as its last two octets.

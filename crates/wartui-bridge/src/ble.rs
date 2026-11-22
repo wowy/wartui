@@ -1878,11 +1878,15 @@ mod tests {
 
     #[test]
     fn ble_connect_timeout_fits_fault_box_when_terminal_is_80_columns() {
-        // The view's fault box draws 3 lines of the width less 2 (`footer::fault_lines` in
-        // `wartui`).
+        // At 80 columns the view's fault box takes 3 lines of the width less 2, wrapped on words
+        // (`footer::fault_lines` in `wartui`). A greedy wrap wastes at most the longest word less
+        // one character at each line end but the last, so this bound proves the fit.
         for label in ["44:C0", "02:00:5E:10:44:C0"] {
             let line = format!("link down: {}", connect_timeout_text(label, true, true));
-            assert!(line.chars().count() <= 3 * 78, "{line}");
+            let longest_word =
+                line.split_whitespace().map(|word| word.chars().count()).max().unwrap_or(0);
+            let chars = line.chars().count();
+            assert!(chars + 2 * longest_word.saturating_sub(1) <= 3 * 78, "{line}");
         }
     }
 
