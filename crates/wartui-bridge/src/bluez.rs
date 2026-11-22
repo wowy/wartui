@@ -55,7 +55,7 @@ pub const PAIR_WITHIN: Duration = Duration::from_secs(40);
 const POP_EVERY: Duration = Duration::from_millis(250);
 
 /// Why a call to BlueZ failed.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum BluezError {
     /// The system bus or BlueZ on it did not answer.
     #[error("BlueZ did not answer over D-Bus ({0}); check the bluetooth service is running")]
@@ -63,6 +63,9 @@ pub enum BluezError {
     /// The bridge ended the pairing.
     #[error("the bridge refused the pairing ({0})")]
     Rejected(String),
+    /// BlueZ never reached the device, so the pairing did not start.
+    #[error("BlueZ: {0}")]
+    NotReached(String),
     /// Anything else, in BlueZ's words.
     #[error("BlueZ: {0}")]
     Failed(String),
@@ -149,7 +152,8 @@ pub fn remove(device: &Device) -> Result<(), BluezError> {
 /// when BlueZ takes one. A device already paired is a success.
 ///
 /// # Errors
-/// [`BluezError::Rejected`] when the bridge ended the pairing, else [`BluezError`].
+/// [`BluezError::Rejected`] when the bridge ended the pairing, [`BluezError::NotReached`] when
+/// BlueZ never reached it, else [`BluezError`].
 pub fn pair(device: &Device) -> Result<(), BluezError> {
     let conn = Connection::new_system().map_err(unreachable)?;
     let agent = register_agent(&conn);
@@ -227,7 +231,8 @@ fn call_pair(conn: &Connection, device: &Device) -> Result<(), BluezError> {
 /// not a refusal.
 ///
 /// # Errors
-/// [`BluezError::Rejected`] when the bridge ended the pairing, else [`BluezError::Failed`].
+/// [`BluezError::Rejected`] when the bridge ended the pairing, [`BluezError::NotReached`] when
+/// BlueZ never reached it, else [`BluezError::Failed`].
 pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
     let short = name.strip_prefix("org.bluez.Error.").unwrap_or(name);
     let said = if text.is_empty() { short.to_owned() } else { format!("{short}: {text}") };
@@ -237,6 +242,7 @@ pub fn pair_outcome(name: &str, text: &str) -> Result<(), BluezError> {
         | "AuthenticationRejected"
         | "AuthenticationCanceled"
         | "AuthenticationTimeout" => Err(BluezError::Rejected(said)),
+        "ConnectionAttemptFailed" => Err(BluezError::NotReached(said)),
         _ => Err(BluezError::Failed(said)),
     }
 }
@@ -345,10 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn bluez_reads_pairing_as_failed_when_bluez_never_reached_the_bridge() {
+    fn bluez_reads_pairing_as_not_reached_when_bluez_never_reached_the_bridge() {
         let outcome = pair_outcome("org.bluez.Error.ConnectionAttemptFailed", "Page Timeout");
         let said = "ConnectionAttemptFailed: Page Timeout".to_owned();
-        assert_eq!(outcome, Err(BluezError::Failed(said)));
+        assert_eq!(outcome, Err(BluezError::NotReached(said)));
     }
 
     #[test]

@@ -346,6 +346,10 @@ Timeout`, each straight after a `forget`, as on 2026-11-17 and 2026-11-19
 the pairing window over USB, which holds phones out for 15 s, so the phone was not on the air for
 those.
 
+`wartui bluetooth pair` tries a second time, 1 s later, when BlueZ answers that way. On
+2026-11-22, with that host build, `forget` then `pair` bonded 40 of 40, in 16.9 to 17.4 s: BlueZ
+did not reach the bridge once, and the second try paired.
+
 ## Not measured
 
 - The advertisement's raw bytes: `btmon` needs root on the bench PC. BlueZ listed the WardriveESP
