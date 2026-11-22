@@ -316,6 +316,18 @@ WardriveESP set returned, kept the default MTU, never encrypted and never subscr
 So the phone's own Bluetooth stack sends requests on connecting, and none of them is to the
 bridge's services. At the longest rest a knock holds the bridge for about 3 s in every 34 s.
 
+**The app beside the rests**, on 2026-11-22, same build. The phone had knocked through the night:
+`unbonded_kicks` stood at 1,012 after 10 h, one knock in about every 34 s.
+
+| Check | Result |
+| --- | --- |
+| The app opened while the phone knocked, rests at 30 s | linked and scanning within 0.3 s of the rest's end, and stayed linked |
+| A `status` over USB while the open app was linked | the app was dropped, and was linked and scanning again within 2.3 s of USB's 15 s ending |
+| The app swiped away while linked | it kept its session, as on the day before, until a `status` over USB took the bridge; the phone then knocked |
+
+The app's first request therefore comes well inside the 3 s a central is given. Whether a link
+starts the rests over at 5 s was not watched: the app never let go by itself.
+
 **The bonded PC beside the knocking phone**, no bridge named, so each run scans:
 
 | Check | Result |
