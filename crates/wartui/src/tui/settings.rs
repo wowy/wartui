@@ -72,7 +72,8 @@ pub struct Settings {
 }
 
 /// One row of the settings modal. A new setting adds a variant here and a row in
-/// [`draw_settings_modal`].
+/// [`draw_settings_modal`]. The API key rows take typed text, through
+/// [`ConfigModal::text_row`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Pool,
@@ -83,10 +84,12 @@ enum Field {
     WaitForGps,
     ExcludedSsids,
     WdgwarsKey,
+    WigleName,
+    WigleToken,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 8] = [
+const FIELDS: [Field; 10] = [
     Field::Pool,
     Field::Fan,
     Field::Bluetooth,
@@ -95,6 +98,8 @@ const FIELDS: [Field; 8] = [
     Field::WaitForGps,
     Field::ExcludedSsids,
     Field::WdgwarsKey,
+    Field::WigleName,
+    Field::WigleToken,
 ];
 
 impl Field {
@@ -145,6 +150,10 @@ pub(super) struct ConfigModal {
     wait_for_gps: bool,
     /// The WDGWars API key, typed or pasted. Empty means not set.
     wdgwars_key: String,
+    /// WiGLE's API Name, typed or pasted. Empty means not set.
+    wigle_name: String,
+    /// WiGLE's API Token, typed or pasted. Empty means not set.
+    wigle_token: String,
     /// The SSIDs never captured, edited on [`Page::Excluded`].
     excluded: Vec<String>,
     /// Which page of the modal is showing.
@@ -208,7 +217,7 @@ impl ConfigModal {
     /// | remember | flips |
     /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
-    /// | key | none; [`Self::on_key`] types into it |
+    /// | wdgwars, wigle name, wigle token | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
@@ -233,8 +242,8 @@ impl ConfigModal {
                     self.wait_for_gps = !self.wait_for_gps;
                 }
             }
-            // A text row, and a row that opens a page. `on_key` handles both.
-            Field::WdgwarsKey | Field::ExcludedSsids => {}
+            // Text rows, and a row that opens a page. `on_key` handles both.
+            Field::WdgwarsKey | Field::WigleName | Field::WigleToken | Field::ExcludedSsids => {}
         }
     }
 }
@@ -288,10 +297,28 @@ impl ConfigModal {
             remember_bridge: settings.bridge_memory.is_enabled(),
             // The file's, since a run reads it only at launch.
             wait_for_gps: settings.saved.gps.waits_for_fix(),
-            // Nor this one. It is what the file holds, hand edits included.
+            // Nor these. They are what the file holds, hand edits included.
             wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
+            wigle_name: settings.saved.api_keys.wigle_name.clone(),
+            wigle_token: settings.saved.api_keys.wigle_token.clone(),
             excluded: snapshot.excluded_ssids.clone(),
             page: Page::Main,
+        }
+    }
+
+    /// The selected row's text, when it is one of the API key rows.
+    fn text_row(&mut self) -> Option<&mut String> {
+        match self.selected {
+            Field::WdgwarsKey => Some(&mut self.wdgwars_key),
+            Field::WigleName => Some(&mut self.wigle_name),
+            Field::WigleToken => Some(&mut self.wigle_token),
+            Field::Pool
+            | Field::Fan
+            | Field::Bluetooth
+            | Field::WardriveEsp
+            | Field::RememberBridge
+            | Field::WaitForGps
+            | Field::ExcludedSsids => None,
         }
     }
 
@@ -311,20 +338,20 @@ impl ConfigModal {
             };
             return ModalAction::Stay;
         }
-        // The key row is a text field. Letters type there rather than move or close.
-        if self.selected == Field::WdgwarsKey {
+        // The key rows are text fields. Letters type there rather than move or close.
+        if let Some(text) = self.text_row() {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('u') if control => {
-                    self.wdgwars_key.clear();
+                    text.clear();
                     return ModalAction::Stay;
                 }
                 KeyCode::Char(c) if !control => {
-                    self.wdgwars_key.push(c);
+                    text.push(c);
                     return ModalAction::Stay;
                 }
                 KeyCode::Backspace => {
-                    self.wdgwars_key.pop();
+                    text.pop();
                     return ModalAction::Stay;
                 }
                 KeyCode::Char(_) => return ModalAction::Stay,
@@ -405,20 +432,21 @@ impl ConfigModal {
         self.page = Page::Main;
     }
 
-    /// A bracketed paste. Appended to the key when the modal is on its row, or to the
-    /// SSID being typed on the excluded-SSIDs page, and ignored anywhere else. Control
-    /// characters are dropped from both, so a trailing newline never reaches the file.
-    /// The key drops whitespace too, which an SSID may hold.
+    /// A bracketed paste. Appended to the selected API key row, or to the SSID being
+    /// typed on the excluded-SSIDs page, and ignored anywhere else. Control characters
+    /// are dropped from both, so a trailing newline never reaches the file. The key rows
+    /// drop whitespace too, which an SSID may hold.
     pub(super) fn paste(&mut self, text: &str) {
         if let Page::Excluded { input: Some(input), error, .. } = &mut self.page {
             input.extend(text.chars().filter(|c| !c.is_control()));
             *error = None;
             return;
         }
-        if self.page != Page::Main || self.selected != Field::WdgwarsKey {
+        if self.page != Page::Main {
             return;
         }
-        self.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
+        let Some(row) = self.text_row() else { return };
+        row.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
     }
 }
 
@@ -583,7 +611,11 @@ fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf,
             bridge_rate_hz: settings.saved.gps.bridge_rate_hz,
             wait_for_fix,
         },
-        api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
+        api_keys: config::ApiKeys {
+            wdgwars: modal.wdgwars_key.trim().to_owned(),
+            wigle_name: modal.wigle_name.trim().to_owned(),
+            wigle_token: modal.wigle_token.trim().to_owned(),
+        },
     };
     save(settings, written)
 }
@@ -633,7 +665,7 @@ pub(super) fn link_written(
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 14, frame.area());
+    let area = centered_rect(48, 16, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -666,6 +698,12 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         Line::from(Span::styled(format!("{label:<18}◂ {value} ▸"), styled(field)))
     };
     let on_off = |on: bool| if on { "on" } else { "off" };
+    let text_row = |label: &str, value: &str, field: Field| {
+        Line::from(Span::styled(format!("{label:<18}  {value}"), styled(field)))
+    };
+    // What fits right of the 18-wide label column and its two spaces.
+    let value_width = usize::from(inner.width).saturating_sub(20);
+    const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
     let lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
@@ -706,16 +744,15 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         )),
         Line::default(),
         Line::from("api keys"),
-        Line::from(Span::styled(
-            format!("{:<18}  {}", "wdgwars", mask_key(&modal.wdgwars_key)),
-            styled(Field::WdgwarsKey),
-        )),
+        text_row("wdgwars", &mask_key(&modal.wdgwars_key), Field::WdgwarsKey),
+        text_row("wigle name", &fit_name(&modal.wigle_name, value_width), Field::WigleName),
+        text_row("wigle token", &mask_key(&modal.wigle_token), Field::WigleToken),
         Line::default(),
-        // The one key the row needs that nothing else on screen says.
+        // The one key a text row needs that nothing else on screen says.
         Line::from(match modal.selected {
-            Field::WdgwarsKey if !modal.wdgwars_key.is_empty() => {
-                "ctrl-u clear · enter save · esc cancel"
-            }
+            Field::WdgwarsKey if !modal.wdgwars_key.is_empty() => CLEAR_TIP,
+            Field::WigleName if !modal.wigle_name.is_empty() => CLEAR_TIP,
+            Field::WigleToken if !modal.wigle_token.is_empty() => CLEAR_TIP,
             Field::ExcludedSsids => "enter open · esc cancel",
             _ => "enter save · esc cancel",
         }),
@@ -768,11 +805,29 @@ fn excluded_page_lines(
     lines
 }
 
-/// A key as the modal shows it, so a screen share or a photo does not leak it.
+/// What an empty API key row shows.
+const NOT_SET: &str = "(not set, type or paste)";
+
+/// The wigle name row's value: the whole name, or as much as fits in `width` and `…`.
+/// WiGLE's account page shows the name openly, so the row does too.
+fn fit_name(name: &str, width: usize) -> String {
+    if name.is_empty() {
+        return NOT_SET.to_owned();
+    }
+    if name.chars().count() <= width {
+        return name.to_owned();
+    }
+    let mut shown: String = name.chars().take(width.saturating_sub(1)).collect();
+    shown.push('…');
+    shown
+}
+
+/// A secret as the wdgwars and wigle token rows show it, so a screen share or a photo
+/// does not leak it.
 ///
 /// | Length | Shown |
 /// |---|---|
-/// | 0 | `(not set, type or paste)` |
+/// | 0 | [`NOT_SET`] |
 /// | 1–3 | the whole key |
 /// | 4–9 | `•` × (length − 3), then the last 3 |
 /// | 10+ | the first 1–3, `•` × 6, then the last 3 |
@@ -784,7 +839,7 @@ fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     let n = chars.len();
     if n == 0 {
-        return "(not set, type or paste)".to_owned();
+        return NOT_SET.to_owned();
     }
     let tail = n.min(3);
     let head = n.saturating_sub(9).min(3);
@@ -1652,39 +1707,77 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(code, modifiers), snapshot, &tx);
     }
 
-    #[test]
-    fn ui_types_letters_into_key_when_wdgwars_row_selected() {
-        let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        select_wdgwars(&mut ui, &snapshot, &tx);
-        assert_eq!(FIELDS.last(), Some(&Field::WdgwarsKey), "the last row");
+    /// The rows that take typed text.
+    const TEXT_ROWS: [Field; 3] = [Field::WdgwarsKey, Field::WigleName, Field::WigleToken];
 
-        for c in "hjkq".chars() {
-            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+    /// What the modal holds for the text row `field`.
+    fn text_of(modal: &ConfigModal, field: Field) -> &str {
+        match field {
+            Field::WdgwarsKey => &modal.wdgwars_key,
+            Field::WigleName => &modal.wigle_name,
+            Field::WigleToken => &modal.wigle_token,
+            other => panic!("{other:?} is not a text row"),
         }
-
-        let modal = ui.modal().expect("q types rather than closes");
-        assert_eq!(modal.selected, Field::WdgwarsKey, "j and k type rather than move");
-        assert_eq!(modal.wdgwars_key, "hjkq");
-        assert!(rx.try_recv().is_err(), "nothing was sent");
     }
 
     #[test]
-    fn ui_edits_key_when_backspace_or_ctrl_u_pressed() {
+    fn ui_types_letters_into_row_when_text_row_selected() {
+        let snapshot = busy();
+        for field in TEXT_ROWS {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(field, &mut ui, &snapshot, &tx);
+
+            for c in "hjklq".chars() {
+                press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+            }
+
+            let modal = ui.modal().expect("q types rather than closes");
+            assert_eq!(modal.selected, field, "j and k type rather than move");
+            assert_eq!(text_of(modal, field), "hjklq", "{field:?}");
+            for other in TEXT_ROWS.into_iter().filter(|&other| other != field) {
+                assert_eq!(text_of(modal, other), "", "{field:?} typed into {other:?}");
+            }
+            assert!(rx.try_recv().is_err(), "nothing was sent");
+        }
+    }
+
+    #[test]
+    fn ui_edits_row_when_backspace_or_ctrl_u_pressed_on_text_row() {
+        let snapshot = busy();
+        for field in TEXT_ROWS {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(field, &mut ui, &snapshot, &tx);
+            for c in "abc".chars() {
+                press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+            }
+
+            press(&mut ui, KeyCode::Backspace, KeyModifiers::NONE, &snapshot);
+            assert_eq!(text_of(ui.modal().expect("open"), field), "ab", "{field:?}");
+
+            press(&mut ui, KeyCode::Char('x'), KeyModifiers::CONTROL, &snapshot);
+            assert_eq!(text_of(ui.modal().expect("open"), field), "ab", "ctrl-x types nothing");
+
+            press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
+            assert_eq!(text_of(ui.modal().expect("open"), field), "", "{field:?}");
+        }
+    }
+
+    #[test]
+    fn ui_reaches_wigle_rows_and_stops_when_down_pressed_from_wdgwars_row() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         select_wdgwars(&mut ui, &snapshot, &tx);
-        for c in "abc".chars() {
-            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        assert_eq!(FIELDS.last(), Some(&Field::WigleToken), "the last row");
+
+        for expected in [Field::WigleName, Field::WigleToken, Field::WigleToken] {
+            press(&mut ui, KeyCode::Down, KeyModifiers::NONE, &snapshot);
+            assert_eq!(ui.modal().expect("open").selected, expected);
         }
-
-        press(&mut ui, KeyCode::Backspace, KeyModifiers::NONE, &snapshot);
-        assert_eq!(ui.modal().expect("open").wdgwars_key, "ab");
-
-        press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
-        assert_eq!(ui.modal().expect("open").wdgwars_key, "");
+        press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
+        assert_eq!(ui.modal().expect("open").selected, Field::WigleName);
     }
 
     #[test]
@@ -1700,17 +1793,19 @@ mod tests {
     }
 
     #[test]
-    fn ui_appends_paste_without_whitespace_when_wdgwars_row_selected() {
+    fn ui_appends_paste_without_whitespace_when_text_row_selected() {
         let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        select_wdgwars(&mut ui, &snapshot, &tx);
-        press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE, &snapshot);
+        for field in TEXT_ROWS {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(field, &mut ui, &snapshot, &tx);
+            press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE, &snapshot);
 
-        ui.on_modal_paste(" abc\tdef\r\n");
+            ui.on_modal_paste(" abc\tdef\u{7}\r\n");
 
-        let modal = ui.modal().expect("a pasted newline does not save");
-        assert_eq!(modal.wdgwars_key, "xabcdef");
+            let modal = ui.modal().expect("a pasted newline does not save");
+            assert_eq!(text_of(modal, field), "xabcdef", "{field:?}");
+        }
     }
 
     #[test]
@@ -1727,7 +1822,9 @@ mod tests {
 
         let modal = ui.modal().expect("open");
         assert_eq!(modal.selected, Field::Pool);
-        assert_eq!(modal.wdgwars_key, "");
+        for field in TEXT_ROWS {
+            assert_eq!(text_of(modal, field), "", "{field:?}");
+        }
     }
 
     #[test]
@@ -1749,10 +1846,42 @@ mod tests {
     }
 
     #[test]
-    fn ui_keeps_hand_written_key_when_enter_pressed_without_touching_it() {
+    fn ui_saves_wigle_name_and_token_that_reload_when_enter_pressed() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[api-keys]\nwdgwars = \"by-hand-key\"\n").unwrap();
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::WigleName, &mut ui, &snapshot, &tx);
+        for c in "AIDname ".chars() {
+            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        }
+        press(&mut ui, KeyCode::Down, KeyModifiers::NONE, &snapshot);
+        ui.on_modal_paste("exampletoken789");
+
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
+
+        assert!(ui.modal().is_none(), "Enter saves and closes on the token row too");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.api_keys.wigle_name, "AIDname", "trimmed");
+        assert_eq!(saved.api_keys.wigle_token, "exampletoken789");
+        assert_eq!(saved.api_keys.wdgwars, "");
+        assert_eq!(ui.saved().api_keys.wigle_token, "exampletoken789", "the view knows it too");
+
+        // And the next opening shows what the file holds.
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        let modal = ui.modal().expect("open");
+        assert_eq!(modal.wigle_name, "AIDname");
+        assert_eq!(modal.wigle_token, "exampletoken789");
+    }
+
+    #[test]
+    fn ui_keeps_hand_written_keys_when_enter_pressed_without_touching_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let text = "[api-keys]\nwdgwars = \"by-hand-key\"\nwigle-name = \"hand-name\"\n\
+                    wigle-token = \"hand-token\"\n";
+        std::fs::write(&target, text).unwrap();
         let saved = config::load(Some(&target)).unwrap();
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
@@ -1765,6 +1894,8 @@ mod tests {
 
         let file = config::load(Some(&target)).expect("a valid file");
         assert_eq!(file.api_keys.wdgwars, "by-hand-key");
+        assert_eq!(file.api_keys.wigle_name, "hand-name");
+        assert_eq!(file.api_keys.wigle_token, "hand-token");
     }
 
     #[test]
@@ -1792,7 +1923,10 @@ mod tests {
     fn draw_shows_masked_key_and_never_the_whole_key_when_modal_open() {
         let snapshot = busy();
         let saved = config::Config {
-            api_keys: config::ApiKeys { wdgwars: "abcSECRETxyz".to_owned() },
+            api_keys: config::ApiKeys {
+                wdgwars: "abcSECRETxyz".to_owned(),
+                ..config::ApiKeys::default()
+            },
             ..config::Config::default()
         };
         let mut ui = Ui::new(Settings { saved, ..Settings::default() });
@@ -1812,17 +1946,96 @@ mod tests {
 
     /// The modal drawn at 120×30, opened with `key` saved and the cursor on `field`.
     fn modal_rendered(key: &str, field: Field) -> String {
+        let keys = config::ApiKeys { wdgwars: key.to_owned(), ..config::ApiKeys::default() };
+        modal_terminal(keys, field).backend().to_string()
+    }
+
+    /// The terminal at 120×30 with the modal open, `keys` saved and the cursor on `field`.
+    fn modal_terminal(keys: config::ApiKeys, field: Field) -> Terminal<TestBackend> {
         let snapshot = busy();
-        let saved = config::Config {
-            api_keys: config::ApiKeys { wdgwars: key.to_owned() },
-            ..config::Config::default()
-        };
+        let saved = config::Config { api_keys: keys, ..config::Config::default() };
         let mut ui = Ui::new(Settings { saved, ..Settings::default() });
         let (tx, _rx) = mpsc::channel(4);
         select(field, &mut ui, &snapshot, &tx);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
-        terminal.backend().to_string()
+        terminal
+    }
+
+    /// `keys` holding only WiGLE's name and token.
+    fn wigle_keys(name: &str, token: &str) -> config::ApiKeys {
+        config::ApiKeys {
+            wigle_name: name.to_owned(),
+            wigle_token: token.to_owned(),
+            ..config::ApiKeys::default()
+        }
+    }
+
+    #[test]
+    fn draw_shows_wigle_name_in_full_and_token_masked_when_modal_open() {
+        let keys = wigle_keys("AIDexamplename", "tokSECRETend");
+        let rendered = modal_terminal(keys, Field::Pool).backend().to_string();
+
+        assert!(rendered.contains("wigle name          AIDexamplename"), "{rendered}");
+        assert!(rendered.contains("wigle token         tok••••••end"), "{rendered}");
+        assert!(!rendered.contains("SECRET"), "{rendered}");
+    }
+
+    #[test]
+    fn draw_says_not_set_on_wigle_rows_when_both_are_empty() {
+        let rendered = modal_rendered("", Field::Pool);
+        assert!(rendered.contains("wigle name          (not set, type or paste)"), "{rendered}");
+        assert!(rendered.contains("wigle token         (not set, type or paste)"), "{rendered}");
+    }
+
+    #[test]
+    fn draw_truncates_wigle_name_and_keeps_border_when_name_is_wider_than_its_column() {
+        // Shaped like a WiGLE API name: `AID` and 32 hex digits, made up.
+        let name = format!("AID{}", "0123456789abcdef".repeat(2));
+        let terminal = modal_terminal(wigle_keys(&name, ""), Field::WigleName);
+        let rendered = terminal.backend().to_string();
+
+        assert!(!rendered.contains(&name), "{rendered}");
+        // 46 columns inside the border, less the 20 of the label column.
+        assert!(rendered.contains(&format!("{}…", &name[..25])), "{rendered}");
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                let line: String =
+                    (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect();
+                line.contains("wigle name")
+            })
+            .expect("the name row");
+        // The modal is 48 wide, centered in 120: columns 36 to 83.
+        assert_eq!(buffer[(36, row)].symbol(), "│", "{rendered}");
+        assert_eq!(buffer[(83, row)].symbol(), "│", "{rendered}");
+    }
+
+    #[test]
+    fn draw_shows_enter_save_when_last_row_selected() {
+        let rendered = modal_terminal(wigle_keys("", ""), Field::WigleToken).backend().to_string();
+        assert!(rendered.contains("wigle token"), "{rendered}");
+        assert!(
+            rendered.contains("enter save · esc cancel"),
+            "the modal is tall enough: {rendered}"
+        );
+    }
+
+    #[test]
+    fn draw_shows_ctrl_u_tip_when_wigle_row_selected_with_text_entered() {
+        for field in [Field::WigleName, Field::WigleToken] {
+            let rendered =
+                modal_terminal(wigle_keys("AIDname", "tok"), field).backend().to_string();
+            assert!(rendered.contains("ctrl-u clear · enter save · esc cancel"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn draw_omits_ctrl_u_tip_when_wigle_row_selected_with_text_empty() {
+        for field in [Field::WigleName, Field::WigleToken] {
+            let rendered = modal_terminal(wigle_keys("", ""), field).backend().to_string();
+            assert!(!rendered.contains("ctrl-u"), "{field:?}: {rendered}");
+        }
     }
 
     #[test]

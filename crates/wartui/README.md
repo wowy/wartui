@@ -332,6 +332,8 @@ wait-for-fix = false
 
 [api-keys]
 wdgwars = ""
+wigle-name = ""
+wigle-token = ""
 ```
 
 | Key                    | Default | What it is                                                                     |
@@ -345,6 +347,8 @@ wdgwars = ""
 | `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[gps] wait-for-fix`   | on      | Whether `run` holds the scan until a receiver holds a fix; see "Positions"     |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
+| `[api-keys] wigle-name` | `""`   | WiGLE API Name, as its account page gives it                                   |
+| `[api-keys] wigle-token` | `""`  | WiGLE API Token, as its account page gives it                                  |
 
 wartui refuses to start on an unknown key or table, naming the file and line. A `pool` key or a
 `[bluetooth]` table is refused with the command that sets it instead: `wartui pool`, or
@@ -361,8 +365,8 @@ key when unticked.
 `run` writes `[bridge] mac`, `serial` and `bluetooth-address` when the bridge it remembers
 changes, and `link` once the bridge answers over it; see "Keyboard commands", "When nothing
 arrives" and "The Bluetooth link". `flash-bridge` writes both for a board it found and flashed;
-see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`,
-except under `--sim`. A new file is readable only by its owner.
+see "Flashing the bridge". When the file is missing, `run` creates it holding only the three
+empty `[api-keys]` keys, except under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
@@ -867,7 +871,7 @@ key help for a few seconds; see "Power-cycling a node".
 |---------------------|---------------------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`   | Move between rows                                                                           |
 | `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
-| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears)                          |
+| Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)        |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
 | `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
 | `Esc` / `q`         | Close without changing anything                                                             |
@@ -890,15 +894,16 @@ The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan`
 phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
 `remember bridge` (`off`, `on`),
 `wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, and the
-`wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
-lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
+API keys: `wdgwars`, `wigle name` and `wigle token`. `excluded ssids` shows how many are listed, or
+`none`, and opens a page that lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
 one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
 the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns to
-the rows; edits to the rows stay pending. On the key row, letters type, so `h` `j` `k` `l` `q`
-neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip while a key is entered.
-The key shows its last three characters, up to six bullets before them, and from ten characters its
-first one to three. `Enter` sends the rows to the engine and writes every row shown but the pool,
-the fan, `bluetooth` and `wardrive esp` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and
+the rows; edits to the rows stay pending. On a key row, letters type, so `h` `j` `k` `l` `q`
+neither move nor close; `↑` and `↓` leave it, and the footer shows the `ctrl-u` tip while the row
+holds text. `wigle name` shows in full, cut short with `…` when it is wider than the row.
+`wdgwars` and `wigle token` show their last three characters, up to six bullets before them, and
+from ten characters their first one to three. `Enter` sends the rows to the engine and writes
+every row shown but the pool, the fan, `bluetooth` and `wardrive esp` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and
 `[api-keys]`, whatever was there, and settings closes. The pool, the fan, `bluetooth` and
 `wardrive esp` go to the bridge only when their rows moved, and none is written to `wartui.toml`.
 The bridge keeps the pool, the fan and `wardrive esp`; the run keeps `bluetooth` and asks for it
