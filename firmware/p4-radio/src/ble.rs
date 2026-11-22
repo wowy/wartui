@@ -171,9 +171,12 @@
 //! stream:
 //!
 //! - one silent [`QUIET_DEADLINE`] after connecting: it has asked nothing of the bridge's two
-//!   services, begun no pairing, read no stream and exchanged no MTU. A phone's own Bluetooth
-//!   stack discovers the services by itself on connecting, so discovery does not count
-//!   ([`asks_of_services`]);
+//!   services, has neither paired nor encrypted, and, on a connection made inside the window, has
+//!   exchanged no MTU. A phone's own Bluetooth stack discovers the services by itself on
+//!   connecting, so discovery does not count ([`asks_of_services`]). TrouBLE reports a pairing
+//!   only when it ends, and a host that pairs through its OS exchanges an MTU first, so inside the
+//!   window the exchange stands for a pairing under way. Outside it nothing can pair, and a
+//!   phone's own stack may exchange an MTU by itself, so there it does not count;
 //! - one encrypted without a stored bond on a connection made outside the window;
 //! - one that lost its bond, outside the window;
 //! - one neither bonded and encrypted nor reading the phone's stream [`PAIR_DEADLINE`] after
@@ -189,9 +192,10 @@
 //! dropped. So while phones are admitted, dropping a silent central also starts a rest: the
 //! phones' set is not started until it ends, and the wartui set runs through it alone, so a host
 //! reaches the bridge. [`accept`] wakes at the rest's end and starts both sets again. Each silent
-//! central in a row lengthens the next rest, up to `wartui_proto::ble::REST_MAX_MS`, and a phone
-//! that reads its stream starts them over. The C6 cannot tell which set a central connected on,
-//! so a silent one on the wartui set rests the phones' set too.
+//! central in a row lengthens the next rest, up to `wartui_proto::ble::REST_MAX_MS`. The run ends
+//! when none is dropped for that long after a rest, or when a phone reads its stream. The C6
+//! cannot tell which set a central connected on, so a silent one on the wartui set rests the
+//! phones' set too.
 //!
 //! **The P4 keeps the bonds; the C6 holds them in TrouBLE's RAM** (`wartui_proto::bonds`). It
 //! waits up to [`BONDS_WAIT`] for the P4's first `Down::Bonds` before it advertises, so the
@@ -359,12 +363,14 @@ const BONDS_POLL: Duration = Duration::from_millis(20);
 /// connection, by when the controller has already failed to resolve that central's address.
 const RESOLVING_SETTLE: Duration = Duration::from_millis(50);
 
-/// How long a central may stay silent after connecting: ask nothing of the bridge's two services
-/// and begin no pairing. A wartui host encrypts or reads the wartui service within a second; a
-/// phone with its app closed does neither.
+/// How long a central may stay silent after connecting: ask nothing of the bridge's two services,
+/// neither pair nor encrypt, and inside the pairing window exchange no MTU (module docs). A wartui
+/// host encrypts, reads the wartui service or starts to pair within a second; a phone with its app
+/// closed does none of these.
 const QUIET_DEADLINE: Duration = Duration::from_secs(3);
 
-/// The ATT MTU a link has before an exchange: a central that has asked for none.
+/// The ATT MTU a link has before an exchange: a central that has asked for none. Inside the pairing
+/// window, any other stands for a pairing under way ([`QUIET_DEADLINE`]).
 const ATT_MTU_DEFAULT: u16 = 23;
 
 /// How long a central that connected inside the pairing window has to be bonded and encrypted
@@ -961,8 +967,11 @@ async fn advertise(
     loop {
         let admitted = shared.ble.admitted();
         let alone = core::mem::take(&mut solo);
-        let resting = shared.ble.rest.get().until(Instant::now().as_millis()).is_some();
-        let phones = if admitted && !alone && !resting {
+        // Read once, so the set left out and the timer `accept` arms agree. Only a connection
+        // starts a rest, so one that runs now is the only one to wait for.
+        let rest_ends =
+            if admitted { shared.ble.rest.get().until(Instant::now().as_millis()) } else { None };
+        let phones = if admitted && !alone && rest_ends.is_none() {
             let phones = free_payload(name.as_bytes(), bridge, shared);
             if phones.is_none() {
                 shared.error(format_args!(
@@ -985,18 +994,19 @@ async fn advertise(
                     bridge,
                     running: Running { params: phone_params, handle: handles[PHONE_SET] },
                 });
-                let accepted =
-                    match accept(advertiser, peripheral, stack, shared, admitted, free).await {
-                        Ok(accepted) => accepted,
-                        Err(restart) => {
-                            // The advertiser is dropped, and TrouBLE's runner stops its sets.
-                            restarting(restart, shared);
-                            Timer::after(RESOLVING_SETTLE).await;
-                            sync_bonds(stack, shared);
-                            Timer::after(RESOLVING_SETTLE).await;
-                            continue;
-                        }
-                    };
+                let accepting =
+                    accept(advertiser, peripheral, stack, shared, admitted, rest_ends, free);
+                let accepted = match accepting.await {
+                    Ok(accepted) => accepted,
+                    Err(restart) => {
+                        // The advertiser is dropped, and TrouBLE's runner stops its sets.
+                        restarting(restart, shared);
+                        Timer::after(RESOLVING_SETTLE).await;
+                        sync_bonds(stack, shared);
+                        Timer::after(RESOLVING_SETTLE).await;
+                        continue;
+                    }
+                };
                 if accepted.is_ok() {
                     stop_sets(stack, shared).await;
                 }
@@ -1232,10 +1242,10 @@ fn restarting(restart: Restart, shared: &Shared) {
 
 /// Wait for a central to connect to `advertiser`'s sets, through every `Down::Bonds` that leaves
 /// the P4's bonds as TrouBLE holds them and phones `admitted` as they were, and while phones are
-/// admitted, until a rest of the phones' set ends. Returns the [`Restart`] once one of those
-/// changes: the advertiser is dropped on return, so TrouBLE stops its sets and can load its
-/// resolving list ([`RESOLVING_SETTLE`]), and the next start is the sets for phones as they now
-/// are.
+/// admitted, until a rest of the phones' set ends at `rest_ends`, as [`advertise`] read it. Returns
+/// the [`Restart`] once one of those changes: the advertiser is dropped on return, so TrouBLE stops
+/// its sets and can load its resolving list ([`RESOLVING_SETTLE`]), and the next start is the sets
+/// for phones as they now are. A `rest_ends` already past returns [`Restart::Rested`] at once.
 ///
 /// With `phones`, the phones' set runs beside the link's: its pair is rebuilt and given to the
 /// controller in place every [`BEACON_EVERY`] and on each change of the beacon, so a central can
@@ -1247,12 +1257,10 @@ async fn accept<'d>(
     stack: &BleStack<'_>,
     shared: &Shared,
     admitted: bool,
+    rest_ends: Option<u64>,
     phones: Option<PhoneSet<'_>>,
 ) -> Result<Result<Connection<'d, DefaultPacketPool>, Error>, Restart> {
     let mut failed = false;
-    // Only a connection starts a rest, so one that runs now is the only one to wait for.
-    let rest_ends =
-        if admitted { shared.ble.rest.get().until(Instant::now().as_millis()) } else { None };
     let rested = async {
         match rest_ends {
             Some(at) => Timer::at(Instant::from_millis(at)).await,
@@ -1509,8 +1517,8 @@ struct Session {
     idle_since: Cell<Instant>,
     /// Raised when the stream or `idle_since` changes, for [`deadline`].
     idle_changed: Signal<NoopRawMutex, ()>,
-    /// The central has asked something of the bridge's two services or begun to pair, for
-    /// [`QUIET_DEADLINE`] ([`asks_of_services`]).
+    /// The central has asked something of the bridge's two services ([`asks_of_services`]), or a
+    /// pairing or an encryption has ended on it, for [`QUIET_DEADLINE`].
     alive: Cell<bool>,
     /// The central's address, in display order, for the log.
     peer: Mac,
@@ -1543,7 +1551,8 @@ fn reads_another(stream: Stream, mine: Stream) -> bool {
     stream != Stream::None && stream != mine
 }
 
-/// Disconnect a central that holds no bond, count it in `unbonded_kicks`, and say why.
+/// Disconnect a central that holds no bond or is silent ([`QUIET_DEADLINE`]), count it in
+/// `unbonded_kicks`, and say why.
 fn kick(conn: &Conn<'_, '_>, session: &Session, shared: &Shared, why: &str) {
     shared.ble.count(|c| c.unbonded_kicks = c.unbonded_kicks.wrapping_add(1));
     disconnect(conn, session, shared, why);
@@ -1730,17 +1739,17 @@ async fn revoke(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
 /// Disconnect a central silent [`QUIET_DEADLINE`] after it connected, one that is neither bonded
 /// and encrypted nor reading the WardriveESP stream [`PAIR_DEADLINE`] or [`UNBONDABLE_DEADLINE`]
 /// after, and one that reads no stream for [`IDLE_DEADLINE`] after that, so neither a silent, an
-/// unbonded nor an idle one holds the only connection. A silent central rests the phones' set
-/// while phones are admitted (module docs). A central reading a stream is never idle, a USB host
-/// holding the bridge while it waits included. The idle clock runs from `idle_since`, which
-/// pairing and letting go of a stream restart ([`Session`]).
+/// unbonded nor an idle one holds the only connection. Silent is the module docs' rule: an MTU
+/// exchange spares a central only on a bondable connection. A silent central rests the phones' set
+/// while phones are admitted. A central reading a stream is never idle, a USB host holding the
+/// bridge while it waits included. The idle clock runs from `idle_since`, which pairing and letting
+/// go of a stream restart ([`Session`]).
 async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
     let ble = &shared.ble;
     Timer::at(session.connected_at + QUIET_DEADLINE).await;
-    let silent = !session.alive.get()
-        && !authorized(conn)
-        && ble.stream() == Stream::None
-        && conn.raw().att_mtu() == ATT_MTU_DEFAULT;
+    let pairing = session.bondable && conn.raw().att_mtu() != ATT_MTU_DEFAULT;
+    let silent =
+        !session.alive.get() && !authorized(conn) && ble.stream() == Stream::None && !pairing;
     if silent {
         if ble.admitted() {
             let mut rest = ble.rest.get();
@@ -1774,8 +1783,8 @@ async fn deadline(conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! 
 /// Whether `event` asks something of the bridge's two services: a read, a write or a refused
 /// request on a characteristic of the wartui link or the WardriveESP service, or on a
 /// subscription to one. Discovery, MTU exchange and reads of the generic services are
-/// [`GattEvent::Other`] or name other handles, and never count: a phone's own Bluetooth stack
-/// sends them on connecting.
+/// [`GattEvent::Other`] or name other handles, and are no request to the services: a phone's own
+/// Bluetooth stack sends them on connecting. [`deadline`] reads an MTU exchange apart.
 fn asks_of_services(event: &GattEvent<'_, '_, DefaultPacketPool>, server: &Server<'_>) -> bool {
     let handle = match event {
         GattEvent::Read(read) => read.handle(),

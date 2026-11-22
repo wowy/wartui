@@ -1373,7 +1373,7 @@ scans Bluetooth:
 | `host  usb; a Bluetooth host is connected, …`                            | A Bluetooth host waits while USB holds the bridge, or is not let in: `not bonded` is one it refuses, a phone among them |
 | `pairing  closed, 2 bonds stored`                                        | The window, `open for N s more` or `open until a host pairs`, and the bonds |
 | `phones  wardrive esp on`                                                | Whether phones may link: `on` or `off` (`bluetooth wardrive-esp`) |
-| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included), the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
+| `bluetooth host  pairings 1  failed_pairings 0  unbonded_kicks 0  …`     | The C6's counts since it booted: pairings that bonded and that failed, hosts dropped for holding no bond (a cleared one included) or for asking nothing after connecting, the last disconnect's HCI reason, stream bytes lost on the way to the C6 (`resynced_bytes`), and host writes dropped for a full queue |
 
 **One host at a time.** USB wins: a USB frame takes the bridge from a Bluetooth host, as
 `flash-bridge` over USB does. The Bluetooth host stays connected and waits. The bridge hands it back 15 s

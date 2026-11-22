@@ -119,11 +119,12 @@ disconnected, 30 s while the bridge's pairing window is open, and so is a phone 
 unsubscribed for 30 s.
 
 A silent central is disconnected sooner: one that, 3 s after it connects, has asked nothing of
-either service and not begun to pair, as a phone that has linked is when it reconnects with its
-app closed. Discovering the services does not count: a phone's own Bluetooth stack does that by
-itself. The WardriveESP set then rests: it is off the air for 5 s, doubled for each silent central
-in a row up to 30 s, while the wartui set runs. An app opened during a rest links when the rest
-ends.
+either service and has neither paired nor encrypted, as a phone that has linked is when it
+reconnects with its app closed. Discovering the services does not count: a phone's own Bluetooth
+stack does that by itself. Inside the pairing window, an MTU exchange spares a central, since a
+host pairing through its OS makes one first. The WardriveESP set then rests: it is off the air for
+5 s, doubled for each silent central in a row up to 30 s, while the wartui set runs. The run ends
+when none is dropped for 30 s after a rest. An app opened during a rest links when the rest ends.
 
 ## Frames
 

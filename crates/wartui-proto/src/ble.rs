@@ -19,7 +19,8 @@
 //! on the phones' set with its app closed, says nothing, and is back as soon as it is dropped. So
 //! the C6 drops it and stops advertising the phones' set for a while, and the wartui set stays
 //! reachable meanwhile. Each silent central in a row doubles the rest, up to [`REST_MAX_MS`]: the
-//! longest an opened app waits to link.
+//! longest an opened app waits to link. The run ends when none is dropped for [`REST_MAX_MS`]
+//! after a rest.
 //!
 //! **The C6 serves an ATT MTU of [`ATT_MTU`]**, so no write to Down carries more than
 //! [`DOWN_VALUE_MAX`] value bytes, and a central's own stack keeps to it. wartui's transport caps
@@ -69,7 +70,9 @@ pub const REST_FIRST_MS: u64 = 5_000;
 pub const REST_MAX_MS: u64 = 30_000;
 
 /// When the phones' set rests: [`REST_FIRST_MS`] after the first silent central, doubled for each
-/// one in a row after it, up to [`REST_MAX_MS`]. Times are the caller's uptime, in ms.
+/// one in a row after it, up to [`REST_MAX_MS`]. A silent central is in the run when it is dropped
+/// no more than [`REST_MAX_MS`] after the last rest ends; a phone that keeps knocking is dropped a
+/// few seconds after each. Times are the caller's uptime, in ms.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rest {
     /// Silent centrals dropped in a row.
@@ -86,7 +89,12 @@ impl Rest {
     }
 
     /// A silent central was dropped at `now_ms`: start the next rest and return its length in ms.
+    /// More than [`REST_MAX_MS`] past the last rest's end, the run is over and this rest is the
+    /// first.
     pub fn begin(&mut self, now_ms: u64) -> u64 {
+        if self.ends.is_some_and(|ends| now_ms.saturating_sub(ends) > REST_MAX_MS) {
+            self.kicks = 0;
+        }
         // Past a shift of 3 the length is the cap; 8 keeps the product far inside a `u64`.
         let length = (REST_FIRST_MS << self.kicks.min(8)).min(REST_MAX_MS);
         self.kicks = self.kicks.saturating_add(1);

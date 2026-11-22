@@ -36,7 +36,7 @@ fn link_address_sets_static_random_bits_when_built_from_mac() {
         [0xC2, 0x00, 0x5E, 0x10, 0x44, 0xC0]
     );
     // It ends in the bridge's own octets whatever the first octet holds.
-    assert_eq!(link_address(&[0xD8, 1, 2, 3, 0x96, 0xC4]), [0xD8, 1, 2, 3, 0x96, 0xC4]);
+    assert_eq!(link_address(&[0xDA, 1, 2, 3, 0x96, 0xC4]), [0xDA, 1, 2, 3, 0x96, 0xC4]);
 }
 
 #[test]
@@ -68,6 +68,18 @@ fn rest_starts_over_when_cleared() {
     rest.clear();
     assert_eq!(rest.until(1), None);
     assert_eq!(rest.begin(0), REST_FIRST_MS);
+}
+
+#[test]
+fn rest_starts_over_when_silent_run_has_ended() {
+    let mut rest = Rest::new();
+    assert_eq!(rest.begin(0), 5_000);
+    // Dropped again 6 s after that rest's end: still the run.
+    assert_eq!(rest.begin(11_000), 10_000);
+    // That rest ends at 21 s; exactly REST_MAX_MS past it is still the run.
+    assert_eq!(rest.begin(21_000 + REST_MAX_MS), 20_000);
+    // That one ends at 71 s; later than REST_MAX_MS past it starts over.
+    assert_eq!(rest.begin(71_000 + REST_MAX_MS + 1), REST_FIRST_MS);
 }
 
 #[test]

@@ -491,8 +491,9 @@ edit stops; follow the pointer before changing the rule.
   first it subscribes to, and one central connects at a time, so a linked phone keeps a Bluetooth
   host out and USB always gets in. The C6 sends no Security Request, which a phone would answer
   with a pairing prompt: a host starts its own pairing. A central that, 3 s after connecting, has
-  asked nothing of either service and not begun to pair is silent and dropped, and while phones
-  are admitted the phones' set rests after it, up to `ble::REST_MAX_MS`.
+  asked nothing of either service, has neither paired nor encrypted, and inside the pairing window
+  has exchanged no MTU is silent and dropped, and while phones are admitted the phones' set rests
+  after it, up to `ble::REST_MAX_MS`.
   → `firmware/p4-radio/src/ble.rs` `//!`, `authorized`, `revoke`; `crates/wartui-proto/src/ble.rs`,
   `Rest`
 - **The C6's host stream credit is an absolute stream position, not a sum.** It is the offset, in
