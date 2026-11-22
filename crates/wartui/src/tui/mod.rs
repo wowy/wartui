@@ -152,7 +152,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // cannot push them off screen.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
     let buffer_full = u16::from(buffer_full_line(&snapshot.counters).is_some());
-    let upload = u16::from(ui.upload().status().is_some());
+    let upload = u16::try_from(ui.upload().status_lines().len()).unwrap_or(u16::MAX);
     let takeover = u16::from(takeover_line(snapshot).is_some());
     let waiting = u16::from(waiting_line(snapshot).is_some());
     let footer_height = 1
@@ -194,8 +194,8 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     if let Some(lines) = ui.power_confirm_lines(snapshot) {
         draw_confirm_modal(frame, " power-cycle ", &lines);
     }
-    if let Some(lines) = ui.upload().confirm_lines() {
-        draw_confirm_modal(frame, " upload to WDGWars ", &lines);
+    if let (Some(title), Some(lines)) = (ui.upload().confirm_title(), ui.upload().confirm_lines()) {
+        draw_confirm_modal(frame, &title, &lines);
     }
 }
 

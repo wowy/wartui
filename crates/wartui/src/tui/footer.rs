@@ -81,9 +81,9 @@ pub(super) fn draw_footer(
         lines.push(Line::from(waiting));
     }
 
-    // Its own line for the same reason. It stays after the upload ends, until the
-    // next `u`.
-    if let Some(status) = ui.upload().status() {
+    // A line per site for the same reason, since the two uploads end separately. Each stays
+    // after its upload ends, until the next `u`.
+    for status in ui.upload().status_lines() {
         lines.push(Line::from(format!("  {status}")));
     }
 

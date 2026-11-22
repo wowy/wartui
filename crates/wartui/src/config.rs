@@ -4,7 +4,7 @@
 //! an unknown key or an out-of-range value stops `run`, `export`, `analyze`, `upload`
 //! and `flash-bridge` from starting, and names the file and the problem.
 //! `--config` is one of each's own arguments. Within `run`, the file beats the built-in
-//! default. `export`, `analyze` and `upload` read the excluded SSIDs, `upload` the API key
+//! default. `export`, `analyze` and `upload` read the excluded SSIDs, `upload` the API keys
 //! too, and none of them creates or saves the file.
 //!
 //! **The remembered bridge is the one value other commands read.** `status`, `sniff`,
@@ -17,7 +17,7 @@
 //! file. Neither `bluetooth pair` nor `bluetooth forget` writes it.
 //!
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
-//! holding only the empty API key, so a first-time operator has a place to paste one. It
+//! holding only the empty API keys, so a first-time operator has a place to paste them. It
 //! never rewrites an existing file at startup. Its view does, through one save path: the
 //! settings modal, a change to the bridge the transport remembers, the link the run connected
 //! over, which writes `[bridge] link`, and the box on the waiting-for-GPS pop-up, which writes
@@ -155,6 +155,19 @@ impl Gps {
 pub struct ApiKeys {
     #[serde(default)]
     pub wdgwars: String,
+    /// WiGLE's API Name, as its account page gives it.
+    #[serde(default)]
+    pub wigle_name: String,
+    /// WiGLE's API Token, as its account page gives it.
+    #[serde(default)]
+    pub wigle_token: String,
+}
+
+impl ApiKeys {
+    /// Whether any key is set, so the file holding them is shut away from others.
+    fn any_set(&self) -> bool {
+        !self.wdgwars.is_empty() || !self.wigle_name.is_empty() || !self.wigle_token.is_empty()
+    }
 }
 
 fn write_mac<S: Serializer>(mac: &Option<Mac>, serializer: S) -> Result<S::Ok, S::Error> {
@@ -395,19 +408,19 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 /// rather than `path` itself, so a `path` that is a symlink stays one: the rename
 /// replaces what it points at, not the link, even a dangling one. A file that
 /// existed keeps its permissions, copied onto the temp file before the rename; a
-/// new file is readable only by its owner on unix, since it can hold an API key.
-/// Saving a key into an existing file also drops its group and other bits, so a
-/// file written world-readable before it held a key stops being so. The temp file is
-/// created fresh at `0600` on unix and loosened only after it is written, so the key is
-/// never readable by others in passing.
+/// new file is readable only by its owner on unix, since it can hold API keys.
+/// Saving any key into an existing file also drops its group and other bits, so a
+/// file written world-readable before it held one stops being so. The temp file is
+/// created fresh at `0600` on unix and loosened only after it is written, so no key is
+/// ever readable by others in passing.
 ///
 /// Skipped when the file already holds exactly this text: no temp file and no
-/// rename, though a key still has its permissions tightened in place.
+/// rename, though a file holding a key still has its permissions tightened in place.
 pub fn save(path: &Path, config: &Config) -> Result<()> {
     config.validate().context("the settings to save are invalid")?;
     let written = toml::to_string(config).context("serializing the settings")?;
 
-    let secret = !config.api_keys.wdgwars.is_empty();
+    let secret = config.api_keys.any_set();
 
     if std::fs::read_to_string(path).is_ok_and(|text| text == written) {
         // Same text, but a key in a file others can read still has to be shut away.
@@ -736,7 +749,11 @@ mod tests {
                 link: Some(Link::Bluetooth),
             },
             gps: Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) },
-            api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
+            api_keys: ApiKeys {
+                wdgwars: "abc123def456".to_owned(),
+                wigle_name: "AIDexamplename".to_owned(),
+                wigle_token: "exampletoken789".to_owned(),
+            },
         }
     }
 
@@ -772,6 +789,8 @@ mod tests {
         assert_eq!(saved.gps.bridge_rate_hz, Some(2));
         assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
         assert_eq!(saved.api_keys.wdgwars, "abc123def456");
+        assert_eq!(saved.api_keys.wigle_name, "AIDexamplename");
+        assert_eq!(saved.api_keys.wigle_token, "exampletoken789");
         assert_eq!(saved.bridge.link, Some(Link::Bluetooth));
         assert_eq!(saved.bridge.bluetooth_address.as_deref(), Some("02:00:5E:10:44:C1"));
     }
@@ -1134,14 +1153,14 @@ mod tests {
     }
 
     #[test]
-    fn config_save_writes_empty_api_key_when_config_is_default() {
+    fn config_save_writes_empty_api_keys_when_config_is_default() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
         save(&target, &Config::default()).unwrap();
 
         let text = std::fs::read_to_string(&target).unwrap();
-        assert_eq!(text, "[api-keys]\nwdgwars = \"\"\n");
+        assert_eq!(text, "[api-keys]\nwdgwars = \"\"\nwigle-name = \"\"\nwigle-token = \"\"\n");
     }
 
     #[test]
@@ -1150,6 +1169,18 @@ mod tests {
         let path = dir.path().join("wartui.toml");
         std::fs::write(&path, "[api-keys]\nwdgwars = \"abc\"\n").unwrap();
         assert_eq!(load(Some(&path)).unwrap().api_keys.wdgwars, "abc");
+    }
+
+    #[test]
+    fn config_loader_reads_wigle_keys_when_api_keys_table_holds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let text = "[api-keys]\nwigle-name = \"AIDexamplename\"\nwigle-token = \"tok\"\n";
+        std::fs::write(&path, text).unwrap();
+        let keys = load(Some(&path)).unwrap().api_keys;
+        assert_eq!(keys.wigle_name, "AIDexamplename");
+        assert_eq!(keys.wigle_token, "tok");
+        assert_eq!(keys.wdgwars, "", "an absent key reads as not set");
     }
 
     #[test]
@@ -1164,7 +1195,7 @@ mod tests {
     fn config_loader_rejects_unknown_key_when_under_api_keys_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[api-keys]\nwigle = \"abc\"\n").unwrap();
+        std::fs::write(&path, "[api-keys]\nbeacondb = \"abc\"\n").unwrap();
         assert!(load(Some(&path)).is_err());
     }
 
@@ -1176,6 +1207,27 @@ mod tests {
         save(&target, &full()).unwrap();
 
         assert_eq!(load(Some(&target)).unwrap().api_keys.wdgwars, "abc123def456");
+    }
+
+    #[test]
+    fn config_save_writes_wigle_keys_that_reload_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let config = Config {
+            api_keys: ApiKeys {
+                wigle_name: "AIDexamplename".to_owned(),
+                wigle_token: "exampletoken789".to_owned(),
+                ..ApiKeys::default()
+            },
+            ..Config::default()
+        };
+
+        save(&target, &config).unwrap();
+
+        let keys = load(Some(&target)).unwrap().api_keys;
+        assert_eq!(keys.wigle_name, "AIDexamplename");
+        assert_eq!(keys.wigle_token, "exampletoken789");
+        assert_eq!(keys.wdgwars, "");
     }
 
     #[test]
@@ -1245,6 +1297,26 @@ mod tests {
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a key is readable only by its owner");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_drops_group_and_other_bits_when_only_wigle_token_saved_into_open_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[gps]\nbridge-rate-hz = 1\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let config = Config {
+            api_keys: ApiKeys { wigle_token: "exampletoken789".to_owned(), ..ApiKeys::default() },
+            ..Config::default()
+        };
+
+        save(&target, &config).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a token is readable only by its owner");
     }
 
     #[test]

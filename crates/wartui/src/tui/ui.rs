@@ -106,6 +106,12 @@ impl Ui {
         &self.upload
     }
 
+    /// The upload `u` started, to set by hand.
+    #[cfg(test)]
+    pub(super) fn upload_mut(&mut self) -> &mut Upload {
+        &mut self.upload
+    }
+
     /// Keep the cursor on a real block as the fleet grows and shrinks.
     pub(super) fn clamp(&mut self, node_count: usize) {
         self.selected = self.selected.min(node_count.saturating_sub(1));

@@ -1,4 +1,4 @@
-SCHEMA_VERSION 4
+SCHEMA_VERSION 5
 
 CREATE TABLE assignment (
   id INTEGER PRIMARY KEY,
@@ -162,9 +162,10 @@ CREATE TABLE raw_frame (
 
 CREATE TABLE upload (
   id INTEGER PRIMARY KEY,
+  site TEXT NOT NULL,
   through_id INTEGER NOT NULL,
   uploaded_at INTEGER NOT NULL,
-  job_id INTEGER NOT NULL,
+  job TEXT NOT NULL,
   rows INTEGER NOT NULL,
   result TEXT
 )
