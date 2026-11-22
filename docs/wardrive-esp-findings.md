@@ -342,6 +342,10 @@ and asks nothing of them. The pairing window was closed.
 | `status --link bluetooth`, pairing window closed | 10 of 10, 5 to 9 s |
 | The stand-in on WardriveESP | linked; 131 `WD:AP` lines in 12 s |
 
+**A Mac**, the same day and build. Its old pairing was forgotten in System Settings, and it paired
+again inside a pairing window opened from the PC over USB. `wartui status --link bluetooth
+--bridge D0:1C` was then served 10 of 10 with `wardrive esp` on and 10 of 10 with it off.
+
 **The bonded PC beside the knocking phone**, no bridge named, so each run scans:
 
 | Check | Result |
