@@ -21,7 +21,8 @@ use wartui_core::record::{
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
-    capture_link, is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
+    UploadSite, capture_link, is_simulated, last_upload, open_readonly, open_readwrite,
+    record_upload, set_upload_result,
 };
 use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
 use wartui_proto::fan::{FanDuty, FanStats};
@@ -2374,9 +2375,16 @@ fn wigle_csv_skips_invalid_wifi_addresses_when_capture_preserves_them() {
     assert_eq!(stored, 6, "export does not remove evidence from the store");
 
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, summary.last_id.unwrap(), EPOCH_MS + 6000, 7, summary.rows)
-        .expect("recording the cutoff locally");
-    let (csv, summary) = export_with(&conn, &after_uploads());
+    record_upload(
+        &rw,
+        UploadSite::Wdgwars,
+        summary.last_id.unwrap(),
+        EPOCH_MS + 6000,
+        "7",
+        summary.rows,
+    )
+    .expect("recording the cutoff locally");
+    let (csv, summary) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
     assert!(macs(&csv).is_empty());
     assert_eq!(summary.last_id, None);
     assert_eq!((summary.invalid_address, summary.wifi_channel_zero), (0, 0));
@@ -2562,9 +2570,9 @@ fn macs(csv: &str) -> Vec<&str> {
     csv.lines().skip(2).filter_map(|line| line.split(',').next()).collect()
 }
 
-/// The filter an upload exports with: everything after the newest non-failed upload.
-fn after_uploads() -> ExportFilter {
-    ExportFilter { after_uploads: true, ..ExportFilter::default() }
+/// The filter an upload to `site` exports with: everything after its newest non-failed upload.
+fn after_uploads(site: UploadSite) -> ExportFilter {
+    ExportFilter { after_uploads: Some(site), ..ExportFilter::default() }
 }
 
 /// The default filter, leaving out Wi-Fi sightings of `ssid`.
@@ -2628,9 +2636,16 @@ fn wigle_csv_moves_last_id_when_final_sighting_is_excluded() {
     assert_eq!(summary.last_id, Some(2));
 
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, summary.last_id.unwrap(), EPOCH_MS + 2000, 7, summary.rows)
-        .expect("recording the cutoff");
-    let (csv, summary) = export_with(&conn, &after_uploads());
+    record_upload(
+        &rw,
+        UploadSite::Wdgwars,
+        summary.last_id.unwrap(),
+        EPOCH_MS + 2000,
+        "7",
+        summary.rows,
+    )
+    .expect("recording the cutoff");
+    let (csv, summary) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
     assert!(macs(&csv).is_empty(), "{csv}");
     assert_eq!(summary.last_id, None);
 }
@@ -2641,10 +2656,11 @@ fn wigle_csv_skips_sightings_through_cutoff_when_after_uploads() {
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
     // The cutoff is the second sighting itself: it was sent, so it is not sent again.
-    let id = record_upload(&rw, 2, EPOCH_MS + 90_000, 7, 2).expect("recording");
+    let id =
+        record_upload(&rw, UploadSite::Wdgwars, 2, EPOCH_MS + 90_000, "7", 2).expect("recording");
     set_upload_result(&rw, id, "done").expect("setting the result");
 
-    let (csv, summary) = export_with(&conn, &after_uploads());
+    let (csv, summary) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
     assert_eq!(macs(&csv), ["A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.last_id, Some(3));
 }
@@ -2654,12 +2670,13 @@ fn wigle_csv_ignores_upload_for_cutoff_when_it_failed() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, 1, EPOCH_MS + 30_000, 7, 1).expect("recording");
+    record_upload(&rw, UploadSite::Wdgwars, 1, EPOCH_MS + 30_000, "7", 1).expect("recording");
     // A later job the site reported failed imported nothing, so the cutoff stays at job 7.
-    let failed = record_upload(&rw, 2, EPOCH_MS + 90_000, 8, 1).expect("recording");
+    let failed =
+        record_upload(&rw, UploadSite::Wdgwars, 2, EPOCH_MS + 90_000, "8", 1).expect("recording");
     set_upload_result(&rw, failed, "failed").expect("setting the result");
 
-    let (csv, summary) = export_with(&conn, &after_uploads());
+    let (csv, summary) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
     assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2", "A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.rows, 2);
 }
@@ -2669,7 +2686,7 @@ fn wigle_csv_ignores_uploads_when_after_uploads_off() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, 3, EPOCH_MS + 150_000, 7, 3).expect("recording");
+    record_upload(&rw, UploadSite::Wdgwars, 3, EPOCH_MS + 150_000, "7", 3).expect("recording");
 
     let (_, summary) = export(&conn);
     assert_eq!(summary.rows, 3);
@@ -2689,8 +2706,66 @@ fn wigle_csv_includes_row_when_stored_after_upload_at_cutoff_time() {
         ],
     );
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, 1, EPOCH_MS + 30_000, 7, 1).expect("recording");
+    record_upload(&rw, UploadSite::Wdgwars, 1, EPOCH_MS + 30_000, "7", 1).expect("recording");
 
-    let (csv, _) = export_with(&conn, &after_uploads());
+    let (csv, _) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
     assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2"], "{csv}");
+}
+
+#[test]
+fn wigle_csv_keeps_rows_another_site_was_sent_when_after_uploads_names_a_site() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    let id =
+        record_upload(&rw, UploadSite::Wdgwars, 2, EPOCH_MS + 90_000, "7", 2).expect("recording");
+    set_upload_result(&rw, id, "done").expect("setting the result");
+
+    // WDGWars' cutoff is not WiGLE's: WiGLE has been sent nothing yet.
+    let (csv, _) = export_with(&conn, &after_uploads(UploadSite::Wigle));
+    assert_eq!(macs(&csv), ["A0:A0:A0:A0:A0:A0", "A2:A2:A2:A2:A2:A2", "A4:A4:A4:A4:A4:A4"]);
+    let (csv, _) = export_with(&conn, &after_uploads(UploadSite::Wdgwars));
+    assert_eq!(macs(&csv), ["A4:A4:A4:A4:A4:A4"], "{csv}");
+}
+
+#[test]
+fn store_reads_last_upload_for_its_site_when_another_site_uploaded_later() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, UploadSite::Wdgwars, 1, EPOCH_MS + 30_000, "7", 1).expect("recording");
+    record_upload(&rw, UploadSite::Wigle, 3, EPOCH_MS + 150_000, "20261122-00042", 3)
+        .expect("recording");
+
+    let wdgwars = last_upload(&rw, UploadSite::Wdgwars).expect("reading").expect("a record");
+    assert_eq!(
+        (wdgwars.job.as_str(), wdgwars.uploaded_at_ms, wdgwars.rows),
+        ("7", EPOCH_MS + 30_000, 1)
+    );
+    let wigle = last_upload(&rw, UploadSite::Wigle).expect("reading").expect("a record");
+    assert_eq!(
+        (wigle.job.as_str(), wigle.uploaded_at_ms, wigle.rows),
+        ("20261122-00042", EPOCH_MS + 150_000, 3)
+    );
+}
+
+#[test]
+fn store_reads_earlier_upload_for_site_when_its_latest_failed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, UploadSite::Wdgwars, 1, EPOCH_MS + 30_000, "7", 1).expect("recording");
+    let failed =
+        record_upload(&rw, UploadSite::Wdgwars, 2, EPOCH_MS + 90_000, "8", 1).expect("recording");
+    set_upload_result(&rw, failed, "failed").expect("setting the result");
+    let failed = record_upload(&rw, UploadSite::Wigle, 3, EPOCH_MS + 150_000, "20261122-00042", 3)
+        .expect("recording");
+    set_upload_result(&rw, failed, "failed").expect("setting the result");
+
+    // A failed upload imported nothing, so it is no cutoff for its own site.
+    let wdgwars = last_upload(&rw, UploadSite::Wdgwars).expect("reading").expect("a record");
+    assert_eq!(wdgwars.job, "7");
+    assert_eq!(last_upload(&rw, UploadSite::Wigle).expect("reading"), None);
+    let (csv, _) = export_with(&rw, &after_uploads(UploadSite::Wigle));
+    assert_eq!(macs(&csv).len(), 3, "{csv}");
 }

@@ -32,7 +32,7 @@ NOT_FAULTS = ("power_on", "external")
 
 # Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
 # only, as the store does.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
@@ -1327,31 +1327,33 @@ def gps(db, ctx):
 
 def uploads(db, ctx):
     section("uploads")
-    rows = db.q("SELECT uploaded_at, job_id, rows, through_id, result FROM upload ORDER BY id")
+    rows = db.q("SELECT site, uploaded_at, job, rows, through_id, result FROM upload ORDER BY id")
     if not rows:
         print("  none")
         return
     total = db.one("SELECT MAX(id) FROM observation")
-    for at, job, n, through, result in rows:
-        print(f"  job {job}  {utc(at)} ({rel(at)})  {n} rows  through observation {through} "
-              f"of {total}  result {result}")
+    cutoffs = {}
+    for site, at, job, n, through, result in rows:
+        print(f"  {site} job {job}  {utc(at)} ({rel(at)})  {n} rows  through observation "
+              f"{through} of {total}  result {result}")
         if result == "failed":
             flag("WARN", "upload",
-                 f"upload job {job} failed: the site imported nothing, so it is no cutoff and its "
-                 f"{n} rows are still unsent",
+                 f"{site} upload job {job} failed: the site imported nothing, so it is no cutoff "
+                 f"and its {n} rows are still unsent to {site}",
                  "SELECT * FROM upload")
-        elif result in (None, "unfollowed"):
+            continue
+        cutoffs[site] = max(cutoffs.get(site, 0), through)
+        if result in (None, "unfollowed"):
             flag("INFO", "upload",
-                 f"upload job {job} result is {result!r}: whether the site imported it is not "
-                 "recorded (check the job on the site; never re-upload without asking)",
+                 f"{site} upload job {job} result is {result!r}: whether the site imported it is "
+                 "not recorded (check the job on the site; never re-upload without asking)",
                  "SELECT * FROM upload")
-    cutoffs = [r[3] for r in rows if r[4] != "failed"]
     if not cutoffs:
         return
     junk = db.one(
         "SELECT COUNT(DISTINCT bssid) FROM observation WHERE kind='wifi' AND id <= ? AND "
         "(bssid = zeroblob(6) OR instr('13579BDF', substr(hex(bssid), 2, 1)) > 0)",
-        (cutoffs[-1],))
+        (max(cutoffs.values()),))
     if junk:
         print(f"  {junk} zero/group BSSIDs lie inside the uploaded range; the current export "
               "drops them, but compare the uploaded row count with `wartui export` to see whether "

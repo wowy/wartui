@@ -77,7 +77,7 @@ impl Selection {
     pub(crate) fn filter(&self, config: &Config) -> ExportFilter {
         ExportFilter {
             recapture_secs: self.recapture,
-            after_uploads: false,
+            after_uploads: None,
             excluded_ssids: config::excluded_ssid_bytes(&config.excluded_ssids).collect(),
         }
     }

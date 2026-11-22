@@ -15,7 +15,8 @@
 //! the measurements behind the batching, the checkpoint and the lack of any index on sightings.
 //!
 //! A file holds one run. [`Store::create`] refuses a path that exists, so every export, analysis
-//! and upload cutoff is about one file, with no run to pick.
+//! and upload cutoff is about one file, with no run to pick. Each upload site keeps its own cutoff
+//! ([`UploadSite`]), since what one site holds says nothing about the other.
 //!
 //! Each status reply's Bluetooth host link is a `bridge_bluetooth` row beside its `bridge_status`
 //! row, as its queues are `bridge_queue` rows: its counters are the C6's, which restart with the C6
@@ -57,7 +58,7 @@ use crate::record::{CaptureSettings, HostLink, Record};
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -300,16 +301,19 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   bytes BLOB NOT NULL
 );
 
--- One row per upload the site queued. `through_id` is the last observation id the upload
--- covered; the next upload sends only observations stored after it. Ids follow commit order,
--- so the cutoff is exact even when one frame's sightings span two commits. `result` is NULL
--- until known, then 'done', 'failed' or 'unfollowed'. A job the site reported failed imported
--- nothing and is no cutoff.
+-- One row per upload a site queued. `site` is `UploadSite::name`, and each site keeps its own
+-- cutoff. `through_id` is the last observation id the upload covered; the next upload to that
+-- site sends only observations stored after it. Ids follow commit order, so the cutoff is exact
+-- even when one frame's sightings span two commits. `job` is the site's name for the upload:
+-- WDGWars' job number, or WiGLE's transaction id. `result` is NULL until known, then 'done',
+-- 'failed', 'unfollowed', or 'queued' (the site took the file and wartui does not follow its
+-- import). An upload the site reported failed imported nothing and is no cutoff.
 CREATE TABLE IF NOT EXISTS upload (
   id INTEGER PRIMARY KEY,
+  site TEXT NOT NULL,
   through_id INTEGER NOT NULL,
   uploaded_at INTEGER NOT NULL,
-  job_id INTEGER NOT NULL,
+  job TEXT NOT NULL,
   rows INTEGER NOT NULL,
   result TEXT
 );
@@ -791,37 +795,59 @@ pub fn open_readwrite(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
-/// An upload the site queued, as [`last_upload`] reads it back.
+/// A site a capture is uploaded to. Each keeps its own cutoff, so an upload to one never reads as
+/// sent to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadSite {
+    /// wdgwars.pl.
+    Wdgwars,
+    /// wigle.net.
+    Wigle,
+}
+
+impl UploadSite {
+    /// The text the capture stores in `upload.site`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wdgwars => "wdgwars",
+            Self::Wigle => "wigle",
+        }
+    }
+}
+
+/// An upload a site queued, as [`last_upload`] reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadRecord {
-    /// The site's job.
-    pub job_id: u64,
+    /// The site's name for the upload: WDGWars' job number, or WiGLE's transaction id.
+    pub job: String,
     /// When the site queued it, in unix milliseconds.
     pub uploaded_at_ms: i64,
     /// Rows the upload sent.
     pub rows: u64,
 }
 
-/// Record an upload the site queued as `job_id`, covering observations through id `through_id`.
+/// Record an upload `site` queued as `job`, covering observations through id `through_id`.
 /// Returns the row's id, for [`set_upload_result`].
 ///
 /// # Errors
 /// If the insert fails.
 pub fn record_upload(
     conn: &Connection,
+    site: UploadSite,
     through_id: i64,
     uploaded_at_ms: i64,
-    job_id: u64,
+    job: &str,
     rows: u64,
 ) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO upload (through_id, uploaded_at, job_id, rows) VALUES (?1, ?2, ?3, ?4)",
-        params![through_id, uploaded_at_ms, job_id as i64, rows as i64],
+        "INSERT INTO upload (site, through_id, uploaded_at, job, rows) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![site.name(), through_id, uploaded_at_ms, job, rows as i64],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-/// Record how upload `id` ended: `done`, `failed` or `unfollowed`.
+/// Record how upload `id` ended: `done`, `failed`, `unfollowed` or `queued`.
 ///
 /// # Errors
 /// If the update fails.
@@ -838,18 +864,18 @@ pub fn is_simulated(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row("SELECT simulated FROM capture WHERE id = 1", [], |row| row.get(0))
 }
 
-/// The newest upload the site did not report failed, if any.
+/// The newest upload to `site` that it did not report failed, if any.
 ///
 /// # Errors
 /// If the query fails.
-pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> {
+pub fn last_upload(conn: &Connection, site: UploadSite) -> rusqlite::Result<Option<UploadRecord>> {
     conn.query_row(
-        "SELECT job_id, uploaded_at, rows FROM upload WHERE result IS NOT 'failed' \
+        "SELECT job, uploaded_at, rows FROM upload WHERE site = ?1 AND result IS NOT 'failed' \
          ORDER BY id DESC LIMIT 1",
-        [],
+        [site.name()],
         |row| {
             Ok(UploadRecord {
-                job_id: row.get::<_, i64>(0)? as u64,
+                job: row.get(0)?,
                 uploaded_at_ms: row.get(1)?,
                 rows: row.get::<_, i64>(2)? as u64,
             })

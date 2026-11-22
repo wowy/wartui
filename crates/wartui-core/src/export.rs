@@ -40,12 +40,13 @@
 //! Coordinates are rounded to seven decimals and `AccuracyMeters` to centimeters, because values
 //! derived from NMEA minutes and HDOP would otherwise print float noise.
 //!
-//! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload covered, so a
-//! repeat upload sends only what came after. The cutoff is the last sighting that upload walked, in
-//! stored order. Ids follow commit order, so a frame split across two commits is cut exactly, and a
-//! capture still being written loses nothing. The fold restarts at the cutoff, so a network heard
-//! on both sides within the recapture width gets a second row, which WDGWars skips when scoring. An
-//! unpositioned sighting before the cutoff counts as sent, so a later fix does not bring it back.
+//! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload to one site
+//! covered, so a repeat upload to that site sends only what came after. The cutoff is the last
+//! sighting that upload walked, in stored order. Ids follow commit order, so a frame split across
+//! two commits is cut exactly, and a capture still being written loses nothing. The fold restarts
+//! at the cutoff, so a network heard on both sides within the recapture width gets a second row,
+//! which WDGWars skips when scoring. An unpositioned sighting before the cutoff counts as sent, so
+//! a later fix does not bring it back.
 //!
 //! [`ExportFilter::excluded_ssids`] leaves out every Wi-Fi sighting of an excluded SSID, including
 //! what a network sent before it was excluded mid-run; removing the exclusion brings them back to
@@ -69,7 +70,7 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Band, ChannelInfo, channel_info};
 
 use crate::record::ssid_text;
-use crate::store::{kind_name, parse_kind};
+use crate::store::{UploadSite, kind_name, parse_kind};
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
@@ -103,9 +104,9 @@ pub struct ExportFilter {
     /// How long after a window opened a sighting still belongs to it, in seconds. `0` folds a
     /// network's whole capture into one row.
     pub recapture_secs: u64,
-    /// Leave out sightings covered by the newest non-failed upload. Off by default, so `export` and
-    /// `analyze` read the whole capture.
-    pub after_uploads: bool,
+    /// Leave out sightings covered by the newest non-failed upload to this site. `None` by default,
+    /// so `export` and `analyze` read the whole capture.
+    pub after_uploads: Option<UploadSite>,
     /// Wi-Fi SSIDs left out, matched on the stored bytes exactly like
     /// `EngineConfig::excluded_ssids`. BLE names are never matched. Empty by default.
     pub excluded_ssids: HashSet<Vec<u8>>,
@@ -116,7 +117,7 @@ impl Default for ExportFilter {
     fn default() -> Self {
         Self {
             recapture_secs: DEFAULT_RECAPTURE_SECS,
-            after_uploads: false,
+            after_uploads: None,
             excluded_ssids: HashSet::new(),
         }
     }
@@ -242,7 +243,7 @@ pub fn wigle_csv<W: Write>(
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
         let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
-        let mut rows = stmt.query([filter.after_uploads])?;
+        let mut rows = stmt.query([filter.after_uploads.map(UploadSite::name)])?;
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
@@ -428,15 +429,16 @@ fn close(
 /// narrowest a sort row carries. That measured a quarter of what the node and source columns cost
 /// the export.
 ///
-/// `?1` is [`ExportFilter::after_uploads`], an uncorrelated scalar evaluated once, not per
-/// sighting. No index on purpose: a scan and a sort beat one random lookup per sighting
-/// (`docs/store-io-findings.md`).
+/// `?1` is the name of [`ExportFilter::after_uploads`]'s site, or NULL for none. The cutoff is an
+/// uncorrelated scalar evaluated once, not per sighting. No index on purpose: a scan and a sort
+/// beat one random lookup per sighting (`docs/store-io-findings.md`).
 const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
        node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END, o.id
 FROM observation o
-WHERE ?1 = 0
-   OR o.id > (SELECT COALESCE(MAX(through_id), 0) FROM upload WHERE result IS NOT 'failed')
+WHERE ?1 IS NULL
+   OR o.id > (SELECT COALESCE(MAX(through_id), 0) FROM upload
+              WHERE site = ?1 AND result IS NOT 'failed')
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 

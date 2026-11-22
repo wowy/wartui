@@ -67,7 +67,7 @@ use serde_json::{Map, Value};
 use ureq::unversioned::multipart::{Form, Part};
 use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
-    Connection, UploadRecord, is_simulated, last_upload, open_readonly, open_readwrite,
+    Connection, UploadRecord, UploadSite, is_simulated, last_upload, open_readonly, open_readwrite,
     record_upload, set_upload_result,
 };
 
@@ -128,7 +128,7 @@ pub fn run(args: Args) -> Result<()> {
             eprintln!(
                 "everything in {} was uploaded (job {}, {}); --resend sends it again",
                 db.display(),
-                previous.job_id,
+                previous.job,
                 utc_minute(previous.uploaded_at_ms)
             );
             note_unpositioned(&summary);
@@ -207,7 +207,7 @@ impl Prepared {
             text.push_str(&format!(
                 "  {:<11}job {}, {}; sending what came after\n",
                 "previously",
-                previous.job_id,
+                previous.job,
                 utc_minute(previous.uploaded_at_ms)
             ));
         }
@@ -246,7 +246,7 @@ pub(crate) fn prepare(
              under `[api-keys]` in {file}"
         );
     }
-    filter.after_uploads = !resend;
+    filter.after_uploads = (!resend).then_some(UploadSite::Wdgwars);
     let Body { gz, csv_bytes, summary, previous } = body(db, &filter)?;
     if summary.rows == 0 {
         return Ok(match previous {
@@ -310,7 +310,10 @@ fn body(db: &Path, filter: &ExportFilter) -> Result<Body> {
     let mut csv = Counted { inner: GzEncoder::new(Vec::new(), Compression::default()), bytes: 0 };
     let summary = wigle_csv(&conn, filter, &mut csv, env!("CARGO_PKG_VERSION"))?;
     let gz = csv.inner.finish().context("compressing the upload")?;
-    let previous = if filter.after_uploads { last_upload(&conn)? } else { None };
+    let previous = match filter.after_uploads {
+        Some(site) => last_upload(&conn, site)?,
+        None => None,
+    };
     Ok(Body { gz, csv_bytes: csv.bytes, summary, previous })
 }
 
@@ -347,8 +350,15 @@ pub(crate) fn send(client: &Client, prepared: &Prepared, db: &Path) -> Result<Se
     let job = client.submit(&prepared.body, &filename(db))?;
     let through = prepared.summary.last_id.expect("a capture with rows has a last sighting");
     let now = Utc::now().timestamp_millis();
-    let record = record_upload(&conn, through, now, job, prepared.summary.rows)
-        .with_context(|| format!("recording job {job} in {}", db.display()))?;
+    let record = record_upload(
+        &conn,
+        UploadSite::Wdgwars,
+        through,
+        now,
+        &job.to_string(),
+        prepared.summary.rows,
+    )
+    .with_context(|| format!("recording job {job} in {}", db.display()))?;
     Ok(Sent { job, record, conn })
 }
 
@@ -749,7 +759,7 @@ mod tests {
     use flate2::read::GzDecoder;
     use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
     use wartui_core::store::{
-        last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
+        UploadSite, last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
     };
 
     use super::{
@@ -909,7 +919,7 @@ mod tests {
             ],
         );
         let conn = open_readwrite(&db).unwrap();
-        let id = record_upload(&conn, 2, EPOCH_MS + 90_000, 7, 2).unwrap();
+        let id = record_upload(&conn, UploadSite::Wdgwars, 2, EPOCH_MS + 90_000, "7", 2).unwrap();
         set_upload_result(&conn, id, "done").unwrap();
         db
     }
@@ -937,8 +947,10 @@ mod tests {
         // Everything went, so a repeat has nothing to send, and the record names the job.
         let again = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
         assert!(matches!(again, Prepare::NothingNew { .. }));
-        let previous = last_upload(&open_readonly(&db).unwrap()).unwrap().expect("a record");
-        assert_eq!((previous.job_id, previous.rows), (42, 1));
+        let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
+            .unwrap()
+            .expect("a record");
+        assert_eq!((previous.job.as_str(), previous.rows), ("42", 1));
     }
 
     #[test]
@@ -972,7 +984,7 @@ mod tests {
         let prepared =
             prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
         assert_eq!(macs(&prepared.body), ["10:00:00:00:00:03"]);
-        assert_eq!(prepared.previous.map(|p| p.job_id), Some(7));
+        assert_eq!(prepared.previous.map(|p| p.job).as_deref(), Some("7"));
     }
 
     #[test]
@@ -990,11 +1002,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(&dir);
         let conn = open_readwrite(&db).unwrap();
-        let record = record_upload(&conn, 3, EPOCH_MS + 150_000, 8, 1).unwrap();
+        let record =
+            record_upload(&conn, UploadSite::Wdgwars, 3, EPOCH_MS + 150_000, "8", 1).unwrap();
         finish(&Sent { job: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
 
-        let previous = last_upload(&open_readonly(&db).unwrap()).unwrap().expect("a record");
-        assert_eq!(previous.job_id, 7);
+        let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
+            .unwrap()
+            .expect("a record");
+        assert_eq!(previous.job, "7");
     }
 
     #[test]

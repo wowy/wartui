@@ -142,7 +142,7 @@ impl Upload {
                 None
             }
             Ok(Prepare::NothingNew { previous, .. }) => {
-                Some(format!("nothing new since job {}", previous.job_id))
+                Some(format!("nothing new since job {}", previous.job))
             }
             Ok(Prepare::NoRows(_)) => Some("no positioned rows to upload yet".to_owned()),
             Err(error) if error.is::<Simulated>() => Some(error.to_string()),
