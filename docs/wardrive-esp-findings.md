@@ -328,6 +328,20 @@ bridge's services. At the longest rest a knock holds the bridge for about 3 s in
 The app's first request therefore comes well inside the 3 s a central is given. Whether a link
 starts the rests over at 5 s was not watched: the app never let go by itself.
 
+**A central that exchanges an MTU by itself**, on 2026-11-22 at `bdb6f01`, where an MTU exchange
+spares a central only inside the pairing window. The phone was quiet, so the PC stood in for it:
+a plain BlueZ connection to the public address, which exchanges an MTU and discovers the services
+and asks nothing of them. The pairing window was closed.
+
+| Check | Result |
+| --- | --- |
+| Three such connections | each dropped after 3.0 to 3.1 s; `unbonded_kicks` rose by 3 |
+| The rests after the first two, made 7 s apart | 5 s, then 10 s |
+| The rest after the third, made 40 s after the second rest ended | 5 s |
+| `forget`, then `wartui bluetooth pair` | 10 of 10, in 16.9 to 17.7 s |
+| `status --link bluetooth`, pairing window closed | 10 of 10, 5 to 9 s |
+| The stand-in on WardriveESP | linked; 131 `WD:AP` lines in 12 s |
+
 **The bonded PC beside the knocking phone**, no bridge named, so each run scans:
 
 | Check | Result |
