@@ -92,6 +92,8 @@ macro_rules! note {
 
 mod bus;
 mod ota;
+// TEMPORARY burst-test build: never merge
+mod burst;
 
 /// Granularity of the loops that wait on the bus: fine against the P4's millisecond gap
 /// between transfers, coarse enough not to spin the core.
@@ -395,6 +397,8 @@ fn main() -> ! {
     node.trial = trial;
     node.mac = esp_radio::wifi::Interface::station().mac_address();
     note!("wartui node {} v{}", mac::full(&node.mac), env!("CARGO_PKG_VERSION"));
+    // TEMPORARY burst-test build: never merge
+    let mut burst = burst::Burst::new(&node.mac);
 
     loop {
         drain(node, &mut ota);
@@ -439,6 +443,8 @@ fn main() -> ! {
             // that scanner being there.
             if let Some(scanner) = scanner.as_deref_mut() {
                 report_ble(node, scanner);
+                // TEMPORARY burst-test build: never merge
+                burst.poll(node);
             }
             node.counter = node.counter.wrapping_add(1).max(1);
             // Drain first, so a heartbeat due now reports an epoch adopted since the scan.
@@ -467,6 +473,8 @@ fn main() -> ! {
             sniff::disarm();
             radio::quiet(&sniffer);
             report(node, channel);
+            // TEMPORARY burst-test build: never merge
+            burst.poll(node);
         } else {
             note!("radio refused channel {}", channel);
         }
