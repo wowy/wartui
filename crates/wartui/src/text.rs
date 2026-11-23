@@ -1,7 +1,12 @@
-//! Number and label text shared by the subcommands' reports and the TUI.
+//! Number, label and message text shared by the subcommands' reports and the TUI.
+//!
+//! [`message_text`] is the one-liner for each bridge message. `wartui sniff` prints it for a
+//! message the bridge sends now, and `wartui sd-log` for one its log kept, so a message reads
+//! alike in both.
 
+use wartui_core::engine::power_cycled_text;
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::link::{SdLogState, SdState, SdStatus};
+use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -128,6 +133,58 @@ pub(crate) fn sd_log_text(sd: Option<SdStatus>) -> String {
         SdLogState::Failed => "stopped after a card error".to_owned(),
     };
     format!("on · {doing}")
+}
+
+/// A bridge message as one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MessageText {
+    /// What the message is, in a word: `status`, `log`, `fleet`.
+    pub(crate) kind: &'static str,
+    /// What it says.
+    pub(crate) text: String,
+}
+
+/// `msg` as one line, naming slots as `board` labels them.
+pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText {
+    let (kind, text) = match msg {
+        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => (
+            "ready",
+            format!("{} firmware {fw_version} link v{LINK_PROTO_VERSION}", mac::full(bridge_mac)),
+        ),
+        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, .. } => (
+            "status",
+            format!(
+                "{rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
+                uptime_ms / 1000
+            ),
+        ),
+        BridgeToHost::Log { message } => ("log", message.to_string()),
+        BridgeToHost::Error { message } => ("error", message.to_string()),
+        BridgeToHost::Gps { bytes } => ("gps", format!("{} bytes", bytes.len())),
+        BridgeToHost::Update(status) => ("update", hex(status)),
+        BridgeToHost::FromNode { slot, kind, body, .. } => {
+            ("node", format!("{} type {kind}, {} bytes", board.label(*slot), body.len()))
+        }
+        BridgeToHost::Delivered { id } => ("delivered", format!("record {id} delivered")),
+        BridgeToHost::Undelivered { id, reason } => {
+            ("undelivered", format!("record {id} undelivered: {reason:?}"))
+        }
+        BridgeToHost::PowerCycled { slot, outcome } => {
+            ("power", power_cycled_text(board, *slot, *outcome))
+        }
+        BridgeToHost::CacheImage(status) => ("cache", hex(status)),
+        BridgeToHost::Fleet(report) => (
+            "fleet",
+            format!("{:?}, pool {}, {} shares", report.mode, report.pool, report.shares.len()),
+        ),
+        BridgeToHost::SdFormatted { outcome } => ("sd", format!("formatted: {outcome:?}")),
+    };
+    MessageText { kind, text }
+}
+
+/// `bytes` as lowercase hex, two digits each and nothing between.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Format a set as channel numbers, the units every other tool uses.

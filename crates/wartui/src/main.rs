@@ -55,6 +55,7 @@ mod reset;
 mod run;
 mod scan;
 mod sd;
+mod sd_log;
 mod sniff;
 mod status;
 #[cfg(test)]
@@ -108,6 +109,8 @@ enum Command {
     Scan(scan::Args),
     /// Show the bridge's microSD card, format it, or set whether the bridge logs to it.
     Sd(sd::Args),
+    /// Print an SD card log as text, from log files read off the card. `sd log` is the setting.
+    SdLog(sd_log::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -176,6 +179,7 @@ async fn command(cli: Cli) -> std::process::ExitCode {
         Some(Command::Pool(args)) => interruptible(pool::run(args)).await,
         Some(Command::Scan(args)) => interruptible(scan::run(args)).await,
         Some(Command::Sd(args)) => interruptible(sd::run(args)).await,
+        Some(Command::SdLog(args)) => sd_log::run(args),
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         // Interruptible once its link is open (`flash::p4`).
@@ -1088,6 +1092,30 @@ mod tests {
             ["wartui", "sd", "log", "maybe"].as_slice(),
             &["wartui", "sd", "log", "true"],
             &["wartui", "sd", "log", "on", "off"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn cli_parser_accepts_sd_log_file_when_given_paths_and_verbose() {
+        for args in [
+            ["wartui", "sd-log", "LOG/00000007.BIN"].as_slice(),
+            &["wartui", "sd-log", "LOG/00000007.BIN", "LOG/00000008.BIN"],
+            &["wartui", "sd-log", "/Volumes/WARTUI/LOG", "--verbose"],
+            &["wartui", "--log-file", "w.log", "sd-log", "LOG"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::SdLog(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_sd_log_file_when_given_no_path_or_a_bridge() {
+        for args in [
+            ["wartui", "sd-log"].as_slice(),
+            &["wartui", "sd-log", "--verbose"],
+            &["wartui", "sd-log", "LOG", "--bridge", "44:C0"],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
         }

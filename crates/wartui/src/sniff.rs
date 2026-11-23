@@ -17,8 +17,10 @@ use wartui_proto::bus::{
     UpType,
 };
 use wartui_proto::hci::BleTrailer;
-use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION};
+use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac;
+
+use crate::text::{hex, message_text};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -213,37 +215,10 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
-        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => {
-            // Unreachable as the transport stands: every `Ready` it decodes
-            // becomes a `LinkEvent::Connected`, handled above, and none is
-            // forwarded as a message. Kept because the match is exhaustive
-            // over the wire format rather than over what happens to arrive.
-            println!(
-                "# bridge ready: {} firmware {fw_version} link v{LINK_PROTO_VERSION}",
-                mac::full(bridge_mac)
-            );
-        }
-
-        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, .. } => {
-            println!(
-                "# status: {rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, \
-                 up {}s",
-                uptime_ms / 1000
-            );
-        }
-
-        BridgeToHost::Log { message } => {
-            if args.verbose {
-                println!("# bridge log: {message}");
-            }
-        }
-
-        BridgeToHost::Error { message } => println!("# bridge error: {message}"),
-
         // The receiver's stream as the bridge read it, split wherever a batch ended. The
         // text is how the wiring is checked by eye, so it is shown escaped, not parsed.
         BridgeToHost::Gps { bytes } => {
-            println!("# gps  {} bytes", bytes.len());
+            println!("{}", message_line(message, NodeBoard::NoCarrier));
             if args.verbose {
                 println!("#   {}", String::from_utf8_lossy(bytes).escape_debug());
             }
@@ -252,26 +227,13 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
-        // Answers `flash-bridge`'s update ops, which `sniff` never sends.
-        BridgeToHost::Update(status) => println!("# update status {}", hex(status)),
-        // Answers `ota`'s cache upload, which `sniff` never sends.
-        BridgeToHost::CacheImage(status) => println!("# cache status {}", hex(status)),
+        BridgeToHost::Log { .. } if !args.verbose => {}
 
-        // Answers to `ToNode`, which `sniff` never sends.
-        BridgeToHost::Delivered { id } => println!("# record {id} delivered"),
-        BridgeToHost::Undelivered { id, reason } => {
-            println!("# record {id} undelivered: {reason:?}");
-        }
-        // The P4's plan: its mode and each slot's share.
-        BridgeToHost::Fleet(report) => {
+        _ => {
             let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
-            println!(
-                "# fleet {:?}, pool {}, {} shares",
-                report.mode,
-                report.pool,
-                report.shares.len()
-            );
-            if args.verbose {
+            println!("{}", message_line(message, board));
+            // The P4's plan: each slot's share under its mode.
+            if let (BridgeToHost::Fleet(report), true) = (message, args.verbose) {
                 for share in &report.shares {
                     let job = if share.ble {
                         "bluetooth".to_owned()
@@ -282,14 +244,37 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 }
             }
         }
-        // Answers `power-cycle`, which `sniff` never sends.
-        BridgeToHost::PowerCycled { slot, outcome } => {
-            let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
-            println!("# {}", wartui_core::engine::power_cycled_text(board, *slot, *outcome));
-        }
-        // Answers a format of the bridge's microSD card, which `sniff` never asks for.
-        BridgeToHost::SdFormatted { outcome } => println!("# sd formatted: {outcome:?}"),
     }
+}
+
+/// The line for a message the bridge sent: its one-liner as `wartui sd-log` prints it too,
+/// behind `sniff`'s own label.
+fn message_line(message: &BridgeToHost, board: NodeBoard) -> String {
+    let label = match message {
+        // Unreachable as the transport stands: every `Ready` it decodes becomes a
+        // `LinkEvent::Connected`, handled in `handle`, and none is forwarded as a message. Kept
+        // because the match is exhaustive over the wire format rather than over what happens to
+        // arrive.
+        BridgeToHost::Ready { .. } => "bridge ready: ",
+        BridgeToHost::Status { .. } => "status: ",
+        BridgeToHost::Log { .. } => "bridge log: ",
+        BridgeToHost::Error { .. } => "bridge error: ",
+        BridgeToHost::Gps { .. } => "gps  ",
+        // Answers `flash-bridge`'s update ops, which `sniff` never sends.
+        BridgeToHost::Update(_) => "update status ",
+        // Answers `ota`'s cache upload, which `sniff` never sends.
+        BridgeToHost::CacheImage(_) => "cache status ",
+        BridgeToHost::Fleet(_) => "fleet ",
+        // Answers a format of the bridge's microSD card, which `sniff` never asks for.
+        BridgeToHost::SdFormatted { .. } => "sd ",
+        // Each says what it is: a node's record, answers to `ToNode` and `power-cycle`, which
+        // `sniff` never sends.
+        BridgeToHost::FromNode { .. }
+        | BridgeToHost::Delivered { .. }
+        | BridgeToHost::Undelivered { .. }
+        | BridgeToHost::PowerCycled { .. } => "",
+    };
+    format!("# {label}{}", message_text(message, board).text)
 }
 
 /// The start of each line about a record: the bridge's stamp, and the slot as the operator
@@ -407,10 +392,6 @@ fn render(sighting: &SightingMsg<'_>) -> String {
     )
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +444,28 @@ mod tests {
             bluetooth: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
+    }
+
+    #[test]
+    fn sniff_cmd_prints_label_and_shared_text_when_bridge_sends_a_message() {
+        use wartui_proto::link::{LogStr, PowerOutcome, SdFormatOutcome};
+        let board = NodeBoard::Carrier14;
+        let log = BridgeToHost::Log { message: LogStr::try_from("hello").expect("short") };
+        let error = BridgeToHost::Error { message: LogStr::try_from("no").expect("short") };
+        let cycled = BridgeToHost::PowerCycled {
+            slot: Slot::new(1, 0).expect("B1"),
+            outcome: PowerOutcome::Done,
+        };
+        let lines = [
+            (log, "# bridge log: hello"),
+            (error, "# bridge error: no"),
+            (BridgeToHost::Delivered { id: 4 }, "# record 4 delivered"),
+            (cycled, "# N8 power-cycled"),
+            (BridgeToHost::SdFormatted { outcome: SdFormatOutcome::Done }, "# sd formatted: Done"),
+        ];
+        for (message, line) in lines {
+            assert_eq!(message_line(&message, board), line);
+        }
     }
 
     #[test]

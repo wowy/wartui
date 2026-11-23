@@ -23,6 +23,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
 | `sd`           | Show the bridge's microSD card, format it, or set its log; see "The SD card"        |
+| `sd-log`       | Print the SD card's log files as text; see "Reading the SD log"                     |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -917,6 +918,57 @@ footer says `formatting the SD card…`, then the bridge's answer when it comes.
 | `no slot`              | Nothing: the bridge drives no card slot     |
 | `waiting`              | Nothing: no status from the bridge yet      |
 | `no bridge`            | Nothing: the link is down                   |
+
+### Reading the SD log
+
+`wartui sd-log` prints the bridge's log as text. It reads the log files off the card, mounted or
+copied, and needs no bridge; `wartui sd log` is the setting. Each path is a file, or a directory
+such as the card's `LOG/`, whose `NNNNNNNN.BIN` files it reads in number order.
+
+```sh
+wartui sd-log /Volumes/WARTUI/LOG          # every file on the card, in number order
+wartui sd-log LOG/00000007.BIN --verbose   # one file, each frame in full under its line
+```
+
+```
+$ wartui sd-log LOG/00000007.BIN
+LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerOn, last phase Unknown
+00:00:05.000  open        format 1 · card 29.7 GB, 29.3 GB free · image abababab
+00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v1
+00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s
+00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s
+00:00:06.100  log         sd: hello
+--:--:--.---  unreadable  20 bytes (CRC mismatch)
+00:00:06.200  phone →     WD:START\n
+00:00:06.300  phone ←     answer WD:OK
+00:00:06.400  owner       Usb → Phone on PhoneSubscribed
+00:00:07.000  dropped     3 records lost
+00:00:08.000  closed      full, the next file takes over
+12 records · 1 unreadable · 3 dropped · 00:00:05.000 to 00:00:08.000
+```
+
+A header opens each file: its number, which of the boot's files it is, the firmware, the slot it
+booted from and whether it is on trial, and why the bridge booted. A line per record follows: the
+P4's uptime, with `Nd ` ahead past a day, the record's kind and what it says. A frame reads as
+`wartui sniff` prints it.
+
+| Kind                              | Record                                                                   |
+|-----------------------------------|--------------------------------------------------------------------------|
+| `open`                            | The file's first: its format, the card, its free space, the image digest |
+| `ready`, `status`, `log`, `error` | A frame the bridge sent; `fleet`, `update`, `cache`, `power`, `sd` too   |
+| `status*`                         | A status the log built itself                                            |
+| `phone →`                         | A command a phone wrote                                                  |
+| `phone ←`                         | A line the bridge sent a phone, an `answer` or a `stream` line           |
+| `owner`                           | Who holds the host queue, before and after, and what moved it            |
+| `dropped`                         | Records the log lost                                                     |
+| `closed`                          | The file's end: logging turned off, or the next file took over           |
+| `unreadable`                      | A record that did not decode, its length and why                         |
+
+An unreadable record costs that record alone: reading goes on at the next one. A summary closes
+each file: records, unreadable, dropped and the uptime span. Given several files, it prints a total
+too, whose time adds each file's span, since files from different boots share no clock. A file
+holding nothing reads `no records`. A path that does not exist, or a directory with no log files,
+is the command's error.
 
 ### The channel pool
 
