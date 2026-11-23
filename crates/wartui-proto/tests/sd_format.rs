@@ -2,131 +2,16 @@
 //! implementation written by someone else: a plan that only agreed with its own reader would
 //! prove nothing about a laptop's.
 
-use std::collections::HashMap;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 
 use wartui_proto::sd::BLOCK;
 use wartui_proto::sd::format::{FormatError, Layout, Op, plan};
 use wartui_proto::sd::inspect::{partition, volume};
 use wartui_proto::sd::mib;
 
-/// A card of `blocks`, holding only the blocks written non-zero: a 128 GB card fits in memory.
-#[derive(Clone)]
-struct Card {
-    blocks: u64,
-    written: HashMap<u64, [u8; BLOCK]>,
-}
-
-impl Card {
-    fn new(blocks: u64) -> Self {
-        Self { blocks, written: HashMap::new() }
-    }
-
-    fn block(&self, lba: u64) -> [u8; BLOCK] {
-        self.written.get(&lba).copied().unwrap_or([0; BLOCK])
-    }
-
-    fn put(&mut self, lba: u64, data: [u8; BLOCK]) {
-        assert!(lba < self.blocks, "block {lba} is past the card's end");
-        if data == [0; BLOCK] {
-            self.written.remove(&lba);
-        } else {
-            self.written.insert(lba, data);
-        }
-    }
-
-    fn apply(&mut self, op: &Op) {
-        match op {
-            Op::Zeros { lba, count } => {
-                for lba in u64::from(*lba)..u64::from(*lba) + u64::from(*count) {
-                    self.put(lba, [0; BLOCK]);
-                }
-            }
-            Op::Block { lba, data } => self.put(u64::from(*lba), *data),
-        }
-    }
-
-    /// A card that held something before: an old GPT at both ends, and junk where the FATs and
-    /// the root directory go.
-    fn used(blocks: u64, layout: &Layout) -> Self {
-        let mut card = Self::new(blocks);
-        for lba in [1, 2, blocks - 1, blocks - 33] {
-            card.put(lba, [0xA5; BLOCK]);
-        }
-        for lba in [layout.fat_start() + 1, layout.fat_start() + layout.fat_blocks + 7] {
-            card.put(u64::from(lba), [0xA5; BLOCK]);
-        }
-        card.put(u64::from(layout.data_start()) + 1, [0xA5; BLOCK]);
-        card
-    }
-
-    fn formatted(layout: &Layout) -> Self {
-        let mut card = Self::used(u64::from(layout.card_blocks), layout);
-        for op in layout.ops() {
-            card.apply(&op);
-        }
-        card
-    }
-
-    /// The partition at `start` as a stream from its first byte, as `fatfs` reads a volume.
-    fn partition(&mut self, start: u32) -> Partition<'_> {
-        let len = (self.blocks - u64::from(start)) * BLOCK as u64;
-        Partition { card: self, base: u64::from(start) * BLOCK as u64, len, pos: 0 }
-    }
-}
-
-struct Partition<'a> {
-    card: &'a mut Card,
-    base: u64,
-    len: u64,
-    pos: u64,
-}
-
-impl Partition<'_> {
-    /// The block holding the stream's position, and the offset in it.
-    fn at(&self) -> (u64, usize) {
-        let byte = self.base + self.pos;
-        (byte / BLOCK as u64, (byte % BLOCK as u64) as usize)
-    }
-}
-
-impl Read for Partition<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let (lba, offset) = self.at();
-        let n = buf.len().min(BLOCK - offset).min((self.len - self.pos.min(self.len)) as usize);
-        buf[..n].copy_from_slice(&self.card.block(lba)[offset..offset + n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for Partition<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let (lba, offset) = self.at();
-        let n = buf.len().min(BLOCK - offset).min((self.len - self.pos.min(self.len)) as usize);
-        let mut block = self.card.block(lba);
-        block[offset..offset + n].copy_from_slice(&buf[..n]);
-        self.card.put(lba, block);
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Seek for Partition<'_> {
-    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-        let pos = match to {
-            SeekFrom::Start(pos) => Some(pos),
-            SeekFrom::Current(by) => self.pos.checked_add_signed(by),
-            SeekFrom::End(by) => self.len.checked_add_signed(by),
-        };
-        self.pos = pos.ok_or_else(|| io::Error::other("seek before the partition"))?;
-        Ok(self.pos)
-    }
-}
+#[path = "common/sd_card.rs"]
+mod sd_card;
+use sd_card::Card;
 
 /// One card size and the geometry its plan pins.
 struct Geometry {

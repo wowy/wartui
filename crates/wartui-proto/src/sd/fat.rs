@@ -97,6 +97,8 @@ pub const DIR_ENTRIES_PER_SECTOR: usize = BLOCK / DIR_ENTRY;
 
 /// A directory entry's attribute bits.
 pub mod attr {
+    /// The volume label, an entry of the root directory that is no file.
+    pub const VOLUME: u8 = 0x08;
     /// A subdirectory.
     pub const DIR: u8 = 0x10;
     /// A file changed since it was last backed up, which every new file is.
@@ -215,6 +217,15 @@ impl DirEntry {
     pub const fn is_long_name(&self) -> bool {
         self.attr & attr::LFN_MASK == attr::LFN
     }
+}
+
+/// Where a long-name entry keeps the checksum of the short name it belongs to.
+pub const LFN_CHECKSUM: usize = 13;
+
+/// The checksum a long-name entry carries of its short name, `name`.
+#[must_use]
+pub fn lfn_checksum(name: &[u8; 11]) -> u8 {
+    name.iter().fold(0u8, |sum, &byte| sum.rotate_right(1).wrapping_add(byte))
 }
 
 /// Directory entry `index` of `sector`, or `None` past its [`DIR_ENTRIES_PER_SECTOR`].

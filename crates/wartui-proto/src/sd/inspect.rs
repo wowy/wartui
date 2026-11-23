@@ -6,8 +6,8 @@
 //! and a block that fails a check reads as no FAT32 volume rather than a guess.
 
 use super::{
-    BLOCK, FAT32_TYPES, FREE_UNKNOWN, FSINFO_LEAD, FSINFO_STRUCT, FSINFO_TRAIL, MAX_CLUSTERS,
-    MBR_ENTRY, MIN_CLUSTERS, bpb, fsinfo, le16, le32, mib, signed,
+    BLOCK, FAT32_TYPES, FREE_UNKNOWN, MAX_CLUSTERS, MBR_ENTRY, MIN_CLUSTERS, bpb, fsinfo,
+    fsinfo_signed, le16, le32, mib, signed,
 };
 
 /// The MBR's partition entries, and the bytes in each.
@@ -143,11 +143,8 @@ impl Volume {
     /// signatures are wrong, or it records no count or one past the volume's clusters.
     #[must_use]
     pub fn free_mb(&self, fsinfo: &[u8; BLOCK]) -> Option<u32> {
-        let signed = le32(fsinfo, fsinfo::LEAD) == FSINFO_LEAD
-            && le32(fsinfo, fsinfo::STRUCT) == FSINFO_STRUCT
-            && le32(fsinfo, fsinfo::TRAIL) == FSINFO_TRAIL;
         let free = le32(fsinfo, fsinfo::FREE);
-        (signed && free != FREE_UNKNOWN && free <= self.clusters)
+        (fsinfo_signed(fsinfo) && free != FREE_UNKNOWN && free <= self.clusters)
             .then(|| mib(u64::from(free) * u64::from(self.sectors_per_cluster)))
     }
 
