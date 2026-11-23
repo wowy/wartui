@@ -374,6 +374,50 @@ fn sd_inspect_reads_layout_when_card_is_formatted() {
 }
 
 #[test]
+fn sd_inspect_pins_fat_geometry_when_card_is_each_size() {
+    for row in &GEOMETRY {
+        let layout = layout(row.card_blocks);
+        let card = Card::formatted(&layout);
+        let found = volume(&card.block(8192), 8192).expect("a FAT32 volume");
+        let got = (found.fat_start, found.fat_blocks, found.fats, found.root_cluster);
+        assert_eq!(got, (8192 + u32::from(row.reserved), row.fat_blocks, 2, 2), "{}", row.name);
+        assert_eq!((found.ext_flags, found.version), (0, 0), "{}: mirrored, version 0", row.name);
+        assert_eq!(found.data_start(), layout.data_start(), "{}", row.name);
+        let size = u32::from(row.sectors_per_cluster);
+        assert_eq!(found.cluster_lba(2), Some(layout.data_start()), "{}", row.name);
+        assert_eq!(found.cluster_lba(3), Some(layout.data_start() + size), "{}", row.name);
+        let last = row.clusters + 1;
+        // The last cluster ends the card, but for any blocks too few to make another.
+        let end = u64::from(found.cluster_lba(last).expect("the last cluster") + size);
+        assert!(end <= row.card_blocks && row.card_blocks - end < u64::from(size), "{}", row.name);
+        for outside in [0, 1, last + 1, u32::MAX] {
+            assert_eq!(found.cluster_lba(outside), None, "{}: cluster {outside}", row.name);
+        }
+    }
+}
+
+#[test]
+fn sd_inspect_reads_mirroring_and_version_when_boot_sector_sets_them() {
+    let card = Card::formatted(&layout(31_250_000));
+    let mut boot = card.block(8192);
+    // One active FAT, the second, unmirrored; and version 1.0.
+    boot[40..42].copy_from_slice(&0x0081u16.to_le_bytes());
+    boot[42..44].copy_from_slice(&0x0100u16.to_le_bytes());
+    boot[44..48].copy_from_slice(&5u32.to_le_bytes());
+    let found = volume(&boot, 8192).expect("still a volume to report");
+    assert_eq!((found.ext_flags, found.version, found.root_cluster), (0x0081, 0x0100, 5));
+}
+
+#[test]
+fn sd_inspect_reads_nothing_when_volume_ends_past_u32_blocks() {
+    let card = Card::formatted(&layout(31_250_000));
+    let boot = card.block(8192);
+    let total = u32::from_le_bytes(boot[32..36].try_into().expect("four bytes"));
+    assert!(volume(&boot, u32::MAX - total).is_some(), "ends at u32::MAX");
+    assert_eq!(volume(&boot, u32::MAX - total + 1), None, "ends a block past it");
+}
+
+#[test]
 fn sd_inspect_fits_volume_when_card_is_the_one_it_was_planned_for() {
     for row in &GEOMETRY {
         let card = Card::formatted(&layout(row.card_blocks));
@@ -544,6 +588,10 @@ fn sd_inspect_never_panics_when_blocks_are_random() {
             if let Some(found) = volume(&block, start) {
                 let _ = found.free_mb(&block);
                 let _ = found.size_mb();
+                let _ = found.data_start();
+                for cluster in [0, 2, found.clusters + 1, found.root_cluster, u32::MAX] {
+                    let _ = found.cluster_lba(cluster);
+                }
             }
         }
         let _ = found.free_mb(&block);

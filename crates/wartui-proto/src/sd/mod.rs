@@ -1,5 +1,6 @@
-//! The P4 bridge's microSD card: the FAT32 volume it writes ([`format`]) and how it reads one it
-//! did not ([`inspect`]).
+//! The P4 bridge's microSD card: the FAT32 volume it writes ([`format`]), how it reads one it
+//! did not ([`inspect`]), the FAT32 pieces its diagnostics log is written in ([`fat`]) and the
+//! log's records ([`log`]).
 //!
 //! The layout is the one SD cards ship with, so a card the bridge formats looks like a new card
 //! to a laptop or a phone:
@@ -23,8 +24,10 @@
 //! [`inspect`] reads whatever a stranger's card holds, so it bounds every read and every sum:
 //! nothing in a block can make it panic or overflow.
 
+pub mod fat;
 pub mod format;
 pub mod inspect;
+pub mod log;
 
 /// The bytes in one card block. Every SD card addresses 512-byte blocks.
 pub const BLOCK: usize = 512;
@@ -67,6 +70,8 @@ mod bpb {
     pub const HIDDEN: usize = 28;
     pub const TOTAL_32: usize = 32;
     pub const FAT_32: usize = 36;
+    pub const EXT_FLAGS: usize = 40;
+    pub const FS_VERSION: usize = 42;
     pub const ROOT_CLUSTER: usize = 44;
     pub const FSINFO: usize = 48;
     pub const BACKUP: usize = 50;

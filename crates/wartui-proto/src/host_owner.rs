@@ -34,11 +34,13 @@
 //! since any frame it sends takes it, so [`Owner::owner`] reads a phone as [`HostOwner::None`].
 
 use heapless::Vec;
+use serde::{Deserialize, Serialize};
 
 use crate::link::HostOwner;
 
-/// What the P4 feeds [`Owner`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the P4 feeds [`Owner`]. Serialized for the SD log's `Owner` record
+/// ([`crate::sd::log`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Input {
     /// A central subscribed to the host stream, on an encrypted link, holding a stored bond.
     Subscribed,
@@ -86,8 +88,8 @@ pub enum Effect {
 /// The effects of one input: three at most.
 pub type Effects = Vec<Effect, 3>;
 
-/// Who holds the host queue.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Who holds the host queue. Serialized for the SD log's `Owner` record ([`crate::sd::log`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Holder {
     /// No host: the P4 queues nothing.
     #[default]

@@ -25,6 +25,10 @@ use wartui_proto::radio_link::BleCounters;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
+#[path = "common/status.rs"]
+mod status;
+use status::{full_members, largest_status};
+
 fn sample_commands() -> Vec<HostToBridge, 24> {
     let assign = Assign { epoch: 3, flags: 0, channels: wartui_proto::plan::ChannelSet::empty() };
     let body = ToNodeBody::from_slice(&assign.encode()).expect("an assignment fits");
@@ -258,15 +262,6 @@ fn without_sd_and_bluetooth(body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
 }
 
 /// A member in every slot, the most a [`BridgeToHost::Status`] carries.
-fn full_members() -> Vec<Member, 14> {
-    (0..14)
-        .map(|byte| Member {
-            slot: Slot::from_u8(byte).expect("a slot"),
-            mac: [0x02, 0xFF, 0xFF, 0xFF, 0xFF, byte],
-        })
-        .collect()
-}
-
 /// A report with a share in every slot, the largest a [`BridgeToHost::Fleet`] carries.
 fn full_report() -> Report {
     let mut shares = heapless::Vec::new();
@@ -826,62 +821,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
 
 #[test]
 fn link_fits_status_in_one_frame_when_every_field_is_largest() {
-    // Every varint at its longest, every queue reported and a member in every slot.
-    let mut queues = QueueStats::new();
-    for queue in QueueId::ALL.into_iter().cycle().take(8) {
-        let stat = QueueStat { queue, capacity: u32::MAX, high_water: u32::MAX, dropped: u32::MAX };
-        queues.push(stat).expect("eight fit");
-    }
-    let status = BridgeToHost::Status {
-        rx_count: u32::MAX,
-        dropped_tx: u32::MAX,
-        uptime_ms: u32::MAX,
-        rx_oversize: u32::MAX,
-        queues,
-        radio_link: RadioLinkStats {
-            packets: u32::MAX,
-            crc_fail: u32::MAX,
-            bad_magic: u32::MAX,
-            seq_gap: u32::MAX,
-            uart_errors: u32::MAX,
-            radio_crc_fail: u32::MAX,
-            radio_bad_magic: u32::MAX,
-            radio_seq_gap: u32::MAX,
-            radio_uart_errors: u32::MAX,
-        },
-        host_uart_errors: u32::MAX,
-        fan: Some(FanStats { duty: FanDuty::FULL, rpm: Some(u16::MAX) }),
-        pool: ChannelPool::All,
-        scan: ScanMode::WifiBluetooth,
-        ble: Slot::from_u8(13),
-        present: u32::MAX,
-        members: full_members(),
-        sd: Some(SdStatus { state: SdState::Failed, card_mb: u32::MAX, free_mb: Some(u32::MAX) }),
-        bluetooth: BluetoothStatus {
-            owner: HostOwner::Bluetooth,
-            bonds: u8::MAX,
-            window: PairWindow::Open { secs: u16::MAX },
-            central: Some(Central {
-                encrypted: true,
-                bonded: true,
-                mtu: u16::MAX,
-                phy: u8::MAX,
-                interval_us: u32::MAX,
-            }),
-            counters: BleCounters {
-                pairings: u32::MAX,
-                failed_pairings: u32::MAX,
-                unbonded_kicks: u32::MAX,
-                last_disconnect: u8::MAX,
-                resynced_bytes: u32::MAX,
-                dropped_writes: u32::MAX,
-                phy: u8::MAX,
-                interval_us: u32::MAX,
-                heap_high_water: u32::MAX,
-            },
-            wardrive_esp: true,
-        },
-    };
+    let status = largest_status();
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("fits one frame");
     assert!(n <= MAX_FRAME);

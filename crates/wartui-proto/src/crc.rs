@@ -1,4 +1,4 @@
-//! CRC-32 for records on flash.
+//! CRC-32 for records on flash and in the SD log ([`crate::sd::log`]).
 //!
 //! A flash record outlives the build that wrote it, so it takes the 32-bit CRC every tool can
 //! check. The links' packets use [`crc16`](crate::link::crc16), which is enough for a packet
