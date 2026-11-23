@@ -639,7 +639,7 @@ pub enum SdLogState {
     Waiting,
     /// A file is open.
     Writing,
-    /// The card has no room, even after deleting the oldest logs.
+    /// The card has no room above the reserve, and deleting the old logs cannot restore it.
     Full,
     /// The card's volume is one the writer will not touch.
     Refused,

@@ -57,7 +57,11 @@
 //! read in [`CHUNK_BLOCKS`] runs. Clusters are taken forward from FSInfo's next-free hint, so a
 //! fresh card costs one FAT read per 128 clusters of log. When a flush would leave less free than
 //! [`Policy::keep_free_mb`], capped at an eighth of the volume, the oldest log file is deleted
-//! first. The root and `LOG/` are never extended: a full `LOG/` reuses the oldest file's entry.
+//! first, but only while deleting all the log's files but the open one would restore the reserve.
+//! Each counts at its size, which undercounts a chain a cut left longer. When other files took
+//! the space, deleting the log's gains nothing and loses its history, so the flush stops with
+//! [`Fault::Full`] and keeps every file. The root and `LOG/` are never extended: a full `LOG/`
+//! reuses the oldest file's entry.
 //!
 //! **A stranger's volume is written when nothing in it surprises the writer:** any cluster size,
 //! a root anywhere, no FSInfo, one FAT. Mirroring off, a FAT32 version past 0 or more than two
@@ -168,7 +172,8 @@ pub enum Fault {
     NotADirectory,
     /// `LOG/` has no free entry and none of the log's files to delete; it is never extended.
     LogDirFull,
-    /// The card is short of clusters and no log file but the open one is left to delete.
+    /// The card is short of clusters, and deleting the log's files but the open one cannot
+    /// restore the reserve.
     Full,
     /// The next file number is past [`fat::LOG_MAX`].
     Numbers,
@@ -271,6 +276,9 @@ struct Census {
     highest: Option<u32>,
     /// The lowest-numbered log file but the open one.
     oldest: Option<Named>,
+    /// The clusters the log's files but the open one hold, by their sizes: at most what
+    /// deleting them frees.
+    reclaimable: u32,
     free: Option<Slot>,
 }
 
@@ -418,7 +426,7 @@ impl Appender {
             log_dir: None,
             file: None,
             root: Root { log: None, file: false, free: None },
-            census: Census { highest: None, oldest: None, free: None },
+            census: Census { highest: None, oldest: None, reclaimable: 0, free: None },
             walk: Walk {
                 kind: Kind::Root,
                 cluster: 0,
@@ -858,7 +866,8 @@ impl Appender {
 
     /// Read `LOG/`, then go to `after`.
     fn start_census(&mut self, after: Phase) {
-        self.census = Census { highest: None, oldest: None, free: None };
+        // A delete ends in a census too, so `reclaimable` never counts a deleted file.
+        self.census = Census { highest: None, oldest: None, reclaimable: 0, free: None };
         self.after_census = after;
         let log = self.log_dir.unwrap_or(0);
         self.start_walk(Kind::Census, log);
@@ -938,9 +947,12 @@ impl Appender {
                 Kind::Census if entry.attr & attr::DIR == 0 => {
                     let Some(number) = fat::parse_log_name(&entry.name) else { continue };
                     self.census.highest = self.census.highest.max(Some(number));
-                    if Some(number) != open
-                        && self.census.oldest.is_none_or(|oldest| number < oldest.number)
-                    {
+                    if Some(number) == open {
+                        continue;
+                    }
+                    let clusters = self.clusters_of(&entry);
+                    self.census.reclaimable = self.census.reclaimable.saturating_add(clusters);
+                    if self.census.oldest.is_none_or(|oldest| number < oldest.number) {
                         self.census.oldest = Some(Named { number, slot });
                     }
                 }
@@ -948,6 +960,16 @@ impl Appender {
             }
         }
         self.walk.scanned = true;
+    }
+
+    /// The clusters deleting `entry` frees at least: what its size takes, or none when it names
+    /// no cluster of the volume.
+    fn clusters_of(&self, entry: &DirEntry) -> u32 {
+        if !fat::is_link(entry.cluster, self.vol.clusters) {
+            return 0;
+        }
+        let cluster = u32::from(self.vol.sectors_per_cluster) * BLOCK as u32;
+        entry.size.div_ceil(cluster)
     }
 
     fn root_done(&mut self) -> Flow {
@@ -1089,7 +1111,8 @@ impl Appender {
 
     // Flushing.
 
-    /// Before allocating, delete the oldest files until the reserve holds.
+    /// Before allocating, delete the oldest files until the reserve holds, when deleting the
+    /// log's files can make it hold.
     fn reserve(&mut self) -> Flow {
         let want = self.plan.want;
         if want == 0 {
@@ -1098,8 +1121,10 @@ impl Appender {
             return Ok(());
         }
         let free = u64::from(self.free.unwrap_or(0));
-        if free < u64::from(want) + u64::from(self.reserve) {
-            return match self.census.oldest {
+        let need = u64::from(want) + u64::from(self.reserve);
+        if free < need {
+            let reclaimable = u64::from(self.census.reclaimable);
+            return match self.census.oldest.filter(|_| free + reclaimable >= need) {
                 Some(oldest) => {
                     self.start_delete(oldest, Phase::Reserve);
                     Ok(())

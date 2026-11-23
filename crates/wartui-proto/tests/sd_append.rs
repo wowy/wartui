@@ -1081,6 +1081,63 @@ fn appender_faults_full_when_only_open_file_is_left() {
     fsck(&driver.card, &found).assert_allowed("full");
 }
 
+/// A volume holding log files 1 to `files.len()`, each its bytes, then filled by a foreign file
+/// until `leave` clusters are free.
+fn logged_then_filled(files: &[Vec<u8>], leave: usize) -> (Card, Volume) {
+    let (mut card, found) = small();
+    let names: Vec<String> = (1..=files.len()).map(|n| format!("LOG/{n:08}.BIN")).collect();
+    let made: Vec<(&str, &[u8])> =
+        names.iter().zip(files).map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+    create(&mut card, &found, &["LOG"], &made);
+    fill(&mut card, &found, leave);
+    (card, found)
+}
+
+#[test]
+fn appender_faults_full_and_keeps_every_file_when_log_files_cannot_restore_reserve() {
+    // Three files of two clusters each, and ten clusters short of the reserve.
+    let files: Vec<Vec<u8>> = (1..=3u8).map(|n| vec![n; 700]).collect();
+    let (card, found) = logged_then_filled(&files, 2048 - 10);
+    let mut app = mounted(&found, Policy { file_max: 64 << 20, keep_free_mb: 1 });
+    let mut driver = Driver::new(card);
+    driver.open(&mut app).expect("opens");
+    assert_eq!(app.file(), Some(4));
+    assert_eq!(driver.flush(&mut app, &[4; 100]), Err(Fault::Full));
+    let mut names: Vec<String> =
+        listed(&driver.card, &found, "LOG").into_iter().map(|f| f.0).collect();
+    names.sort();
+    assert_eq!(names, ["00000001.BIN", "00000002.BIN", "00000003.BIN", "00000004.BIN"]);
+    for (n, want) in (1..).zip(&files) {
+        assert_eq!(&read(&driver.card, &found, &format!("LOG/{n:08}.BIN")), want, "file {n}");
+    }
+    assert!(read(&driver.card, &found, "LOG/00000004.BIN").is_empty());
+    assert_eq!(counted_free(&driver.card, &found), 2048 - 10, "nothing freed or taken");
+    fsck(&driver.card, &found).assert_allowed("kept");
+}
+
+#[test]
+fn appender_deletes_just_enough_oldest_when_log_files_can_restore_reserve() {
+    // Four files of three clusters each, and five clusters short of the reserve: a one-cluster
+    // flush needs six, so files 1 and 2 go.
+    let files: Vec<Vec<u8>> = (1..=4u8).map(|n| vec![n; 1500]).collect();
+    let (card, found) = logged_then_filled(&files, 2048 - 5);
+    let mut app = mounted(&found, Policy { file_max: 64 << 20, keep_free_mb: 1 });
+    let mut driver = Driver::new(card);
+    driver.open(&mut app).expect("opens");
+    assert_eq!(app.file(), Some(5));
+    driver.flush(&mut app, &[5; 100]).expect("flushes");
+    let mut names: Vec<String> =
+        listed(&driver.card, &found, "LOG").into_iter().map(|f| f.0).collect();
+    names.sort();
+    assert_eq!(names, ["00000003.BIN", "00000004.BIN", "00000005.BIN"]);
+    assert_eq!(read(&driver.card, &found, "LOG/00000003.BIN"), files[2]);
+    assert_eq!(read(&driver.card, &found, "LOG/00000004.BIN"), files[3]);
+    assert_eq!(read(&driver.card, &found, "LOG/00000005.BIN"), [5; 100]);
+    assert_eq!(counted_free(&driver.card, &found), 2048, "the reserve holds");
+    assert_eq!(fsinfo_free(&driver.card, &found), counted_free(&driver.card, &found));
+    fsck(&driver.card, &found).assert_allowed("deleted");
+}
+
 #[test]
 fn appender_rotates_when_file_reaches_max() {
     let (card, found) = small();

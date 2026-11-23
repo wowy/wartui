@@ -894,7 +894,7 @@ The log line reads:
 |-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `on · writing LOG/00000007.BIN · …` | Logging to that file; bytes written, records dropped, card errors, and the writer's longest stretch without yielding |
 | `on · waiting for a card`           | On, with no card the bridge can write to yet                                                                         |
-| `on · card full`                    | No room, even after deleting the oldest logs                                                                         |
+| `on · card full`                    | No room above the reserve, which deleting the old logs cannot restore; every log is kept                             |
 | `on · volume refused`               | The card's volume is one the bridge will not write to; format it                                                     |
 | `on · stopped after a card error`   | Stopped until the card is reinserted or formatted, or the setting is turned off and on                               |
 | `off`                               | The setting is off                                                                                                   |
