@@ -15,9 +15,13 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::hci::BleTrailer;
-use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome, ToNodeBody, Undelivered};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, PowerOutcome, SdFormatOutcome, SdState, SdStatus, ToNodeBody,
+    Undelivered,
+};
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::sd::format;
 
 /// One record a node sent, as the bridge forwarded it.
 ///
@@ -907,6 +911,48 @@ async fn sim_bridge_reports_wardrive_esp_when_set() {
     assert!(next_wardrive_esp(&mut link).await);
     link.send_bulk(HostToBridge::SetWardriveEsp { on: false }).expect("queued");
     assert!(!next_wardrive_esp(&mut link).await);
+}
+
+/// The card the next `Status` reports.
+async fn next_sd(link: &mut LinkHandle) -> Option<SdStatus> {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { sd, .. }) =
+            link.recv().await.expect("running")
+        {
+            return sd;
+        }
+    }
+}
+
+/// The next format answer.
+async fn next_sd_formatted(link: &mut LinkHandle) -> SdFormatOutcome {
+    loop {
+        if let LinkEvent::Message(BridgeToHost::SdFormatted { outcome }) =
+            link.recv().await.expect("running")
+        {
+            return outcome;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_formats_sd_card_when_asked() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    let blank = SdStatus { state: SdState::NoFat32, card_mb: 30_436, free_mb: None };
+    assert_eq!(next_sd(&mut link).await, Some(blank), "a card with no volume");
+
+    link.send_bulk(HostToBridge::FormatSd).expect("queued");
+    let card = next_sd(&mut link).await.expect("a card");
+    assert_eq!(card.state, SdState::Formatting);
+    // A second format while the first runs is refused at once.
+    link.send_bulk(HostToBridge::FormatSd).expect("queued");
+    assert_eq!(next_sd_formatted(&mut link).await, SdFormatOutcome::Busy);
+
+    assert_eq!(next_sd_formatted(&mut link).await, SdFormatOutcome::Done);
+    let card = next_sd(&mut link).await.expect("a card");
+    let free_mb = format::plan(62_333_952, 0).expect("a layout").free_mb();
+    assert_eq!(card, SdStatus { state: SdState::Ready, card_mb: 30_436, free_mb: Some(free_mb) });
 }
 
 /// The mode and Bluetooth slot the next `Status` reports.

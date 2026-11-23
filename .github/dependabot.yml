@@ -41,6 +41,10 @@ updates:
   # written against the versions it names: `rand_chacha` 0.10 implements
   # `rand_core` 0.10's traits, and the copy's security manager asks for 0.6's.
   # Drop these six entries with the copy.
+  # `sdio` is held at the version `esp-hal` builds against: its SDMMC slot implements
+  # `sdio`'s bus trait, so a higher one is a second copy whose trait the slot does not
+  # implement. `firmware/p4-bridge` names it, with `block-device-driver` and `aligned`
+  # held at the versions `sdio` builds against, for its microSD card.
   # `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
@@ -57,6 +61,10 @@ updates:
     # are worth taking — an `esp-hal` patch release is a fix this firmware can have.
     ignore:
       - dependency-name: "aes"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "aligned"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "block-device-driver"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "bt-hci"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
@@ -93,6 +101,8 @@ updates:
       - dependency-name: "rand_chacha"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "rand_core"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "sdio"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "github-actions"

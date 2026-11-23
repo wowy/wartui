@@ -162,7 +162,10 @@ has no `esp-radio` of its own. All three link the same `esp-hal`, `esp-rtos`, `e
 same `esp-hal` requirement.
 
 `embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are
-held the same way, through `esp-rtos` and `esp-hal`.
+held the same way, through `esp-rtos` and `esp-hal`. So is `sdio`, which the P4 names for its
+microSD card: esp-hal's SDMMC slot implements its bus trait, so a higher one is a second copy the
+slot does not plug into. `block-device-driver` and `aligned`, which the P4 names beside it, are
+held at the versions `sdio` builds against.
 
 The C5's PAC resolves twice in the node, and that is known: `esp-hal 1.2.2` builds against
 `esp32c5 0.3`, `esp-radio 1.0.0-beta.1` against `esp32c5 0.4`. Both build and link. A later

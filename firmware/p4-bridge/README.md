@@ -6,7 +6,7 @@ Type-C, and to the on-board ESP32-C6 over UART1, with hardware flow control, on 
 traces. The C6 runs a Bluetooth host link over it
 ([`firmware/p4-radio`](../p4-radio/README.md)), so a bonded central can be the host instead, or a
 phone on the WardriveESP service (§ "Bluetooth hosts"). The host sees one bridge, reporting both chips' diagnostics. The queue
-sizes are in `src/config.rs`.
+sizes and the microSD card's clock are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -166,7 +166,7 @@ the cache serves an image only once its SHA-256 checks. Until then, and for a ch
 another image or runs past its end, the P4 answers `Undelivered` `NoImage`.
 
 The cache takes up to 2 MB, a node's app slot, of the board's 32 MB of PSRAM, and the host bulk
-ring the next 1 MB (§ "Queue sizes"). A P4 whose PSRAM does not map refuses every upload, runs its
+ring the next 1 MB (§ "Build-time settings"). A P4 whose PSRAM does not map refuses every upload, runs its
 bulk ring over no bytes, and reports the error `no PSRAM: no node image cache, and the host bulk
 ring holds nothing` to the first host it announces to; everything else runs. One whose PSRAM the
 cache takes whole reports `too little PSRAM: the host bulk ring holds nothing` instead. The cache is
@@ -294,7 +294,7 @@ The default build reads a u-blox receiver over I2C and passes its bytes to the h
 neither NMEA nor UBX: the host splits the two and composes the receiver's configuration, so a change
 to the rate or the sentences costs a `cargo run` rather than a reflash. `wartui sniff --verbose`
 prints each `Gps` frame's bytes as text, which is how to check the wiring. Like every other frame, bytes read while no host is present are dropped (see
-[Queue sizes](#queue-sizes)), so a host that attaches late gets live fixes rather than a backlog.
+[Build-time settings](#build-time-settings)), so a host that attaches late gets live fixes rather than a backlog.
 So are the lines saying the receiver stopped or came back; the announcement carries the current
 fault instead. Wire it to the P4's header:
 
@@ -311,9 +311,58 @@ the carrier each lock the bus for one transaction at a time. The bridge always r
 Without a receiver, every announcement carries "no GPS receiver answered on the I2C bus
 (GPIO7/GPIO8)".
 
-## Queue sizes
+## The microSD card
 
-Each is read at build time from an environment variable, so a bench run resizes one with a
+The board's TF slot is SDMMC slot 0, and the P4 drives it from boot (`src/sd.rs`). It writes
+nothing to the card but a format the host asks for.
+
+| Signal | P4 GPIO |
+| --- | --- |
+| CLK | 43 |
+| CMD | 44 |
+| D0–D3 | 39–42 |
+| Card power | 45, low = on |
+
+GPIO45 switches the card's supply through a P-channel MOSFET, so the P4 holds it low. The SDMMC
+driver powers the slot's I/O from LDO4 itself. The slot has no card-detect line, so the P4 tries
+to identify a card every 5 s until one answers, then reads block 0 every 5 s to see it is still
+there, and reads a card that failed a read again in full. A card swapped in is found within about
+10 s. Finding it again relies on two fixes to `sdio`, which the build takes from a fork pinned in
+`Cargo.toml` ([`docs/p4-sd-findings.md`](../../docs/p4-sd-findings.md) § "A card identified
+again").
+
+`Status` reports the card:
+
+| State | Meaning |
+| --- | --- |
+| `NoCard` | No card answered |
+| `NoFat32` | A card answered and holds no FAT32 volume the P4 reads, such as exFAT |
+| `Ready` | A FAT32 volume, with its free space when its FSInfo sector records it |
+| `Formatting` | A format is asked for or running |
+| `Failed` | The card failed a read, until it reads again, or the last format, until the next one |
+
+**`FormatSd` erases the card and writes one FAT32 volume** labeled `WARTUI`, in the layout
+`wartui_proto::sd` describes, which a laptop or a phone reads as a new card. The MBR goes last, so
+a format cut short leaves no partition table. Each transfer is tried three times. The P4 answers
+`Done` once the card reads back as FAT32, `NoCard` with no card, `Busy` while a format runs, and
+`Failed` otherwise. A format of the bench's 64 GB card writes about 20 MiB.
+
+**Every transfer is at most 16 KiB, from a 64-byte-aligned buffer in internal RAM.** The driver's
+DMA ring covers 16 KiB in one fill, and a longer transfer needs its interrupt mid-way, while a
+flash erase masks the P4's interrupts for about 40 ms. A buffer with less alignment is split
+around its middle and needs the interrupt too.
+
+**The bus clock is 20 MHz.** At 40 MHz the bench card failed about one write in 6,100 with a CRC
+error; at 20 MHz none in 24,000.
+
+**The card runs on core 0, with everything else, and core 1 is never started.** esp-storage
+stalls the other core for every flash write, wherever it is. On the bench, a core 1 driving the
+card made `flash-bridge` updates restart or hang the P4.
+[`docs/p4-sd-findings.md`](../../docs/p4-sd-findings.md) has the measurements.
+
+## Build-time settings
+
+Each is read at build time from an environment variable, so a bench run changes one with a
 rebuild, for example `WARTUI_P4_HOST_BULK_BYTES=131072 cargo build --release`. `wartui status`
 reports each queue's high-water mark.
 
@@ -334,6 +383,7 @@ less PSRAM gets a smaller ring.
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
 | `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |
+| `WARTUI_P4_SD_HZ` | 20000000 | the microSD card's bus clock asked for, in Hz; the driver caps it at 40 MHz |
 
 The C6 link's baud rate (4 Mbaud) is fixed, as part of its frozen core. The host link's is
 `wartui_proto::link::HOST_BAUD`.

@@ -49,6 +49,11 @@
 //! [`SimConfig::pool`]. A `SetWardriveEsp` sets the setting `Status` reports, off at the start; no
 //! phone links. It has no flash, and connects once and never reboots, so all three last the
 //! simulator's life, and the duty starts at full.
+//!
+//! Its microSD slot holds a 32 GB card with no FAT32 volume. A `FormatSd` shows it formatting
+//! for [`SD_FORMAT`], about as long as a real card takes, then ready with the free space
+//! [`format::plan`] gives and an `SdFormatted { Done }`. A `FormatSd` while one runs is `Busy`.
+//! No block is written: the card is its state alone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -66,8 +71,8 @@ use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr, LoopPhase,
-    NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, UPDATE_STATUS_MAX,
-    Undelivered, UpdateStatusBytes, cache_chunk_body,
+    NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, SdFormatOutcome,
+    SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes, cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
@@ -75,6 +80,7 @@ use wartui_proto::ota::{Receiver, SectorSink};
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
+use wartui_proto::sd::format;
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 
@@ -214,6 +220,60 @@ const POWER_OFF: Duration = Duration::from_secs(1);
 
 /// The bytes the bridge's node image cache holds, the P4's `CACHE_MAX`.
 const CACHE_CAPACITY: usize = 2 * 1024 * 1024;
+
+/// The simulated microSD card's blocks: a "32 GB" card, 30,436 MiB.
+const SD_BLOCKS: u64 = 62_333_952;
+
+/// How long the simulated card takes to format. On the bridge's clock.
+const SD_FORMAT: Duration = Duration::from_secs(2);
+
+/// The simulated microSD card: what `Status` reports, and when a running format ends.
+struct SimSd {
+    status: SdStatus,
+    done_at: Option<tokio::time::Instant>,
+}
+
+impl SimSd {
+    fn new() -> Self {
+        let card_mb = u32::try_from(SD_BLOCKS / 2048).unwrap_or(u32::MAX);
+        Self { status: SdStatus { state: SdState::NoFat32, card_mb, free_mb: None }, done_at: None }
+    }
+
+    /// Start a format, or `Busy` while one runs.
+    fn format(&mut self) -> Option<BridgeToHost> {
+        if self.done_at.is_some() {
+            return Some(BridgeToHost::SdFormatted { outcome: SdFormatOutcome::Busy });
+        }
+        self.status = SdStatus { state: SdState::Formatting, free_mb: None, ..self.status };
+        self.done_at = Some(tokio::time::Instant::now() + SD_FORMAT);
+        None
+    }
+
+    /// End the running format, with `volume_id` for the volume it writes.
+    fn finish(&mut self, volume_id: u32) -> BridgeToHost {
+        self.done_at = None;
+        let outcome = match format::plan(SD_BLOCKS, volume_id) {
+            Ok(layout) => {
+                let free_mb = Some(layout.free_mb());
+                self.status = SdStatus { state: SdState::Ready, free_mb, ..self.status };
+                SdFormatOutcome::Done
+            }
+            Err(_) => {
+                self.status = SdStatus { state: SdState::Failed, free_mb: None, ..self.status };
+                SdFormatOutcome::Failed
+            }
+        };
+        BridgeToHost::SdFormatted { outcome }
+    }
+}
+
+/// Wait until `at`, or forever with none.
+async fn until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
 
 /// What the bus delivers to a simulated node.
 ///
@@ -532,8 +592,24 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     let mut cache = sim_cache();
     let mut fan_duty = FanDuty::FULL;
     let mut wardrive_esp = false;
+    let mut sd = SimSd::new();
 
-    while let Some(cmd) = plumbing.commands.recv().await {
+    loop {
+        // A format ending first, so a `Status` asked for after it shows the card ready.
+        let cmd = tokio::select! {
+            biased;
+            () = until(sd.done_at) => {
+                let answer = sd.finish(elapsed_ms(started));
+                if plumbing.events.send(LinkEvent::Message(answer)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            cmd = plumbing.commands.recv() => match cmd {
+                Some(cmd) => cmd,
+                None => return,
+            },
+        };
         if !command_latency.is_zero() {
             tokio::time::sleep(command_latency).await;
         }
@@ -576,6 +652,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     ble: core.bluetooth(),
                     present: present.load(Ordering::Relaxed),
                     members: core.members(),
+                    sd: Some(sd.status),
                     // A host on USB, and no Bluetooth link to report.
                     bluetooth: BluetoothStatus {
                         owner: HostOwner::Usb,
@@ -603,6 +680,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 | HostToBridge::SetPool { .. } => None,
                 // It has no Bluetooth link to pair or bonds to clear.
                 HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
+                // Answered when the format ends, or at once while one runs.
+                HostToBridge::FormatSd => sd.format(),
                 HostToBridge::Reset => Some(BridgeToHost::Log {
                     message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
                 }),

@@ -304,6 +304,9 @@ pub enum HostToBridge {
         /// Whether phones may link.
         on: bool,
     },
+    /// Format the bridge's microSD card as FAT32, erasing it ([`crate::sd::format`]), answered
+    /// by [`BridgeToHost::SdFormatted`]. The next [`BridgeToHost::Status`] shows the card.
+    FormatSd,
 }
 
 /// How long [`HostToBridge::OpenPairing`] opens the pairing window.
@@ -390,6 +393,8 @@ pub enum BridgeToHost {
         /// overtake batches queued before it, so it fills only a slot nothing has named; a
         /// heartbeat, which travels in order with the batches, stays the authority.
         members: Vec<Member, MAX_SLOTS>,
+        /// The microSD card, or `None` when the bridge has no card slot or does not drive it.
+        sd: Option<SdStatus>,
         /// The Bluetooth host link: who holds the host queue, the bonds and pairing window, the
         /// connected central and the C6's counters.
         bluetooth: BluetoothStatus,
@@ -458,6 +463,11 @@ pub enum BridgeToHost {
     /// [`BridgeToHost::Status`], and when a host attaches. A priority frame, so it reaches the
     /// host ahead of the heartbeats that show nodes adopting it.
     Fleet(Report),
+    /// The answer to [`HostToBridge::FormatSd`]. A priority frame.
+    SdFormatted {
+        /// How it went.
+        outcome: SdFormatOutcome,
+    },
 }
 
 /// The Bluetooth host link, as a [`BridgeToHost::Status`] reports it. The default is no host,
@@ -543,6 +553,45 @@ pub enum PowerOutcome {
     /// The carrier does not drive that slot.
     NotDriven,
     /// The carrier's I/O expander did not answer.
+    Failed,
+}
+
+/// How a [`HostToBridge::FormatSd`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum SdFormatOutcome {
+    /// The card holds a fresh FAT32 volume.
+    Done,
+    /// No card answered.
+    NoCard,
+    /// A format is already running.
+    Busy,
+    /// The card refused a write, or is too small or too large for the layout.
+    Failed,
+}
+
+/// The microSD card, as a [`BridgeToHost::Status`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SdStatus {
+    /// What the card holds.
+    pub state: SdState,
+    /// The card's size in MiB, 0 with no card.
+    pub card_mb: u32,
+    /// The volume's free space in MiB, when it is [`SdState::Ready`] and its FSInfo sector says.
+    pub free_mb: Option<u32>,
+}
+
+/// What the bridge's microSD card holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum SdState {
+    /// No card answered.
+    NoCard,
+    /// A card answered and holds no FAT32 volume the bridge reads.
+    NoFat32,
+    /// The card holds a FAT32 volume.
+    Ready,
+    /// A format is running.
+    Formatting,
+    /// The card answered, then failed a read or the last format.
     Failed,
 }
 

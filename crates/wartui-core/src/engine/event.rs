@@ -114,6 +114,13 @@ pub enum Command {
     /// [`Snapshot::wardrive_esp`](super::Snapshot::wardrive_esp) shows the setting in force. The
     /// bridge stores it, so the engine holds nothing and never sends it again.
     SetWardriveEsp(bool),
+
+    /// Ask the bridge to format its microSD card as FAT32, erasing it.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, so
+    /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the card formatting. The
+    /// answer reaches the operator as [`Snapshot::sd_answer`](super::Snapshot::sd_answer).
+    FormatSd,
 }
 
 /// What the engine wants done as a result.

@@ -10,7 +10,7 @@
 //! **Every Bluetooth link is closed before the process exits.** `main` waits for each to
 //! unsubscribe and disconnect once the command returns, by any route, so the bridge never keeps
 //! serving a host that has gone (`wartui_bridge::close_all`). A ctrl-c reaches that wait too:
-//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan` and `bluetooth` stop at one,
+//! `status`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `sd` and `bluetooth` stop at one,
 //! `flash-bridge` once its link is open, `sniff` and `ota` watch for one themselves, and `run`'s
 //! view reads it as a key. Watching installs tokio's handler for the rest of the process, and
 //! `flash-bridge`'s download or build blocks its task, so it watches only once the link is open;
@@ -54,6 +54,7 @@ mod power_cycle;
 mod reset;
 mod run;
 mod scan;
+mod sd;
 mod sniff;
 mod status;
 #[cfg(test)]
@@ -105,6 +106,8 @@ enum Command {
     Pool(pool::Args),
     /// Start or stop the bridge's scan, or show it. The bridge scans on with no host attached.
     Scan(scan::Args),
+    /// Show the bridge's microSD card, or format it, erasing it.
+    Sd(sd::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
@@ -172,6 +175,7 @@ async fn command(cli: Cli) -> std::process::ExitCode {
         Some(Command::Fan(args)) => interruptible(fan::run(args)).await,
         Some(Command::Pool(args)) => interruptible(pool::run(args)).await,
         Some(Command::Scan(args)) => interruptible(scan::run(args)).await,
+        Some(Command::Sd(args)) => interruptible(sd::run(args)).await,
         Some(Command::Ports) => ports().await,
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         // Interruptible once its link is open (`flash::p4`).
@@ -440,7 +444,7 @@ fn open_remembered(
 }
 
 /// Open the one bridge `named` resolves to, with the remembered bridge read from `config`, and
-/// wait for its `Ready`. `fan`, `pool`, `scan` and `power-cycle` connect through this.
+/// wait for its `Ready`. `fan`, `pool`, `scan`, `sd` and `power-cycle` connect through this.
 ///
 /// Over USB it resolves as `wartui reset` does ([`reset::board_to_reset`]). Over Bluetooth the
 /// transport refuses a `named` that several advertising bridges match, and the `Ready` names the
@@ -1031,6 +1035,31 @@ mod tests {
             &["wartui", "scan", "stop", "--bluetooth"],
             &["wartui", "scan", "--bluetooth"],
             &["wartui", "scan", "--bridge", "44:C0", "start"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn cli_parser_accepts_sd_when_given_format_or_nothing() {
+        for args in [
+            ["wartui", "sd"].as_slice(),
+            &["wartui", "sd", "--bridge", "44:C0", "--config", "w.toml"],
+            &["wartui", "sd", "format"],
+            &["wartui", "sd", "format", "--link", "usb", "--log-file", "w.log"],
+            &["wartui", "sd", "format", "--sim"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Sd(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_sd_when_given_unknown_action_or_flag_before_it() {
+        for args in [
+            ["wartui", "sd", "erase"].as_slice(),
+            &["wartui", "sd", "--bridge", "44:C0", "format"],
+            &["wartui", "sd", "format", "--yes"],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
         }

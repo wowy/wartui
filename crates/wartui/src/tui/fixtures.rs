@@ -14,7 +14,7 @@ use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::{BluetoothStatus, HostOwner, LoopPhase};
+use wartui_proto::link::{BluetoothStatus, HostOwner, LoopPhase, SdState, SdStatus};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -198,6 +198,8 @@ pub(super) fn busy() -> Snapshot {
             dropped_since_attach: 0,
             uptime_ms: 60_000,
             fan: None,
+            // A "64 GB" card, formatted.
+            sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(55_000) }),
             // What a bridge on USB with no Bluetooth host reports.
             bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
         }),
@@ -214,6 +216,7 @@ pub(super) fn busy() -> Snapshot {
         gps: None,
         excluded_ssids: Vec::new(),
         power_answer: None,
+        sd_answer: None,
         awaiting_fix: false,
     }
 }

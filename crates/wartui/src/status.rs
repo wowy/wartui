@@ -12,7 +12,9 @@
 //! `oversize` counts node records the bridge dropped for being longer than any node of
 //! this build sends: a node on another build.
 //!
-//! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed. `pool` is
+//! `fan` is the carrier's lid fan: the duty the bridge runs and keeps, and its speed. `sd card` is
+//! the bridge's microSD card: its size and free space, `not FAT32` for a card `wartui sd format`
+//! has to format first, `no card`, or `no slot` for a bridge that drives none. `pool` is
 //! the channel pool the bridge holds, which its planner deals. `slots` names the slots the
 //! bridge counts a node in, as the operator reads them on its board. `scan`, `bluetooth` and the
 //! `share` lines are the planner's: its mode, the node it picked for Bluetooth, and each node's
@@ -38,6 +40,8 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac;
 use wartui_proto::radio_link::BleCounters;
+
+use crate::text::{SdForm, sd_text};
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the
@@ -118,6 +122,7 @@ pub async fn run(args: Args) -> Result<()> {
         present,
         // The plan below names each share's slot; the members' MACs are the engine's.
         members: _,
+        sd,
         bluetooth,
     } = status
     else {
@@ -129,6 +134,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
+    println!("sd card    {}", sd_text(sd, SdForm::Line));
     println!("pool       {pool}");
     println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));
@@ -846,6 +852,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());

@@ -26,6 +26,8 @@
 //! [`Command::SetFanDuty`] sets the carrier's lid fan, whose duty the bridge keeps.
 //! [`Command::SetWardriveEsp`] sets whether a phone may link to the bridge as a WardriveESP
 //! board, which the bridge keeps too.
+//! [`Command::FormatSd`] asks the bridge to format its microSD card, and the answer reaches the
+//! operator as [`Snapshot::sd_answer`], as a power-cycle's does.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -59,8 +61,8 @@ pub use lag::{BEHIND_BLUETOOTH_US, BEHIND_USB_US, behind_us};
 pub use node::NodeState;
 pub use scan::FIX_WAIT;
 pub use snapshot::{
-    BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, Snapshot, TailEntry,
-    power_cycled_text,
+    BridgeStatus, Counters, NO_CARRIER, NodeView, PowerAnswer, SdAnswer, Snapshot, TailEntry,
+    power_cycled_text, sd_formatted_text,
 };
 
 pub(crate) use node::supply_dropped_from;
@@ -154,6 +156,8 @@ pub struct FleetEngine {
     behind_peak_us: u64,
     /// The bridge's last answer to a power-cycle.
     power_answer: Option<PowerAnswer>,
+    /// The bridge's last answer to a format of its microSD card.
+    sd_answer: Option<SdAnswer>,
 }
 
 impl FleetEngine {
@@ -215,6 +219,7 @@ impl FleetEngine {
             behind_since: None,
             behind_peak_us: 0,
             power_answer: None,
+            sd_answer: None,
             config,
         }
     }
@@ -402,6 +407,14 @@ impl FleetEngine {
                 let id = self.power_answer.as_ref().map_or(1, |answer| answer.id + 1);
                 self.power_answer = Some(PowerAnswer { id, text });
             }
+            BridgeToHost::SdFormatted { outcome } => {
+                let text = sd_formatted_text(*outcome);
+                tracing::info!(?outcome, "{text}");
+                let id = self.sd_answer.as_ref().map_or(1, |answer| answer.id + 1);
+                self.sd_answer = Some(SdAnswer { id, text });
+                // The card's new state, now rather than at the next poll.
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
             BridgeToHost::Status {
                 rx_count,
                 dropped_tx,
@@ -416,6 +429,7 @@ impl FleetEngine {
                 ble,
                 present,
                 members,
+                sd,
                 bluetooth,
             } => {
                 // Below the baseline means the bridge restarted from zero.
@@ -430,6 +444,7 @@ impl FleetEngine {
                     dropped_since_attach: dropped_tx - baseline,
                     uptime_ms: *uptime_ms,
                     fan: *fan,
+                    sd: *sd,
                     bluetooth: *bluetooth,
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {

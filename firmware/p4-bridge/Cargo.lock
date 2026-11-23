@@ -1456,8 +1456,7 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 [[package]]
 name = "sdio"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f8dcf75e0f6aeeda4819e3adea9a2c0705c2f109970abcc07edcfef372b68a"
+source = "git+https://github.com/wowy/sdio?rev=a6fc7b596dadf9cccc50c85e75d167ac1507ab3e#a6fc7b596dadf9cccc50c85e75d167ac1507ab3e"
 dependencies = [
  "aligned",
  "block-device-driver",
@@ -1827,6 +1826,8 @@ dependencies = [
 name = "wartui-p4-bridge-fw"
 version = "0.1.0"
 dependencies = [
+ "aligned",
+ "block-device-driver",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
@@ -1834,6 +1835,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-rtos",
+ "sdio",
  "sha2",
  "static_cell",
  "wartui-firmware",

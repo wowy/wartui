@@ -287,6 +287,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             let board = counts.board.unwrap_or(NodeBoard::NoCarrier);
             println!("# {}", wartui_core::engine::power_cycled_text(board, *slot, *outcome));
         }
+        // Answers a format of the bridge's microSD card, which `sniff` never asks for.
+        BridgeToHost::SdFormatted { outcome } => println!("# sd formatted: {outcome:?}"),
     }
 }
 
@@ -457,6 +459,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));

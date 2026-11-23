@@ -19,3 +19,5 @@ sha2 = { version = "0.11.1", default-features = false }
 
 [dev-dependencies]
 cobs = { version = "0.5.1", default-features = false }
+# The independent check on `sd::format`: a FAT32 reader written by someone else mounts each plan.
+fatfs = { version = "0.3", default-features = false, features = ["std", "alloc"] }
