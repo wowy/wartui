@@ -110,7 +110,9 @@ opt-level = 3
 opt-level = 3
 
 # `trouble-host` 0.8.0 with upstream's move to `bt-hci` 0.11 (44f91293), and nothing else of
-# TrouBLE's `main` (`README.md` § "Dependency versions"). The branch is the published 0.8.0 plus
-# that commit. Back to crates.io once a `trouble-host` release builds on `bt-hci` 0.11.
+# TrouBLE's `main` (`README.md` § "Dependency versions"). The branch,
+# `trouble-host-0.8.0-bt-hci-0.11`, is the published 0.8.0 plus that commit, and stays: the rev
+# is fetchable only while a ref holds it. Back to crates.io once a `trouble-host` release builds
+# on `bt-hci` 0.11.
 [patch.crates-io]
 trouble-host = { git = "https://github.com/wowy/trouble", rev = "b048afad96c1aa9df3f0350b28e13ff94b7812f0" }

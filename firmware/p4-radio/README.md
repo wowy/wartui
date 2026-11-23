@@ -180,8 +180,10 @@ connection parameter request, so answering one panicked. `bt-hci` 0.11 fixes bot
 `trouble-host` release builds on it yet.
 
 So `Cargo.toml`'s `[patch.crates-io]` takes `trouble-host` from the
-[`wowy/trouble`](https://github.com/wowy/trouble) fork, pinned by rev: the published 0.8.0 with the
-one upstream commit that moves TrouBLE to `bt-hci` 0.11, and nothing else of TrouBLE's `main`.
+[`wowy/trouble`](https://github.com/wowy/trouble) fork, pinned by rev, from its branch
+`trouble-host-0.8.0-bt-hci-0.11`: the published 0.8.0 with the one upstream commit that moves
+TrouBLE to `bt-hci` 0.11, and nothing else of TrouBLE's `main`. The branch stays, since the rev is
+fetchable only while a ref holds it.
 Drop the patch entry when a `trouble-host` release builds on `bt-hci` 0.11 or later. Dependabot's
 pull request for that release is the signal; until then it ignores `bt-hci`'s minor and major
 releases, since one above what `trouble-host` builds on is a second copy whose types TrouBLE's API
