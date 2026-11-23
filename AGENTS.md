@@ -228,7 +228,7 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every node-bus
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
-  `Heartbeat` (27 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
+  `Heartbeat` (63 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
   plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Stop`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes every node record to the host

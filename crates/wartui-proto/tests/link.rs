@@ -7,9 +7,9 @@
 use heapless::{String, Vec};
 use wartui_proto::ChannelPool;
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, RecordKind, Security,
-    SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateChunk,
-    UpdateState, UpdateStatus, Vdd,
+    Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, NodeBus, RecordKind,
+    Security, SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType,
+    UpdateChunk, UpdateState, UpdateStatus, Vdd,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
@@ -129,6 +129,9 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 40_000,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     };
 
     let mut v = Vec::new();

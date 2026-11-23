@@ -24,7 +24,7 @@ use wartui_core::store::{
     UploadSite, capture_link, is_simulated, last_upload, open_readonly, open_readwrite,
     record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
+use wartui_proto::bus::{BUS_VERSION, NodeBoard, NodeBus, RecordKind, Slot, UpType};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{
@@ -342,6 +342,24 @@ fn heartbeat() -> Heartbeat {
         vdd_mv: Some(3304),
         die_temp_c: Some(41),
         heap_free: 40_000,
+        heap_used: 24_000,
+        heap_high_water: 31_000,
+        bus: NodeBus {
+            bad_magic: 1,
+            bad_crc: 2,
+            bad_len: 3,
+            gaps: 4,
+            early: 5,
+            arm_failed: 6,
+            inbox_full: 7,
+            out_of_order: 8,
+            repeats: 9,
+            replaced: 10,
+            resent: 11,
+            undelivered: 12,
+            handler_max_us: 13,
+            settle_max_us: 14,
+        },
         live: true,
     }
 }
@@ -479,6 +497,63 @@ fn store_writes_heap_free_when_heartbeat_recorded() {
     let heap_free: i64 =
         conn.query_row("SELECT heap_free FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert_eq!(heap_free, 37_120);
+}
+
+#[test]
+fn store_writes_heap_use_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Heartbeat(Heartbeat {
+            heap_used: 61_000,
+            heap_high_water: u32::MAX,
+            ..heartbeat()
+        })],
+    );
+    let row: (i64, i64) = conn
+        .query_row("SELECT heap_used, heap_high_water FROM heartbeat", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(row, (61_000, i64::from(u32::MAX)), "unsigned, never negative");
+}
+
+#[test]
+fn store_writes_each_bus_counter_to_its_column_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut beat = heartbeat();
+    beat.bus.undelivered = u16::MAX;
+    let bus = beat.bus;
+    let conn = write(&dir, vec![Record::Heartbeat(beat)]);
+    let row: Vec<i64> = conn
+        .query_row(
+            "SELECT bus_bad_magic, bus_bad_crc, bus_bad_len, bus_gaps, bus_early, bus_arm_failed,
+                    bus_inbox_full, bus_out_of_order, bus_repeats, bus_replaced, bus_resent,
+                    bus_undelivered, bus_handler_max_us, bus_settle_max_us
+             FROM heartbeat",
+            [],
+            |r| (0..14).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    // `heartbeat()` gives every field its own value, so two swapped columns fail here.
+    let want = [
+        bus.bad_magic,
+        bus.bad_crc,
+        bus.bad_len,
+        bus.gaps,
+        bus.early,
+        bus.arm_failed,
+        bus.inbox_full,
+        bus.out_of_order,
+        bus.repeats,
+        bus.replaced,
+        bus.resent,
+        bus.undelivered,
+        bus.handler_max_us,
+        bus.settle_max_us,
+    ]
+    .map(i64::from);
+    assert_eq!(row, want);
 }
 
 #[test]

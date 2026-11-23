@@ -55,8 +55,9 @@ use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use static_cell::ConstStaticCell;
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, FlightTaker, HEADER_LEN, Header, PAYLOAD_MAX,
-    Packer, RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, Take, UpType, VerifyError, seal, verify,
+    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, FlightTaker, HEADER_LEN, Header, NodeBus,
+    PAYLOAD_MAX, Packer, RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, Take, UpType, VerifyError,
+    seal, verify,
 };
 use wartui_proto::heapless::{Deque, Vec};
 
@@ -645,6 +646,35 @@ pub fn service() {
     if due {
         report();
     }
+}
+
+/// The counters a heartbeat carries: each count truncated to its wrapping `u16`, each gauge
+/// saturated. All zeros before [`start`].
+pub fn counters() -> NodeBus {
+    // A count's low 16 bits wrap as the full count does, which is how the host reads it.
+    let count = |n: u32| n as u16;
+    let gauge = |us: u32| u16::try_from(us).unwrap_or(u16::MAX);
+    let mut bus = with_shared(|s| NodeBus {
+        bad_magic: count(s.bad_magic),
+        bad_crc: count(s.bad_crc),
+        bad_len: count(s.bad_len),
+        gaps: count(s.gaps),
+        early: count(s.early),
+        arm_failed: count(s.arm_failed),
+        inbox_full: count(s.inbox_full),
+        out_of_order: count(s.out_of_order),
+        repeats: count(s.repeats),
+        handler_max_us: gauge(s.handler_max_us),
+        settle_max_us: gauge(s.settle_max_us),
+        ..NodeBus::default()
+    })
+    .unwrap_or_default();
+    MAIN.with(|m| {
+        bus.replaced = count(m.replaced);
+        bus.resent = count(m.resent);
+        bus.undelivered = count(m.undelivered);
+    });
+    bus
 }
 
 /// What the handler counted, for one console line.

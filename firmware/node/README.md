@@ -17,7 +17,7 @@ transfer carries records, one message each:
 
 | Message        | Direction   | Body                    |
 |----------------|-------------|-------------------------|
-| Heartbeat      | Node → P4   | 27 bytes                |
+| Heartbeat      | Node → P4   | 63 bytes                |
 | Sighting batch | Node → P4   | Up to 1024 bytes        |
 | Assign         | P4 → node   | 8 bytes                 |
 | Stop           | P4 → node   | Empty                   |
@@ -27,7 +27,10 @@ transfer carries records, one message each:
   (major, minor, patch), the board and the capability flags. Then come the node's station MAC, a
   counter of completed sweeps (scans, on the Bluetooth node), the epoch of the assignment held or
   0, running counts of Wi-Fi and BLE sightings turned away by a full buffer, the reset cause, the
-  chip's 3.3 V rail and die temperature, one byte each, and the bytes free in its heap.
+  chip's 3.3 V rail and die temperature, one byte each, and the bytes free in its heap, in use, and
+  most in use since boot. Last come its own counts of the bus since boot: transfers from the P4
+  that failed their checks or skipped a seq, flights it dropped, heartbeats replaced, records
+  resent or given up on, and the longest interrupt handler run and DMA settle in µs.
 - **Sighting batch**: sent at the end of each dwell or scan, and acknowledged by the P4. A 3-byte
   header, then one 12-plus-SSID record per newly seen BSSID or advertiser, packed to fill 1024
   bytes. A BLE record's SSID is the advertiser's name, when it sent one. A record's trailer carries

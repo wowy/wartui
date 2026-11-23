@@ -32,7 +32,7 @@ NOT_FAULTS = ("power_on", "external")
 
 # Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
 # only, as the store does.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14
@@ -405,12 +405,17 @@ def nodes(db, ctx):
 # driver's own churn.
 HEAP_FALL_BYTES = 2048
 
+# The node's own bus counters a rise in which across its last boot is flagged. Each is a wrapping
+# 16-bit since-boot count, read by difference.
+BUS_COUNTERS = (("bus_undelivered", 15, "records undelivered"), ("bus_bad_crc", 16, "bad CRCs"))
+
 
 def heartbeats(db, ctx):
     section("heartbeats")
     # Row layout, read by index here and in assignments() and observations().
     rows = db.q("SELECT node_mac, id, rx_at, counter, epoch, slot, reset_cause, live, "
-                "wifi_refused, ble_refused, vdd_mv, die_temp_c, heap_free FROM heartbeat "
+                "wifi_refused, ble_refused, vdd_mv, die_temp_c, heap_free, heap_used, "
+                "heap_high_water, bus_undelivered, bus_bad_crc FROM heartbeat "
                 "ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
@@ -444,7 +449,7 @@ def heartbeats(db, ctx):
         # Where the node's last boot in the capture starts, for its heap.
         boot_start = 0
         for i, r in enumerate(hs):
-            (_, _, rx, counter, epoch, slot, cause, live, wr, br, _, _, _) = r
+            (_, _, rx, counter, epoch, slot, cause, live, wr, br, *_) = r
             replayed += live == 0
             slots[slot] += 1
             if prev is not None:
@@ -497,7 +502,9 @@ def heartbeats(db, ctx):
         node_sql = f"hex(node_mac)='{mac.hex().upper()}'"
         heaps = [r[12] for r in hs]
         if heaps:
-            print(f"        heap free    first {heaps[0]}  min {min(heaps)}  last {heaps[-1]}")
+            used = [r[13] for r in hs]
+            print(f"        heap free    first {heaps[0]}  min {min(heaps)}  last {heaps[-1]}  "
+                  f"used last {used[-1]}  peak {max(r[14] for r in hs)}")
             # Over the last boot alone, since a restart refills the heap. The driver's own churn
             # moves it a little, so only a fall from the boot's first fifth to its last counts.
             boot = heaps[boot_start:]
@@ -511,6 +518,15 @@ def heartbeats(db, ctx):
                          "a leak in the node firmware?",
                          f"SELECT id, rx_at, counter, heap_free FROM heartbeat WHERE {node_sql} "
                          "ORDER BY id")
+        # Over the last boot alone, since a restart zeroes the counts.
+        for column, at, what in BUS_COUNTERS:
+            boot = [r[at] for r in hs[boot_start:]]
+            rose = sum((b - a) % 2**16 for a, b in zip(boot, boot[1:]))
+            if rose:
+                flag("WARN", "node",
+                     f"{name(mac)} counted {rose} {what} on the bus across its last boot",
+                     f"SELECT id, rx_at, counter, {column} FROM heartbeat WHERE {node_sql} "
+                     "ORDER BY id")
         for at, a, b in moves[:5]:
             print(f"        moved        {label(a)} -> {label(b)} at {rel(at)}")
         if moves:

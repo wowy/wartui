@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use wartui_proto::beacon::visible_ssid;
-use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
+use wartui_proto::bus::{NodeBoard, NodeBus, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{BluetoothStatus, HostOwner, QueueStats, RadioLinkStats};
@@ -82,6 +82,12 @@ pub struct Heartbeat {
     pub die_temp_c: Option<i16>,
     /// Bytes free in the node's heap.
     pub heap_free: u32,
+    /// Bytes in use in the node's heap; with `heap_free`, the heap's size.
+    pub heap_used: u32,
+    /// The most bytes in use in the node's heap since its boot.
+    pub heap_high_water: u32,
+    /// The node's own bus counters since its boot, as the heartbeat carried them.
+    pub bus: NodeBus,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }

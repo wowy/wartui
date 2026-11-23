@@ -542,7 +542,7 @@ mod tests {
     }
 
     fn heartbeat_with(version: wartui_proto::bus::Version) -> Vec<u8> {
-        use wartui_proto::bus::{Board, Capabilities, DieTemp, Vdd};
+        use wartui_proto::bus::{Board, Capabilities, DieTemp, NodeBus, Vdd};
         Heartbeat {
             capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
             mac: [0x02, 0, 0, 0, 0x57, 0x84],
@@ -554,6 +554,9 @@ mod tests {
             vdd: Vdd::NONE,
             die_temp: DieTemp::NONE,
             heap_free: 0,
+            heap_used: 0,
+            heap_high_water: 0,
+            bus: NodeBus::default(),
         }
         .encode()
         .to_vec()

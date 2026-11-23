@@ -1,4 +1,4 @@
-SCHEMA_VERSION 5
+SCHEMA_VERSION 6
 
 CREATE TABLE assignment (
   id INTEGER PRIMARY KEY,
@@ -96,6 +96,22 @@ CREATE TABLE heartbeat (
   vdd_mv INTEGER,
   die_temp_c INTEGER,
   heap_free INTEGER NOT NULL,
+  heap_used INTEGER NOT NULL,
+  heap_high_water INTEGER NOT NULL,
+  bus_bad_magic INTEGER NOT NULL,
+  bus_bad_crc INTEGER NOT NULL,
+  bus_bad_len INTEGER NOT NULL,
+  bus_gaps INTEGER NOT NULL,
+  bus_early INTEGER NOT NULL,
+  bus_arm_failed INTEGER NOT NULL,
+  bus_inbox_full INTEGER NOT NULL,
+  bus_out_of_order INTEGER NOT NULL,
+  bus_repeats INTEGER NOT NULL,
+  bus_replaced INTEGER NOT NULL,
+  bus_resent INTEGER NOT NULL,
+  bus_undelivered INTEGER NOT NULL,
+  bus_handler_max_us INTEGER NOT NULL,
+  bus_settle_max_us INTEGER NOT NULL,
   live INTEGER NOT NULL
 )
 

@@ -63,8 +63,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION,
-    NodeBoard, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK_MAX,
-    UpType, UpdateState, UpdateStatus, Vdd, Version,
+    NodeBoard, NodeBus, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot,
+    UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::fan::{FanDuty, FanStats};
@@ -228,6 +228,11 @@ const SD_BLOCKS: u64 = 62_333_952;
 
 /// How long the simulated card takes to format. On the bridge's clock.
 const SD_FORMAT: Duration = Duration::from_secs(2);
+
+/// A simulated node's heap, in bytes: the node firmware's two regions, 64 and 36 KiB.
+const SIM_HEAP: u32 = 100 * 1024;
+/// How far above its use a simulated node's heap high water sits.
+const SIM_HEAP_PEAK: u32 = 2 * 1024;
 
 /// The simulated microSD card: what `Status` reports, when a running format ends, and whether
 /// it logs.
@@ -1329,6 +1334,10 @@ async fn beat(
         vdd: node.vdd,
         die_temp: node.die_temp,
         heap_free: node.heap_free,
+        heap_used: SIM_HEAP - node.heap_free,
+        heap_high_water: SIM_HEAP - node.heap_free + SIM_HEAP_PEAK,
+        // A simulated bus loses nothing.
+        bus: NodeBus::default(),
     };
     send_record(events, node.bus_slot, UpType::Heartbeat, &msg.encode(), started).await
 }

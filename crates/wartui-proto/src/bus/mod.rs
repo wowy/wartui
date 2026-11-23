@@ -137,7 +137,7 @@ pub use downlink::{Downlink, FLIGHT_MAX, Ids, RESEND_GAP_MS};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
-    HEARTBEAT_PREFIX_LEN, Heartbeat,
+    HEARTBEAT_PREFIX_LEN, Heartbeat, NodeBus,
 };
 pub use msg::{DecodeError, DownMsg, DownType, UpMsg, UpType};
 pub use node_board::{NodeBoard, NodeBoardError, SlotLabel};

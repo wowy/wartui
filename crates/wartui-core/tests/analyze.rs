@@ -13,7 +13,7 @@ use wartui_core::record::{
     BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, Observation, Record,
 };
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
+use wartui_proto::bus::{NodeBoard, NodeBus, RecordKind, Slot};
 use wartui_proto::link::{BluetoothStatus, QueueId, QueueStat, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::radio_link::BleCounters;
@@ -132,6 +132,9 @@ fn beat(node: Mac, at_ms: i64, counter: u32, wifi: u16, ble: u16) -> Record {
         vdd_mv: None,
         die_temp_c: None,
         heap_free: 40_000,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
         live: true,
     })
 }

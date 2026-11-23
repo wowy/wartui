@@ -8,7 +8,7 @@
 use wartui_proto::bus::{
     ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg,
     DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN, HEARTBEAT_PREFIX_LEN, Heartbeat,
-    RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
+    NodeBus, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
     SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, STOP_LEN, Security, SightingBatch,
     SightingBatchWriter, SightingMsg, Stop, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK,
     UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
@@ -32,7 +32,41 @@ const HEARTBEAT: &[u8] = &[
     0x43, // vdd: code 67, 3304 mV
     0x51, // die_temp: code 81, 41 °C
     0x40, 0x9C, 0x00, 0x00, // heap_free 40,000, little-endian
+    0x60, 0xEA, 0x00, 0x00, // heap_used 60,000, little-endian
+    0x2C, 0x0F, 0x01, 0x00, // heap_high_water 69,420, little-endian
+    0x01, 0x11, // bus.bad_magic 0x1101, little-endian, as every bus field
+    0x02, 0x12, // bus.bad_crc 0x1202
+    0x03, 0x13, // bus.bad_len 0x1303
+    0x04, 0x14, // bus.gaps 0x1404
+    0x05, 0x15, // bus.early 0x1505
+    0x06, 0x16, // bus.arm_failed 0x1606
+    0x07, 0x17, // bus.inbox_full 0x1707
+    0x08, 0x18, // bus.out_of_order 0x1808
+    0x09, 0x19, // bus.repeats 0x1909
+    0x0A, 0x1A, // bus.replaced 0x1A0A
+    0x0B, 0x1B, // bus.resent 0x1B0B
+    0x0C, 0x1C, // bus.undelivered 0x1C0C
+    0x0D, 0x1D, // bus.handler_max_us 0x1D0D
+    0x0E, 0x1E, // bus.settle_max_us 0x1E0E
 ];
+
+/// [`HEARTBEAT`]'s bus counters, field by field.
+const HEARTBEAT_BUS: NodeBus = NodeBus {
+    bad_magic: 0x1101,
+    bad_crc: 0x1202,
+    bad_len: 0x1303,
+    gaps: 0x1404,
+    early: 0x1505,
+    arm_failed: 0x1606,
+    inbox_full: 0x1707,
+    out_of_order: 0x1808,
+    repeats: 0x1909,
+    replaced: 0x1A0A,
+    resent: 0x1B0B,
+    undelivered: 0x1C0C,
+    handler_max_us: 0x1D0D,
+    settle_max_us: 0x1E0E,
+};
 
 /// A heartbeat from a node unassigned since boot: epoch 0, never sent by the host.
 const HEARTBEAT_NO_EPOCH: &[u8] = &[
@@ -48,6 +82,12 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, // vdd: no reading
     0xFF, // die_temp: no reading
     0x00, 0x00, 0x00, 0x00, // heap_free 0
+    0x00, 0x00, 0x00, 0x00, // heap_used 0
+    0x00, 0x00, 0x00, 0x00, // heap_high_water 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bus: bad_magic to gaps 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // early to out_of_order 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // repeats to undelivered 0
+    0x00, 0x00, 0x00, 0x00, // handler_max_us and settle_max_us 0
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -222,7 +262,7 @@ fn bus_msg_codec_matches_expected_body_lengths_when_checking_constants() {
     // The ceiling is the 1024 bytes every body a node sends keeps to, and a batch is packed
     // to fill exactly that many.
     const {
-        assert!(HEARTBEAT_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
+        assert!(HEARTBEAT_LEN < 64 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
         assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
     };
 }
@@ -245,6 +285,9 @@ fn heartbeat_serializes_byte_for_byte_when_encoded_and_decoded() {
         vdd: Vdd(67),
         die_temp: DieTemp(81),
         heap_free: 40_000,
+        heap_used: 60_000,
+        heap_high_water: 69_420,
+        bus: HEARTBEAT_BUS,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(Heartbeat::decode(HEARTBEAT), Ok(msg));
@@ -268,6 +311,9 @@ fn heartbeat_serializes_epoch_zero_when_node_holds_no_assignment() {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(Heartbeat::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -341,6 +387,46 @@ fn heartbeat_serializes_heap_free_as_little_endian_when_encoded() {
     let msg = Heartbeat { heap_free: u32::MAX, ..decoded };
     assert_eq!(&msg.encode()[23..27], &[0xFF; 4]);
     assert_eq!(Heartbeat::decode(&msg.encode()), Ok(msg));
+}
+
+#[test]
+fn heartbeat_serializes_heap_used_and_high_water_as_little_endian_when_encoded() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!((decoded.heap_used, decoded.heap_high_water), (60_000, 69_420));
+    assert_eq!(&HEARTBEAT[27..31], &[0x60, 0xEA, 0, 0]);
+    assert_eq!(&HEARTBEAT[31..35], &[0x2C, 0x0F, 0x01, 0]);
+
+    let msg = Heartbeat { heap_used: 0x0403_0201, heap_high_water: 0x0807_0605, ..decoded };
+    let body = msg.encode();
+    assert_eq!(&body[27..35], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(Heartbeat::decode(&body), Ok(msg));
+}
+
+#[test]
+fn heartbeat_places_each_bus_field_at_its_offset_when_encoded() {
+    // Every field differs, so two swapped fields fail here rather than round-tripping.
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.bus, HEARTBEAT_BUS);
+    let b = HEARTBEAT_BUS;
+    for (at, value) in [
+        (35, b.bad_magic),
+        (37, b.bad_crc),
+        (39, b.bad_len),
+        (41, b.gaps),
+        (43, b.early),
+        (45, b.arm_failed),
+        (47, b.inbox_full),
+        (49, b.out_of_order),
+        (51, b.repeats),
+        (53, b.replaced),
+        (55, b.resent),
+        (57, b.undelivered),
+        (59, b.handler_max_us),
+        (61, b.settle_max_us),
+    ] {
+        assert_eq!(&HEARTBEAT[at..at + 2], &value.to_le_bytes(), "the field at {at}");
+    }
+    assert_eq!(61 + 2, HEARTBEAT_LEN, "settle_max_us ends the body");
 }
 
 #[test]
@@ -990,7 +1076,7 @@ fn msg_decoder_rejects_truncated_body_when_body_is_too_short() {
 fn heartbeat_pins_prefix_and_mac_when_inspecting_body() {
     // Version, board and flags, then the MAC: what a host reads from a node on another
     // layout to name it.
-    assert_eq!(HEARTBEAT_LEN, 27);
+    assert_eq!(HEARTBEAT_LEN, 63);
     assert_eq!(HEARTBEAT_PREFIX_LEN, 5);
     assert_eq!(HEARTBEAT_IDENTITY_LEN, 11);
     assert_eq!(&HEARTBEAT[..11], &[0, 1, 2, 1, 1, 0x02, 0, 0, 0, 0x0D, 0x20]);

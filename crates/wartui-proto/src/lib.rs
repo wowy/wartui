@@ -59,8 +59,8 @@ pub use heapless;
 
 pub use beacon::{Sighting, parse_mgmt};
 pub use bus::{
-    Assign, DecodeError, DownMsg, Heartbeat, SightingBatch, SightingBatchWriter, SightingMsg, Slot,
-    UpMsg,
+    Assign, DecodeError, DownMsg, Heartbeat, NodeBus, SightingBatch, SightingBatchWriter,
+    SightingMsg, Slot, UpMsg,
 };
 pub use dedup::MacRing;
 pub use hci::AdvReport;

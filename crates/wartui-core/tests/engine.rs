@@ -23,7 +23,7 @@ use wartui_core::record::{BatchGap, BridgeStatusSeen, HostLink, HostStatus, Reco
 use wartui_core::ubx::valset_rate;
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, Heartbeat as HeartbeatMsg, MAX_SLOTS, NODE_VERSION, NodeBoard,
-    RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType, UpdateState,
+    NodeBus, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot, UpType, UpdateState,
     UpdateStatus, Vdd, Version,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
@@ -231,6 +231,9 @@ fn beat_msg(src: Mac, counter: u32) -> HeartbeatMsg {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     }
 }
 

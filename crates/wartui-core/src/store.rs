@@ -58,7 +58,7 @@ use crate::record::{CaptureSettings, HostLink, Record};
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -100,7 +100,12 @@ CREATE TABLE IF NOT EXISTS node (
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
 -- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
 -- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
--- across a capture is a leak in the node firmware. `epoch` is the share the node holds, which
+-- across a capture is a leak in the node firmware. `heap_used` is the bytes in use, so
+-- `heap_used + heap_free` is the heap's size, and `heap_high_water` the most in use since boot.
+-- The `bus_` columns are the node's own view of the bus (`wartui_proto::bus::NodeBus`): each
+-- count a raw wrapping 16-bit since-boot count, read as a difference between rows, so a reboot
+-- shows as the value falling; `bus_handler_max_us` and `bus_settle_max_us` are since-boot
+-- maxima in µs, saturating at 65535. `epoch` is the share the node holds, which
 -- `assignment` says the bridge gave it.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
@@ -115,6 +120,22 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   vdd_mv INTEGER,
   die_temp_c INTEGER,
   heap_free INTEGER NOT NULL,
+  heap_used INTEGER NOT NULL,
+  heap_high_water INTEGER NOT NULL,
+  bus_bad_magic INTEGER NOT NULL,
+  bus_bad_crc INTEGER NOT NULL,
+  bus_bad_len INTEGER NOT NULL,
+  bus_gaps INTEGER NOT NULL,
+  bus_early INTEGER NOT NULL,
+  bus_arm_failed INTEGER NOT NULL,
+  bus_inbox_full INTEGER NOT NULL,
+  bus_out_of_order INTEGER NOT NULL,
+  bus_repeats INTEGER NOT NULL,
+  bus_replaced INTEGER NOT NULL,
+  bus_resent INTEGER NOT NULL,
+  bus_undelivered INTEGER NOT NULL,
+  bus_handler_max_us INTEGER NOT NULL,
+  bus_settle_max_us INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -1200,8 +1221,13 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, slot, wifi_refused, ble_refused,
-                        reset_cause, vdd_mv, die_temp_c, heap_free, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        reset_cause, vdd_mv, die_temp_c, heap_free, heap_used, heap_high_water,
+                        bus_bad_magic, bus_bad_crc, bus_bad_len, bus_gaps, bus_early,
+                        bus_arm_failed, bus_inbox_full, bus_out_of_order, bus_repeats,
+                        bus_replaced, bus_resent, bus_undelivered, bus_handler_max_us,
+                        bus_settle_max_us, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1215,6 +1241,22 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.vdd_mv,
                     hb.die_temp_c,
                     hb.heap_free,
+                    hb.heap_used,
+                    hb.heap_high_water,
+                    hb.bus.bad_magic,
+                    hb.bus.bad_crc,
+                    hb.bus.bad_len,
+                    hb.bus.gaps,
+                    hb.bus.early,
+                    hb.bus.arm_failed,
+                    hb.bus.inbox_full,
+                    hb.bus.out_of_order,
+                    hb.bus.repeats,
+                    hb.bus.replaced,
+                    hb.bus.resent,
+                    hb.bus.undelivered,
+                    hb.bus.handler_max_us,
+                    hb.bus.settle_max_us,
                     hb.live
                 ])?;
             }

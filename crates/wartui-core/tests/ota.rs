@@ -16,8 +16,8 @@ use wartui_core::ota::{
 };
 use wartui_core::runtime::{FleetError, drive_fleet, now};
 use wartui_proto::bus::{
-    Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION, Slot,
-    UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
+    Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION, NodeBus,
+    Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::link::{BridgeToHost, HostToBridge, cache_chunk_body, image_tag};
 use wartui_proto::mac::Mac;
@@ -162,6 +162,9 @@ fn heartbeat_of(mac: Mac, version: Version, trial: bool) -> Vec<u8> {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     }
     .encode()
     .to_vec()

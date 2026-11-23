@@ -263,6 +263,9 @@ impl FleetEngine {
             vdd_mv: heartbeat.vdd.mv(),
             die_temp_c: heartbeat.die_temp.c(),
             heap_free: heartbeat.heap_free,
+            heap_used: heartbeat.heap_used,
+            heap_high_water: heartbeat.heap_high_water,
+            bus: heartbeat.bus,
             live,
         }));
     }
