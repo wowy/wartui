@@ -160,6 +160,24 @@ for 3 minutes with the log on, then 3 with it off:
 The bench hears few networks, so this was a light load. The writer's steps on this board were next
 102, fed 63, copy 59 and plan 83 µs; opening a file took 407–439 µs.
 
+### The same carrier under a burst load
+
+The bench's networks are too few to load anything, so every node ran a bench-only build that is
+not in the tree. Every 10 s, while scanning, it sends a burst of 46, 91 or 132 full batches of
+made-up Wi-Fi sightings, cycling, with locally administered addresses, over the real bus path.
+The bursts are spread across the 10 s by node, so some of them overlap. `wartui sniff` took every
+frame over USB, for 5 minutes with the log on, then 5 with it off. Loss was counted from each
+node's batch sequence numbers:
+
+| Log | Batches to the host | Lost | Host link | Queues | Radio link | SD log |
+| --- | --- | --- | --- | --- | --- | --- |
+| On | 27,064, 968,666 sightings, 90.7 a second | 0 on every node | 0 UART errors | 0 dropped | 0 CRC, magic or UART errors, no new gap | 115 KB, 0 dropped, 0 errors, longest step 403 µs |
+| Off | 27,083, 968,585 sightings, 90.3 a second | 0 on every node | 0 UART errors | 0 dropped | the same | |
+
+**The log made no difference the bench could see.** The load was the node bus's, which fills
+neither the host queue nor the log, since sightings are not logged. The log's own traffic was the
+bridge's answers, lines and snapshots.
+
 ### Deleting the history for nothing
 
 After the power cuts, the Mac's own Spotlight and fsevents files took about 22 clusters while the
@@ -175,5 +193,5 @@ staged.
 ## Not answered here
 
 The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
-the bridge does not. A carrier under a heavy load, a drive or a two-node burst, was not tested
-with the log, nor was a WardriveESP phone session, the case the log is for.
+the bridge does not. A real drive was not tested with the log, nor was a WardriveESP phone
+session, the case the log is for.
