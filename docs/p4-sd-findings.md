@@ -71,11 +71,38 @@ GPIO45 switches the card's VDD through a P-channel MOSFET, so low powers it. The
 ## What `sdio` does
 
 - `BlockDevice::new_uninit_sd_card(slot, Delay)`, then `reacquire(hz)`, identifies the card, and
-  `reacquire` identifies it again on the same slot.
+  `reacquire` identifies it again on the same slot, once the two fixes below are in.
 - A 32-block write is one CMD25.
 - `csd.block_count()` is a `u64`.
 - `MmcError::Crc` covers response CRC, data CRC and start-bit errors. `Io` covers FIFO overrun,
   DMA and response errors.
+
+## A card identified again
+
+Measured on 2026-11-23 on the same board and card, with the bridge's own firmware. The card was
+pulled while the bridge ran, then put back about 15 s later.
+
+| Firmware | Result |
+| --- | --- |
+| `sdio` 0.5.2 from crates.io | `no card` until the P4 restarted, though the card was back. A P4 reset found it in under 3 s, with GPIO45 held low, so the card stayed powered |
+| `sdio` with the RCA fix only | The card was identified again, then every block read timed out |
+| `sdio` with both fixes | Found within one 5 s check: `FAT32, 60326 MiB free` |
+
+Each attempt dumped the SDMMC registers. Two faults in `sdio` 0.5.2 caused it, and 0.5.3 has both:
+
+- **The previous card's RCA.** After reinsertion, CMD8 was answered and the CMD55 before ACMD41
+  timed out, every 5 s. `BusAdapter` keeps the RCA from the last CMD3, and nothing clears it, so
+  the CMD55 carried the old card's address. CMD0 had returned the card to RCA 0, and a card answers
+  only its own address. **Fix:** `init_idle` sets the RCA to 0 with its CMD0.
+- **A sticky error flag.** After re-identification, the last command was CMD12 with a response
+  timeout, and no read had been sent. `BlockDevice` sets `error` before each read or write and
+  clears it only on success. While it is set, a read or write first sends CMD12 and returns if that
+  fails, and a card with no transfer open ignores CMD12. **Fix:** `reacquire` clears the flag. The
+  same fault follows any failed read with the card in place, which the firmware then recovers by
+  identifying it again.
+
+**Decided: the P4 bridge builds against a fork of `sdio`**, the published 0.5.2 plus those two
+changes, pinned by commit in `firmware/p4-bridge/Cargo.toml`. esp-hal builds against the same copy.
 
 ## Not answered here
 

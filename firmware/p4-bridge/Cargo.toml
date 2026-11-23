@@ -73,3 +73,10 @@ opt-level = 3
 
 [profile.release.package.postcard]
 opt-level = 3
+
+# `sdio` 0.5.2 with two fixes that let a card be identified again: a card swapped in, or one that
+# failed a read, otherwise stays lost until the P4 restarts (`docs/p4-sd-findings.md` § "A card
+# identified again"). The branch is the published 0.5.2 plus those two changes; esp-hal builds
+# against this copy too. Back to crates.io once a release carries both.
+[patch.crates-io]
+sdio = { git = "https://github.com/wowy/sdio", rev = "a6fc7b596dadf9cccc50c85e75d167ac1507ab3e" }

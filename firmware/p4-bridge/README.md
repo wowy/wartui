@@ -327,6 +327,9 @@ GPIO45 switches the card's supply through a P-channel MOSFET, so the P4 holds it
 driver powers the slot's I/O from LDO4 itself. The slot has no card-detect line, so the P4 tries
 to identify a card every 5 s until one answers, then reads block 0 every 5 s to see it is still
 there, and reads a `Failed` card again in full. A card swapped in is found within about 10 s.
+Finding it again relies on two fixes to `sdio`, which the build takes from a fork pinned in
+`Cargo.toml` ([`docs/p4-sd-findings.md`](../../docs/p4-sd-findings.md) § "A card identified
+again").
 
 `Status` reports the card:
 
