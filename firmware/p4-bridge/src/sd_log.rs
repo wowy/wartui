@@ -32,14 +32,16 @@
 //! emptied at once. Turning it on opens a new file.
 
 use core::cell::{Cell, RefCell};
+use core::fmt::Write as _;
 
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use wartui_proto::frame_ring::FrameRingIn;
+use wartui_proto::heapless::String;
 use wartui_proto::host_owner::{Holder, Input};
-use wartui_proto::link::{self, LoopPhase, MAX_FRAME, SdLogState, ShortStr, encode_frame};
+use wartui_proto::link::{self, LogStr, LoopPhase, MAX_FRAME, SdLogState, ShortStr, encode_frame};
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::log::{self, FORMAT_VERSION, Kind, Opened, RECORD_MAX};
@@ -65,6 +67,63 @@ pub struct Boot {
     pub cause: ResetCause,
     pub last_phase: LoopPhase,
     pub image: Option<[u8; DIGEST_LEN]>,
+}
+
+/// A stretch of the writer's synchronous work between two yields, which [`note_busy`] times.
+#[derive(Clone, Copy)]
+pub enum Window {
+    /// The appender's `next`, and copying a block it writes.
+    Next,
+    /// The appender taking a block a `Read` brought back.
+    Fed,
+    /// The appender taking one block of a `ReadRun`.
+    RunFed,
+    /// A flush's head: the file's tail and a `Dropped` record.
+    Head,
+    /// A flush's head with the new file's `Opened` record.
+    Opened,
+    /// One slice of a flush's records copied from the ring, a block or so.
+    Copy,
+    /// A flush's end: a `Closed` record, the padding and the appender planning the flush.
+    Plan,
+}
+
+impl Window {
+    /// Every window in declaration order, so a window's `as usize` is its index here.
+    const ALL: [Self; 7] =
+        [Self::Next, Self::Fed, Self::RunFed, Self::Head, Self::Opened, Self::Copy, Self::Plan];
+    const COUNT: usize = Self::ALL.len();
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Fed => "fed",
+            Self::RunFed => "run",
+            Self::Head => "head",
+            Self::Opened => "opened",
+            Self::Copy => "copy",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+/// The start of [`say_longest`]'s line.
+const LONGEST: &str = "sd log: longest µs";
+
+// [`say_longest`]'s line fits a [`LogStr`] while every maximum is under 100 ms (five digits).
+const _: () = {
+    let mut len = LONGEST.len();
+    let mut i = 0;
+    while i < Window::COUNT {
+        len += 1 + Window::ALL[i].name().len() + 1 + 5;
+        i += 1;
+    }
+    assert!(len <= capacity(None::<&LogStr>));
+};
+
+/// The capacity of a `String<N>`, where a constant needs it.
+const fn capacity<const N: usize>(_: Option<&String<N>>) -> usize {
+    N
 }
 
 /// What the writer reports in `SdStatus.log`, beside the setting and the drops.
@@ -93,6 +152,10 @@ pub struct SdLog {
     /// Raised for a snapshot ahead of the next [`SNAPSHOT_EVERY`].
     snapshot: Signal<NoopRawMutex, ()>,
     stats: Cell<Stats>,
+    /// Each [`Window`]'s longest stretch, by its index.
+    maxima: [Cell<u32>; Window::COUNT],
+    /// Whether a maximum grew since [`say_longest`] last said them.
+    unsaid: Cell<bool>,
     boot: Boot,
 }
 
@@ -113,6 +176,8 @@ impl SdLog {
                 errors: 0,
                 busy_max_us: 0,
             }),
+            maxima: [const { Cell::new(0) }; Window::COUNT],
+            unsaid: Cell::new(false),
             boot,
         }
     }
@@ -195,10 +260,32 @@ pub fn update(shared: &Shared, f: impl FnOnce(&mut Stats)) {
     shared.sd_log.stats.set(stats);
 }
 
-/// Keep `start`'s elapsed time as the longest synchronous stretch, if it is.
-pub fn note_busy(shared: &Shared, start: Instant) {
+/// Keep `start`'s elapsed time as `window`'s longest synchronous stretch, and as the longest of
+/// all, if it is, for [`say_longest`]. It logs nothing itself, since a caller may hold the ring.
+pub fn note_busy(shared: &Shared, start: Instant, window: Window) {
     let us = u32::try_from(start.elapsed().as_micros()).unwrap_or(u32::MAX);
-    update(shared, |stats| stats.busy_max_us = stats.busy_max_us.max(us));
+    let max = &shared.sd_log.maxima[window as usize];
+    if us > max.get() {
+        max.set(us);
+        shared.sd_log.unsaid.set(true);
+    }
+    if us > stats(shared).busy_max_us {
+        update(shared, |stats| stats.busy_max_us = us);
+    }
+}
+
+/// Say every window's longest stretch in one log line, once after any of them grows: `sd log:
+/// longest µs next 41 fed 12 …`. Called by the writer where it holds no borrow.
+pub fn say_longest(shared: &Shared) {
+    if !shared.sd_log.unsaid.replace(false) {
+        return;
+    }
+    let mut line = LogStr::new();
+    let _ = line.push_str(LONGEST);
+    for (window, max) in Window::ALL.iter().zip(&shared.sd_log.maxima) {
+        let _ = write!(line, " {} {}", window.name(), max.get());
+    }
+    shared.push_log(&line);
 }
 
 /// The log, for `SdStatus.log`.

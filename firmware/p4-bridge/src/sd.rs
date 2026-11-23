@@ -44,16 +44,17 @@
 //! its steps with the same [`read`] and [`write`] the rest of this module uses, at most
 //! [`TRANSFER_BLOCKS`] blocks each, metadata through [`META`] and data through [`BUF`]. It yields
 //! after every step, so every other future runs between two card transfers, and the synchronous
-//! work of a step (the appender's one sector of scanning, or staging up to 16 KiB from PSRAM) is
-//! timed and its longest reported as `busy_max_us`. It pauses while an update of the P4's image
-//! or a node image upload is part-way in: both are a host's transfer in progress, and an update's
-//! flash writes hold the executor. The ring keeps the newest records meanwhile.
+//! work between two yields (the appender's one sector of scanning, or a block of records staged
+//! from PSRAM) is timed. The longest is reported as `busy_max_us`, and each [`Window`] keeps its
+//! own longest, all said in one log line whenever one grows. It pauses while an update of the
+//! P4's image or a node image upload is part-way in: both are a host's transfer in progress, and
+//! an update's flash writes hold the executor. The ring keeps the newest records meanwhile.
 //!
 //! **Each flush is staged in [`BUF`]:** the file's partial last block first, so the file grows in
 //! place, then an `Opened` record when the file is new, a `Dropped` record when the ring lost
 //! records since the last, whole records from the ring while they fit, and a `Closed` record when
 //! the file ends. The rest of the last block is zeros, which the reader skips. Records are copied
-//! block by block, so one may span two.
+//! block by block, so one may span two, and staging yields after each block of them.
 //!
 //! **A failure stops only the writer.** A failed transfer counts an error, drops the file and
 //! reads block 0 at once: a card gone sends [`run`] back to identifying, and one that answers is
@@ -88,7 +89,7 @@ use wartui_proto::sd::log::{self as records, CloseReason};
 use wartui_proto::sd::{BLOCK, inspect, mib};
 
 use crate::config::{SD_HZ, SD_LOG_BYTES, SD_LOG_FILE_MAX, SD_LOG_KEEP_FREE_MB};
-use crate::sd_log::{self, Ring};
+use crate::sd_log::{self, Ring, Window};
 use crate::{Shared, now_ms};
 
 /// How often [`run`] identifies a card while none answers, and checks one that did.
@@ -586,8 +587,21 @@ fn give_way(shared: &Shared) -> bool {
 
 /// One wake of the log's writer: follow the setting, mount and open a file when there is none,
 /// then flush what the ring holds. Returns the error of a failed transfer that found the card
-/// gone; any other failure stops only the writer.
+/// gone; any other failure stops only the writer. The windows' longest steps are said at its end,
+/// where nothing is borrowed, when one grew.
 async fn log_tick(
+    card: &mut Card,
+    buf: &mut [Block; TRANSFER_BLOCKS],
+    w: &mut Writer,
+    volume: Option<&Volume>,
+    shared: &Shared,
+) -> Result<(), MmcError> {
+    let woke = log_wake(card, buf, w, volume, shared).await;
+    sd_log::say_longest(shared);
+    woke
+}
+
+async fn log_wake(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
     w: &mut Writer,
@@ -711,8 +725,9 @@ struct Staged {
 }
 
 /// Stage a flush and carry it out: records from the ring when `from_ring`, then `close`'s
-/// `Closed` record once nothing is left to take. Returns what it staged, or `None` when the
-/// writer stopped or gave way to a format.
+/// `Closed` record once nothing is left to take. Staging yields after its head and after each
+/// block of records, so no one stretch copies more than a block and a record. Returns what it
+/// staged, or `None` when the writer stopped or gave way to a format.
 async fn flush(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
@@ -721,12 +736,30 @@ async fn flush(
     from_ring: bool,
     close: Option<CloseReason>,
 ) -> Result<Option<Staged>, MmcError> {
-    let start = Instant::now();
     let tail = w.app.tail().len();
-    let staged = stage(buf, w, shared, from_ring, close);
-    let last = staged.len.saturating_sub(1) / BLOCK;
-    w.app.flush(staged.len, &buf[last]);
-    sd_log::note_busy(shared, start);
+    let start = Instant::now();
+    let (mut at, dropped, window) = stage_head(buf, w, shared);
+    sd_log::note_busy(shared, start, window);
+    yield_now().await;
+    let mut taken = 0;
+    if from_ring {
+        loop {
+            let start = Instant::now();
+            let until = (at / BLOCK + 1) * BLOCK;
+            let n = sd_log::with_ring(shared, |ring| take_records(ring, buf, &mut at, until));
+            sd_log::note_busy(shared, start, Window::Copy);
+            let n = n.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            taken += n;
+            yield_now().await;
+        }
+    }
+    let start = Instant::now();
+    let closed = stage_end(buf, w, shared, &mut at, from_ring, close);
+    sd_log::note_busy(shared, start, Window::Plan);
+    let staged = Staged { len: at, taken, closed, dropped };
     if !task(card, buf, w, shared, staged.taken).await? {
         return Ok(None);
     }
@@ -736,21 +769,21 @@ async fn flush(
     Ok(Some(staged))
 }
 
-/// Fill `buf` for a flush: the file's tail, the `Opened` record owed, a `Dropped` record when the
-/// log lost records since the last, whole ring records while they fit when `from_ring`, then
-/// `close`'s record when the ring has nothing left to give. Zeros pad the last block.
+/// Start a flush in `buf`: the file's tail, the `Opened` record owed, and a `Dropped` record when
+/// the log lost records since the last. Returns where the staged bytes end, the drops counted, and
+/// the window it was.
 #[inline(never)]
-fn stage(
+fn stage_head(
     buf: &mut [Block; TRANSFER_BLOCKS],
     w: &mut Writer,
     shared: &Shared,
-    from_ring: bool,
-    close: Option<CloseReason>,
-) -> Staged {
+) -> (usize, u32, Window) {
     let mut at = 0;
+    let mut window = Window::Head;
     put(buf, &mut at, w.app.tail());
     let mut record = [0; SMALL_RECORD];
     if let Some(part) = w.owed.take() {
+        window = Window::Opened;
         let file = w.app.file().unwrap_or(0);
         let card_mb = shared.sd.status.get().card_mb;
         let free_mb = w.app.free_mb();
@@ -758,31 +791,42 @@ fn stage(
             put(buf, &mut at, &record[..n]);
         }
     }
-    let ms = now_ms() as u32;
     let dropped = sd_log::dropped(shared);
     let lost = dropped.wrapping_sub(w.dropped_said);
     if lost > 0
-        && let Some(n) = records::encode_dropped(lost, ms, &mut record)
+        && let Some(n) = records::encode_dropped(lost, now_ms() as u32, &mut record)
     {
         put(buf, &mut at, &record[..n]);
     }
-    let taken = if from_ring {
-        sd_log::with_ring(shared, |ring| take_records(ring, buf, &mut at)).unwrap_or(0)
-    } else {
-        0
-    };
+    (at, dropped, window)
+}
+
+/// End a flush in `buf` at `at`: `close`'s record when the ring has nothing left to give, zeros to
+/// the end of the last block, and the appender's plan. Returns whether the `Closed` record went in.
+#[inline(never)]
+fn stage_end(
+    buf: &mut [Block; TRANSFER_BLOCKS],
+    w: &mut Writer,
+    shared: &Shared,
+    at: &mut usize,
+    from_ring: bool,
+    close: Option<CloseReason>,
+) -> bool {
+    let mut record = [0; SMALL_RECORD];
     let mut closed = false;
     if let Some(reason) = close
         && !(from_ring && sd_log::pending(shared))
-        && let Some(n) = records::encode_closed(reason, ms, &mut record)
+        && let Some(n) = records::encode_closed(reason, now_ms() as u32, &mut record)
     {
-        closed = put(buf, &mut at, &record[..n]);
+        closed = put(buf, at, &record[..n]);
     }
     let end = at.div_ceil(BLOCK) * BLOCK;
-    if end > at {
-        buf[at / BLOCK][at % BLOCK..].fill(0);
+    if end > *at {
+        buf[*at / BLOCK][*at % BLOCK..].fill(0);
     }
-    Staged { len: at, taken, closed, dropped }
+    let last = at.saturating_sub(1) / BLOCK;
+    w.app.flush(*at, &buf[last]);
+    closed
 }
 
 /// Copy `bytes` into the staged blocks at `at`, block by block, and move `at` past them. Returns
@@ -802,11 +846,18 @@ fn put(buf: &mut [Block; TRANSFER_BLOCKS], at: &mut usize, bytes: &[u8]) -> bool
     true
 }
 
-/// Move whole records from `ring` into the staged blocks at `at` while the next fits. Returns how
-/// many. Nothing here pushes to the host or logs: `ring` is borrowed.
-fn take_records(ring: &mut Ring, buf: &mut [Block; TRANSFER_BLOCKS], at: &mut usize) -> u32 {
+/// Move whole records from `ring` into the staged blocks at `at` while the next fits, until `at`
+/// reaches `until`. Returns how many. Nothing here pushes to the host or logs: `ring` is borrowed.
+fn take_records(
+    ring: &mut Ring,
+    buf: &mut [Block; TRANSFER_BLOCKS],
+    at: &mut usize,
+    until: usize,
+) -> u32 {
     let mut taken = 0;
-    while let Some(len) = ring.peek_len() {
+    while *at < until
+        && let Some(len) = ring.peek_len()
+    {
         if *at + len > CHUNK_BYTES {
             break;
         }
@@ -918,14 +969,14 @@ async fn drive(
         if let Step::Write(_) = step {
             w.meta[0].copy_from_slice(w.app.block());
         }
-        sd_log::note_busy(shared, start);
+        sd_log::note_busy(shared, start, Window::Next);
         match step {
             Step::Done(result) => return Ok(Ended::Done(result)),
             Step::Read(lba) => {
                 read(card, lba, &mut w.meta[..]).await?;
                 let start = Instant::now();
                 w.app.fed(&w.meta[0]);
-                sd_log::note_busy(shared, start);
+                sd_log::note_busy(shared, start, Window::Fed);
             }
             Step::ReadRun { lba, count } => {
                 let count = usize::from(count).min(TRANSFER_BLOCKS);
@@ -933,7 +984,7 @@ async fn drive(
                 for block in &buf[..count] {
                     let start = Instant::now();
                     w.app.fed(block);
-                    sd_log::note_busy(shared, start);
+                    sd_log::note_busy(shared, start, Window::RunFed);
                     yield_now().await;
                 }
             }
