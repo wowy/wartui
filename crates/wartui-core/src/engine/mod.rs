@@ -416,6 +416,8 @@ impl FleetEngine {
                 ble,
                 present,
                 members,
+                // Not read yet: nothing above the engine shows the card.
+                sd: _,
                 bluetooth,
             } => {
                 // Below the baseline means the bridge restarted from zero.
@@ -478,7 +480,7 @@ impl FleetEngine {
             // `Ready` arrives as `LinkEvent::Connected`. An update status answers
             // `flash-bridge`, and a cache status and a send's outcome `ota`, which `run` never is.
             // GPS bytes are the runtime's, which feeds them to the position chain before the
-            // engine would see them.
+            // engine would see them. Nothing in `run` asks for a format yet.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Delivered { .. }
             | BridgeToHost::Undelivered { .. }
@@ -486,7 +488,8 @@ impl FleetEngine {
             | BridgeToHost::Error { .. }
             | BridgeToHost::Gps { .. }
             | BridgeToHost::Update(_)
-            | BridgeToHost::CacheImage(_) => {}
+            | BridgeToHost::CacheImage(_)
+            | BridgeToHost::SdFormatted { .. } => {}
         }
     }
 

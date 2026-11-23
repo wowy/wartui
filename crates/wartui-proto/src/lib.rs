@@ -19,7 +19,8 @@
 //! carrier's lid fan: its duty, its PWM wave and tach reading. [`settings`] lays out the records
 //! the P4 keeps its settings in, and [`bonds`] the Bluetooth bonds it keeps for its C6, each record
 //! ending in a [`crc`] and both logged in a sector as [`sector_log`] lays out. [`fleet`] is the P4's fleet planner: who scans what, and the records that
-//! tell each node.
+//! tell each node. [`sd`] is the FAT32 volume the P4 formats its microSD card with, and the
+//! reading of one it did not format.
 
 #![no_std]
 
@@ -46,6 +47,7 @@ pub mod pending;
 pub mod plan;
 pub mod radio_link;
 pub mod reset;
+pub mod sd;
 pub mod sector_log;
 pub mod settings;
 pub mod split;

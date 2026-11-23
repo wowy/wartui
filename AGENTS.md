@@ -115,7 +115,8 @@ own.
   lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
   round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
   cut, the Bluetooth pick and the records that tell each node), `node` (a node's timings and
-  sweep cursor), `pending` (the buffers sightings wait in on a node),
+  sweep cursor), `pending` (the buffers sightings wait in on a node), `sd` (the FAT32 layout the
+  P4 formats its microSD card with, and the reading of a card it did not format),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing

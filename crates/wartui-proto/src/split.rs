@@ -137,6 +137,8 @@ pub struct P4Counters {
     pub present: u32,
     /// The fleet planner's members ([`crate::fleet::Fleet::members`]).
     pub members: heapless::Vec<crate::fleet::Member, MAX_SLOTS>,
+    /// The microSD card, or `None` when the P4 does not drive one.
+    pub sd: Option<crate::link::SdStatus>,
     /// The Bluetooth host link as the P4 sees it. [`Pair::status`] replaces its `counters`, and
     /// a connected central's `phy` and `interval_us`, with the C6's once the C6 has reported
     /// them.
@@ -526,6 +528,7 @@ impl Pair {
             ble,
             present,
             members,
+            sd,
             mut bluetooth,
         } = p4;
         let mut queues = QueueStats::new();
@@ -567,6 +570,7 @@ impl Pair {
             ble,
             present,
             members,
+            sd,
             bluetooth,
         }
     }

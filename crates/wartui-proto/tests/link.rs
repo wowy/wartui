@@ -17,15 +17,15 @@ use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, Central, FrameAccumulator, FromNodeBody, GPS_FRAME,
     GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION, LinkError,
     LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
-    PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, ToNodeBody,
-    UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes, cache_chunk_body, crc16,
-    decode_frame, encode_frame, encode_host_frame, image_tag,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, SdFormatOutcome,
+    SdState, SdStatus, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes,
+    cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame, image_tag,
 };
 use wartui_proto::radio_link::BleCounters;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::reset::ResetCause;
 
-fn sample_commands() -> Vec<HostToBridge, 16> {
+fn sample_commands() -> Vec<HostToBridge, 24> {
     let assign = Assign { epoch: 3, flags: 0, channels: wartui_proto::plan::ChannelSet::empty() };
     let body = ToNodeBody::from_slice(&assign.encode()).expect("an assignment fits");
 
@@ -63,6 +63,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::OpenPairing).expect("sample_commands has room");
     v.push(HostToBridge::ClearBonds).expect("sample_commands has room");
     v.push(HostToBridge::SetWardriveEsp { on: true }).expect("sample_commands has room");
+    v.push(HostToBridge::FormatSd).expect("sample_commands has room");
     v
 }
 
@@ -99,7 +100,7 @@ fn frame_body(frame: &[u8]) -> std::vec::Vec<u8> {
     decoded[1..len - 2].to_vec()
 }
 
-fn sample_events() -> Vec<BridgeToHost, 24> {
+fn sample_events() -> Vec<BridgeToHost, 32> {
     let mut writer = SightingBatchWriter::new(1);
     assert!(writer.push(&SightingMsg {
         kind: RecordKind::Wifi,
@@ -185,6 +186,7 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
         ble: Slot::new(1, 0),
         present: 0b11_1111,
         members: full_members(),
+        sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(60_340) }),
         bluetooth: usb_bluetooth(),
     })
     .expect("sample_events has room");
@@ -213,6 +215,14 @@ fn sample_events() -> Vec<BridgeToHost, 24> {
     })))
     .expect("sample_events has room");
     v.push(BridgeToHost::Fleet(full_report())).expect("sample_events has room");
+    for outcome in [
+        SdFormatOutcome::Done,
+        SdFormatOutcome::NoCard,
+        SdFormatOutcome::Busy,
+        SdFormatOutcome::Failed,
+    ] {
+        v.push(BridgeToHost::SdFormatted { outcome }).expect("sample_events has room");
+    }
     v
 }
 
@@ -237,6 +247,13 @@ fn without_bluetooth(mut body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
     let at = body.len() - USB_BLUETOOTH_BYTES.len();
     assert_eq!(body[at..], USB_BLUETOOTH_BYTES, "the Status ends in usb_bluetooth");
     body.truncate(at);
+    body
+}
+
+/// A Status body with `sd: None`'s tag and [`usb_bluetooth`] taken off its end.
+fn without_sd_and_bluetooth(body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
+    let mut body = without_bluetooth(body);
+    assert_eq!(body.pop(), Some(0), "`sd` is `None` ahead of `bluetooth`");
     body
 }
 
@@ -644,7 +661,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 16, "one of each");
+    assert_eq!(commands.len(), 17, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -669,6 +686,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
         ),
         (10, BridgeToHost::CacheImage(UpdateStatusBytes::new())),
         (11, BridgeToHost::Fleet(full_report())),
+        (12, BridgeToHost::SdFormatted { outcome: SdFormatOutcome::Done }),
     ];
     for (want, event) in &events {
         assert_eq!(postcard::to_slice(event, &mut buf).expect("encodes")[0], *want, "{event:?}");
@@ -716,6 +734,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         ble: None,
         present: 0,
         members: Vec::new(),
+        sd: None,
         bluetooth: usb_bluetooth(),
     };
     let mut out = [0u8; MAX_FRAME];
@@ -799,6 +818,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         ble: None,
         present: u32::MAX,
         members: Vec::new(),
+        sd: None,
         bluetooth: usb_bluetooth(),
     };
     assert_eq!(round_trip(&status), status);
@@ -836,6 +856,7 @@ fn link_fits_status_in_one_frame_when_every_field_is_largest() {
         ble: Slot::from_u8(13),
         present: u32::MAX,
         members: full_members(),
+        sd: Some(SdStatus { state: SdState::Failed, card_mb: u32::MAX, free_mb: Some(u32::MAX) }),
         bluetooth: BluetoothStatus {
             owner: HostOwner::Bluetooth,
             bonds: u8::MAX,
@@ -958,11 +979,12 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
         ble: None,
         present: 0,
         members: Vec::new(),
+        sd: None,
         bluetooth: usb_bluetooth(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
-    // `bluetooth` follows `members`, pinned in its own test.
-    let none = without_bluetooth(frame_body(&out[..n]));
+    // `sd` and `bluetooth` follow `members`, each pinned in its own test.
+    let none = without_sd_and_bluetooth(frame_body(&out[..n]));
     assert_eq!(none[none.len() - 6..], [0, 2, 0, 0, 0, 0]);
     if let BridgeToHost::Status { fan, pool, scan, ble, present, members, .. } = &mut status {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
@@ -981,7 +1003,7 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
             .collect();
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
-    let some = without_bluetooth(frame_body(&out[..n]));
+    let some = without_sd_and_bluetooth(frame_body(&out[..n]));
     assert_eq!(some[..none.len() - 6], none[..none.len() - 6]);
     assert_eq!(
         some[none.len() - 6..],
@@ -1012,6 +1034,7 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
         ble: None,
         present: 0,
         members: Vec::new(),
+        sd: None,
         bluetooth: usb_bluetooth(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -1081,6 +1104,75 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
 }
 
 #[test]
+fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_card() {
+    // `sd`: an option's tag, then `state`'s variant index, `card_mb` as a varint and
+    // `free_mb`'s tag and varint.
+    let mut out = [0u8; MAX_FRAME];
+    let mut status = BridgeToHost::Status {
+        rx_count: 0,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: QueueStats::new(),
+        radio_link: RadioLinkStats::default(),
+        host_uart_errors: 0,
+        fan: None,
+        pool: ChannelPool::All,
+        scan: ScanMode::Stopped,
+        ble: None,
+        present: 0,
+        members: Vec::new(),
+        sd: None,
+        bluetooth: usb_bluetooth(),
+    };
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let head = without_sd_and_bluetooth(frame_body(&out[..n]));
+    for (sd, expected) in [
+        (SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None }, &[1, 0, 0, 0][..]),
+        (SdStatus { state: SdState::NoFat32, card_mb: 300, free_mb: None }, &[1, 1, 0xAC, 0x02, 0]),
+        (
+            SdStatus { state: SdState::Ready, card_mb: 300, free_mb: Some(5) },
+            &[1, 2, 0xAC, 0x02, 1, 5],
+        ),
+        (SdStatus { state: SdState::Formatting, card_mb: 1, free_mb: None }, &[1, 3, 1, 0]),
+        (SdStatus { state: SdState::Failed, card_mb: 1, free_mb: None }, &[1, 4, 1, 0]),
+    ] {
+        if let BridgeToHost::Status { sd: field, .. } = &mut status {
+            *field = Some(sd);
+        }
+        let n = encode_frame(&status, &mut out).expect("encodes");
+        let body = without_bluetooth(frame_body(&out[..n]));
+        assert_eq!(body[..head.len()], head[..], "{sd:?}");
+        assert_eq!(body[head.len()..], *expected, "{sd:?}");
+        assert_eq!(round_trip(&status), status);
+    }
+}
+
+#[test]
+fn link_codec_pins_format_sd_bytes_when_host_asks() {
+    // Postcard's variant index, last of the commands, and nothing else.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&HostToBridge::FormatSd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [16]);
+}
+
+#[test]
+fn link_codec_pins_sd_formatted_bytes_when_bridge_answers() {
+    // Postcard's variant index, last of the events, then the outcome's.
+    let mut out = [0u8; MAX_FRAME];
+    for (outcome, code) in [
+        (SdFormatOutcome::Done, 0),
+        (SdFormatOutcome::NoCard, 1),
+        (SdFormatOutcome::Busy, 2),
+        (SdFormatOutcome::Failed, 3),
+    ] {
+        let event = BridgeToHost::SdFormatted { outcome };
+        let n = encode_frame(&event, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [12, code], "{outcome:?}");
+    }
+}
+
+#[test]
 fn link_codec_pins_set_pool_bytes_when_host_sets_a_pool() {
     // Postcard's variant index, then the pool's.
     let mut out = [0u8; MAX_HOST_FRAME];
@@ -1105,7 +1197,7 @@ fn link_codec_pins_scan_bytes_when_host_starts_or_stops() {
 
 #[test]
 fn link_round_trips_set_wardrive_esp_when_encoded() {
-    // Postcard's variant index, last of the commands, then `on`'s byte.
+    // Postcard's variant index, then `on`'s byte.
     let mut out = [0u8; MAX_HOST_FRAME];
     for (on, byte) in [(false, 0), (true, 1)] {
         let cmd = HostToBridge::SetWardriveEsp { on };

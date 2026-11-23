@@ -616,6 +616,7 @@ mod tests {
             ble,
             present: 0,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         }))
     }

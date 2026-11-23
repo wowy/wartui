@@ -123,6 +123,7 @@ fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
         ble: BRIDGE_BLE.get(),
         present,
         members: members.iter().copied().collect(),
+        sd: None,
         bluetooth: Default::default(),
     }))
 }
@@ -2198,6 +2199,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         }))
     };
@@ -2256,6 +2258,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         }))
     };
@@ -2354,6 +2357,7 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            sd: None,
             bluetooth,
         })),
         clock.at(2),
@@ -2445,6 +2449,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             ble: None,
             present: ALL_PRESENT,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         })),
         clock.at(4),

@@ -66,8 +66,8 @@ use wartui_firmware::reboot;
 use wartui_proto::host_owner::{Effect, Input};
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    FrameAccumulator, HOST_BAUD, HOST_SILENCE_SECS, HostOwner, HostToBridge, LoopPhase,
-    MAX_HOST_FRAME, decode_frame, encode_frame,
+    BridgeToHost, FrameAccumulator, HOST_BAUD, HOST_SILENCE_SECS, HostOwner, HostToBridge,
+    LoopPhase, MAX_HOST_FRAME, SdFormatOutcome, decode_frame, encode_frame,
 };
 use wartui_proto::radio_link::Down;
 
@@ -223,6 +223,10 @@ pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
         HostToBridge::OpenPairing => crate::bonds::open_window(shared),
         HostToBridge::ClearBonds => crate::bonds::clear(shared),
         HostToBridge::SetWardriveEsp { on } => crate::settings::set_wardrive_esp(shared, *on),
+        // The bridge drives no card yet.
+        HostToBridge::FormatSd => {
+            shared.push_host(&BridgeToHost::SdFormatted { outcome: SdFormatOutcome::NoCard });
+        }
     }
 }
 

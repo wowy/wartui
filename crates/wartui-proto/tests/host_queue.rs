@@ -207,6 +207,21 @@ fn host_queue_classifies_message_when_deciding_priority() {
 }
 
 #[test]
+fn host_queue_classifies_sd_formatted_as_priority_when_bridge_answers() {
+    use wartui_proto::link::SdFormatOutcome;
+    use wartui_proto::{BridgeToHost, host_queue::is_priority};
+    // The answer to a command the operator is waiting on, as `PowerCycled` is.
+    for outcome in [
+        SdFormatOutcome::Done,
+        SdFormatOutcome::NoCard,
+        SdFormatOutcome::Busy,
+        SdFormatOutcome::Failed,
+    ] {
+        assert!(is_priority(&BridgeToHost::SdFormatted { outcome }), "{outcome:?}");
+    }
+}
+
+#[test]
 fn host_queue_reports_bulk_capacity_when_bulk_is_set() {
     let mut queue = HostQueueIn::<16, &'static mut [u8]>::with_bulk(&mut [][..]);
     assert_eq!(queue.bulk_capacity(), 0);

@@ -554,6 +554,8 @@ impl Shared {
             ble: fleet.bluetooth(),
             present: self.nodes.present(),
             members: fleet.members(),
+            // The bridge drives no card yet.
+            sd: None,
             bluetooth: self.bluetooth(now),
         };
         drop(fleet);

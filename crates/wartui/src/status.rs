@@ -118,6 +118,8 @@ pub async fn run(args: Args) -> Result<()> {
         present,
         // The plan below names each share's slot; the members' MACs are the engine's.
         members: _,
+        // Not printed: no command reads the card yet.
+        sd: _,
         bluetooth,
     } = status
     else {
@@ -846,6 +848,7 @@ mod tests {
             ble: None,
             present: 0,
             members: Default::default(),
+            sd: None,
             bluetooth: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());

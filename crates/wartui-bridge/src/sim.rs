@@ -576,6 +576,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     ble: core.bluetooth(),
                     present: present.load(Ordering::Relaxed),
                     members: core.members(),
+                    // No card slot.
+                    sd: None,
                     // A host on USB, and no Bluetooth link to report.
                     bluetooth: BluetoothStatus {
                         owner: HostOwner::Usb,
@@ -603,6 +605,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 | HostToBridge::SetPool { .. } => None,
                 // It has no Bluetooth link to pair or bonds to clear.
                 HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
+                // It has no microSD card to format.
+                HostToBridge::FormatSd => None,
                 HostToBridge::Reset => Some(BridgeToHost::Log {
                     message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
                 }),
