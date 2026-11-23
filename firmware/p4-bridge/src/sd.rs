@@ -23,13 +23,17 @@
 //!
 //! **No card-detect line exists, so "no card" is an identification that failed.** [`run`]
 //! identifies the card every [`EVERY`] until one answers, reads what it holds, then reads block 0
-//! every [`EVERY`] to see that it is still there. A read that fails sends it back to identifying,
-//! which also finds a swapped card.
+//! every [`EVERY`] to see that it is still there. Block 0 failing to read is the one sign of a
+//! card gone, and sends it back to identifying, which also finds a swapped card. A `Failed` card
+//! whose block 0 reads is read again in full; a read past block 0 that fails leaves it `Failed`.
 //!
 //! **A format writes `Layout::ops` in order**, each a transfer tried up to [`TRIES`] times, since
 //! the bus clock was measured, not proven, to be clean (`src/config.rs`, `SD_HZ`). Then the card
 //! is read again, and the answer is `Done` only when it reads back as FAT32. [`request_format`]
-//! answers `NoCard` and `Busy` at once, so the request signal never holds a second format.
+//! marks the card `Formatting` as it passes a request on, so a `Status` sent before [`run`] wakes
+//! already shows it, and answers `NoCard` and `Busy` at once, so the request signal never holds a
+//! second format. Before the first identification ends, the state says nothing yet, so a request
+//! is passed on unanswered: identification answers it `NoCard`, or the card found is formatted.
 
 use core::cell::Cell;
 use core::fmt::{self, Write};
@@ -89,6 +93,8 @@ pub struct Pins {
 pub struct Sd {
     /// What `Status` reports.
     status: Cell<SdStatus>,
+    /// Whether the first identification has ended and `status` holds what it found.
+    identified: Cell<bool>,
     /// Raised by a format request that [`request_format`] passed on.
     format: Signal<NoopRawMutex, ()>,
 }
@@ -96,7 +102,7 @@ pub struct Sd {
 impl Sd {
     pub const fn new() -> Self {
         let none = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
-        Self { status: Cell::new(none), format: Signal::new() }
+        Self { status: Cell::new(none), identified: Cell::new(false), format: Signal::new() }
     }
 }
 
@@ -105,15 +111,21 @@ pub fn status(shared: &Shared) -> Option<SdStatus> {
     Some(shared.sd.status.get())
 }
 
-/// Take the host's request to format the card: pass it to [`run`], or answer at once with no
-/// card, or with a format already running or asked for.
+/// Take the host's request to format the card: mark it `Formatting` and pass it to [`run`], or
+/// answer at once with no card, or with a format already running or asked for. Before the first
+/// identification ends, pass it on as it is.
 pub fn request_format(shared: &Shared) {
     let sd = &shared.sd;
-    match sd.status.get().state {
+    let status = sd.status.get();
+    match status.state {
+        _ if sd.format.signaled() => answer(shared, SdFormatOutcome::Busy),
+        _ if !sd.identified.get() => sd.format.signal(()),
         SdState::NoCard => answer(shared, SdFormatOutcome::NoCard),
         SdState::Formatting => answer(shared, SdFormatOutcome::Busy),
-        _ if sd.format.signaled() => answer(shared, SdFormatOutcome::Busy),
-        _ => sd.format.signal(()),
+        _ => {
+            set(shared, SdStatus { state: SdState::Formatting, free_mb: None, ..status });
+            sd.format.signal(());
+        }
     }
 }
 
@@ -129,8 +141,18 @@ fn log(shared: &Shared, args: fmt::Arguments<'_>) {
     shared.push_log(&line);
 }
 
+/// Report `status`. Each one is a finding, so the first ends the first identification.
 fn set(shared: &Shared, status: SdStatus) {
     shared.sd.status.set(status);
+    shared.sd.identified.set(true);
+}
+
+/// Report no card, and answer a format asked for meanwhile.
+fn no_card(shared: &Shared) {
+    set(shared, SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
+    if shared.sd.format.try_take().is_some() {
+        answer(shared, SdFormatOutcome::NoCard);
+    }
 }
 
 /// Power the card, then identify it, report what it holds, check it is still there and format
@@ -144,6 +166,7 @@ pub async fn run(pins: Pins, shared: &Shared) -> ! {
         Ok(slot) => slot,
         Err(e) => {
             log(shared, format_args!("sd: the SDMMC controller refused its configuration: {e:?}"));
+            no_card(shared);
             pending().await
         }
     };
@@ -164,7 +187,7 @@ pub async fn run(pins: Pins, shared: &Shared) -> ! {
                 log(shared, format_args!("sd: the {card_mb} MiB card failed a read: {e:?}"));
             }
         }
-        let gone = serve(&mut card, buf, shared, blocks).await;
+        let gone = serve(&mut card, buf, shared, blocks, khz).await;
         log(shared, format_args!("sd: the card stopped answering: {gone:?}"));
     }
 }
@@ -192,21 +215,18 @@ fn slot(
 }
 
 /// Identify the card, every [`EVERY`] until one answers, and return its size in blocks. The
-/// state is `NoCard` meanwhile, and the first failure is logged. A format asked for before the
-/// card went is answered `NoCard`.
+/// state is `NoCard` meanwhile, and the first failure is logged. A format asked for before a
+/// failure is answered `NoCard`.
 async fn identify(card: &mut Card, shared: &Shared) -> u64 {
     let mut said = false;
     loop {
         match card.reacquire(SD_HZ).await {
             Ok(()) => return card.card().csd.block_count(),
             Err(e) => {
-                set(shared, SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
+                no_card(shared);
                 if !said {
                     log(shared, format_args!("sd: no card answered: {e:?}"));
                     said = true;
-                }
-                if shared.sd.format.try_take().is_some() {
-                    answer(shared, SdFormatOutcome::NoCard);
                 }
             }
         }
@@ -236,7 +256,8 @@ fn say_found(shared: &Shared, khz: u32, status: SdStatus) {
 }
 
 /// What the card of `card_blocks` holds: its block 0, then the volume's boot sector and FSInfo
-/// sector. A table or a boot sector that points past the card's end is no FAT32 volume.
+/// sector. A table that points past the card's end, or a volume that runs past it, is no FAT32
+/// volume.
 async fn inspect_card(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
@@ -250,34 +271,46 @@ async fn inspect_card(
         return Ok(none);
     };
     read(card, start, &mut buf[..1]).await?;
-    let Some(volume) = inspect::volume(&buf[0], start).filter(|v| on_card(v.fsinfo_lba)) else {
+    let Some(volume) = inspect::volume(&buf[0], start).filter(|v| v.fits(card_blocks)) else {
         return Ok(none);
     };
     read(card, volume.fsinfo_lba, &mut buf[..1]).await?;
     Ok(SdStatus { state: SdState::Ready, card_mb, free_mb: volume.free_mb(&buf[0]) })
 }
 
-/// Format the card on request, and check every [`EVERY`] that it still answers. Returns the
-/// error of the check that found it gone.
+/// Format the card on request, and check every [`EVERY`] that it still answers, reading a
+/// `Failed` card again in full. Returns the error of the check that found it gone. `khz` is the
+/// card's clock, for the log.
 async fn serve(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
     shared: &Shared,
     card_blocks: u64,
+    khz: u32,
 ) -> MmcError {
     loop {
         match select(shared.sd.format.wait(), Timer::after(EVERY)).await {
             Either::First(()) => format(card, buf, shared, card_blocks).await,
             Either::Second(()) => {
+                // Only block 0 failing means the card is gone; any other read that fails leaves
+                // it `Failed`, so a card with one bad block is not identified every 5 s.
                 if let Err(e) = read(card, 0, &mut buf[..1]).await {
                     return e;
+                }
+                if shared.sd.status.get().state != SdState::Failed {
+                    continue;
+                }
+                if let Ok(status) = inspect_card(card, buf, card_blocks).await {
+                    set(shared, status);
+                    say_found(shared, khz, status);
                 }
             }
         }
     }
 }
 
-/// Format the card of `card_blocks` FAT32, read it back, and answer the host.
+/// Format the card of `card_blocks` FAT32, read it back, and answer the host. The state may be
+/// `Formatting` already, from [`request_format`].
 async fn format(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],

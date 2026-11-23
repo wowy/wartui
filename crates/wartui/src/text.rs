@@ -73,12 +73,12 @@ pub(crate) enum SdForm {
     Row,
 }
 
-/// `mib` in GB, MiB / 1024 with one decimal: `61.8`.
+/// `mib` in GB, MiB / 1024 with one decimal: `58.9`.
 pub(crate) fn gb(mib: u32) -> String {
     format!("{:.1}", f64::from(mib) / 1024.0)
 }
 
-/// The bridge's microSD card, as `form` shows it: `58.9 of 61.8 GB free`, or `no slot` for a
+/// The bridge's microSD card, as `form` shows it: `53.7 of 58.9 GB free`, or `no slot` for a
 /// bridge with none.
 pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
     let Some(SdStatus { state, card_mb, free_mb }) = sd else { return "no slot".to_owned() };
@@ -142,9 +142,9 @@ mod tests {
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 
-    /// A "64 GB" card: 63,284 MiB, 61.8 GB.
+    /// A "64 GB" card: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
-        Some(SdStatus { state, card_mb: 63_284, free_mb })
+        Some(SdStatus { state, card_mb: 60_350, free_mb })
     }
 
     #[test]
@@ -153,11 +153,11 @@ mod tests {
         let no_card = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
         assert_eq!(line(None), "no slot");
         assert_eq!(line(Some(no_card)), "no card");
-        assert_eq!(line(card(SdState::NoFat32, None)), "61.8 GB, not FAT32");
-        assert_eq!(line(card(SdState::Ready, Some(60_314))), "58.9 of 61.8 GB free");
-        assert_eq!(line(card(SdState::Ready, None)), "61.8 GB, FAT32");
+        assert_eq!(line(card(SdState::NoFat32, None)), "58.9 GB, not FAT32");
+        assert_eq!(line(card(SdState::Ready, Some(55_000))), "53.7 of 58.9 GB free");
+        assert_eq!(line(card(SdState::Ready, None)), "58.9 GB, FAT32");
         assert_eq!(line(card(SdState::Formatting, None)), "formatting");
-        assert_eq!(line(card(SdState::Failed, None)), "card error (61.8 GB)");
+        assert_eq!(line(card(SdState::Failed, None)), "card error (58.9 GB)");
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(row(card(SdState::Formatting, None)), "formatting…");
         assert_eq!(row(card(SdState::Failed, None)), "card error");
         // The rest read as the line does.
-        assert_eq!(row(card(SdState::Ready, Some(60_314))), "58.9 of 61.8 GB free");
+        assert_eq!(row(card(SdState::Ready, Some(55_000))), "53.7 of 58.9 GB free");
         assert_eq!(row(None), "no slot");
     }
 

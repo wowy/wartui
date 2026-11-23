@@ -374,6 +374,24 @@ fn sd_inspect_reads_layout_when_card_is_formatted() {
 }
 
 #[test]
+fn sd_inspect_fits_volume_when_card_is_the_one_it_was_planned_for() {
+    for row in &GEOMETRY {
+        let card = Card::formatted(&layout(row.card_blocks));
+        let found = volume(&card.block(8192), 8192).expect("a FAT32 volume");
+        assert!(found.fits(row.card_blocks), "{}", row.name);
+    }
+}
+
+#[test]
+fn sd_inspect_refuses_fit_when_card_is_a_block_short_or_half_the_size() {
+    let card_blocks = 123_596_800;
+    let card = Card::formatted(&layout(card_blocks));
+    let found = volume(&card.block(8192), 8192).expect("a FAT32 volume");
+    assert!(!found.fits(card_blocks - 1), "a block short");
+    assert!(!found.fits(card_blocks / 2), "half the size");
+}
+
+#[test]
 fn sd_inspect_reads_volume_at_block_0_when_card_has_no_partition_table() {
     let layout = layout(31_250_000);
     let card = Card::formatted(&layout);

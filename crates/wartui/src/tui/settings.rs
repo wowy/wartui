@@ -2749,9 +2749,9 @@ mod tests {
         snapshot
     }
 
-    /// A "64 GB" card in `state`: 63,284 MiB, 61.8 GB.
+    /// A "64 GB" card in `state`: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
-        Some(SdStatus { state, card_mb: 63_284, free_mb })
+        Some(SdStatus { state, card_mb: 60_350, free_mb })
     }
 
     /// The first line of `screen` holding `text`.
@@ -2769,10 +2769,10 @@ mod tests {
             (sd_snapshot(None), "no slot", "this bridge has no card slot · esc cancel", false),
             (unreported, "no slot", "this bridge has no card slot · esc cancel", false),
             (sd_snapshot(no_card), "no card", "no card in the slot · esc cancel", false),
-            (sd_snapshot(card(SdState::NoFat32, None)), "61.8 GB, not FAT32", FORMAT_TIP, true),
+            (sd_snapshot(card(SdState::NoFat32, None)), "58.9 GB, not FAT32", FORMAT_TIP, true),
             (
-                sd_snapshot(card(SdState::Ready, Some(60_314))),
-                "58.9 of 61.8 GB free",
+                sd_snapshot(card(SdState::Ready, Some(55_000))),
+                "53.7 of 58.9 GB free",
                 FORMAT_TIP,
                 true,
             ),
@@ -2841,7 +2841,7 @@ mod tests {
             lines,
             [
                 "format the SD card as FAT32?",
-                "everything on the 61.8 GB card is erased.",
+                "everything on the 58.9 GB card is erased.",
                 "",
                 "y format · any other key cancels",
             ]
@@ -2910,16 +2910,16 @@ mod tests {
         let mut ui = Ui::default();
         select(Field::SdCard, &mut ui, &blank, &tx);
         let screen = modal_screen(&blank, &mut ui);
-        assert!(screen.contains("61.8 GB, not FAT32"), "{screen}");
+        assert!(screen.contains("58.9 GB, not FAT32"), "{screen}");
 
         let formatting = sd_snapshot(card(SdState::Formatting, None));
         let screen = modal_screen(&formatting, &mut ui);
         assert!(screen.contains("format              formatting…"), "{screen}");
         assert!(screen.contains("a format is running · esc cancel"), "{screen}");
 
-        let ready = sd_snapshot(card(SdState::Ready, Some(60_314)));
+        let ready = sd_snapshot(card(SdState::Ready, Some(55_000)));
         let screen = modal_screen(&ready, &mut ui);
-        assert!(screen.contains("format              58.9 of 61.8 GB free"), "{screen}");
+        assert!(screen.contains("format              53.7 of 58.9 GB free"), "{screen}");
         assert!(screen.contains(FORMAT_TIP), "{screen}");
     }
 
@@ -2945,7 +2945,7 @@ mod tests {
         assert!(row(3).starts_with("┌ settings "), "{rendered}");
         assert_eq!(row(21), format!("└{}┘", "─".repeat(46)), "{rendered}");
         assert_eq!(row(20), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
-        assert!(row(18).starts_with("│format              58.9 of 61.8 GB free"), "{rendered}");
+        assert!(row(18).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
         assert!(row(17).starts_with("│sd card "), "{rendered}");
     }
 
@@ -2957,7 +2957,7 @@ mod tests {
         let rendered = handheld(&snapshot, &mut ui).backend().to_string();
 
         assert!(rendered.contains(" format sd card "), "{rendered}");
-        assert!(rendered.contains("everything on the 61.8 GB card is erased."), "{rendered}");
+        assert!(rendered.contains("everything on the 58.9 GB card is erased."), "{rendered}");
         assert!(rendered.contains("y format · any other key cancels"), "{rendered}");
         assert!(rendered.contains(" settings "), "the modal behind it: {rendered}");
     }

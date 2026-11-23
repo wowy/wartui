@@ -100,4 +100,12 @@ impl Volume {
     pub fn size_mb(&self) -> u32 {
         mib(u64::from(self.total_blocks))
     }
+
+    /// Whether it lies on a card of `card_blocks`, its FSInfo sector and last block included. A
+    /// volume that runs past the card's end is no FAT32 volume.
+    #[must_use]
+    pub fn fits(&self, card_blocks: u64) -> bool {
+        u64::from(self.start) + u64::from(self.total_blocks) <= card_blocks
+            && u64::from(self.fsinfo_lba) < card_blocks
+    }
 }

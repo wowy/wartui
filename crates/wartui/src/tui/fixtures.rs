@@ -199,7 +199,7 @@ pub(super) fn busy() -> Snapshot {
             uptime_ms: 60_000,
             fan: None,
             // A "64 GB" card, formatted.
-            sd: Some(SdStatus { state: SdState::Ready, card_mb: 63_284, free_mb: Some(60_314) }),
+            sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(55_000) }),
             // What a bridge on USB with no Bluetooth host reports.
             bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
         }),

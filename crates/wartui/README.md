@@ -853,18 +853,18 @@ wartui sd format --bridge 44:C0
 $ wartui sd format
 formatting the SD card on bridge 02:00:5E:10:9D:24
 SD card formatted
-sd card    58.9 of 61.8 GB free
+sd card    58.9 of 58.9 GB free
 ```
 
 The card line reads:
 
 | Line                                 | What it means                                          |
 |--------------------------------------|--------------------------------------------------------|
-| `58.9 of 61.8 GB free`               | A FAT32 volume, and its free space                     |
-| `61.8 GB, FAT32`                     | A FAT32 volume whose free space the bridge cannot read |
-| `61.8 GB, not FAT32`                 | A card to format before the bridge can use it          |
+| `53.7 of 58.9 GB free`               | A FAT32 volume, and its free space                     |
+| `58.9 GB, FAT32`                     | A FAT32 volume whose free space the bridge cannot read |
+| `58.9 GB, not FAT32`                 | A card to format before the bridge can use it          |
 | `formatting`                         | A format is running                                    |
-| `card error (61.8 GB)`               | The card failed a read or the last format              |
+| `card error (58.9 GB)`               | The card failed a read or the last format              |
 | `no card`                            | The slot is empty                                      |
 | `no slot`                            | The bridge drives no card slot                         |
 
@@ -881,8 +881,8 @@ footer says `formatting the SD card…`, then the bridge's answer when it comes.
 
 | Row                    | `Enter`                                     |
 |------------------------|---------------------------------------------|
-| `58.9 of 61.8 GB free` | Asks to format                              |
-| `61.8 GB, not FAT32`   | Asks to format                              |
+| `53.7 of 58.9 GB free` | Asks to format                              |
+| `58.9 GB, not FAT32`   | Asks to format                              |
 | `card error`           | Asks to format                              |
 | `formatting…`          | Nothing: a format is running                |
 | `no card`              | Nothing: the slot is empty                  |

@@ -3960,7 +3960,7 @@ fn engine_reports_sd_card_when_status_arrives() {
     };
     assert_eq!(shown(&engine), None, "no `Status` yet");
 
-    let card = SdStatus { state: SdState::Ready, card_mb: 63_284, free_mb: Some(60_300) };
+    let card = SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(55_000) };
     engine.handle(sd_status(Some(card)), clock.at(1));
     assert_eq!(shown(&engine), Some(Some(card)));
 
