@@ -885,20 +885,20 @@ prints the line and changes nothing:
 
 ```
 $ wartui sd log
-sd log     on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 0 errors
+sd log     on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 0 errors · longest step 90 µs
 ```
 
 The log line reads:
 
-| Line                                | What it means                                                                          |
-|-------------------------------------|----------------------------------------------------------------------------------------|
-| `on · writing LOG/00000007.BIN · …` | Logging to that file; bytes written, records dropped, card errors                      |
-| `on · waiting for a card`           | On, with no card the bridge can write to yet                                           |
-| `on · card full`                    | No room, even after deleting the oldest logs                                           |
-| `on · volume refused`               | The card's volume is one the bridge will not write to; format it                       |
-| `on · stopped after a card error`   | Stopped until the card is reinserted or formatted, or the setting is turned off and on |
-| `off`                               | The setting is off                                                                     |
-| `no slot`                           | The bridge drives no card slot                                                         |
+| Line                                | What it means                                                                                                        |
+|-------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `on · writing LOG/00000007.BIN · …` | Logging to that file; bytes written, records dropped, card errors, and the writer's longest stretch without yielding |
+| `on · waiting for a card`           | On, with no card the bridge can write to yet                                                                         |
+| `on · card full`                    | No room, even after deleting the oldest logs                                                                         |
+| `on · volume refused`               | The card's volume is one the bridge will not write to; format it                                                     |
+| `on · stopped after a card error`   | Stopped until the card is reinserted or formatted, or the setting is turned off and on                               |
+| `off`                               | The setting is off                                                                                                   |
+| `no slot`                           | The bridge drives no card slot                                                                                       |
 
 `wartui status` prints an `sd log` line after `sd card`.
 

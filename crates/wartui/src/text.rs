@@ -104,12 +104,20 @@ pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
 
 /// `bytes` in MB or GB, MiB and GiB with one decimal as [`gb`] gives them: `1.2 MB`.
 pub(crate) fn bytes_text(bytes: u64) -> String {
-    let mib = bytes as f64 / (1024.0 * 1024.0);
-    if mib < 1024.0 { format!("{mib:.1} MB") } else { format!("{:.1} GB", mib / 1024.0) }
+    let kib = bytes as f64 / 1024.0;
+    let mib = kib / 1024.0;
+    if mib < 1.0 {
+        format!("{kib:.0} KB")
+    } else if mib < 1024.0 {
+        format!("{mib:.1} MB")
+    } else {
+        format!("{:.1} GB", mib / 1024.0)
+    }
 }
 
 /// The bridge's SD log: `off`, `on · waiting for a card`, `on · writing LOG/00000007.BIN · 1.2 MB
-/// written · 0 dropped · 0 errors`, or `no slot` for a bridge with no card slot.
+/// written · 0 dropped · 0 errors · longest step 90 µs`, or `no slot` for a bridge with no card
+/// slot. The longest step is the writer's longest stretch without yielding.
 pub(crate) fn sd_log_text(sd: Option<SdStatus>) -> String {
     let Some(SdStatus { log, .. }) = sd else { return "no slot".to_owned() };
     if !log.on {
@@ -122,10 +130,11 @@ pub(crate) fn sd_log_text(sd: Option<SdStatus>) -> String {
         SdLogState::Writing => {
             let file = log.file.map_or_else(String::new, |n| format!(" LOG/{n:08}.BIN"));
             format!(
-                "writing{file} · {} written · {} dropped · {} errors",
+                "writing{file} · {} written · {} dropped · {} errors · longest step {} µs",
                 bytes_text(log.written),
                 thousands(u64::from(log.dropped)),
                 thousands(u64::from(log.errors)),
+                thousands(u64::from(log.busy_max_us)),
             )
         }
         SdLogState::Full => "card full".to_owned(),
@@ -268,7 +277,8 @@ mod tests {
         };
         assert_eq!(
             sd_log_text(logging(log)),
-            "on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 1,200 errors"
+            "on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 1,200 errors · longest step \
+             90 µs"
         );
     }
 
@@ -282,8 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn bytes_text_switches_to_gb_when_past_1024_mb() {
-        assert_eq!(bytes_text(0), "0.0 MB");
+    fn bytes_text_switches_unit_when_past_1_mb_and_1024_mb() {
+        assert_eq!(bytes_text(0), "0 KB");
+        assert_eq!(bytes_text(12_800), "12 KB");
         assert_eq!(bytes_text(1_258_291), "1.2 MB");
         assert_eq!(bytes_text(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
     }
