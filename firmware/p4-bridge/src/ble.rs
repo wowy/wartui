@@ -155,11 +155,19 @@ const fn reader(state: BleState, phones: bool) -> Reader {
 
 /// Feed `input` to the owner, and carry out what it returns, in order. Returns the effects, so a
 /// UART0 frame's caller knows whether it opened the gate or was answered already.
+///
+/// A change of holder goes in the SD log ahead of what the effects queue, and a snapshot follows
+/// them (`src/sd_log.rs`); neither is built here.
 pub fn own(shared: &Shared, input: Input) -> Effects {
     let mut owner = shared.owner.get();
+    let before = owner.holder();
     let effects = owner.on(input);
     // Set first, so what the effects queue goes to the new owner.
     shared.owner.set(owner);
+    let moved = owner.holder() != before;
+    if moved {
+        crate::sd_log::owner(shared, input, before, owner.holder());
+    }
     for effect in &effects {
         match effect {
             Effect::AttachBluetooth => take(shared),
@@ -173,6 +181,9 @@ pub fn own(shared: &Shared, input: Input) -> Effects {
         }
     }
     crate::bonds::follow_admission(shared);
+    if moved {
+        crate::sd_log::ask_snapshot(shared);
+    }
     effects
 }
 

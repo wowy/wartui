@@ -73,7 +73,7 @@ pub fn set_wardrive_esp(shared: &Shared, on: bool) {
 /// so a repeat retries a save that failed.
 #[inline(never)]
 pub fn set_sd_log(shared: &Shared, on: bool) {
-    crate::sd::set_log(shared, on);
+    crate::sd_log::set(shared, on);
     if let Err(why) = save(shared, Setting::SdLog(on)) {
         let state = if on { "on" } else { "off" };
         let mut message = LogStr::new();

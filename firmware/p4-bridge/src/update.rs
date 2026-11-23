@@ -280,6 +280,11 @@ pub fn take_lines(shared: &Shared) -> Lines {
     core::mem::take(&mut shared.updates.borrow_mut().lines)
 }
 
+/// Whether an image is part-way in, which the SD log's writer gives way to (`src/sd.rs`).
+pub fn receiving(shared: &Shared) -> bool {
+    shared.updates.borrow().receiver.status().state == UpdateState::Receiving
+}
+
 /// Whether the booted image is on trial.
 pub fn on_trial(shared: &Shared) -> bool {
     shared.updates.borrow().trial

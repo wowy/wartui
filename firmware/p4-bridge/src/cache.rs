@@ -160,6 +160,12 @@ pub fn say(shared: &Shared) {
     shared.push_error(line);
 }
 
+/// Whether a node image upload is part-way in, which the SD log's writer gives way to
+/// (`src/sd.rs`).
+pub fn receiving(shared: &Shared) -> bool {
+    shared.cache.borrow().inner.is_receiving()
+}
+
 /// A host let go of the queue: drop the session and the image it filled.
 pub fn host_gone(shared: &Shared) {
     shared.cache.borrow_mut().inner.reset();

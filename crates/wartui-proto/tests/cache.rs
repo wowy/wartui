@@ -119,3 +119,14 @@ fn node_image_cache_serves_nothing_when_reset() {
     cache.reset();
     assert_eq!(cache.image(image_tag(&sha256)), None);
 }
+
+#[test]
+fn node_image_cache_reports_receiving_only_when_upload_is_part_way() {
+    let mut cache = cache(2 * 1024 * 1024);
+    let (bytes, sha256) = image(0);
+    assert!(!cache.is_receiving());
+    begin(&mut cache, 1, bytes.len(), sha256);
+    assert!(cache.is_receiving());
+    upload(&mut cache, 2, &bytes, sha256);
+    assert!(!cache.is_receiving());
+}

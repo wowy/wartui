@@ -1,4 +1,4 @@
-//! The P4 bridge's queue sizes and the microSD card's clock, in one place.
+//! The P4 bridge's queue sizes, the microSD card's clock and the SD log's sizes, in one place.
 //!
 //! Each is read from a `WARTUI_P4_*` environment variable at build time, with the default
 //! here, so a bench run changes one with a rebuild rather than an edit.
@@ -43,3 +43,17 @@ pub const NODE_DOWN_BYTES: usize = env_usize(option_env!("WARTUI_P4_NODE_DOWN_BY
 /// `sdio` switches the card to high speed above 25 MHz. At 40 MHz the bench card failed about one
 /// write in 6,100 with a CRC error, and at 20 MHz none in 24,000 (`docs/p4-sd-findings.md`).
 pub const SD_HZ: u32 = env_usize(option_env!("WARTUI_P4_SD_HZ"), 20_000_000) as u32;
+
+/// Bytes of encoded records the SD log holds in PSRAM until the card takes them, the newest kept
+/// while no card does (`src/sd_log.rs`). Split off the PSRAM after the host bulk ring, and fewer
+/// when less is left.
+pub const SD_LOG_BYTES: usize = env_usize(option_env!("WARTUI_P4_SD_LOG_BYTES"), 256 * 1024);
+
+/// The size at which the SD log closes its file and opens the next, in bytes.
+pub const SD_LOG_FILE_MAX: u32 =
+    env_usize(option_env!("WARTUI_P4_SD_LOG_FILE_MAX"), 64 * 1024 * 1024) as u32;
+
+/// The free space the SD log leaves on the card, in MiB, deleting its oldest files to keep it.
+/// Capped at an eighth of the volume (`wartui_proto::sd::append::Policy`).
+pub const SD_LOG_KEEP_FREE_MB: u32 =
+    env_usize(option_env!("WARTUI_P4_SD_LOG_KEEP_FREE_MB"), 256) as u32;
