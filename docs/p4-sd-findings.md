@@ -104,7 +104,62 @@ Each attempt dumped the SDMMC registers. Two faults in `sdio` 0.5.2 caused it, a
 **Decided: the P4 bridge builds against a fork of `sdio`**, the published 0.5.2 plus those two
 changes, pinned by commit in `firmware/p4-bridge/Cargo.toml`. esp-hal builds against the same copy.
 
+## The log writer on the bench
+
+Measured on 2026-11-23 on the same board, `96:C4`, with no carrier and a 32 GB card formatted by
+the bridge: 30,436 MiB, 32 KiB clusters. The bridge ran its own firmware with the SD log on. The
+card was read on a Mac with `fsck_msdos -n`, through `diskutil verifyVolume`, and with
+`wartui sd-log`.
+
+### How long the writer holds the executor
+
+The writer yields after every card step, and times the work between two yields. Each kind of step
+keeps its own longest, in µs:
+
+| Build | next | fed | head | opened | copy | plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| A flush staged in one stretch | | | | | | 695, all of a flush |
+| Staging yields after its head and each block | 89–107 | 57 | 21–35 | 320–447 | 47–72 | 59–79 |
+| The same, `Opened` encoded again at once | | | 7 | 24 | | |
+
+`opened` is the head of a flush that starts a file, with its `Opened` record. It runs once per
+file. Encoding the same record a second time right after took 24 µs, and the head without it
+dropped from 35 to 7, so the rest is that code and the CRC table coming in from flash, cold. It
+costs 0.3–0.45 ms, varying with the build, once per boot and once per rotation, as any code
+run that seldom does.
+
+**Decided: every step but a file's first stays under 200 µs, and the first is left as it is.**
+The P4 masks no interrupt in any of it, so a UART's FIFO is still served.
+
+### What the bench did to it
+
+| Test | Result |
+| --- | --- |
+| The card pulled while the bridge wrote, twice | `fsck` clean both times. Every file decoded, 0 unreadable, 0 dropped. Put back, the next file opened |
+| `sd log off`, then `on` | The file ended with `Closed`, logging turned off, and stopped growing; `on` opened the next |
+| `sd log off`, then a restart | Still off after the restart; `on` opened the next file |
+| A format while writing | Answered in 2.7 s, connecting included. The fresh card started again at file 1 |
+| A file limit of 8 KiB | Files closed at 13–15 KB with `Closed`, the next file taking over, nothing lost. The size is checked before each flush, so a file runs up to one flush over |
+| The card filled from the Mac to 7 clusters above the 256 MiB reserve, then 12 rotations | The oldest files went first, one per new cluster: files 1–11 deleted, 12–23 kept. `fsck` clean |
+| About ten cuts of the board's power, at random moments, on that full card | `fsck` clean, with no lost clusters and the two FATs equal. Four boots got as far as opening a file; each decoded whole up to its last flush |
+| Five `flash-bridge` updates with the log writing | All installed and confirmed |
+| A card formatted FAT32 by macOS's `diskutil`, 16 KiB clusters | Mounted and logged: one file of 21 KB over two clusters, 332 records, 0 unreadable. `fsck` clean |
+
+### Deleting the history for nothing
+
+After the power cuts, the Mac's own Spotlight and fsevents files took about 22 clusters while the
+card was mounted, and left it below the reserve. The writer deleted every old file, about 12
+clusters, could not get back over the reserve, and stopped with `card full` and nothing kept.
+
+**Decided: the writer deletes the oldest only when deleting its own files can restore the
+reserve.** Otherwise it keeps every file and stops with `card full`. With that build, the next
+boot on the same card stopped with `Full` at its first flush and deleted nothing. The 40 records
+that flush had staged, the boot's first, were counted dropped, as any failed flush counts what it
+staged.
+
 ## Not answered here
 
 The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
-the bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested.
+the bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested, with
+the log or without it. Nor was a WardriveESP phone session, the case the log is for, or the same
+load run with the log on and then off to compare the host link's counters.

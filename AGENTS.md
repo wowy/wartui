@@ -105,18 +105,22 @@ own.
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
-  `settings` (the records the P4 keeps its fan duty and channel pool in), `bonds` (the Bluetooth
-  bonds the P4 keeps for its C6, and their records), `host_owner` (who holds the P4's host queue:
-  USB, a Bluetooth central, a phone or no one), `crc`, `beacon`, `hci`, `dedup`, `link`,
-  `radio_link` (the UART packets between the P4 and its C6, and their frozen core), `ble` (the
-  GATT identity of the C6's Bluetooth host link, the id a host finds a bridge by, the address its
-  set advertises from, and the rest of the phones' set after a silent central),
+  `settings` (the records the P4 keeps its fan duty, channel pool, `wardrive esp` setting and SD
+  log setting in), `bonds` (the Bluetooth bonds the P4 keeps for its C6, and their records),
+  `host_owner` (who holds the P4's host queue: USB, a Bluetooth central, a phone or no one), `crc`,
+  `beacon`, `hci`, `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and
+  their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
+  finds a bridge by, the address its set advertises from, and the rest of the phones' set after a
+  silent central),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
   lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
   round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
   cut, the Bluetooth pick and the records that tell each node), `node` (a node's timings and
   sweep cursor), `pending` (the buffers sightings wait in on a node), `sd` (the FAT32 layout the
-  P4 formats its microSD card with, and the reading of a card it did not format),
+  P4 formats its microSD card with, and the reading of a card it did not format; `sd::log`, the
+  log's records, `COBS(kind | uptime_ms | payload | crc32) 0x00` in eight kinds; and
+  `sd::append`, the sans-IO append-only FAT32 writer, tested against `fatfs` with a power-cut
+  replay),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
@@ -132,8 +136,9 @@ own.
   enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `power-cycle`/`fan`/`pool`/`sd`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/`bluetooth`) and
-  the ratatui view.
+  `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
+  `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and
+  `sd-log <PATH>... [--verbose]` prints its files as text.
 - **`firmware/p4-bridge`** — the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6: COBS framing over
   a DMA UART to the host, through the board's CH343, the node bus's two SPI controllers, and a FIFO
   UART with RTS/CTS to its C6. It plans the fleet, so a board scans with no host attached: it
@@ -144,14 +149,16 @@ own.
   linked, and no other kind. Its image carries the C6's, and
   updates it. It caches a node image in PSRAM for `wartui ota`, and builds `UpdateChunk`s from it,
   a layout in the bus's frozen core (`src/cache.rs`). On a carrier it drives the lid fan
-  (`src/fan.rs`). It keeps the fan's duty, the channel pool and the `wardrive esp` setting in the `nvs`
-  partition, the settings the bridge rather than the host holds (`src/settings.rs`); the scan mode is kept
-  nowhere, so it boots stopped. A bonded central over Bluetooth, through the C6, can be its host
-  instead of USB (`src/ble.rs`): it keeps the C6's bonds in `nvs` too (`src/bonds.rs`), and the host
-  bulk ring in PSRAM, past the node image cache. With `wardrive esp` on, a phone on the C6's
-  WardriveESP service can hold the queue instead: the P4 runs its session, scans for it and
-  sends it text lines (`src/wardrive_esp.rs`). It reports the board's microSD card in `Status` and
-  formats it FAT32 on a host's `FormatSd` (`src/sd.rs`), the layout `wartui_proto::sd`'s.
+  (`src/fan.rs`). It keeps the fan's duty, the channel pool, the `wardrive esp` setting and the SD
+  log setting (`L`) in the `nvs` partition, the settings the bridge rather than the host holds
+  (`src/settings.rs`); the scan mode is kept nowhere, so it boots stopped. A bonded central over
+  Bluetooth, through the C6, can be its host instead of USB (`src/ble.rs`): it keeps the C6's
+  bonds in `nvs` too (`src/bonds.rs`), and the host bulk ring in PSRAM, past the node image cache.
+  With `wardrive esp` on, a phone on the C6's WardriveESP service can hold the queue instead: the
+  P4 runs its session, scans for it and sends it text lines (`src/wardrive_esp.rs`). It reports
+  the board's microSD card in `Status` and formats it FAT32 on a host's `FormatSd` (`src/sd.rs`),
+  the layout `wartui_proto::sd`'s. It logs its diagnostics to the card (`src/sd_log.rs`, and the
+  writer in `src/sd.rs`), from a ring in PSRAM past the host bulk ring.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
@@ -458,6 +465,18 @@ edit stops; follow the pointer before changing the rule.
   wherever it is, so a core 1 frozen holding a lock leaves core 0 spinning on it: on the bench,
   `flash-bridge` updates restarted or hung the P4. → `firmware/p4-bridge/src/sd.rs` `//!`,
   `docs/p4-sd-findings.md`
+- **The SD log is the lowest-priority work on the P4, and never waits on anything or makes anything
+  wait.** Producers copy each record into a ring that evicts its oldest, and a snapshot asks the
+  C6 for nothing. The writer yields after every card step and every block it stages, and gives way
+  to an update of the P4 or a node image upload. A fault in it stops only the writer. Its FAT32
+  rules are load-bearing: one cache per kind, FAT and directory; data before the link that points
+  at it; FAT1, then FAT2; new clusters marked end-of-chain in both FATs before their data; and a
+  delete marks the entry `0xE5` before it frees the chain. In
+  `crates/wartui-proto/tests/sd_append.rs` the flush-step test pins the flush's order, the
+  deleted-entry test the one cache, and the power-cut replay, which cuts after every write, a
+  delete's included, the rest. Changing one needs that replay to pass.
+  → `crates/wartui-proto/src/sd/append.rs` `//!`, `firmware/p4-bridge/src/sd_log.rs` `//!`,
+  `firmware/p4-bridge/src/sd.rs` `//!`
 - **The P4's I2C0 is shared** by the GPS reader and the carrier's I/O expander, behind one mutex.
   Lock it per transaction, never across an await on anything but the bus, or one stalls the
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
