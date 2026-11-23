@@ -36,6 +36,10 @@
 //!   lines;
 //! - **the fan** (`src/fan.rs`), on a carrier only, drives the lid fan's PWM at the duty stored on
 //!   flash, which a host's `SetFan` changes, and reads its tach for `Status`;
+//! - **the microSD card** (`src/sd.rs`) identifies the card every 5 s until one answers, reports
+//!   what it holds in `Status`, checks every 5 s that it still answers, and formats it FAT32 on a
+//!   host's `FormatSd`. It runs here with the rest because core 1 is never started: a flash write
+//!   stalls core 1 wherever it is;
 //! - **the fleet planner** (`src/fleet.rs`) sleeps until its core's next deadline, or until an
 //!   input wakes it, then ticks the core and sends what it owes. It decides what every node
 //!   scans, reading their heartbeats, and authors every `Assign` and `Stop`. It boots stopped, and
@@ -81,13 +85,14 @@ mod gps;
 mod host;
 mod link;
 mod radio;
+mod sd;
 mod settings;
 mod update;
 mod wardrive_esp;
 
 use core::cell::{Cell, RefCell};
 
-use embassy_futures::join::{join, join3, join4};
+use embassy_futures::join::{join, join4};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -281,6 +286,8 @@ pub struct Shared {
     fleet_wake: Signal<NoopRawMutex, ()>,
     /// The core deadline [`fleet::run`] sleeps toward, or `None` while it waits for a wake alone.
     fleet_sleep: Cell<Option<u64>>,
+    /// The microSD card: what it holds, and a format request (`src/sd.rs`).
+    sd: sd::Sd,
 }
 
 impl Shared {
@@ -340,6 +347,7 @@ impl Shared {
             fleet: RefCell::new(fleet),
             fleet_wake: Signal::new(),
             fleet_sleep: Cell::new(None),
+            sd: sd::Sd::new(),
         }
     }
 
@@ -554,8 +562,7 @@ impl Shared {
             ble: fleet.bluetooth(),
             present: self.nodes.present(),
             members: fleet.members(),
-            // The bridge drives no card yet.
-            sd: None,
+            sd: sd::status(self),
             bluetooth: self.bluetooth(now),
         };
         drop(fleet);
@@ -699,6 +706,16 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let fan_pins =
         fan::Pins { rmt: peripherals.RMT, pwm: peripherals.GPIO51, tach: peripherals.GPIO52 };
+    let sd_pins = sd::Pins {
+        sdhost: peripherals.SDHOST,
+        clk: peripherals.GPIO43,
+        cmd: peripherals.GPIO44,
+        d0: peripherals.GPIO39,
+        d1: peripherals.GPIO40,
+        d2: peripherals.GPIO41,
+        d3: peripherals.GPIO42,
+        power: peripherals.GPIO45,
+    };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
@@ -730,7 +747,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             carrier::run(carrier, i2c.ok(), shared),
             bus::run(bus_a, shared),
             bus::run(bus_b, shared),
-            join3(fan::run(fan_pins, shared), fleet::run(shared), wardrive_esp::run(shared)),
+            join4(
+                fan::run(fan_pins, shared),
+                fleet::run(shared),
+                wardrive_esp::run(shared),
+                sd::run(sd_pins, shared),
+            ),
         ),
     )
     .await {}

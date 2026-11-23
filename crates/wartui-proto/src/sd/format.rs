@@ -210,7 +210,7 @@ impl Layout {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    /// Zero `count` blocks from `lba`. A run may be megabytes long: the caller splits it.
+    /// Zero `count` blocks from `lba`. A run may be megabytes long: [`Op::transfers`] splits it.
     Zeros {
         /// The first block.
         lba: u32,
@@ -242,6 +242,37 @@ impl Op {
             Self::Zeros { count, .. } => *count,
             Self::Block { .. } => 1,
         }
+    }
+
+    /// The op as transfers of at most `max` blocks, in order: a `Zeros` run in pieces, a `Block`
+    /// as one. A `max` of 0 is taken as 1.
+    #[must_use]
+    pub const fn transfers(&self, max: u32) -> Transfers {
+        let max = if max == 0 { 1 } else { max };
+        Transfers { lba: self.lba(), left: self.blocks(), max }
+    }
+}
+
+/// [`Op::transfers`]: each transfer's first block and its count.
+#[derive(Debug, Clone)]
+pub struct Transfers {
+    lba: u32,
+    left: u32,
+    max: u32,
+}
+
+impl Iterator for Transfers {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<(u32, u32)> {
+        if self.left == 0 {
+            return None;
+        }
+        let count = self.left.min(self.max);
+        let lba = self.lba;
+        self.lba = self.lba.saturating_add(count);
+        self.left -= count;
+        Some((lba, count))
     }
 }
 

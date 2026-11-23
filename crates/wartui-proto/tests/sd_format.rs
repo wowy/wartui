@@ -8,6 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use wartui_proto::sd::BLOCK;
 use wartui_proto::sd::format::{FormatError, Layout, Op, plan};
 use wartui_proto::sd::inspect::{partition, volume};
+use wartui_proto::sd::mib;
 
 /// A card of `blocks`, holding only the blocks written non-zero: a 128 GB card fits in memory.
 #[derive(Clone)]
@@ -470,4 +471,51 @@ fn sd_inspect_never_panics_when_blocks_are_random() {
         }
         let _ = found.free_mb(&block);
     }
+}
+
+#[test]
+fn sd_transfers_cover_each_op_exactly_when_capped_at_32_blocks() {
+    for row in &GEOMETRY {
+        for op in layout(row.card_blocks).ops() {
+            let mut next = op.lba();
+            for (lba, count) in op.transfers(32) {
+                assert_eq!(lba, next, "{}: {op:?} leaves a gap or overlaps", row.name);
+                assert!((1..=32).contains(&count), "{}: {op:?} gave {count} blocks", row.name);
+                next += count;
+            }
+            assert_eq!(next, op.lba() + op.blocks(), "{}: {op:?} is not covered", row.name);
+        }
+    }
+}
+
+#[test]
+fn sd_transfers_split_run_when_not_a_multiple_of_the_cap() {
+    let op = Op::Zeros { lba: 100, count: 70 };
+    let got: Vec<_> = op.transfers(32).collect();
+    assert_eq!(got, [(100, 32), (132, 32), (164, 6)]);
+}
+
+#[test]
+fn sd_transfers_yield_one_block_when_op_is_a_block() {
+    let op = Op::Block { lba: 9, data: [0; BLOCK] };
+    assert_eq!(op.transfers(32).collect::<Vec<_>>(), [(9, 1)]);
+}
+
+#[test]
+fn sd_transfers_take_one_block_each_when_cap_is_zero() {
+    let op = Op::Zeros { lba: 4, count: 3 };
+    assert_eq!(op.transfers(0).collect::<Vec<_>>(), [(4, 1), (5, 1), (6, 1)]);
+}
+
+#[test]
+fn sd_transfers_yield_nothing_when_run_is_empty() {
+    assert_eq!(Op::Zeros { lba: 4, count: 0 }.transfers(32).count(), 0);
+}
+
+#[test]
+fn sd_mib_rounds_down_and_saturates_when_blocks_are_large() {
+    // The bench card: 123,596,800 blocks.
+    assert_eq!(mib(123_596_800), 60_350);
+    assert_eq!(mib(2047), 0);
+    assert_eq!(mib(u64::MAX), u32::MAX);
 }

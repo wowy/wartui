@@ -1827,6 +1827,8 @@ dependencies = [
 name = "wartui-p4-bridge-fw"
 version = "0.1.0"
 dependencies = [
+ "aligned",
+ "block-device-driver",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
@@ -1834,6 +1836,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-rtos",
+ "sdio",
  "sha2",
  "static_cell",
  "wartui-firmware",

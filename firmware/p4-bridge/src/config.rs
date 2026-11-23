@@ -1,7 +1,7 @@
-//! The P4 bridge's queue sizes, in one place.
+//! The P4 bridge's queue sizes and the microSD card's clock, in one place.
 //!
-//! Each size is read from a `WARTUI_P4_*` environment variable at build time, with the
-//! default here, so a bench run resizes one with a rebuild rather than an edit.
+//! Each is read from a `WARTUI_P4_*` environment variable at build time, with the default
+//! here, so a bench run changes one with a rebuild rather than an edit.
 //! `wartui_proto::config` has the parsing.
 //!
 //! esp-hal's default 256 KB L2 cache leaves the P4 about 439 KB of internal RAM, and the main
@@ -38,3 +38,8 @@ pub const DOWN_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_P4_DOWN_QUEUE_
 ///
 /// A record that finds the queue full is refused at once, with `Undelivered`.
 pub const NODE_DOWN_BYTES: usize = env_usize(option_env!("WARTUI_P4_NODE_DOWN_BYTES"), 4160);
+
+/// The microSD card's bus clock asked for, in Hz (`src/sd.rs`). The driver caps it at 40 MHz, and
+/// `sdio` switches the card to high speed above 25 MHz. At 40 MHz the bench card failed about one
+/// write in 6,100 with a CRC error, and at 20 MHz none in 24,000 (`docs/p4-sd-findings.md`).
+pub const SD_HZ: u32 = env_usize(option_env!("WARTUI_P4_SD_HZ"), 20_000_000) as u32;

@@ -109,7 +109,8 @@ fn le32(block: &[u8; BLOCK], at: usize) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// `blocks` of [`BLOCK`] bytes in MiB, rounded down.
-fn mib(blocks: u64) -> u32 {
+/// `blocks` of [`BLOCK`] bytes in MiB, rounded down, and `u32::MAX` past it.
+#[must_use]
+pub fn mib(blocks: u64) -> u32 {
     u32::try_from(blocks / 2048).unwrap_or(u32::MAX)
 }

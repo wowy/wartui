@@ -150,7 +150,8 @@ own.
   instead of USB (`src/ble.rs`): it keeps the C6's bonds in `nvs` too (`src/bonds.rs`), and the host
   bulk ring in PSRAM, past the node image cache. With `wardrive esp` on, a phone on the C6's
   WardriveESP service can hold the queue instead: the P4 runs its session, scans for it and
-  sends it text lines (`src/wardrive_esp.rs`).
+  sends it text lines (`src/wardrive_esp.rs`). It reports the board's microSD card in `Status` and
+  formats it FAT32 on a host's `FormatSd` (`src/sd.rs`), the layout `wartui_proto::sd`'s.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
@@ -452,6 +453,11 @@ edit stops; follow the pointer before changing the rule.
 - **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
   any node build, and a node never needs a wired flash.
   → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **The P4's core 1 stays off.** Every future, the microSD card's included, is joined on core 0,
+  and nothing calls `start_second_core`. esp-storage stalls the other core for every flash write,
+  wherever it is, so a core 1 frozen holding a lock leaves core 0 spinning on it: on the bench,
+  `flash-bridge` updates restarted or hung the P4. → `firmware/p4-bridge/src/sd.rs` `//!`,
+  `docs/p4-sd-findings.md`
 - **The P4's I2C0 is shared** by the GPS reader and the carrier's I/O expander, behind one mutex.
   Lock it per transaction, never across an await on anything but the bus, or one stalls the
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
