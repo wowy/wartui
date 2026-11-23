@@ -874,6 +874,21 @@ the bridge's answer and fails with its words unless the card was formatted:
 `no SD card to format`, `the SD card is already being formatted` or `the SD card format failed`.
 `wartui status` prints an `sd card` line too.
 
+In `run`, settings' `format` row, under `sd card`, shows the card as the bridge reports it, and
+changes while settings is open. `Enter` on it opens a confirm naming the card's size; `y` sends the
+format, and any other key cancels. Settings stays open behind the confirm, its edits kept. The
+footer says `formatting the SD card…`, then the bridge's answer when it comes. The row reads:
+
+| Row                    | `Enter`                                     |
+|------------------------|---------------------------------------------|
+| `58.9 of 61.8 GB free` | Asks to format                              |
+| `61.8 GB, not FAT32`   | Asks to format                              |
+| `card error`           | Asks to format                              |
+| `formatting…`          | Nothing: a format is running                |
+| `no card`              | Nothing: the slot is empty                  |
+| `no slot`              | Nothing: the bridge drives no card slot     |
+| `no bridge`            | Nothing: the link is down                   |
+
 ### The channel pool
 
 The bridge keeps the channel pool in its own flash and boots into it, so the pool holds across its
@@ -981,6 +996,7 @@ key help for a few seconds; see "Power-cycling a node".
 | `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
 | Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)        |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it              |
 | `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
 | `Esc` / `q`         | Close without changing anything                                                             |
 | `ctrl-c`            | Quit                                                                                        |
@@ -1001,8 +1017,9 @@ The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan`
 "The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `wardrive esp` (`off`, `on`; lets a
 phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
 `remember bridge` (`off`, `on`),
-`wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, and the
-API keys: `wdgwars`, `wigle name` and `wigle token`. `excluded ssids` shows how many are listed, or
+`wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, the
+API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `format` row, which
+formats the bridge's microSD card (see "The SD card"). `excluded ssids` shows how many are listed, or
 `none`, and opens a page that lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
 one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
 the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns to

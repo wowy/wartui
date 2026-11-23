@@ -94,6 +94,7 @@ async fn view(
         ui.clamp(current.nodes.len());
         ui.poll_upload(&current);
         ui.poll_power(&current);
+        ui.poll_sd(&current);
         ui.poll_bridge();
         ui.poll_link(&current);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
@@ -111,6 +112,8 @@ async fn view(
                 Some(Input::Key(key)) if ui.power_confirming() => {
                     ui.on_power_key(key, &current, commands);
                 }
+                // Opened over the settings modal, which keys reach again once it closes.
+                Some(Input::Key(key)) if ui.sd_confirming() => ui.on_sd_key(key, &current, commands),
                 // Ahead of `quits()`, so `q` closes the modal rather than the view. Also ahead of
                 // the waiting-for-GPS pop-up it may be opened over, which keys reach again once
                 // it closes.
@@ -186,13 +189,16 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
         draw_confirm_modal(frame, " waiting for GPS ", &lines);
     }
     if let Some(modal) = ui.modal() {
-        draw_settings_modal(frame, modal);
+        draw_settings_modal(frame, modal, snapshot);
     }
     if ui.gps_open() {
         draw_gps_modal(frame, snapshot);
     }
     if let Some(lines) = ui.power_confirm_lines(snapshot) {
         draw_confirm_modal(frame, " power-cycle ", &lines);
+    }
+    if let Some(lines) = ui.sd_confirm_lines() {
+        draw_confirm_modal(frame, " format sd card ", &lines);
     }
     if let (Some(title), Some(lines)) = (ui.upload().confirm_title(), ui.upload().confirm_lines()) {
         draw_confirm_modal(frame, &title, &lines);

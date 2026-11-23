@@ -13,6 +13,11 @@
 //! scan mode, so the bluetooth row is held by the run, which starts the scan in that mode again
 //! after the bridge reboots. The bridge picks which node scans Bluetooth.
 //!
+//! The sd card row is an action, not a setting: nothing in it is applied or saved. Its value is
+//! drawn from the live snapshot on every frame, so a format's progress shows while the modal is
+//! open. `Enter` on it asks [`super::ui::Ui`] to confirm a format, which erases the card, and the
+//! modal stays open behind the confirm with its edits.
+//!
 //! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
 //! decides at launch whether it waits, so the row applies from the next launch. The
 //! waiting-for-GPS pop-up's box writes the same key, through [`save_fix_wait`].
@@ -35,12 +40,14 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
 use wartui_proto::fan::FanDuty;
 use wartui_proto::fleet::ScanMode;
+use wartui_proto::link::SdState;
 use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;
 use super::centered_rect;
 use super::ui::ENGINE_BUSY;
 use crate::config;
+use crate::text::{SdForm, sd_text};
 
 /// What saving settings needs that a [`Snapshot`] lacks.
 ///
@@ -86,10 +93,11 @@ enum Field {
     WdgwarsKey,
     WigleName,
     WigleToken,
+    SdCard,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 10] = [
+const FIELDS: [Field; 11] = [
     Field::Pool,
     Field::Fan,
     Field::Bluetooth,
@@ -100,6 +108,7 @@ const FIELDS: [Field; 10] = [
     Field::WdgwarsKey,
     Field::WigleName,
     Field::WigleToken,
+    Field::SdCard,
 ];
 
 impl Field {
@@ -117,7 +126,7 @@ impl Field {
 }
 
 /// The settings modal's state while open. Seeded from the snapshot at opening, then
-/// edited independently of it.
+/// edited independently of it. The sd card row holds nothing: it reads the live snapshot.
 #[derive(Debug, Clone)]
 pub(super) struct ConfigModal {
     selected: Field,
@@ -218,6 +227,7 @@ impl ConfigModal {
     /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | wdgwars, wigle name, wigle token | none; [`Self::on_key`] types into it |
+    /// | sd card | none; `Enter` asks to format the card ([`sd_row`]) |
     fn step(&mut self, delta: i8) {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
@@ -242,8 +252,12 @@ impl ConfigModal {
                     self.wait_for_gps = !self.wait_for_gps;
                 }
             }
-            // Text rows, and a row that opens a page. `on_key` handles both.
-            Field::WdgwarsKey | Field::WigleName | Field::WigleToken | Field::ExcludedSsids => {}
+            // Text rows, a row that opens a page, and an action. `on_key` handles all three.
+            Field::WdgwarsKey
+            | Field::WigleName
+            | Field::WigleToken
+            | Field::ExcludedSsids
+            | Field::SdCard => {}
         }
     }
 }
@@ -260,6 +274,8 @@ pub(super) enum ModalAction {
     /// `Enter` on the excluded-SSIDs page: apply and save only the list, then return to
     /// the rows.
     SaveExcluded,
+    /// `Enter` on the sd card row with a card to format: ask to confirm, and stay open.
+    FormatSd,
 }
 
 impl ConfigModal {
@@ -318,12 +334,13 @@ impl ConfigModal {
             | Field::WardriveEsp
             | Field::RememberBridge
             | Field::WaitForGps
-            | Field::ExcludedSsids => None,
+            | Field::ExcludedSsids
+            | Field::SdCard => None,
         }
     }
 
-    /// A key while the modal is open.
-    pub(super) fn on_key(&mut self, key: KeyEvent) -> ModalAction {
+    /// A key while the modal is open. `snapshot` is what the sd card row reads.
+    pub(super) fn on_key(&mut self, key: KeyEvent, snapshot: &Snapshot) -> ModalAction {
         if matches!(self.page, Page::Excluded { .. }) {
             return self.on_page_key(key);
         }
@@ -364,6 +381,13 @@ impl ConfigModal {
             KeyCode::Left | KeyCode::Char('h') => self.step(-1),
             KeyCode::Right | KeyCode::Char('l') => self.step(1),
             KeyCode::Esc | KeyCode::Char('q') => return ModalAction::Close,
+            // An action, not a setting: `Enter` asks, or does nothing where the tip says why.
+            KeyCode::Enter if self.selected == Field::SdCard => {
+                return match sd_row(snapshot).1 {
+                    Ok(()) => ModalAction::FormatSd,
+                    Err(_) => ModalAction::Stay,
+                };
+            }
             KeyCode::Enter => return ModalAction::Apply,
             _ => {}
         }
@@ -663,9 +687,37 @@ pub(super) fn link_written(
     }
 }
 
-/// The settings modal, centered over the live view behind it.
-pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 16, frame.area());
+/// The tip on the sd card row when `Enter` asks to format the card.
+const FORMAT_TIP: &str = "enter formats the card and erases it";
+
+/// The sd card row as `snapshot` has it: its value, and `Ok` when `Enter` asks to format the
+/// card, or the tip saying why it does nothing.
+///
+/// | Card | Value | `Enter` |
+/// |---|---|---|
+/// | link down | `no bridge` | nothing |
+/// | none, or no `Status` yet | `no slot` | nothing |
+/// | no card | `no card` | nothing |
+/// | not FAT32, ready, or failed | its size and state | asks |
+/// | formatting | `formatting…` | nothing |
+fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
+    if !snapshot.link_up {
+        return ("no bridge".to_owned(), Err("no bridge to format a card on · esc cancel"));
+    }
+    let sd = snapshot.bridge_status.and_then(|status| status.sd);
+    let action = match sd.map(|sd| sd.state) {
+        None => Err("this bridge has no card slot · esc cancel"),
+        Some(SdState::NoCard) => Err("no card in the slot · esc cancel"),
+        Some(SdState::Formatting) => Err("a format is running · esc cancel"),
+        Some(SdState::NoFat32 | SdState::Ready | SdState::Failed) => Ok(()),
+    };
+    (sd_text(sd, SdForm::Row), action)
+}
+
+/// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
+/// the sd card row reads on every frame.
+pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
+    let area = centered_rect(48, 19, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -704,6 +756,7 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     // What fits right of the 18-wide label column and its two spaces.
     let value_width = usize::from(inner.width).saturating_sub(20);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
+    let (sd_value, sd_action) = sd_row(snapshot);
     let lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
@@ -748,12 +801,17 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         text_row("wigle name", &fit_name(&modal.wigle_name, value_width), Field::WigleName),
         text_row("wigle token", &mask_key(&modal.wigle_token), Field::WigleToken),
         Line::default(),
+        Line::from("sd card"),
+        // Nothing to step, so no arrows.
+        text_row("format", &sd_value, Field::SdCard),
+        Line::default(),
         // The one key a text row needs that nothing else on screen says.
         Line::from(match modal.selected {
             Field::WdgwarsKey if !modal.wdgwars_key.is_empty() => CLEAR_TIP,
             Field::WigleName if !modal.wigle_name.is_empty() => CLEAR_TIP,
             Field::WigleToken if !modal.wigle_token.is_empty() => CLEAR_TIP,
             Field::ExcludedSsids => "enter open · esc cancel",
+            Field::SdCard => sd_action.err().unwrap_or(FORMAT_TIP),
             _ => "enter save · esc cancel",
         }),
     ];
@@ -854,6 +912,8 @@ fn mask_key(key: &str) -> String {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use wartui_proto::link::SdStatus;
 
     use super::*;
     use crate::tui::draw;
@@ -1765,19 +1825,19 @@ mod tests {
     }
 
     #[test]
-    fn ui_reaches_wigle_rows_and_stops_when_down_pressed_from_wdgwars_row() {
+    fn ui_reaches_wigle_and_sd_rows_and_stops_when_down_pressed_from_wdgwars_row() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         select_wdgwars(&mut ui, &snapshot, &tx);
-        assert_eq!(FIELDS.last(), Some(&Field::WigleToken), "the last row");
+        assert_eq!(FIELDS.last(), Some(&Field::SdCard), "the last row");
 
-        for expected in [Field::WigleName, Field::WigleToken, Field::WigleToken] {
+        for expected in [Field::WigleName, Field::WigleToken, Field::SdCard, Field::SdCard] {
             press(&mut ui, KeyCode::Down, KeyModifiers::NONE, &snapshot);
             assert_eq!(ui.modal().expect("open").selected, expected);
         }
         press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
-        assert_eq!(ui.modal().expect("open").selected, Field::WigleName);
+        assert_eq!(ui.modal().expect("open").selected, Field::WigleToken);
     }
 
     #[test]
@@ -2012,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_shows_enter_save_when_last_row_selected() {
+    fn draw_shows_enter_save_when_wigle_token_row_selected() {
         let rendered = modal_terminal(wigle_keys("", ""), Field::WigleToken).backend().to_string();
         assert!(rendered.contains("wigle token"), "{rendered}");
         assert!(
@@ -2678,5 +2738,227 @@ mod tests {
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
 
         assert_eq!(rx.try_recv().unwrap(), Command::SetBluetooth(true));
+    }
+
+    /// [`busy`] with the bridge reporting `sd`.
+    fn sd_snapshot(sd: Option<SdStatus>) -> Snapshot {
+        let mut snapshot = busy();
+        if let Some(status) = snapshot.bridge_status.as_mut() {
+            status.sd = sd;
+        }
+        snapshot
+    }
+
+    /// A "64 GB" card in `state`: 63,284 MiB, 61.8 GB.
+    fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
+        Some(SdStatus { state, card_mb: 63_284, free_mb })
+    }
+
+    /// The first line of `screen` holding `text`.
+    fn line_with<'a>(screen: &'a str, text: &str) -> &'a str {
+        screen.lines().find(|line| line.contains(text)).unwrap_or_else(|| panic!("{screen}"))
+    }
+
+    #[test]
+    fn ui_shows_sd_row_and_asks_only_where_card_can_be_formatted_when_enter_pressed() {
+        let down = Snapshot { link_up: false, ..busy() };
+        let unreported = Snapshot { bridge_status: None, ..busy() };
+        let no_card = Some(SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
+        let cases = [
+            (down, "no bridge", "no bridge to format a card on · esc cancel", false),
+            (sd_snapshot(None), "no slot", "this bridge has no card slot · esc cancel", false),
+            (unreported, "no slot", "this bridge has no card slot · esc cancel", false),
+            (sd_snapshot(no_card), "no card", "no card in the slot · esc cancel", false),
+            (sd_snapshot(card(SdState::NoFat32, None)), "61.8 GB, not FAT32", FORMAT_TIP, true),
+            (
+                sd_snapshot(card(SdState::Ready, Some(60_314))),
+                "58.9 of 61.8 GB free",
+                FORMAT_TIP,
+                true,
+            ),
+            (
+                sd_snapshot(card(SdState::Formatting, None)),
+                "formatting…",
+                "a format is running · esc cancel",
+                false,
+            ),
+            (sd_snapshot(card(SdState::Failed, None)), "card error", FORMAT_TIP, true),
+        ];
+        for (snapshot, value, tip, asks) in cases {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(Field::SdCard, &mut ui, &snapshot, &tx);
+
+            let screen = modal_screen(&snapshot, &mut ui);
+            let row = line_with(&screen, "format   ");
+            assert!(row.contains(&format!("format              {value}")), "{value}: {screen}");
+            // Nothing steps it, so it never shows arrows.
+            assert!(!row.contains('◂') && !row.contains('▸'), "{value}: {screen}");
+            assert!(screen.contains(tip), "{value}: {screen}");
+
+            ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+            assert_eq!(ui.sd_confirming(), asks, "{value}");
+            assert!(ui.modal().is_some(), "{value}: Enter on the row never closes the modal");
+            assert!(rx.try_recv().is_err(), "{value}: nothing before the answer");
+        }
+    }
+
+    #[test]
+    fn ui_leaves_sd_row_unchanged_when_h_or_l_pressed() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdCard, &mut ui, &snapshot, &tx);
+        let before = modal_screen(&snapshot, &mut ui);
+        for code in [KeyCode::Char('h'), KeyCode::Char('l'), KeyCode::Left, KeyCode::Right] {
+            ui.on_modal_key(key(code), &snapshot, &tx);
+        }
+        assert_eq!(modal_screen(&snapshot, &mut ui), before);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The modal open on the sd card row of `snapshot`, its pool row moved to `eu`, and the
+    /// format confirm open over it.
+    fn sd_confirm_over_edits(snapshot: &Snapshot, tx: &mpsc::Sender<Command>) -> Ui {
+        let mut ui = Ui::default();
+        select(Field::Pool, &mut ui, snapshot, tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), snapshot, tx);
+        while ui.modal().expect("open").selected != Field::SdCard {
+            ui.on_modal_key(key(KeyCode::Down), snapshot, tx);
+        }
+        ui.on_modal_key(key(KeyCode::Enter), snapshot, tx);
+        assert!(ui.sd_confirming());
+        ui
+    }
+
+    #[test]
+    fn ui_sends_format_sd_and_keeps_modal_edits_when_y_pressed_on_sd_confirm() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = sd_confirm_over_edits(&snapshot, &tx);
+        let lines = ui.sd_confirm_lines().expect("the confirm");
+        assert_eq!(
+            lines,
+            [
+                "format the SD card as FAT32?",
+                "everything on the 61.8 GB card is erased.",
+                "",
+                "y format · any other key cancels",
+            ]
+        );
+
+        ui.on_sd_key(key(KeyCode::Char('y')), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().expect("a command"), Command::FormatSd);
+        assert!(rx.try_recv().is_err(), "the pool edit is not sent");
+        assert!(!ui.sd_confirming());
+        assert_eq!(ui.notice(snapshot.now_ms), Some("formatting the SD card…"));
+        let modal = ui.modal().expect("still open");
+        assert_eq!((modal.pool, modal.selected), (Some(ChannelPool::Eu), Field::SdCard));
+    }
+
+    #[test]
+    fn ui_sends_nothing_and_keeps_modal_edits_when_other_key_pressed_on_sd_confirm() {
+        let snapshot = busy();
+        for code in [KeyCode::Char('n'), KeyCode::Char('Y'), KeyCode::Esc, KeyCode::Enter] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = sd_confirm_over_edits(&snapshot, &tx);
+
+            ui.on_sd_key(key(code), &snapshot, &tx);
+
+            assert!(rx.try_recv().is_err(), "{code:?}");
+            assert!(!ui.sd_confirming(), "{code:?}");
+            assert_eq!(ui.notice(snapshot.now_ms), Some("SD card not formatted"), "{code:?}");
+            let modal = ui.modal().expect("still open");
+            assert_eq!(modal.pool, Some(ChannelPool::Eu), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_link_drops_before_sd_format_is_confirmed() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = sd_confirm_over_edits(&snapshot, &tx);
+        let down = Snapshot { link_up: false, ..snapshot };
+
+        ui.on_sd_key(key(KeyCode::Char('y')), &down, &tx);
+
+        assert!(rx.try_recv().is_err());
+        assert!(!ui.sd_confirming());
+        let notice = ui.notice(down.now_ms).expect("a reason");
+        assert!(notice.contains("not connected"), "{notice}");
+        assert_eq!(ui.modal().expect("still open").pool, Some(ChannelPool::Eu));
+    }
+
+    #[test]
+    fn ui_says_engine_busy_when_sd_format_is_confirmed_with_queue_full() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut ui = sd_confirm_over_edits(&snapshot, &tx);
+        tx.try_send(Command::StopScan).expect("the one slot");
+
+        ui.on_sd_key(key(KeyCode::Char('y')), &snapshot, &tx);
+
+        assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
+        assert!(ui.modal().is_some());
+    }
+
+    #[test]
+    fn ui_updates_sd_row_when_snapshot_changes_while_modal_open() {
+        let blank = sd_snapshot(card(SdState::NoFat32, None));
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdCard, &mut ui, &blank, &tx);
+        let screen = modal_screen(&blank, &mut ui);
+        assert!(screen.contains("61.8 GB, not FAT32"), "{screen}");
+
+        let formatting = sd_snapshot(card(SdState::Formatting, None));
+        let screen = modal_screen(&formatting, &mut ui);
+        assert!(screen.contains("format              formatting…"), "{screen}");
+        assert!(screen.contains("a format is running · esc cancel"), "{screen}");
+
+        let ready = sd_snapshot(card(SdState::Ready, Some(60_314)));
+        let screen = modal_screen(&ready, &mut ui);
+        assert!(screen.contains("format              58.9 of 61.8 GB free"), "{screen}");
+        assert!(screen.contains(FORMAT_TIP), "{screen}");
+    }
+
+    /// The view at 58×26, the size of the Linux handheld, with the modal open on `field`.
+    fn handheld(snapshot: &Snapshot, ui: &mut Ui) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
+        terminal.draw(|frame| draw(frame, snapshot, ui)).expect("drawing");
+        terminal
+    }
+
+    #[test]
+    fn draw_fits_modal_with_sd_row_selected_when_terminal_is_58_by_26() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdCard, &mut ui, &snapshot, &tx);
+        let terminal = handheld(&snapshot, &mut ui);
+        let rendered = terminal.backend().to_string();
+
+        // 48×19, centered in 58×26: columns 5 to 52, rows 3 to 21.
+        let buffer = terminal.backend().buffer();
+        let row = |y: u16| -> String { (5..53).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(3).starts_with("┌ settings "), "{rendered}");
+        assert_eq!(row(21), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        assert_eq!(row(20), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
+        assert!(row(18).starts_with("│format              58.9 of 61.8 GB free"), "{rendered}");
+        assert!(row(17).starts_with("│sd card "), "{rendered}");
+    }
+
+    #[test]
+    fn draw_renders_sd_confirm_over_settings_modal_when_enter_pressed_on_sd_row() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = sd_confirm_over_edits(&snapshot, &tx);
+        let rendered = handheld(&snapshot, &mut ui).backend().to_string();
+
+        assert!(rendered.contains(" format sd card "), "{rendered}");
+        assert!(rendered.contains("everything on the 61.8 GB card is erased."), "{rendered}");
+        assert!(rendered.contains("y format · any other key cancels"), "{rendered}");
+        assert!(rendered.contains(" settings "), "the modal behind it: {rendered}");
     }
 }

@@ -41,7 +41,7 @@ use wartui_proto::link::{
 use wartui_proto::mac;
 use wartui_proto::radio_link::BleCounters;
 
-use crate::text::sd_text;
+use crate::text::{SdForm, sd_text};
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the
@@ -134,7 +134,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
-    println!("sd card    {}", sd_text(sd));
+    println!("sd card    {}", sd_text(sd, SdForm::Line));
     println!("pool       {pool}");
     println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));

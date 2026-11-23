@@ -183,6 +183,7 @@ the pop-up again if the run still waits.
 | `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
 | Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)        |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
+| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it              |
 | `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
 | `Esc` / `q`         | Close without changing anything                                                             |
 | `ctrl-c`            | Quit                                                                                        |

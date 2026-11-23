@@ -20,7 +20,7 @@ use wartui_core::engine::sd_formatted_text;
 use wartui_proto::link::{BridgeToHost, HostToBridge, SdFormatOutcome};
 use wartui_proto::mac;
 
-use crate::text::sd_text;
+use crate::text::{SdForm, sd_text};
 
 /// How long the bridge has to answer the status request.
 const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
@@ -147,7 +147,7 @@ async fn card_line(link: &mut LinkHandle) -> Result<String> {
     let BridgeToHost::Status { sd, .. } = status else {
         unreachable!("wait_for_status only returns Status")
     };
-    Ok(format!("sd card    {}", sd_text(sd)))
+    Ok(format!("sd card    {}", sd_text(sd, SdForm::Line)))
 }
 
 /// Wait for the format's answer, printing each fault the bridge reports meanwhile.

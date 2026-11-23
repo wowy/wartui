@@ -13,7 +13,7 @@ use super::settings::{
 };
 use super::upload::Upload;
 use crate::config;
-use crate::text::node_name;
+use crate::text::{gb, node_name};
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -22,6 +22,10 @@ pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 /// The notice when a power-cycle is asked for with the link down. The transport holds commands
 /// while it reconnects, so one sent now would cut the node whenever the bridge comes back.
 const NOT_CONNECTED: &str = "the bridge is not connected, so it cannot switch node power";
+
+/// The notice when a confirmed format finds the link down, for the same reason: a format sent
+/// now would erase the card whenever the bridge comes back.
+const SD_NOT_CONNECTED: &str = "the bridge is not connected, so it cannot format its SD card";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
 /// GPS modal, saved settings and upload.
@@ -54,6 +58,10 @@ pub(super) struct Ui {
     power_confirm: Option<Slot>,
     /// The last power-cycle answer shown, so each is shown once.
     power_shown: Option<u64>,
+    /// The card's size in MiB, while the confirm to format it is open over the settings modal.
+    sd_confirm: Option<u32>,
+    /// The last format answer shown, so each is shown once.
+    sd_shown: Option<u64>,
 }
 
 /// How long a notice replaces the footer's key help and totals.
@@ -275,6 +283,66 @@ impl Ui {
         ])
     }
 
+    /// Open the confirm to format the bridge's SD card, over the settings modal.
+    fn ask_format_sd(&mut self, snapshot: &Snapshot) {
+        let Some(sd) = snapshot.bridge_status.and_then(|status| status.sd) else { return };
+        self.notice = None;
+        self.sd_confirm = Some(sd.card_mb);
+    }
+
+    /// Whether the format confirm is open, and so takes every key.
+    pub(super) fn sd_confirming(&self) -> bool {
+        self.sd_confirm.is_some()
+    }
+
+    /// A key while the format confirm is open: `y` sends, anything else cancels. The settings
+    /// modal stays open either way, its edits untouched.
+    pub(super) fn on_sd_key(
+        &mut self,
+        key: KeyEvent,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
+        if self.sd_confirm.take().is_none() {
+            return;
+        }
+        if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
+            self.say("SD card not formatted".to_owned(), snapshot);
+            return;
+        }
+        // The link may have dropped while the confirm was open.
+        if !snapshot.link_up {
+            self.say(SD_NOT_CONNECTED.to_owned(), snapshot);
+            return;
+        }
+        let said = match commands.try_send(Command::FormatSd) {
+            Ok(()) => "formatting the SD card…".to_owned(),
+            Err(_) => ENGINE_BUSY.to_owned(),
+        };
+        self.say(said, snapshot);
+    }
+
+    /// The format confirm's lines, while it is open.
+    pub(super) fn sd_confirm_lines(&self) -> Option<Vec<String>> {
+        let card_mb = self.sd_confirm?;
+        Some(vec![
+            "format the SD card as FAT32?".to_owned(),
+            format!("everything on the {} GB card is erased.", gb(card_mb)),
+            String::new(),
+            "y format · any other key cancels".to_owned(),
+        ])
+    }
+
+    /// Show the bridge's answer to a format, once.
+    pub(super) fn poll_sd(&mut self, snapshot: &Snapshot) {
+        let Some(answer) = &snapshot.sd_answer else { return };
+        if self.sd_shown == Some(answer.id) {
+            return;
+        }
+        self.sd_shown = Some(answer.id);
+        self.say(answer.text.clone(), snapshot);
+    }
+
     /// Show the bridge's answer to a power-cycle, once.
     pub(super) fn poll_power(&mut self, snapshot: &Snapshot) {
         let Some(answer) = &snapshot.power_answer else { return };
@@ -300,7 +368,7 @@ impl Ui {
         commands: &mpsc::Sender<Command>,
     ) {
         let Some(modal) = self.modal.as_mut() else { return };
-        match modal.on_key(key) {
+        match modal.on_key(key, snapshot) {
             // As in `on_key`, unbound keys leave the notice alone.
             ModalAction::Stay => {}
             ModalAction::Close => self.modal = None,
@@ -312,6 +380,7 @@ impl Ui {
                 // The modal stays open with its edits, for another `Enter`.
                 Err(busy) => self.say(busy.to_owned(), snapshot),
             },
+            ModalAction::FormatSd => self.ask_format_sd(snapshot),
             ModalAction::SaveExcluded => {
                 match apply_excluded(modal, commands, &mut self.settings) {
                     Ok(text) => {
@@ -538,6 +607,26 @@ mod tests {
         ui.say("something since".to_owned(), &snapshot);
         ui.poll_power(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
+    }
+
+    #[test]
+    fn ui_shows_sd_format_answer_once_when_it_arrives() {
+        use wartui_core::engine::SdAnswer;
+        let mut snapshot = busy();
+        let mut ui = Ui::default();
+        snapshot.sd_answer = Some(SdAnswer { id: 1, text: "SD card formatted".to_owned() });
+        ui.poll_sd(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("SD card formatted"));
+
+        // The same answer in the next snapshot does not bring the notice back.
+        ui.say("something since".to_owned(), &snapshot);
+        ui.poll_sd(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
+
+        // A new answer, even in the same words, is shown.
+        snapshot.sd_answer = Some(SdAnswer { id: 2, text: "SD card formatted".to_owned() });
+        ui.poll_sd(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("SD card formatted"));
     }
 
     #[test]
