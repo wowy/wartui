@@ -32,15 +32,7 @@ updates:
   # names it beside `trouble-host`, and a higher one is a second copy whose types
   # `trouble-host`'s API does not take (E0308 in `firmware/p4-radio/src/ble.rs`).
   # `trouble-host` itself is deliberately not ignored — a pull request there is
-  # the signal that the two can move, and that the copy vendored in
-  # `firmware/p4-radio/vendor/trouble-host` can go.
-  # The six crates that copy's `security` feature names are held with it: `aes`,
-  # `cmac`, `p256`, `rand`, `rand_chacha` and `rand_core`. Dependabot reads the
-  # copy's `Cargo.toml` as one of the C6's manifests, so a minor or major release
-  # of one arrives as an edit to a copy that takes no change. Its source is
-  # written against the versions it names: `rand_chacha` 0.10 implements
-  # `rand_core` 0.10's traits, and the copy's security manager asks for 0.6's.
-  # Drop these six entries with the copy.
+  # the signal that the two can move, and that the fork the C6 patches in can go.
   # `sdio` is held at the version `esp-hal` builds against: its SDMMC slot implements
   # `sdio`'s bus trait, so a higher one is a second copy whose trait the slot does not
   # implement. `firmware/p4-bridge` names it, with `block-device-driver` and `aligned`
@@ -60,15 +52,11 @@ updates:
     # firmware's CI job counts the versions before it builds. Those
     # are worth taking — an `esp-hal` patch release is a fix this firmware can have.
     ignore:
-      - dependency-name: "aes"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "aligned"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "block-device-driver"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "bt-hci"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "cmac"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "embassy-executor"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
@@ -93,14 +81,6 @@ updates:
       - dependency-name: "esp-sync"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-wifi-sys-*"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "p256"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "rand"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "rand_chacha"
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "rand_core"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "sdio"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]

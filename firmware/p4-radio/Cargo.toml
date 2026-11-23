@@ -2,7 +2,6 @@
 # different toolchain pin and a lockfile that must not be resolved together with the
 # host crates.
 [workspace]
-exclude = ["vendor"]
 
 [package]
 name = "wartui-p4-radio-fw"
@@ -47,11 +46,10 @@ embassy-time = "0.5.1"
 # atomics as persistable.
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
-# The Bluetooth host: 0.8.0, vendored and moved to `bt-hci` 0.11 (the `[patch.crates-io]`
-# entry at the end of this file, `vendor/trouble-host/VENDORED.md`). Its transport trait lives in
-# `bt-hci-transport`, the crate `esp-radio`'s `BleConnector` implements it from, so the connector
-# plugs in as it is. `bt-hci` resolves twice, 0.9 for `esp-radio` and 0.11 here: plain types with
-# no global symbols.
+# The Bluetooth host: 0.8.0 moved to `bt-hci` 0.11, from the fork the `[patch.crates-io]` entry
+# at the end of this file names. Its transport trait lives in `bt-hci-transport`, the crate
+# `esp-radio`'s `BleConnector` implements it from, so the connector plugs in as it is. `bt-hci`
+# resolves twice, 0.9 for `esp-radio` and 0.11 here: plain types with no global symbols.
 #
 # The packet pool works around two esp-radio bugs, until a release the held set accepts fixes
 # them. It holds an L2CAP PDU of 186 bytes, an ATT MTU of 182, set by
@@ -111,7 +109,8 @@ opt-level = 3
 [profile.release.package.postcard]
 opt-level = 3
 
-# `trouble-host` 0.8.0 with upstream's move to `bt-hci` 0.11 applied, until a release
-# builds on it. `vendor/trouble-host/VENDORED.md` has its provenance and when it goes.
+# `trouble-host` 0.8.0 with upstream's move to `bt-hci` 0.11 (44f91293), and nothing else of
+# TrouBLE's `main` (`README.md` § "Dependency versions"). The branch is the published 0.8.0 plus
+# that commit. Back to crates.io once a `trouble-host` release builds on `bt-hci` 0.11.
 [patch.crates-io]
-trouble-host = { path = "vendor/trouble-host" }
+trouble-host = { git = "https://github.com/wowy/trouble", rev = "b048afad96c1aa9df3f0350b28e13ff94b7812f0" }

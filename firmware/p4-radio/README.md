@@ -179,22 +179,17 @@ extended advertising data commands, and it declared no return for the replies to
 connection parameter request, so answering one panicked. `bt-hci` 0.11 fixes both, and no
 `trouble-host` release builds on it yet.
 
-So the C6 builds the copy in [`vendor/trouble-host`](vendor/trouble-host/VENDORED.md): the
-published 0.8.0 with the one upstream commit that moves TrouBLE to `bt-hci` 0.11, and nothing
-else of TrouBLE's `main`. `Cargo.toml` points `[patch.crates-io]` at it, and the workspace
-excludes it, so it is neither linted nor formatted as this firmware's. Delete it, and the patch
-entry, when a `trouble-host` release builds on `bt-hci` 0.11 or later. Dependabot's pull request
-for that release is the signal; until then it ignores `bt-hci`'s minor and major releases, since
-one above what `trouble-host` builds on is a second copy whose types TrouBLE's API does not take.
-
-Dependabot reads the copy's `Cargo.toml` as one of this firmware's manifests. So it also ignores
-the minor and major releases of the six crates the copy's `security` feature names: `aes`, `cmac`,
-`p256`, `rand`, `rand_chacha` and `rand_core`. One of those arrives as an edit to the copy, whose
-source is written against the versions it names. Those six entries go when the copy does.
+So `Cargo.toml`'s `[patch.crates-io]` takes `trouble-host` from the
+[`wowy/trouble`](https://github.com/wowy/trouble) fork, pinned by rev: the published 0.8.0 with the
+one upstream commit that moves TrouBLE to `bt-hci` 0.11, and nothing else of TrouBLE's `main`.
+Drop the patch entry when a `trouble-host` release builds on `bt-hci` 0.11 or later. Dependabot's
+pull request for that release is the signal; until then it ignores `bt-hci`'s minor and major
+releases, since one above what `trouble-host` builds on is a second copy whose types TrouBLE's API
+does not take.
 
 `esp-radio` builds on `bt-hci` 0.9, so `bt-hci` resolves twice, 0.9 and 0.11. Both are plain
 types with no global symbols, and the controller plugs in through `bt-hci-transport` 0.1, which
-both share. The C6 names `bt-hci` 0.11 itself, at the version the vendored `trouble-host`
+both share. The C6 names `bt-hci` 0.11 itself, at the version the patched `trouble-host`
 resolves, for the command that stops its advertising sets.
 
 ### Crates that double
