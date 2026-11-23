@@ -5,10 +5,10 @@ Measured on 2026-11-22 on a Waveshare ESP32-P4-WIFI6, the bridge `96:C4`, with n
 on which core, and whether a settings write or a `wartui flash-bridge` update still passes while
 it writes.
 
-The firmware is the spike on the branch `spike/sd-bring-up` (`c778bb6`), `src/sd.rs` and
-`src/last_panic.rs`, not for merging. Build-time switches picked the core
-(`WARTUI_P4_SD_CORE`), the bus clock asked for (`WARTUI_P4_SD_HZ`), the input sampling phase
-(`WARTUI_P4_SD_PHASE`) and a gap between writes (`WARTUI_P4_SD_GAP_MS`).
+The firmware was a bench build of the P4 bridge that is not in the tree. It ran the write loop
+below beside the bridge's own futures, and kept the P4's panic text across a reset. Build-time
+switches picked the core the loop ran on, the bus clock asked for, the input sampling phase and a
+gap between writes. Of those, the tree keeps the clock, as `WARTUI_P4_SD_HZ`.
 
 ## The setup
 
@@ -20,7 +20,7 @@ The firmware is the spike on the branch `spike/sd-bring-up` (`c778bb6`), `src/sd
 
 ## The card
 
-123,596,800 blocks (63,281 MB). Block 0 ends `55 aa` and its first partition is type `0x0c`,
+123,596,800 blocks: 63,281 MB, or the 60,350 MiB that `Status` reports. Block 0 ends `55 aa` and its first partition is type `0x0c`,
 FAT32 with LBA, as the card shipped.
 
 ## Core 1 broke updates
@@ -79,5 +79,5 @@ GPIO45 switches the card's VDD through a P-channel MOSFET, so low powers it. The
 
 ## Not answered here
 
-The P4 keeps no record of its own last panic, as the C6 does; the spike carried one, and the
-bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested.
+The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
+the bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested.
