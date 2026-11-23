@@ -102,14 +102,19 @@ pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
     }
 }
 
-/// `bytes` in MB or GB, MiB and GiB with one decimal as [`gb`] gives them: `1.2 MB`.
+/// `bytes` in KB, MB or GB: whole KiB, or MiB and GiB with one decimal as [`gb`] gives them,
+/// `1.2 MB`. The unit is the smallest whose rounded value is under 1024, so it never prints
+/// `1024 KB` or `1024.0 MB`.
 pub(crate) fn bytes_text(bytes: u64) -> String {
-    let kib = bytes as f64 / 1024.0;
-    let mib = kib / 1024.0;
-    if mib < 1.0 {
-        format!("{kib:.0} KB")
-    } else if mib < 1024.0 {
-        format!("{mib:.1} MB")
+    // Ties to even, as `format!` rounds.
+    let kib = (bytes as f64 / 1024.0).round_ties_even();
+    if kib < 1024.0 {
+        return format!("{kib:.0} KB");
+    }
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    let tenths = (mib * 10.0).round_ties_even();
+    if tenths < 10_240.0 {
+        format!("{:.1} MB", tenths / 10.0)
     } else {
         format!("{:.1} GB", mib / 1024.0)
     }
@@ -297,6 +302,14 @@ mod tests {
         assert_eq!(bytes_text(12_800), "12 KB");
         assert_eq!(bytes_text(1_258_291), "1.2 MB");
         assert_eq!(bytes_text(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+    }
+
+    #[test]
+    fn bytes_text_switches_unit_when_rounding_reaches_1024() {
+        assert_eq!(bytes_text(1023 * 1024), "1023 KB");
+        assert_eq!(bytes_text(1_048_570), "1.0 MB", "just under 1 MiB");
+        assert_eq!(bytes_text(1024 * 1024), "1.0 MB");
+        assert_eq!(bytes_text(1_073_741_823), "1.0 GB", "just under 1 GiB");
     }
 
     #[test]

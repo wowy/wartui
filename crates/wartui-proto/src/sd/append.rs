@@ -65,12 +65,12 @@
 //!
 //! **A stranger's volume is written when nothing in it surprises the writer:** any cluster size,
 //! a root anywhere, no FSInfo, one FAT. Mirroring off, a FAT32 version past 0 or more than two
-//! FATs is refused at [`Appender::mount`]. A link out of range, a loop, or a free cluster inside a
-//! chain stops the writer with [`Fault::Corrupt`]; it repairs nothing. FAT entries keep their top
-//! four bits, and FAT\[1\]'s clean-shutdown bit is left alone. A log file another writer gave
-//! long-name entries loses them with its short entry, in the same write, when they share its
-//! sector; any in the sector before stay behind as orphans, which readers drop because their
-//! checksum matches no entry.
+//! FATs is refused at [`Appender::mount`]. A link out of range, a loop, a directory past FAT32's
+//! 2 MiB, or a free cluster inside a chain stops the writer with [`Fault::Corrupt`]; it repairs
+//! nothing. FAT entries keep their top four bits, and FAT\[1\]'s clean-shutdown bit is left alone.
+//! A log file another writer gave long-name entries loses them with its short entry, in the same
+//! write, when they share its sector; any in the sector before stay behind as orphans, which
+//! readers drop because their checksum matches no entry.
 
 use super::fat::{self, DirEntry, attr};
 use super::inspect::Volume;
@@ -87,6 +87,10 @@ pub const SCAN_MAX: u16 = fat::ENTRIES_PER_SECTOR as u16;
 
 /// A directory entry's share of [`SCAN_MAX`]: a sector of either is the same work.
 const DIR_ENTRY_COST: u16 = SCAN_MAX / fat::DIR_ENTRIES_PER_SECTOR as u16;
+
+/// The most a FAT32 directory holds: 65,536 entries of 32 bytes. A directory chain longer than
+/// this is a loop, and the walk faults rather than read a whole card's worth of it.
+const DIR_MAX_BYTES: u32 = 65_536 * 32;
 
 /// The extended-flags bit that turns FAT mirroring off.
 const UNMIRRORED: u16 = 0x0080;
@@ -254,7 +258,7 @@ struct Walk {
     kind: Kind,
     cluster: u32,
     sector: u8,
-    /// The links followed, bounded by the volume's clusters.
+    /// The links followed, bounded by the clusters [`DIR_MAX_BYTES`] fills.
     steps: u32,
     /// Whether the current sector was scanned.
     scanned: bool,
@@ -879,12 +883,15 @@ impl Appender {
             if u32::from(self.walk.sector) + 1 < u32::from(self.vol.sectors_per_cluster) {
                 self.walk.sector += 1;
             } else {
+                let cluster = u32::from(self.vol.sectors_per_cluster) * BLOCK as u32;
+                let most = (DIR_MAX_BYTES / cluster).max(1);
                 let next = self.fat_get(self.walk.cluster)?;
                 if fat::is_end(next) {
                     self.walk.done = true;
                 } else if !fat::is_link(next, self.vol.clusters)
                     || next == self.walk.cluster
-                    || self.walk.steps >= self.vol.clusters
+                    // Following `next` makes the chain `steps + 2` clusters long.
+                    || self.walk.steps + 2 > most
                 {
                     return self.fault(Fault::Corrupt);
                 } else {

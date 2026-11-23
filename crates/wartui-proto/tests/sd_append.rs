@@ -1037,6 +1037,54 @@ fn appender_faults_corrupt_when_deleting_a_looped_chain() {
 }
 
 #[test]
+fn appender_faults_corrupt_within_2_mib_of_reads_when_a_directory_chain_loops() {
+    // FAT32's largest directory, in sectors: what a looped walk reads at most.
+    const DIR_MAX_SECTORS: usize = (2 << 20) / BLOCK;
+    // FSInfo, the root's sectors before the loop, and the FAT sectors the walk reads.
+    const FIXED_READS: usize = 16;
+    let full = |card: &Card, found: &Volume, cluster: u32| {
+        let sector = card.block(u64::from(lba(found, cluster)));
+        (0..16).all(|i| dir_entry(&sector, i).is_some_and(|e| !e.is_end()))
+    };
+    // Sector reads; the free count's runs read the FAT once, whatever the walk does.
+    let reads =
+        |driver: &Driver| driver.steps.iter().filter(|s| matches!(s, Step::Read(_))).count();
+
+    // `LOG/` of two full clusters, the second linked back to the first.
+    let (mut card, found) = small();
+    let names: Vec<String> = (1..=14).map(|n| format!("LOG/{n:08}.BIN")).collect();
+    let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"l"[..])).collect();
+    create(&mut card, &found, &["LOG"], &files);
+    let log = {
+        let root = card.block(u64::from(lba(&found, found.root_cluster)));
+        (0..16).find_map(|i| dir_entry(&root, i).filter(|e| e.name == fat::LOG_DIR)).expect("LOG")
+    };
+    let chain = chain_of(&card, &found, log.cluster);
+    assert_eq!(chain.len(), 2);
+    assert!(chain.iter().all(|&c| full(&card, &found, c)), "no end entry stops the walk");
+    set_fat(&mut card, &found, &[(chain[1], chain[0])]);
+    let mut app = mounted(&found, POLICY);
+    let mut driver = Driver::new(card);
+    assert_eq!(driver.open(&mut app), Err(Fault::Corrupt));
+    assert!(reads(&driver) <= DIR_MAX_SECTORS + FIXED_READS, "LOG/: {} reads", reads(&driver));
+    assert!(driver.writes.is_empty(), "nothing written");
+
+    // A root whose second cluster links back to its first.
+    let (mut card, found) = small();
+    let names: Vec<String> = (0..20).map(|n| format!("ROOT{n:04}.TXT")).collect();
+    let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"r"[..])).collect();
+    create(&mut card, &found, &[], &files);
+    let chain = chain_of(&card, &found, found.root_cluster);
+    assert!(chain[..2].iter().all(|&c| full(&card, &found, c)), "no end entry stops the walk");
+    set_fat(&mut card, &found, &[(chain[1], chain[0])]);
+    let mut app = mounted(&found, POLICY);
+    let mut driver = Driver::new(card);
+    assert_eq!(driver.open(&mut app), Err(Fault::Corrupt));
+    assert!(reads(&driver) <= DIR_MAX_SECTORS + FIXED_READS, "root: {} reads", reads(&driver));
+    assert!(driver.writes.is_empty(), "nothing written");
+}
+
+#[test]
 fn appender_faults_when_root_is_full_or_log_is_a_file() {
     let (mut card, found) = small();
     // The root's one sector filled with empty files; its chain ends there.
