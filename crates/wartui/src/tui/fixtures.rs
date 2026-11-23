@@ -14,7 +14,9 @@ use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::{BluetoothStatus, HostOwner, LoopPhase, SdState, SdStatus};
+use wartui_proto::link::{
+    BluetoothStatus, HostOwner, LoopPhase, SdLog, SdLogState, SdState, SdStatus,
+};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -141,6 +143,8 @@ pub(super) fn busy() -> Snapshot {
         scan: Some(ScanMode::Wifi),
         ble_slot: None,
         wardrive_esp: Some(false),
+        // What a bridge with none stored reports.
+        sd_log: Some(true),
         unreachable: ChannelSet::empty(),
         nodes: vec![
             assigned(0x84),
@@ -198,8 +202,17 @@ pub(super) fn busy() -> Snapshot {
             dropped_since_attach: 0,
             uptime_ms: 60_000,
             fan: None,
-            // A "64 GB" card, formatted.
-            sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(55_000) }),
+            // A "64 GB" card, formatted, and logging.
+            sd: Some(SdStatus {
+                log: SdLog {
+                    on: true,
+                    state: SdLogState::Writing,
+                    file: Some(7),
+                    written: 1_258_291,
+                    ..SdLog::OFF
+                },
+                ..SdStatus::card(SdState::Ready, 60_350, Some(55_000))
+            }),
             // What a bridge on USB with no Bluetooth host reports.
             bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
         }),
@@ -262,6 +275,7 @@ pub(super) fn empty() -> Snapshot {
         store: StoreStats::default(),
         bridge_status: None,
         wardrive_esp: None,
+        sd_log: None,
         position: Fix::none(),
         ..busy()
     }

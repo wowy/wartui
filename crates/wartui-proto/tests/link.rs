@@ -18,8 +18,9 @@ use wartui_proto::link::{
     GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION, LinkError,
     LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
     PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, SdFormatOutcome,
-    SdState, SdStatus, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp, UpdateStatusBytes,
-    cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame, image_tag,
+    SdLog, SdLogState, SdState, SdStatus, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
+    UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
+    image_tag,
 };
 use wartui_proto::radio_link::BleCounters;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
@@ -68,6 +69,7 @@ fn sample_commands() -> Vec<HostToBridge, 24> {
     v.push(HostToBridge::ClearBonds).expect("sample_commands has room");
     v.push(HostToBridge::SetWardriveEsp { on: true }).expect("sample_commands has room");
     v.push(HostToBridge::FormatSd).expect("sample_commands has room");
+    v.push(HostToBridge::SetSdLog { on: false }).expect("sample_commands has room");
     v
 }
 
@@ -190,7 +192,18 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
         ble: Slot::new(1, 0),
         present: 0b11_1111,
         members: full_members(),
-        sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(60_340) }),
+        sd: Some(SdStatus {
+            log: SdLog {
+                on: true,
+                state: SdLogState::Writing,
+                file: Some(7),
+                written: 1_200_000,
+                dropped: 3,
+                errors: 1,
+                busy_max_us: 150,
+            },
+            ..SdStatus::card(SdState::Ready, 60_350, Some(60_340))
+        }),
         bluetooth: usb_bluetooth(),
     })
     .expect("sample_events has room");
@@ -656,7 +669,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 17, "one of each");
+    assert_eq!(commands.len(), 18, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -1045,8 +1058,9 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
 
 #[test]
 fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_card() {
-    // `sd`: an option's tag, then `state`'s variant index, `card_mb` as a varint and
-    // `free_mb`'s tag and varint.
+    // `sd`: an option's tag, then `state`'s variant index, `card_mb` as a varint, `free_mb`'s tag
+    // and varint, then `log`: `on`'s byte, `state`'s variant index, `file`'s tag and varint, and
+    // `written`, `dropped`, `errors` and `busy_max_us` as varints.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
         rx_count: 0,
@@ -1068,14 +1082,36 @@ fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_c
     let n = encode_frame(&status, &mut out).expect("encodes");
     let head = without_sd_and_bluetooth(frame_body(&out[..n]));
     for (sd, expected) in [
-        (SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None }, &[1, 0, 0, 0][..]),
-        (SdStatus { state: SdState::NoFat32, card_mb: 300, free_mb: None }, &[1, 1, 0xAC, 0x02, 0]),
+        (SdStatus::card(SdState::NoCard, 0, None), &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..]),
+        (SdStatus::card(SdState::NoFat32, 300, None), &[1, 1, 0xAC, 0x02, 0, 0, 0, 0, 0, 0, 0, 0]),
         (
-            SdStatus { state: SdState::Ready, card_mb: 300, free_mb: Some(5) },
-            &[1, 2, 0xAC, 0x02, 1, 5],
+            SdStatus::card(SdState::Ready, 300, Some(5)),
+            &[1, 2, 0xAC, 0x02, 1, 5, 0, 0, 0, 0, 0, 0, 0],
         ),
-        (SdStatus { state: SdState::Formatting, card_mb: 1, free_mb: None }, &[1, 3, 1, 0]),
-        (SdStatus { state: SdState::Failed, card_mb: 1, free_mb: None }, &[1, 4, 1, 0]),
+        (SdStatus::card(SdState::Formatting, 1, None), &[1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (SdStatus::card(SdState::Failed, 1, None), &[1, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            SdStatus {
+                log: SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF },
+                ..SdStatus::card(SdState::NoCard, 0, None)
+            },
+            &[1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0],
+        ),
+        (
+            SdStatus {
+                log: SdLog {
+                    on: true,
+                    state: SdLogState::Writing,
+                    file: Some(7),
+                    written: 1_200_000,
+                    dropped: 3,
+                    errors: 1,
+                    busy_max_us: 150,
+                },
+                ..SdStatus::card(SdState::Ready, 300, Some(5))
+            },
+            &[1, 2, 0xAC, 0x02, 1, 5, 1, 2, 1, 7, 0x80, 0x9F, 0x49, 3, 1, 0x96, 0x01],
+        ),
     ] {
         if let BridgeToHost::Status { sd: field, .. } = &mut status {
             *field = Some(sd);
@@ -1090,10 +1126,59 @@ fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_c
 
 #[test]
 fn link_codec_pins_format_sd_bytes_when_host_asks() {
-    // Postcard's variant index, last of the commands, and nothing else.
+    // Postcard's variant index, and nothing else.
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&HostToBridge::FormatSd, &mut out).expect("encodes");
     assert_eq!(frame_body(&out[..n]), [16]);
+}
+
+#[test]
+fn link_round_trips_set_sd_log_when_encoded() {
+    // Postcard's variant index, last of the commands, then `on`'s byte.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    for (on, byte) in [(false, 0), (true, 1)] {
+        let cmd = HostToBridge::SetSdLog { on };
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), [17, byte]);
+        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        assert_eq!(decoded, cmd);
+    }
+}
+
+#[test]
+fn link_round_trips_status_when_sd_log_is_full() {
+    let mut status = largest_status();
+    let BridgeToHost::Status { sd: Some(sd), .. } = &mut status else {
+        panic!("the largest status reports a card")
+    };
+    sd.log = SdLog {
+        on: true,
+        state: SdLogState::Failed,
+        file: Some(u32::MAX),
+        written: u64::MAX,
+        dropped: u32::MAX,
+        errors: u32::MAX,
+        busy_max_us: u32::MAX,
+    };
+    assert_eq!(round_trip(&status), status);
+    for state in [
+        SdLogState::Off,
+        SdLogState::Waiting,
+        SdLogState::Writing,
+        SdLogState::Full,
+        SdLogState::Refused,
+        SdLogState::Failed,
+    ] {
+        sd_log_state(&mut status, state);
+        assert_eq!(round_trip(&status), status, "{state:?}");
+    }
+}
+
+/// `status` with its SD log in `state`.
+fn sd_log_state(status: &mut BridgeToHost, state: SdLogState) {
+    if let BridgeToHost::Status { sd: Some(sd), .. } = status {
+        sd.log.state = state;
+    }
 }
 
 #[test]

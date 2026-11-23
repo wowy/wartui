@@ -1,7 +1,7 @@
 //! Number and label text shared by the subcommands' reports and the TUI.
 
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::link::{SdState, SdStatus};
+use wartui_proto::link::{SdLogState, SdState, SdStatus};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -81,7 +81,7 @@ pub(crate) fn gb(mib: u32) -> String {
 /// The bridge's microSD card, as `form` shows it: `53.7 of 58.9 GB free`, or `no slot` for a
 /// bridge with none.
 pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
-    let Some(SdStatus { state, card_mb, free_mb }) = sd else { return "no slot".to_owned() };
+    let Some(SdStatus { state, card_mb, free_mb, .. }) = sd else { return "no slot".to_owned() };
     let size = gb(card_mb);
     match (state, form) {
         (SdState::NoCard, _) => "no card".to_owned(),
@@ -95,6 +95,39 @@ pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
         (SdState::Failed, SdForm::Line) => format!("card error ({size} GB)"),
         (SdState::Failed, SdForm::Row) => "card error".to_owned(),
     }
+}
+
+/// `bytes` in MB or GB, MiB and GiB with one decimal as [`gb`] gives them: `1.2 MB`.
+pub(crate) fn bytes_text(bytes: u64) -> String {
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    if mib < 1024.0 { format!("{mib:.1} MB") } else { format!("{:.1} GB", mib / 1024.0) }
+}
+
+/// The bridge's SD log: `off`, `on · waiting for a card`, `on · writing LOG/00000007.BIN · 1.2 MB
+/// written · 0 dropped · 0 errors`, or `no slot` for a bridge with no card slot.
+pub(crate) fn sd_log_text(sd: Option<SdStatus>) -> String {
+    let Some(SdStatus { log, .. }) = sd else { return "no slot".to_owned() };
+    if !log.on {
+        return "off".to_owned();
+    }
+    let doing = match log.state {
+        // The writer has not said yet.
+        SdLogState::Off => return "on".to_owned(),
+        SdLogState::Waiting => "waiting for a card".to_owned(),
+        SdLogState::Writing => {
+            let file = log.file.map_or_else(String::new, |n| format!(" LOG/{n:08}.BIN"));
+            format!(
+                "writing{file} · {} written · {} dropped · {} errors",
+                bytes_text(log.written),
+                thousands(u64::from(log.dropped)),
+                thousands(u64::from(log.errors)),
+            )
+        }
+        SdLogState::Full => "card full".to_owned(),
+        SdLogState::Refused => "volume refused".to_owned(),
+        SdLogState::Failed => "stopped after a card error".to_owned(),
+    };
+    format!("on · {doing}")
 }
 
 /// Format a set as channel numbers, the units every other tool uses.
@@ -134,23 +167,74 @@ fn push_run(out: &mut String, start: u8, end: u8) {
 #[cfg(test)]
 mod tests {
     use wartui_proto::bus::{NodeBoard, Slot};
-    use wartui_proto::link::{SdState, SdStatus};
+    use wartui_proto::link::{SdLog, SdLogState, SdState, SdStatus};
     use wartui_proto::mac::Mac;
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-    use super::{SdForm, channel_list, node_name, sd_text, slot_named, slot_range, thousands};
+    use super::{
+        SdForm, bytes_text, channel_list, node_name, sd_log_text, sd_text, slot_named, slot_range,
+        thousands,
+    };
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 
     /// A "64 GB" card: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
-        Some(SdStatus { state, card_mb: 60_350, free_mb })
+        Some(SdStatus::card(state, 60_350, free_mb))
+    }
+
+    /// A ready card whose log is `log`.
+    fn logging(log: SdLog) -> Option<SdStatus> {
+        Some(SdStatus { log, ..SdStatus::card(SdState::Ready, 60_350, Some(55_000)) })
+    }
+
+    #[test]
+    fn sd_log_text_names_each_state_when_setting_is_on() {
+        let on = |state| sd_log_text(logging(SdLog { on: true, state, ..SdLog::OFF }));
+        assert_eq!(on(SdLogState::Waiting), "on · waiting for a card");
+        assert_eq!(on(SdLogState::Full), "on · card full");
+        assert_eq!(on(SdLogState::Refused), "on · volume refused");
+        assert_eq!(on(SdLogState::Failed), "on · stopped after a card error");
+        assert_eq!(on(SdLogState::Off), "on");
+    }
+
+    #[test]
+    fn sd_log_text_names_file_and_counts_when_writing() {
+        let log = SdLog {
+            on: true,
+            state: SdLogState::Writing,
+            file: Some(7),
+            written: 1_258_291,
+            dropped: 0,
+            errors: 1_200,
+            busy_max_us: 90,
+        };
+        assert_eq!(
+            sd_log_text(logging(log)),
+            "on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 1,200 errors"
+        );
+    }
+
+    #[test]
+    fn sd_log_text_reads_off_or_no_slot_when_setting_is_off_or_bridge_has_no_slot() {
+        assert_eq!(sd_log_text(logging(SdLog::OFF)), "off");
+        // Off is the setting, whatever the writer is still finishing.
+        let closing = SdLog { state: SdLogState::Writing, file: Some(3), ..SdLog::OFF };
+        assert_eq!(sd_log_text(logging(closing)), "off");
+        assert_eq!(sd_log_text(None), "no slot");
+    }
+
+    #[test]
+    fn bytes_text_switches_to_gb_when_past_1024_mb() {
+        assert_eq!(bytes_text(0), "0.0 MB");
+        assert_eq!(bytes_text(1_258_291), "1.2 MB");
+        assert_eq!(bytes_text(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
     }
 
     #[test]
     fn sd_text_names_each_state_when_printed_as_a_line() {
         let line = |sd| sd_text(sd, SdForm::Line);
-        let no_card = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
+        let no_card = SdStatus::card(SdState::NoCard, 0, None);
         assert_eq!(line(None), "no slot");
         assert_eq!(line(Some(no_card)), "no card");
         assert_eq!(line(card(SdState::NoFat32, None)), "58.9 GB, not FAT32");
@@ -172,7 +256,7 @@ mod tests {
 
     #[test]
     fn sd_text_rounds_to_one_decimal_when_size_is_not_whole_gb() {
-        let sd = Some(SdStatus { state: SdState::NoFat32, card_mb: 30_436, free_mb: None });
+        let sd = Some(SdStatus::card(SdState::NoFat32, 30_436, None));
         assert_eq!(sd_text(sd, SdForm::Line), "29.7 GB, not FAT32");
     }
 

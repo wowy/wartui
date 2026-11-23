@@ -129,6 +129,9 @@ pub struct Snapshot {
     /// Whether the bridge lets a phone link to it as a WardriveESP board, from its last `Status`.
     /// `None` before its first.
     pub wardrive_esp: Option<bool>,
+    /// Whether the bridge logs to its microSD card, from its last `Status`. `None` before its
+    /// first, and from a bridge with no card slot.
+    pub sd_log: Option<bool>,
     /// Channels of the pool no node can take, from the bridge's last plan. Empty before one.
     pub unreachable: ChannelSet,
     /// Every node, ordered by slot as the carrier lays them out, then the slotless ones by MAC, so
@@ -359,6 +362,7 @@ impl FleetEngine {
             scan: self.scan,
             ble_slot: self.ble_slot,
             wardrive_esp: self.bridge_status.map(|status| status.bluetooth.wardrive_esp),
+            sd_log: self.bridge_status.and_then(|status| status.sd).map(|sd| sd.log.on),
             unreachable: self
                 .fleet
                 .as_ref()

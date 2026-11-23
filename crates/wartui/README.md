@@ -22,7 +22,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
 | `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
-| `sd`           | Show the bridge's microSD card, or format it; see "The SD card"                     |
+| `sd`           | Show the bridge's microSD card, format it, or set its log; see "The SD card"        |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -842,11 +842,14 @@ two after a duty change, since no reading spans two duties. `wartui status` prin
 The bridge's board has a microSD slot. `wartui sd` shows the card, and `wartui sd format` formats
 it: one FAT32 partition labeled `WARTUI`, laid out as a new card ships. **A format erases
 everything on the card**, and the command asks no confirmation, as `power-cycle` does not.
+`wartui sd log` reads or sets the SD log setting: whether the bridge logs to the card.
 
 ```sh
 wartui sd                   # the card now; changes nothing
 wartui sd format            # erase and format it, then print the card
 wartui sd format --bridge 44:C0
+wartui sd log               # the log setting, and what the log is doing
+wartui sd log off           # stop logging; `on` starts again
 ```
 
 ```
@@ -874,7 +877,32 @@ the bridge's answer and fails with its words unless the card was formatted:
 `no SD card to format`, `the SD card is already being formatted` or `the SD card format failed`.
 `wartui status` prints an `sd card` line too.
 
-In `run`, settings' `format` row, under `sd card`, shows the card as the bridge reports it, and
+`wartui sd log on` and `wartui sd log off` set the setting alone, which the bridge keeps across its
+reboots; with none stored, it logs. The command reads the setting back and fails with
+`the bridge did not take the setting` when the bridge holds the other one. With no state given, it
+prints the line and changes nothing:
+
+```
+$ wartui sd log
+sd log     on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 0 errors
+```
+
+The log line reads:
+
+| Line                                | What it means                                                                          |
+|-------------------------------------|----------------------------------------------------------------------------------------|
+| `on · writing LOG/00000007.BIN · …` | Logging to that file; bytes written, records dropped, card errors                      |
+| `on · waiting for a card`           | On, with no card the bridge can write to yet                                           |
+| `on · card full`                    | No room, even after deleting the oldest logs                                           |
+| `on · volume refused`               | The card's volume is one the bridge will not write to; format it                       |
+| `on · stopped after a card error`   | Stopped until the card is reinserted or formatted, or the setting is turned off and on |
+| `off`                               | The setting is off                                                                     |
+| `no slot`                           | The bridge drives no card slot                                                         |
+
+`wartui status` prints an `sd log` line after `sd card`.
+
+In `run`, settings' `log` row, under `sd card`, sets the log as `wartui sd log` does; see
+"In settings (`c`)". The `format` row below it shows the card as the bridge reports it, and
 changes while settings is open. `Enter` on it opens a confirm naming the card's size; `y` sends the
 format, and any other key cancels. Settings stays open behind the confirm, its edits kept. The
 footer says `formatting the SD card…`, then the bridge's answer when it comes. The row reads:
@@ -991,16 +1019,16 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                                |
-|---------------------|---------------------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                                           |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                         |
-| Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)        |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                  |
-| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it              |
-| `Enter`             | Apply every row; pool, fan, bluetooth and wardrive esp to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                                             |
-| `ctrl-c`            | Quit                                                                                        |
+| Key                 | What it does                                                                                        |
+|---------------------|-----------------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                                   |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                                 |
+| Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)                |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                          |
+| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it                      |
+| `Enter`             | Apply every row; pool, fan, bluetooth, wardrive esp and sd log to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                                     |
+| `ctrl-c`            | Quit                                                                                                |
 
 On the `excluded ssids` page:
 
@@ -1019,8 +1047,10 @@ The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan`
 phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
 `remember bridge` (`off`, `on`),
 `wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, the
-API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `format` row, which
-formats the bridge's microSD card (see "The SD card"). `excluded ssids` shows how many are listed, or
+API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `log` row (`off`,
+`on`; whether the bridge logs to its microSD card), then the `format` row, which formats the card
+(see "The SD card"). `log` reads `no bridge` while the link is down and `no slot` on a bridge with
+no card slot, and does not step. `excluded ssids` shows how many are listed, or
 `none`, and opens a page that lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
 one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
 the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns to
@@ -1029,10 +1059,11 @@ neither move nor close; `↑` and `↓` leave it, and the footer shows the `ctrl
 holds text. `wigle name` shows in full, cut short with `…` when it is wider than the row.
 `wdgwars` and `wigle token` show their last three characters, up to six bullets before them, and
 from ten characters their first one to three. `Enter` sends the rows to the engine and writes
-every row shown but the pool, the fan, `bluetooth` and `wardrive esp` to `excluded-ssids`, `[bridge]`, `[gps] wait-for-fix` and
-`[api-keys]`, whatever was there, and settings closes. The pool, the fan, `bluetooth` and
-`wardrive esp` go to the bridge only when their rows moved, and none is written to `wartui.toml`.
-The bridge keeps the pool, the fan and `wardrive esp`; the run keeps `bluetooth` and asks for it
+every row shown but the pool, the fan, `bluetooth`, `wardrive esp` and `log` to `excluded-ssids`,
+`[bridge]`, `[gps] wait-for-fix` and `[api-keys]`, whatever was there, and settings closes. The
+pool, the fan, `bluetooth`, `wardrive esp` and `log` go to the bridge only when their rows moved,
+and none is written to `wartui.toml`. The bridge keeps the pool, the fan, `wardrive esp` and
+`log`; the run keeps `bluetooth` and asks for it
 again when the bridge reboots. While the bridge reports
 the scan stopped, `bluetooth` reads `scan stopped` and does not step, since the run starts the scan
 once the bridge answers. Before the bridge has reported a scan, it reads `off`, and the run starts
@@ -1627,6 +1658,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
 - **`sd card  …`**: the bridge's microSD card, its size and free space; see "The SD card".
+- **`sd log  …`**: the bridge's log on that card: the setting, then what it is doing; see "The SD
+  card".
 - **`pool  …`**: the channel pool the bridge holds and cuts; see "Channel pools".
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see

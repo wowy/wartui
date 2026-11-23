@@ -28,6 +28,7 @@
 //! board, which the bridge keeps too.
 //! [`Command::FormatSd`] asks the bridge to format its microSD card, and the answer reaches the
 //! operator as [`Snapshot::sd_answer`], as a power-cycle's does.
+//! [`Command::SetSdLog`] sets whether the bridge logs to that card, which the bridge keeps.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those

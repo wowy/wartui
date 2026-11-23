@@ -31,8 +31,8 @@ use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED,
     HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER, PairWindow,
-    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome, SdState,
-    SdStatus, USB_TOOK_BRIDGE,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome, SdLog,
+    SdLogState, SdState, SdStatus, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
@@ -3960,13 +3960,60 @@ fn engine_reports_sd_card_when_status_arrives() {
     };
     assert_eq!(shown(&engine), None, "no `Status` yet");
 
-    let card = SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(55_000) };
+    let card = SdStatus::card(SdState::Ready, 60_350, Some(55_000));
     engine.handle(sd_status(Some(card)), clock.at(1));
     assert_eq!(shown(&engine), Some(Some(card)));
 
     // A bridge with no slot.
     engine.handle(sd_status(None), clock.at(1));
     assert_eq!(shown(&engine), Some(None));
+}
+
+#[test]
+fn engine_sends_set_sd_log_then_get_status_when_commanded() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let batch = engine.handle(Event::Command(Command::SetSdLog(false)), clock.at(1));
+
+    // The bridge stores the setting before it answers the poll, so the `Status` carries it.
+    assert_eq!(batch.bulk, [HostToBridge::SetSdLog { on: false }, HostToBridge::GetStatus]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    // The bridge keeps the setting, so nothing re-sends it.
+    let later = engine.handle(Event::Tick, clock.at(30));
+    assert!(!later.bulk.iter().any(|cmd| matches!(cmd, HostToBridge::SetSdLog { .. })));
+}
+
+#[test]
+fn engine_reports_sd_log_when_status_arrives() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(connected(), clock.at(0));
+    let shown = |engine: &FleetEngine| engine.snapshot(clock.at(1), StoreStats::default()).sd_log;
+
+    let on = SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF };
+    let card = SdStatus { log: on, ..SdStatus::card(SdState::NoCard, 0, None) };
+    engine.handle(sd_status(Some(card)), clock.at(1));
+    assert_eq!(shown(&engine), Some(true));
+
+    engine.handle(sd_status(Some(SdStatus::card(SdState::NoCard, 0, None))), clock.at(1));
+    assert_eq!(shown(&engine), Some(false));
+
+    // A bridge with no slot has no setting to show.
+    engine.handle(sd_status(None), clock.at(1));
+    assert_eq!(shown(&engine), None);
+}
+
+#[test]
+fn engine_reports_no_sd_log_when_no_status_has_arrived() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(connected(), clock.at(0));
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+
+    assert_eq!(snapshot.sd_log, None, "the setting is the bridge's to say");
 }
 
 #[test]

@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args as ClapArgs, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Subcommand};
 #[cfg(any(target_os = "linux", test))]
 use wartui_bridge::DisconnectCause;
 #[cfg(any(target_os = "linux", test))]
@@ -65,6 +65,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::{self, Mac};
 
+use crate::OnOff;
 use crate::config::Link;
 #[cfg(any(target_os = "linux", test))]
 use crate::status::bonds_text;
@@ -157,13 +158,6 @@ struct WardriveEspArgs {
     /// `crates/wartui/README.md` § "Config file".
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-}
-
-/// A setting, as the command line spells it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OnOff {
-    On,
-    Off,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -807,7 +801,7 @@ async fn wardrive_esp(args: WardriveEspArgs) -> Result<()> {
     let (mut link, info) =
         crate::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
             .await?;
-    let wanted = args.state.map(|state| state == OnOff::On);
+    let wanted = args.state.map(OnOff::is_on);
     if let Some(on) = wanted {
         link.send_bulk(HostToBridge::SetWardriveEsp { on }).context("queueing the setting")?;
         let state = if on { "on" } else { "off" };

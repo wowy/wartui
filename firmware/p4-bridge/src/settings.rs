@@ -1,5 +1,6 @@
-//! The settings the P4 keeps on flash: the lid fan's duty, the channel pool and whether it offers
-//! phones the WardriveESP service, in the first sector of its `nvs` partition.
+//! The settings the P4 keeps on flash: the lid fan's duty, the channel pool, whether it offers
+//! phones the WardriveESP service and whether it logs to its microSD card, in the first sector of
+//! its `nvs` partition.
 //! `wartui_proto::settings` has the records' layout.
 //!
 //! **The P4 is the settings' system of record.** It reads the sector once at boot, on every
@@ -64,6 +65,19 @@ pub fn set_wardrive_esp(shared: &Shared, on: bool) {
         let state = if on { "on" } else { "off" };
         let mut message = LogStr::new();
         let _ = write!(message, "wardrive esp {state} not saved, so it holds until reboot: {why}");
+        shared.push_error(&message);
+    }
+}
+
+/// A `SetSdLog`: log to the card when `on`, now, and store it when the sector does not hold it,
+/// so a repeat retries a save that failed.
+#[inline(never)]
+pub fn set_sd_log(shared: &Shared, on: bool) {
+    crate::sd::set_log(shared, on);
+    if let Err(why) = save(shared, Setting::SdLog(on)) {
+        let state = if on { "on" } else { "off" };
+        let mut message = LogStr::new();
+        let _ = write!(message, "sd log {state} not saved, so it holds until reboot: {why}");
         shared.push_error(&message);
     }
 }

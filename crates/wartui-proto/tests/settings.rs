@@ -4,7 +4,8 @@ use wartui_proto::ChannelPool;
 use wartui_proto::fan::FanDuty;
 use wartui_proto::ota::SECTOR;
 use wartui_proto::settings::{
-    self, FAN, POOL, RECORDS, Setting, Stored, WARDRIVE_ESP, WORD, Write, record, write_for,
+    self, FAN, KINDS, POOL, RECORDS, SD_LOG, Setting, Stored, WARDRIVE_ESP, WORD, Write, record,
+    write_for,
 };
 
 fn duty(pct: u8) -> FanDuty {
@@ -78,7 +79,12 @@ fn settings_read_each_tags_last_record_when_fan_and_pool_interleave() {
     store(&mut sector, fan(30));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu), wardrive_esp: None }
+        Stored {
+            fan: Some(duty(30)),
+            pool: Some(ChannelPool::Eu),
+            wardrive_esp: None,
+            sd_log: None
+        }
     );
 }
 
@@ -92,7 +98,12 @@ fn settings_skip_word_when_it_is_torn_or_its_tag_is_unknown() {
     put(&mut sector, [b'X', 7, !7, 0]);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: Some(ChannelPool::Us), wardrive_esp: None }
+        Stored {
+            fan: Some(duty(40)),
+            pool: Some(ChannelPool::Us),
+            wardrive_esp: None,
+            sd_log: None
+        }
     );
 
     // A record after them still reads.
@@ -111,7 +122,12 @@ fn settings_skip_record_when_value_is_unknown_or_check_byte_is_bad() {
     put(&mut sector, [POOL, 0, !0, 1]);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Eu), wardrive_esp: None }
+        Stored {
+            fan: Some(duty(30)),
+            pool: Some(ChannelPool::Eu),
+            wardrive_esp: None,
+            sd_log: None
+        }
     );
 }
 
@@ -153,7 +169,7 @@ fn settings_erase_and_keep_fan_when_sector_is_full_and_pool_is_written() {
     store(&mut sector, pool);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(last), pool: Some(ChannelPool::Us), wardrive_esp: None }
+        Stored { fan: Some(last), pool: Some(ChannelPool::Us), wardrive_esp: None, sd_log: None }
     );
     assert_eq!(next_offset(&sector, fan(5)), 2 * WORD);
 }
@@ -195,7 +211,12 @@ fn settings_skip_record_when_tag_is_a_bluetooth_slot() {
     store(&mut sector, fan(40));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: Some(ChannelPool::Eu), wardrive_esp: None }
+        Stored {
+            fan: Some(duty(40)),
+            pool: Some(ChannelPool::Eu),
+            wardrive_esp: None,
+            sd_log: None
+        }
     );
 }
 
@@ -225,7 +246,7 @@ fn settings_read_wardrive_esp_when_written() {
     store(&mut sector, Setting::WardriveEsp(false));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: None, wardrive_esp: Some(false) }
+        Stored { fan: Some(duty(40)), pool: None, wardrive_esp: Some(false), sd_log: None }
     );
 }
 
@@ -249,7 +270,12 @@ fn settings_keep_every_kind_when_sector_is_rewritten() {
     store(&mut sector, pool);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(30)), pool: Some(ChannelPool::Us), wardrive_esp: Some(true) }
+        Stored {
+            fan: Some(duty(30)),
+            pool: Some(ChannelPool::Us),
+            wardrive_esp: Some(true),
+            sd_log: None
+        }
     );
 }
 
@@ -260,4 +286,70 @@ fn settings_skip_wardrive_esp_record_when_value_is_not_a_flag() {
     put(&mut sector, [WARDRIVE_ESP, 2, !2, 0]);
     put(&mut sector, [WARDRIVE_ESP, 0xFF, 0x00, 0]);
     assert_eq!(settings::read(&sector).wardrive_esp, Some(true));
+}
+
+#[test]
+fn settings_read_sd_log_when_written() {
+    let mut sector = [0xFF; SECTOR];
+    assert_eq!(record(Setting::SdLog(true)), [b'L', 1, 0xFE, 0]);
+    assert_eq!(record(Setting::SdLog(false)), [b'L', 0, 0xFF, 0]);
+    assert_eq!(SD_LOG, b'L');
+    store(&mut sector, Setting::SdLog(false));
+    assert_eq!(settings::read(&sector).sd_log, Some(false));
+    store(&mut sector, fan(40));
+    store(&mut sector, Setting::SdLog(true));
+    assert_eq!(
+        settings::read(&sector),
+        Stored { fan: Some(duty(40)), pool: None, wardrive_esp: None, sd_log: Some(true) }
+    );
+}
+
+#[test]
+fn settings_read_no_sd_log_when_none_is_written() {
+    // Unset, which the P4 reads as logging on.
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, fan(40));
+    store(&mut sector, Setting::WardriveEsp(true));
+    assert_eq!(settings::read(&sector).sd_log, None);
+}
+
+#[test]
+fn settings_write_sd_log_last_when_sector_is_rewritten() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::SdLog(false));
+    store(&mut sector, Setting::WardriveEsp(true));
+    store(&mut sector, Setting::Pool(ChannelPool::Eu));
+    for i in 0..RECORDS - 3 {
+        store(&mut sector, fan(if i % 2 == 0 { 30 } else { 20 }));
+    }
+    let pool = Setting::Pool(ChannelPool::Us);
+    let Some(Write::Erase { records, len }) = write_for(&sector, pool) else {
+        panic!("a full sector erases")
+    };
+    // Fan, pool, wardrive esp, then the SD log, the new pool in its place.
+    assert_eq!(len, KINDS * WORD);
+    assert_eq!(len, 4 * WORD);
+    assert_eq!(records[..WORD], record(fan(30)));
+    assert_eq!(records[WORD..2 * WORD], record(pool));
+    assert_eq!(records[2 * WORD..3 * WORD], record(Setting::WardriveEsp(true)));
+    assert_eq!(records[3 * WORD..4 * WORD], record(Setting::SdLog(false)));
+    store(&mut sector, pool);
+    assert_eq!(
+        settings::read(&sector),
+        Stored {
+            fan: Some(duty(30)),
+            pool: Some(ChannelPool::Us),
+            wardrive_esp: Some(true),
+            sd_log: Some(false),
+        }
+    );
+}
+
+#[test]
+fn settings_skip_sd_log_record_when_check_byte_is_bad_or_value_is_not_a_flag() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::SdLog(false));
+    put(&mut sector, [SD_LOG, 1, !0, 0]);
+    put(&mut sector, [SD_LOG, 2, !2, 0]);
+    assert_eq!(settings::read(&sector).sd_log, Some(false));
 }

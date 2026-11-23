@@ -106,7 +106,7 @@ enum Command {
     Pool(pool::Args),
     /// Start or stop the bridge's scan, or show it. The bridge scans on with no host attached.
     Scan(scan::Args),
-    /// Show the bridge's microSD card, or format it, erasing it.
+    /// Show the bridge's microSD card, format it, or set whether the bridge logs to it.
     Sd(sd::Args),
     /// List the Espressif boards and CH343s attached, and the address of each, asking each CH343.
     Ports,
@@ -473,6 +473,20 @@ async fn connect_one(
     match status::wait_for_ready(&mut handle, link, connect_wait(link)).await? {
         Some(info) => Ok((handle, info)),
         None => anyhow::bail!("{}", no_bridge_notice(named, link).await),
+    }
+}
+
+/// A setting, as the command line spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
+impl OnOff {
+    /// Whether this is `on`.
+    const fn is_on(self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
@@ -1051,6 +1065,31 @@ mod tests {
         ] {
             let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
             assert!(matches!(cli.command, Some(Command::Sd(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_accepts_sd_log_when_given_on_off_or_nothing() {
+        for args in [
+            ["wartui", "sd", "log"].as_slice(),
+            &["wartui", "sd", "log", "on"],
+            &["wartui", "sd", "log", "off"],
+            &["wartui", "sd", "log", "off", "--bridge", "44:C0", "--link", "usb"],
+            &["wartui", "sd", "log", "on", "--sim"],
+        ] {
+            let cli = parse(args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            assert!(matches!(cli.command, Some(Command::Sd(_))), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_parser_refuses_sd_log_when_given_another_word() {
+        for args in [
+            ["wartui", "sd", "log", "maybe"].as_slice(),
+            &["wartui", "sd", "log", "true"],
+            &["wartui", "sd", "log", "on", "off"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
         }
     }
 

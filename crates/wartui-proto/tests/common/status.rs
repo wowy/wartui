@@ -7,7 +7,7 @@ use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, Central, HostOwner, PairWindow, QueueId, QueueStat, QueueStats,
-    RadioLinkStats, SdState, SdStatus,
+    RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
 use wartui_proto::radio_link::BleCounters;
 
@@ -52,7 +52,20 @@ pub fn largest_status() -> BridgeToHost {
         ble: Slot::from_u8(13),
         present: u32::MAX,
         members: full_members(),
-        sd: Some(SdStatus { state: SdState::Failed, card_mb: u32::MAX, free_mb: Some(u32::MAX) }),
+        sd: Some(SdStatus {
+            state: SdState::Failed,
+            card_mb: u32::MAX,
+            free_mb: Some(u32::MAX),
+            log: SdLog {
+                on: true,
+                state: SdLogState::Failed,
+                file: Some(u32::MAX),
+                written: u64::MAX,
+                dropped: u32::MAX,
+                errors: u32::MAX,
+                busy_max_us: u32::MAX,
+            },
+        }),
         bluetooth: BluetoothStatus {
             owner: HostOwner::Bluetooth,
             bonds: u8::MAX,

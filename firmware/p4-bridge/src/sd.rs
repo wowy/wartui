@@ -36,6 +36,9 @@
 //! already shows it, and answers `NoCard` and `Busy` at once, so the request signal never holds a
 //! second format. Before the first identification ends, the state says nothing yet, so a request
 //! is passed on unanswered: identification answers it `NoCard`, or the card found is formatted.
+//!
+//! **The log setting is held here, and nothing writes a log yet.** `Status` reports the setting,
+//! `Waiting` while it is on; the log's writer fills in the rest.
 
 use core::cell::Cell;
 use core::fmt::{self, Write};
@@ -54,7 +57,9 @@ use esp_hal::peripherals::{GPIO39, GPIO40, GPIO41, GPIO42, GPIO43, GPIO44, GPIO4
 use esp_hal::sdmmc::{self, ConfigError, SdHostController, Slot, SlotConfig};
 use sdio::MmcError;
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_proto::link::{BridgeToHost, LogStr, SdFormatOutcome, SdState, SdStatus};
+use wartui_proto::link::{
+    BridgeToHost, LogStr, SdFormatOutcome, SdLog, SdLogState, SdState, SdStatus,
+};
 use wartui_proto::sd::format::{Layout, Op, plan};
 use wartui_proto::sd::{BLOCK, inspect, mib};
 
@@ -99,18 +104,35 @@ pub struct Sd {
     identified: Cell<bool>,
     /// Raised by a format request that [`request_format`] passed on.
     format: Signal<NoopRawMutex, ()>,
+    /// Whether the bridge logs to the card: the setting `SetSdLog` stores.
+    log_on: Cell<bool>,
 }
 
 impl Sd {
-    pub const fn new() -> Self {
-        let none = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
-        Self { status: Cell::new(none), identified: Cell::new(false), format: Signal::new() }
+    /// No card found yet, and the log setting `log_on`, as the settings sector holds it.
+    pub const fn new(log_on: bool) -> Self {
+        Self {
+            status: Cell::new(SdStatus::card(SdState::NoCard, 0, None)),
+            identified: Cell::new(false),
+            format: Signal::new(),
+            log_on: Cell::new(log_on),
+        }
     }
 }
 
 /// The card, for `Status`. The slot is always on this board, so never `None`.
 pub fn status(shared: &Shared) -> Option<SdStatus> {
-    Some(shared.sd.status.get())
+    let log = if shared.sd.log_on.get() {
+        SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF }
+    } else {
+        SdLog::OFF
+    };
+    Some(SdStatus { log, ..shared.sd.status.get() })
+}
+
+/// Log to the card when `on`, from now.
+pub fn set_log(shared: &Shared, on: bool) {
+    shared.sd.log_on.set(on);
 }
 
 /// Take the host's request to format the card: mark it `Formatting` and pass it to [`run`], or
@@ -151,7 +173,7 @@ fn set(shared: &Shared, status: SdStatus) {
 
 /// Report no card, and answer a format asked for meanwhile.
 fn no_card(shared: &Shared) {
-    set(shared, SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
+    set(shared, SdStatus::card(SdState::NoCard, 0, None));
     if shared.sd.format.try_take().is_some() {
         answer(shared, SdFormatOutcome::NoCard);
     }
@@ -238,7 +260,7 @@ async fn identify(card: &mut Card, shared: &Shared) -> u64 {
 
 /// A card of `card_mb` that failed a read or a format.
 const fn failed(card_mb: u32) -> SdStatus {
-    SdStatus { state: SdState::Failed, card_mb, free_mb: None }
+    SdStatus::card(SdState::Failed, card_mb, None)
 }
 
 /// Say what a card that answered holds, and the clock it runs at.
@@ -266,7 +288,7 @@ async fn inspect_card(
     card_blocks: u64,
 ) -> Result<SdStatus, MmcError> {
     let card_mb = mib(card_blocks);
-    let none = SdStatus { state: SdState::NoFat32, card_mb, free_mb: None };
+    let none = SdStatus::card(SdState::NoFat32, card_mb, None);
     let on_card = |lba: u32| u64::from(lba) < card_blocks;
     read(card, 0, &mut buf[..1]).await?;
     let Some(start) = inspect::partition(&buf[0]).filter(|&lba| on_card(lba)) else {
@@ -283,7 +305,7 @@ async fn inspect_card(
         }
         None => None,
     };
-    Ok(SdStatus { state: SdState::Ready, card_mb, free_mb })
+    Ok(SdStatus::card(SdState::Ready, card_mb, free_mb))
 }
 
 /// Format the card on request, and check every [`EVERY`] that it still answers, reading a card
@@ -329,7 +351,7 @@ async fn format(
     card_blocks: u64,
 ) -> bool {
     let card_mb = mib(card_blocks);
-    set(shared, SdStatus { state: SdState::Formatting, card_mb, free_mb: None });
+    set(shared, SdStatus::card(SdState::Formatting, card_mb, None));
     log(shared, format_args!("sd: formatting the {card_mb} MiB card"));
     let start = Instant::now();
     // Any value names the volume; the clock gives each format its own.

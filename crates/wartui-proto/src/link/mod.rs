@@ -307,6 +307,13 @@ pub enum HostToBridge {
     /// Format the bridge's microSD card as FAT32, erasing it ([`crate::sd::format`]), answered
     /// by [`BridgeToHost::SdFormatted`]. The next [`BridgeToHost::Status`] shows the card.
     FormatSd,
+    /// Log to the microSD card when `on`, and store it so the P4 boots into it; unset, the P4
+    /// logs. No answer: the next [`BridgeToHost::Status`] shows the setting in force
+    /// ([`SdStatus::log`]), and a failed save answers [`BridgeToHost::Error`].
+    SetSdLog {
+        /// Whether the bridge logs.
+        on: bool,
+    },
 }
 
 /// How long [`HostToBridge::OpenPairing`] opens the pairing window.
@@ -578,6 +585,67 @@ pub struct SdStatus {
     pub card_mb: u32,
     /// The volume's free space in MiB, when it is [`SdState::Ready`] and its FSInfo sector says.
     pub free_mb: Option<u32>,
+    /// The log the bridge writes to the card.
+    pub log: SdLog,
+}
+
+impl SdStatus {
+    /// A card in `state`, with the log [`SdLog::OFF`].
+    #[must_use]
+    pub const fn card(state: SdState, card_mb: u32, free_mb: Option<u32>) -> Self {
+        Self { state, card_mb, free_mb, log: SdLog::OFF }
+    }
+}
+
+/// The log the bridge writes to its microSD card, as [`SdStatus::log`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SdLog {
+    /// The setting [`HostToBridge::SetSdLog`] stores.
+    pub on: bool,
+    /// What the writer is doing.
+    pub state: SdLogState,
+    /// The number of the file open, `LOG/NNNNNNNN.BIN`, or `None` with none open.
+    pub file: Option<u32>,
+    /// Bytes written to the card since boot.
+    pub written: u64,
+    /// Records dropped since boot, because the log's ring filled before the card took them.
+    pub dropped: u32,
+    /// Card transfers that failed since boot.
+    pub errors: u32,
+    /// The longest synchronous stretch of one writer step, in microseconds: a check that the
+    /// log never stalls the bridge's other work.
+    pub busy_max_us: u32,
+}
+
+impl SdLog {
+    /// The setting off, and nothing written.
+    pub const OFF: Self = Self {
+        on: false,
+        state: SdLogState::Off,
+        file: None,
+        written: 0,
+        dropped: 0,
+        errors: 0,
+        busy_max_us: 0,
+    };
+}
+
+/// What the bridge's SD log writer is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum SdLogState {
+    /// The setting is off.
+    Off,
+    /// The setting is on, and no writable card is in yet, or the writer is paused.
+    Waiting,
+    /// A file is open.
+    Writing,
+    /// The card has no room, even after deleting the oldest logs.
+    Full,
+    /// The card's volume is one the writer will not touch.
+    Refused,
+    /// The writer stopped on a card error or a corrupt volume, until the card is identified
+    /// again, formatted, or the setting toggled.
+    Failed,
 }
 
 /// What the bridge's microSD card holds.

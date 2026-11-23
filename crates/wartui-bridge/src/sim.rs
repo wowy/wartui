@@ -53,7 +53,8 @@
 //! Its microSD slot holds a 32 GB card with no FAT32 volume. A `FormatSd` shows it formatting
 //! for [`SD_FORMAT`], about as long as a real card takes, then ready with the free space
 //! [`format::plan`] gives and an `SdFormatted { Done }`. A `FormatSd` while one runs is `Busy`.
-//! No block is written: the card is its state alone.
+//! Its log is on at the start, and a `SetSdLog` sets it: `Status` reports it writing file 1 while
+//! the card is ready and waiting otherwise. No block is written: the card is its state alone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -72,7 +73,8 @@ use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr, LoopPhase,
     NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, SdFormatOutcome,
-    SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes, cache_chunk_body,
+    SdLog, SdLogState, SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
+    cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
@@ -227,16 +229,30 @@ const SD_BLOCKS: u64 = 62_333_952;
 /// How long the simulated card takes to format. On the bridge's clock.
 const SD_FORMAT: Duration = Duration::from_secs(2);
 
-/// The simulated microSD card: what `Status` reports, and when a running format ends.
+/// The simulated microSD card: what `Status` reports, when a running format ends, and whether
+/// it logs.
 struct SimSd {
-    status: SdStatus,
+    card: SdStatus,
     done_at: Option<tokio::time::Instant>,
+    log_on: bool,
 }
 
 impl SimSd {
     fn new() -> Self {
         let card_mb = u32::try_from(SD_BLOCKS / 2048).unwrap_or(u32::MAX);
-        Self { status: SdStatus { state: SdState::NoFat32, card_mb, free_mb: None }, done_at: None }
+        Self { card: SdStatus::card(SdState::NoFat32, card_mb, None), done_at: None, log_on: true }
+    }
+
+    /// The card as `Status` reports it, its log included.
+    fn status(&self) -> SdStatus {
+        let log = match (self.log_on, self.card.state) {
+            (false, _) => SdLog::OFF,
+            (true, SdState::Ready) => {
+                SdLog { on: true, state: SdLogState::Writing, file: Some(1), ..SdLog::OFF }
+            }
+            (true, _) => SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF },
+        };
+        SdStatus { log, ..self.card }
     }
 
     /// Start a format, or `Busy` while one runs.
@@ -244,7 +260,7 @@ impl SimSd {
         if self.done_at.is_some() {
             return Some(BridgeToHost::SdFormatted { outcome: SdFormatOutcome::Busy });
         }
-        self.status = SdStatus { state: SdState::Formatting, free_mb: None, ..self.status };
+        self.card = SdStatus { state: SdState::Formatting, free_mb: None, ..self.card };
         self.done_at = Some(tokio::time::Instant::now() + SD_FORMAT);
         None
     }
@@ -255,11 +271,11 @@ impl SimSd {
         let outcome = match format::plan(SD_BLOCKS, volume_id) {
             Ok(layout) => {
                 let free_mb = Some(layout.free_mb());
-                self.status = SdStatus { state: SdState::Ready, free_mb, ..self.status };
+                self.card = SdStatus { state: SdState::Ready, free_mb, ..self.card };
                 SdFormatOutcome::Done
             }
             Err(_) => {
-                self.status = SdStatus { state: SdState::Failed, free_mb: None, ..self.status };
+                self.card = SdStatus { state: SdState::Failed, free_mb: None, ..self.card };
                 SdFormatOutcome::Failed
             }
         };
@@ -652,7 +668,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     ble: core.bluetooth(),
                     present: present.load(Ordering::Relaxed),
                     members: core.members(),
-                    sd: Some(sd.status),
+                    sd: Some(sd.status()),
                     // A host on USB, and no Bluetooth link to report.
                     bluetooth: BluetoothStatus {
                         owner: HostOwner::Usb,
@@ -719,6 +735,11 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 // No phone ever links: the setting is kept for `Status` alone.
                 HostToBridge::SetWardriveEsp { on } => {
                     wardrive_esp = on;
+                    None
+                }
+                // No block is written: the setting changes what `Status` reports.
+                HostToBridge::SetSdLog { on } => {
+                    sd.log_on = on;
                     None
                 }
                 HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {

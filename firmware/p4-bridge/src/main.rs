@@ -46,10 +46,10 @@
 //!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty, the channel pool and the WardriveESP setting, which `Status` reports. A host's `SetFan`,
-//! `SetPool` or `SetWardriveEsp` stores its change there. The scan mode is not stored. The C6's
-//! Bluetooth bonds are read from flash at boot too, and go down to it after each hello
-//! (`src/bonds.rs`).
+//! duty, the channel pool, the WardriveESP setting and the SD log setting, which `Status` reports.
+//! A host's `SetFan`, `SetPool`, `SetWardriveEsp` or `SetSdLog` stores its change there. The scan
+//! mode is not stored. The C6's Bluetooth bonds are read from flash at boot too, and go down to it
+//! after each hello (`src/bonds.rs`).
 //!
 //! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why); the rest
 //! of the queues are in internal RAM.
@@ -347,7 +347,7 @@ impl Shared {
             fleet: RefCell::new(fleet),
             fleet_wake: Signal::new(),
             fleet_sleep: Cell::new(None),
-            sd: sd::Sd::new(),
+            sd: sd::Sd::new(stored.sd_log.unwrap_or(true)),
         }
     }
 

@@ -133,6 +133,10 @@ impl FleetEngine {
                 batch.bulk.push(HostToBridge::FormatSd);
                 batch.bulk.push(HostToBridge::GetStatus);
             }
+            Command::SetSdLog(on) => {
+                batch.bulk.push(HostToBridge::SetSdLog { on });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
             Command::SetPool { pool } => {
                 batch.bulk.push(HostToBridge::SetPool { pool });
                 batch.bulk.push(HostToBridge::GetStatus);
