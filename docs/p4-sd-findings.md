@@ -145,6 +145,21 @@ The P4 masks no interrupt in any of it, so a UART's FIFO is still served.
 | Five `flash-bridge` updates with the log writing | All installed and confirmed |
 | A card formatted FAT32 by macOS's `diskutil`, 16 KiB clusters | Mounted and logged: one file of 21 KB over two clusters, 332 records, 0 unreadable. `fsck` clean |
 
+### On a carrier with ten nodes
+
+The same firmware on the bridge `D0:1C`, a carrier-10 with ten nodes and the card formatted by
+macOS. `flash-bridge` installed it, the C6's bundled image included, with the log writing. The
+load was a Wi-Fi and Bluetooth scan on every node with `wartui sniff` taking every frame over USB,
+for 3 minutes with the log on, then 3 with it off:
+
+| Log | Records to the host | Radio link | Host link | Queues | SD log |
+| --- | --- | --- | --- | --- | --- |
+| On | 439: 88 sightings in 79 batches, 360 heartbeats, 0 undecodable | 198 packets, 0 CRC, magic or UART errors, no new gap | 0 UART errors | 0 dropped | 64 KB, 0 dropped, 0 errors |
+| Off | 497: 221 sightings in 137 batches, 360 heartbeats, 0 undecodable | 198 packets, the same | 0 UART errors | 0 dropped | |
+
+The bench hears few networks, so this was a light load. The writer's steps on this board were next
+102, fed 63, copy 59 and plan 83 µs; opening a file took 407–439 µs.
+
 ### Deleting the history for nothing
 
 After the power cuts, the Mac's own Spotlight and fsevents files took about 22 clusters while the
@@ -160,6 +175,5 @@ staged.
 ## Not answered here
 
 The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
-the bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested, with
-the log or without it. Nor was a WardriveESP phone session, the case the log is for, or the same
-load run with the log on and then off to compare the host link's counters.
+the bridge does not. A carrier under a heavy load, a drive or a two-node burst, was not tested
+with the log, nor was a WardriveESP phone session, the case the log is for.
