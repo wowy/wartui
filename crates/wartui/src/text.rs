@@ -1,6 +1,7 @@
 //! Number and label text shared by the subcommands' reports and the TUI.
 
 use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::link::{SdState, SdStatus};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -63,6 +64,28 @@ pub(crate) fn node_name(board: NodeBoard, slot: Option<Slot>, mac: &Mac) -> Stri
     slot.map_or_else(|| mac::short(mac).to_string(), |slot| board.label(slot).to_string())
 }
 
+/// `mib` in GB, MiB / 1024 with one decimal: `61.8`.
+fn gb(mib: u32) -> String {
+    format!("{:.1}", f64::from(mib) / 1024.0)
+}
+
+/// The bridge's microSD card, as `wartui status` and `wartui sd` print it:
+/// `58.9 of 61.8 GB free`, or `no slot` for a bridge with none.
+pub(crate) fn sd_text(sd: Option<SdStatus>) -> String {
+    let Some(SdStatus { state, card_mb, free_mb }) = sd else { return "no slot".to_owned() };
+    let size = gb(card_mb);
+    match state {
+        SdState::NoCard => "no card".to_owned(),
+        SdState::NoFat32 => format!("{size} GB, not FAT32"),
+        SdState::Ready => match free_mb {
+            Some(free) => format!("{} of {size} GB free", gb(free)),
+            None => format!("{size} GB, FAT32"),
+        },
+        SdState::Formatting => "formatting".to_owned(),
+        SdState::Failed => format!("card error ({size} GB)"),
+    }
+}
+
 /// Format a set as channel numbers, the units every other tool uses.
 ///
 /// Runs collapse to `first-last`, so a contiguous set reads `1-11`.
@@ -100,12 +123,37 @@ fn push_run(out: &mut String, start: u8, end: u8) {
 #[cfg(test)]
 mod tests {
     use wartui_proto::bus::{NodeBoard, Slot};
+    use wartui_proto::link::{SdState, SdStatus};
     use wartui_proto::mac::Mac;
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-    use super::{channel_list, node_name, slot_named, slot_range, thousands};
+    use super::{channel_list, node_name, sd_text, slot_named, slot_range, thousands};
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+
+    /// A "64 GB" card: 63,284 MiB, 61.8 GB.
+    fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
+        Some(SdStatus { state, card_mb: 63_284, free_mb })
+    }
+
+    #[test]
+    fn sd_text_names_each_state_when_printed_as_a_line() {
+        let line = sd_text;
+        let no_card = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
+        assert_eq!(line(None), "no slot");
+        assert_eq!(line(Some(no_card)), "no card");
+        assert_eq!(line(card(SdState::NoFat32, None)), "61.8 GB, not FAT32");
+        assert_eq!(line(card(SdState::Ready, Some(60_314))), "58.9 of 61.8 GB free");
+        assert_eq!(line(card(SdState::Ready, None)), "61.8 GB, FAT32");
+        assert_eq!(line(card(SdState::Formatting, None)), "formatting");
+        assert_eq!(line(card(SdState::Failed, None)), "card error (61.8 GB)");
+    }
+
+    #[test]
+    fn sd_text_rounds_to_one_decimal_when_size_is_not_whole_gb() {
+        let sd = Some(SdStatus { state: SdState::NoFat32, card_mb: 30_436, free_mb: None });
+        assert_eq!(sd_text(sd), "29.7 GB, not FAT32");
+    }
 
     #[test]
     fn node_name_gives_slot_label_when_node_has_slot() {

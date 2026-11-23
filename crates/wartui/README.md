@@ -22,6 +22,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `fan`          | Read or set the carrier's lid fan duty; see "The lid fan"                           |
 | `pool`         | Read or set the bridge's channel pool; see "The channel pool"                       |
 | `scan`         | Start or stop the bridge's scan, or show it; see "The scan"                         |
+| `sd`           | Show the bridge's microSD card, or format it; see "The SD card"                     |
 | `ports`        | List the Espressif boards and CH343s attached, and the address of each              |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
@@ -425,7 +426,7 @@ wartui refuses to start on an unknown key or table, naming the file and line. A 
 `wartui scan start --bluetooth`, since the bridge keeps the pool and picks the Bluetooth node. An out-of-range value,
 a malformed `[bridge] mac`, a `mac`, `serial` or `bluetooth-address` beside `remember = false`, or an `excluded-ssids`
 entry that is empty, over 32 bytes, or listed twice is refused too, naming the file and key.
-`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `ota` and `bluetooth` read
+`status`, `sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `sd`, `ota` and `bluetooth` read
 only `[bridge]`, and treat a broken file as no bridge remembered, so it cannot stop them.
 `bluetooth pair` ignores `link`. `flash-bridge` reads only `[bridge]`, and refuses a broken file,
 since it decides which board gets firmware. `flash-fleet` never
@@ -453,7 +454,7 @@ bytes.
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
 takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `power-cycle`, `fan`,
-`pool`, `scan`, `ota`, `flash-bridge` and `bluetooth`. A named file that is missing is refused; a missing
+`pool`, `scan`, `sd`, `ota`, `flash-bridge` and `bluetooth`. A named file that is missing is refused; a missing
 default file silently means the built-in defaults.
 
 ### Benchmarking the store
@@ -835,6 +836,43 @@ sends it only when the row moved; `no fan` means the bridge reported none, and `
 link is down. While the link is up, the header shows the fan after the bridge, as
 `fan 40% 1830 rpm`, or `fan 40%` with no reading: in the bridge's first second, and for a second or
 two after a duty change, since no reading spans two duties. `wartui status` prints a `fan` line too.
+
+### The SD card
+
+The bridge's board has a microSD slot. `wartui sd` shows the card, and `wartui sd format` formats
+it: one FAT32 partition labeled `WARTUI`, laid out as a new card ships. **A format erases
+everything on the card**, and the command asks no confirmation, as `power-cycle` does not.
+
+```sh
+wartui sd                   # the card now; changes nothing
+wartui sd format            # erase and format it, then print the card
+wartui sd format --bridge 44:C0
+```
+
+```
+$ wartui sd format
+formatting the SD card on bridge 02:00:5E:10:9D:24
+SD card formatted
+sd card    58.9 of 61.8 GB free
+```
+
+The card line reads:
+
+| Line                                 | What it means                                          |
+|--------------------------------------|--------------------------------------------------------|
+| `58.9 of 61.8 GB free`               | A FAT32 volume, and its free space                     |
+| `61.8 GB, FAT32`                     | A FAT32 volume whose free space the bridge cannot read |
+| `61.8 GB, not FAT32`                 | A card to format before the bridge can use it          |
+| `formatting`                         | A format is running                                    |
+| `card error (61.8 GB)`               | The card failed a read or the last format              |
+| `no card`                            | The slot is empty                                      |
+| `no slot`                            | The bridge drives no card slot                         |
+
+GB here is MiB / 1024. It resolves one bridge and takes `--config PATH` as `scan` does, and `--sim`
+as `status` does. A format of a 64 GB card takes a few seconds. The command waits up to 120 s for
+the bridge's answer and fails with its words unless the card was formatted:
+`no SD card to format`, `the SD card is already being formatted` or `the SD card format failed`.
+`wartui status` prints an `sd card` line too.
 
 ### The channel pool
 
@@ -1316,7 +1354,7 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 ## The Bluetooth link
 
 **`--link bluetooth` reaches the bridge through its C6 instead of its CH343.** `run`, `status`,
-`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `flash-bridge`, `ota`, `bluetooth forget`
+`sniff`, `reset`, `power-cycle`, `fan`, `pool`, `scan`, `sd`, `flash-bridge`, `ota`, `bluetooth forget`
 and `bluetooth wardrive-esp` take it. `[bridge] link = "bluetooth"` makes it the default, and `run` saves the link it connected
 over there. A `--bridge` path is always USB, and `--link bluetooth` refuses one. Updates over
 Bluetooth are slower than over USB, and one that fails is recovered over USB ("Flashing the
@@ -1514,7 +1552,7 @@ keeps the first that answers the link protocol. `run` saves that address to `war
 `[bridge] mac`, and the CH343's serial number as `serial`, so later runs open only that port. A
 capture given `--bridge` saves the named board once it answers, since naming it for a capture is
 choosing it. `flash-bridge` over USB saves the board it found and flashed. `status`, `sniff`, `reset`,
-`power-cycle`, `fan`, `pool` and `ota` read it and save nothing, so questioning a board
+`power-cycle`, `fan`, `pool`, `sd` and `ota` read it and save nothing, so questioning a board
 changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
 unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
 
@@ -1570,6 +1608,7 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
   P4 updating its radio. One line per report, and the counters follow.
+- **`sd card  …`**: the bridge's microSD card, its size and free space; see "The SD card".
 - **`pool  …`**: the channel pool the bridge holds and cuts; see "Channel pools".
 - **`scan  …`**: what the bridge scans, `stopped`, `wifi` or `wifi + bluetooth`; see "The scan".
 - **`bluetooth  …`**: the slot the bridge gave the Bluetooth scan, by its silk name, or `none`; see

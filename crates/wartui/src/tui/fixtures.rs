@@ -198,6 +198,7 @@ pub(super) fn busy() -> Snapshot {
             dropped_since_attach: 0,
             uptime_ms: 60_000,
             fan: None,
+            sd: None,
             // What a bridge on USB with no Bluetooth host reports.
             bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
         }),
@@ -214,6 +215,7 @@ pub(super) fn busy() -> Snapshot {
         gps: None,
         excluded_ssids: Vec::new(),
         power_answer: None,
+        sd_answer: None,
         awaiting_fix: false,
     }
 }

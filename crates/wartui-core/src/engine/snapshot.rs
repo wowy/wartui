@@ -2,7 +2,7 @@ use wartui_bridge::{BridgeInfo, DisconnectCause};
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::{BluetoothStatus, PowerOutcome};
+use wartui_proto::link::{BluetoothStatus, PowerOutcome, SdFormatOutcome, SdStatus};
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 #[cfg(doc)]
@@ -177,6 +177,9 @@ pub struct Snapshot {
     /// The bridge's last answer to [`Command::PowerCycle`](super::Command::PowerCycle), for the
     /// view to show once.
     pub power_answer: Option<PowerAnswer>,
+    /// The bridge's last answer to [`Command::FormatSd`](super::Command::FormatSd), for the view
+    /// to show once.
+    pub sd_answer: Option<SdAnswer>,
     /// The run holds its scan for a GPS fix
     /// ([`EngineConfig::wait_for_fix`](super::EngineConfig::wait_for_fix)): the view shows its
     /// pop-up exactly while this holds.
@@ -190,6 +193,27 @@ pub struct PowerAnswer {
     pub id: u64,
     /// What happened, in [`power_cycled_text`]'s words.
     pub text: String,
+}
+
+/// The bridge's answer to a format of its microSD card, as the operator reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdAnswer {
+    /// Counts the answers this engine has had, from 1, so the view tells a new one from the last.
+    pub id: u64,
+    /// What happened, in [`sd_formatted_text`]'s words.
+    pub text: String,
+}
+
+/// What the operator reads of a format's `outcome`.
+#[must_use]
+pub fn sd_formatted_text(outcome: SdFormatOutcome) -> String {
+    match outcome {
+        SdFormatOutcome::Done => "SD card formatted",
+        SdFormatOutcome::NoCard => "no SD card to format",
+        SdFormatOutcome::Busy => "the SD card is already being formatted",
+        SdFormatOutcome::Failed => "the SD card format failed",
+    }
+    .to_owned()
 }
 
 /// Why a bridge with no carrier board cannot power-cycle a node, as the operator reads it.
@@ -249,6 +273,8 @@ pub struct BridgeStatus {
     pub uptime_ms: u32,
     /// The carrier's lid fan, or `None` with no carrier.
     pub fan: Option<FanStats>,
+    /// The microSD card, or `None` when the bridge has no card slot.
+    pub sd: Option<SdStatus>,
     /// The Bluetooth host link: who the bridge serves, its bonds and pairing window, the central
     /// connected to its C6 and the C6's counters.
     pub bluetooth: BluetoothStatus,
@@ -360,6 +386,7 @@ impl FleetEngine {
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
             power_answer: self.power_answer.clone(),
+            sd_answer: self.sd_answer.clone(),
             awaiting_fix: self.fix_wait,
         }
     }

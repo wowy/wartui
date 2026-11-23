@@ -118,6 +118,7 @@ wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware through the bridge
 wartui bluetooth pair # pair this PC with the bridge, for `--link bluetooth`
 wartui scan start # set the bridge scanning with no host attached; `scan stop` idles it
+wartui sd format  # erase the bridge's microSD card and format it FAT32; `sd` shows it
 ```
 
 ## Subprojects

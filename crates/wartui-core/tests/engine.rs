@@ -31,7 +31,8 @@ use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED,
     HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER, PairWindow,
-    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, USB_TOOK_BRIDGE,
+    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome, SdState,
+    SdStatus, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
@@ -3918,6 +3919,76 @@ fn engine_names_power_cycle_outcome_when_bridge_answers() {
         let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
         let said = snapshot.power_answer.expect("an answer");
         assert!(said.text.starts_with(want), "{outcome:?}: {}", said.text);
+        // The view shows each answer once, telling them apart by this.
+        assert!(said.id > last_id, "{outcome:?}");
+        last_id = said.id;
+    }
+}
+
+#[test]
+fn engine_sends_format_sd_then_get_status_when_commanded() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let batch = engine.handle(Event::Command(Command::FormatSd), clock.at(1));
+
+    // The bridge marks the card formatting before it answers the poll, so the `Status` says so.
+    assert_eq!(batch.bulk, [HostToBridge::FormatSd, HostToBridge::GetStatus]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    let later = engine.handle(Event::Tick, clock.at(30));
+    assert!(!later.bulk.contains(&HostToBridge::FormatSd), "a format is sent once");
+}
+
+/// A `Status` on the default pool with every slot present, reporting `sd`.
+fn sd_status(sd: Option<SdStatus>) -> Event {
+    let mut status = pool_status(ChannelPool::default());
+    if let Event::Link(LinkEvent::Message(BridgeToHost::Status { sd: reported, .. })) = &mut status
+    {
+        *reported = sd;
+    }
+    status
+}
+
+#[test]
+fn engine_reports_sd_card_when_status_arrives() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    engine.handle(connected(), clock.at(0));
+    let shown = |engine: &FleetEngine| {
+        engine.snapshot(clock.at(1), StoreStats::default()).bridge_status.map(|status| status.sd)
+    };
+    assert_eq!(shown(&engine), None, "no `Status` yet");
+
+    let card = SdStatus { state: SdState::Ready, card_mb: 63_284, free_mb: Some(60_300) };
+    engine.handle(sd_status(Some(card)), clock.at(1));
+    assert_eq!(shown(&engine), Some(Some(card)));
+
+    // A bridge with no slot.
+    engine.handle(sd_status(None), clock.at(1));
+    assert_eq!(shown(&engine), Some(None));
+}
+
+#[test]
+fn engine_names_sd_format_outcome_and_polls_status_when_bridge_answers() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let cases = [
+        (SdFormatOutcome::Done, "SD card formatted"),
+        (SdFormatOutcome::NoCard, "no SD card to format"),
+        (SdFormatOutcome::Busy, "the SD card is already being formatted"),
+        (SdFormatOutcome::Failed, "the SD card format failed"),
+    ];
+    let mut last_id = 0;
+    for (outcome, want) in cases {
+        let answer = Event::Link(LinkEvent::Message(BridgeToHost::SdFormatted { outcome }));
+        let batch = engine.handle(answer, clock.at(1));
+        // The card's new state, without waiting for the next poll.
+        assert_eq!(batch.bulk, [HostToBridge::GetStatus], "{outcome:?}");
+        let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+        let said = snapshot.sd_answer.expect("an answer");
+        assert_eq!(said.text, want, "{outcome:?}");
         // The view shows each answer once, telling them apart by this.
         assert!(said.id > last_id, "{outcome:?}");
         last_id = said.id;
