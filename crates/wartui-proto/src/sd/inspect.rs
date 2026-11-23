@@ -1,5 +1,6 @@
-//! Reading a card the bridge did not format, from three blocks: block 0 ([`partition`]), the
-//! volume's boot sector ([`volume`]) and its FSInfo sector ([`Volume::free_mb`]).
+//! Reading a card the bridge did not format, from up to three blocks: block 0 ([`partition`]),
+//! the volume's boot sector ([`volume`]) and its FSInfo sector, when it has one
+//! ([`Volume::free_mb`]).
 //!
 //! Each block is a stranger's bytes. Every field is checked before it is used, sums are checked,
 //! and a block that fails a check reads as no FAT32 volume rather than a guess.
@@ -9,9 +10,16 @@ use super::{
     MBR_ENTRY, MIN_CLUSTERS, bpb, fsinfo, le16, le32, mib, signed,
 };
 
-/// The LBA of the FAT32 volume's boot sector, from the card's block 0: the first MBR entry's
-/// start when that entry is FAT32, or 0 when block 0 is itself a FAT32 boot sector. `None` for
-/// anything else: no table, another file system, or a GPT.
+/// The MBR's partition entries, and the bytes in each.
+const MBR_ENTRIES: usize = 4;
+const MBR_ENTRY_LEN: usize = 16;
+
+/// The FSInfo field's values that name no FSInfo sector.
+const NO_FSINFO: [u32; 2] = [0, 0xFFFF];
+
+/// The LBA of the FAT32 volume's boot sector, from the card's block 0: 0 when block 0 is itself
+/// a FAT32 boot sector, or else the start of the first of the MBR's four entries that is FAT32.
+/// `None` for anything else: no table, another file system, or a GPT.
 #[must_use]
 pub fn partition(block0: &[u8; BLOCK]) -> Option<u32> {
     if !signed(block0) {
@@ -21,8 +29,10 @@ pub fn partition(block0: &[u8; BLOCK]) -> Option<u32> {
     if volume(block0, 0).is_some() {
         return Some(0);
     }
-    let start = le32(block0, MBR_ENTRY + 8);
-    (FAT32_TYPES.contains(&block0[MBR_ENTRY + 4]) && start != 0).then_some(start)
+    (0..MBR_ENTRIES).map(|i| MBR_ENTRY + MBR_ENTRY_LEN * i).find_map(|entry| {
+        let start = le32(block0, entry + 8);
+        (FAT32_TYPES.contains(&block0[entry + 4]) && start != 0).then_some(start)
+    })
 }
 
 /// A FAT32 volume, as its boot sector describes it.
@@ -30,8 +40,8 @@ pub fn partition(block0: &[u8; BLOCK]) -> Option<u32> {
 pub struct Volume {
     /// The LBA of its boot sector.
     pub start: u32,
-    /// The LBA of its FSInfo sector.
-    pub fsinfo_lba: u32,
+    /// The LBA of its FSInfo sector, or `None` when its boot sector names none.
+    pub fsinfo_lba: Option<u32>,
     /// The clusters in its data area.
     pub clusters: u32,
     /// Its cluster size, in sectors.
@@ -41,7 +51,8 @@ pub struct Volume {
 }
 
 /// The FAT32 volume whose boot sector `boot` was read at LBA `start`, or `None` when it is not
-/// one: FAT12 or FAT16, exFAT, or bytes that only look like a boot sector.
+/// one: FAT12 or FAT16, exFAT, or bytes that only look like a boot sector. A boot sector whose
+/// FSInfo field is 0 or `0xFFFF` names no FSInfo sector, which some formatters write.
 #[must_use]
 pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     if !signed(boot) || usize::from(le16(boot, bpb::BYTES_PER_SECTOR)) != BLOCK {
@@ -53,6 +64,7 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     let fat_blocks = le32(boot, bpb::FAT_32);
     let total_blocks = le32(boot, bpb::TOTAL_32);
     let fsinfo_sector = u32::from(le16(boot, bpb::FSINFO));
+    let has_fsinfo = !NO_FSINFO.contains(&fsinfo_sector);
     // FAT32 keeps its sizes in the 32-bit fields and leaves the FAT16 ones zero.
     let fat16_fields =
         [bpb::ROOT_ENTRIES, bpb::TOTAL_16, bpb::FAT_16].into_iter().any(|at| le16(boot, at) != 0);
@@ -61,8 +73,7 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
         || reserved == 0
         || fats == 0
         || fat_blocks == 0
-        || fsinfo_sector == 0
-        || fsinfo_sector >= reserved
+        || (has_fsinfo && fsinfo_sector >= reserved)
     {
         return None;
     }
@@ -75,7 +86,7 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     }
     Some(Volume {
         start,
-        fsinfo_lba: start.checked_add(fsinfo_sector)?,
+        fsinfo_lba: if has_fsinfo { Some(start.checked_add(fsinfo_sector)?) } else { None },
         clusters,
         sectors_per_cluster,
         total_blocks,
@@ -101,11 +112,11 @@ impl Volume {
         mib(u64::from(self.total_blocks))
     }
 
-    /// Whether it lies on a card of `card_blocks`, its FSInfo sector and last block included. A
-    /// volume that runs past the card's end is no FAT32 volume.
+    /// Whether it lies on a card of `card_blocks`, its FSInfo sector, when it has one, and last
+    /// block included. A volume that runs past the card's end is no FAT32 volume.
     #[must_use]
     pub fn fits(&self, card_blocks: u64) -> bool {
         u64::from(self.start) + u64::from(self.total_blocks) <= card_blocks
-            && u64::from(self.fsinfo_lba) < card_blocks
+            && self.fsinfo_lba.is_none_or(|lba| u64::from(lba) < card_blocks)
     }
 }

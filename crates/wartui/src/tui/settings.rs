@@ -696,7 +696,8 @@ const FORMAT_TIP: &str = "enter formats the card and erases it";
 /// | Card | Value | `Enter` |
 /// |---|---|---|
 /// | link down | `no bridge` | nothing |
-/// | none, or no `Status` yet | `no slot` | nothing |
+/// | no `Status` yet | `waiting` | nothing |
+/// | none | `no slot` | nothing |
 /// | no card | `no card` | nothing |
 /// | not FAT32, ready, or failed | its size and state | asks |
 /// | formatting | `formatting…` | nothing |
@@ -704,7 +705,10 @@ fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
     if !snapshot.link_up {
         return ("no bridge".to_owned(), Err("no bridge to format a card on · esc cancel"));
     }
-    let sd = snapshot.bridge_status.and_then(|status| status.sd);
+    let Some(status) = snapshot.bridge_status else {
+        return ("waiting".to_owned(), Err("waiting for the bridge's status · esc cancel"));
+    };
+    let sd = status.sd;
     let action = match sd.map(|sd| sd.state) {
         None => Err("this bridge has no card slot · esc cancel"),
         Some(SdState::NoCard) => Err("no card in the slot · esc cancel"),
@@ -2762,12 +2766,10 @@ mod tests {
     #[test]
     fn ui_shows_sd_row_and_asks_only_where_card_can_be_formatted_when_enter_pressed() {
         let down = Snapshot { link_up: false, ..busy() };
-        let unreported = Snapshot { bridge_status: None, ..busy() };
         let no_card = Some(SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
         let cases = [
             (down, "no bridge", "no bridge to format a card on · esc cancel", false),
             (sd_snapshot(None), "no slot", "this bridge has no card slot · esc cancel", false),
-            (unreported, "no slot", "this bridge has no card slot · esc cancel", false),
             (sd_snapshot(no_card), "no card", "no card in the slot · esc cancel", false),
             (sd_snapshot(card(SdState::NoFat32, None)), "58.9 GB, not FAT32", FORMAT_TIP, true),
             (
@@ -2801,6 +2803,25 @@ mod tests {
             assert!(ui.modal().is_some(), "{value}: Enter on the row never closes the modal");
             assert!(rx.try_recv().is_err(), "{value}: nothing before the answer");
         }
+    }
+
+    #[test]
+    fn ui_shows_sd_row_waiting_and_asks_nothing_when_bridge_has_sent_no_status() {
+        // A link just up has no `Status` yet, so the slot is unknown rather than absent.
+        let snapshot = Snapshot { bridge_status: None, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdCard, &mut ui, &snapshot, &tx);
+
+        let screen = modal_screen(&snapshot, &mut ui);
+        let row = line_with(&screen, "format   ");
+        assert!(row.contains("format              waiting"), "{screen}");
+        assert!(screen.contains("waiting for the bridge's status · esc cancel"), "{screen}");
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        assert!(!ui.sd_confirming());
+        assert!(ui.modal().is_some(), "Enter on the row never closes the modal");
+        assert!(rx.try_recv().is_err(), "nothing sent");
     }
 
     #[test]

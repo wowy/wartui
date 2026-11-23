@@ -24,8 +24,10 @@
 //! **No card-detect line exists, so "no card" is an identification that failed.** [`run`]
 //! identifies the card every [`EVERY`] until one answers, reads what it holds, then reads block 0
 //! every [`EVERY`] to see that it is still there. Block 0 failing to read is the one sign of a
-//! card gone, and sends it back to identifying, which also finds a swapped card. A `Failed` card
-//! whose block 0 reads is read again in full; a read past block 0 that fails leaves it `Failed`.
+//! card gone, and sends it back to identifying, which also finds a swapped card. A card that
+//! failed a read is read again in full while its block 0 reads; a read past block 0 that fails
+//! leaves it `Failed`. A failed format stays `Failed` until the next format: a format cut short
+//! leaves a zeroed block 0, which would read again as no FAT32 volume.
 //!
 //! **A format writes `Layout::ops` in order**, each a transfer tried up to [`TRIES`] times, since
 //! the bus clock was measured, not proven, to be clean (`src/config.rs`, `SD_HZ`). Then the card
@@ -256,8 +258,8 @@ fn say_found(shared: &Shared, khz: u32, status: SdStatus) {
 }
 
 /// What the card of `card_blocks` holds: its block 0, then the volume's boot sector and FSInfo
-/// sector. A table that points past the card's end, or a volume that runs past it, is no FAT32
-/// volume.
+/// sector, when it has one. A table that points past the card's end, or a volume that runs past
+/// it, is no FAT32 volume.
 async fn inspect_card(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
@@ -274,13 +276,19 @@ async fn inspect_card(
     let Some(volume) = inspect::volume(&buf[0], start).filter(|v| v.fits(card_blocks)) else {
         return Ok(none);
     };
-    read(card, volume.fsinfo_lba, &mut buf[..1]).await?;
-    Ok(SdStatus { state: SdState::Ready, card_mb, free_mb: volume.free_mb(&buf[0]) })
+    let free_mb = match volume.fsinfo_lba {
+        Some(lba) => {
+            read(card, lba, &mut buf[..1]).await?;
+            volume.free_mb(&buf[0])
+        }
+        None => None,
+    };
+    Ok(SdStatus { state: SdState::Ready, card_mb, free_mb })
 }
 
-/// Format the card on request, and check every [`EVERY`] that it still answers, reading a
-/// `Failed` card again in full. Returns the error of the check that found it gone. `khz` is the
-/// card's clock, for the log.
+/// Format the card on request, and check every [`EVERY`] that it still answers, reading a card
+/// that failed a read again in full. A card a format left `Failed` is not read again. Returns
+/// the error of the check that found it gone. `khz` is the card's clock, for the log.
 async fn serve(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
@@ -288,16 +296,19 @@ async fn serve(
     card_blocks: u64,
     khz: u32,
 ) -> MmcError {
+    // A card that failed a read is read again. One a format left `Failed` stays so: a format cut
+    // short would read as `NoFat32` within 5 s.
+    let mut retry_failed = true;
     loop {
         match select(shared.sd.format.wait(), Timer::after(EVERY)).await {
-            Either::First(()) => format(card, buf, shared, card_blocks).await,
+            Either::First(()) => retry_failed = !format(card, buf, shared, card_blocks).await,
             Either::Second(()) => {
                 // Only block 0 failing means the card is gone; any other read that fails leaves
                 // it `Failed`, so a card with one bad block is not identified every 5 s.
                 if let Err(e) = read(card, 0, &mut buf[..1]).await {
                     return e;
                 }
-                if shared.sd.status.get().state != SdState::Failed {
+                if !retry_failed || shared.sd.status.get().state != SdState::Failed {
                     continue;
                 }
                 if let Ok(status) = inspect_card(card, buf, card_blocks).await {
@@ -310,13 +321,13 @@ async fn serve(
 }
 
 /// Format the card of `card_blocks` FAT32, read it back, and answer the host. The state may be
-/// `Formatting` already, from [`request_format`].
+/// `Formatting` already, from [`request_format`]. Returns whether it leaves the card `Failed`.
 async fn format(
     card: &mut Card,
     buf: &mut [Block; TRANSFER_BLOCKS],
     shared: &Shared,
     card_blocks: u64,
-) {
+) -> bool {
     let card_mb = mib(card_blocks);
     set(shared, SdStatus { state: SdState::Formatting, card_mb, free_mb: None });
     log(shared, format_args!("sd: formatting the {card_mb} MiB card"));
@@ -328,13 +339,15 @@ async fn format(
         Err(why) => {
             set(shared, failed(card_mb));
             log(shared, format_args!("sd: no FAT32 layout fits the {card_mb} MiB card: {why:?}"));
-            return answer(shared, SdFormatOutcome::Failed);
+            answer(shared, SdFormatOutcome::Failed);
+            return true;
         }
     };
     if let Err((lba, e)) = write_layout(card, buf, &layout).await {
         set(shared, failed(card_mb));
         log(shared, format_args!("sd: a format write at block {lba} failed {TRIES} times: {e:?}"));
-        return answer(shared, SdFormatOutcome::Failed);
+        answer(shared, SdFormatOutcome::Failed);
+        return true;
     }
     let ms = start.elapsed().as_millis();
     let outcome = match inspect_card(card, buf, card_blocks).await {
@@ -360,6 +373,7 @@ async fn format(
         }
     };
     answer(shared, outcome);
+    shared.sd.status.get().state == SdState::Failed
 }
 
 /// Carry out `layout`'s writes in order: a run of zeros from the zeroed buffer, a block from the

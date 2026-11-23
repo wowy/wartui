@@ -326,8 +326,8 @@ nothing to the card but a format the host asks for.
 GPIO45 switches the card's supply through a P-channel MOSFET, so the P4 holds it low. The SDMMC
 driver powers the slot's I/O from LDO4 itself. The slot has no card-detect line, so the P4 tries
 to identify a card every 5 s until one answers, then reads block 0 every 5 s to see it is still
-there, and reads a `Failed` card again in full. A card swapped in is found within about 10 s.
-Finding it again relies on two fixes to `sdio`, which the build takes from a fork pinned in
+there, and reads a card that failed a read again in full. A card swapped in is found within about
+10 s. Finding it again relies on two fixes to `sdio`, which the build takes from a fork pinned in
 `Cargo.toml` ([`docs/p4-sd-findings.md`](../../docs/p4-sd-findings.md) § "A card identified
 again").
 
@@ -339,7 +339,7 @@ again").
 | `NoFat32` | A card answered and holds no FAT32 volume the P4 reads, such as exFAT |
 | `Ready` | A FAT32 volume, with its free space when its FSInfo sector records it |
 | `Formatting` | A format is asked for or running |
-| `Failed` | The card failed a read, or the last format, until it reads again |
+| `Failed` | The card failed a read, until it reads again, or the last format, until the next one |
 
 **`FormatSd` erases the card and writes one FAT32 volume** labeled `WARTUI`, in the layout
 `wartui_proto::sd` describes, which a laptop or a phone reads as a new card. The MBR goes last, so

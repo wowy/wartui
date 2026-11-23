@@ -887,6 +887,7 @@ footer says `formatting the SD card…`, then the bridge's answer when it comes.
 | `formatting…`          | Nothing: a format is running                |
 | `no card`              | Nothing: the slot is empty                  |
 | `no slot`              | Nothing: the bridge drives no card slot     |
+| `waiting`              | Nothing: no status from the bridge yet      |
 | `no bridge`            | Nothing: the link is down                   |
 
 ### The channel pool

@@ -366,9 +366,9 @@ fn sd_inspect_reads_layout_when_card_is_formatted() {
         let found = volume(&card.block(u64::from(start)), start).expect("a FAT32 volume");
         assert_eq!(found.clusters, layout.clusters, "{}", row.name);
         assert_eq!(found.sectors_per_cluster, layout.sectors_per_cluster);
-        assert_eq!(found.fsinfo_lba, start + 1);
+        assert_eq!(found.fsinfo_lba, Some(start + 1));
         assert_eq!(found.size_mb(), layout.part_blocks / 2048, "{}", row.name);
-        let fsinfo = card.block(u64::from(found.fsinfo_lba));
+        let fsinfo = card.block(u64::from(found.fsinfo_lba.expect("an FSInfo sector")));
         assert_eq!(found.free_mb(&fsinfo), Some(layout.free_mb()), "{}", row.name);
     }
 }
@@ -397,7 +397,66 @@ fn sd_inspect_reads_volume_at_block_0_when_card_has_no_partition_table() {
     let card = Card::formatted(&layout);
     let boot = card.block(u64::from(layout.part_start));
     assert_eq!(partition(&boot), Some(0));
-    assert_eq!(volume(&boot, 0).expect("a volume").fsinfo_lba, 1);
+    assert_eq!(volume(&boot, 0).expect("a volume").fsinfo_lba, Some(1));
+}
+
+#[test]
+fn sd_inspect_reads_volume_without_fsinfo_when_field_is_0_or_ffff() {
+    let card_blocks = 31_250_000;
+    let card = Card::formatted(&layout(card_blocks));
+    for value in [0u16, 0xFFFF] {
+        let mut boot = card.block(8192);
+        boot[48..50].copy_from_slice(&value.to_le_bytes());
+        let found = volume(&boot, 8192).unwrap_or_else(|| panic!("{value:#X}: a volume"));
+        assert_eq!(found.fsinfo_lba, None, "{value:#X}");
+        assert!(found.fits(card_blocks), "{value:#X}");
+    }
+}
+
+#[test]
+fn sd_inspect_reads_nothing_when_fsinfo_is_past_the_reserved_sectors() {
+    let layout = layout(31_250_000);
+    let card = Card::formatted(&layout);
+    for value in [layout.reserved, layout.reserved + 8] {
+        let mut boot = card.block(8192);
+        boot[48..50].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(volume(&boot, 8192), None, "FSInfo at {value}, {} reserved", layout.reserved);
+    }
+}
+
+#[test]
+fn sd_inspect_finds_partition_when_fat32_entry_is_second() {
+    let card = Card::formatted(&layout(31_250_000));
+    let mut mbr = card.block(0);
+    // A Linux partition in entry 1, the FAT32 one moved to entry 2.
+    let fat32: [u8; 16] = mbr[446..462].try_into().expect("an entry");
+    mbr[462..478].copy_from_slice(&fat32);
+    mbr[446 + 4] = 0x83;
+    mbr[454..458].copy_from_slice(&2048u32.to_le_bytes());
+    assert_eq!(partition(&mbr), Some(8192));
+}
+
+#[test]
+fn sd_inspect_takes_first_fat32_entry_when_two_are_fat32() {
+    let card = Card::formatted(&layout(31_250_000));
+    let mut mbr = card.block(0);
+    let mut later: [u8; 16] = mbr[446..462].try_into().expect("an entry");
+    later[8..12].copy_from_slice(&100_000u32.to_le_bytes());
+    mbr[494..510].copy_from_slice(&later);
+    assert_eq!(partition(&mbr), Some(8192));
+}
+
+#[test]
+fn sd_inspect_reads_nothing_when_no_entry_is_fat32() {
+    let card = Card::formatted(&layout(31_250_000));
+    let mut mbr = card.block(0);
+    let entry: [u8; 16] = mbr[446..462].try_into().expect("an entry");
+    for (i, kind) in [0x83, 0x07, 0x82, 0x0E].into_iter().enumerate() {
+        let at = 446 + 16 * i;
+        mbr[at..at + 16].copy_from_slice(&entry);
+        mbr[at + 4] = kind;
+    }
+    assert_eq!(partition(&mbr), None);
 }
 
 #[test]
