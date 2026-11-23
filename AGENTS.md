@@ -535,11 +535,11 @@ edit stops; follow the pointer before changing the rule.
   the legacy ones. TrouBLE stops no set on a connection, and a set left enabled ends its runner at
   the next resolving-list load, which restarts the C6. → `firmware/p4-radio/src/ble.rs` `//!`,
   `stop_sets`
-- **The C6's `trouble-host` is the vendored 0.8.0 with one upstream commit, the move to bt-hci
-  0.11, and takes no other change.** The release builds on bt-hci 0.10, whose encoder and
-  parameter-request replies are wrong. The C6 names `bt-hci` itself, held at the version
-  `trouble-host` resolves, and the copy goes when a release builds on 0.11.
-  → `firmware/p4-radio/vendor/trouble-host/VENDORED.md`, `firmware/p4-radio/README.md`
+- **The C6's `trouble-host` is 0.8.0 from the `wowy/trouble` fork, pinned by rev, with one
+  upstream commit, the move to bt-hci 0.11, and takes no other change.** The release builds on
+  bt-hci 0.10, whose encoder and parameter-request replies are wrong. The C6 names `bt-hci`
+  itself, held at the version `trouble-host` resolves, and the fork goes when a release builds on
+  0.11. → `firmware/p4-radio/Cargo.toml` `[patch.crates-io]`, `firmware/p4-radio/README.md`
   § "Dependency versions"
 - **Where the Bluetooth code picks a protocol, it matches every `Stream`, `Holder` or
   `HostOwner`.** An `if phone … else host` gives a third stream the host's arm with no compile

@@ -438,7 +438,8 @@ works with the held versions.
   was still the newest release, and trouble's `main` reaches bt-hci 0.11 only after its move to
   `embassy-crypto`, which is unpublished and changes the pairing crypto. So the C6 builds the
   published 0.8.0 with the one upstream commit that moves it to bt-hci 0.11, vendored in
-  `firmware/p4-radio/vendor/trouble-host`. It built against the held esp-radio as inferred
+  `firmware/p4-radio/vendor/trouble-host`. On 2026-11-23 that copy moved to the `wowy/trouble`
+  fork, pinned by rev, with the same source. It built against the held esp-radio as inferred
   above. Commands take bt-hci's async encoder again, with no sync encoder in the path
   ([`wardrive-esp-findings.md`](wardrive-esp-findings.md)).
 
