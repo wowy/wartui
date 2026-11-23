@@ -104,7 +104,94 @@ Each attempt dumped the SDMMC registers. Two faults in `sdio` 0.5.2 caused it, a
 **Decided: the P4 bridge builds against a fork of `sdio`**, the published 0.5.2 plus those two
 changes, pinned by commit in `firmware/p4-bridge/Cargo.toml`. esp-hal builds against the same copy.
 
+## The log writer on the bench
+
+Measured on 2026-11-23 on the same board, `96:C4`, with no carrier and a 32 GB card formatted by
+the bridge: 30,436 MiB, 32 KiB clusters. The bridge ran its own firmware with the SD log on. The
+card was read on a Mac with `fsck_msdos -n`, through `diskutil verifyVolume`, and with
+`wartui sd-log`.
+
+### How long the writer holds the executor
+
+The writer yields after every card step, and times the work between two yields. Each kind of step
+keeps its own longest, in µs:
+
+| Build | next | fed | head | opened | copy | plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| A flush staged in one stretch | | | | | | 695, all of a flush |
+| Staging yields after its head and each block | 89–107 | 57 | 21–35 | 320–447 | 47–72 | 59–79 |
+| The same, `Opened` encoded again at once | | | 7 | 24 | | |
+
+`opened` is the head of a flush that starts a file, with its `Opened` record. It runs once per
+file. Encoding the same record a second time right after took 24 µs, and the head without it
+dropped from 35 to 7, so the rest is that code and the CRC table coming in from flash, cold. It
+costs 0.3–0.45 ms, varying with the build, once per boot and once per rotation, as any code
+run that seldom does.
+
+**Decided: every step but a file's first stays under 200 µs, and the first is left as it is.**
+The P4 masks no interrupt in any of it, so a UART's FIFO is still served.
+
+### What the bench did to it
+
+| Test | Result |
+| --- | --- |
+| The card pulled while the bridge wrote, twice | `fsck` clean both times. Every file decoded, 0 unreadable, 0 dropped. Put back, the next file opened |
+| `sd log off`, then `on` | The file ended with `Closed`, logging turned off, and stopped growing; `on` opened the next |
+| `sd log off`, then a restart | Still off after the restart; `on` opened the next file |
+| A format while writing | Answered in 2.7 s, connecting included. The fresh card started again at file 1 |
+| A file limit of 8 KiB | Files closed at 13–15 KB with `Closed`, the next file taking over, nothing lost. The size is checked before each flush, so a file runs up to one flush over |
+| The card filled from the Mac to 7 clusters above the 256 MiB reserve, then 12 rotations | The oldest files went first, one per new cluster: files 1–11 deleted, 12–23 kept. `fsck` clean |
+| About ten cuts of the board's power, at random moments, on that full card | `fsck` clean, with no lost clusters and the two FATs equal. Four boots got as far as opening a file; each decoded whole up to its last flush |
+| Five `flash-bridge` updates with the log writing | All installed and confirmed |
+| A card formatted FAT32 by macOS's `diskutil`, 16 KiB clusters | Mounted and logged: one file of 21 KB over two clusters, 332 records, 0 unreadable. `fsck` clean |
+
+### On a carrier with ten nodes
+
+The same firmware on the bridge `D0:1C`, a carrier-10 with ten nodes and the card formatted by
+macOS. `flash-bridge` installed it, the C6's bundled image included, with the log writing. The
+load was a Wi-Fi and Bluetooth scan on every node with `wartui sniff` taking every frame over USB,
+for 3 minutes with the log on, then 3 with it off:
+
+| Log | Records to the host | Radio link | Host link | Queues | SD log |
+| --- | --- | --- | --- | --- | --- |
+| On | 439: 88 sightings in 79 batches, 360 heartbeats, 0 undecodable | 198 packets, 0 CRC, magic or UART errors, no new gap | 0 UART errors | 0 dropped | 64 KB, 0 dropped, 0 errors |
+| Off | 497: 221 sightings in 137 batches, 360 heartbeats, 0 undecodable | 198 packets, the same | 0 UART errors | 0 dropped | |
+
+The bench hears few networks, so this was a light load. The writer's steps on this board were next
+102, fed 63, copy 59 and plan 83 µs; opening a file took 407–439 µs.
+
+### The same carrier under a burst load
+
+The bench's networks are too few to load anything, so every node ran a bench-only build that is
+not in the tree. Every 10 s, while scanning, it sends a burst of 46, 91 or 132 full batches of
+made-up Wi-Fi sightings, cycling, with locally administered addresses, over the real bus path.
+The bursts are spread across the 10 s by node, so some of them overlap. `wartui sniff` took every
+frame over USB, for 5 minutes with the log on, then 5 with it off. Loss was counted from each
+node's batch sequence numbers:
+
+| Log | Batches to the host | Lost | Host link | Queues | Radio link | SD log |
+| --- | --- | --- | --- | --- | --- | --- |
+| On | 27,064, 968,666 sightings, 90.7 a second | 0 on every node | 0 UART errors | 0 dropped | 0 CRC, magic or UART errors, no new gap | 115 KB, 0 dropped, 0 errors, longest step 403 µs |
+| Off | 27,083, 968,585 sightings, 90.3 a second | 0 on every node | 0 UART errors | 0 dropped | the same | |
+
+**The log made no difference the bench could see.** The load was the node bus's, which fills
+neither the host queue nor the log, since sightings are not logged. The log's own traffic was the
+bridge's answers, lines and snapshots.
+
+### Deleting the history for nothing
+
+After the power cuts, the Mac's own Spotlight and fsevents files took about 22 clusters while the
+card was mounted, and left it below the reserve. The writer deleted every old file, about 12
+clusters, could not get back over the reserve, and stopped with `card full` and nothing kept.
+
+**Decided: the writer deletes the oldest only when deleting its own files can restore the
+reserve.** Otherwise it keeps every file and stops with `card full`. With that build, the next
+boot on the same card stopped with `Full` at its first flush and deleted nothing. The 40 records
+that flush had staged, the boot's first, were counted dropped, as any failed flush counts what it
+staged.
+
 ## Not answered here
 
 The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
-the bridge does not. A board on a carrier with nodes, under a two-node burst, was not tested.
+the bridge does not. A real drive was not tested with the log, nor was a WardriveESP phone
+session, the case the log is for.

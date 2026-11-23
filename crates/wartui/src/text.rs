@@ -1,7 +1,12 @@
-//! Number and label text shared by the subcommands' reports and the TUI.
+//! Number, label and message text shared by the subcommands' reports and the TUI.
+//!
+//! [`message_text`] is the one-liner for each bridge message. `wartui sniff` prints it for a
+//! message the bridge sends now, and `wartui sd-log` for one its log kept, so a message reads
+//! alike in both.
 
+use wartui_core::engine::power_cycled_text;
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::link::{SdState, SdStatus};
+use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -81,7 +86,7 @@ pub(crate) fn gb(mib: u32) -> String {
 /// The bridge's microSD card, as `form` shows it: `53.7 of 58.9 GB free`, or `no slot` for a
 /// bridge with none.
 pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
-    let Some(SdStatus { state, card_mb, free_mb }) = sd else { return "no slot".to_owned() };
+    let Some(SdStatus { state, card_mb, free_mb, .. }) = sd else { return "no slot".to_owned() };
     let size = gb(card_mb);
     match (state, form) {
         (SdState::NoCard, _) => "no card".to_owned(),
@@ -95,6 +100,105 @@ pub(crate) fn sd_text(sd: Option<SdStatus>, form: SdForm) -> String {
         (SdState::Failed, SdForm::Line) => format!("card error ({size} GB)"),
         (SdState::Failed, SdForm::Row) => "card error".to_owned(),
     }
+}
+
+/// `bytes` in KB, MB or GB: whole KiB, or MiB and GiB with one decimal as [`gb`] gives them,
+/// `1.2 MB`. The unit is the smallest whose rounded value is under 1024, so it never prints
+/// `1024 KB` or `1024.0 MB`.
+pub(crate) fn bytes_text(bytes: u64) -> String {
+    // Ties to even, as `format!` rounds.
+    let kib = (bytes as f64 / 1024.0).round_ties_even();
+    if kib < 1024.0 {
+        return format!("{kib:.0} KB");
+    }
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    let tenths = (mib * 10.0).round_ties_even();
+    if tenths < 10_240.0 {
+        format!("{:.1} MB", tenths / 10.0)
+    } else {
+        format!("{:.1} GB", mib / 1024.0)
+    }
+}
+
+/// The bridge's SD log: `off`, `on · waiting for a card`, `on · writing LOG/00000007.BIN · 1.2 MB
+/// written · 0 dropped · 0 errors · longest step 90 µs`, or `no slot` for a bridge with no card
+/// slot. The longest step is the writer's longest stretch without yielding.
+pub(crate) fn sd_log_text(sd: Option<SdStatus>) -> String {
+    let Some(SdStatus { log, .. }) = sd else { return "no slot".to_owned() };
+    if !log.on {
+        return "off".to_owned();
+    }
+    let doing = match log.state {
+        // The writer has not said yet.
+        SdLogState::Off => return "on".to_owned(),
+        SdLogState::Waiting => "waiting for a card".to_owned(),
+        SdLogState::Writing => {
+            let file = log.file.map_or_else(String::new, |n| format!(" LOG/{n:08}.BIN"));
+            format!(
+                "writing{file} · {} written · {} dropped · {} errors · longest step {} µs",
+                bytes_text(log.written),
+                thousands(u64::from(log.dropped)),
+                thousands(u64::from(log.errors)),
+                thousands(u64::from(log.busy_max_us)),
+            )
+        }
+        SdLogState::Full => "card full".to_owned(),
+        SdLogState::Refused => "volume refused".to_owned(),
+        SdLogState::Failed => "stopped after a card error".to_owned(),
+    };
+    format!("on · {doing}")
+}
+
+/// A bridge message as one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MessageText {
+    /// What the message is, in a word: `status`, `log`, `fleet`.
+    pub(crate) kind: &'static str,
+    /// What it says.
+    pub(crate) text: String,
+}
+
+/// `msg` as one line, naming slots as `board` labels them.
+pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText {
+    let (kind, text) = match msg {
+        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => (
+            "ready",
+            format!("{} firmware {fw_version} link v{LINK_PROTO_VERSION}", mac::full(bridge_mac)),
+        ),
+        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, .. } => (
+            "status",
+            format!(
+                "{rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
+                uptime_ms / 1000
+            ),
+        ),
+        BridgeToHost::Log { message } => ("log", message.to_string()),
+        BridgeToHost::Error { message } => ("error", message.to_string()),
+        BridgeToHost::Gps { bytes } => ("gps", format!("{} bytes", bytes.len())),
+        BridgeToHost::Update(status) => ("update", hex(status)),
+        BridgeToHost::FromNode { slot, kind, body, .. } => {
+            ("node", format!("{} type {kind}, {} bytes", board.label(*slot), body.len()))
+        }
+        BridgeToHost::Delivered { id } => ("delivered", format!("record {id} delivered")),
+        BridgeToHost::Undelivered { id, reason } => {
+            ("undelivered", format!("record {id} undelivered: {reason:?}"))
+        }
+        BridgeToHost::PowerCycled { slot, outcome } => {
+            ("power", power_cycled_text(board, *slot, *outcome))
+        }
+        BridgeToHost::CacheImage(status) => ("cache", hex(status)),
+        BridgeToHost::Fleet(report) => (
+            "fleet",
+            format!("{:?}, pool {}, {} shares", report.mode, report.pool, report.shares.len()),
+        ),
+        BridgeToHost::SdFormatted { outcome } => ("sd", format!("formatted: {outcome:?}")),
+    };
+    MessageText { kind, text }
+}
+
+/// `bytes` as lowercase hex, two digits each and nothing between.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Format a set as channel numbers, the units every other tool uses.
@@ -134,23 +238,84 @@ fn push_run(out: &mut String, start: u8, end: u8) {
 #[cfg(test)]
 mod tests {
     use wartui_proto::bus::{NodeBoard, Slot};
-    use wartui_proto::link::{SdState, SdStatus};
+    use wartui_proto::link::{SdLog, SdLogState, SdState, SdStatus};
     use wartui_proto::mac::Mac;
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-    use super::{SdForm, channel_list, node_name, sd_text, slot_named, slot_range, thousands};
+    use super::{
+        SdForm, bytes_text, channel_list, node_name, sd_log_text, sd_text, slot_named, slot_range,
+        thousands,
+    };
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 
     /// A "64 GB" card: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
-        Some(SdStatus { state, card_mb: 60_350, free_mb })
+        Some(SdStatus::card(state, 60_350, free_mb))
+    }
+
+    /// A ready card whose log is `log`.
+    fn logging(log: SdLog) -> Option<SdStatus> {
+        Some(SdStatus { log, ..SdStatus::card(SdState::Ready, 60_350, Some(55_000)) })
+    }
+
+    #[test]
+    fn sd_log_text_names_each_state_when_setting_is_on() {
+        let on = |state| sd_log_text(logging(SdLog { on: true, state, ..SdLog::OFF }));
+        assert_eq!(on(SdLogState::Waiting), "on · waiting for a card");
+        assert_eq!(on(SdLogState::Full), "on · card full");
+        assert_eq!(on(SdLogState::Refused), "on · volume refused");
+        assert_eq!(on(SdLogState::Failed), "on · stopped after a card error");
+        assert_eq!(on(SdLogState::Off), "on");
+    }
+
+    #[test]
+    fn sd_log_text_names_file_and_counts_when_writing() {
+        let log = SdLog {
+            on: true,
+            state: SdLogState::Writing,
+            file: Some(7),
+            written: 1_258_291,
+            dropped: 0,
+            errors: 1_200,
+            busy_max_us: 90,
+        };
+        assert_eq!(
+            sd_log_text(logging(log)),
+            "on · writing LOG/00000007.BIN · 1.2 MB written · 0 dropped · 1,200 errors · longest step \
+             90 µs"
+        );
+    }
+
+    #[test]
+    fn sd_log_text_reads_off_or_no_slot_when_setting_is_off_or_bridge_has_no_slot() {
+        assert_eq!(sd_log_text(logging(SdLog::OFF)), "off");
+        // Off is the setting, whatever the writer is still finishing.
+        let closing = SdLog { state: SdLogState::Writing, file: Some(3), ..SdLog::OFF };
+        assert_eq!(sd_log_text(logging(closing)), "off");
+        assert_eq!(sd_log_text(None), "no slot");
+    }
+
+    #[test]
+    fn bytes_text_switches_unit_when_past_1_mb_and_1024_mb() {
+        assert_eq!(bytes_text(0), "0 KB");
+        assert_eq!(bytes_text(12_800), "12 KB");
+        assert_eq!(bytes_text(1_258_291), "1.2 MB");
+        assert_eq!(bytes_text(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+    }
+
+    #[test]
+    fn bytes_text_switches_unit_when_rounding_reaches_1024() {
+        assert_eq!(bytes_text(1023 * 1024), "1023 KB");
+        assert_eq!(bytes_text(1_048_570), "1.0 MB", "just under 1 MiB");
+        assert_eq!(bytes_text(1024 * 1024), "1.0 MB");
+        assert_eq!(bytes_text(1_073_741_823), "1.0 GB", "just under 1 GiB");
     }
 
     #[test]
     fn sd_text_names_each_state_when_printed_as_a_line() {
         let line = |sd| sd_text(sd, SdForm::Line);
-        let no_card = SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None };
+        let no_card = SdStatus::card(SdState::NoCard, 0, None);
         assert_eq!(line(None), "no slot");
         assert_eq!(line(Some(no_card)), "no card");
         assert_eq!(line(card(SdState::NoFat32, None)), "58.9 GB, not FAT32");
@@ -172,7 +337,7 @@ mod tests {
 
     #[test]
     fn sd_text_rounds_to_one_decimal_when_size_is_not_whole_gb() {
-        let sd = Some(SdStatus { state: SdState::NoFat32, card_mb: 30_436, free_mb: None });
+        let sd = Some(SdStatus::card(SdState::NoFat32, 30_436, None));
         assert_eq!(sd_text(sd, SdForm::Line), "29.7 GB, not FAT32");
     }
 

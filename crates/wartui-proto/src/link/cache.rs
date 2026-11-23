@@ -117,6 +117,12 @@ impl<R: BorrowMut<Receiver>, M: BorrowMut<[u8]>> NodeImageCache<R, M> {
         self.region.borrow().get(..len)
     }
 
+    /// Whether an upload is part-way in: a session open and not yet committed.
+    #[must_use]
+    pub fn is_receiving(&self) -> bool {
+        self.receiver.borrow().status().state == UpdateState::Receiving
+    }
+
     /// Drop the session and the image it filled.
     pub fn reset(&mut self) {
         self.receiver.borrow_mut().reset();

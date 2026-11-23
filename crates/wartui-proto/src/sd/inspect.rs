@@ -6,8 +6,8 @@
 //! and a block that fails a check reads as no FAT32 volume rather than a guess.
 
 use super::{
-    BLOCK, FAT32_TYPES, FREE_UNKNOWN, FSINFO_LEAD, FSINFO_STRUCT, FSINFO_TRAIL, MAX_CLUSTERS,
-    MBR_ENTRY, MIN_CLUSTERS, bpb, fsinfo, le16, le32, mib, signed,
+    BLOCK, FAT32_TYPES, FREE_UNKNOWN, MAX_CLUSTERS, MBR_ENTRY, MIN_CLUSTERS, bpb, fsinfo,
+    fsinfo_signed, le16, le32, mib, signed,
 };
 
 /// The MBR's partition entries, and the bytes in each.
@@ -48,11 +48,29 @@ pub struct Volume {
     pub sectors_per_cluster: u8,
     /// Its size, in sectors.
     pub total_blocks: u32,
+    /// The LBA of its first FAT: its start plus its reserved sectors.
+    pub fat_start: u32,
+    /// The sectors in each FAT.
+    pub fat_blocks: u32,
+    /// How many FATs it keeps, one after another from `fat_start`.
+    pub fats: u8,
+    /// The first cluster of its root directory, as its boot sector names it.
+    pub root_cluster: u32,
+    /// Its boot sector's extended flags: bit 7 set means one FAT is active and the others are
+    /// not mirrored.
+    pub ext_flags: u16,
+    /// Its FAT32 version, which every FAT32 reader expects to be 0.
+    pub version: u16,
 }
 
 /// The FAT32 volume whose boot sector `boot` was read at LBA `start`, or `None` when it is not
 /// one: FAT12 or FAT16, exFAT, or bytes that only look like a boot sector. A boot sector whose
-/// FSInfo field is 0 or `0xFFFF` names no FSInfo sector, which some formatters write.
+/// FSInfo field is 0 or `0xFFFF` names no FSInfo sector, which some formatters write. A volume
+/// that ends past LBA `u32::MAX` is none either: no SD card addresses a block there, and every
+/// LBA a [`Volume`] computes then fits a `u32`.
+///
+/// It reads mirroring, version and root cluster without judging them: a volume it reports is not
+/// always one the bridge can write.
 #[must_use]
 pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     if !signed(boot) || usize::from(le16(boot, bpb::BYTES_PER_SECTOR)) != BLOCK {
@@ -60,7 +78,7 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     }
     let sectors_per_cluster = boot[bpb::SECTORS_PER_CLUSTER];
     let reserved = u32::from(le16(boot, bpb::RESERVED));
-    let fats = u32::from(boot[bpb::FATS]);
+    let fats = boot[bpb::FATS];
     let fat_blocks = le32(boot, bpb::FAT_32);
     let total_blocks = le32(boot, bpb::TOTAL_32);
     let fsinfo_sector = u32::from(le16(boot, bpb::FSINFO));
@@ -77,7 +95,9 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
     {
         return None;
     }
-    let ahead_of_data = fats.checked_mul(fat_blocks)?.checked_add(reserved)?;
+    let ahead_of_data = u32::from(fats).checked_mul(fat_blocks)?.checked_add(reserved)?;
+    // Past `u32::MAX` it is no card's volume.
+    start.checked_add(total_blocks)?;
     let clusters = total_blocks.checked_sub(ahead_of_data)? / u32::from(sectors_per_cluster);
     // The FAT has an entry for every cluster, past its two reserved ones.
     let entries = u64::from(fat_blocks) * (BLOCK as u64 / 4);
@@ -90,19 +110,41 @@ pub fn volume(boot: &[u8; BLOCK], start: u32) -> Option<Volume> {
         clusters,
         sectors_per_cluster,
         total_blocks,
+        // Within the volume, which ends at or before `u32::MAX`.
+        fat_start: start + reserved,
+        fat_blocks,
+        fats,
+        root_cluster: le32(boot, bpb::ROOT_CLUSTER),
+        ext_flags: le16(boot, bpb::EXT_FLAGS),
+        version: le16(boot, bpb::FS_VERSION),
     })
 }
 
 impl Volume {
+    /// The LBA of its data area, cluster 2's first sector: past every FAT.
+    #[must_use]
+    pub const fn data_start(&self) -> u32 {
+        // Within the volume, as `volume` checked.
+        self.fat_start + self.fats as u32 * self.fat_blocks
+    }
+
+    /// The LBA of `cluster`'s first sector, or `None` for a cluster outside its data area, the
+    /// two reserved entries 0 and 1 included.
+    #[must_use]
+    pub const fn cluster_lba(&self, cluster: u32) -> Option<u32> {
+        if cluster < 2 || cluster - 2 >= self.clusters {
+            return None;
+        }
+        // A cluster of the data area lies within the volume, as `volume` checked.
+        Some(self.data_start() + (cluster - 2) * self.sectors_per_cluster as u32)
+    }
+
     /// The free space its FSInfo sector `fsinfo` records, in MiB. `None` when the sector's
     /// signatures are wrong, or it records no count or one past the volume's clusters.
     #[must_use]
     pub fn free_mb(&self, fsinfo: &[u8; BLOCK]) -> Option<u32> {
-        let signed = le32(fsinfo, fsinfo::LEAD) == FSINFO_LEAD
-            && le32(fsinfo, fsinfo::STRUCT) == FSINFO_STRUCT
-            && le32(fsinfo, fsinfo::TRAIL) == FSINFO_TRAIL;
         let free = le32(fsinfo, fsinfo::FREE);
-        (signed && free != FREE_UNKNOWN && free <= self.clusters)
+        (fsinfo_signed(fsinfo) && free != FREE_UNKNOWN && free <= self.clusters)
             .then(|| mib(u64::from(free) * u64::from(self.sectors_per_cluster)))
     }
 

@@ -39,20 +39,22 @@
 //! - **the microSD card** (`src/sd.rs`) identifies the card every 5 s until one answers, reports
 //!   what it holds in `Status`, checks every 5 s that it still answers, and formats it FAT32 on a
 //!   host's `FormatSd`. It runs here with the rest because core 1 is never started: a flash write
-//!   stalls core 1 wherever it is;
+//!   stalls core 1 wherever it is. It also writes the bridge's diagnostics log to the card, the
+//!   lowest-priority work here, and a future beside it logs a `Status` every 30 s
+//!   (`src/sd_log.rs`);
 //! - **the fleet planner** (`src/fleet.rs`) sleeps until its core's next deadline, or until an
 //!   input wakes it, then ticks the core and sends what it owes. It decides what every node
 //!   scans, reading their heartbeats, and authors every `Assign` and `Stop`. It boots stopped, and
 //!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty, the channel pool and the WardriveESP setting, which `Status` reports. A host's `SetFan`,
-//! `SetPool` or `SetWardriveEsp` stores its change there. The scan mode is not stored. The C6's
-//! Bluetooth bonds are read from flash at boot too, and go down to it after each hello
-//! (`src/bonds.rs`).
+//! duty, the channel pool, the WardriveESP setting and the SD log setting, which `Status` reports.
+//! A host's `SetFan`, `SetPool`, `SetWardriveEsp` or `SetSdLog` stores its change there. The scan
+//! mode is not stored. The C6's Bluetooth bonds are read from flash at boot too, and go down to it
+//! after each hello (`src/bonds.rs`).
 //!
-//! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why); the rest
-//! of the queues are in internal RAM.
+//! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why), and the SD
+//! log's ring past it; the rest of the queues are in internal RAM.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -86,6 +88,7 @@ mod host;
 mod link;
 mod radio;
 mod sd;
+mod sd_log;
 mod settings;
 mod update;
 mod wardrive_esp;
@@ -131,13 +134,13 @@ use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, BleCounters, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held,
     PacketReader, RECORD_MAX, RTS_THRESHOLD, Stream, WIRE_MAX, encode_down,
 };
-use wartui_proto::reset::ResetCause;
+use wartui_proto::sd::log::Kind;
 use wartui_proto::split::{P4Counters, Pair, PairEvent};
 
 use crate::ble::{Ble, BleFrames};
 use crate::cache::Cache;
 use crate::carrier::{Carrier, Power};
-use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
+use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SD_LOG_BYTES};
 use crate::host::Presence;
 use crate::link::{Bus, Link, run_link};
 use crate::radio::RADIO_DIGEST;
@@ -180,6 +183,8 @@ static FLEET: ConstStaticCell<Fleet> =
 /// What the futures share. Static, to keep it out of `main`'s future, which `.clippy.toml`'s
 /// stack threshold bounds.
 static SHARED: StaticCell<Shared> = StaticCell::new();
+/// The SD log's state, which [`Shared`] holds a reference to.
+static SD_LOG: StaticCell<sd_log::SdLog> = StaticCell::new();
 
 /// I2C0, shared by the GPS reader and the carrier's expander. Both lock it per transaction, and
 /// every future is in one task, so the lock needs no more than [`NoopRawMutex`].
@@ -288,6 +293,9 @@ pub struct Shared {
     fleet_sleep: Cell<Option<u64>>,
     /// The microSD card: what it holds, and a format request (`src/sd.rs`).
     sd: sd::Sd,
+    /// The diagnostics log on the card: the setting, the ring of records waiting for the card, and
+    /// the writer's figures (`src/sd_log.rs`). Static, to keep it out of `Shared::new`'s frame.
+    sd_log: &'static sd_log::SdLog,
 }
 
 impl Shared {
@@ -298,12 +306,14 @@ impl Shared {
         updates: &'static mut Updates,
         cache: Cache,
         carrier: &Carrier,
-        cause: ResetCause,
+        sd_log: &'static sd_log::SdLog,
     ) -> Self {
+        let cause = sd_log.reset_cause();
         // The stored settings, read before any future runs.
         let (sector, stored) = settings::boot(updates);
         let bonds = bonds::boot(updates, sector);
         let fan = carrier.board().is_carrier().then(|| fan::Fan::boot(stored.fan));
+        sd_log.boot_setting(stored.sd_log.unwrap_or(true));
         let fleet = FLEET.take();
         fleet.set_pool(stored.pool.unwrap_or_default(), now_ms());
         Self {
@@ -348,6 +358,7 @@ impl Shared {
             fleet_wake: Signal::new(),
             fleet_sleep: Cell::new(None),
             sd: sd::Sd::new(),
+            sd_log,
         }
     }
 
@@ -374,28 +385,40 @@ impl Shared {
         host.clear();
     }
 
-    /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
+    /// Queue `msg` for the host, and copy it into the SD log when the log keeps it
+    /// (`src/sd_log.rs`). A full ring evicts its oldest frame and counts the drop.
     ///
     /// Dropped, and not counted, while no host owns the queue, a phone holding it included: a
     /// phone reads text lines, not frames (`src/wardrive_esp.rs`). A backlog held for an absent
     /// host arrives late when one attaches, and the host stamps its current position onto the old
     /// sightings in it. Faults worth keeping are repeated by
-    /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
+    /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`). The log
+    /// takes its copy whoever owns the queue, so a phone session keeps its errors there.
+    ///
+    /// Never called while the log's ring is borrowed: the copy borrows it.
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
+        let tee = sd_log::on(self) && wartui_proto::sd::log::logged(msg);
         // Each writer waits on its own signal: a central's is the C6 link's.
         let writer = match self.owner.get().owner() {
-            HostOwner::None => return,
-            HostOwner::Usb => &self.pushed,
-            HostOwner::Bluetooth => &self.wake_link,
+            HostOwner::None if !tee => return,
+            HostOwner::None => None,
+            HostOwner::Usb => Some(&self.pushed),
+            HostOwner::Bluetooth => Some(&self.wake_link),
         };
         let mut frame = [0; MAX_FRAME];
         // Every `BridgeToHost` fits `MAX_FRAME`.
         let Ok(len) = encode_frame(msg, &mut frame) else { return };
-        self.host.borrow_mut().push(&frame[..len], is_priority(msg));
-        writer.signal(());
+        if tee {
+            // The frame ends in its terminator, which the record leaves out.
+            sd_log::record_frame(self, Kind::Frame, &frame[..len - 1]);
+        }
+        if let Some(writer) = writer {
+            self.host.borrow_mut().push(&frame[..len], is_priority(msg));
+            writer.signal(());
+        }
     }
 
     /// Queue `down` for the C6, or refuse it and return `false` when the queue is full.
@@ -534,6 +557,14 @@ impl Shared {
 
     #[inline(never)]
     fn push_status_only(&self) {
+        let status = self.status_msg();
+        self.push_host(&status);
+    }
+
+    /// The `Status` a poll gets, with the C6's counters as last received: it asks the C6 for
+    /// nothing, so the SD log's snapshots build it too (`src/sd_log.rs`).
+    #[inline(never)]
+    fn status_msg(&self) -> BridgeToHost {
         let host = self.host.borrow().stats();
         let down = {
             let ring = self.down.borrow();
@@ -566,8 +597,7 @@ impl Shared {
             bluetooth: self.bluetooth(now),
         };
         drop(fleet);
-        let status = self.pair.borrow().status(now, counters);
-        self.push_host(&status);
+        self.pair.borrow().status(now, counters)
     }
 }
 
@@ -718,11 +748,14 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
+    let log_boot =
+        sd_log::Boot { fw_version: fw_version.clone(), cause, last_phase, image: own_image };
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {
-        let host = host_queue(spare_psram);
-        Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, cause)
+        let (host, ring) = host_queue(spare_psram);
+        let log = SD_LOG.init(sd_log::SdLog::new(ring, log_boot));
+        Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, log)
     });
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(
@@ -751,20 +784,23 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
                 fan::run(fan_pins, shared),
                 fleet::run(shared),
                 wardrive_esp::run(shared),
-                sd::run(sd_pins, shared),
+                join(sd::run(sd_pins, shared), sd_log::run(shared)),
             ),
         ),
     )
     .await {}
 }
 
-/// The host queue, its bulk ring over up to [`HOST_BULK_BYTES`] of `spare_psram`: the PSRAM the
-/// node image cache leaves, and none when none mapped.
-fn host_queue(spare_psram: &'static mut [u8]) -> &'static mut HostFrames {
+/// The host queue, its bulk ring over up to [`HOST_BULK_BYTES`] of `spare_psram`, and up to
+/// [`SD_LOG_BYTES`] past it for the SD log's ring. `spare_psram` is the PSRAM the node image cache
+/// leaves, and none when none mapped.
+fn host_queue(spare_psram: &'static mut [u8]) -> (&'static mut HostFrames, &'static mut [u8]) {
     let queue = HOST_QUEUE.take();
     let len = spare_psram.len().min(HOST_BULK_BYTES);
-    queue.set_bulk(&mut spare_psram[..len]);
-    queue
+    let (bulk, rest) = spare_psram.split_at_mut(len);
+    queue.set_bulk(bulk);
+    let len = rest.len().min(SD_LOG_BYTES);
+    (queue, &mut rest[..len])
 }
 
 /// Bring up I2C0 for the GPS receiver and a carrier's expander, read the expander blocking, then

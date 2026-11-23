@@ -1,4 +1,4 @@
-//! `wartui sd` — show the bridge's microSD card, or format it.
+//! `wartui sd` — show the bridge's microSD card, format it, or set whether the bridge logs to it.
 //!
 //! `format` erases the card and writes one FAT32 partition labeled `WARTUI`
 //! (`wartui_proto::sd::format`). It asks no confirmation, as `power-cycle` and `reset` do not:
@@ -6,6 +6,11 @@
 //! for a 64 GB card, so the command waits up to [`FORMAT_TIMEOUT`]; the transport keeps the link
 //! alive meanwhile. An answer other than done is the command's error. A done format is followed
 //! by a fresh `Status`, so the card line shows the new volume.
+//!
+//! `log` reads or sets the setting alone: whether the bridge logs to the card. The bridge keeps
+//! it on its own flash, as it keeps `wardrive esp`, and this sets it as `wartui bluetooth
+//! wardrive-esp` sets that: send, listen for a fault, then read the setting back from a fresh
+//! `Status`.
 //!
 //! The bridge is resolved to one board as `wartui scan` resolves it. A `wartui run` holds the
 //! port, so this runs only while none is attached; in `run`, settings' `format` row does the same.
@@ -17,16 +22,20 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::sd_formatted_text;
-use wartui_proto::link::{BridgeToHost, HostToBridge, SdFormatOutcome};
+use wartui_proto::link::{BridgeToHost, HostToBridge, SdFormatOutcome, SdStatus};
 use wartui_proto::mac;
 
-use crate::text::{SdForm, sd_text};
+use crate::OnOff;
+use crate::text::{SdForm, sd_log_text, sd_text};
 
 /// How long the bridge has to answer the status request.
 const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 /// How long the bridge has to finish a format: room past the few seconds a large card takes.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long `log` listens for a fault once the setting is sent, as `wartui pool` does.
+const SETTING_SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(ClapArgs)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -42,6 +51,16 @@ pub struct Args {
 enum Action {
     /// Format the card as FAT32, erasing everything on it. Asks no confirmation.
     Format {
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Read or set the SD log setting: whether the bridge logs to its card. The bridge keeps it
+    /// across its reboots. This is the setting; it reads no log.
+    Log {
+        /// `on` logs, `off` does not. Without it, prints the setting.
+        #[arg(value_name = "on|off")]
+        state: Option<OnOff>,
+
         #[command(flatten)]
         target: Target,
     },
@@ -89,6 +108,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (wanted, target) = match args.action {
         None => (Wanted::Show, args.target),
         Some(Action::Format { target }) => (Wanted::Format, target),
+        Some(Action::Log { state, target }) => return log(state.map(OnOff::is_on), &target).await,
     };
     let (mut link, info) = connect(&target).await?;
     if wanted == Wanted::Format {
@@ -98,6 +118,33 @@ pub async fn run(args: Args) -> Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// `wartui sd log`: set the log to `wanted` when given, then print the setting in force.
+async fn log(wanted: Option<bool>, target: &Target) -> Result<()> {
+    let (mut link, info) = connect(target).await?;
+    if let Some(on) = wanted {
+        let state = if on { "on" } else { "off" };
+        println!("turning sd log {state} on bridge {}", mac::full(&info.mac));
+    }
+    let (line, taken) = set_log(&mut link, wanted).await?;
+    println!("{line}");
+    if !taken {
+        bail!("the bridge did not take the setting");
+    }
+    Ok(())
+}
+
+/// Send the log setting `wanted` when given, then return the `sd log` line from a fresh status
+/// and whether the bridge holds what was wanted.
+async fn set_log(link: &mut LinkHandle, wanted: Option<bool>) -> Result<(String, bool)> {
+    if let Some(on) = wanted {
+        link.send_bulk(HostToBridge::SetSdLog { on }).context("queueing the setting")?;
+        crate::settle(link, SETTING_SETTLE).await?;
+    }
+    let sd = sd_status(link).await?;
+    let taken = wanted.is_none_or(|on| sd.map(|sd| sd.log.on) == Some(on));
+    Ok((format!("sd log     {}", sd_log_text(sd)), taken))
 }
 
 /// The bridge `target` names, connected and announced.
@@ -140,6 +187,11 @@ async fn act(link: &mut LinkHandle, wanted: Wanted) -> Result<Vec<String>> {
 
 /// The card, from a fresh status request.
 async fn card_line(link: &mut LinkHandle) -> Result<String> {
+    Ok(format!("sd card    {}", sd_text(sd_status(link).await?, SdForm::Line)))
+}
+
+/// The card as a fresh status request reports it.
+async fn sd_status(link: &mut LinkHandle) -> Result<Option<SdStatus>> {
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
     let status = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status(link))
         .await
@@ -147,7 +199,7 @@ async fn card_line(link: &mut LinkHandle) -> Result<String> {
     let BridgeToHost::Status { sd, .. } = status else {
         unreachable!("wait_for_status only returns Status")
     };
-    Ok(format!("sd card    {}", sd_text(sd, SdForm::Line)))
+    Ok(sd)
 }
 
 /// Wait for the format's answer, printing each fault the bridge reports meanwhile.
@@ -170,7 +222,7 @@ mod tests {
     use wartui_bridge::sim::{SimConfig, SimTransport};
     use wartui_proto::link::HostToBridge;
 
-    use super::{LinkHandle, Wanted, act};
+    use super::{LinkHandle, Wanted, act, set_log};
 
     /// A simulated bridge, connected.
     async fn sim() -> LinkHandle {
@@ -198,6 +250,30 @@ mod tests {
         assert_eq!(lines[0], "SD card formatted", "{lines:?}");
         assert!(lines[1].starts_with("sd card    "), "{lines:?}");
         assert!(lines[1].ends_with(" of 29.7 GB free"), "{lines:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sd_cmd_shows_log_setting_when_given_no_state() {
+        let mut link = sim().await;
+        let shown = set_log(&mut link, None).await.expect("the status");
+        assert_eq!(shown, ("sd log     on · waiting for a card".to_owned(), true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sd_cmd_sets_log_and_reads_it_back_when_given_a_state() {
+        let mut link = sim().await;
+        let off = set_log(&mut link, Some(false)).await.expect("the setting");
+        assert_eq!(off, ("sd log     off".to_owned(), true));
+        let on = set_log(&mut link, Some(true)).await.expect("the setting");
+        assert_eq!(on, ("sd log     on · waiting for a card".to_owned(), true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sd_cmd_shows_log_writing_file_when_card_is_formatted() {
+        let mut link = sim().await;
+        act(&mut link, Wanted::Format).await.expect("the format");
+        let (line, _) = set_log(&mut link, None).await.expect("the status");
+        assert!(line.starts_with("sd log     on · writing LOG/00000001.BIN · "), "{line}");
     }
 
     #[tokio::test(start_paused = true)]

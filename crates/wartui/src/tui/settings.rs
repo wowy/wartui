@@ -7,16 +7,16 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
-//! The pool, fan, bluetooth and wardrive esp rows are the bridge's, and are never written to
-//! `wartui.toml`. Each shows what the bridge last reported, and `Enter` sends it only when the
-//! row moved. The bridge stores the pool, fan and wardrive esp and boots into them. It keeps no
-//! scan mode, so the bluetooth row is held by the run, which starts the scan in that mode again
-//! after the bridge reboots. The bridge picks which node scans Bluetooth.
+//! The pool, fan, bluetooth, wardrive esp and sd card log rows are the bridge's, and are never
+//! written to `wartui.toml`. Each shows what the bridge last reported, and `Enter` sends it only
+//! when the row moved. The bridge stores the pool, fan, wardrive esp and log and boots into them.
+//! It keeps no scan mode, so the bluetooth row is held by the run, which starts the scan in that
+//! mode again after the bridge reboots. The bridge picks which node scans Bluetooth.
 //!
-//! The sd card row is an action, not a setting: nothing in it is applied or saved. Its value is
-//! drawn from the live snapshot on every frame, so a format's progress shows while the modal is
-//! open. `Enter` on it asks [`super::ui::Ui`] to confirm a format, which erases the card, and the
-//! modal stays open behind the confirm with its edits.
+//! The sd card's format row is an action, not a setting: nothing in it is applied or saved. Its
+//! value is drawn from the live snapshot on every frame, so a format's progress shows while the
+//! modal is open. `Enter` on it asks [`super::ui::Ui`] to confirm a format, which erases the card,
+//! and the modal stays open behind the confirm with its edits.
 //!
 //! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
 //! decides at launch whether it waits, so the row applies from the next launch. The
@@ -93,11 +93,12 @@ enum Field {
     WdgwarsKey,
     WigleName,
     WigleToken,
+    SdLog,
     SdCard,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 11] = [
+const FIELDS: [Field; 12] = [
     Field::Pool,
     Field::Fan,
     Field::Bluetooth,
@@ -108,6 +109,7 @@ const FIELDS: [Field; 11] = [
     Field::WdgwarsKey,
     Field::WigleName,
     Field::WigleToken,
+    Field::SdLog,
     Field::SdCard,
 ];
 
@@ -126,7 +128,7 @@ impl Field {
 }
 
 /// The settings modal's state while open. Seeded from the snapshot at opening, then
-/// edited independently of it. The sd card row holds nothing: it reads the live snapshot.
+/// edited independently of it. The format row holds nothing: it reads the live snapshot.
 #[derive(Debug, Clone)]
 pub(super) struct ConfigModal {
     selected: Field,
@@ -150,8 +152,14 @@ pub(super) struct ConfigModal {
     /// The wardrive esp row as the bridge reported it when the modal opened, so `Enter` sends
     /// only a change.
     wardrive_esp_seed: Option<bool>,
-    /// Whether the link was up when the modal opened. While it is down, the pool, fan and wardrive
-    /// esp rows are `None`: a value sent then would be dropped, not stored.
+    /// Whether the bridge logs to its microSD card, or `None` while no bridge with a card slot has
+    /// reported it.
+    sd_log: Option<bool>,
+    /// The log row as the bridge reported it when the modal opened, so `Enter` sends only a
+    /// change.
+    sd_log_seed: Option<bool>,
+    /// Whether the link was up when the modal opened. While it is down, the pool, fan, wardrive
+    /// esp and log rows are `None`: a value sent then would be dropped, not stored.
     bridge_up: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
@@ -223,11 +231,12 @@ impl ConfigModal {
     /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
     /// | bluetooth | flips; none at `scan stopped` |
     /// | wardrive esp | flips; none at `no bridge` |
+    /// | log | flips; none at `no bridge` or `no slot` |
     /// | remember | flips |
     /// | wait for gps | flips |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | wdgwars, wigle name, wigle token | none; [`Self::on_key`] types into it |
-    /// | sd card | none; `Enter` asks to format the card ([`sd_row`]) |
+    /// | format | none; `Enter` asks to format the card ([`sd_row`]) |
     fn step(&mut self, delta: i8) {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
@@ -240,6 +249,11 @@ impl ConfigModal {
             Field::WardriveEsp => {
                 if delta != 0 {
                     self.wardrive_esp = self.wardrive_esp.map(|on| !on);
+                }
+            }
+            Field::SdLog => {
+                if delta != 0 {
+                    self.sd_log = self.sd_log.map(|on| !on);
                 }
             }
             Field::RememberBridge => {
@@ -281,11 +295,12 @@ pub(super) enum ModalAction {
 impl ConfigModal {
     /// Open the modal, seeded from what is in force.
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
-        // The bridge holds these three, so they are what its last `Status` said, and nothing
+        // The bridge holds these four, so they are what its last `Status` said, and nothing
         // while the link is down.
         let bridge_up = snapshot.link_up;
         let pool = snapshot.pool.filter(|_| bridge_up);
         let wardrive_esp = snapshot.wardrive_esp.filter(|_| bridge_up);
+        let sd_log = snapshot.sd_log.filter(|_| bridge_up);
         let fan = snapshot
             .bridge_status
             .and_then(|status| status.fan)
@@ -308,6 +323,8 @@ impl ConfigModal {
             bluetooth_seed: bluetooth,
             wardrive_esp,
             wardrive_esp_seed: wardrive_esp,
+            sd_log,
+            sd_log_seed: sd_log,
             bridge_up,
             // The engine does not hold this one, so it comes from the handle.
             remember_bridge: settings.bridge_memory.is_enabled(),
@@ -332,6 +349,7 @@ impl ConfigModal {
             | Field::Fan
             | Field::Bluetooth
             | Field::WardriveEsp
+            | Field::SdLog
             | Field::RememberBridge
             | Field::WaitForGps
             | Field::ExcludedSsids
@@ -498,16 +516,18 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The bridge's rows go only when they moved: the bridge stores every pool, duty and wardrive
-    // esp setting it is sent, and an unmoved bluetooth row would restate the scan.
+    // The bridge's rows go only when they moved: the bridge stores every pool, duty, wardrive esp
+    // and log setting it is sent, and an unmoved bluetooth row would restate the scan.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
     let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
     let wardrive_esp = modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed);
+    let sd_log = modal.sd_log.filter(|_| modal.sd_log != modal.sd_log_seed);
     let wanted = usize::from(pool.is_some())
         + usize::from(fan.is_some())
         + usize::from(bluetooth.is_some())
-        + usize::from(wardrive_esp.is_some());
+        + usize::from(wardrive_esp.is_some())
+        + usize::from(sd_log.is_some());
     let Ok(mut permits) = commands.try_reserve_many(wanted) else {
         return Err(ENGINE_BUSY);
     };
@@ -515,11 +535,13 @@ pub(super) fn apply(
     let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
     let bluetooth_command = bluetooth.map(Command::SetBluetooth);
     let wardrive_esp_command = wardrive_esp.map(Command::SetWardriveEsp);
+    let sd_log_command = sd_log.map(Command::SetSdLog);
     for command in pool_command
         .into_iter()
         .chain(fan_command)
         .chain(bluetooth_command)
         .chain(wardrive_esp_command)
+        .chain(sd_log_command)
     {
         if let Some(permit) = permits.next() {
             permit.send(command);
@@ -540,6 +562,13 @@ pub(super) fn apply(
             "; wardrive esp on sent to the bridge, open to any phone in range"
         } else {
             "; wardrive esp off sent to the bridge"
+        });
+    }
+    if let Some(on) = sd_log {
+        text.push_str(if on {
+            "; sd log on sent to the bridge"
+        } else {
+            "; sd log off sent to the bridge"
         });
     }
     let memory = &settings.bridge_memory;
@@ -721,7 +750,7 @@ fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
 /// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
 /// the sd card row reads on every frame.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
-    let area = centered_rect(48, 19, frame.area());
+    let area = centered_rect(48, 20, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -761,6 +790,9 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
     let value_width = usize::from(inner.width).saturating_sub(20);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
     let (sd_value, sd_action) = sd_row(snapshot);
+    // A bridge that reported no card slot has no log to set.
+    let no_slot =
+        modal.bridge_up && snapshot.bridge_status.is_some_and(|status| status.sd.is_none());
     let lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
@@ -806,6 +838,11 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
         text_row("wigle token", &mask_key(&modal.wigle_token), Field::WigleToken),
         Line::default(),
         Line::from("sd card"),
+        match modal.sd_log {
+            Some(on) => row("log", &on_off(on), Field::SdLog),
+            // Nothing to step, so no arrows.
+            None => text_row("log", if no_slot { "no slot" } else { "no bridge" }, Field::SdLog),
+        },
         // Nothing to step, so no arrows.
         text_row("format", &sd_value, Field::SdCard),
         Line::default(),
@@ -1836,12 +1873,14 @@ mod tests {
         select_wdgwars(&mut ui, &snapshot, &tx);
         assert_eq!(FIELDS.last(), Some(&Field::SdCard), "the last row");
 
-        for expected in [Field::WigleName, Field::WigleToken, Field::SdCard, Field::SdCard] {
+        let walk =
+            [Field::WigleName, Field::WigleToken, Field::SdLog, Field::SdCard, Field::SdCard];
+        for expected in walk {
             press(&mut ui, KeyCode::Down, KeyModifiers::NONE, &snapshot);
             assert_eq!(ui.modal().expect("open").selected, expected);
         }
         press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
-        assert_eq!(ui.modal().expect("open").selected, Field::WigleToken);
+        assert_eq!(ui.modal().expect("open").selected, Field::SdLog);
     }
 
     #[test]
@@ -2648,6 +2687,116 @@ mod tests {
         assert!(screen.contains("enter save · esc cancel"), "{screen}");
     }
 
+    #[test]
+    fn ui_draws_sd_log_row_between_sd_card_heading_and_format_when_opened() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+
+        let screen = modal_screen(&snapshot, &mut ui);
+
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|line| line.contains(text)).expect(text);
+        let log = at("log               ◂ on ▸");
+        assert_eq!(at("sd card"), log - 1, "{screen}");
+        assert_eq!(at("format              "), log + 1, "{screen}");
+        // The modal grew a row, and the last still fits.
+        assert!(screen.contains("enter save · esc cancel"), "{screen}");
+    }
+
+    #[test]
+    fn ui_toggles_sd_log_row_when_h_or_l_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdLog, &mut ui, &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").sd_log, Some(true));
+
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").sd_log, Some(false));
+        let screen = modal_screen(&snapshot, &mut ui);
+        assert!(screen.contains("log               ◂ off ▸"), "{screen}");
+
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("open").sd_log, Some(true));
+    }
+
+    #[test]
+    fn ui_sends_sd_log_when_row_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::SdLog, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Right), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetSdLog(false));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("sd log off sent to the bridge"), "{notice}");
+        let file = std::fs::read_to_string(&target).expect("the other rows were saved");
+        assert!(!file.contains("log"), "the bridge keeps it, not the file: {file}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_sd_log_row_unmoved() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdLog, &mut ui, &snapshot, &tx);
+        // Out and back: the setting the bridge already holds.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetSdLog");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("sd log"), "{notice}");
+    }
+
+    #[test]
+    fn ui_keeps_sd_log_row_still_when_bridge_is_down_or_has_no_slot() {
+        let down = Snapshot { link_up: false, ..busy() };
+        let no_slot = Snapshot { sd_log: None, ..sd_snapshot(None) };
+        for (snapshot, value) in [(down, "no bridge"), (no_slot, "no slot")] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(Field::SdLog, &mut ui, &snapshot, &tx);
+            ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+            assert_eq!(ui.modal().expect("open").sd_log, None, "{value}");
+            let screen = modal_screen(&snapshot, &mut ui);
+            let row = line_with(&screen, "log    ");
+            assert!(row.contains(&format!("log                 {value}")), "{value}: {screen}");
+            // Nothing steps it, so it never shows arrows.
+            assert!(!row.contains('◂') && !row.contains('▸'), "{value}: {screen}");
+
+            ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+            assert!(rx.try_recv().is_err(), "{value}: no SetSdLog");
+        }
+    }
+
+    #[test]
+    fn ui_asks_no_format_when_enter_pressed_on_sd_log_row() {
+        // The row sits beside the format row, and a card that can be formatted is in the slot.
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SdLog, &mut ui, &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(ui.modal().is_none(), "Enter applies the modal, as on any setting row");
+        assert!(rx.try_recv().is_err(), "the row did not move, so nothing is sent");
+        let rendered = modal_screen(&snapshot, &mut ui);
+        assert!(!rendered.contains(" format sd card "), "no format confirm: {rendered}");
+    }
+
     /// The settings modal drawn over the view, as text.
     fn modal_screen(snapshot: &Snapshot, ui: &mut Ui) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
@@ -2755,7 +2904,7 @@ mod tests {
 
     /// A "64 GB" card in `state`: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {
-        Some(SdStatus { state, card_mb: 60_350, free_mb })
+        Some(SdStatus::card(state, 60_350, free_mb))
     }
 
     /// The first line of `screen` holding `text`.
@@ -2766,7 +2915,7 @@ mod tests {
     #[test]
     fn ui_shows_sd_row_and_asks_only_where_card_can_be_formatted_when_enter_pressed() {
         let down = Snapshot { link_up: false, ..busy() };
-        let no_card = Some(SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None });
+        let no_card = Some(SdStatus::card(SdState::NoCard, 0, None));
         let cases = [
             (down, "no bridge", "no bridge to format a card on · esc cancel", false),
             (sd_snapshot(None), "no slot", "this bridge has no card slot · esc cancel", false),
@@ -2960,13 +3109,14 @@ mod tests {
         let terminal = handheld(&snapshot, &mut ui);
         let rendered = terminal.backend().to_string();
 
-        // 48×19, centered in 58×26: columns 5 to 52, rows 3 to 21.
+        // 48×20, centered in 58×26: columns 5 to 52, rows 3 to 22.
         let buffer = terminal.backend().buffer();
         let row = |y: u16| -> String { (5..53).map(|x| buffer[(x, y)].symbol()).collect() };
         assert!(row(3).starts_with("┌ settings "), "{rendered}");
-        assert_eq!(row(21), format!("└{}┘", "─".repeat(46)), "{rendered}");
-        assert_eq!(row(20), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
-        assert!(row(18).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
+        assert_eq!(row(22), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        assert_eq!(row(21), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
+        assert!(row(19).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
+        assert!(row(18).starts_with("│log               ◂ on ▸"), "{rendered}");
         assert!(row(17).starts_with("│sd card "), "{rendered}");
     }
 

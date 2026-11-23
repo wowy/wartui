@@ -250,12 +250,12 @@ the owner, the bonds, the window, the connected central and the C6's Bluetooth c
 
 ## Settings
 
-The P4 keeps three settings in the first sector of its `nvs` partition, on every board: the lid
-fan's duty, the channel pool and whether it offers the WardriveESP service. It reads them once at
-boot and runs them with no host present, or 100 %, `All` and off with none stored. A host's
-`SetFan`, `SetPool` or `SetWardriveEsp` applies at once and is written only when the sector does
-not hold it. `Status` reports all three (`src/settings.rs`). The scan mode is
-not stored, so the P4 boots stopped.
+The P4 keeps four settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty, the channel pool, whether it offers the WardriveESP service and whether it logs to its
+microSD card. It reads them once at boot and runs them with no host present, or 100 %, `All`, off
+and on with none stored. A host's `SetFan`, `SetPool`, `SetWardriveEsp` or `SetSdLog` applies at
+once and is written only when the sector does not hold it. `Status` reports all four
+(`src/settings.rs`). The scan mode is not stored, so the P4 boots stopped.
 
 ## The host link
 
@@ -313,8 +313,8 @@ Without a receiver, every announcement carries "no GPS receiver answered on the 
 
 ## The microSD card
 
-The board's TF slot is SDMMC slot 0, and the P4 drives it from boot (`src/sd.rs`). It writes
-nothing to the card but a format the host asks for.
+The board's TF slot is SDMMC slot 0, and the P4 drives it from boot (`src/sd.rs`). It writes two
+things to the card: a format the host asks for, and its diagnostics log (§ "The SD log").
 
 | Signal | P4 GPIO |
 | --- | --- |
@@ -360,6 +360,45 @@ stalls the other core for every flash write, wherever it is. On the bench, a cor
 card made `flash-bridge` updates restart or hang the P4.
 [`docs/p4-sd-findings.md`](../../docs/p4-sd-findings.md) has the measurements.
 
+### The SD log
+
+The P4 logs its diagnostics to the card (`src/sd_log.rs`), by default. The SD log setting, tagged
+`L` in the settings sector (§ "Settings"), turns it on or off: `wartui sd log on|off`, or the
+settings modal's `log` row. `wartui sd-log` prints the files as text
+([`crates/wartui/README.md`](../../crates/wartui/README.md) § "Reading the SD log").
+
+It logs whoever owns the host queue, and with no host at all:
+
+- every frame the P4 produces for a host but node records, GPS bytes, `Delivered` and
+  `Undelivered`;
+- a `Status` snapshot every 30 s, when a file opens and at each change of who holds the host
+  queue, built from the C6's counters as last received;
+- each change of who holds the host queue;
+- a phone's commands, and the lines it is sent but its `WD:AP` and `WD:BT` sightings.
+
+The log holds the addresses of the nodes and of Bluetooth peers, so a card identifies the fleet as
+a capture does.
+
+**Files are `LOG/NNNNNNNN.BIN`**, each numbered past the highest there. A new one opens at each
+boot, each time the setting turns on, for each card found or formatted, and after a failed write.
+At `SD_LOG_FILE_MAX` bytes a file ends with a `Closed` record and the next opens. The size is
+checked before each flush, so a file runs up to one flush, 16 KiB, past it. When a flush would
+leave less free than `SD_LOG_KEEP_FREE_MB`, or an eighth of the volume if that is less, the log
+deletes its oldest files first, but only when deleting its files can restore that reserve.
+Otherwise, as when other files took the space, it stops, `card full`, and keeps every file.
+
+**Records wait in a ring of `SD_LOG_BYTES` in PSRAM**, past the host bulk ring. A producer copies
+its record in and returns; a full ring evicts its oldest records, and the next flush says how many
+in a `Dropped` record. The writer flushes the ring every 5 s, and sooner once 12 KiB is queued.
+While no card takes the log, or while an update of the P4 or a node image upload runs, the ring
+keeps the newest records for the next file. Turning the setting off flushes the ring and ends the
+file with a `Closed` record.
+
+**The writer is the lowest-priority work on the P4.** It yields after every card transfer and
+every block it stages, so every other future runs between them. A failed transfer, a fault it
+finds on the card or a volume it refuses stops only the writer. `wartui_proto::sd::append`'s docs
+say what a power cut leaves on the card.
+
 ## Build-time settings
 
 Each is read at build time from an environment variable, so a bench run changes one with a
@@ -384,6 +423,13 @@ less PSRAM gets a smaller ring.
 | `WARTUI_P4_DOWN_QUEUE_BYTES` | 1024 | `Down` records waiting for a packet to the C6 |
 | `WARTUI_P4_NODE_DOWN_BYTES` | 4160 | per slot, the host's records for that node waiting behind the two flights out; a full queue answers `Undelivered` |
 | `WARTUI_P4_SD_HZ` | 20000000 | the microSD card's bus clock asked for, in Hz; the driver caps it at 40 MHz |
+| `WARTUI_P4_SD_LOG_BYTES` | 262144 | SD log records waiting for the card, in PSRAM past the host bulk ring |
+| `WARTUI_P4_SD_LOG_FILE_MAX` | 67108864 | the size at which an SD log file ends and the next opens, in bytes |
+| `WARTUI_P4_SD_LOG_KEEP_FREE_MB` | 256 | the free space the SD log keeps, in MiB, deleting its oldest files; at most an eighth of the volume |
+
+The bench builds the SD log's sizes small to force rotation and deletion: a small ring overflows
+and counts drops, and small files rotate within minutes and, on a card filled to its reserve, are
+deleted one at a time.
 
 The C6 link's baud rate (4 Mbaud) is fixed, as part of its frozen core. The host link's is
 `wartui_proto::link::HOST_BAUD`.

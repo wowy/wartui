@@ -16,8 +16,8 @@ use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
-    BridgeToHost, HostToBridge, PowerOutcome, SdFormatOutcome, SdState, SdStatus, ToNodeBody,
-    Undelivered,
+    BridgeToHost, HostToBridge, PowerOutcome, SdFormatOutcome, SdLog, SdLogState, SdState,
+    SdStatus, ToNodeBody, Undelivered,
 };
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -939,7 +939,8 @@ async fn next_sd_formatted(link: &mut LinkHandle) -> SdFormatOutcome {
 #[tokio::test(start_paused = true)]
 async fn sim_bridge_formats_sd_card_when_asked() {
     let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
-    let blank = SdStatus { state: SdState::NoFat32, card_mb: 30_436, free_mb: None };
+    let waiting = SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF };
+    let blank = SdStatus { log: waiting, ..SdStatus::card(SdState::NoFat32, 30_436, None) };
     assert_eq!(next_sd(&mut link).await, Some(blank), "a card with no volume");
 
     link.send_bulk(HostToBridge::FormatSd).expect("queued");
@@ -952,7 +953,23 @@ async fn sim_bridge_formats_sd_card_when_asked() {
     assert_eq!(next_sd_formatted(&mut link).await, SdFormatOutcome::Done);
     let card = next_sd(&mut link).await.expect("a card");
     let free_mb = format::plan(62_333_952, 0).expect("a layout").free_mb();
-    assert_eq!(card, SdStatus { state: SdState::Ready, card_mb: 30_436, free_mb: Some(free_mb) });
+    let writing = SdLog { on: true, state: SdLogState::Writing, file: Some(1), ..SdLog::OFF };
+    let ready = SdStatus::card(SdState::Ready, 30_436, Some(free_mb));
+    assert_eq!(card, SdStatus { log: writing, ..ready });
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_sd_log_setting_when_set() {
+    let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
+    let log = |sd: Option<SdStatus>| sd.expect("a card").log;
+    assert_eq!(log(next_sd(&mut link).await).state, SdLogState::Waiting, "on at the start");
+
+    link.send_bulk(HostToBridge::SetSdLog { on: false }).expect("queued");
+    assert_eq!(log(next_sd(&mut link).await), SdLog::OFF);
+
+    link.send_bulk(HostToBridge::SetSdLog { on: true }).expect("queued");
+    let on = log(next_sd(&mut link).await);
+    assert_eq!((on.on, on.state), (true, SdLogState::Waiting), "the card holds no volume");
 }
 
 /// The mode and Bluetooth slot the next `Status` reports.

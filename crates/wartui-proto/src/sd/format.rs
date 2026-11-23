@@ -4,7 +4,7 @@
 pub use super::BLOCK;
 use super::{
     ALIGN, FSINFO_LEAD, FSINFO_STRUCT, FSINFO_TRAIL, MAX_CLUSTERS, MBR_ENTRY, MIN_CLUSTERS, bpb,
-    fsinfo, mib,
+    fsinfo, mib, put16, put32,
 };
 
 /// Cluster sizes in sectors, tried largest first.
@@ -319,14 +319,6 @@ impl Iterator for Ops {
         self.step += 1;
         Some(op)
     }
-}
-
-fn put16(block: &mut [u8; BLOCK], at: usize, value: u16) {
-    block[at..at + 2].copy_from_slice(&value.to_le_bytes());
-}
-
-fn put32(block: &mut [u8; BLOCK], at: usize, value: u32) {
-    block[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Ends a block in the `55 AA` boot signature.

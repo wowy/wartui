@@ -1,5 +1,6 @@
-//! The P4 bridge's microSD card: the FAT32 volume it writes ([`format`]) and how it reads one it
-//! did not ([`inspect`]).
+//! The P4 bridge's microSD card: the FAT32 volume it writes ([`format`]), how it reads one it
+//! did not ([`inspect`]), the FAT32 pieces its diagnostics log is written in ([`fat`]), the
+//! log's records ([`log`]) and the writer that appends them to a file ([`append`]).
 //!
 //! The layout is the one SD cards ship with, so a card the bridge formats looks like a new card
 //! to a laptop or a phone:
@@ -23,8 +24,11 @@
 //! [`inspect`] reads whatever a stranger's card holds, so it bounds every read and every sum:
 //! nothing in a block can make it panic or overflow.
 
+pub mod append;
+pub mod fat;
 pub mod format;
 pub mod inspect;
+pub mod log;
 
 /// The bytes in one card block. Every SD card addresses 512-byte blocks.
 pub const BLOCK: usize = 512;
@@ -67,6 +71,8 @@ mod bpb {
     pub const HIDDEN: usize = 28;
     pub const TOTAL_32: usize = 32;
     pub const FAT_32: usize = 36;
+    pub const EXT_FLAGS: usize = 40;
+    pub const FS_VERSION: usize = 42;
     pub const ROOT_CLUSTER: usize = 44;
     pub const FSINFO: usize = 48;
     pub const BACKUP: usize = 50;
@@ -91,6 +97,13 @@ fn signed(block: &[u8; BLOCK]) -> bool {
     block[BLOCK - 2..] == [0x55, 0xAA]
 }
 
+/// Whether a block carries the FSInfo sector's three signatures.
+fn fsinfo_signed(block: &[u8; BLOCK]) -> bool {
+    le32(block, fsinfo::LEAD) == FSINFO_LEAD
+        && le32(block, fsinfo::STRUCT) == FSINFO_STRUCT
+        && le32(block, fsinfo::TRAIL) == FSINFO_TRAIL
+}
+
 /// The `u16` at `at`, little-endian, or 0 past the block's end.
 fn le16(block: &[u8; BLOCK], at: usize) -> u16 {
     let mut bytes = [0; 2];
@@ -107,6 +120,14 @@ fn le32(block: &[u8; BLOCK], at: usize) -> u32 {
         bytes.copy_from_slice(src);
     }
     u32::from_le_bytes(bytes)
+}
+
+fn put16(block: &mut [u8; BLOCK], at: usize, value: u16) {
+    block[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put32(block: &mut [u8; BLOCK], at: usize, value: u32) {
+    block[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// `blocks` of [`BLOCK`] bytes in MiB, rounded down, and `u32::MAX` past it.

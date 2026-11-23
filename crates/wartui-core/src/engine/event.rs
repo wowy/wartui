@@ -121,6 +121,13 @@ pub enum Command {
     /// [`Snapshot::bridge_status`](super::Snapshot::bridge_status) shows the card formatting. The
     /// answer reaches the operator as [`Snapshot::sd_answer`](super::Snapshot::sd_answer).
     FormatSd,
+
+    /// Ask the bridge to log to its microSD card when `true`, and keep it across its reboots.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetWardriveEsp`] is, so
+    /// [`Snapshot::sd_log`](super::Snapshot::sd_log) shows the setting in force. The bridge stores
+    /// it, so the engine holds nothing and never sends it again.
+    SetSdLog(bool),
 }
 
 /// What the engine wants done as a result.

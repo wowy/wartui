@@ -224,6 +224,7 @@ pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
         HostToBridge::ClearBonds => crate::bonds::clear(shared),
         HostToBridge::SetWardriveEsp { on } => crate::settings::set_wardrive_esp(shared, *on),
         HostToBridge::FormatSd => crate::sd::request_format(shared),
+        HostToBridge::SetSdLog { on } => crate::settings::set_sd_log(shared, *on),
     }
 }
 

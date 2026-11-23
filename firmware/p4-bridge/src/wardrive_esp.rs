@@ -54,6 +54,9 @@
 //! the full down queue refuses is counted with its other refusals and sent again at the repeat.
 //! The C6 encodes it.
 //!
+//! **The SD log keeps the phone's commands and every line it is sent but `WD:AP` and `WD:BT`**
+//! (`src/sd_log.rs`), so a session leaves a trace although no frame reaches the phone.
+//!
 //! **The setting is kept in `nvs`** (`src/settings.rs`) and off by default. Whether the C6 admits
 //! a phone rides `Down::Bonds` (`src/bonds.rs`); turning the setting off drops a linked phone
 //! there, and `src/ble.rs` releases it once its `BleState` says so.
@@ -136,6 +139,7 @@ struct Lines<'a>(&'a Shared);
 
 impl Sink for Lines<'_> {
     fn line(&mut self, class: Class, line: &[u8]) {
+        crate::sd_log::phone_line(self.0, class, line);
         let mut host = self.0.host.borrow_mut();
         let _ = match class {
             Class::Answer => host.push(line, true),
@@ -270,9 +274,10 @@ pub fn release(shared: &Shared) {
     follow_beacon(shared);
 }
 
-/// A command the phone wrote. Dropped unless the phone holds the queue.
+/// A command the phone wrote, logged to the card first. Dropped unless the phone holds the queue.
 #[inline(never)]
 pub fn on_command(shared: &Shared, text: &[u8]) {
+    crate::sd_log::phone_command(shared, text);
     if !holds(shared) {
         return;
     }

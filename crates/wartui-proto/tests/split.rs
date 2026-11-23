@@ -7,7 +7,7 @@ use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
     BluetoothStatus, BridgeToHost, Central, HostOwner, LoopPhase, QueueId, QueueStat,
-    RADIO_UPDATING, RadioLinkStats, SdState, SdStatus,
+    RADIO_UPDATING, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::radio_link::{BleCounters, Chip, Hello, LINK_REVISION, RadioStatus};
@@ -189,7 +189,7 @@ fn pair_status_sums_host_and_radio_drops() {
         ]
         .into_iter()
         .collect(),
-        sd: Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(60_340) }),
+        sd: Some(SdStatus::card(SdState::Ready, 60_350, Some(60_340))),
         bluetooth: usb_bluetooth(),
     };
     let sent = p4.members.clone();
@@ -214,7 +214,7 @@ fn pair_status_sums_host_and_radio_drops() {
             assert_eq!((rx_count, rx_oversize), (40, 2));
             assert_eq!(
                 sd,
-                Some(SdStatus { state: SdState::Ready, card_mb: 60_350, free_mb: Some(60_340) }),
+                Some(SdStatus::card(SdState::Ready, 60_350, Some(60_340))),
                 "passed through"
             );
             assert_eq!(bluetooth.owner, HostOwner::Usb, "passed through");
@@ -257,8 +257,12 @@ fn pair_status_carries_sd_when_p4_reports_a_card_or_none() {
     let pair = up_pair();
     for sd in [
         None,
-        Some(SdStatus { state: SdState::NoCard, card_mb: 0, free_mb: None }),
-        Some(SdStatus { state: SdState::Formatting, card_mb: 15_193, free_mb: None }),
+        Some(SdStatus::card(SdState::NoCard, 0, None)),
+        Some(SdStatus::card(SdState::Formatting, 15_193, None)),
+        Some(SdStatus {
+            log: SdLog { on: true, state: SdLogState::Waiting, ..SdLog::OFF },
+            ..SdStatus::card(SdState::NoCard, 0, None)
+        }),
     ] {
         let BridgeToHost::Status { sd: reported, .. } =
             pair.status(3_000, P4Counters { sd, ..p4_zero() })
