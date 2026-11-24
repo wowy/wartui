@@ -117,7 +117,7 @@ use esp_hal::uart::{
 };
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
+use wartui_firmware::{gps as gps_bus, last_panic, phase, reboot, reset_cause};
 use wartui_proto::bus::PER_BUS;
 use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
@@ -213,10 +213,12 @@ macro_rules! dma_buf {
 // After `dma_buf!`, which it uses.
 mod bus;
 
-/// Resets rather than hanging. The reset takes the C6 with it, and the host sees a new
-/// life in the next `Ready`.
+/// Resets rather than hanging, keeping the text for the next life's SD log
+/// (`wartui_firmware::last_panic`). The reset takes the C6 with it, and the host sees a new life
+/// in the next `Ready`.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    last_panic::record(info);
     reboot()
 }
 
@@ -748,8 +750,13 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let log_boot =
-        sd_log::Boot { fw_version: fw_version.clone(), cause, last_phase, image: own_image };
+    let log_boot = sd_log::Boot {
+        fw_version: fw_version.clone(),
+        cause,
+        last_phase,
+        image: own_image,
+        panic: sd_log::last_panic(cause),
+    };
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {

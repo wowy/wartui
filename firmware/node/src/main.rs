@@ -38,12 +38,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::health;
+use wartui_firmware::{health, last_panic};
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg, Heartbeat, PAYLOAD_MAX,
-    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType, UpdateState, UpdateStatus,
-    Vdd, records,
+    Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg, Heartbeat, PANIC_MAX, PAYLOAD_MAX,
+    PanicMsg, PanicStr, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType,
+    UpdateState, UpdateStatus, Vdd, records,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB};
 use wartui_proto::mac::{self, Mac};
@@ -105,9 +105,16 @@ const POLL_MS: u64 = 2;
 /// The C5 failure [`reboot`] guards against is quieter on this end: a node that never
 /// comes back reads as `no heartbeat`, as one out of range does, so it would go
 /// unexplained for longer.
+///
+/// The text is recorded first, for the next life to send the P4 ([`send_panic`]): recording
+/// touches only RTC memory and needs no stack buffer. The console line formats on whatever stack
+/// is left, so it comes second and only on the first entry: a fault inside it re-enters here and
+/// resets at once.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    note!("panic: {}", info);
+    if last_panic::record(info) {
+        note!("panic: {}", info);
+    }
     reboot()
 }
 
@@ -166,6 +173,8 @@ struct Node {
     /// Whether this image is on trial, not yet confirmed by a record from the bridge. Every
     /// heartbeat carries it as [`Capabilities::trial`]; `ota` has the rest.
     trial: bool,
+    /// The last life's panic text, until the P4 acknowledges it ([`send_panic`]).
+    panic: Option<PanicStr>,
 }
 
 impl Node {
@@ -187,6 +196,7 @@ impl Node {
             // `main` replaces it before the first heartbeat.
             reset_cause: ResetCause::Unknown,
             trial: false,
+            panic: None,
         }
     }
 
@@ -395,6 +405,10 @@ fn main() -> ! {
     node.trial = trial;
     node.mac = esp_radio::wifi::Interface::station().mac_address();
     note!("wartui node {} v{}", mac::full(&node.mac), env!("CARGO_PKG_VERSION"));
+    node.panic = last_panic::take(cause);
+    if let Some(text) = &node.panic {
+        note!("last boot panicked: {}", text);
+    }
 
     loop {
         drain(node, &mut ota);
@@ -402,7 +416,7 @@ fn main() -> ! {
             // Update mode: sniffing nothing and scanning no Bluetooth, servicing the bus
             // throughout. It heartbeats every second whatever the assignment, so the host
             // sees it alive, and keeps that assignment to return to.
-            heartbeat(node);
+            beat(node);
             listen(node, &mut ota, scanning, IDLE_BEAT_MS);
             ota.expire();
             continue;
@@ -414,7 +428,7 @@ fn main() -> ! {
             // answer to one, so this is how long joining a fleet takes. One idle beat is
             // this node's whole cycle, so the counter the heartbeat carries advances here
             // too.
-            heartbeat(node);
+            beat(node);
             node.counter = node.counter.wrapping_add(1).max(1);
             listen(node, &mut ota, scanning, IDLE_BEAT_MS);
             // An assignment adopted mid-listen: this node has just heartbeated, so its
@@ -489,8 +503,37 @@ fn beat_if_due(node: &mut Node) {
     let now = Instant::now();
     let deadline = node.next_beat.unwrap_or(now);
     if now >= deadline {
-        heartbeat(node);
+        beat(node);
         node.next_beat = Some(next_beat_after(deadline));
+    }
+}
+
+/// Send a heartbeat, then the last life's panic while one is held.
+fn beat(node: &mut Node) {
+    heartbeat(node);
+    send_panic(node);
+}
+
+/// Deliver the last life's panic to the P4, and forget it once the P4 acknowledges it.
+///
+/// Tried once a beat, behind the heartbeat, which [`bus::deliver`] lets go first, so the host
+/// reads this life's reset cause ahead of the text. A delivery blocks the main loop until
+/// acknowledged or out of tries, seconds on a slot no P4 clocks, so it is tried only while one
+/// does ([`bus::clocked`]). A failed try waits for the next beat.
+fn send_panic(node: &mut Node) {
+    let Some(text) = node.panic.as_deref() else { return };
+    if !bus::clocked() {
+        return;
+    }
+    let mut body = [0u8; PANIC_MAX];
+    // A `PanicStr` always fits.
+    let Some(len) = (PanicMsg { mac: node.mac, text }).encode_into(&mut body) else { return };
+    if bus::deliver(UpType::Panic, &body[..len]) {
+        last_panic::clear();
+        node.panic = None;
+        note!("last boot's panic delivered");
+    } else {
+        note!("last boot's panic unacknowledged");
     }
 }
 

@@ -369,12 +369,16 @@ settings modal's `log` row. `wartui sd-log` prints the files as text
 
 It logs whoever owns the host queue, and with no host at all:
 
-- every frame the P4 produces for a host but node records, GPS bytes, `Delivered` and
-  `Undelivered`;
+- every frame the P4 produces for a host but sighting batches, update statuses, GPS bytes,
+  `Delivered` and `Undelivered`, so every node heartbeat and panic record is kept as forwarded;
 - a `Status` snapshot every 30 s, when a file opens and at each change of who holds the host
   queue, built from the C6's counters as last received;
 - each change of who holds the host queue;
 - a phone's commands, and the lines it is sent but its `WD:AP` and `WD:BT` sightings.
+
+Each file's `Opened` record carries the text of the panic that ended the P4's previous boot, when
+that reset kept one. The panic handler keeps it in RTC memory (`wartui_firmware::last_panic`), and
+the boot copies it out and clears it.
 
 The log holds the addresses of the nodes and of Bluetooth peers, so a card identifies the fleet as
 a capture does.

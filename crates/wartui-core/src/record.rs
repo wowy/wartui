@@ -180,6 +180,21 @@ pub struct BatchGap {
     pub lost: u16,
 }
 
+/// The text of a node's last panic, as the node sent it once after the reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePanic {
+    /// Which node, by the MAC its record carries.
+    pub node_mac: Mac,
+    /// Unix milliseconds of receipt.
+    pub rx_at_ms: i64,
+    /// The node-bus slot it came from.
+    pub slot: Slot,
+    /// Why the node's next boot started, from its latest heartbeat. `None` before one.
+    pub reset_cause: Option<ResetCause>,
+    /// The panic's `{file}:{line}:{column}: {message}`.
+    pub message: String,
+}
+
 /// One network or advertiser a node reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
@@ -347,6 +362,8 @@ pub enum Record {
     BridgeStatus(BridgeStatusSeen),
     /// Append a gap in a node's batch sequence.
     BatchGap(BatchGap),
+    /// Append a node's last panic.
+    NodePanic(NodePanic),
     /// Append a sample of the host's own state.
     HostStatus(HostStatus),
 }

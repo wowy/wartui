@@ -77,7 +77,7 @@ costs a P4 reflash as well as a node update; `UpdateChunk`'s layout is in the fr
 | 1 | `Heartbeat` | 63 | 1 | `Assign` | 8 |
 | 2 | `Sightings` | up to 1,024 | 2 | `Stop` | 0 |
 | 3 | `UpdateStatus` | 6 | 3 | `UpdateBegin` | 41 |
-| | | | 4 | `UpdateChunk` | 6 to 1,029 |
+| 4 | `Panic` | 6 to 246 | 4 | `UpdateChunk` | 6 to 1,029 |
 | | | | 5 | `UpdateCommit` | 1 |
 | | | | 6 | `UpdateAbort` | 1 |
 | | | | 7 | `UpdateConfirm` | 0 |

@@ -158,7 +158,8 @@ own.
   P4 runs its session, scans for it and sends it text lines (`src/wardrive_esp.rs`). It reports
   the board's microSD card in `Status` and formats it FAT32 on a host's `FormatSd` (`src/sd.rs`),
   the layout `wartui_proto::sd`'s. It logs its diagnostics to the card (`src/sd_log.rs`, and the
-  writer in `src/sd.rs`), from a ring in PSRAM past the host bulk ring.
+  writer in `src/sd.rs`), from a ring in PSRAM past the host bulk ring. The log keeps every node
+  heartbeat and panic record it forwards, and each file opens with the P4's own last panic.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
@@ -172,7 +173,8 @@ own.
   radio and the bus.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
-  the bridge's reset-surviving phase marker (`phase`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
+  the bridge's reset-surviving phase marker (`phase`), every firmware's last panic kept across the
+  reset (`last_panic`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
   updates on flash, the slot, the switch and the trial, and the P4's settings sector (`ota`).
   Each firmware depends on it by path and selects its chip feature in that dependency. It is its
   own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
@@ -229,7 +231,8 @@ is here rather than only in a `//!`.
   transfer is a fixed 1,044 bytes with a magic, `bus::BUS_VERSION` and a CRC, carrying records of
   a type byte, a length and a body. The type byte is the message, numbered per direction: up,
   `Heartbeat` (63 bytes, its prefix and the node's MAC first), `Sightings` (3 plus records of 12
-  plus the SSID and the trailer, up to 1024) and `UpdateStatus` (6); down, `Assign` (8), `Stop`
+  plus the SSID and the trailer, up to 1024), `UpdateStatus` (6) and `Panic` (the MAC and up to
+  240 bytes of the last boot's panic text, 6 to 246); down, `Assign` (8), `Stop`
   (empty), and `UpdateBegin` (41), `UpdateChunk` (6 to 1029), `UpdateCommit` (1), `UpdateAbort` (1)
   and `UpdateConfirm` (empty). The P4 checks the framing and passes every node record to the host
   as `FromNode`, heartbeats included, and every host `ToNode` to its node. It reads heartbeats for
@@ -573,7 +576,8 @@ edit stops; follow the pointer before changing the rule.
   disconnection event, and the C6 never advertises again. The C6 panics, and its panic handler
   keeps the reason for the next boot to report. That report reaches a host that has usually gone,
   so the P4 keeps the line and repeats it to every host that attaches.
-  → `firmware/p4-radio/src/ble.rs`, `run_host`; `firmware/p4-radio/src/last_panic.rs`;
+  → `firmware/p4-radio/src/ble.rs`, `run_host`; `firmware/common/src/last_panic.rs`,
+  `firmware/p4-radio/src/last_panic.rs`;
   `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
 - **Updates follow the link, and a failed one over Bluetooth is recovered over USB.**
   `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's

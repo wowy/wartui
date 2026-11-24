@@ -42,6 +42,7 @@ use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::PairWindow;
 use wartui_proto::plan::ChannelPool;
+use wartui_proto::reset::ResetCause;
 
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, HostLink, Record};
@@ -310,6 +311,19 @@ CREATE TABLE IF NOT EXISTS batch_gap (
   after_seq INTEGER NOT NULL,
   seq INTEGER NOT NULL,
   lost INTEGER NOT NULL
+);
+
+-- One row per panic a node reported, which it sends once in the boot after the panic. `slot` is
+-- the bus name, as in `heartbeat`, and `message` the panic's `{file}:{line}:{column}: {message}`,
+-- cut at 240 bytes. `reset_cause` is what the node's latest heartbeat said when the row arrived,
+-- so that boot's cause, and NULL when no heartbeat had.
+CREATE TABLE IF NOT EXISTS node_panic (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  reset_cause TEXT,
+  message TEXT NOT NULL
 );
 
 -- One row per node record, kept only with `--record-raw`: the slot it came from, its type
@@ -1434,6 +1448,19 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     gap.after_seq,
                     gap.seq,
                     gap.lost,
+                ])?;
+            }
+            Record::NodePanic(panic) => {
+                tx.prepare_cached(
+                    "INSERT INTO node_panic (node_mac, rx_at, slot, reset_cause, message)
+                     VALUES (?1,?2,?3,?4,?5)",
+                )?
+                .execute(params![
+                    &panic.node_mac[..],
+                    panic.rx_at_ms,
+                    panic.slot.to_string(),
+                    panic.reset_cause.map(ResetCause::as_str),
+                    panic.message,
                 ])?;
             }
             Record::Raw(raw) => {

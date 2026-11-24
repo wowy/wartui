@@ -100,13 +100,14 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} records: {} sighting in {} batches, {} heartbeat, {} update status, \
+        "\n# {} records: {} sighting in {} batches, {} heartbeat, {} update status, {} panic, \
          {} undecodable",
         counts.total,
         counts.sighting,
         counts.batches,
         counts.heartbeat,
         counts.update_status,
+        counts.panic,
         counts.undecodable
     );
     if counts.update_status > 0 {
@@ -157,6 +158,8 @@ struct Counts {
     heartbeat: u64,
     /// Update statuses nodes sent, answering some host's session.
     update_status: u64,
+    /// Panic records: a node saying why its last boot ended.
+    panic: u64,
     /// Records in a layout this build does not read, as the engine counts them, which is what a
     /// fleet half-way through a reflash looks like.
     incompatible: u64,
@@ -344,6 +347,16 @@ fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
                 "{head}  UPDATE STATUS s{} {:?} next @{}",
                 status.session, status.state, status.next_offset
             );
+        }
+        Ok(UpMsg::Panic(_))
+            if counts.compat.get(&slot).is_some_and(|compat| !compat.drivable()) =>
+        {
+            counts.incompatible += 1;
+            println!("{head}  PANIC from a node on another minor, not read");
+        }
+        Ok(UpMsg::Panic(panic)) => {
+            counts.panic += 1;
+            println!("{head}  PANIC {} last boot: {}", mac::full(&panic.mac), panic.text);
         }
         // Named rather than left as "undecodable": a fleet half-way through a reflash is
         // exactly what this looks like.
@@ -568,6 +581,16 @@ mod tests {
         let status = UpdateStatus { session: 1, state: UpdateState::Receiving, next_offset: 4096 };
         let counts = counted(UpType::UpdateStatus, &status.encode());
         assert_eq!((counts.update_status, counts.undecodable), (1, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_panic_when_node_reports_last_boot() {
+        use wartui_proto::bus::{PANIC_MAX, PanicMsg};
+        let mut body = [0; PANIC_MAX];
+        let msg = PanicMsg { mac: [0x02, 0, 0, 0, 0x57, 0x84], text: "src/main.rs:1:1: oops" };
+        let len = msg.encode_into(&mut body).expect("fits");
+        let counts = counted(UpType::Panic, &body[..len]);
+        assert_eq!((counts.panic, counts.undecodable), (1, 0));
     }
 
     #[test]

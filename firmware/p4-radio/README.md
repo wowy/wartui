@@ -85,8 +85,9 @@ An unanswered request ends the link at the link layer's 40 s timeout. All three 
 the sources and none is measured. The feature buys only the C6's interval request taking the
 link layer's procedure before L2CAP.
 
-The C6 keeps its last panic's text in RTC memory across the reset, and sends it to the P4 as
-`Error` lines once the link is up (`src/last_panic.rs`).
+The C6 keeps its last panic's text in RTC memory across the reset
+(`wartui_firmware::last_panic`), and sends it to the P4 as `Error` lines once the link is up
+(`src/last_panic.rs`).
 
 ## Boards
 

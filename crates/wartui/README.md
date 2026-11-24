@@ -948,14 +948,16 @@ LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerO
 ```
 
 A header opens each file: its number, which of the boot's files it is, the firmware, the slot it
-booted from and whether it is on trial, and why the bridge booted. A line per record follows: the
-P4's uptime, with `Nd ` ahead past a day, the record's kind and what it says. A frame reads as
-`wartui sniff` prints it.
+booted from and whether it is on trial, and why the bridge booted. It ends `panicked last boot`
+when the boot before ended in a panic, and `--verbose` prints the panic's text under it. A line per
+record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and what it says. A
+frame reads as `wartui sniff` prints it.
 
 | Kind                              | Record                                                                   |
 |-----------------------------------|--------------------------------------------------------------------------|
 | `open`                            | The file's first: its format, the card, its free space, the image digest |
 | `ready`, `status`, `log`, `error` | A frame the bridge sent; `fleet`, `update`, `cache`, `power`, `sd` too   |
+| `node`                            | A node's heartbeat or panic record, as the bridge forwarded it           |
 | `status*`                         | A status the log built itself                                            |
 | `phone →`                         | A command a phone wrote                                                  |
 | `phone ←`                         | A line the bridge sent a phone, an `answer` or a `stream` line           |
@@ -1759,6 +1761,10 @@ Each node's membership changes are logged once each:
 | `node left the fleet` | its slot goes off the bus (`reason="off bus"`), or 20 s after its last heartbeat (`reason="silent"`) |
 | `node returned`       | its first heartbeat after `node left the fleet`                                                      |
 | `node restarted`      | its heartbeat counter fell, or its epoch reset                                                       |
+
+A node whose last boot ended in a panic sends the panic's text once it is back on the bus. The host
+logs it at `warn` as `node panicked last boot: …`, with its slot, and keeps it as a `node_panic` row.
+`wartui sniff` prints it as `PANIC`.
 
 `RUST_LOG=debug` adds GPS probe attempts, each retry, undecodable frames, and dropped bulk
 commands.

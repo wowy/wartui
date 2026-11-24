@@ -146,6 +146,15 @@ CREATE TABLE node (
   capabilities TEXT
 )
 
+CREATE TABLE node_panic (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  reset_cause TEXT,
+  message TEXT NOT NULL
+)
+
 CREATE TABLE observation (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,

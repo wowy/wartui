@@ -16,8 +16,8 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodeSeen, Observation,
-    RawFrame, Record, ShareChange,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodePanic, NodeSeen,
+    Observation, RawFrame, Record, ShareChange,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
@@ -945,6 +945,41 @@ fn store_round_trips_every_column_when_batch_gap_written() {
         })
         .unwrap();
     assert_eq!(row, (NODE.to_vec(), EPOCH_MS + 7_000, 65535, 2, 2));
+}
+
+#[test]
+fn store_round_trips_every_column_when_node_panic_written() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let panic = |reset_cause| {
+        Record::NodePanic(NodePanic {
+            node_mac: NODE,
+            rx_at_ms: EPOCH_MS + 7_000,
+            slot: SLOT,
+            reset_cause,
+            message: "src/main.rs:9:5: oops".to_owned(),
+        })
+    };
+    let conn = write(&dir, vec![panic(Some(ResetCause::Software)), panic(None)]);
+
+    type Row = (Vec<u8>, i64, String, Option<String>, String);
+    let rows: Vec<Row> = conn
+        .prepare("SELECT node_mac, rx_at, slot, reset_cause, message FROM node_panic ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let row = |cause: Option<&str>| {
+        (
+            NODE.to_vec(),
+            EPOCH_MS + 7_000,
+            "A2".to_owned(),
+            cause.map(str::to_owned),
+            "src/main.rs:9:5: oops".to_owned(),
+        )
+    };
+    // No heartbeat yet stores no cause, rather than a guess.
+    assert_eq!(rows, [row(Some(ResetCause::Software.as_str())), row(None)]);
 }
 
 #[test]

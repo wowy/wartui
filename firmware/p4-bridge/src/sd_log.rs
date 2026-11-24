@@ -4,9 +4,12 @@
 //!
 //! **What is logged**, while the setting is on:
 //!
-//! - every frame the bridge produces for a host but node records, GPS bytes and delivery outcomes
-//!   (`log::logged`), whether or not a host holds the queue, so a phone session, which reads no
-//!   frames, still leaves its errors and logs;
+//! - every frame the bridge produces for a host but sighting batches, update statuses, GPS bytes
+//!   and delivery outcomes (`log::logged`), whether or not a host holds the queue, so a phone
+//!   session, which reads no frames, still leaves its errors and logs. That keeps every node
+//!   heartbeat and panic record as forwarded. A 63-byte heartbeat makes an 87-byte record, so 14
+//!   idle nodes, at one a second each, write about 1.2 KB/s, 4.4 MB an hour: minutes of the
+//!   256 KiB ring, and a 64 MiB file every 15 hours;
 //! - a `Status` every [`SNAPSHOT_EVERY`], when a file opens and after each change of who holds the
 //!   host queue. It is built from the C6's counters as last received: it never asks the C6 for
 //!   fresh ones, so it adds no radio-link traffic and waits for nothing;
@@ -38,6 +41,8 @@ use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
+use static_cell::StaticCell;
+use wartui_proto::bus::PanicStr;
 use wartui_proto::frame_ring::FrameRingIn;
 use wartui_proto::heapless::String;
 use wartui_proto::host_owner::{Holder, Input};
@@ -67,6 +72,21 @@ pub struct Boot {
     pub cause: ResetCause,
     pub last_phase: LoopPhase,
     pub image: Option<[u8; DIGEST_LEN]>,
+    /// The text of the panic that ended the previous boot ([`last_panic`]).
+    pub panic: Option<&'static PanicStr>,
+}
+
+/// The text of the panic that ended the previous boot, if this reset kept one, copied out of RTC
+/// memory into a static and then forgotten there, so the next reset does not report it again.
+/// Called once.
+///
+/// Out of line, so the text's copies stay off `main`'s frame.
+#[inline(never)]
+pub fn last_panic(cause: ResetCause) -> Option<&'static PanicStr> {
+    static TEXT: StaticCell<PanicStr> = StaticCell::new();
+    let text = wartui_firmware::last_panic::take(cause);
+    wartui_firmware::last_panic::clear();
+    text.map(|text| &*TEXT.init(text))
 }
 
 /// A stretch of the writer's synchronous work between two yields, which [`note_busy`] times.
@@ -415,6 +435,7 @@ pub fn encode_opened(
         image: boot.image,
         card_mb,
         free_mb,
+        last_panic: boot.panic.cloned(),
     };
     log::encode_opened(&opened, ms(), out)
 }

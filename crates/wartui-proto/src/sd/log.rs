@@ -27,7 +27,9 @@
 //!
 //! **A frame is stored as the link encoded it.** The bridge already encodes every frame it sends,
 //! so logging one is a copy, and the reader decodes it with the host's own [`decode_frame`]: a
-//! message the host reads, the log reads, with no second encoding to keep in step.
+//! message the host reads, the log reads, with no second encoding to keep in step. A node's
+//! heartbeat or panic record is kept so too, as a plain `Frame` of the `FromNode` the bridge
+//! forwarded ([`logged`]).
 //!
 //! **Uptime is the P4's, in 32 bits.** The P4 knows no date, and a `u32` of milliseconds wraps
 //! after 49 days. [`Opened`] carries the full uptime once per file, and [`Clock`] unwraps the
@@ -37,6 +39,7 @@ use core::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bus::{PANIC_TEXT_MAX, PanicStr, UpType};
 use crate::crc::crc32;
 use crate::host_owner::{Holder, Input};
 use crate::link::{
@@ -69,9 +72,20 @@ pub const RECORD_MAX: usize = cobs::max_encoding_length(BODY_MAX) + 1;
 /// The longest [`Opened`] payload: every varint and string at its longest.
 // The version, then `file`, `part` and `opened_ms` as varints, `fw_version` behind its length,
 // `reset_cause` and `last_phase`, `slot` behind its length, `trial`, `image` behind its tag,
-// `card_mb`, and `free_mb` behind its tag.
-const OPENED_MAX: usize =
-    1 + 5 + 3 + 10 + (1 + 32) + 1 + 1 + (1 + 32) + 1 + (1 + DIGEST_LEN) + 5 + 6;
+// `card_mb`, `free_mb` behind its tag, and `last_panic` behind its tag and a two-byte length.
+const OPENED_MAX: usize = 1
+    + 5
+    + 3
+    + 10
+    + (1 + 32)
+    + 1
+    + 1
+    + (1 + 32)
+    + 1
+    + (1 + DIGEST_LEN)
+    + 5
+    + 6
+    + (1 + 2 + PANIC_TEXT_MAX);
 
 const _: () = assert!(OPENED_MAX <= PAYLOAD_MAX, "an Opened record must fit");
 // The class byte, then the line.
@@ -150,6 +164,8 @@ pub struct Opened {
     pub card_mb: u32,
     /// The volume's free space in MiB when the file opened, when the P4 knew it.
     pub free_mb: Option<u32>,
+    /// The text of the panic that ended the previous boot, when the reset preserved it.
+    pub last_panic: Option<PanicStr>,
 }
 
 /// Why a file ended.
@@ -188,14 +204,18 @@ const fn class_from_code(code: u8) -> Option<Class> {
     }
 }
 
-/// Whether the log keeps `msg`. Node records, GPS bytes and delivery outcomes are the bulk of
-/// the host stream and a capture's to keep, so the log leaves them out.
+/// Whether the log keeps `msg`. Sighting batches, update statuses, GPS bytes and delivery
+/// outcomes are the bulk of the host stream and a capture's to keep, so the log leaves them out.
+/// It keeps a node's heartbeats and panic records: they say how each node fared, at a few
+/// records a second for the whole fleet.
 #[must_use]
 pub const fn logged(msg: &BridgeToHost) -> bool {
     // No `_` arm: a new message is a decision, not a default.
     match msg {
-        BridgeToHost::FromNode { .. }
-        | BridgeToHost::Gps { .. }
+        BridgeToHost::FromNode { kind, .. } => {
+            *kind == UpType::Heartbeat.as_u8() || *kind == UpType::Panic.as_u8()
+        }
+        BridgeToHost::Gps { .. }
         | BridgeToHost::Delivered { .. }
         | BridgeToHost::Undelivered { .. } => false,
         BridgeToHost::Ready { .. }

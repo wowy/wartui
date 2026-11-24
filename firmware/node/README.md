@@ -19,6 +19,7 @@ transfer carries records, one message each:
 |----------------|-------------|-------------------------|
 | Heartbeat      | Node → P4   | 63 bytes                |
 | Sighting batch | Node → P4   | Up to 1024 bytes        |
+| Panic          | Node → P4   | 6 to 246 bytes          |
 | Assign         | P4 → node   | 8 bytes                 |
 | Stop           | P4 → node   | Empty                   |
 
@@ -36,6 +37,10 @@ transfer carries records, one message each:
   bytes. A BLE record's SSID is the advertiser's name, when it sent one. A record's trailer carries
   a Passpoint network's roaming consortium identifiers, when there are any, or a BLE advertiser's
   address type and connectable flag, then its manufacturer identifier when it sent one.
+- **Panic**: the text of the panic that ended the last boot, once, after the reset. The panic
+  handler keeps it in RTC memory (`wartui_firmware::last_panic`), and the next boot sends it
+  behind a heartbeat once the P4 is clocking its slot, acknowledged by the P4 and retried each
+  beat until it is. The MAC, then up to 240 bytes of `{file}:{line}:{column}: {message}`.
 - **Assign**: the assignment.
 - **Stop**: drops the assignment and empties the dedup ring. The node idles at epoch 0, as at
   boot, and adopts the next assignment whatever its epoch.

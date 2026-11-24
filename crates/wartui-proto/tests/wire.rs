@@ -8,12 +8,12 @@
 use wartui_proto::bus::{
     ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg,
     DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN, HEARTBEAT_PREFIX_LEN, Heartbeat,
-    NodeBus, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
-    SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, STOP_LEN, Security, SightingBatch,
-    SightingBatchWriter, SightingMsg, Stop, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK,
-    UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
-    UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit,
-    UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
+    NodeBus, PANIC_MAX, PANIC_MIN, PANIC_TEXT_MAX, PanicMsg, RecordKind, SIGHTING_BATCH_HEADER,
+    SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX,
+    SSID_MAX, STOP_LEN, Security, SightingBatch, SightingBatchWriter, SightingMsg, Stop,
+    UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK, UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX,
+    UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN, UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort,
+    UpdateBegin, UpdateChunk, UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
@@ -980,6 +980,7 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
     assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_1), Ok(UpMsg::Sightings(_))));
     assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_BLE), Ok(UpMsg::Sightings(_))));
     assert!(matches!(up(UpType::UpdateStatus, OTA_STATUS), Ok(UpMsg::UpdateStatus(_))));
+    assert!(matches!(up(UpType::Panic, PANIC), Ok(UpMsg::Panic(_))));
     assert!(matches!(down(DownType::Assign, ASSIGN), Ok(DownMsg::Assign(_))));
     assert!(matches!(down(DownType::Stop, STOP), Ok(DownMsg::Stop(_))));
     assert!(matches!(down(DownType::UpdateBegin, OTA_BEGIN), Ok(DownMsg::UpdateBegin(_))));
@@ -993,7 +994,7 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
 /// change, and no code is reused.
 #[test]
 fn msg_types_number_each_direction_from_one_when_pinned() {
-    let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus];
+    let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus, UpType::Panic];
     for (byte, kind) in (1..).zip(up) {
         assert_eq!(kind.as_u8(), byte);
         assert_eq!(UpType::from_u8(byte), Some(kind));
@@ -1012,8 +1013,64 @@ fn msg_types_number_each_direction_from_one_when_pinned() {
         assert_eq!(DownType::from_u8(byte), Some(kind));
     }
     assert_eq!(UpType::from_u8(0), None);
-    assert_eq!(UpType::from_u8(4), None);
+    assert_eq!(UpType::from_u8(5), None);
     assert_eq!(DownType::from_u8(8), None);
+}
+
+/// A panic record: the MAC, then the text.
+const PANIC: &[u8] = &[
+    0x02, 0x00, 0x00, 0x00, 0x0D, 0x20, // mac 02:00:00:00:0D:20
+    b's', b'r', b'c', b'/', b'm', b'a', b'i', b'n', b'.', b'r', b's', b':', b'9', b':', b'5', b':',
+    b' ', b'o', b'o', b'p', b's', // "src/main.rs:9:5: oops"
+];
+
+#[test]
+fn panic_msg_round_trips_body_when_pinned() {
+    let msg = PanicMsg::decode(PANIC).expect("valid");
+    assert_eq!(msg, PanicMsg { mac: [0x02, 0, 0, 0, 0x0D, 0x20], text: "src/main.rs:9:5: oops" });
+    let mut out = [0u8; PANIC_MAX];
+    let len = msg.encode_into(&mut out).expect("fits");
+    assert_eq!(&out[..len], PANIC);
+    assert_eq!(UpMsg::Panic(msg).kind(), UpType::Panic);
+}
+
+#[test]
+fn panic_msg_decodes_body_when_text_is_empty() {
+    let msg = PanicMsg::decode(&PANIC[..PANIC_MIN]).expect("valid");
+    assert_eq!(msg.text, "");
+    let mut out = [0u8; PANIC_MIN];
+    assert_eq!(msg.encode_into(&mut out), Some(PANIC_MIN));
+}
+
+#[test]
+fn panic_msg_rejects_body_when_shorter_than_mac() {
+    assert_eq!(
+        PanicMsg::decode(&PANIC[..PANIC_MIN - 1]),
+        Err(DecodeError::TooShort { need: PANIC_MIN, got: PANIC_MIN - 1 })
+    );
+}
+
+#[test]
+fn panic_msg_rejects_body_when_text_is_too_long() {
+    let body = [b'x'; PANIC_MAX + 1];
+    assert!(PanicMsg::decode(&body[..PANIC_MAX]).is_ok(), "the longest text is taken");
+    assert_eq!(
+        PanicMsg::decode(&body),
+        Err(DecodeError::BadLength { need: PANIC_MAX, got: PANIC_MAX + 1 })
+    );
+    // Nor is one encoded.
+    let text = core::str::from_utf8(&body[PANIC_MIN..]).expect("ascii");
+    assert_eq!(text.len(), PANIC_TEXT_MAX + 1);
+    let mut out = [0u8; PANIC_MAX + 1];
+    assert_eq!(PanicMsg { mac: [0x02, 0, 0, 0, 0, 1], text }.encode_into(&mut out), None);
+}
+
+#[test]
+fn panic_msg_rejects_body_when_text_is_not_utf8() {
+    let mut body = PANIC.to_vec();
+    // A lone continuation byte.
+    body.push(0x80);
+    assert_eq!(PanicMsg::decode(&body), Err(DecodeError::NotUtf8));
 }
 
 #[test]

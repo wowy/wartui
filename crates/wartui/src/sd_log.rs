@@ -166,11 +166,15 @@ fn render(name: &str, file: &mut [u8], verbose: bool, lines: &mut Vec<String>) -
         return tally;
     };
     // Decoded from a copy: decoding is in place, and the loop below reads the record again.
-    let header = match decode(&mut file[first.clone()].to_vec()) {
-        Ok(Entry { body: Body::Opened(opened), .. }) => header_text(&opened),
-        _ => "no open record".to_owned(),
+    let opened = match decode(&mut file[first.clone()].to_vec()) {
+        Ok(Entry { body: Body::Opened(opened), .. }) => Some(opened),
+        _ => None,
     };
+    let header = opened.as_ref().map_or_else(|| "no open record".to_owned(), header_text);
     lines.push(format!("{name}  {header}"));
+    if verbose && let Some(text) = opened.as_ref().and_then(|opened| opened.last_panic.as_ref()) {
+        lines.push(format!("    last panic: {}", text.escape_debug()));
+    }
 
     let mut clock = Clock::new(0);
     let mut board = NodeBoard::NoCarrier;
@@ -204,11 +208,13 @@ fn render(name: &str, file: &mut [u8], verbose: bool, lines: &mut Vec<String>) -
     tally
 }
 
-/// The file's header: which file of which boot, the firmware and why it booted.
+/// The file's header: which file of which boot, the firmware, why it booted and whether the boot
+/// before panicked.
 fn header_text(opened: &Opened) -> String {
     let trial = if opened.trial { "on trial" } else { "confirmed" };
+    let panicked = if opened.last_panic.is_some() { " · panicked last boot" } else { "" };
     format!(
-        "file {}, part {} · fw {} on {}, {trial} · reset {:?}, last phase {:?}",
+        "file {}, part {} · fw {} on {}, {trial} · reset {:?}, last phase {:?}{panicked}",
         opened.file,
         opened.part,
         opened.fw_version,
@@ -334,6 +340,7 @@ mod tests {
             image: Some([0xAB; 32]),
             card_mb: 30_436,
             free_mb: Some(30_000),
+            last_panic: None,
         }
     }
 
@@ -457,6 +464,25 @@ mod tests {
         assert_eq!(lines[1], "00:00:00.000  log         sd: hello");
         assert_eq!(lines[2], "    Log {");
         assert!(lines[3].starts_with("        message: \"sd: hello\""), "{lines:?}");
+    }
+
+    #[test]
+    fn sd_log_prints_last_panic_when_previous_boot_panicked() {
+        let text = "src/sd.rs:12:5: oops\nmore";
+        let panicked = Opened {
+            reset_cause: ResetCause::Software,
+            last_panic: Some(text.try_into().expect("short")),
+            ..opened(5_000)
+        };
+        let file = record(|out| encode_opened(&panicked, 5_000, out));
+        let header = "LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset \
+                      Software, last phase Unknown · panicked last boot";
+        let (lines, _) = rendered(&file, false);
+        assert_eq!(lines[0], header);
+        assert!(!lines.iter().any(|line| line.contains("oops")), "{lines:?}");
+        // The text on one line of its own, under the header.
+        let (lines, _) = rendered(&file, true);
+        assert_eq!(lines[..2], [header, "    last panic: src/sd.rs:12:5: oops\\nmore"]);
     }
 
     #[test]
