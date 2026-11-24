@@ -5,8 +5,10 @@
 //! alike in both.
 
 use wartui_core::engine::power_cycled_text;
-use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::link::{BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus};
+use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg};
+use wartui_proto::link::{
+    BridgeHealth, BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus,
+};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -120,6 +122,85 @@ pub(crate) fn bytes_text(bytes: u64) -> String {
     }
 }
 
+/// `bytes` in whole KiB, rounded, as `61K`: short enough for three heap figures on one line.
+pub(crate) fn kib(bytes: u32) -> String {
+    // Ties to even, as `bytes_text` rounds.
+    format!("{:.0}K", (f64::from(bytes) / 1024.0).round_ties_even())
+}
+
+/// A heartbeat past its node's MAC: counter, epoch, reset cause, capabilities, rail, die,
+/// refusals and heap, `#412 e7 power_on 0.7.0;5g · 3.30 V · 52 °C · refused 3/0 · heap 61K used
+/// 39K free 68K peak`. The refusals are Wi-Fi's then Bluetooth's as the node counts them, since
+/// boot and wrapping. The heap's peak is the most in use since boot. `—` is a failed reading.
+pub(crate) fn heartbeat_text(hb: &Heartbeat) -> String {
+    format!(
+        "#{} e{} {} {} · {} · {} · refused {}/{} · heap {} used {} free {} peak",
+        hb.counter,
+        hb.epoch,
+        hb.reset_cause,
+        hb.capabilities,
+        hb.vdd,
+        hb.die_temp,
+        hb.wifi_refused,
+        hb.ble_refused,
+        kib(hb.heap_used),
+        kib(hb.heap_free),
+        kib(hb.heap_high_water),
+    )
+}
+
+/// A node's own view of the bus since boot: its nonzero counts by name, then its two gauges,
+/// `bus bad_crc 2 gaps 1 · handler max 14 µs, settle max 3 µs`. All counts zero read `bus clean`.
+pub(crate) fn node_bus_text(bus: &NodeBus) -> String {
+    let counts: Vec<String> = [
+        ("bad_magic", bus.bad_magic),
+        ("bad_crc", bus.bad_crc),
+        ("bad_len", bus.bad_len),
+        ("gaps", bus.gaps),
+        ("early", bus.early),
+        ("arm_failed", bus.arm_failed),
+        ("inbox_full", bus.inbox_full),
+        ("out_of_order", bus.out_of_order),
+        ("repeats", bus.repeats),
+        ("replaced", bus.replaced),
+        ("resent", bus.resent),
+        ("undelivered", bus.undelivered),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(name, n)| format!("{name} {}", thousands(u64::from(n))))
+    .collect();
+    let counts = if counts.is_empty() { "clean".to_owned() } else { counts.join(" ") };
+    format!(
+        "bus {counts} · handler max {} µs, settle max {} µs",
+        thousands(u64::from(bus.handler_max_us)),
+        thousands(u64::from(bus.settle_max_us)),
+    )
+}
+
+/// The bridge's own chips, after a status line: ` · P4 48 °C`, then ` · C6 45 °C 3.30 V heap 40K
+/// free` once the C6 has reported.
+fn health_text(health: &BridgeHealth) -> String {
+    let c6 = health.radio.map_or_else(String::new, |radio| {
+        format!(" · C6 {} {} heap {} free", radio.die_temp, radio.vdd, kib(radio.heap_free))
+    });
+    format!(" · P4 {}{c6}", health.p4_die_temp)
+}
+
+/// A node's record: a heartbeat or a panic this build reads, or its type and length. A heartbeat
+/// from another major or minor is not this build's layout past its prefix, even at this length.
+fn node_text(label: impl core::fmt::Display, kind: u8, body: &[u8]) -> (&'static str, String) {
+    match UpMsg::decode(kind, body) {
+        Ok(UpMsg::Heartbeat(hb)) if hb.capabilities.version.compat_with_host().drivable() => {
+            ("heartbeat", format!("{label} {} {}", mac::short(&hb.mac), heartbeat_text(&hb)))
+        }
+        Ok(UpMsg::Panic(panic)) => {
+            ("panic", format!("{label} last boot: {}", panic.text.escape_debug()))
+        }
+        _ => ("node", format!("{label} type {kind}, {} bytes", body.len())),
+    }
+}
+
 /// The bridge's SD log: `off`, `on · waiting for a card`, `on · writing LOG/00000007.BIN · 1.2 MB
 /// written · 0 dropped · 0 errors · longest step 90 µs`, or `no slot` for a bridge with no card
 /// slot. The longest step is the writer's longest stretch without yielding.
@@ -165,11 +246,12 @@ pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText 
             "ready",
             format!("{} firmware {fw_version} link v{LINK_PROTO_VERSION}", mac::full(bridge_mac)),
         ),
-        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, .. } => (
+        BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, health, .. } => (
             "status",
             format!(
-                "{rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
-                uptime_ms / 1000
+                "{rx_count} received, {dropped_tx} dropped, {rx_oversize} oversize, up {}s{}",
+                uptime_ms / 1000,
+                health_text(health),
             ),
         ),
         BridgeToHost::Log { message } => ("log", message.to_string()),
@@ -177,7 +259,7 @@ pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText 
         BridgeToHost::Gps { bytes } => ("gps", format!("{} bytes", bytes.len())),
         BridgeToHost::Update(status) => ("update", hex(status)),
         BridgeToHost::FromNode { slot, kind, body, .. } => {
-            ("node", format!("{} type {kind}, {} bytes", board.label(*slot), body.len()))
+            node_text(board.label(*slot), *kind, body)
         }
         BridgeToHost::Delivered { id } => ("delivered", format!("record {id} delivered")),
         BridgeToHost::Undelivered { id, reason } => {
@@ -242,12 +324,181 @@ mod tests {
     use wartui_proto::mac::Mac;
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
+    use wartui_proto::bus::{
+        Board, Capabilities, DieTemp, Heartbeat, NODE_VERSION, NodeBus, PANIC_MAX, PanicMsg,
+        UpType, Vdd,
+    };
+    use wartui_proto::link::{BridgeHealth, BridgeToHost, FromNodeBody};
+    use wartui_proto::radio_link::RadioHealth;
+    use wartui_proto::reset::ResetCause;
+
     use super::{
-        SdForm, bytes_text, channel_list, node_name, sd_log_text, sd_text, slot_named, slot_range,
-        thousands,
+        SdForm, bytes_text, channel_list, heartbeat_text, kib, message_text, node_bus_text,
+        node_name, sd_log_text, sd_text, slot_named, slot_range, thousands,
     };
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+
+    /// A heartbeat from a node on this build, with readings.
+    fn heartbeat() -> Heartbeat {
+        Heartbeat {
+            capabilities: Capabilities::here(Board::Esp32c5),
+            mac: MAC,
+            counter: 412,
+            epoch: 7,
+            wifi_refused: 3,
+            ble_refused: 0,
+            reset_cause: ResetCause::PowerOn,
+            vdd: Vdd::from_mv(3300),
+            die_temp: DieTemp::from_c(52),
+            heap_free: 39 * 1024,
+            heap_used: 61 * 1024,
+            heap_high_water: 68 * 1024,
+            bus: NodeBus::default(),
+        }
+    }
+
+    /// A record from N8 on a fourteen-node carrier.
+    fn from_node(kind: u8, body: &[u8]) -> BridgeToHost {
+        BridgeToHost::FromNode {
+            slot: Slot::new(1, 0).expect("B1"),
+            rx_us: 0,
+            kind,
+            body: FromNodeBody::from_slice(body).expect("fits"),
+        }
+    }
+
+    fn status(health: BridgeHealth) -> BridgeToHost {
+        BridgeToHost::Status {
+            rx_count: 1_200,
+            dropped_tx: 3,
+            uptime_ms: 123_400,
+            rx_oversize: 0,
+            queues: wartui_proto::link::QueueStats::new(),
+            radio_link: wartui_proto::link::RadioLinkStats::default(),
+            host_uart_errors: 0,
+            fan: None,
+            pool: wartui_proto::plan::ChannelPool::All,
+            scan: wartui_proto::fleet::ScanMode::Stopped,
+            ble: None,
+            present: 0,
+            members: Default::default(),
+            sd: None,
+            bluetooth: Default::default(),
+            health,
+        }
+    }
+
+    #[test]
+    fn heartbeat_text_prints_each_field_when_node_has_readings() {
+        assert_eq!(
+            heartbeat_text(&heartbeat()),
+            format!(
+                "#412 e7 power_on {NODE_VERSION};5g · 3.30 V · 52 °C · refused 3/0 · heap 61K \
+                 used 39K free 68K peak"
+            )
+        );
+    }
+
+    #[test]
+    fn heartbeat_text_prints_dash_when_readings_failed() {
+        let hb = Heartbeat { vdd: Vdd::NONE, die_temp: DieTemp::NONE, ..heartbeat() };
+        assert!(heartbeat_text(&hb).contains(";5g · — · — · refused"), "{}", heartbeat_text(&hb));
+    }
+
+    #[test]
+    fn kib_rounds_to_whole_kib_when_bytes_fall_between() {
+        assert_eq!(kib(0), "0K");
+        assert_eq!(kib(1_535), "1K");
+        assert_eq!(kib(1_537), "2K");
+        assert_eq!(kib(400 * 1024), "400K");
+    }
+
+    #[test]
+    fn node_bus_text_reads_clean_when_counts_are_zero() {
+        let bus = NodeBus { handler_max_us: 14, settle_max_us: 3, ..NodeBus::default() };
+        assert_eq!(node_bus_text(&bus), "bus clean · handler max 14 µs, settle max 3 µs");
+    }
+
+    #[test]
+    fn node_bus_text_names_nonzero_counts_when_bus_saw_faults() {
+        let bus = NodeBus {
+            bad_crc: 2,
+            gaps: 1,
+            undelivered: 1_200,
+            handler_max_us: 14,
+            settle_max_us: 3,
+            ..NodeBus::default()
+        };
+        assert_eq!(
+            node_bus_text(&bus),
+            "bus bad_crc 2 gaps 1 undelivered 1,200 · handler max 14 µs, settle max 3 µs"
+        );
+    }
+
+    #[test]
+    fn message_text_names_heartbeat_by_slot_and_address_tail_when_body_decodes() {
+        let said = message_text(
+            &from_node(UpType::Heartbeat.as_u8(), &heartbeat().encode()),
+            NodeBoard::Carrier14,
+        );
+        assert_eq!(said.kind, "heartbeat");
+        assert_eq!(said.text, format!("N8 57:84 {}", heartbeat_text(&heartbeat())));
+    }
+
+    #[test]
+    fn message_text_prints_type_and_length_when_heartbeat_does_not_decode() {
+        let board = NodeBoard::Carrier14;
+        let mut short = heartbeat().encode().to_vec();
+        short.truncate(14);
+        let said = message_text(&from_node(UpType::Heartbeat.as_u8(), &short), board);
+        assert_eq!((said.kind, said.text.as_str()), ("node", "N8 type 1, 14 bytes"));
+        // Full length, but another minor's layout past the prefix.
+        let minor = NODE_VERSION.minor + 1;
+        let version = wartui_proto::bus::Version { minor, ..NODE_VERSION };
+        let ahead = Heartbeat {
+            capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
+            ..heartbeat()
+        };
+        let said = message_text(&from_node(UpType::Heartbeat.as_u8(), &ahead.encode()), board);
+        assert_eq!((said.kind, said.text.as_str()), ("node", "N8 type 1, 63 bytes"));
+    }
+
+    #[test]
+    fn message_text_names_last_boot_when_panic_decodes() {
+        let mut body = [0; PANIC_MAX];
+        let msg = PanicMsg { mac: MAC, text: "src/main.rs:1:1: oops\nmore" };
+        let len = msg.encode_into(&mut body).expect("fits");
+        let said =
+            message_text(&from_node(UpType::Panic.as_u8(), &body[..len]), NodeBoard::Carrier14);
+        assert_eq!(said.kind, "panic");
+        // On one line, as `sd-log --verbose` prints a bridge's last panic.
+        assert_eq!(said.text, "N8 last boot: src/main.rs:1:1: oops\\nmore");
+    }
+
+    #[test]
+    fn message_text_appends_bridge_health_when_status_carries_it() {
+        let radio = RadioHealth {
+            die_temp: DieTemp::from_c(45),
+            vdd: Vdd::from_mv(3300),
+            heap_used: 60 * 1024,
+            heap_free: 40 * 1024,
+            heap_high_water: 70 * 1024,
+        };
+        let health = BridgeHealth { p4_die_temp: DieTemp::from_c(48), radio: Some(radio) };
+        let said = message_text(&status(health), NodeBoard::Carrier14);
+        assert_eq!(
+            said.text,
+            "1200 received, 3 dropped, 0 oversize, up 123s · P4 48 °C · C6 45 °C 3.30 V heap 40K \
+             free"
+        );
+    }
+
+    #[test]
+    fn message_text_leaves_c6_out_when_status_has_no_radio_health() {
+        let said = message_text(&status(BridgeHealth::default()), NodeBoard::Carrier14);
+        assert_eq!(said.text, "1200 received, 3 dropped, 0 oversize, up 123s · P4 —");
+    }
 
     /// A "64 GB" card: 60,350 MiB, 58.9 GB.
     fn card(state: SdState, free_mb: Option<u32>) -> Option<SdStatus> {

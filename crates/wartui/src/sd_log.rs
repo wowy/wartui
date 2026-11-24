@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_proto::bus::NodeBoard;
+use wartui_proto::bus::{NodeBoard, UpMsg};
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::sd::log::{Bad, Body, Clock, CloseReason, Entry, Opened, decode, records};
 use wartui_proto::wardrive_esp::session::Class;
@@ -201,11 +201,27 @@ fn render(name: &str, file: &mut [u8], verbose: bool, lines: &mut Vec<String>) -
         let (kind, text) = entry_text(&entry.body, board);
         lines.push(format!("{}  {kind:<10}  {text}", uptime(at)));
         if verbose && let Body::Frame(msg) | Body::Snapshot(msg) = &entry.body {
-            lines.extend(format!("{msg:#?}").lines().map(|line| format!("    {line}")));
+            lines.extend(detail(msg).lines().map(|line| format!("    {line}")));
         }
     }
     lines.push(tally.line());
     tally
+}
+
+/// `msg` in full: a node's heartbeat or panic decoded, since its body's bytes read as nothing,
+/// and any other message as it came.
+fn detail(msg: &BridgeToHost) -> String {
+    if let BridgeToHost::FromNode { kind, body, .. } = msg {
+        match UpMsg::decode(*kind, body) {
+            // Another major or minor's layout past the prefix reads as its bytes.
+            Ok(UpMsg::Heartbeat(hb)) if hb.capabilities.version.compat_with_host().drivable() => {
+                return format!("{hb:#?}");
+            }
+            Ok(UpMsg::Panic(panic)) => return format!("{panic:#?}"),
+            _ => {}
+        }
+    }
+    format!("{msg:#?}")
 }
 
 /// The file's header: which file of which boot, the firmware, why it booted and whether the boot
@@ -310,9 +326,15 @@ fn uptime(ms: u64) -> String {
 mod tests {
     use std::path::Path;
 
-    use wartui_proto::bus::Slot;
+    use wartui_proto::bus::{
+        Board, Capabilities, DieTemp, Heartbeat, NODE_VERSION, NodeBus, PANIC_MAX, PanicMsg, Slot,
+        UpType, Vdd,
+    };
     use wartui_proto::host_owner::{Holder, Input};
-    use wartui_proto::link::{LINK_PROTO_VERSION, LogStr, LoopPhase, ShortStr};
+    use wartui_proto::link::{
+        BridgeHealth, FromNodeBody, LINK_PROTO_VERSION, LogStr, LoopPhase, ShortStr,
+    };
+    use wartui_proto::radio_link::RadioHealth;
     use wartui_proto::reset::ResetCause;
     use wartui_proto::sd::log::{
         FORMAT_VERSION, Kind, RECORD_MAX, encode, encode_closed, encode_dropped, encode_message,
@@ -345,6 +367,10 @@ mod tests {
     }
 
     fn status(uptime_ms: u32) -> BridgeToHost {
+        status_with(uptime_ms, BridgeHealth::default())
+    }
+
+    fn status_with(uptime_ms: u32, health: BridgeHealth) -> BridgeToHost {
         BridgeToHost::Status {
             rx_count: 1_200,
             dropped_tx: 3,
@@ -361,8 +387,57 @@ mod tests {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
-            health: Default::default(),
+            health,
         }
+    }
+
+    /// Both chips' readings, as a bridge whose C6 has reported sends them.
+    fn health() -> BridgeHealth {
+        let radio = RadioHealth {
+            die_temp: DieTemp::from_c(45),
+            vdd: Vdd::from_mv(3300),
+            heap_used: 60 * 1024,
+            heap_free: 40 * 1024,
+            heap_high_water: 70 * 1024,
+        };
+        BridgeHealth { p4_die_temp: DieTemp::from_c(48), radio: Some(radio) }
+    }
+
+    /// The node in N8 on a fourteen-node carrier, as its record reached the bridge.
+    fn from_node(kind: UpType, body: &[u8]) -> BridgeToHost {
+        BridgeToHost::FromNode {
+            slot: Slot::new(1, 0).expect("B1"),
+            rx_us: 0,
+            kind: kind.as_u8(),
+            body: FromNodeBody::from_slice(body).expect("fits"),
+        }
+    }
+
+    fn heartbeat() -> BridgeToHost {
+        let hb = Heartbeat {
+            capabilities: Capabilities::here(Board::Esp32c5),
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
+            counter: 412,
+            epoch: 7,
+            wifi_refused: 3,
+            ble_refused: 0,
+            reset_cause: ResetCause::PowerOn,
+            vdd: Vdd::from_mv(3300),
+            die_temp: DieTemp::from_c(52),
+            heap_free: 39 * 1024,
+            heap_used: 61 * 1024,
+            heap_high_water: 68 * 1024,
+            bus: NodeBus { bad_crc: 2, handler_max_us: 14, ..NodeBus::default() },
+        };
+        from_node(UpType::Heartbeat, &hb.encode())
+    }
+
+    fn panic_msg() -> BridgeToHost {
+        let mut body = [0; PANIC_MAX];
+        let msg =
+            PanicMsg { mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84], text: "src/bus.rs:9:5: oops" };
+        let len = msg.encode_into(&mut body).expect("fits");
+        from_node(UpType::Panic, &body[..len])
     }
 
     fn ready() -> BridgeToHost {
@@ -405,11 +480,13 @@ mod tests {
             record(|out| encode_opened(&opened(5_000), 5_000, out)),
             record(|out| encode_message(Kind::Frame, &ready(), 5_010, out)),
             record(|out| encode_message(Kind::Frame, &status(5_020), 5_020, out)),
-            record(|out| encode_message(Kind::Snapshot, &status(6_000), 6_000, out)),
+            record(|out| encode_message(Kind::Snapshot, &status_with(6_000, health()), 6_000, out)),
             record(|out| encode_message(Kind::Frame, &log_msg("sd: hello"), 6_100, out)),
             corrupt.clone(),
             vec![0; 16],
             record(|out| encode_message(Kind::Frame, &cycled, 6_120, out)),
+            record(|out| encode_message(Kind::Frame, &heartbeat(), 6_130, out)),
+            record(|out| encode_message(Kind::Frame, &panic_msg(), 6_140, out)),
             record(|out| encode(Kind::PhoneCommand, 6_200, b"WD:START\n", out)),
             record(|out| encode_phone_line(Class::Answer, b"WD:OK", 6_300, out)),
             record(|out| {
@@ -441,20 +518,28 @@ mod tests {
                 "00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link \
                  v{LINK_PROTO_VERSION}"
             ),
-            "00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s".to_owned(),
-            "00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s".to_owned(),
+            "00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s · P4 —"
+                .to_owned(),
+            "00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s · P4 48 °C · \
+             C6 45 °C 3.30 V heap 40K free"
+                .to_owned(),
             "00:00:06.100  log         sd: hello".to_owned(),
             format!("--:--:--.---  unreadable  {torn} bytes (CRC mismatch)"),
             "00:00:06.120  power       N8 power-cycled".to_owned(),
+            format!(
+                "00:00:06.130  heartbeat   N8 57:84 #412 e7 power_on {NODE_VERSION};5g · 3.30 V · \
+                 52 °C · refused 3/0 · heap 61K used 39K free 68K peak"
+            ),
+            "00:00:06.140  panic       N8 last boot: src/bus.rs:9:5: oops".to_owned(),
             "00:00:06.200  phone →     WD:START\\n".to_owned(),
             "00:00:06.300  phone ←     answer WD:OK".to_owned(),
             "00:00:06.400  owner       Usb → Phone on PhoneSubscribed".to_owned(),
             "00:00:07.000  dropped     3 records lost".to_owned(),
             "00:00:08.000  closed      full, the next file takes over".to_owned(),
-            "12 records · 1 unreadable · 3 dropped · 00:00:05.000 to 00:00:08.000".to_owned(),
+            "14 records · 1 unreadable · 3 dropped · 00:00:05.000 to 00:00:08.000".to_owned(),
         ];
         assert_eq!(lines, expected);
-        assert_eq!((tally.records, tally.unreadable, tally.dropped), (12, 1, 3));
+        assert_eq!((tally.records, tally.unreadable, tally.dropped), (14, 1, 3));
     }
 
     #[test]
@@ -465,6 +550,23 @@ mod tests {
         assert_eq!(lines[1], "00:00:00.000  log         sd: hello");
         assert_eq!(lines[2], "    Log {");
         assert!(lines[3].starts_with("        message: \"sd: hello\""), "{lines:?}");
+    }
+
+    #[test]
+    fn sd_log_prints_decoded_heartbeat_and_panic_when_verbose() {
+        let file = [
+            record(|out| encode_message(Kind::Frame, &heartbeat(), 0, out)),
+            record(|out| encode_message(Kind::Frame, &panic_msg(), 10, out)),
+        ]
+        .concat();
+        let (lines, _) = rendered(&file, true);
+        assert!(lines[1].starts_with("00:00:00.000  heartbeat   B1 57:84 #412"), "{lines:?}");
+        assert_eq!(lines[2], "    Heartbeat {");
+        // The node's bus counters, not the body's bytes.
+        assert!(lines.contains(&"            bad_crc: 2,".to_owned()), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("body")), "{lines:?}");
+        let panic = lines.iter().position(|line| line == "    PanicMsg {").expect("panic dump");
+        assert!(lines[panic..].contains(&"        text: \"src/bus.rs:9:5: oops\",".to_owned()));
     }
 
     #[test]
@@ -542,7 +644,7 @@ mod tests {
         assert_eq!(lines[lines.len() - 3], format!("{}  no records", named(&empty)));
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("2 files · 12 records · 1 unreadable · 3 dropped · 00:00:03.000 logged")
+            Some("2 files · 14 records · 1 unreadable · 3 dropped · 00:00:03.000 logged")
         );
     }
 
@@ -553,7 +655,7 @@ mod tests {
         std::fs::write(&path, fixture().0).expect("written");
         let lines = report(std::slice::from_ref(&path), false).expect("report");
         assert!(lines[0].starts_with(&format!("{}  file 7", named(&path))), "{lines:?}");
-        assert!(lines.last().expect("a line").starts_with("12 records"), "{lines:?}");
+        assert!(lines.last().expect("a line").starts_with("14 records"), "{lines:?}");
     }
 
     #[test]

@@ -31,8 +31,11 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `bluetooth`    | `pair` this PC, `forget` it, or let phones link; see "The Bluetooth link"           |
 
 `sniff` names each record by the slot it came from, as the node blocks do, and each heartbeat by
-the node's address. It also prints a `# status` line every 10 s: a connection that has sent nothing for 10 s asks
-for one, since the P4 stops writing to a host it has not heard from in 15 s.
+the node's address. A heartbeat's fields read as `sd-log` prints them (see "Reading the SD log"),
+and `--verbose` adds the node's own bus counters under it: the nonzero fault counts since boot, or
+`bus clean`, then its longest interrupt handler and DMA settle. It also prints a `# status` line
+every 10 s: a connection that has sent nothing for 10 s asks for one, since the P4 stops writing
+to a host it has not heard from in 15 s.
 A node is known by its address wherever it sits, and the bridge plans by slot: a node moved to
 another slot leaves the plan at the old one and joins it at the new one on its next heartbeat.
 
@@ -937,19 +940,22 @@ $ wartui sd-log LOG/00000007.BIN
 LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerOn, last phase Unknown
 00:00:05.000  open        format 1 · card 29.7 GB, 29.3 GB free · image abababab
 00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v1
-00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s
-00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s
+00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s · P4 —
+00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s · P4 48 °C · C6 45 °C 3.30 V heap 40K free
 00:00:06.100  log         sd: hello
 --:--:--.---  unreadable  20 bytes (CRC mismatch)
+00:00:06.120  power       N8 power-cycled
+00:00:06.130  heartbeat   N8 57:84 #412 e7 power_on 0.7.0;5g · 3.30 V · 52 °C · refused 3/0 · heap 61K used 39K free 68K peak
+00:00:06.140  panic       N8 last boot: src/bus.rs:9:5: oops
 00:00:06.200  phone →     WD:START\n
 00:00:06.300  phone ←     answer WD:OK
 00:00:06.400  owner       Usb → Phone on PhoneSubscribed
 00:00:07.000  dropped     3 records lost
 00:00:08.000  closed      full, the next file takes over
-12 records · 1 unreadable · 3 dropped · 00:00:05.000 to 00:00:08.000
+14 records · 1 unreadable · 3 dropped · 00:00:05.000 to 00:00:08.000
 ```
 
-A header opens each file: its number, which of the boot's files it is, the firmware, the slot it
+The longer lines wrap on a narrow terminal. A header opens each file: its number, which of the boot's files it is, the firmware, the slot it
 booted from and whether it is on trial, and why the bridge booted. It ends `panicked last boot`
 when the boot before ended in a panic, and `--verbose` prints the panic's text under it. A line per
 record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and what it says. A
@@ -959,7 +965,9 @@ frame reads as `wartui sniff` prints it.
 |-----------------------------------|--------------------------------------------------------------------------|
 | `open`                            | The file's first: its format, the card, its free space, the image digest |
 | `ready`, `status`, `log`, `error` | A frame the bridge sent; `fleet`, `update`, `cache`, `power`, `sd` too   |
-| `node`                            | A node's heartbeat or panic record, as the bridge forwarded it           |
+| `heartbeat`                       | A node's heartbeat, as the bridge forwarded it; see below                |
+| `panic`                           | The text of a node's last panic, sent once after the reset it caused     |
+| `node`                            | A node's record on another build's layout: its type and length           |
 | `status*`                         | A status the log built itself                                            |
 | `phone →`                         | A command a phone wrote                                                  |
 | `phone ←`                         | A line the bridge sent a phone, an `answer` or a `stream` line           |
@@ -967,6 +975,22 @@ frame reads as `wartui sniff` prints it.
 | `dropped`                         | Records the log lost                                                     |
 | `closed`                          | The file's end: logging turned off, or the next file took over           |
 | `unreadable`                      | A record that did not decode, its length and why                         |
+
+A `status` line ends with the bridge's own chips: the P4's die, then the C6's die, rail and free
+heap once the C6 has reported. A `heartbeat` line names the node by slot and address tail, then:
+
+| Field                             | What it is                                                               |
+|-----------------------------------|--------------------------------------------------------------------------|
+| `#412`                            | The heartbeat counter, from the node's boot                              |
+| `e7`                              | The assignment epoch it holds, `e0` for none                             |
+| `power_on`                        | Why the node booted                                                      |
+| `0.7.0;5g`                        | Its firmware, `;5g` for a 5 GHz radio, `;trial` for an unconfirmed image |
+| `3.30 V`, `52 °C`                 | Its 3.3 V rail and die, `—` for a failed reading                         |
+| `refused 3/0`                     | Wi-Fi and Bluetooth sightings a full buffer turned away since boot       |
+| `heap 61K used 39K free 68K peak` | Its heap in KiB: in use, free, and the most in use since boot            |
+
+`--verbose` prints a node's heartbeat and panic decoded under their lines, the node's bus counters
+included.
 
 An unreadable record costs that record alone: reading goes on at the next one. A summary closes
 each file: records, unreadable, dropped and the uptime span. Given several files, it prints a total

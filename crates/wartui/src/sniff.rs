@@ -20,7 +20,7 @@ use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac;
 
-use crate::text::{hex, message_text};
+use crate::text::{heartbeat_text, hex, message_text, node_bus_text};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -53,7 +53,8 @@ pub struct Args {
     #[arg(long)]
     raw: bool,
 
-    /// Print the bridge's own log lines, and its GPS receiver's bytes as text.
+    /// Print the bridge's own log lines, its GPS receiver's bytes as text, and each node's bus
+    /// counters under its heartbeat.
     #[arg(long)]
     verbose: bool,
 }
@@ -212,7 +213,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         BridgeToHost::FromNode { slot, rx_us, kind, body } => {
             counts.total += 1;
             let head = head(*rx_us, *slot, counts);
-            record(*slot, &head, *kind, body, counts);
+            record(*slot, &head, *kind, body, args.verbose, counts);
             if args.raw {
                 println!("      {}", hex(body));
             }
@@ -287,8 +288,21 @@ fn head(rx_us: u32, slot: Slot, counts: &Counts) -> String {
     format!("{rx_us:>10}us  {}", board.label(slot))
 }
 
+/// A heartbeat's line behind `head`, and with `verbose` the node's bus counters under it.
+fn heartbeat_lines(head: &str, heartbeat: &Heartbeat, verbose: bool) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{head}  HEARTBEAT {} {}",
+        mac::full(&heartbeat.mac),
+        heartbeat_text(heartbeat)
+    )];
+    if verbose {
+        lines.push(format!("      {}", node_bus_text(&heartbeat.bus)));
+    }
+    lines
+}
+
 /// One record from the node in `slot`, decoded and counted as the engine reads it.
-fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
+fn record(slot: Slot, head: &str, kind: u8, body: &[u8], verbose: bool, counts: &mut Counts) {
     // A heartbeat from another major or minor opens with the prefix, which names the node's
     // firmware. The rest is not this build's layout, even when its length happens to match.
     let undrivable = (kind == UpType::Heartbeat.as_u8())
@@ -311,14 +325,9 @@ fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
         Ok(UpMsg::Heartbeat(heartbeat)) => {
             counts.heartbeat += 1;
             counts.compat.insert(slot, heartbeat.capabilities.version.compat_with_host());
-            println!(
-                "{head}  HEARTBEAT {} #{} e{} {}  {}",
-                mac::full(&heartbeat.mac),
-                heartbeat.counter,
-                heartbeat.epoch,
-                heartbeat.reset_cause,
-                heartbeat.capabilities
-            );
+            for line in heartbeat_lines(head, &heartbeat, verbose) {
+                println!("{line}");
+            }
         }
         // Not this build's layout once the slot's heartbeat has named another major or minor,
         // even when it parses, as the engine reads it.
@@ -574,6 +583,25 @@ mod tests {
         }
         .encode()
         .to_vec()
+    }
+
+    #[test]
+    fn sniff_cmd_prints_heartbeat_text_when_heartbeat_decodes() {
+        let hb = Heartbeat::decode(&heartbeat_with(NODE_VERSION)).expect("decodes");
+        assert_eq!(
+            heartbeat_lines("         0us  N1", &hb, false),
+            [format!("         0us  N1  HEARTBEAT 02:00:00:00:57:84 {}", heartbeat_text(&hb))]
+        );
+    }
+
+    #[test]
+    fn sniff_cmd_prints_bus_counters_under_heartbeat_when_verbose() {
+        let mut hb = Heartbeat::decode(&heartbeat_with(NODE_VERSION)).expect("decodes");
+        hb.bus.bad_crc = 2;
+        hb.bus.handler_max_us = 14;
+        let lines = heartbeat_lines("         0us  N1", &hb, true);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], "      bus bad_crc 2 · handler max 14 µs, settle max 0 µs");
     }
 
     #[test]
