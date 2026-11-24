@@ -8,11 +8,19 @@
 //! The P4 bridge reads its sensor itself (`firmware/p4-bridge/src/tsens.rs`), and [`p4_tsens_c`]
 //! converts its code here so `cargo test` checks it. It follows ESP-IDF 5.5.4's driver: the
 //! sensor's DAC holds range index 2, offset 0, so `°C = 0.4386 · out − 20.52`, less the
-//! calibration.
+//! calibration. [`p4_die_temp`] encodes it, and reads code 0 as no reading: only a dead or
+//! unconverted sensor gives it, since it would mean about −21 °C, below anything the board runs at.
 //!
 //! The C5 and C6 read through the PHY blob, whose conversion applies no calibration, so
 //! [`calibrated_c`] applies it to the PHY's whole degrees (`firmware/common/src/health.rs`).
-//! Integer math, so the firmware needs no floats.
+//! [`phy_die_temp`] encodes it, and decides a failed read from the PHY's own reading, before the
+//! calibration moves it. Integer math, so the firmware needs no floats.
+
+use crate::bus::DieTemp;
+
+/// PHY readings below this are failed reads: the PHY floors one at −200 °C, and no running die
+/// is below −40 °C.
+pub const PHY_FAILED_BELOW_C: i16 = -40;
 
 /// The eFuse TSENS field's bits that ESP-IDF reads: a sign at bit 8 and a magnitude below it.
 const EFUSE_BITS: u16 = 0x1FF;
@@ -62,9 +70,26 @@ pub const fn p4_tsens_c(out: u8, efuse: u16) -> i16 {
     rounded as i16
 }
 
+/// The P4's die temperature for the sensor's code `out` and the eFuse calibration `efuse`, as
+/// [`p4_tsens_c`] converts it, or no reading for code 0.
+#[must_use]
+pub const fn p4_die_temp(out: u8, efuse: u16) -> DieTemp {
+    if out == 0 { DieTemp::NONE } else { DieTemp::from_c(p4_tsens_c(out, efuse)) }
+}
+
+/// A C5's or C6's die temperature for the PHY's whole-degree reading `c` and the eFuse
+/// calibration `efuse`, as [`calibrated_c`] corrects it, or no reading for a failed read
+/// ([`PHY_FAILED_BELOW_C`]). The cutoff is the PHY's reading's, so a calibration never turns a
+/// cold reading into a failed one; [`DieTemp::from_c`] clamps what it makes.
+#[must_use]
+pub const fn phy_die_temp(c: i16, efuse: u16) -> DieTemp {
+    if c < PHY_FAILED_BELOW_C { DieTemp::NONE } else { DieTemp::from_c(calibrated_c(c, efuse)) }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{calibrated_c, calibration_tenths, p4_tsens_c};
+    use super::{calibrated_c, calibration_tenths, p4_die_temp, p4_tsens_c, phy_die_temp};
+    use crate::bus::DieTemp;
 
     // Expected values from ESP-IDF's float formula, 0.4386 · out − 20.52 − deltaT / 10,
     // rounded to the nearest degree.
@@ -153,5 +178,40 @@ mod tests {
         assert_eq!(calibrated_c(-5, 0x100 | 5), -5);
         // 0 − 0.4 = −0.4.
         assert_eq!(calibrated_c(0, 4), 0);
+    }
+
+    #[test]
+    fn p4_die_temp_reads_no_reading_when_code_zero() {
+        assert_eq!(p4_die_temp(0, 0), DieTemp::NONE);
+        assert_eq!(p4_die_temp(0, 0x049), DieTemp::NONE);
+    }
+
+    #[test]
+    fn p4_die_temp_encodes_conversion_when_code_nonzero() {
+        assert_eq!(p4_die_temp(150, 0).c(), Some(45));
+        // 0.4386 − 20.52, about −20 °C: low, and still a reading.
+        assert_eq!(p4_die_temp(1, 0).c(), Some(-20));
+    }
+
+    #[test]
+    fn phy_die_temp_reads_no_reading_when_phy_read_failed() {
+        // The PHY's floor for a failed read.
+        assert_eq!(phy_die_temp(-200, 0x049), DieTemp::NONE);
+        assert_eq!(phy_die_temp(-41, 0), DieTemp::NONE);
+    }
+
+    #[test]
+    fn phy_die_temp_keeps_reading_when_calibration_takes_it_below_cutoff() {
+        // −38 − 7.3 = −45.3: below −40 °C once calibrated, but the PHY read it, so it is a
+        // reading, clamped to the code's floor.
+        assert_eq!(calibrated_c(-38, 0x049), -45);
+        assert_eq!(phy_die_temp(-38, 0x049), DieTemp::from_c(-45));
+        assert_eq!(phy_die_temp(-38, 0x049).c(), Some(-40));
+    }
+
+    #[test]
+    fn phy_die_temp_calibrates_when_reading_valid() {
+        assert_eq!(phy_die_temp(33, 0x18b).c(), Some(47));
+        assert_eq!(phy_die_temp(-40, 0).c(), Some(-40));
     }
 }

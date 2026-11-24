@@ -965,9 +965,11 @@ LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerO
 
 The longer lines wrap on a narrow terminal. A header opens each file: its number, which of the boot's files it is, the firmware, the slot it
 booted from and whether it is on trial, and why the bridge booted. It ends `panicked last boot`
-when the boot before ended in a panic, and `--verbose` prints the panic's text under it. A line per
-record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and what it says. A
-frame reads as `wartui sniff` prints it.
+when the boot before ended in a panic, and `--verbose` prints the panic's text under it. Every
+file of that boot repeats it, so count panics by boot (part 0), not by file. The bridge also logs
+the text at boot as `last boot panicked: …` lines, and says them to the first host that attaches.
+A line per record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and
+what it says. A frame reads as `wartui sniff` prints it.
 
 | Kind                              | Record                                                                   |
 |-----------------------------------|--------------------------------------------------------------------------|

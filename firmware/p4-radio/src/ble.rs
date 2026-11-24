@@ -245,7 +245,7 @@ use trouble_host::att::AttClient;
 use trouble_host::prelude::*;
 use wartui_proto::ble::{ByteRing, ID_UUID, NAME_PREFIX, Rest, SERVICE_UUID, link_address};
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
-use wartui_proto::bus::{DieTemp, Vdd};
+use wartui_proto::bus::Vdd;
 use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{
@@ -883,7 +883,7 @@ pub fn repeat_health(shared: &Shared) {
 
 /// Say the chip's TSENS eFuse calibration beside the PHY's reading and the calibrated one it
 /// reports, once a boot: `tsens: calibration 0x18b, PHY 33 °C, calibrated 47 °C`. The PHY's
-/// conversion applies no calibration, so `health::calibrate_die_temp` subtracts it (`deltaT / 10`
+/// conversion applies no calibration, so `health::die_temp_from` subtracts it (`deltaT / 10`
 /// °C, bit 8 the sign), as ESP-IDF's driver does, and the line lets the bench check that by hand.
 #[inline(never)]
 fn say_calibration(shared: &Shared, phy: i16, health: RadioHealth) {
@@ -904,9 +904,8 @@ fn say_calibration(shared: &Shared, phy: i16, health: RadioHealth) {
 /// unmeasured; the bench checks it with a central connected, in `dropped_writes`,
 /// `resynced_bytes` and disconnects.
 fn read_health(phy: i16) -> RadioHealth {
-    let c = wartui_firmware::health::calibrate_die_temp(phy);
-    // The PHY floors a failed read at −200 °C, and no running die is below −40 °C.
-    let die_temp = if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) };
+    // A failed read is the PHY's reading's to decide, before the calibration moves it.
+    let die_temp = wartui_firmware::health::die_temp_from(phy);
     let heap = esp_alloc::HEAP.stats();
     RadioHealth {
         die_temp,

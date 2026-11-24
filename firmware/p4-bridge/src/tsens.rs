@@ -26,7 +26,7 @@
 //! smallest error (1 °C) and the range ESP-IDF starts in. It is never moved, unlike ESP-IDF's
 //! driver, which re-ranges as the die heats. The 8-bit code tops out at about 91 °C at this
 //! range, so a reading there means that or hotter. The conversion is
-//! `wartui_proto::tsens::p4_tsens_c`, tested on the host. The bench checks the reading: it moves
+//! `wartui_proto::tsens::p4_die_temp`, tested on the host, which reads code 0 as no reading. The bench checks the reading: it moves
 //! with the lid fan on and off, and sits near the C6's own reading beside it.
 
 use core::fmt::Write as _;
@@ -35,7 +35,7 @@ use esp_hal::delay::Delay;
 use esp_hal::peripherals::{LP_I2C_ANA_MST, LP_PERI, PMU};
 use wartui_proto::bus::DieTemp;
 use wartui_proto::link::LogStr;
-use wartui_proto::tsens::p4_tsens_c;
+use wartui_proto::tsens::p4_die_temp;
 
 /// The analog I2C block of the SAR ADC and the temperature sensor.
 const I2C_SAR_ADC: u8 = 0x69;
@@ -62,15 +62,15 @@ const SETTLE_US: u32 = 300;
 /// The powered sensor and the chip's calibration.
 pub struct Tsens {
     block: esp32p4::LP_TSENS,
-    /// The eFuse `TEMPERATURE_SENSOR` field as read, which `p4_tsens_c` takes nine bits of.
+    /// The eFuse `TEMPERATURE_SENSOR` field as read, which `p4_die_temp` takes nine bits of.
     calibration: u16,
 }
 
 impl Tsens {
-    /// The die temperature now.
+    /// The die temperature now, or no reading while the sensor gives code 0.
     pub fn read(&self) -> DieTemp {
         let out = self.block.ctrl().read().out().bits();
-        DieTemp::from_c(p4_tsens_c(out, self.calibration))
+        p4_die_temp(out, self.calibration)
     }
 
     /// Say the eFuse calibration and one reading's raw code beside what it converts to, once
@@ -84,7 +84,7 @@ impl Tsens {
             line,
             "tsens: calibration {:#05x}, code {out}, {}",
             self.calibration,
-            DieTemp::from_c(p4_tsens_c(out, self.calibration))
+            p4_die_temp(out, self.calibration)
         );
         shared.push_log(&line);
     }

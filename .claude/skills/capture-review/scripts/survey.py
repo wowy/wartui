@@ -405,8 +405,8 @@ def nodes(db, ctx):
 # driver's own churn.
 HEAP_FALL_BYTES = 2048
 
-# The node's own bus counters a rise in which across its last boot is flagged. Each is a wrapping
-# 16-bit since-boot count, read by difference.
+# The node's own bus counters a rise in which across its last boot's live beats is flagged. Each
+# is a wrapping 16-bit since-boot count, read by difference.
 BUS_COUNTERS = (("bus_undelivered", 15, "records undelivered"), ("bus_bad_crc", 16, "bad CRCs"))
 
 
@@ -518,10 +518,13 @@ def heartbeats(db, ctx):
                          "a leak in the node firmware?",
                          f"SELECT id, rx_at, counter, heap_free FROM heartbeat WHERE {node_sql} "
                          "ORDER BY id")
-        # Over the last boot alone, since a restart zeroes the counts.
+        # Over the last boot's live beats alone: a restart zeroes the counts, and beats replayed
+        # from the bridge's backlog can arrive out of order. A step that wraps past half the
+        # range went backwards, so it counts nothing.
         for column, at, what in BUS_COUNTERS:
-            boot = [r[at] for r in hs[boot_start:]]
-            rose = sum((b - a) % 2**16 for a, b in zip(boot, boot[1:]))
+            boot = [r[at] for r in hs[boot_start:] if r[7] != 0]
+            steps = ((b - a) % 2**16 for a, b in zip(boot, boot[1:]))
+            rose = sum(step for step in steps if step <= 2**15)
             if rose:
                 flag("WARN", "node",
                      f"{name(mac)} counted {rose} {what} on the bus across its last boot",

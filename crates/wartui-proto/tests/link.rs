@@ -1551,3 +1551,38 @@ fn usb_took_bridge_fits_the_p4s_notice_buffer_when_encoded() {
     let len = encode_frame(&BridgeToHost::Error { message }, &mut buf).expect("fits");
     assert!(len <= 63, "{len}");
 }
+
+#[test]
+fn split_lines_gives_one_line_when_text_fits() {
+    let mut lines = std::vec::Vec::new();
+    wartui_proto::link::split_lines("panicked: ", "cont.: ", "src/main.rs:9:5: oops", |line| {
+        lines.push(line)
+    });
+    assert_eq!(lines, ["panicked: src/main.rs:9:5: oops"]);
+}
+
+#[test]
+fn split_lines_continues_with_more_prefix_when_text_overflows() {
+    let text = "é".repeat(100);
+    let mut lines = std::vec::Vec::new();
+    wartui_proto::link::split_lines("first: ", "more: ", &text, |line| lines.push(line));
+    // No line passes a `LogStr`'s capacity, and the text comes back whole.
+    let cap = wartui_proto::link::LogStr::new().capacity();
+    assert!(lines.len() > 1);
+    assert!(lines[0].starts_with("first: "));
+    assert!(lines[1..].iter().all(|line| line.starts_with("more: ")));
+    assert!(lines.iter().all(|line| line.len() <= cap));
+    let rejoined: std::string::String = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| &line[if i == 0 { "first: ".len() } else { "more: ".len() }..])
+        .collect();
+    assert_eq!(rejoined, text);
+}
+
+#[test]
+fn split_lines_gives_prefix_alone_when_text_empty() {
+    let mut lines = std::vec::Vec::new();
+    wartui_proto::link::split_lines("first: ", "more: ", "", |line| lines.push(line));
+    assert_eq!(lines, ["first: "]);
+}

@@ -20,7 +20,9 @@
 //! **Clearing after reporting is what keeps a panic from being reported twice.** Any reset but a
 //! power-on keeps the record, a brownout that does not zero RTC memory included, so a record
 //! never cleared is reported again after every such reset. Each firmware calls [`clear`] once
-//! the text has reached somewhere that keeps it.
+//! the text has reached somewhere that keeps it: a node once the P4 acknowledges its panic
+//! record, the C6 once the P4's hello arrives behind its lines, and the P4 once a log file's
+//! `Opened` record or a host has it (`firmware/p4-bridge/src/sd_log.rs`).
 
 use core::fmt::{self, Write};
 use core::sync::atomic::AtomicBool;

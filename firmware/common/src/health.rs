@@ -12,12 +12,17 @@
 //! through the PHY instead.
 //!
 //! The PHY's conversion applies none of the chip's eFuse TSENS calibration, which ESP-IDF's
-//! driver subtracts from every reading, so [`die_temp_calibrated_c`] applies it
-//! (`wartui_proto::tsens::calibrated_c`). On the bench C6 the PHY read 33 °C while an IR
+//! driver subtracts from every reading, so [`die_temp`] applies it
+//! (`wartui_proto::tsens::phy_die_temp`). A failed read is decided from the PHY's own reading,
+//! before the calibration moves it, so a cold die with a positive calibration still reads as
+//! cold rather than failed. On the bench C6 the PHY read 33 °C while an IR
 //! thermometer read about 47 °C on the package; its field read 0x18b, −13.9 °C, and calibrated
 //! the reading is 47 °C. The C5 uses the same PHY call and the same eFuse scheme. The P4 reads
 //! its own sensor and applies its calibration there (`firmware/p4-bridge/src/tsens.rs`), so the
 //! calibrated reading is the C5's and C6's alone.
+
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+use wartui_proto::bus::DieTemp;
 
 /// The chip's 3.3 V rail in millivolts, or 0 when the PHY is not initialized.
 ///
@@ -44,7 +49,7 @@ pub fn vdd_mv() -> u16 {
 /// The die temperature in whole degrees Celsius, as the PHY converts it, uncalibrated.
 ///
 /// Call it only where the PHY is initialized, as for [`vdd_mv`]. A reading to report is
-/// [`die_temp_calibrated_c`]'s.
+/// [`die_temp`]'s.
 #[allow(unsafe_code, reason = "the PHY blob's range-aware TSENS read has no esp-hal wrapper")]
 #[must_use]
 pub fn die_temp_c() -> i16 {
@@ -64,24 +69,22 @@ pub fn die_temp_c() -> i16 {
     unsafe { phy_get_tsens_value() }
 }
 
-/// The die temperature in whole degrees Celsius, less the chip's eFuse calibration: [`die_temp_c`]
-/// through [`calibrate_die_temp`].
+/// The die temperature less the chip's eFuse calibration, or no reading when the PHY's read
+/// failed: [`die_temp_c`] through [`die_temp_from`].
 ///
 /// Call it only where the PHY is initialized, as for [`vdd_mv`].
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 #[must_use]
-pub fn die_temp_calibrated_c() -> i16 {
-    calibrate_die_temp(die_temp_c())
+pub fn die_temp() -> DieTemp {
+    die_temp_from(die_temp_c())
 }
 
-/// A [`die_temp_c`] reading less the chip's eFuse calibration.
-///
-/// A reading below −40 °C, which no running die is and the PHY's −200 °C floor for a failed read
-/// is, passes through uncalibrated, so a caller still reads it as failed.
+/// The die temperature for `raw`, a [`die_temp_c`] reading, less the chip's eFuse calibration,
+/// or no reading when `raw` is a failed read (`wartui_proto::tsens::phy_die_temp`).
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 #[must_use]
-pub fn calibrate_die_temp(c: i16) -> i16 {
-    if c < -40 { c } else { wartui_proto::tsens::calibrated_c(c, tsens_calibration()) }
+pub fn die_temp_from(raw: i16) -> DieTemp {
+    wartui_proto::tsens::phy_die_temp(raw, tsens_calibration())
 }
 
 /// The chip's eFuse TSENS calibration field, as `wartui_proto::tsens::calibration_tenths` takes

@@ -160,7 +160,8 @@ own.
   the board's microSD card in `Status` and formats it FAT32 on a host's `FormatSd` (`src/sd.rs`),
   the layout `wartui_proto::sd`'s. It logs its diagnostics to the card (`src/sd_log.rs`, and the
   writer in `src/sd.rs`), from a ring in PSRAM past the host bulk ring. The log keeps every node
-  heartbeat and panic record it forwards, and each file opens with the P4's own last panic.
+  heartbeat and panic record it forwards, and each file opens with the P4's own last panic,
+  which the first host it announces to also hears (`src/sd_log.rs`).
   Every `Status` carries the bridge's own health: the P4's die temperature, read from its
   temperature sensor (`src/tsens.rs`), and the C6's latest die temperature, rail and heap.
 - **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status, its health

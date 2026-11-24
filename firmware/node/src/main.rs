@@ -41,9 +41,9 @@ use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::{health, last_panic};
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg, Heartbeat, PANIC_MAX, PAYLOAD_MAX,
-    PanicMsg, PanicStr, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType,
-    UpdateState, UpdateStatus, Vdd, records,
+    Assign, Board, Capabilities, DecodeError, DownMsg, Heartbeat, PANIC_MAX, PAYLOAD_MAX, PanicMsg,
+    PanicStr, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType, UpdateState,
+    UpdateStatus, Vdd, records,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB};
 use wartui_proto::mac::{self, Mac};
@@ -175,6 +175,8 @@ struct Node {
     trial: bool,
     /// The last life's panic text, until the P4 acknowledges it ([`send_panic`]).
     panic: Option<PanicStr>,
+    /// The earliest next try at [`send_panic`] after one failed.
+    panic_retry: Option<Instant>,
 }
 
 impl Node {
@@ -197,6 +199,7 @@ impl Node {
             reset_cause: ResetCause::Unknown,
             trial: false,
             panic: None,
+            panic_retry: None,
         }
     }
 
@@ -508,6 +511,9 @@ fn beat_if_due(node: &mut Node) {
     }
 }
 
+/// How long [`send_panic`] waits after a failed try before the next.
+const PANIC_RETRY: Duration = Duration::from_secs(30);
+
 /// Send a heartbeat, then the last life's panic while one is held.
 fn beat(node: &mut Node) {
     heartbeat(node);
@@ -519,10 +525,11 @@ fn beat(node: &mut Node) {
 /// Tried once a beat, behind the heartbeat, which [`bus::deliver`] lets go first, so the host
 /// reads this life's reset cause ahead of the text. A delivery blocks the main loop until
 /// acknowledged or out of tries, seconds on a slot no P4 clocks, so it is tried only while one
-/// does ([`bus::clocked`]). A failed try waits for the next beat.
+/// does ([`bus::clocked`]). A clocked slot can still lose every ack, so a failed try waits
+/// [`PANIC_RETRY`] before the next, which caps the scan loop's stalls at one every 30 s.
 fn send_panic(node: &mut Node) {
     let Some(text) = node.panic.as_deref() else { return };
-    if !bus::clocked() {
+    if !bus::clocked() || node.panic_retry.is_some_and(|at| Instant::now() < at) {
         return;
     }
     let mut body = [0u8; PANIC_MAX];
@@ -533,6 +540,7 @@ fn send_panic(node: &mut Node) {
         node.panic = None;
         note!("last boot's panic delivered");
     } else {
+        node.panic_retry = Some(Instant::now() + PANIC_RETRY);
         note!("last boot's panic unacknowledged");
     }
 }
@@ -573,19 +581,13 @@ fn heartbeat(node: &Node) {
         ble_refused: ble::refused(),
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
-        die_temp: die_temp(health::die_temp_calibrated_c()),
+        die_temp: health::die_temp(),
         heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
         heap_used: heap.current_usage as u32,
         heap_high_water: heap.max_usage as u32,
         bus: bus::counters(),
     };
     bus::send(UpType::Heartbeat, &msg.encode());
-}
-
-/// Encode a die reading, sending a failed one as no reading.
-fn die_temp(c: i16) -> DieTemp {
-    // The PHY floors a failed read at −200 °C, and no running die is below −40 °C.
-    if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) }
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few batches as

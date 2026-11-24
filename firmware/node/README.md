@@ -39,8 +39,8 @@ transfer carries records, one message each:
   address type and connectable flag, then its manufacturer identifier when it sent one.
 - **Panic**: the text of the panic that ended the last boot, once, after the reset. The panic
   handler keeps it in RTC memory (`wartui_firmware::last_panic`), and the next boot sends it
-  behind a heartbeat once the P4 is clocking its slot, acknowledged by the P4 and retried each
-  beat until it is. The MAC, then up to 240 bytes of `{file}:{line}:{column}: {message}`.
+  behind a heartbeat once the P4 is clocking its slot, acknowledged by the P4 and retried until
+  it is, at most once every 30 s after a failed try, since each try blocks the scan loop. The MAC, then up to 240 bytes of `{file}:{line}:{column}: {message}`.
 - **Assign**: the assignment.
 - **Stop**: drops the assignment and empties the dedup ring. The node idles at epoch 0, as at
   boot, and adopts the next assignment whatever its epoch.

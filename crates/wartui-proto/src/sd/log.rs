@@ -164,7 +164,8 @@ pub struct Opened {
     pub card_mb: u32,
     /// The volume's free space in MiB when the file opened, when the P4 knew it.
     pub free_mb: Option<u32>,
-    /// The text of the panic that ended the previous boot, when the reset preserved it.
+    /// The text of the panic that ended the previous boot, when the reset preserved it. Every
+    /// file of that boot carries it, so a reader counts panics by boot (`part` 0), not by file.
     pub last_panic: Option<PanicStr>,
 }
 

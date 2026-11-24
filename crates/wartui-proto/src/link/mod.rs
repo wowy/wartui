@@ -153,6 +153,34 @@ pub const USB_TOOK_BRIDGE: &str = "the USB host took the bridge";
 /// usually gone.
 pub const RADIO_PANICKED: &str = "C6 panicked: ";
 
+/// Split `text` over as many [`LogStr`] lines as it takes, the first led by `first` and each
+/// after it by `more`, and give each line to `each`. Cuts only at a character's end. A prefix
+/// that leaves no room for a character ends the split.
+///
+/// A bridge chip's last panic, which can run past one line, goes to the host this way
+/// (`firmware/p4-radio/src/last_panic.rs`, `firmware/p4-bridge/src/sd_log.rs`).
+pub fn split_lines(first: &str, more: &str, text: &str, mut each: impl FnMut(LogStr)) {
+    let mut rest = text;
+    let mut prefix = first;
+    loop {
+        let mut line = LogStr::new();
+        let _ = line.push_str(prefix);
+        let mut taken = 0;
+        for c in rest.chars() {
+            if line.push(c).is_err() {
+                break;
+            }
+            taken += c.len_utf8();
+        }
+        each(line);
+        rest = rest.get(taken..).unwrap_or_default();
+        if rest.is_empty() || taken == 0 {
+            break;
+        }
+        prefix = more;
+    }
+}
+
 /// What a bridge chip's firmware last marked before it reset.
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],

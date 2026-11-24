@@ -214,8 +214,8 @@ macro_rules! dma_buf {
 // After `dma_buf!`, which it uses.
 mod bus;
 
-/// Resets rather than hanging, keeping the text for the next life's SD log
-/// (`wartui_firmware::last_panic`). The reset takes the C6 with it, and the host sees a new life
+/// Resets rather than hanging, keeping the text for the next life's SD log and host
+/// (`wartui_firmware::last_panic`, `src/sd_log.rs`). The reset takes the C6 with it, and the host sees a new life
 /// in the next `Ready`.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -452,8 +452,9 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, the C6's last panic if it reported one, what the carrier and the
-    /// node image cache have to say, and what the P4's own image has to say.
+    /// GPS fault if there is one, the C6's last panic if it reported one, the P4's own to the
+    /// first host told this boot, what the carrier and the node image cache have to say, and what
+    /// the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -470,6 +471,7 @@ impl Shared {
         if let Some(line) = radio_panic {
             self.push_error(&line);
         }
+        sd_log::tell_host_panic(self);
         carrier::say(self);
         cache::say(self);
         fleet::say(self);
@@ -773,6 +775,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, log)
     });
     shared.tsens.say_calibration(shared);
+    sd_log::say_panic(shared);
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(
         boot,
