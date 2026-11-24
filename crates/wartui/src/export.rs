@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
-use wartui_core::analyze::node_slots;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{Connection, is_simulated, open_readonly};
 
@@ -119,7 +118,7 @@ pub fn run(args: Args) -> Result<()> {
     let warning = test_data_note(&conn, &db)?;
     let filter = args.selection.filter(&config);
     let version = env!("CARGO_PKG_VERSION");
-    let names = node_names(&conn, &db)?;
+    let names = NodeNames::of(&conn);
 
     let summary = if out.as_os_str() == "-" {
         let stdout = std::io::stdout();
@@ -143,12 +142,6 @@ pub fn run(args: Args) -> Result<()> {
         eprintln!("{warning}");
     }
     Ok(())
-}
-
-/// What the summary calls the nodes of the capture `conn` holds, read from `db`.
-fn node_names(conn: &Connection, db: &Path) -> Result<NodeNames> {
-    let (board, slots) = node_slots(conn).with_context(|| format!("reading {}", db.display()))?;
-    Ok(NodeNames::new(board, &slots))
 }
 
 /// [`test_data_warning`] when the capture holds test data.

@@ -125,10 +125,7 @@ impl FleetEngine {
                 self.wanted = None;
                 self.startup = Startup::Done;
                 batch.urgent.push(HostToBridge::StopScan);
-                if std::mem::replace(&mut self.fix_wait, false) {
-                    // As the gate opening does: the sky follows the view alone again.
-                    batch.bulk.extend(self.gps_write());
-                }
+                self.end_fix_wait(batch);
                 batch.bulk.push(HostToBridge::GetStatus);
             }
             Command::StartWithoutFix => {
@@ -231,27 +228,36 @@ impl FleetEngine {
         );
     }
 
-    /// The bridge's uptime in seconds, as its last `Status` gave it. `None` before the first.
+    /// The bridge's uptime in seconds, as the last `Status` on this connection gave it. `None`
+    /// before the first: the last connection's would be a bridge that may since have restarted.
     fn bridge_up_s(&self) -> Option<u64> {
+        if !self.link_up || !self.status_seen {
+            return None;
+        }
         self.bridge_status.map(|status| u64::from(status.uptime_ms / 1000))
     }
 
     /// Stop waiting for a GPS fix, and start the scan if the P4 has reported stopped and the link
     /// is up. With the link down, the next `Status` reporting stopped starts it.
     pub(super) fn open_fix_gate(&mut self, batch: &mut ActionBatch) {
-        let waited = std::mem::replace(&mut self.fix_wait, false);
-        self.fix_run = None;
-        self.fix_wait_since = None;
-        self.searched_at = None;
-        if waited {
-            // The receiver's sky follows the view alone again.
-            batch.bulk.extend(self.gps_write());
-        }
+        self.end_fix_wait(batch);
         if let Startup::AwaitingFix { bluetooth } = self.startup
             && self.link_up
         {
             self.startup = Startup::Done;
             self.start(bluetooth, batch);
+        }
+    }
+
+    /// Stop waiting for a GPS fix and forget the wait's timing. A wait that was running writes the
+    /// receiver's sky back to following the view alone, in the batch that ends it.
+    fn end_fix_wait(&mut self, batch: &mut ActionBatch) {
+        let waited = std::mem::replace(&mut self.fix_wait, false);
+        self.fix_run = None;
+        self.fix_wait_since = None;
+        self.searched_at = None;
+        if waited {
+            batch.bulk.extend(self.gps_write());
         }
     }
 

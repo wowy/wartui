@@ -4749,3 +4749,23 @@ fn engine_logs_wait_and_bridge_uptime_when_fix_held() {
     assert!(lines[1].starts_with("message=gps fix held"), "{lines:?}");
     assert!(lines[1].contains("waited_s=42 bridge_up_s=90"), "{lines:?}");
 }
+
+#[test]
+fn engine_logs_fix_held_without_old_uptime_when_bridge_reconnects_before_status() {
+    let clock = Clock::new();
+    let gps = Gps::bridged(DEFAULT_MAX_AGE);
+    let (mut engine, _) = bridge_fix_capture(&gps, &clock, true);
+    engine.handle(stopped_up(90_000), clock.at(0));
+    tick_at(&mut engine, &clock, 0);
+    // The bridge restarts: its next `Status` has not landed when the fix holds.
+    engine.handle(disconnected("reset"), clock.at(1));
+    engine.handle(connected(), clock.at(2));
+
+    let lines = Logs::during(|| {
+        fixes_ticked(&mut engine, &gps, &clock, [10_000, 11_000, 12_000]);
+    });
+
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("message=gps fix held"), "{lines:?}");
+    assert!(!lines[0].contains("bridge_up_s"), "{lines:?}");
+}

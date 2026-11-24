@@ -120,7 +120,10 @@ pub(crate) fn wait(
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                tracing::warn!(job, error = %message, "WDGWars poll failed");
+                // Once per distinct error, as `on_stderr` prints them.
+                if last_error.as_ref() != Some(&message) {
+                    tracing::warn!(job, error = %message, "WDGWars poll failed");
+                }
                 say(Progress::PollError(message.clone()));
                 last_error = Some(message);
             }
@@ -630,7 +633,9 @@ mod tests {
     fn upload_wait_returns_unfollowed_when_only_errors_until_give_up() {
         let errors = (0..100).map(|_| Err(anyhow::anyhow!("timed out"))).collect();
         let waited = wait_on(Duration::from_secs(60), errors).unwrap();
-        assert!(matches!(waited, Waited::Unfollowed(_)), "{waited:?}");
+        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
+        // Repeats logged once still name the error.
+        assert_eq!(reason, "no answer within 60 seconds; the last poll failed: timed out");
     }
 
     #[test]

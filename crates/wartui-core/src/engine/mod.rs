@@ -134,8 +134,8 @@ pub struct FleetEngine {
     /// and cleared by [`Command::StopScan`]. `None` for an engine that starts nothing, or a fleet
     /// the operator stopped. A P4 reporting stopped while it is `Some` is started again.
     wanted: Option<bool>,
-    /// A `Status` has arrived on this connection. The first after a reconnect sets
-    /// [`Self::wanted`] from the P4's mode rather than asking for it again.
+    /// A `Status` has arrived on this connection, cleared on each connect. The first after a
+    /// reconnect sets [`Self::wanted`] from the P4's mode rather than asking for it again.
     status_seen: bool,
     /// The run holds its first start for a GPS fix ([`EngineConfig::wait_for_fix`]). Cleared once
     /// a receiver has held one for [`FIX_WAIT`], on [`Command::StartWithoutFix`], and on

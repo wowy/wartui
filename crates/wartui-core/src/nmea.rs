@@ -833,7 +833,7 @@ mod tests {
         ["GPGSV,1,1,02,10,63,137,17,08,49,090,26,1", "GNGSA,A,3,10,,,,,,,,,,,,1.5,0.9,1.2,1"];
 
     #[test]
-    fn sky_counts_counts_tracked_used_and_strong_when_sky_is_fed() {
+    fn nmea_counts_tracked_used_and_strong_when_sky_is_fed() {
         let mut nmea = Nmea::new();
         // Four GPS in view: one untracked, one weak, one at the line and one above it, used.
         feed(
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn sky_counts_reports_no_best_snr_when_nothing_is_tracked() {
+    fn nmea_reports_no_best_snr_when_nothing_is_tracked() {
         let mut nmea = Nmea::new();
         feed(&mut nmea, &["GPGSV,1,1,02,10,63,137,,08,49,090,,1"]);
         let counts = SkyCounts::of(nmea.sky());

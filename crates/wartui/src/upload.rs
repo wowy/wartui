@@ -60,7 +60,6 @@ use clap::{Args as ClapArgs, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde_json::{Map, Value};
-use wartui_core::analyze::node_slots;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
     Connection, UploadRecord, UploadSite, is_simulated, last_upload, open_readonly, open_readwrite,
@@ -499,11 +498,12 @@ pub(crate) fn prepare(
     if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
         return Err(Simulated { db: db.to_owned() }.into());
     }
+    let names = NodeNames::of(&conn);
     signed
         .into_iter()
         .map(|(site, credentials)| {
             let outcome = match credentials {
-                Ok(credentials) => prepare_site(&conn, credentials, options)?,
+                Ok(credentials) => prepare_site(&conn, credentials, options, &names)?,
                 Err(error) => Prepare::Refused(error),
             };
             Ok((site, outcome))
@@ -511,8 +511,13 @@ pub(crate) fn prepare(
         .collect()
 }
 
-/// [`prepare`] for the site `credentials` signs in to.
-fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) -> Result<Prepare> {
+/// [`prepare`] for the site `credentials` signs in to, its summary naming nodes by `names`.
+fn prepare_site(
+    conn: &Connection,
+    credentials: Credentials,
+    options: &Options,
+    names: &NodeNames,
+) -> Result<Prepare> {
     let site = credentials.site();
     let filter = ExportFilter {
         recapture_secs: options.recapture.unwrap_or_else(|| site.recapture_secs()),
@@ -529,8 +534,7 @@ fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) 
     if let Err(error) = site.check_size(csv_bytes, gz.len()) {
         return Ok(Prepare::Refused(error));
     }
-    let (board, slots) = node_slots(conn).context("reading the capture's node slots")?;
-    let names = NodeNames::new(board, &slots);
+    let names = names.clone();
     Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous, names }))
 }
 
