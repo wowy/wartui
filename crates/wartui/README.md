@@ -843,6 +843,11 @@ link is down. While the link is up, the header shows the fan after the bridge, a
 `fan 40% 1830 rpm`, or `fan 40%` with no reading: in the bridge's first second, and for a second or
 two after a duty change, since no reading spans two duties. `wartui status` prints a `fan` line too.
 
+After it, `wartui status` prints the chips the fan cools: `die temp   P4 48 °C · radio 45 °C`, and
+`radio rail 3.30 V · heap 64K used 40K free 104K peak`, the C6's 3.3 V rail and its heap in KiB.
+The radio reports both every 10 s once its Bluetooth controller is up, and reads
+`not reported yet` before that; `—` is a failed reading. A die runs well above the air around it.
+
 ### The SD card
 
 The bridge's board has a microSD slot. `wartui sd` shows the card, and `wartui sd format` formats
