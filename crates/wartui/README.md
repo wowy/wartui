@@ -847,6 +847,8 @@ After it, `wartui status` prints the chips the fan cools: `die temp   P4 48 °C 
 `radio rail 3.30 V · heap 64K used 40K free 104K peak`, the C6's 3.3 V rail and its heap in KiB.
 The radio reports both every 10 s once its Bluetooth controller is up, and reads
 `not reported yet` before that; `—` is a failed reading. A die runs well above the air around it.
+The radio's reading runs low by an offset of its own chip's, 15 °C in a 22 °C room on the bench
+(`docs/p4-sd-findings.md` § "Health in the log"), so only a change in it means anything.
 
 ### The SD card
 
