@@ -60,6 +60,7 @@ use clap::{Args as ClapArgs, ValueEnum};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde_json::{Map, Value};
+use wartui_core::analyze::node_slots;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
     Connection, UploadRecord, UploadSite, is_simulated, last_upload, open_readonly, open_readwrite,
@@ -70,7 +71,7 @@ use crate::config::Config;
 use crate::export::{
     Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
 };
-use crate::text::thousands;
+use crate::text::{NodeNames, thousands};
 
 /// Every site, in the order an upload goes to them.
 pub(crate) const SITES: [UploadSite; 2] = [UploadSite::Wdgwars, UploadSite::Wigle];
@@ -352,6 +353,8 @@ pub(crate) struct Prepared {
     /// The upload to this site this one follows on from. `None` with `--resend`, which follows
     /// on from nothing.
     pub(crate) previous: Option<UploadRecord>,
+    /// What the summary's details call the capture's nodes.
+    names: NodeNames,
 }
 
 impl Prepared {
@@ -364,7 +367,7 @@ impl Prepared {
     /// size, its compressed size and the upload this one follows on from, a line each.
     pub(crate) fn describe(&self) -> String {
         let mut text = self.rows_line();
-        text.push_str(&details(&self.summary));
+        text.push_str(&details(&self.summary, &self.names));
         text.push_str(&self.sizes());
         text
     }
@@ -526,7 +529,9 @@ fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) 
     if let Err(error) = site.check_size(csv_bytes, gz.len()) {
         return Ok(Prepare::Refused(error));
     }
-    Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous }))
+    let (board, slots) = node_slots(conn).context("reading the capture's node slots")?;
+    let names = NodeNames::new(board, &slots);
+    Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous, names }))
 }
 
 /// What [`body`] built.
@@ -787,6 +792,7 @@ fn reason(object: &Map<String, Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Read;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
@@ -798,6 +804,7 @@ mod tests {
     use wartui_core::store::{
         UploadSite, last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
     };
+    use wartui_proto::bus::NodeBoard;
 
     use super::{
         Credentials, Job, Options, Prepare, Prepared, Sent, Site, To, body, finish, prepare, send,
@@ -805,6 +812,7 @@ mod tests {
     };
     use crate::config::Config;
     use crate::testing::{EPOCH_MS, capture, capture_simulated, serve_once, sighting};
+    use crate::text::NodeNames;
 
     fn keyed() -> Config {
         let mut config = Config::default();
@@ -884,6 +892,7 @@ mod tests {
             csv_bytes: 3_343_178,
             summary: ExportSummary { rows: 2, ..Default::default() },
             previous,
+            names: NodeNames::new(NodeBoard::NoCarrier, &BTreeMap::new()),
         }
     }
 

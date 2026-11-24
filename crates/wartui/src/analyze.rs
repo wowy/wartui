@@ -9,8 +9,10 @@
 //! last heartbeats name one slot each get their tail after the label, wherever they appear in the
 //! report.
 
-use std::collections::BTreeSet;
-
+use crate::export::{
+    Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
+};
+use crate::text::{NodeNames, buffer_full, thousands};
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{
@@ -20,13 +22,6 @@ use wartui_core::engine::behind_us;
 use wartui_core::export::wigle_csv;
 use wartui_core::record::HostLink;
 use wartui_core::store::open_readonly;
-use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::mac::{self, Mac};
-
-use crate::export::{
-    Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
-};
-use crate::text::{buffer_full, node_name, thousands};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -42,11 +37,11 @@ pub fn run(args: Args) -> Result<()> {
     let summary = wigle_csv(&conn, &filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
     let loss = losses(&conn).context("reading what the capture lost")?;
     let peak = peaks(&conn, &loss.slots()).context("reading how fast sightings arrived")?;
-    let names = NodeNames::new(loss.board, &loss);
+    let names = NodeNames::new(loss.board, &loss.slots());
     print!(
         "{} rows to export\n{}{}{}",
         thousands(summary.rows),
-        details(&summary),
+        details(&summary, &names),
         peaks_text(&peak, &names),
         losses_text(&loss, &names)
     );
@@ -55,32 +50,6 @@ pub fn run(args: Args) -> Result<()> {
     note_excluded(&summary);
     note_quality(&summary);
     Ok(())
-}
-
-/// What the report calls its nodes.
-struct NodeNames {
-    board: NodeBoard,
-    /// Slots more than one node's latest heartbeat names.
-    shared: BTreeSet<Slot>,
-}
-
-impl NodeNames {
-    /// `loss` lists every node with a heartbeat, so every node with a slot.
-    fn new(board: NodeBoard, loss: &LossSummary) -> Self {
-        let mut seen = BTreeSet::new();
-        let shared =
-            loss.nodes.iter().filter_map(|node| node.slot).filter(|s| !seen.insert(*s)).collect();
-        Self { board, shared }
-    }
-
-    fn name(&self, slot: Option<Slot>, mac: &Mac) -> String {
-        let name = node_name(self.board, slot, mac);
-        if slot.is_some_and(|slot| self.shared.contains(&slot)) {
-            format!("{name} {}", mac::short(mac))
-        } else {
-            name
-        }
-    }
 }
 
 /// `names`, padded to the widest so the figures after them line up.
@@ -117,7 +86,7 @@ fn peaks_text(peak: &PeakSummary, names: &NodeNames) -> String {
         }
     }
     let _ = writeln!(text, "  peak by node");
-    let column = name_column(peak.nodes.iter().map(|n| names.name(n.slot, &n.mac)).collect());
+    let column = name_column(peak.nodes.iter().map(|n| names.name(&n.mac)).collect());
     for (name, node) in column.iter().zip(&peak.nodes) {
         let _ = writeln!(text, "    {name}  {}", rate(&node.peak));
     }
@@ -197,7 +166,7 @@ fn losses_text(loss: &LossSummary, names: &NodeNames) -> String {
     }
 
     let _ = writeln!(text, "  loss by node");
-    let column = name_column(loss.nodes.iter().map(|n| names.name(n.slot, &n.mac)).collect());
+    let column = name_column(loss.nodes.iter().map(|n| names.name(&n.mac)).collect());
     for (name, node) in column.iter().zip(&loss.nodes) {
         let mut line = format!("    {name}  batches {}", thousands(node.batches_lost));
         if node.heartbeats > 0 {
@@ -344,6 +313,8 @@ fn percent(part: u64, whole: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use wartui_core::analyze::{
         BluetoothLoss, BridgeLoss, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
         QueueLoss, RadioLinkLoss,
@@ -353,7 +324,8 @@ mod tests {
     use wartui_proto::link::QueueId;
     use wartui_proto::mac::Mac;
 
-    use super::{NodeNames, losses_text, peaks_text};
+    use super::{losses_text, peaks_text};
+    use crate::text::NodeNames;
 
     const NODE_1C: Mac = [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A];
     const NODE_57: Mac = [0x02, 0, 0x5E, 0x10, 0x57, 0x84];
@@ -369,7 +341,7 @@ mod tests {
 
     /// Names for a capture with no node on a slot, so every node goes by its tail.
     fn tails() -> NodeNames {
-        NodeNames::new(NodeBoard::Carrier14, &LossSummary::default())
+        NodeNames::new(NodeBoard::Carrier14, &BTreeMap::new())
     }
 
     /// `losses_text` with the names of a capture with no node on a slot.
@@ -857,7 +829,7 @@ mod tests {
     #[test]
     fn analyze_report_names_nodes_by_label_when_on_a_carrier() {
         let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, a(1))]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         assert_eq!(
             rows(&losses_text(&loss, &names), "  loss by node"),
             ["    N1  batches 1", "    N2  batches 1"]
@@ -867,7 +839,7 @@ mod tests {
     #[test]
     fn analyze_report_names_node_by_tail_when_it_has_no_slot() {
         let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, None)]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         assert_eq!(
             rows(&losses_text(&loss, &names), "  loss by node"),
             ["    N1     batches 1", "    1C:5A  batches 1"]
@@ -878,7 +850,7 @@ mod tests {
     fn analyze_report_marks_only_the_dropped_node_when_a_supply_drop_is_recorded() {
         let dropped = NodeLoss { supply_drop: true, ..lost(NODE_1C, a(1)) };
         let loss = node_losses(vec![lost(NODE_57, a(0)), dropped]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         let text = losses_text(&loss, &names);
         assert_eq!(
             rows(&text, "  loss by node"),
@@ -890,7 +862,7 @@ mod tests {
     #[test]
     fn analyze_report_keeps_columns_aligned_when_label_widths_differ() {
         let loss = node_losses(vec![lost(NODE_57, a(0)), lost(NODE_1C, B7)]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         assert_eq!(
             rows(&losses_text(&loss, &names), "  loss by node"),
             ["    N1   batches 1", "    N14  batches 1"]
@@ -900,7 +872,7 @@ mod tests {
     #[test]
     fn analyze_report_adds_tail_only_to_rows_sharing_a_slot_when_another_node_took_it() {
         let loss = node_losses(vec![lost(NODE_1C, a(2)), lost(NODE_57, a(2)), lost(NODE_90, B7)]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         assert_eq!(
             rows(&losses_text(&loss, &names), "  loss by node"),
             ["    N3 1C:5A  batches 1", "    N3 57:84  batches 1", "    N14       batches 1"]
@@ -911,7 +883,7 @@ mod tests {
     fn analyze_report_adds_tail_in_peak_rows_when_slot_is_shared_with_a_node_without_sightings() {
         // The other node has no peak row, and the two sections should still name this one alike.
         let loss = node_losses(vec![lost(NODE_1C, a(2)), lost(NODE_57, a(2))]);
-        let names = NodeNames::new(NodeBoard::Carrier14, &loss);
+        let names = NodeNames::new(NodeBoard::Carrier14, &loss.slots());
         let peak = PeakSummary {
             sightings: 1,
             nodes: vec![NodePeak {

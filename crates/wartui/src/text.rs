@@ -4,6 +4,8 @@
 //! message the bridge sends now, and `wartui sd-log` for one its log kept, so a message reads
 //! alike in both.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use wartui_core::engine::power_cycled_text;
 use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg};
 use wartui_proto::link::{
@@ -69,6 +71,43 @@ pub(crate) fn carrier_slot_named(
 /// the tail of its address for a node with no slot, which has nothing else to go by.
 pub(crate) fn node_name(board: NodeBoard, slot: Option<Slot>, mac: &Mac) -> String {
     slot.map_or_else(|| mac::short(mac).to_string(), |slot| board.label(slot).to_string())
+}
+
+/// What a capture's reports call its nodes, and the order they list them in: [`node_name`] for
+/// each, with the address tail after the label when two nodes' latest heartbeats name one slot, so
+/// every section of a report names a node alike.
+pub(crate) struct NodeNames {
+    board: NodeBoard,
+    /// Each node's slot (`wartui_core::analyze::node_slots`).
+    slots: BTreeMap<Mac, Slot>,
+    /// Slots more than one node's latest heartbeat names.
+    shared: BTreeSet<Slot>,
+}
+
+impl NodeNames {
+    /// Names for the nodes on `board` whose slots `slots` gives. A node missing from it has none.
+    pub(crate) fn new(board: NodeBoard, slots: &BTreeMap<Mac, Slot>) -> Self {
+        let mut seen = BTreeSet::new();
+        let shared = slots.values().copied().filter(|slot| !seen.insert(*slot)).collect();
+        Self { board, slots: slots.clone(), shared }
+    }
+
+    /// What the reports call `mac`.
+    pub(crate) fn name(&self, mac: &Mac) -> String {
+        let slot = self.slots.get(mac).copied();
+        let name = node_name(self.board, slot, mac);
+        if slot.is_some_and(|slot| self.shared.contains(&slot)) {
+            format!("{name} {}", mac::short(mac))
+        } else {
+            name
+        }
+    }
+
+    /// Where `mac` sorts in a list of nodes: by slot, then slotless nodes, ties by address.
+    pub(crate) fn order(&self, mac: &Mac) -> (bool, Option<Slot>, Mac) {
+        let slot = self.slots.get(mac).copied();
+        (slot.is_none(), slot, *mac)
+    }
 }
 
 /// Where the bridge's microSD card is shown.

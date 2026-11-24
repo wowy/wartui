@@ -368,6 +368,29 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     Ok(LossSummary { board, link, bridge, nodes, host: host(conn, link)? })
 }
 
+/// What carried the capture's nodes, and each node's slot, as [`LossSummary::board`] and
+/// [`LossSummary::slots`] give them, without walking the losses: for the summary's node list.
+pub fn node_slots(conn: &Connection) -> rusqlite::Result<(NodeBoard, BTreeMap<Mac, Slot>)> {
+    let board = node_board(conn)?;
+    // SQLite takes a bare column beside `MAX` from the row holding the maximum: the latest beat.
+    let mut stmt =
+        conn.prepare("SELECT node_mac, slot, MAX(id) FROM heartbeat GROUP BY node_mac")?;
+    let mut rows = stmt.query([])?;
+    let mut slots = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        if let Some(slot) = beat_slot(row.get_ref(1)?, board) {
+            slots.insert(row.get(0)?, slot);
+        }
+    }
+    Ok((board, slots))
+}
+
+/// The slot a heartbeat row's `slot` column names on `board`: none on no carrier, and none for a
+/// name this build cannot read, which is left out rather than failing the report.
+fn beat_slot(column: rusqlite::types::ValueRef<'_>, board: NodeBoard) -> Option<Slot> {
+    column.as_str().ok().and_then(Slot::parse).filter(|_| board.is_carrier())
+}
+
 /// What carried the capture's nodes, as [`LossSummary::board`] says.
 fn node_board(conn: &Connection) -> rusqlite::Result<NodeBoard> {
     let name: Option<String> = conn
@@ -701,9 +724,8 @@ fn heartbeats(
             .or_insert_with(|| NodeLoss { mac: beat.mac, ..Default::default() });
         node.heartbeats += 1;
         // Rows run oldest first, so the latest heartbeat's slot stands, even one this build
-        // cannot read, which is left out rather than failing the report.
-        node.slot =
-            row.get_ref(4)?.as_str().ok().and_then(Slot::parse).filter(|_| board.is_carrier());
+        // cannot read ([`node_slots`] keeps the same rule).
+        node.slot = beat_slot(row.get_ref(4)?, board);
         // A reading this build cannot read is no reading, likewise.
         if let Some(mv) = row.get_ref(5)?.as_i64().ok().and_then(|mv| u16::try_from(mv).ok()) {
             let baseline = *vdd_baseline.get_or_insert(mv);

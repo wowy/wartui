@@ -194,11 +194,11 @@ of its output, after the export summary:
 | `batches`      | Sighting batches lost between node and host; the footer's `lost`                |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
-`peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
-order, so one that moved appears once. A node with no heartbeat, or any node in a capture with no
-carrier, goes by the last two octets of its address and sorts after the labels. Two nodes whose
-latest heartbeats name one slot, as when a board is replaced, each get their address after the
-label (`N3 57:84`).
+`peak by node` and `loss by node`, and the export summary's node list, name a node by the slot its
+latest heartbeat came from, in slot order, so one that moved appears once. A node with no
+heartbeat, or any node in a capture with no carrier, goes by the last two octets of its address and
+sorts after the labels. Two nodes whose latest heartbeats name one slot, as when a board is
+replaced, each get their address after the label (`N3 57:84`).
 
 `supply drop` on a `loss by node` row means a node's rail reading fell 150 mV or more below its
 first in the capture, even if it later recovered. `analyze` prints no figure, and
