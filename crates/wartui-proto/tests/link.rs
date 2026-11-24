@@ -14,16 +14,16 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, FrameAccumulator, FromNodeBody, GPS_FRAME,
-    GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
+    BluetoothStatus, BridgeHealth, BridgeToHost, Central, FrameAccumulator, FromNodeBody,
+    GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION,
+    LinkError, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
     PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, SdFormatOutcome,
     SdLog, SdLogState, SdState, SdStatus, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
     UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
     image_tag,
 };
-use wartui_proto::radio_link::BleCounters;
 use wartui_proto::radio_link::update::{OP_MAX, Op};
+use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
 #[path = "common/status.rs"]
@@ -208,6 +208,16 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
             ..SdStatus::card(SdState::Ready, 60_350, Some(60_340))
         }),
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth {
+            p4_die_temp: DieTemp::from_c(45),
+            radio: Some(RadioHealth {
+                die_temp: DieTemp::from_c(42),
+                vdd: Vdd::from_mv(3_300),
+                heap_used: 40_000,
+                heap_free: 32_000,
+                heap_high_water: 51_000,
+            }),
+        },
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -258,12 +268,24 @@ fn usb_bluetooth() -> BluetoothStatus {
     }
 }
 
-/// [`usb_bluetooth`]'s bytes: `owner`, `bonds`, `window`, `central`'s tag, nine counters, then
+/// [`usb_bluetooth`]'s bytes: `owner`, `bonds`, `window`, `central`'s tag, eight counters, then
 /// `wardrive_esp`.
-const USB_BLUETOOTH_BYTES: [u8; 14] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const USB_BLUETOOTH_BYTES: [u8; 13] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-/// A Status body with [`usb_bluetooth`] taken off its end.
-fn without_bluetooth(mut body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
+/// `BridgeHealth::default()`'s bytes: the P4's `DieTemp::NONE`, then `radio`'s `None` tag.
+const NO_HEALTH_BYTES: [u8; 2] = [0xFF, 0];
+
+/// A Status body with a default `health` taken off its end.
+fn without_health(mut body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
+    let at = body.len() - NO_HEALTH_BYTES.len();
+    assert_eq!(body[at..], NO_HEALTH_BYTES, "the Status ends in a default health");
+    body.truncate(at);
+    body
+}
+
+/// A Status body with [`usb_bluetooth`] and a default `health` taken off its end.
+fn without_bluetooth(body: std::vec::Vec<u8>) -> std::vec::Vec<u8> {
+    let mut body = without_health(body);
     let at = body.len() - USB_BLUETOOTH_BYTES.len();
     assert_eq!(body[at..], USB_BLUETOOTH_BYTES, "the Status ends in usb_bluetooth");
     body.truncate(at);
@@ -747,6 +769,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -831,6 +854,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
     };
     assert_eq!(round_trip(&status), status);
 }
@@ -937,6 +961,7 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     // `sd` and `bluetooth` follow `members`, each pinned in its own test.
@@ -992,6 +1017,7 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let head = without_bluetooth(frame_body(&out[..n]));
@@ -1015,7 +1041,6 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
             dropped_writes: 4,
             phy: 2,
             interval_us: 7_500,
-            heap_high_water: 5,
         },
         wardrive_esp: true,
     };
@@ -1038,10 +1063,9 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
         0xAC, 0x02,             // resynced_bytes 300
         4, 2,                   // dropped_writes, phy
         0xCC, 0x3A,             // interval_us 7500
-        5,                      // heap_high_water
         1,                      // wardrive_esp
     ];
-    assert_eq!(body[head.len()..], expected);
+    assert_eq!(without_health(body[head.len()..].to_vec()), expected);
     assert_eq!(round_trip(&status), status);
 
     // The other owners and windows: their variant indices alone.
@@ -1056,6 +1080,60 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
     let n = encode_frame(&status, &mut out).expect("encodes");
     let body = frame_body(&out[..n]);
     assert_eq!(body[head.len()..head.len() + 4], [0, 0, 2, 0]);
+    assert_eq!(round_trip(&status), status);
+}
+
+#[test]
+fn link_codec_pins_health_bytes_at_end_of_status_when_bridge_reports_both_chips() {
+    // `p4_die_temp`: its code byte. `radio`: an option's tag, then the C6's two code bytes and
+    // three varints.
+    let mut out = [0u8; MAX_FRAME];
+    let mut status = BridgeToHost::Status {
+        rx_count: 0,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: QueueStats::new(),
+        radio_link: RadioLinkStats::default(),
+        host_uart_errors: 0,
+        fan: None,
+        pool: ChannelPool::All,
+        scan: ScanMode::Stopped,
+        ble: None,
+        present: 0,
+        members: Vec::new(),
+        sd: None,
+        bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
+    };
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let head = without_health(frame_body(&out[..n]));
+    if let BridgeToHost::Status { health, .. } = &mut status {
+        *health = BridgeHealth {
+            p4_die_temp: DieTemp::from_c(45),
+            radio: Some(RadioHealth {
+                die_temp: DieTemp::from_c(42),
+                vdd: Vdd::from_mv(3_300),
+                heap_used: 40_000,
+                heap_free: 300,
+                heap_high_water: 5,
+            }),
+        };
+    }
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let body = frame_body(&out[..n]);
+    assert_eq!(body[..head.len()], head[..]);
+    #[rustfmt::skip]
+    let expected = [
+        85,               // p4_die_temp: 45 °C, offset by 40
+        1,                // radio: Some
+        82,               // die_temp: 42 °C
+        67,               // vdd: 3.300 V
+        0xC0, 0xB8, 0x02, // heap_used 40000, varint
+        0xAC, 0x02,       // heap_free 300, varint
+        5,                // heap_high_water
+    ];
+    assert_eq!(body[head.len()..], expected);
     assert_eq!(round_trip(&status), status);
 }
 
@@ -1081,6 +1159,7 @@ fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_c
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        health: BridgeHealth::default(),
     };
     let n = encode_frame(&status, &mut out).expect("encodes");
     let head = without_sd_and_bluetooth(frame_body(&out[..n]));

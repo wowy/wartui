@@ -11,8 +11,8 @@
 //!   idle nodes, at one a second each, write about 1.2 KB/s, 4.4 MB an hour: minutes of the
 //!   256 KiB ring, and a 64 MiB file every 15 hours;
 //! - a `Status` every [`SNAPSHOT_EVERY`], when a file opens and after each change of who holds the
-//!   host queue. It is built from the C6's counters as last received: it never asks the C6 for
-//!   fresh ones, so it adds no radio-link traffic and waits for nothing;
+//!   host queue. It is built from the C6's counters and health as last received: it never asks the
+//!   C6 for fresh ones, so it adds no radio-link traffic and waits for nothing;
 //! - each change of who holds the host queue (`src/ble.rs`, `own`);
 //! - a phone's commands, and the lines it is sent but its `WD:AP` and `WD:BT` sightings.
 //!

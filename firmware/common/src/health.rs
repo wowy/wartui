@@ -1,4 +1,5 @@
-//! The chip's supply voltage and die temperature, for the node's heartbeat.
+//! The chip's supply voltage and die temperature, for a node's heartbeat and the P4 bridge's
+//! C6's `Up::Health`.
 //!
 //! Both come from the PHY blob, through functions it exports but no header declares. No
 //! board in the fleet has a divider on an ADC pin, so [`vdd_mv`] calls `phy_get_vdd33`. It
@@ -12,8 +13,9 @@
 
 /// The chip's 3.3 V rail in millivolts, or 0 when the PHY is not initialized.
 ///
-/// Call it only from the heartbeat path, where the radio is up and parked on the control
-/// channel. The read borrows the PBUS for a moment, which a dwell must not lose.
+/// Call it only where the PHY is initialized: a node's heartbeat path, where the radio is up and
+/// parked on the control channel, or a C6 whose Bluetooth controller has started. The read
+/// borrows the PBUS for a moment, which a node's dwell must not lose.
 #[allow(unsafe_code, reason = "the PHY blob's rail read has no esp-hal or esp-radio wrapper")]
 #[must_use]
 pub fn vdd_mv() -> u16 {
@@ -33,8 +35,7 @@ pub fn vdd_mv() -> u16 {
 
 /// The die temperature in whole degrees Celsius.
 ///
-/// Call it only from the heartbeat path, where the PHY is initialized and the radio is up,
-/// as for [`vdd_mv`].
+/// Call it only where the PHY is initialized, as for [`vdd_mv`].
 #[allow(unsafe_code, reason = "the PHY blob's range-aware TSENS read has no esp-hal wrapper")]
 #[must_use]
 pub fn die_temp_c() -> i16 {
@@ -49,6 +50,7 @@ pub fn die_temp_c() -> i16 {
     // range index, reads the TSENS code and converts it with that range's offset; the C5's
     // `phy_code_to_temp` is `(44·raw − 2788·offset − 2052) / 100`, clamped at −200, in
     // whole °C. Each then re-ranges the DAC, exactly as the PHY's own tracking reads do.
-    // The PHY must be initialized, which the heartbeat path guarantees.
+    // The PHY must be initialized, which each caller guarantees: a node's heartbeat path, and a
+    // C6 only once its Bluetooth controller has started.
     unsafe { phy_get_tsens_value() }
 }

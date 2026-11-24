@@ -36,8 +36,7 @@ CREATE TABLE bridge_bluetooth (
   resynced_bytes INTEGER NOT NULL,
   dropped_writes INTEGER NOT NULL,
   phy INTEGER NOT NULL,
-  interval_us INTEGER NOT NULL,
-  heap_high_water INTEGER NOT NULL
+  interval_us INTEGER NOT NULL
 )
 
 CREATE TABLE bridge_queue (
@@ -68,7 +67,13 @@ CREATE TABLE bridge_status (
   host_uart_errors INTEGER NOT NULL,
   fan_duty INTEGER,
   fan_rpm INTEGER,
-  slots_present INTEGER NOT NULL
+  slots_present INTEGER NOT NULL,
+  p4_die_temp_c INTEGER,
+  c6_die_temp_c INTEGER,
+  c6_vdd_mv INTEGER,
+  c6_heap_used INTEGER,
+  c6_heap_free INTEGER,
+  c6_heap_high_water INTEGER
 )
 
 CREATE TABLE capture (

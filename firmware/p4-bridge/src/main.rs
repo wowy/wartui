@@ -90,6 +90,7 @@ mod radio;
 mod sd;
 mod sd_log;
 mod settings;
+mod tsens;
 mod update;
 mod wardrive_esp;
 
@@ -298,6 +299,8 @@ pub struct Shared {
     /// The diagnostics log on the card: the setting, the ring of records waiting for the card, and
     /// the writer's figures (`src/sd_log.rs`). Static, to keep it out of `Shared::new`'s frame.
     sd_log: &'static sd_log::SdLog,
+    /// The P4's temperature sensor, read for each `Status` (`src/tsens.rs`).
+    tsens: tsens::Tsens,
 }
 
 impl Shared {
@@ -361,6 +364,9 @@ impl Shared {
             fleet_sleep: Cell::new(None),
             sd: sd::Sd::new(),
             sd_log,
+            // After `Cache::new` mapped the PSRAM, the last of esp-hal's analog I2C writes
+            // (`src/tsens.rs`).
+            tsens: tsens::init(),
         }
     }
 
@@ -563,8 +569,9 @@ impl Shared {
         self.push_host(&status);
     }
 
-    /// The `Status` a poll gets, with the C6's counters as last received: it asks the C6 for
-    /// nothing, so the SD log's snapshots build it too (`src/sd_log.rs`).
+    /// The `Status` a poll gets, with the C6's counters and health as last received and the P4's
+    /// die temperature read now: it asks the C6 for nothing, so the SD log's snapshots build it
+    /// too (`src/sd_log.rs`).
     #[inline(never)]
     fn status_msg(&self) -> BridgeToHost {
         let host = self.host.borrow().stats();
@@ -597,6 +604,7 @@ impl Shared {
             members: fleet.members(),
             sd: sd::status(self),
             bluetooth: self.bluetooth(now),
+            p4_die_temp: self.tsens.read(),
         };
         drop(fleet);
         self.pair.borrow().status(now, counters)

@@ -29,14 +29,14 @@
 //! [`crate::bus::UpdateChunk`] from it ([`cache_chunk_body`]), answered like a
 //! [`HostToBridge::ToNode`].
 
-use crate::bus::{MAX_SLOTS, NodeBoard, Slot};
+use crate::bus::{DieTemp, MAX_SLOTS, NodeBoard, Slot};
 use crate::fan::{FanDuty, FanStats};
 use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
-use crate::radio_link::BleCounters;
 use crate::radio_link::update::OP_MAX;
+use crate::radio_link::{BleCounters, RadioHealth};
 use crate::reset::ResetCause;
 use heapless::{String, Vec};
 use serde::Serialize;
@@ -405,6 +405,8 @@ pub enum BridgeToHost {
         /// The Bluetooth host link: who holds the host queue, the bonds and pairing window, the
         /// connected central and the C6's counters.
         bluetooth: BluetoothStatus,
+        /// The bridge's own chips: the P4's die temperature, and the C6's latest health.
+        health: BridgeHealth,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -494,6 +496,17 @@ pub struct BluetoothStatus {
     /// Whether the bridge offers the WardriveESP service to phones: the setting, not whether a
     /// phone is linked.
     pub wardrive_esp: bool,
+}
+
+/// The bridge's own chips, as a [`BridgeToHost::Status`] reports them. The default is no
+/// reading from either.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BridgeHealth {
+    /// The P4's die temperature, read when the `Status` was built ([`crate::tsens`]).
+    pub p4_die_temp: DieTemp,
+    /// The C6's latest [`crate::radio_link::Up::Health`], or `None` until this C6 life has sent
+    /// one.
+    pub radio: Option<RadioHealth>,
 }
 
 /// Which host the P4's host queue serves.

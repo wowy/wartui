@@ -432,6 +432,7 @@ impl FleetEngine {
                 members,
                 sd,
                 bluetooth,
+                health,
             } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
@@ -447,6 +448,7 @@ impl FleetEngine {
                     fan: *fan,
                     sd: *sd,
                     bluetooth: *bluetooth,
+                    health: *health,
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,
@@ -462,6 +464,7 @@ impl FleetEngine {
                     slots_present: *present,
                     // As reported: the engine reads nothing in it, and the view and the store do.
                     bluetooth: *bluetooth,
+                    health: *health,
                 }));
                 // Every heartbeat read so far is no later than this `Status`, so a slot it shows
                 // absent holds a node that has not answered since.

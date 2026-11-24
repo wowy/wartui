@@ -87,7 +87,9 @@ it.
 The `capture` row's `link` is the link the host used, `usb` or `bluetooth`, and NULL under `--sim`.
 Every bridge status keeps a `bridge_bluetooth` row beside its `bridge_status` row, over either
 link: who the bridge served, its bonds and pairing window, the connected Bluetooth host's link,
-and the C6's counters, as `status` prints them (§ "The Bluetooth link").
+and the C6's counters, as `status` prints them (§ "The Bluetooth link"). The `bridge_status` row
+also keeps the bridge's own health: the P4's die temperature, and the C6's die temperature, rail
+and heap from its latest report, each NULL with no reading.
 
 The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
 keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store

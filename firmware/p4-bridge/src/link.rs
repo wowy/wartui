@@ -236,8 +236,8 @@ impl Link {
         }
     }
 
-    /// Act on one record from the C6: a line for the host, its counters, the Bluetooth host's
-    /// stream, credit and state, a change to its bonds, or a phone's command or link.
+    /// Act on one record from the C6: a line for the host, its counters or health, the Bluetooth
+    /// host's stream, credit and state, a change to its bonds, or a phone's command or link.
     #[inline(never)]
     fn relay(&mut self, record: &[u8], shared: &Shared) {
         match decode_up(record) {
@@ -261,6 +261,7 @@ impl Link {
             Ok(Up::BondRemoved(addr)) => crate::bonds::on_removed(shared, addr),
             Ok(Up::WardriveEspCommand(text)) => crate::wardrive_esp::on_command(shared, text),
             Ok(Up::PhoneLink(link)) => crate::wardrive_esp::on_link(shared, link),
+            Ok(Up::Health(health)) => shared.pair.borrow_mut().note_radio_health(health),
             Err(_) => self.undecoded = self.undecoded.wrapping_add(1),
         }
     }

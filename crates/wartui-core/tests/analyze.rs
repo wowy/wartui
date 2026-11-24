@@ -68,6 +68,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         fan: None,
         slots_present: 0,
         bluetooth: BluetoothStatus::default(),
+        health: Default::default(),
     })
 }
 

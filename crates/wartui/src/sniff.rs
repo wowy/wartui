@@ -455,6 +455,7 @@ mod tests {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
     }

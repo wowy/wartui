@@ -11,7 +11,7 @@ use wartui_proto::beacon::visible_ssid;
 use wartui_proto::bus::{NodeBoard, NodeBus, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{BluetoothStatus, HostOwner, QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, BridgeHealth, HostOwner, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -123,6 +123,8 @@ pub struct BridgeStatusSeen {
     /// Its Bluetooth host link: who held the host queue, the bonds and pairing window, the
     /// connected central and the C6's counters since the C6 booted.
     pub bluetooth: BluetoothStatus,
+    /// Its own chips: the P4's die temperature, and the C6's latest health.
+    pub health: BridgeHealth,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

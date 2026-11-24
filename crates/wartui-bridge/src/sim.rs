@@ -71,15 +71,16 @@ use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr, LoopPhase,
-    NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats, SdFormatOutcome,
-    SdLog, SdLogState, SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes,
-    cache_chunk_body,
+    BluetoothStatus, BridgeHealth, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr,
+    LoopPhase, NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats,
+    SdFormatOutcome, SdLog, SdLogState, SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered,
+    UpdateStatusBytes, cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::ota::{Receiver, SectorSink};
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::radio_link::RadioHealth;
 use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::format;
@@ -233,6 +234,19 @@ const SD_FORMAT: Duration = Duration::from_secs(2);
 const SIM_HEAP: u32 = 100 * 1024;
 /// How far above its use a simulated node's heap high water sits.
 const SIM_HEAP_PEAK: u32 = 2 * 1024;
+
+/// The simulated bridge's own health: a warm P4, a C6 a little cooler, a steady rail and a
+/// fixed heap.
+const SIM_HEALTH: BridgeHealth = BridgeHealth {
+    p4_die_temp: DieTemp::from_c(45),
+    radio: Some(RadioHealth {
+        die_temp: DieTemp::from_c(42),
+        vdd: Vdd::from_mv(3_300),
+        heap_used: 96 * 1024,
+        heap_free: 64 * 1024,
+        heap_high_water: 104 * 1024,
+    }),
+};
 
 /// The simulated microSD card: what `Status` reports, when a running format ends, and whether
 /// it logs.
@@ -680,6 +694,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                         wardrive_esp,
                         ..BluetoothStatus::default()
                     },
+                    health: SIM_HEALTH,
                 };
                 if plumbing.events.send(LinkEvent::Message(status)).await.is_err()
                     || fleet.say(Some(core.report())).await.is_err()

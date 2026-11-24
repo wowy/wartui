@@ -20,7 +20,7 @@
 //! the P4 keeps its settings in, and [`bonds`] the Bluetooth bonds it keeps for its C6, each record
 //! ending in a [`crc`] and both logged in a sector as [`sector_log`] lays out. [`fleet`] is the P4's fleet planner: who scans what, and the records that
 //! tell each node. [`sd`] is the FAT32 volume the P4 formats its microSD card with, and the
-//! reading of one it did not format.
+//! reading of one it did not format. [`tsens`] converts the P4's temperature sensor's code.
 
 #![no_std]
 
@@ -51,6 +51,7 @@ pub mod sd;
 pub mod sector_log;
 pub mod settings;
 pub mod split;
+pub mod tsens;
 pub mod wardrive_esp;
 
 /// Re-exported so consumers can build link payloads without depending on

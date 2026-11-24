@@ -4,8 +4,12 @@
 //! encoding that still answers the operator's question: is this node browning out, and is
 //! it cooking. Both are integer codes with one value set aside for a failed read, so the
 //! firmware converts without floats and the host never mistakes a failure for a reading.
+//! The bridge reports its own chips' readings in the same codes
+//! ([`crate::link::BridgeHealth`]).
 
 use core::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// The lowest voltage [`Vdd`] encodes, below its first step.
 const VDD_BASE_MV: u16 = 2500;
@@ -18,8 +22,17 @@ const VDD_STEP_MV: u16 = 12;
 /// reading. It measures the rail the regulator feeds the chip, not the board's 5 V input,
 /// so a sagging supply shows here once the regulator can no longer hold 3.3 V. It reads low by a
 /// per-chip offset, so only a change on one node means anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The link carries it as its one byte, so the C6's reading travels in the same code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vdd(pub u8);
+
+/// No reading.
+impl Default for Vdd {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
 
 impl Vdd {
     /// No reading: the read failed, or ran before the radio was up.
@@ -73,8 +86,17 @@ const DIE_TEMP_BASE_C: i16 = -40;
 /// `°C = code − 40` for codes 0 to 254, so −40 °C to 214 °C. 0xFF is no reading. The PHY
 /// reads whole degrees, so a finer step would carry nothing, and the range spans every
 /// temperature the chip is rated for with the die's headroom above ambient.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The link carries it as its one byte, so the bridge's chips report in the same code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DieTemp(pub u8);
+
+/// No reading, never code 0, which is −40 °C.
+impl Default for DieTemp {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
 
 impl DieTemp {
     /// No reading.

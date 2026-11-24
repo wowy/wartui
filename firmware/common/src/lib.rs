@@ -6,9 +6,10 @@
 //! a host workspace member built with `--all-features`, which would select both chips'
 //! `esp-hal` features at once.
 //!
-//! Each firmware names its chip feature here, so one build selects one chip. Only the
-//! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`gps`] reads a
-//! u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any of the three chips.
+//! Each firmware names its chip feature here, so one build selects one chip. The node and the
+//! P4 bridge's C6 use [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`gps`]
+//! reads a u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any of the three
+//! chips.
 //! [`ota`] is updates on flash, which every firmware takes, and [`last_panic`] keeps every
 //! firmware's last panic across the reset.
 #![no_std]

@@ -31,15 +31,15 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED, GPS_RECEIVER_ANSWERED,
-    HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER, PairWindow,
-    PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome, SdLog,
-    SdLogState, SdState, SdStatus, USB_TOOK_BRIDGE,
+    BluetoothStatus, BridgeHealth, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED,
+    GPS_RECEIVER_ANSWERED, HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER,
+    PairWindow, PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome,
+    SdLog, SdLogState, SdState, SdStatus, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
-use wartui_proto::radio_link::BleCounters;
+use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -128,6 +128,7 @@ fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
         members: members.iter().copied().collect(),
         sd: None,
         bluetooth: Default::default(),
+        health: Default::default(),
     }))
 }
 
@@ -2207,6 +2208,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         }))
     };
 
@@ -2266,6 +2268,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -2300,6 +2303,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             fan,
             slots_present: ALL_PRESENT,
             bluetooth: BluetoothStatus::default(),
+            health: Default::default(),
         }]
     );
     assert_eq!(
@@ -2317,6 +2321,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             fan: None,
             slots_present: ALL_PRESENT,
             bluetooth: BluetoothStatus::default(),
+            health: Default::default(),
         }]
     );
     let shown = engine.snapshot(clock.at(7), StoreStats::default()).bridge_status;
@@ -2365,6 +2370,7 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
             members: Default::default(),
             sd: None,
             bluetooth,
+            health: Default::default(),
         })),
         clock.at(2),
     );
@@ -2379,6 +2385,43 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
     assert_eq!(recorded, [bluetooth]);
     let shown = engine.snapshot(clock.at(2), StoreStats::default()).bridge_status;
     assert_eq!(shown.map(|status| status.bluetooth), Some(bluetooth));
+}
+
+#[test]
+fn engine_passes_health_to_store_and_view_when_status_arrives() {
+    // The engine reads nothing in it: the store keeps it and the view shows it.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let health = BridgeHealth {
+        p4_die_temp: DieTemp::from_c(47),
+        radio: Some(RadioHealth {
+            die_temp: DieTemp::from_c(41),
+            vdd: Vdd::from_mv(3_300),
+            heap_used: 90_000,
+            heap_free: 70_000,
+            heap_high_water: 101_000,
+        }),
+    };
+    let Event::Link(LinkEvent::Message(mut status)) = status_naming(ChannelPool::All, 0, &[])
+    else {
+        unreachable!()
+    };
+    if let BridgeToHost::Status { health: field, .. } = &mut status {
+        *field = health;
+    }
+    engine.handle(connected(), clock.at(1));
+    let batch = engine.handle(Event::Link(LinkEvent::Message(status)), clock.at(2));
+    let recorded: Vec<BridgeHealth> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::BridgeStatus(s) => Some(s.health),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, [health]);
+    let shown = engine.snapshot(clock.at(2), StoreStats::default()).bridge_status;
+    assert_eq!(shown.map(|status| status.health), Some(health));
 }
 
 #[test]
@@ -2457,6 +2500,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         })),
         clock.at(4),
     );

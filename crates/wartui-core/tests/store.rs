@@ -24,15 +24,16 @@ use wartui_core::store::{
     UploadSite, capture_link, is_simulated, last_upload, open_readonly, open_readwrite,
     record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, NodeBoard, NodeBus, RecordKind, Slot, UpType};
+use wartui_proto::bus::{BUS_VERSION, DieTemp, NodeBoard, NodeBus, RecordKind, Slot, UpType, Vdd};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{
-    BluetoothStatus, Central, HostOwner, PairWindow, QueueId, QueueStat, RadioLinkStats,
+    BluetoothStatus, BridgeHealth, Central, HostOwner, PairWindow, QueueId, QueueStat,
+    RadioLinkStats,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
-use wartui_proto::radio_link::BleCounters;
+use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -620,8 +621,21 @@ fn bridge_status_with_fan(
         // A1, A3 and B3, and the top bit, so the column holds the whole u32.
         slots_present: 0x8000_0205,
         bluetooth: BLUETOOTH,
+        health: HEALTH,
     })
 }
+
+/// Both chips' readings, every figure distinct.
+const HEALTH: BridgeHealth = BridgeHealth {
+    p4_die_temp: DieTemp::from_c(51),
+    radio: Some(RadioHealth {
+        die_temp: DieTemp::from_c(-3),
+        vdd: Vdd::from_mv(3_304),
+        heap_used: 40_000,
+        heap_free: 4_000_000_005,
+        heap_high_water: 41_000,
+    }),
+};
 
 /// A bonded host on an encrypted 2M link holding the bridge, every counter distinct.
 const BLUETOOTH: BluetoothStatus = BluetoothStatus {
@@ -638,7 +652,6 @@ const BLUETOOTH: BluetoothStatus = BluetoothStatus {
         dropped_writes: 6,
         phy: 2,
         interval_us: 30_000,
-        heap_high_water: 41_000,
     },
     wardrive_esp: false,
 };
@@ -705,6 +718,45 @@ fn store_round_trips_every_column_when_bridge_status_written() {
     let present: i64 =
         conn.query_row("SELECT slots_present FROM bridge_status", [], |r| r.get(0)).unwrap();
     assert_eq!(present, 0x8000_0205);
+    let health: Vec<i64> = conn
+        .query_row(
+            "SELECT p4_die_temp_c, c6_die_temp_c, c6_vdd_mv, c6_heap_used, c6_heap_free,
+                    c6_heap_high_water
+             FROM bridge_status",
+            [],
+            |r| (0..6).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    assert_eq!(health, [51, -3, 3_304, 40_000, 4_000_000_005, 41_000]);
+}
+
+#[test]
+fn store_writes_null_health_columns_when_bridge_has_no_readings() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut none = bridge_status(&[], RADIO_LINK);
+    let mut failed = bridge_status(&[], RADIO_LINK);
+    let Record::BridgeStatus(seen) = &mut none else { unreachable!() };
+    seen.health = BridgeHealth::default();
+    // Both reads failed, and the C6 reported anyway.
+    let Record::BridgeStatus(seen) = &mut failed else { unreachable!() };
+    seen.health = BridgeHealth { p4_die_temp: DieTemp::NONE, radio: Some(RadioHealth::default()) };
+    let conn = write(&dir, vec![none, failed]);
+    type Row = (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let rows: Vec<Row> = conn
+        .prepare(
+            "SELECT p4_die_temp_c, c6_die_temp_c, c6_vdd_mv, c6_heap_used, c6_heap_free,
+                    c6_heap_high_water
+             FROM bridge_status ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(None, None, None, None, None, None), (None, None, None, Some(0), Some(0), Some(0))]
+    );
 }
 
 #[test]
@@ -785,13 +837,13 @@ fn store_round_trips_every_column_when_bluetooth_section_written() {
     let counters: Vec<i64> = conn
         .query_row(
             "SELECT pairings, failed_pairings, unbonded_kicks, last_disconnect, resynced_bytes,
-                    dropped_writes, phy, interval_us, heap_high_water
+                    dropped_writes, phy, interval_us
              FROM bridge_bluetooth",
             [],
-            |r| (0..9).map(|i| r.get(i)).collect(),
+            |r| (0..8).map(|i| r.get(i)).collect(),
         )
         .unwrap();
-    assert_eq!(counters, [3, 4, 5, 0x13, 4_000_000_004, 6, 2, 30_000, 41_000]);
+    assert_eq!(counters, [3, 4, 5, 0x13, 4_000_000_004, 6, 2, 30_000]);
 }
 
 #[test]

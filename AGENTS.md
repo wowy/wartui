@@ -122,7 +122,8 @@ own.
   `sd::append`, the sans-IO append-only FAT32 writer, tested against `fatfs` with a power-cut
   replay),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
-  record of an image on trial, and `ota::image`, the digest that names an image).
+  record of an image on trial, and `ota::image`, the digest that names an image), and `tsens`
+  (the P4's temperature sensor's code, converted).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash, and the P4's planner testable without one.
@@ -160,7 +161,10 @@ own.
   the layout `wartui_proto::sd`'s. It logs its diagnostics to the card (`src/sd_log.rs`, and the
   writer in `src/sd.rs`), from a ring in PSRAM past the host bulk ring. The log keeps every node
   heartbeat and panic record it forwards, and each file opens with the P4's own last panic.
-- **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status and its updates.
+  Every `Status` carries the bridge's own health: the P4's die temperature, read from its
+  temperature sensor (`src/tsens.rs`), and the C6's latest die temperature, rail and heap.
+- **`firmware/p4-radio`** — the board's C6, behind a DMA UART: its hello, its status, its health
+  every 10 s and its updates.
   It runs the Bluetooth host link, a TrouBLE GATT peripheral that only a bonded central reaches
   (`src/ble.rs`), and beside it the open WardriveESP service, which it frames for a phone while
   the P4 admits one. Each service advertises as its own set.
@@ -174,7 +178,8 @@ own.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), every firmware's last panic kept across the
-  reset (`last_panic`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
+  reset (`last_panic`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the
+  supply and die readings a node's heartbeat and the C6's health report carry (`health`), and
   updates on flash, the slot, the switch and the trial, and the P4's settings sector (`ota`).
   Each firmware depends on it by path and selects its chip feature in that dependency. It is its
   own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
@@ -205,7 +210,9 @@ node's heartbeats included). A capture file holds one run: `Store::create` refus
 exists. `export` (WiGLE CSV) is a view over the store, re-runnable against a finished or
 still-running capture. Each bridge status is a `bridge_status` row, with a `bridge_queue` row per
 queue and a `bridge_bluetooth` row for its Bluetooth host link: owner, bonds, pairing window,
-central and the C6's counters, kept over either link. `capture.link` is the link the host used,
+central and the C6's counters, kept over either link. The `bridge_status` row also keeps the
+bridge's own health, the P4's die temperature and the C6's die temperature, rail and heap.
+`capture.link` is the link the host used,
 written once at creation (`store.rs` `//!`). `SCHEMA` changes shape as freely as the work needs.
 Each change bumps `store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather
 than migrated.
@@ -366,10 +373,13 @@ is here rather than only in a `//!`.
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
 - **`clippy::all` is denied workspace-wide, in every firmware too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat and the C6's health, both PHY blob reads:
   the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`).
-  `firmware/p4-bridge` allows one, the slice over its mapped PSRAM (`cache::map`). Avoid `unsafe`
-  wherever a safe route exists. Any further `unsafe` — a new
+  `firmware/p4-bridge` allows three: the slice over its mapped PSRAM (`cache::map`), and for its
+  die temperature the PAC's `LP_TSENS` block, which esp-hal names no singleton for
+  (`tsens::steal`), and the TSENS DAC's range written over the analog I2C
+  (`tsens::write_tsens_dac`). Avoid `unsafe` wherever a safe route exists. Any further `unsafe` —
+  a new
   `#[allow(unsafe_code)]`, or a new `unsafe` block inside a function already allowed — is the
   user's decision, made in review, never a convenience, and committing it needs their approval
   first. An uncommitted experiment, such as a throwaway build that measures what a raw register

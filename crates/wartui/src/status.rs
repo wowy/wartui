@@ -125,6 +125,7 @@ pub async fn run(args: Args) -> Result<()> {
         members: _,
         sd,
         bluetooth,
+        health: _,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -856,6 +857,7 @@ mod tests {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));

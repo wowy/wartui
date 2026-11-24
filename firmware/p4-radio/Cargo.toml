@@ -22,7 +22,7 @@ path = "src/main.rs"
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
 # The Bluetooth controller allocates, and `esp-rtos` and `esp-radio` allocate through this
 # copy's `HEAP`, so it is held at the version `esp-radio` resolves, as the node holds it. The
-# heap stats give `BleCounters` its high-water mark.
+# heap stats give `Up::Health` its heap figures and `Up::PhoneLink` its free heap.
 esp-alloc = { version = "0.11.0", features = ["esp32c6", "internal-heap-stats"] }
 esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
 # The node's `esp-radio`, with Bluetooth alone: the controller behind TrouBLE.

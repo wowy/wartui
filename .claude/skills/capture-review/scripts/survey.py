@@ -798,6 +798,7 @@ def bridge(db, ctx):
     bridge_radio_link(db, lives)
     bridge_host_uart(db)
     bridge_fan(db)
+    bridge_health(db)
     bridge_slots(db)
     bridge_bluetooth(db, ctx, lives)
 
@@ -923,6 +924,38 @@ def bridge_fan(db):
              "was unplugged or stalled",
              "SELECT id, rx_at, uptime_ms, fan_duty, fan_rpm FROM bridge_status "
              "WHERE fan_duty >= 20 AND fan_rpm = 0 ORDER BY id")
+
+
+def bridge_health(db):
+    """The bridge's own chips over the capture: the P4's and the C6's die temperatures, and the
+    C6's heap.
+
+    Each column is NULL when its read failed; the `c6_*` columns are NULL too until the C6 has sent
+    its first health report since it booted.
+    """
+    rows = db.q(
+        "SELECT p4_die_temp_c, c6_die_temp_c, c6_vdd_mv, c6_heap_free, c6_heap_high_water "
+        "FROM bridge_status ORDER BY id"
+    )
+    if not rows:
+        return
+    p4 = [r[0] for r in rows if r[0] is not None]
+    c6 = [r[1] for r in rows if r[1] is not None]
+    vdd = [r[2] for r in rows if r[2] is not None]
+    free = [r[3] for r in rows if r[3] is not None]
+    high = [r[4] for r in rows if r[4] is not None]
+
+    def temps(values):
+        return f"{min(values)}..{max(values)} °C" if values else "no reading"
+
+    print(f"  die temp  P4 {temps(p4)}  C6 {temps(c6)}")
+    if vdd:
+        print(f"  C6 rail   {min(vdd)}..{max(vdd)} mV")
+    if free:
+        print(f"  C6 heap   free min {min(free)}  last {free[-1]}  "
+              f"high water {max(high) if high else 'n/a'}")
+    else:
+        print("  C6 heap   no health report")
 
 
 def bridge_slots(db):

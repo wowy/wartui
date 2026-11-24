@@ -14,7 +14,8 @@
 //! [`Up::WardriveEspCommand`] ([`crate::wardrive_esp`]). The C6 reports that phone's link as
 //! [`Up::PhoneLink`], for the lines that describe it, and [`Down::DropPhone`] asks it to
 //! disconnect the phone. [`Down::Beacon`] carries what the WardriveESP status beacon and advert
-//! extras say.
+//! extras say. [`Up::Health`] is the C6's own die temperature, rail and heap, which the P4
+//! reports in its `Status`.
 //!
 //! **The host stream is credited.** The P4 sends `Down::HostBytes` only while its bytes in
 //! flight, `sent.wrapping_sub(accounted)`, stay under
@@ -35,6 +36,7 @@ use heapless::Vec;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::bonds::{BondAddr, BondRecord, MAX_BONDS};
+use crate::bus::{DieTemp, Vdd};
 use crate::link::{LogStr, QueueStat};
 use crate::wardrive_esp::beacon::Beacon;
 
@@ -131,6 +133,24 @@ pub enum Up<'a> {
     /// phone's stream, then a second after, then every 5 s while a phone reads it, and at once
     /// when the link's timing changes while a phone reads it.
     PhoneLink(PhoneLink),
+    /// The C6's die temperature, rail and heap. Sent unprompted every 10 s once its Bluetooth
+    /// controller has started, and never if it did not.
+    Health(RadioHealth),
+}
+
+/// The C6's own health, as [`Up::Health`] reports it. The default is no reading and no heap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioHealth {
+    /// The die temperature, read through the PHY.
+    pub die_temp: DieTemp,
+    /// The 3.3 V rail, read through the PHY.
+    pub vdd: Vdd,
+    /// Heap in use, in bytes.
+    pub heap_used: u32,
+    /// Heap free, in bytes.
+    pub heap_free: u32,
+    /// The most heap in use since boot, in bytes.
+    pub heap_high_water: u32,
 }
 
 /// Which stream a central reads.
@@ -244,8 +264,6 @@ pub struct BleCounters {
     pub phy: u8,
     /// The connection interval, in microseconds, or 0 with no connection.
     pub interval_us: u32,
-    /// The most heap in use since boot, in bytes.
-    pub heap_high_water: u32,
 }
 
 /// The C6's counters, which the P4 reports beside its own.

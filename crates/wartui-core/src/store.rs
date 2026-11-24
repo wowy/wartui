@@ -204,7 +204,12 @@ CREATE TABLE IF NOT EXISTS observation (
 -- flash. `fan_duty` is the carrier's lid fan duty in force, in percent, and `fan_rpm` its speed
 -- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
 -- the bridge's first window since boot. `slots_present` is the slots the bridge counted holding a
--- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7).
+-- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7). The rest are the bridge's
+-- own chips: `p4_die_temp_c` is the P4's die temperature in whole degrees Celsius, read for the
+-- reply, NULL when the read failed. The `c6_*` columns are the C6's latest health report, all NULL
+-- before this C6 life has sent one: its die temperature in whole degrees Celsius and its 3.3 V
+-- rail in millivolts, each NULL when that read failed, and its heap in use, free and most in use
+-- since it booted, in bytes.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -225,7 +230,13 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   host_uart_errors INTEGER NOT NULL,
   fan_duty INTEGER,
   fan_rpm INTEGER,
-  slots_present INTEGER NOT NULL
+  slots_present INTEGER NOT NULL,
+  p4_die_temp_c INTEGER,
+  c6_die_temp_c INTEGER,
+  c6_vdd_mv INTEGER,
+  c6_heap_used INTEGER,
+  c6_heap_free INTEGER,
+  c6_heap_high_water INTEGER
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
@@ -250,8 +261,7 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
 -- the values falling. `last_disconnect` is the latest disconnection's HCI reason code, 0 before
 -- the first; `resynced_bytes` is host stream bytes lost on the way from the P4 to the C6;
 -- `dropped_writes` is bytes a central wrote that the C6 dropped; `phy` and `interval_us` are the
--- C6's own reading of its connection, 0 with none; `heap_high_water` is the most heap the C6 has
--- used, in bytes.
+-- C6's own reading of its connection, 0 with none.
 CREATE TABLE IF NOT EXISTS bridge_bluetooth (
   status_id INTEGER PRIMARY KEY REFERENCES bridge_status(id),
   owner TEXT NOT NULL,
@@ -270,8 +280,7 @@ CREATE TABLE IF NOT EXISTS bridge_bluetooth (
   resynced_bytes INTEGER NOT NULL,
   dropped_writes INTEGER NOT NULL,
   phy INTEGER NOT NULL,
-  interval_us INTEGER NOT NULL,
-  heap_high_water INTEGER NOT NULL
+  interval_us INTEGER NOT NULL
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
@@ -1331,6 +1340,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             }
             Record::BridgeStatus(status) => {
                 let radio_link = status.radio_link;
+                let radio = status.health.radio;
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
                        (rx_at, rx_count, dropped_tx, uptime_ms, host_frames,
@@ -1338,8 +1348,10 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
                         radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors,
-                        fan_duty, fan_rpm, slots_present)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                        fan_duty, fan_rpm, slots_present, p4_die_temp_c, c6_die_temp_c,
+                        c6_vdd_mv, c6_heap_used, c6_heap_free, c6_heap_high_water)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
+                             ?20,?21,?22,?23,?24,?25)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1361,6 +1373,12 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.fan.map(|fan| fan.duty.get()),
                     status.fan.and_then(|fan| fan.rpm),
                     status.slots_present,
+                    status.health.p4_die_temp.c(),
+                    radio.and_then(|radio| radio.die_temp.c()),
+                    radio.and_then(|radio| radio.vdd.mv()),
+                    radio.map(|radio| radio.heap_used),
+                    radio.map(|radio| radio.heap_free),
+                    radio.map(|radio| radio.heap_high_water),
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1385,9 +1403,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                        (status_id, owner, bonds, pair_window, pair_window_secs,
                         central_encrypted, central_bonded, central_mtu, central_phy,
                         central_interval_us, pairings, failed_pairings, unbonded_kicks,
-                        last_disconnect, resynced_bytes, dropped_writes, phy, interval_us,
-                        heap_high_water)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                        last_disconnect, resynced_bytes, dropped_writes, phy, interval_us)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )?
                 .execute(params![
                     status_id,
@@ -1408,7 +1425,6 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     c.dropped_writes,
                     c.phy,
                     c.interval_us,
-                    c.heap_high_water,
                 ])?;
             }
             Record::HostStatus(host) => {
@@ -1500,6 +1516,7 @@ mod tests {
             fan: None,
             slots_present: 0,
             bluetooth: Default::default(),
+            health: Default::default(),
         })
     }
 

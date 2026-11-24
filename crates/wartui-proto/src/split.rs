@@ -39,20 +39,22 @@
 //!   so only a C6 that is sending nothing faults ([`PairEvent::RadioSilent`]). A
 //!   [`RadioState::Mismatch`] gets no records, so its silence means nothing; `Waiting` and `Absent`
 //!   have their own faults, and an install has its resets.
+//! - **`Status.health.radio` is this C6 life's latest `Up::Health`.** A new life clears it with
+//!   the counters, so a restarted C6 reads as no reading until it sends one.
 
 use core::fmt::Write;
 
-use crate::bus::{MAX_SLOTS, NodeBoard};
+use crate::bus::{DieTemp, MAX_SLOTS, NodeBoard};
 use crate::fan::FanStats;
 use crate::link::{
-    BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING, RadioInfo,
-    RadioLinkStats, ShortStr,
+    BridgeHealth, BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING,
+    RadioInfo, RadioLinkStats, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
-use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
+use crate::radio_link::{Hello, LINK_REVISION, RadioHealth, RadioStatus};
 use crate::reset::ResetCause;
 
 /// How long the P4 waits for the C6's first hello before announcing its own MAC.
@@ -143,6 +145,8 @@ pub struct P4Counters {
     /// a connected central's `phy` and `interval_us`, with the C6's once the C6 has reported
     /// them.
     pub bluetooth: crate::link::BluetoothStatus,
+    /// The P4's die temperature, read for this `Status`.
+    pub p4_die_temp: DieTemp,
 }
 
 /// The P4's pair state.
@@ -156,6 +160,8 @@ pub struct Pair {
     /// The current life began with a C6 restart under a running P4.
     life_from_radio: bool,
     status: Option<RadioStatus>,
+    /// The C6's latest health, this life.
+    health: Option<RadioHealth>,
     own_mac: Mac,
     own_fw: ShortStr,
     own_cause: ResetCause,
@@ -198,6 +204,7 @@ impl Pair {
             c6_seq: 0,
             life_from_radio: false,
             status: None,
+            health: None,
             own_mac,
             own_fw,
             own_cause,
@@ -266,8 +273,9 @@ impl Pair {
         self.silent = false;
         self.hello_at_ms = now_ms;
         self.life_from_radio = running;
-        // A new C6 life: counters from the last one no longer apply.
+        // A new C6 life: counters and health from the last one no longer apply.
         self.status = None;
+        self.health = None;
         PairEvent::NewLife
     }
 
@@ -511,6 +519,11 @@ impl Pair {
         self.status = Some(status);
     }
 
+    /// The C6 reported its health.
+    pub fn note_radio_health(&mut self, health: RadioHealth) {
+        self.health = Some(health);
+    }
+
     /// The `Status` to answer a poll with: `p4`'s counters with the C6's.
     pub fn status(&self, now_ms: u64, p4: P4Counters) -> BridgeToHost {
         let P4Counters {
@@ -530,6 +543,7 @@ impl Pair {
             members,
             sd,
             mut bluetooth,
+            p4_die_temp,
         } = p4;
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -572,6 +586,7 @@ impl Pair {
             members,
             sd,
             bluetooth,
+            health: BridgeHealth { p4_die_temp, radio: self.health },
         }
     }
 }
