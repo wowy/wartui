@@ -47,7 +47,7 @@ advertises the WardriveESP status beacon.
   for holding no bond (a cleared one included), the last disconnect reason, resynced and dropped
   bytes, the PHY and the interval.
 - **It reports its own health every 10 s** as `Up::Health`, once its Bluetooth controller has
-  started: its die temperature and 3.3 V rail, read through the PHY, and its heap in use, free and
+  started: its die temperature, less its eFuse calibration, and 3.3 V rail, read through the PHY, and its heap in use, free and
   at its high-water mark. The P4 puts the latest in every `Status`. The rail read borrows the PBUS
   for a moment while connection events run, so check a change near it on the bench against
   `dropped_writes`, `resynced_bytes` and disconnects.

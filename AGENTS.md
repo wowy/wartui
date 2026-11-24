@@ -123,7 +123,7 @@ own.
   replay),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image), and `tsens`
-  (the P4's temperature sensor's code, converted).
+  (each chip's eFuse temperature calibration, applied, and the P4's sensor's code, converted).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash, and the P4's planner testable without one.
@@ -179,7 +179,8 @@ own.
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), every firmware's last panic kept across the
   reset (`last_panic`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the
-  supply and die readings a node's heartbeat and the C6's health report carry (`health`), and
+  supply and die readings a node's heartbeat and the C6's health report carry, the die less the
+  chip's eFuse calibration (`health`), and
   updates on flash, the slot, the switch and the trial, and the P4's settings sector (`ota`).
   Each firmware depends on it by path and selects its chip feature in that dependency. It is its
   own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.

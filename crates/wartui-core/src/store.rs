@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS node (
 -- `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
--- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
+-- `die_temp_c` its die temperature in whole degrees Celsius, calibrated, each NULL when
 -- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
 -- across a capture is a leak in the node firmware. `heap_used` is the bytes in use, so
 -- `heap_used + heap_free` is the heap's size, and `heap_high_water` the most in use since boot.
@@ -205,11 +205,11 @@ CREATE TABLE IF NOT EXISTS observation (
 -- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
 -- the bridge's first window since boot. `slots_present` is the slots the bridge counted holding a
 -- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7). The rest are the bridge's
--- own chips: `p4_die_temp_c` is the P4's die temperature in whole degrees Celsius, read for the
--- reply, NULL when the read failed. The `c6_*` columns are the C6's latest health report, all NULL
--- before this C6 life has sent one: its die temperature in whole degrees Celsius and its 3.3 V
--- rail in millivolts, each NULL when that read failed, and its heap in use, free and most in use
--- since it booted, in bytes.
+-- own chips: `p4_die_temp_c` is the P4's die temperature in whole degrees Celsius, calibrated,
+-- read for the reply, NULL when the read failed. The `c6_*` columns are the C6's latest health
+-- report, all NULL before this C6 life has sent one: its die temperature in whole degrees Celsius,
+-- calibrated, and its 3.3 V rail in millivolts, each NULL when that read failed, and its heap in
+-- use, free and most in use since it booted, in bytes.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,

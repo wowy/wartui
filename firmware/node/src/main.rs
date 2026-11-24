@@ -573,7 +573,7 @@ fn heartbeat(node: &Node) {
         ble_refused: ble::refused(),
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
-        die_temp: die_temp(health::die_temp_c()),
+        die_temp: die_temp(health::die_temp_calibrated_c()),
         heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
         heap_used: heap.current_usage as u32,
         heap_high_water: heap.max_usage as u32,

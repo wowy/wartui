@@ -218,8 +218,9 @@
 //! time left as it sent it.
 //!
 //! **Once the controller has started, the C6 reports its own health every [`HEALTH_EVERY`]**
-//! ([`repeat_health`]): its die temperature and rail, read through the PHY, and its heap. A
-//! controller that would not start never powered the PHY, so no `Up::Health` goes.
+//! ([`repeat_health`]): its die temperature, less the chip's eFuse calibration, and its rail, both
+//! read through the PHY, and its heap. A controller that would not start never powered the PHY,
+//! so no `Up::Health` goes.
 //!
 //! **The first start ends the image's trial** with the P4's hello (`src/link.rs`): [`advertise`]
 //! raises `advertising_started` once the controller takes its first start, of the wartui set
@@ -871,20 +872,39 @@ pub fn repeat_health(shared: &Shared) {
     {
         return;
     }
-    ble.health_at.set(Some(Instant::now()));
-    shared.push(&Up::Health(read_health()));
+    let first = ble.health_at.replace(Some(Instant::now())).is_none();
+    let phy = wartui_firmware::health::die_temp_c();
+    let health = read_health(phy);
+    shared.push(&Up::Health(health));
+    if first {
+        say_calibration(shared, phy, health);
+    }
 }
 
-/// The C6's die temperature, rail and heap.
+/// Say the chip's TSENS eFuse calibration beside the PHY's reading and the calibrated one it
+/// reports, once a boot: `tsens: calibration 0x18b, PHY 33 °C, calibrated 47 °C`. The PHY's
+/// conversion applies no calibration, so `health::calibrate_die_temp` subtracts it (`deltaT / 10`
+/// °C, bit 8 the sign), as ESP-IDF's driver does, and the line lets the bench check that by hand.
+#[inline(never)]
+fn say_calibration(shared: &Shared, phy: i16, health: RadioHealth) {
+    let calibration = wartui_firmware::health::tsens_calibration();
+    shared.log(format_args!(
+        "tsens: calibration {calibration:#05x}, PHY {phy} °C, calibrated {}",
+        health.die_temp
+    ));
+}
+
+/// The C6's die temperature, rail and heap, for `phy`, the die as the PHY read it
+/// (`health::die_temp_c`).
 ///
 /// Both readings go through the PHY, which is up only once `BleConnector::new` has succeeded, so
-/// only [`repeat_health`] calls this, and only after then. `health::vdd_mv` borrows the PBUS for
+/// only [`repeat_health`] reads them, and only after then. `health::vdd_mv` borrows the PBUS for
 /// a moment and is meant for a parked radio, as a node's heartbeat reads it. Here the controller
 /// runs connection events on its own schedule, so the effect of that moment on a live link is
 /// unmeasured; the bench checks it with a central connected, in `dropped_writes`,
 /// `resynced_bytes` and disconnects.
-fn read_health() -> RadioHealth {
-    let c = wartui_firmware::health::die_temp_c();
+fn read_health(phy: i16) -> RadioHealth {
+    let c = wartui_firmware::health::calibrate_die_temp(phy);
     // The PHY floors a failed read at −200 °C, and no running die is below −40 °C.
     let die_temp = if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) };
     let heap = esp_alloc::HEAP.stats();

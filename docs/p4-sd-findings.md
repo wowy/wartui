@@ -240,6 +240,13 @@ low. **The C6's reads low, by about 14 °C**: 15 °C with the fan on, at least 7
 22 °C, which a working die cannot be. Its PHY reading carries a per-chip offset, as `health.rs`
 says the node's may, so only a change in it means anything.
 
+**Why the C6 read low.** The PHY's `phy_get_tsens_value`, which the C6 and the C5 nodes read
+their die through, applies no eFuse calibration, where ESP-IDF's driver subtracts it from every
+reading (`tsens_raw − deltaT / 10`). The C6 logged its field at boot: 0x18b, −13.9 °C. Its PHY
+read 33 °C while the IR thermometer read about 47 °C, and 33 + 13.9 = 46.9, so calibrated it reads
+47 °C. The fix applies the calibration on the C5 nodes and the C6 alike
+(`firmware/common/src/health.rs`).
+
 ### The C6's readings on a live link
 
 `wartui sniff --link bluetooth` for 9 minutes, with a Wi-Fi and Bluetooth scan running and the C6
