@@ -18,10 +18,13 @@
 //! Redirects are not followed, because an API that redirects is not answering as the API, and
 //! following one reads an HTML page as JSON.
 //!
-//! The wait gives up after 30 seconds. A person sits at the terminal for it, and nothing
-//! needs the result to finish: the job's URL and the profile on the site show it later. Each
-//! poll has its own short deadline and no sleep crosses the give-up time, so one hung poll
-//! cannot stretch the wait.
+//! The wait gives up after 30 seconds and 2 more per thousand rows, at most two minutes
+//! ([`give_up`]): the site takes longer to import a larger file, and a fixed wait leaves the
+//! largest uploads unfollowed. A person sits at the terminal for it, and nothing needs the result
+//! to finish: the job's URL and the profile on the site show it later, so the wait stays short of
+//! what a slow import could take. Each poll has its own short deadline and no sleep crosses the
+//! give-up time, so one hung poll cannot stretch the wait. A wait that ends with no answer at all
+//! names the last poll's error, which tells a lost connection from a slow import.
 
 use std::time::Duration;
 
@@ -45,8 +48,14 @@ pub(crate) const MAX_CSV: usize = 40_000_000;
 const FIRST_POLL: Duration = Duration::from_secs(2);
 const MAX_POLL: Duration = Duration::from_secs(10);
 
-/// How long to keep asking before leaving the job to the site.
-pub(crate) const GIVE_UP: Duration = Duration::from_secs(30);
+/// How long to keep asking after a job of `rows` before leaving it to the site: 30 seconds, and
+/// 2 more per thousand rows, at most [`MAX_GIVE_UP`].
+pub(crate) fn give_up(rows: u64) -> Duration {
+    Duration::from_millis(30_000u64.saturating_add(rows.saturating_mul(2))).min(MAX_GIVE_UP)
+}
+
+/// The longest wait [`give_up`] gives, however large the file.
+const MAX_GIVE_UP: Duration = Duration::from_secs(120);
 
 /// How long one poll may take, start to finish.
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -97,6 +106,7 @@ pub(crate) fn wait(
 ) -> Result<Waited> {
     let mut delay = FIRST_POLL;
     let mut said = None;
+    let mut last_error = None;
     loop {
         sleep(delay.min(give_up.saturating_sub(elapsed())));
         match poll() {
@@ -108,14 +118,22 @@ pub(crate) fn wait(
                 said = Some(name);
                 say(Progress::State(name));
             }
-            Err(error) => say(Progress::PollError(format!("{error:#}"))),
+            Err(error) => {
+                let message = format!("{error:#}");
+                tracing::warn!(job, error = %message, "WDGWars poll failed");
+                say(Progress::PollError(message.clone()));
+                last_error = Some(message);
+            }
         }
         if elapsed() >= give_up {
-            let state = said.map_or_else(String::new, |name| format!("; it is still {name}"));
-            return Ok(Waited::Unfollowed(format!(
-                "no answer within {} seconds{state}",
-                give_up.as_secs()
-            )));
+            let why = match (said, last_error) {
+                (Some(name), _) => format!("; it is still {name}"),
+                (None, Some(error)) => format!("; the last poll failed: {error}"),
+                (None, None) => String::new(),
+            };
+            // Rounded, since the wait is in milliseconds.
+            let secs = (give_up.as_millis() + 500) / 1000;
+            return Ok(Waited::Unfollowed(format!("no answer within {secs} seconds{why}")));
         }
         delay = next_delay(delay);
     }
@@ -356,7 +374,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Client, GIVE_UP, JobStatus, Waited, next_delay, outcome, parse_job, parse_submit, wait,
+        Client, JobStatus, Waited, give_up, next_delay, outcome, parse_job, parse_submit, wait,
     };
     use crate::testing::{serve_once, serve_once_with};
 
@@ -548,9 +566,46 @@ mod tests {
 
     #[test]
     fn upload_wait_returns_unfollowed_when_give_up_reached() {
-        let waited = wait_on(GIVE_UP, vec![Ok(JobStatus::Queued)]).unwrap();
+        let waited = wait_on(give_up(0), vec![Ok(JobStatus::Queued)]).unwrap();
         let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
         assert_eq!(reason, "no answer within 30 seconds; it is still processing");
+    }
+
+    #[test]
+    fn upload_give_up_grows_with_rows_when_file_is_larger() {
+        assert_eq!(give_up(0), Duration::from_secs(30));
+        assert_eq!(give_up(4_819), Duration::from_millis(39_638));
+        assert_eq!(give_up(19_969), Duration::from_millis(69_938));
+        assert_eq!(give_up(100_000), Duration::from_secs(120), "capped at two minutes");
+        assert_eq!(give_up(u64::MAX), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn upload_wait_names_last_poll_error_when_every_poll_fails() {
+        let errors = (0..100).map(|n| Err(anyhow::anyhow!("timed out {n}"))).collect();
+        let waited = wait_on(give_up(9_615), errors).unwrap();
+        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
+        // 49.2 s, rounded; and the error the wait ended on, not the first.
+        assert!(
+            reason.starts_with("no answer within 49 seconds; the last poll failed: timed out ")
+        );
+        assert!(!reason.ends_with("timed out 0"), "{reason}");
+    }
+
+    #[test]
+    fn upload_wait_names_state_when_errors_follow_a_state() {
+        let answers = vec![
+            Ok(JobStatus::Queued),
+            Err(anyhow::anyhow!("timed out")),
+            Err(anyhow::anyhow!("timed out")),
+            Err(anyhow::anyhow!("timed out")),
+            Err(anyhow::anyhow!("timed out")),
+            Err(anyhow::anyhow!("timed out")),
+            Err(anyhow::anyhow!("timed out")),
+        ];
+        let waited = wait_on(give_up(0), answers).unwrap();
+        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
+        assert_eq!(reason, "no answer within 30 seconds; it is still queued");
     }
 
     #[test]

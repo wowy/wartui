@@ -265,13 +265,13 @@ fn follow_wdgwars(client: &wdgwars::Client, job: &Job) -> bool {
     let started = Instant::now();
     let waited = wdgwars::wait(
         id,
-        wdgwars::GIVE_UP,
+        wdgwars::give_up(job.rows),
         || client.poll(id),
         std::thread::sleep,
         || started.elapsed(),
         wdgwars::on_stderr(id),
     );
-    let recorded = finish(job, &waited);
+    let recorded = finish(job, &waited, started.elapsed());
     let imported = match &waited {
         Ok(wdgwars::Waited::Done(result)) => {
             print!("{}", wdgwars::outcome(result));
@@ -601,6 +601,8 @@ pub(crate) enum Sent {
 /// A WDGWars job, and the capture's record of it.
 pub(crate) struct Job {
     pub(crate) id: u64,
+    /// The rows the upload carried, which the wait grows with ([`wdgwars::give_up`]).
+    pub(crate) rows: u64,
     record: i64,
     /// The capture, open for writing since before the upload went.
     conn: Connection,
@@ -626,7 +628,7 @@ pub(crate) fn send(
             let record =
                 record_upload(&conn, UploadSite::Wdgwars, through, now, &id.to_string(), rows)
                     .with_context(|| format!("recording job {id} in {}", db.display()))?;
-            Ok(Sent::Wdgwars { client, job: Job { id, record, conn } })
+            Ok(Sent::Wdgwars { client, job: Job { id, rows, record, conn } })
         }
         Credentials::Wigle { name, token } => {
             let client = wigle::Client::new(wigle_base, name, token);
@@ -642,12 +644,51 @@ pub(crate) fn send(
     }
 }
 
-/// Record how the wait for WDGWars' `job` ended.
-pub(crate) fn finish(job: &Job, waited: &Result<wdgwars::Waited>) -> Result<()> {
+/// Record how the wait for WDGWars' `job` ended, `elapsed` after it began, and log it. The
+/// store keeps only the result, so the log is where an unfollowed job's reason survives.
+pub(crate) fn finish(job: &Job, waited: &Result<wdgwars::Waited>, elapsed: Duration) -> Result<()> {
+    let (id, rows, elapsed_s) = (job.id, job.rows, elapsed.as_secs());
     let result = match waited {
-        Ok(wdgwars::Waited::Done(_)) => "done",
-        Ok(wdgwars::Waited::Unfollowed(_)) => "unfollowed",
-        Err(_) => "failed",
+        Ok(wdgwars::Waited::Done(_)) => {
+            tracing::info!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result = "done",
+                "WDGWars upload"
+            );
+            "done"
+        }
+        Ok(wdgwars::Waited::Unfollowed(reason)) => {
+            let result = "unfollowed";
+            tracing::info!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result,
+                reason,
+                "WDGWars upload"
+            );
+            result
+        }
+        Err(error) => {
+            let reason = error
+                .downcast_ref::<wdgwars::JobFailed>()
+                .map_or_else(|| format!("{error:#}"), |failed| failed.message.clone());
+            let result = "failed";
+            tracing::warn!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result,
+                reason,
+                "WDGWars upload"
+            );
+            result
+        }
     };
     set_upload_result(&job.conn, job.record, result)
         .with_context(|| format!("recording how job {} ended", job.id))?;
@@ -749,6 +790,7 @@ mod tests {
     use std::io::Read;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use clap::Parser;
     use flate2::read::GzDecoder;
@@ -1230,7 +1272,8 @@ mod tests {
         let conn = open_readwrite(&db).unwrap();
         let record =
             record_upload(&conn, UploadSite::Wdgwars, 3, EPOCH_MS + 150_000, "8", 1).unwrap();
-        finish(&Job { id: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
+        let job = Job { id: 8, rows: 1, record, conn };
+        finish(&job, &Err(anyhow::anyhow!("failed")), Duration::from_secs(3)).unwrap();
 
         let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
             .unwrap()

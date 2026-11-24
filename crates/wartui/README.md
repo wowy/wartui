@@ -327,11 +327,16 @@ has queued the job, the upload has happened, so only a failed import makes the e
 | The import fails                                       | Exits non-zero with the site's reason              |
 | A poll errors (network, timeout, 5xx)                  | Says so once per distinct error, and keeps polling |
 | A poll redirects to the login page, or answers 401/403 | Stops polling, prints the job's URL, exits zero    |
-| 30 seconds pass                                        | Stops polling, prints the job's URL, exits zero    |
+| The wait runs out                                      | Stops polling, prints the job's URL, exits zero    |
 
-When it stops early the import carries on; the job's URL or your profile on wdgwars.pl shows the
-result. The wait is short because someone sits at the terminal for it and nothing needs the result
-to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused
+The wait is 30 seconds plus 2 per thousand rows, at most two minutes: about 40 seconds for 5,000
+rows and 70 for 20,000. A larger file takes the site longer to import. When it stops early the
+import carries on; the job's URL or your profile on wdgwars.pl shows the result. The wait stays
+short because someone sits at the terminal for it and nothing needs the result to finish. A wait
+that runs out with no answer at all names the last poll's error, so a lost connection reads apart
+from a slow import. With `--log-file`, each poll error and how the wait ended (the job, its rows,
+the seconds waited, the result and its reason) are logged too, from `upload` and from `u` alike.
+Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused
 key (with the site's reason), an oversized file and any other error status are reported in plain
 words and exit non-zero. Redirects are not followed.
 
