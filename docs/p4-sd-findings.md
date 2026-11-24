@@ -247,6 +247,18 @@ read 33 °C while the IR thermometer read about 47 °C, and 33 + 13.9 = 46.9, so
 47 °C. The fix applies the calibration on the C5 nodes and the C6 alike
 (`firmware/common/src/health.rs`).
 
+With the fix flashed, idle with the fan off, a few minutes apart:
+
+| Chip | Before | Calibrated |
+| --- | --- | --- |
+| C6 | 33 °C | 48 °C |
+| P4, its own calibration already applied | 45 °C | 45 °C |
+| Nodes N1 to N10 | 36 to 48 °C | 46 to 53 °C |
+
+The C6 now reads within a degree of the IR thermometer. Each node moved by its own chip's field,
+from 2 °C on `N10` to 11 °C on `N2` and `N6`, and the ten nodes' spread narrowed from 12 °C to
+7 °C, as a per-chip correction should. The node's 70 °C warning stays where it was.
+
 ### The C6's readings on a live link
 
 `wartui sniff --link bluetooth` for 9 minutes, with a Wi-Fi and Bluetooth scan running and the C6
