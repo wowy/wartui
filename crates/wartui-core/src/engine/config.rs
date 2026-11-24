@@ -44,8 +44,11 @@ pub struct EngineConfig {
     /// modal shows.
     pub excluded_ssids: IndexSet<Vec<u8>>,
     /// How often the bridge's GPS receiver reports a fix, in hertz. `FleetEngine::poll_bridge` says
-    /// why every status poll carries it.
+    /// why every status poll carries it. [`Command::SetGpsRate`] changes it mid-run.
     pub gps_rate_hz: u8,
+    /// Whether the bridge's GPS receiver sends `GSA` and `GSV`, which feed only the view's sky
+    /// list. Off unless [`Command::SetGpsSky`] turns it on while the GPS view is open.
+    pub gps_sky: bool,
     /// The link the host reaches the bridge over, or `None` under `--sim`. It sets how far behind
     /// the bridge the host must read to count as behind (`engine::behind_us`).
     pub link: Option<HostLink>,
@@ -63,6 +66,7 @@ impl Default for EngineConfig {
             position: PositionChain::empty(),
             excluded_ssids: IndexSet::new(),
             gps_rate_hz: ubx::DEFAULT_RATE_HZ,
+            gps_sky: false,
             link: None,
         }
     }

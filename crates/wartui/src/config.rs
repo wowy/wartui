@@ -126,7 +126,8 @@ impl From<Link> for wartui_core::record::HostLink {
 /// The `[gps]` table: how often a bridge's GPS receiver reports a fix, in whole hertz
 /// within [`GPS_RATE_HZ`], and whether `run` holds the scan until a receiver holds a fix.
 /// `bridge-rate-hz` absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`], and
-/// `wait-for-fix` absent means wait.
+/// `wait-for-fix` absent means wait. The settings modal writes both, and leaves each as the file
+/// had it while its row is unmoved.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Gps {

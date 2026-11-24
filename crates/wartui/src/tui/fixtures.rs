@@ -229,6 +229,7 @@ pub(super) fn busy() -> Snapshot {
         },
         gps: None,
         excluded_ssids: Vec::new(),
+        gps_rate_hz: wartui_core::ubx::DEFAULT_RATE_HZ,
         power_answer: None,
         sd_answer: None,
         awaiting_fix: false,

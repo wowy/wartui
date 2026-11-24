@@ -18,9 +18,12 @@
 //! modal is open. `Enter` on it asks [`super::ui::Ui`] to confirm a format, which erases the card,
 //! and the modal stays open behind the confirm with its edits.
 //!
-//! The wait-for-GPS row is the file's `[gps] wait-for-fix`, which `run` reads at launch. A run
-//! decides at launch whether it waits, so the row applies from the next launch. The
-//! waiting-for-GPS pop-up's box writes the same key, through [`save_fix_wait`].
+//! The gps section holds two rows. Wait for gps is the file's `[gps] wait-for-fix`, which `run`
+//! reads at launch. A run decides at launch whether it waits, so the row applies from the next
+//! launch. The waiting-for-GPS pop-up's box writes the same key, through [`save_fix_wait`]. Update
+//! rate is the bridge receiver's rate, which the host holds rather than the bridge: it shows the
+//! rate in force, `Enter` sends it to the engine when it moved, which writes it to the receiver at
+//! once, and saves it as `[gps] bridge-rate-hz` for the next launch.
 //!
 //! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
 //! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
@@ -38,6 +41,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
+use wartui_core::ubx;
 use wartui_proto::fan::FanDuty;
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::SdState;
@@ -88,8 +92,9 @@ enum Field {
     Bluetooth,
     WardriveEsp,
     RememberBridge,
-    WaitForGps,
     ExcludedSsids,
+    WaitForGps,
+    GpsRate,
     WdgwarsKey,
     WigleName,
     WigleToken,
@@ -98,14 +103,15 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 12] = [
+const FIELDS: [Field; 13] = [
     Field::Pool,
     Field::Fan,
     Field::Bluetooth,
     Field::WardriveEsp,
     Field::RememberBridge,
-    Field::WaitForGps,
     Field::ExcludedSsids,
+    Field::WaitForGps,
+    Field::GpsRate,
     Field::WdgwarsKey,
     Field::WigleName,
     Field::WigleToken,
@@ -165,6 +171,10 @@ pub(super) struct ConfigModal {
     remember_bridge: bool,
     /// Whether `run` holds the scan for a GPS fix, from the next launch.
     wait_for_gps: bool,
+    /// The bridge GPS receiver's rate, in hertz within [`ubx::RATE_HZ`].
+    gps_rate: u8,
+    /// The rate in force when the modal opened, so `Enter` sends only a change.
+    gps_rate_seed: u8,
     /// The WDGWars API key, typed or pasted. Empty means not set.
     wdgwars_key: String,
     /// WiGLE's API Name, typed or pasted. Empty means not set.
@@ -206,6 +216,16 @@ fn step_fan(current: FanDuty, delta: i8) -> FanDuty {
     FanDuty::new(pct).unwrap_or(current)
 }
 
+/// Step `current` by 1 Hz in `delta`'s direction, stopping at either end of [`ubx::RATE_HZ`].
+fn step_rate(current: u8, delta: i8) -> u8 {
+    let rate = match delta.signum() {
+        1 => current.saturating_add(1),
+        -1 => current.saturating_sub(1),
+        _ => current,
+    };
+    rate.clamp(*ubx::RATE_HZ.start(), *ubx::RATE_HZ.end())
+}
+
 /// `All → Eu → Us`, the order the pool row steps through.
 const POOL_STEPS: [ChannelPool; 3] = [ChannelPool::All, ChannelPool::Eu, ChannelPool::Us];
 
@@ -222,8 +242,8 @@ fn step_pool(current: ChannelPool, delta: i8) -> ChannelPool {
 }
 
 impl ConfigModal {
-    /// Step the selected row by one. The pool row wraps past its ends, and the fan row stops at
-    /// them.
+    /// Step the selected row by one. The pool row wraps past its ends, and the fan and update
+    /// rate rows stop at them.
     ///
     /// | Row | Step |
     /// |---|---|
@@ -234,6 +254,7 @@ impl ConfigModal {
     /// | log | flips; none at `no bridge` or `no slot` |
     /// | remember | flips |
     /// | wait for gps | flips |
+    /// | update rate | 1 Hz, stopping at 1 and 5 |
     /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | wdgwars, wigle name, wigle token | none; [`Self::on_key`] types into it |
     /// | format | none; `Enter` asks to format the card ([`sd_row`]) |
@@ -266,6 +287,7 @@ impl ConfigModal {
                     self.wait_for_gps = !self.wait_for_gps;
                 }
             }
+            Field::GpsRate => self.gps_rate = step_rate(self.gps_rate, delta),
             // Text rows, a row that opens a page, and an action. `on_key` handles all three.
             Field::WdgwarsKey
             | Field::WigleName
@@ -330,6 +352,9 @@ impl ConfigModal {
             remember_bridge: settings.bridge_memory.is_enabled(),
             // The file's, since a run reads it only at launch.
             wait_for_gps: settings.saved.gps.waits_for_fix(),
+            // The engine's, which holds it for the receiver.
+            gps_rate: snapshot.gps_rate_hz,
+            gps_rate_seed: snapshot.gps_rate_hz,
             // Nor these. They are what the file holds, hand edits included.
             wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
             wigle_name: settings.saved.api_keys.wigle_name.clone(),
@@ -352,6 +377,7 @@ impl ConfigModal {
             | Field::SdLog
             | Field::RememberBridge
             | Field::WaitForGps
+            | Field::GpsRate
             | Field::ExcludedSsids
             | Field::SdCard => None,
         }
@@ -523,11 +549,13 @@ pub(super) fn apply(
     let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
     let wardrive_esp = modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed);
     let sd_log = modal.sd_log.filter(|_| modal.sd_log != modal.sd_log_seed);
+    let gps_rate = (modal.gps_rate != modal.gps_rate_seed).then_some(modal.gps_rate);
     let wanted = usize::from(pool.is_some())
         + usize::from(fan.is_some())
         + usize::from(bluetooth.is_some())
         + usize::from(wardrive_esp.is_some())
-        + usize::from(sd_log.is_some());
+        + usize::from(sd_log.is_some())
+        + usize::from(gps_rate.is_some());
     let Ok(mut permits) = commands.try_reserve_many(wanted) else {
         return Err(ENGINE_BUSY);
     };
@@ -536,12 +564,14 @@ pub(super) fn apply(
     let bluetooth_command = bluetooth.map(Command::SetBluetooth);
     let wardrive_esp_command = wardrive_esp.map(Command::SetWardriveEsp);
     let sd_log_command = sd_log.map(Command::SetSdLog);
+    let gps_rate_command = gps_rate.map(Command::SetGpsRate);
     for command in pool_command
         .into_iter()
         .chain(fan_command)
         .chain(bluetooth_command)
         .chain(wardrive_esp_command)
         .chain(sd_log_command)
+        .chain(gps_rate_command)
     {
         if let Some(permit) = permits.next() {
             permit.send(command);
@@ -570,6 +600,9 @@ pub(super) fn apply(
         } else {
             "; sd log off sent to the bridge"
         });
+    }
+    if let Some(rate) = gps_rate {
+        text.push_str(&format!("; gps {rate} Hz"));
     }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
@@ -651,6 +684,12 @@ fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf,
     } else {
         wait_for_fix_key(modal.wait_for_gps)
     };
+    let saved_rate = settings.saved.gps.bridge_rate_hz;
+    let bridge_rate_hz = if modal.gps_rate == saved_rate.unwrap_or(ubx::DEFAULT_RATE_HZ) {
+        saved_rate
+    } else {
+        Some(modal.gps_rate)
+    };
     let written = config::Config {
         excluded_ssids: modal.excluded.clone(),
         bridge: config::Bridge {
@@ -659,11 +698,7 @@ fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf,
             remember: Some(modal.remember_bridge),
             ..config::Bridge::default()
         },
-        gps: config::Gps {
-            // Not on the modal, so kept as the file last had it.
-            bridge_rate_hz: settings.saved.gps.bridge_rate_hz,
-            wait_for_fix,
-        },
+        gps: config::Gps { bridge_rate_hz, wait_for_fix },
         api_keys: config::ApiKeys {
             wdgwars: modal.wdgwars_key.trim().to_owned(),
             wigle_name: modal.wigle_name.trim().to_owned(),
@@ -750,7 +785,7 @@ fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
 /// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
 /// the sd card row reads on every frame.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
-    let area = centered_rect(48, 20, frame.area());
+    let area = centered_rect(48, 23, frame.area());
     frame.render_widget(Clear, area);
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -826,11 +861,14 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
             )),
         },
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
-        row("wait for gps", &on_off(modal.wait_for_gps), Field::WaitForGps),
         Line::from(Span::styled(
             format!("{:<18}  {} ›", "excluded ssids", excluded_count(&modal.excluded)),
             styled(Field::ExcludedSsids),
         )),
+        Line::default(),
+        Line::from("gps"),
+        row("wait for gps", &on_off(modal.wait_for_gps), Field::WaitForGps),
+        row("update rate", &format!("{} Hz", modal.gps_rate), Field::GpsRate),
         Line::default(),
         Line::from("api keys"),
         text_row("wdgwars", &mask_key(&modal.wdgwars_key), Field::WdgwarsKey),
@@ -1135,24 +1173,123 @@ mod tests {
     }
 
     #[test]
-    fn ui_keeps_gps_rate_in_file_when_modal_saves() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        let saved = config::Config {
-            gps: config::Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) },
-            ..config::Config::default()
-        };
+    fn ui_keeps_gps_rate_as_file_had_it_when_enter_pressed_with_rate_unmoved() {
+        // The file's value, the rate in force, and what the file holds after the save. An absent
+        // key stays absent, and a hand-written default stays written.
+        for (file, in_force) in [(Some(2), 2), (None, 5), (Some(5), 5)] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("wartui.toml");
+            let saved = config::Config {
+                gps: config::Gps { bridge_rate_hz: file, wait_for_fix: Some(false) },
+                ..config::Config::default()
+            };
+            let mut snapshot = busy();
+            snapshot.gps_rate_hz = in_force;
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui::new(Settings {
+                config_path: Some(target.clone()),
+                saved,
+                ..Settings::default()
+            });
+            ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+            assert_eq!(ui.modal().expect("open").gps_rate, in_force, "the rate in force");
+
+            ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+            assert!(rx.try_recv().is_err(), "nothing moved, so nothing goes out");
+            let saved = config::load(Some(&target)).expect("a valid file");
+            assert_eq!(saved.gps.bridge_rate_hz, file);
+            assert_eq!(saved.gps.wait_for_fix, Some(false), "the row seeds from the file");
+            let notice = ui.notice(snapshot.now_ms).expect("a notice");
+            assert!(!notice.contains("gps"), "{notice}");
+        }
+    }
+
+    #[test]
+    fn ui_steps_gps_rate_by_one_and_stops_at_ends_when_h_or_l_pressed() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        let mut ui = Ui::default();
+        select(Field::GpsRate, &mut ui, &snapshot, &tx);
+        let rate = |ui: &Ui| ui.modal().expect("open").gps_rate;
+        assert_eq!(rate(&ui), ubx::DEFAULT_RATE_HZ);
 
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(rate(&ui), 5, "stops at 5 rather than wrapping");
+        for expected in [4, 3, 2, 1, 1] {
+            ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+            assert_eq!(rate(&ui), expected);
+        }
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(rate(&ui), 2);
+    }
 
+    #[test]
+    fn ui_sends_gps_rate_and_saves_it_when_enter_pressed_with_rate_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::GpsRate, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsRate(3)));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("; gps 3 Hz;"), "{notice}");
         let saved = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(saved.gps.bridge_rate_hz, Some(2));
-        assert_eq!(saved.gps.wait_for_fix, Some(false), "the row seeds from the file");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(3));
+    }
+
+    #[test]
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_one_slot_short_of_gps_rate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.try_send(Command::StopScan).unwrap();
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        // The pool and the rate moved: two commands, and room for one.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::GpsRate {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        assert!(!target.exists(), "nothing was written");
+        assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
+        assert_eq!(ui.modal().expect("still open").gps_rate, 4, "the edit survives");
+    }
+
+    #[test]
+    fn draw_shows_gps_section_with_wait_and_rate_rows_when_modal_open() {
+        let mut snapshot = busy();
+        snapshot.gps_rate_hz = 2;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        let lines: Vec<&str> = rendered.lines().collect();
+        let at = |text: &str| lines.iter().position(|line| line.contains(text));
+        let header = at("│gps ").unwrap_or_else(|| panic!("no gps section: {rendered}"));
+        assert_eq!(at("wait for gps      ◂ on ▸"), Some(header + 1), "{rendered}");
+        assert_eq!(at("update rate       ◂ 2 Hz ▸"), Some(header + 2), "{rendered}");
+        assert!(at("excluded ssids").is_some_and(|row| row + 2 == header), "{rendered}");
+        assert!(at("api keys").is_some_and(|row| row == header + 4), "{rendered}");
     }
 
     #[test]
@@ -1892,7 +2029,7 @@ mod tests {
 
         press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
 
-        assert_eq!(ui.modal().expect("open").selected, Field::ExcludedSsids);
+        assert_eq!(ui.modal().expect("open").selected, Field::GpsRate);
     }
 
     #[test]
@@ -3109,15 +3246,18 @@ mod tests {
         let terminal = handheld(&snapshot, &mut ui);
         let rendered = terminal.backend().to_string();
 
-        // 48×20, centered in 58×26: columns 5 to 52, rows 3 to 22.
+        // 48×23, centered in 58×26: columns 5 to 52, rows 1 to 23.
         let buffer = terminal.backend().buffer();
         let row = |y: u16| -> String { (5..53).map(|x| buffer[(x, y)].symbol()).collect() };
-        assert!(row(3).starts_with("┌ settings "), "{rendered}");
-        assert_eq!(row(22), format!("└{}┘", "─".repeat(46)), "{rendered}");
-        assert_eq!(row(21), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
-        assert!(row(19).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
-        assert!(row(18).starts_with("│log               ◂ on ▸"), "{rendered}");
-        assert!(row(17).starts_with("│sd card "), "{rendered}");
+        assert!(row(1).starts_with("┌ settings "), "{rendered}");
+        assert_eq!(row(23), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        assert_eq!(row(22), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
+        assert!(row(20).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
+        assert!(row(19).starts_with("│log               ◂ on ▸"), "{rendered}");
+        assert!(row(18).starts_with("│sd card "), "{rendered}");
+        assert!(row(11).starts_with("│update rate       ◂ 5 Hz ▸"), "{rendered}");
+        assert!(row(10).starts_with("│wait for gps      ◂ on ▸"), "{rendered}");
+        assert!(row(9).starts_with("│gps "), "{rendered}");
     }
 
     #[test]

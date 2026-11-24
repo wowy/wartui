@@ -29,6 +29,8 @@
 //! [`Command::FormatSd`] asks the bridge to format its microSD card, and the answer reaches the
 //! operator as [`Snapshot::sd_answer`], as a power-cycle's does.
 //! [`Command::SetSdLog`] sets whether the bridge logs to that card, which the bridge keeps.
+//! [`Command::SetGpsRate`] sets the bridge GPS receiver's rate, and [`Command::SetGpsSky`] whether
+//! it sends the sky view's sentences. The host keeps both and writes them with every status poll.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -352,19 +354,26 @@ impl FleetEngine {
 
     /// Ask the bridge how it is.
     ///
-    /// A bridge with a GPS receiver is also sent the receiver's rate with every poll, not just the
-    /// first. `bulk` drops rather than blocks, so a dropped write has nothing behind it, and the
-    /// receiver forgets its configuration whenever the dongle loses power ([`ubx::valset_rate`]
-    /// writes RAM only). Rewriting the same values is idempotent, and costs one 64-byte frame per
-    /// interval.
+    /// A bridge with a GPS receiver is also sent the receiver's configuration with every poll, not
+    /// just the first. `bulk` drops rather than blocks, so a dropped write has nothing behind it,
+    /// and the receiver forgets its configuration whenever the dongle loses power
+    /// ([`ubx::valset_rate`] writes RAM only). Rewriting the same values is idempotent, and costs
+    /// one 64-byte frame per interval.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
-        if self.bridge_connected() && self.config.position.bridge_gps().is_some() {
-            let bytes = GpsWriteBytes::from_slice(&ubx::valset_rate(self.config.gps_rate_hz))
-                .expect("a rate write fits one GpsWrite");
-            batch.bulk.push(HostToBridge::GpsWrite { bytes });
-        }
+        batch.bulk.extend(self.gps_write());
         batch.bulk.push(HostToBridge::GetStatus);
+    }
+
+    /// The receiver's configuration as it stands, rate and sky, for a connected bridge whose GPS
+    /// is in the chain. `None` otherwise.
+    fn gps_write(&self) -> Option<HostToBridge> {
+        if !self.bridge_connected() || self.config.position.bridge_gps().is_none() {
+            return None;
+        }
+        let frame = ubx::valset_rate(self.config.gps_rate_hz, self.config.gps_sky);
+        let bytes = GpsWriteBytes::from_slice(&frame).expect("a rate write fits one GpsWrite");
+        Some(HostToBridge::GpsWrite { bytes })
     }
 
     /// What carries the nodes, as the bridge last announced it: no carrier before any has.

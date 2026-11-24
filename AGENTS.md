@@ -202,7 +202,8 @@ running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is 
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
 ordered against each other. Only `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
-far, beside the `StopScan` a quit sends; channels are the P4's.
+far, beside the `StopScan` a quit sends and the `SetGpsSky` opening or closing the GPS modal
+sends; channels are the P4's.
 
 ### Store is the system of record
 

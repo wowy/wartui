@@ -8,7 +8,10 @@
 //! **`GSA` and `GSV` feed diagnostics only.** They build the [`Sky`] the view's GPS modal shows:
 //! which satellites are in view, how strong, and which the solution uses. Nothing in the store or
 //! the position chain reads it, so they still report [`Report::Other`], and a malformed one is
-//! skipped rather than rejected.
+//! skipped rather than rejected. The host has the bridge's receiver send them only while the modal
+//! shows it, and turns [`Nmea::set_sky_lists`] off the rest of the time. Off, they still parse and
+//! count as sentences but change nothing in the [`Sky`], so one already in flight when the receiver
+//! is told to stop cannot leave a list behind that no later sentence replaces.
 //!
 //! A `GSV` group is keyed by constellation and signal ID, so a dual-band receiver's L1 and L5 lists
 //! do not overwrite each other, and it replaces the last one only once its final message arrives.
@@ -214,7 +217,7 @@ const HALF_DAY_MS: i64 = DAY_MS / 2;
 
 /// A running parse of one receiver's output.
 /// Holds the date, which arrives in `RMC` and stamps the `GGA` sentences between, and the [`Sky`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Nmea {
     date: Option<NaiveDate>,
     last_stamp_ms: Option<i64>,
@@ -224,6 +227,14 @@ pub struct Nmea {
     used: BTreeSet<(Option<Constellation>, u16)>,
     /// Whether the last sentence was a `GSA`, so the next one continues the run.
     in_gsa_run: bool,
+    /// Whether `GSA` and `GSV` build the [`Sky`]'s satellites and fix mode ([`Self::set_sky_lists`]).
+    sky_lists: bool,
+}
+
+impl Default for Nmea {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Nmea {
@@ -237,6 +248,7 @@ impl Nmea {
             gsv: BTreeMap::new(),
             used: BTreeSet::new(),
             in_gsa_run: false,
+            sky_lists: true,
         }
     }
 
@@ -244,6 +256,25 @@ impl Nmea {
     #[must_use]
     pub const fn sky(&self) -> &Sky {
         &self.sky
+    }
+
+    /// Whether `GSA` and `GSV` build the sky lists. On from [`Self::new`].
+    #[must_use]
+    pub const fn sky_lists(&self) -> bool {
+        self.sky_lists
+    }
+
+    /// Let `GSA` and `GSV` build the satellites and fix mode when `on`, or not. Either way it drops
+    /// what they said so far, with any group or run being assembled: after an off the lists are
+    /// stale, and after an on they start from the receiver's next sentences. The `GGA` and `RMC`
+    /// fields stay.
+    pub fn set_sky_lists(&mut self, on: bool) {
+        self.sky.satellites.clear();
+        self.sky.mode = None;
+        self.gsv.clear();
+        self.used.clear();
+        self.in_gsa_run = false;
+        self.sky_lists = on;
     }
 
     /// Parse one line.
@@ -275,11 +306,15 @@ impl Nmea {
                 Ok(report)
             }
             "GSA" => {
-                self.gsa(talker, &fields);
+                if self.sky_lists {
+                    self.gsa(talker, &fields);
+                }
                 Ok(Report::Other)
             }
             "GSV" => {
-                self.gsv(talker, &fields);
+                if self.sky_lists {
+                    self.gsv(talker, &fields);
+                }
                 Ok(Report::Other)
             }
             _ => Ok(Report::Other),
@@ -756,6 +791,42 @@ mod tests {
         assert_eq!(sky.used_count, Some(0));
         assert_eq!((sky.lat, sky.lon, sky.hdop, sky.speed_kmh), (None, None, None, None));
         assert!(sky.satellites.is_empty());
+    }
+
+    /// A GPS group in view and a 3D `GSA` using one of it.
+    const SKY: [&str; 2] =
+        ["GPGSV,1,1,02,10,63,137,17,08,49,090,26,1", "GNGSA,A,3,10,,,,,,,,,,,,1.5,0.9,1.2,1"];
+
+    #[test]
+    fn nmea_drops_satellites_and_mode_but_keeps_gga_when_sky_lists_turned_off() {
+        let mut nmea = Nmea::new();
+        assert!(nmea.sky_lists(), "on by default, for a host receiver");
+        assert!(nmea.parse(GGA).is_ok());
+        feed(&mut nmea, &SKY);
+        assert_eq!(nmea.sky().satellites.len(), 2);
+
+        nmea.set_sky_lists(false);
+        let sky = nmea.sky();
+        assert!(sky.satellites.is_empty());
+        assert_eq!(sky.mode, None);
+        assert_eq!((sky.quality, sky.used_count), (Some(1), Some(8)));
+        assert!(sky.lat.is_some() && sky.lon.is_some());
+    }
+
+    #[test]
+    fn nmea_parses_but_ignores_gsa_and_gsv_when_sky_lists_off() {
+        let mut nmea = Nmea::new();
+        nmea.set_sky_lists(false);
+        // `feed` asserts each still parses: a sentence arriving after the off is valid.
+        feed(&mut nmea, &SKY);
+        assert!(nmea.sky().satellites.is_empty());
+        assert_eq!(nmea.sky().mode, None);
+
+        nmea.set_sky_lists(true);
+        // Only what arrives from the on: the GPS group from before is gone.
+        feed(&mut nmea, &["GAGSV,1,1,01,05,30,120,33,7", "GNGSA,A,2,05,,,,,,,,,,,,1.5,0.9,1.2,3"]);
+        assert_eq!(sats(&nmea), [(Constellation::Galileo, 5, Some(33), true)]);
+        assert_eq!(nmea.sky().mode, Some(FixMode::TwoD));
     }
 
     #[test]

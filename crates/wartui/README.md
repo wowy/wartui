@@ -56,7 +56,7 @@ another slot leaves the plan at the old one and joins it at the new one on its n
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The bridge GPS rate has no flag; see "Config file". The channel pool has a command, `wartui pool`,
+The bridge GPS rate has no flag; it has a settings row and a config key, see "Config file". The channel pool has a command, `wartui pool`,
 and a settings row; see "The channel pool". `--log-file PATH` is global; see "When nothing arrives".
 
 ### Capture metadata
@@ -421,7 +421,7 @@ wigle-token = ""
 | `[bridge] serial`      | —       | The USB serial number of the CH343 that bridge answered on                     |
 | `[bridge] bluetooth-address` | — | Its C6's Bluetooth address, or on macOS the identifier CoreBluetooth gives it    |
 | `[bridge] link`        | `usb`   | `usb` or `bluetooth`: how commands reach the bridge; see "The Bluetooth link"  |
-| `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
+| `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; settings' `update rate`      |
 | `[gps] wait-for-fix`   | on      | Whether `run` holds the scan until a receiver holds a fix; see "Positions"     |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 | `[api-keys] wigle-name` | `""`   | WiGLE API Name, as its account page gives it                                   |
@@ -1096,8 +1096,8 @@ takes every key until `Esc`, `q` or `g` closes it; the pop-up is then back if th
 to. The box is the file's `[gps] wait-for-fix`: ticked, later launches skip the wait. `wait for
 gps` in settings turns it back on.
 
-Only `c`, `p` and the pop-up's `Enter` reach the engine, and no key sets channels; the bridge
-authors every share.
+Only `c`, `p`, the pop-up's `Enter` and opening or closing `g` reach the engine, and no key sets
+channels; the bridge authors every share.
 
 `u` asks before it sends, sends each site only what is new since its last upload, and leaves the
 capture running; see "Uploading".
@@ -1112,7 +1112,7 @@ key help for a few seconds; see "Power-cycling a node".
 | Key                 | What it does                                                                                        |
 |---------------------|-----------------------------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`   | Move between rows                                                                                   |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                                 |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan and update rate stop at their ends                 |
 | Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)                |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                          |
 | `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it                      |
@@ -1135,9 +1135,9 @@ On the `excluded ssids` page:
 The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5; see
 "The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `wardrive esp` (`off`, `on`; lets a
 phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
-`remember bridge` (`off`, `on`),
-`wait for gps` (`off`, `on`; from the next launch, see "Positions"), `excluded ssids`, the
-API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `log` row (`off`,
+`remember bridge` (`off`, `on`), `excluded ssids`, under `gps` the `wait for gps` row (`off`,
+`on`; from the next launch, see "Positions") and the `update rate` row (1 to 5 Hz; the bridge
+receiver's fixes a second, at once), the API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `log` row (`off`,
 `on`; whether the bridge logs to its microSD card), then the `format` row, which formats the card
 (see "The SD card"). `log` reads `no bridge` while the link is down and `no slot` on a bridge with
 no card slot, and does not step. `excluded ssids` shows how many are listed, or
@@ -1150,7 +1150,9 @@ holds text. `wigle name` shows in full, cut short with `…` when it is wider th
 `wdgwars` and `wigle token` show their last three characters, up to six bullets before them, and
 from ten characters their first one to three. `Enter` sends the rows to the engine and writes
 every row shown but the pool, the fan, `bluetooth`, `wardrive esp` and `log` to `excluded-ssids`,
-`[bridge]`, `[gps] wait-for-fix` and `[api-keys]`, whatever was there, and settings closes. The
+`[bridge]`, `[gps]` and `[api-keys]`, whatever was there, and settings closes. `update rate` goes
+to the engine only when it moved, which sets the receiver at once; unmoved, `bridge-rate-hz` stays
+as the file had it. The
 pool, the fan, `bluetooth`, `wardrive esp` and `log` go to the bridge only when their rows moved,
 and none is written to `wartui.toml`. The bridge keeps the pool, the fan, `wardrive esp` and
 `log`; the run keeps `bluetooth` and asks for it
@@ -1266,7 +1268,9 @@ nothing and says how many networks it left out.
   older than `--gps-max-age`, or the bridge disconnects. After a reconnect it stands down again on
   the first new sentence. A port named with `--gps` is always read, and its fix goes ahead of the
   bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a second (default 5) on every
-  bridge status poll. `g` reports on a port named with `--gps` when there is one. Otherwise it
+  bridge status poll, and at once when settings' `update rate` moves. The receiver sends `GSA` and
+  `GSV` only while `g` is open on it, once a second, so its satellites take about a second to show.
+  While `g` is closed, the waiting-for-GPS pop-up says `fix` rather than `3D fix`. `g` reports on a port named with `--gps` when there is one. Otherwise it
   reports on the bridge's receiver while it is sending sentences, or when a bridge is connected and
   no host receiver is read or found, and shows `bridge` as its port.
   `wartui sniff --verbose` prints the receiver's raw stream.

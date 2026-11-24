@@ -311,6 +311,51 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     );
 }
 
+/// Two satellites in view.
+const GSV: &[u8] = b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69";
+
+#[tokio::test(start_paused = true)]
+async fn drive_keeps_no_bridge_satellites_when_sky_command_turns_them_off() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("sky.db");
+    let link = SimTransport::new(SimConfig { node_count: 1, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+
+    // As the GPS modal leaves it: the sky lists on, and a list in view.
+    let gps = Gps::bridged(Duration::from_secs(5));
+    gps.set_sky_lists(true);
+    gps.feed(FIRST, started.unix_ms);
+    gps.feed(GSV, started.unix_ms);
+    assert_eq!(gps.view().sky.satellites.len(), 2);
+    let config = EngineConfig {
+        position: PositionChain::empty().with_bridge_gps(gps.clone()),
+        ..Default::default()
+    };
+    let engine = FleetEngine::new(config, started);
+    let (snapshot_tx, _snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+
+    command_tx.send(Command::SetGpsSky(false)).await.expect("the engine is listening");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let sky = gps.view().sky;
+    assert!(sky.satellites.is_empty(), "{sky:?}");
+    assert!(sky.lat.is_some(), "the GGA fields stay");
+    // One already in flight when the receiver was told to stop.
+    gps.feed(GSV, now().unix_ms);
+    let sky = gps.view().sky;
+    assert!(sky.satellites.is_empty(), "{sky:?}");
+
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+}
+
 #[tokio::test(start_paused = true)]
 async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
     let dir = tempfile::tempdir().expect("temp dir");

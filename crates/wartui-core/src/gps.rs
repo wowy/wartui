@@ -262,7 +262,10 @@ impl Inner {
     /// Drop what the last receiver said about its sky, so a lost or replaced one shows no
     /// satellites it is not reporting. The retained fix and status belong to the position chain.
     fn forget_receiver(&mut self) {
+        // The host's choice for this receiver, not something the old one said.
+        let sky_lists = self.nmea.sky_lists();
         self.nmea = Nmea::new();
+        self.nmea.set_sky_lists(sky_lists);
         self.heard_ms = None;
     }
 
@@ -411,7 +414,8 @@ impl Gps {
 
     /// The bridge's receiver: detached, and fed by the runtime through [`Gps::feed_bytes`].
     /// `max_age` is the staleness limit its diagnostics and [`Gps::is_talking`] use, as
-    /// [`GpsConfig::max_age`] is for a puck.
+    /// [`GpsConfig::max_age`] is for a puck. Its sky lists start off ([`Gps::set_sky_lists`]), as
+    /// the host's configuration of the receiver does.
     #[must_use]
     pub fn bridged(max_age: Duration) -> Self {
         let gps = Self::detached();
@@ -419,6 +423,7 @@ impl Gps {
             let mut inner = gps.lock();
             inner.via_bridge = true;
             inner.max_age = max_age;
+            inner.nmea.set_sky_lists(false);
         }
         gps
     }
@@ -494,6 +499,13 @@ impl Gps {
         inner.demux = Demux::new();
         inner.lines = Lines::default();
         inner.heard_in_stream = false;
+    }
+
+    /// Let `GSA` and `GSV` build the satellites and fix mode when `on`, as the host turns those
+    /// sentences on or off ([`Nmea::set_sky_lists`]). Either way the lists so far are dropped,
+    /// and the fix and the `GGA` fields stay. Kept across a lost receiver.
+    pub fn set_sky_lists(&self, on: bool) {
+        self.lock().nmea.set_sky_lists(on);
     }
 
     /// The last fix and the Unix milliseconds it arrived.
@@ -886,6 +898,7 @@ impl Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nmea::FixMode;
     use crate::position::DEFAULT_MAX_AGE;
     use crate::ubx::{ACK_VALSET, NAK_VALSET};
 
@@ -1303,6 +1316,64 @@ mod tests {
     }
 
     #[test]
+    fn gps_drops_sky_lists_but_keeps_fix_when_sky_lists_turned_off() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        gps.feed(SKY_GSV, 1_100);
+        gps.feed(SKY_GSA, 1_200);
+        let latest = gps.latest();
+
+        gps.set_sky_lists(false);
+        let view = gps.view();
+        assert!(view.sky.satellites.is_empty());
+        assert_eq!(view.sky.mode, None);
+        assert_eq!(view.sky.used_count, Some(8));
+        assert!(view.sky.lat.is_some());
+        assert_eq!(view.heard_ms, Some(1_200));
+        assert_eq!(gps.latest(), latest);
+    }
+
+    /// Two GPS satellites in view, and a 3D `GSA` using both.
+    const SKY_GSV: &[u8] = b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69";
+    const SKY_GSA: &[u8] = b"$GNGSA,A,3,10,08,,,,,,,,,,,1.5,0.9,1.2,1*36";
+
+    #[test]
+    fn gps_counts_sky_sentences_without_listing_them_when_bridged() {
+        // Off from the start, matching the engine's default.
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        let mut stream = SKY_GSV.to_vec();
+        stream.extend_from_slice(b"\r\n");
+        stream.extend_from_slice(SKY_GSA);
+        stream.extend_from_slice(b"\r\n");
+        gps.feed_bytes(&stream, 1_000);
+
+        let view = gps.view();
+        assert!(view.sky.satellites.is_empty());
+        assert_eq!(view.sky.mode, None);
+        assert_eq!(view.counters.sentences, 2);
+        assert_eq!(view.heard_ms, Some(1_000));
+        assert!(gps.is_talking(1_000), "they still stand the host's search down");
+
+        gps.set_sky_lists(true);
+        gps.feed_bytes(&stream, 1_100);
+        assert_eq!(gps.view().sky.satellites.len(), 2);
+        assert_eq!(gps.view().sky.mode, Some(FixMode::ThreeD));
+    }
+
+    #[test]
+    fn gps_keeps_sky_lists_off_when_receiver_is_lost() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        gps.lock().forget_receiver();
+        gps.feed(SKY_GSV, 1_000);
+        assert!(gps.view().sky.satellites.is_empty());
+
+        gps.set_sky_lists(true);
+        gps.lock().forget_receiver();
+        gps.feed(SKY_GSV, 1_100);
+        assert_eq!(gps.view().sky.satellites.len(), 2);
+    }
+
+    #[test]
     fn gps_reads_bridge_view_when_bridged() {
         let gps = Gps::bridged(Duration::from_secs(3));
         let view = gps.view();
@@ -1490,10 +1561,12 @@ mod tests {
     #[test]
     fn gps_keeps_fix_and_sky_when_stream_is_reset() {
         let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        gps.set_sky_lists(true);
         let mut stream = GGA.to_vec();
         stream.extend_from_slice(b"\r\n$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69\r\n");
         gps.feed_bytes(&stream, 1_000);
         let (latest, sky) = (gps.latest(), gps.view().sky);
+        assert_eq!(sky.satellites.len(), 2);
         gps.reset_stream();
         assert_eq!(gps.latest(), latest);
         assert_eq!(gps.view().sky, sky);
