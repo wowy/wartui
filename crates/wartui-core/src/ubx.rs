@@ -59,17 +59,19 @@ const CFG_UART1OUTPROT_NMEA: u32 = 0x1074_0002;
 /// One `UBX-CFG-VALSET` that sets the receiver's navigation rate and the NMEA it sends on I2C.
 ///
 /// `GGA` and `RMC` arrive every solution, at `rate_hz` (clamped to [`RATE_HZ`]): they carry the
-/// position. `GSA` and `GSV` arrive once a second whatever the rate. They feed only the sky view,
-/// and at the full rate they would be most of the I2C traffic. `GLL` and `VTG` repeat what `RMC`
-/// says, so they are off.
+/// position. `GSA` and `GSV` feed only the sky view, so they arrive once a second whatever the rate
+/// while `sky` is set, and not at all otherwise. Even once a second they are over half of what the
+/// receiver sends at 5 Hz, so the host sets `sky` only while the GPS view is open. `GLL` and `VTG`
+/// repeat what `RMC` says, so they are off.
 ///
 /// **UART1 output is off.** The receiver's transmit buffers are shared across its ports, and by
 /// default UART1 sends the same NMEA at 9600 baud, about 960 bytes a second. Nobody reads it, since
 /// the bridge reads I2C only, and at 5 Hz it cannot keep up: its backlog fills the shared pool, and
 /// the receiver drops I2C sentences and reports `txbuf alloc` in a `TXT` sentence.
 #[must_use]
-pub fn valset_rate(rate_hz: u8) -> Vec<u8> {
+pub fn valset_rate(rate_hz: u8, sky: bool) -> Vec<u8> {
     let rate = rate_hz.clamp(*RATE_HZ.start(), *RATE_HZ.end());
+    let sky_every = if sky { rate } else { 0 };
     let mut payload = vec![0x00, LAYER_RAM, 0x00, 0x00];
     let mut u2 = |key: u32, value: u16| {
         payload.extend_from_slice(&key.to_le_bytes());
@@ -80,8 +82,8 @@ pub fn valset_rate(rate_hz: u8) -> Vec<u8> {
     for (key, every) in [
         (CFG_MSGOUT_NMEA_GGA_I2C, 1),
         (CFG_MSGOUT_NMEA_RMC_I2C, 1),
-        (CFG_MSGOUT_NMEA_GSA_I2C, rate),
-        (CFG_MSGOUT_NMEA_GSV_I2C, rate),
+        (CFG_MSGOUT_NMEA_GSA_I2C, sky_every),
+        (CFG_MSGOUT_NMEA_GSV_I2C, sky_every),
         (CFG_MSGOUT_NMEA_GLL_I2C, 0),
         (CFG_MSGOUT_NMEA_VTG_I2C, 0),
         (CFG_UART1OUTPROT_UBX, 0),
@@ -253,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn ubx_encodes_valset_byte_for_byte_when_rate_is_1_hz() {
+    fn ubx_encodes_valset_byte_for_byte_when_rate_is_1_hz_with_sky() {
         // Worked out independently of `encode`: CFG-RATE-MEAS 1000 ms, GSA and GSV every epoch,
         // UART1 UBX and NMEA output off.
         let expected = [
@@ -263,11 +265,11 @@ mod tests {
             0xC9, 0x00, 0x91, 0x20, 0x00, 0xB0, 0x00, 0x91, 0x20, 0x00, 0x01, 0x00, 0x74, 0x10,
             0x00, 0x02, 0x00, 0x74, 0x10, 0x00, 0xF0, 0x58,
         ];
-        assert_eq!(valset_rate(1), expected);
+        assert_eq!(valset_rate(1, true), expected);
     }
 
     #[test]
-    fn ubx_encodes_valset_byte_for_byte_when_rate_is_5_hz() {
+    fn ubx_encodes_valset_byte_for_byte_when_rate_is_5_hz_with_sky() {
         // CFG-RATE-MEAS 200 ms, GSA and GSV every fifth epoch, UART1 output off.
         let expected = [
             0xB5, 0x62, 0x06, 0x8A, 0x38, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x21, 0x30,
@@ -276,19 +278,50 @@ mod tests {
             0xC9, 0x00, 0x91, 0x20, 0x00, 0xB0, 0x00, 0x91, 0x20, 0x00, 0x01, 0x00, 0x74, 0x10,
             0x00, 0x02, 0x00, 0x74, 0x10, 0x00, 0xD5, 0x87,
         ];
-        assert_eq!(valset_rate(5), expected);
+        assert_eq!(valset_rate(5, true), expected);
+    }
+
+    #[test]
+    fn ubx_encodes_valset_byte_for_byte_when_rate_is_1_hz_without_sky() {
+        // Worked out independently of `encode`: CFG-RATE-MEAS 1000 ms, GSA and GSV off, UART1
+        // output off.
+        let expected = [
+            0xB5, 0x62, 0x06, 0x8A, 0x38, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x21, 0x30,
+            0xE8, 0x03, 0x02, 0x00, 0x21, 0x30, 0x01, 0x00, 0xBA, 0x00, 0x91, 0x20, 0x01, 0xAB,
+            0x00, 0x91, 0x20, 0x01, 0xBF, 0x00, 0x91, 0x20, 0x00, 0xC4, 0x00, 0x91, 0x20, 0x00,
+            0xC9, 0x00, 0x91, 0x20, 0x00, 0xB0, 0x00, 0x91, 0x20, 0x00, 0x01, 0x00, 0x74, 0x10,
+            0x00, 0x02, 0x00, 0x74, 0x10, 0x00, 0xEE, 0x29,
+        ];
+        assert_eq!(valset_rate(1, false), expected);
+    }
+
+    #[test]
+    fn ubx_encodes_valset_byte_for_byte_when_rate_is_5_hz_without_sky() {
+        // CFG-RATE-MEAS 200 ms, GSA and GSV off, UART1 output off.
+        let expected = [
+            0xB5, 0x62, 0x06, 0x8A, 0x38, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x21, 0x30,
+            0xC8, 0x00, 0x02, 0x00, 0x21, 0x30, 0x01, 0x00, 0xBA, 0x00, 0x91, 0x20, 0x01, 0xAB,
+            0x00, 0x91, 0x20, 0x01, 0xBF, 0x00, 0x91, 0x20, 0x00, 0xC4, 0x00, 0x91, 0x20, 0x00,
+            0xC9, 0x00, 0x91, 0x20, 0x00, 0xB0, 0x00, 0x91, 0x20, 0x00, 0x01, 0x00, 0x74, 0x10,
+            0x00, 0x02, 0x00, 0x74, 0x10, 0x00, 0xCB, 0x9C,
+        ];
+        assert_eq!(valset_rate(5, false), expected);
     }
 
     #[test]
     fn ubx_clamps_valset_rate_when_out_of_range() {
-        assert_eq!(valset_rate(0), valset_rate(1));
-        assert_eq!(valset_rate(9), valset_rate(5));
+        for sky in [false, true] {
+            assert_eq!(valset_rate(0, sky), valset_rate(1, sky));
+            assert_eq!(valset_rate(9, sky), valset_rate(5, sky));
+        }
     }
 
     #[test]
     fn ubx_valset_fits_gps_write_when_at_any_rate() {
         for rate in RATE_HZ {
-            assert!(valset_rate(rate).len() <= GPS_WRITE_MAX);
+            for sky in [false, true] {
+                assert!(valset_rate(rate, sky).len() <= GPS_WRITE_MAX);
+            }
         }
     }
 

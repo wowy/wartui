@@ -45,6 +45,8 @@ pub(super) struct Ui {
     modal: Option<ConfigModal>,
     /// Whether the GPS modal is open.
     gps_open: bool,
+    /// What [`Self::poll_gps_sky`] last told the engine it wants of the bridge's sky sentences.
+    sky_sent: bool,
     /// Where to save, and what was last saved there.
     settings: Settings,
     /// The upload `u` started.
@@ -106,6 +108,18 @@ impl Ui {
     pub(super) fn on_gps_key(&mut self, key: KeyEvent) {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'g')) {
             self.gps_open = false;
+        }
+    }
+
+    /// Tell the engine, once per change, whether the GPS modal is showing the bridge's receiver,
+    /// so that receiver sends its sky lists only while the modal shows them
+    /// ([`Command::SetGpsSky`]). A modal showing a host port wants nothing of the bridge. One rule
+    /// here covers every key that opens or closes the modal, and a change of the receiver it
+    /// shows ([`Snapshot::gps`]). A full queue is tried again on the next call.
+    pub(super) fn poll_gps_sky(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+        let wanted = self.gps_open && snapshot.gps.as_ref().is_some_and(|gps| gps.via_bridge);
+        if wanted != self.sky_sent && commands.try_send(Command::SetGpsSky(wanted)).is_ok() {
+            self.sky_sent = wanted;
         }
     }
 
@@ -653,6 +667,62 @@ mod tests {
     }
 
     #[test]
+    fn ui_sends_gps_sky_once_per_change_when_gps_modal_opens_and_closes() {
+        let snapshot = with_bridge_sky(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "closed from the start: the engine's default");
+
+        ui.on_key(press('g'), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "the key itself sends nothing");
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "once per change");
+
+        ui.on_gps_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(false)));
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ui_sends_no_gps_sky_when_gps_modal_shows_host_port() {
+        let host = with_sky(4);
+        assert!(!host.gps.as_ref().expect("a receiver").via_bridge);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(press('g'), &host, &tx);
+        ui.poll_gps_sky(&host, &tx);
+        assert!(rx.try_recv().is_err(), "the bridge's receiver is not on screen");
+
+        // The modal's source turns to the bridge while it is open, and back.
+        let bridge = with_bridge_sky(4);
+        ui.poll_gps_sky(&bridge, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
+        ui.poll_gps_sky(&host, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(false)));
+    }
+
+    #[test]
+    fn ui_retries_gps_sky_when_command_queue_is_full() {
+        let snapshot = with_bridge_sky(4);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Command::StopScan).expect("room for one");
+        let mut ui = Ui::default();
+        ui.on_key(press('g'), &snapshot, &tx);
+
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::StopScan), "the full queue took nothing more");
+        assert!(rx.try_recv().is_err());
+        ui.poll_gps_sky(&snapshot, &tx);
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
+    }
+
+    #[test]
     fn ui_clamps_cursor_to_valid_row_when_navigating_or_fleet_size_changes() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
@@ -791,6 +861,19 @@ mod tests {
         ui.on_gps_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!ui.gps_open());
         assert!(ui.fix_wait_lines(&snapshot).is_some(), "the pop-up is there again");
+    }
+
+    #[test]
+    fn ui_sends_gps_sky_when_gps_modal_opens_over_fix_wait() {
+        let mut snapshot = awaiting_fix();
+        snapshot.gps.as_mut().expect("a receiver").via_bridge = true;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_fix_wait_key(press('g'), &snapshot, &tx);
+        ui.poll_gps_sky(&snapshot, &tx);
+
+        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
     }
 
     #[test]

@@ -11,7 +11,10 @@
 //! puck search stands down (`stand_host_down`); it resumes when the last one ages past the limit
 //! or the bridge disconnects. Whether a bridge is connected is the engine's to say
 //! ([`FleetEngine::bridge_connected`]), read after the engine has seen each link event. Each
-//! connection, and each disconnect, starts the bridge's stream over.
+//! connection, and each disconnect, starts the bridge's stream over. [`Command::SetGpsSky`] also
+//! sets whether the bridge receiver's `GSA` and `GSV` build its sky lists
+//! ([`crate::gps::Gps::set_sky_lists`]), so one in flight when the receiver stops sending them
+//! leaves no satellites behind.
 //!
 //! **A capture ends by stopping the scan.** When `stop` fires, [`drive`] tells the engine to stop
 //! the P4's scan, and keeps reading until the P4 reports stopped or [`QUIT_WAIT`] passes. Dropping
@@ -151,6 +154,11 @@ pub async fn drive(
             Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
                 if let Some(gps) = &bridge_gps {
                     gps.reset_stream();
+                }
+            }
+            Event::Command(Command::SetGpsSky(on)) => {
+                if let Some(gps) = &bridge_gps {
+                    gps.set_sky_lists(*on);
                 }
             }
             // A quiet receiver sends nothing to age its fix by, nor to resume the host's search.

@@ -177,6 +177,9 @@ pub struct Snapshot {
     pub gps: Option<GpsView>,
     /// The SSIDs never captured, as text for the settings modal to edit.
     pub excluded_ssids: Vec<String>,
+    /// The bridge GPS receiver's rate in force, in hertz, for the settings modal to edit
+    /// ([`EngineConfig::gps_rate_hz`](super::EngineConfig::gps_rate_hz)).
+    pub gps_rate_hz: u8,
     /// The bridge's last answer to [`Command::PowerCycle`](super::Command::PowerCycle), for the
     /// view to show once.
     pub power_answer: Option<PowerAnswer>,
@@ -391,6 +394,7 @@ impl FleetEngine {
                 .iter()
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
+            gps_rate_hz: self.config.gps_rate_hz,
             power_answer: self.power_answer.clone(),
             sd_answer: self.sd_answer.clone(),
             awaiting_fix: self.fix_wait,

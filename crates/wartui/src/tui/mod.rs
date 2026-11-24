@@ -97,6 +97,7 @@ async fn view(
         ui.poll_sd(&current);
         ui.poll_bridge();
         ui.poll_link(&current);
+        ui.poll_gps_sky(&current, commands);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }

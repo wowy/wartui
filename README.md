@@ -181,7 +181,7 @@ the pop-up again if the run still waits.
 | Key                 | What it does                                                                                        |
 |---------------------|-----------------------------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`   | Move between rows                                                                                   |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan stops at 0 and 100                                 |
+| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan and update rate stop at their ends                 |
 | Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)                |
 | `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                          |
 | `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it                      |

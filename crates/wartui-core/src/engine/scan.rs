@@ -50,6 +50,7 @@ use wartui_proto::link::HostToBridge;
 
 use super::{ActionBatch, Command, FleetEngine, Now};
 use crate::record::{Record, ShareChange};
+use crate::ubx;
 
 /// How long a receiver must hold a fix before a run waiting for one starts the scan. Long enough
 /// that a receiver's first fix, often a stray one ahead of a steady lock, does not open the gate.
@@ -120,6 +121,14 @@ impl FleetEngine {
                 self.open_fix_gate(batch);
             }
             Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
+            Command::SetGpsRate(rate_hz) => {
+                self.config.gps_rate_hz = rate_hz.clamp(*ubx::RATE_HZ.start(), *ubx::RATE_HZ.end());
+                batch.bulk.extend(self.gps_write());
+            }
+            Command::SetGpsSky(sky) => {
+                self.config.gps_sky = sky;
+                batch.bulk.extend(self.gps_write());
+            }
             Command::PowerCycle { slot } => batch.bulk.push(HostToBridge::PowerCycle { slot }),
             Command::SetFanDuty { duty } => {
                 batch.bulk.push(HostToBridge::SetFan { duty });

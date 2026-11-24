@@ -128,6 +128,20 @@ pub enum Command {
     /// [`Snapshot::sd_log`](super::Snapshot::sd_log) shows the setting in force. The bridge stores
     /// it, so the engine holds nothing and never sends it again.
     SetSdLog(bool),
+
+    /// Run the bridge's GPS receiver at this many hertz, clamped to [`crate::ubx::RATE_HZ`]
+    /// ([`EngineConfig::gps_rate_hz`]).
+    ///
+    /// Written to the receiver at once, as every status poll writes it again. The host holds it,
+    /// not the bridge.
+    SetGpsRate(u8),
+
+    /// Have the bridge's GPS receiver send `GSA` and `GSV` when `true`, once a second
+    /// ([`EngineConfig::gps_sky`]). Only the view's sky list reads them, so the view turns them on
+    /// while it shows that list.
+    ///
+    /// Written to the receiver at once, as every status poll writes it again.
+    SetGpsSky(bool),
 }
 
 /// What the engine wants done as a result.

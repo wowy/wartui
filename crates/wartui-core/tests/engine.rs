@@ -22,7 +22,7 @@ use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{
     BatchGap, BridgeStatusSeen, HostLink, HostStatus, NodePanic, Record, ShareChange,
 };
-use wartui_core::ubx::valset_rate;
+use wartui_core::ubx::{DEFAULT_RATE_HZ, valset_rate};
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, Heartbeat as HeartbeatMsg, MAX_SLOTS, NODE_VERSION, NodeBoard,
     NodeBus, PANIC_MAX, PanicMsg, RecordKind, Security, SightingBatchWriter, SightingMsg, Slot,
@@ -1835,9 +1835,91 @@ fn engine_writes_gps_rate_on_every_poll_when_bridge_is_connected() {
         ..config_with_receivers(&Gps::detached(), &Gps::detached())
     };
     let mut engine = engine(config, &clock);
-    assert_eq!(gps_writes(&engine.handle(connected(), clock.at(1))), [valset_rate(2)]);
+    // The sky sentences start off: only the GPS view reads them.
+    assert_eq!(gps_writes(&engine.handle(connected(), clock.at(1))), [valset_rate(2, false)]);
     // The next poll repeats it: a dropped write has nothing else behind it.
-    assert_eq!(gps_writes(&engine.handle(Event::Tick, clock.at(7))), [valset_rate(2)]);
+    assert_eq!(gps_writes(&engine.handle(Event::Tick, clock.at(7))), [valset_rate(2, false)]);
+}
+
+/// An engine connected at second 1 to a bridge whose receiver is in the chain.
+fn engine_with_bridge_gps(clock: &Clock) -> FleetEngine {
+    let mut engine = engine(config_with_receivers(&Gps::detached(), &Gps::detached()), clock);
+    engine.handle(connected(), clock.at(1));
+    engine
+}
+
+#[test]
+fn engine_writes_gps_sky_at_once_when_command_sets_it() {
+    let clock = Clock::new();
+    let mut engine = engine_with_bridge_gps(&clock);
+
+    let batch = engine.handle(Event::Command(Command::SetGpsSky(true)), clock.at(2));
+    assert_eq!(batch.bulk.len(), 1, "one write and no status poll: {:?}", batch.bulk);
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, true)]);
+    // The poll repeats the setting in force.
+    let poll = engine.handle(Event::Tick, clock.at(7));
+    assert_eq!(gps_writes(&poll), [valset_rate(DEFAULT_RATE_HZ, true)]);
+
+    let batch = engine.handle(Event::Command(Command::SetGpsSky(false)), clock.at(8));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+    let poll = engine.handle(Event::Tick, clock.at(13));
+    assert_eq!(gps_writes(&poll), [valset_rate(DEFAULT_RATE_HZ, false)]);
+}
+
+#[test]
+fn engine_writes_gps_rate_at_once_when_command_sets_it() {
+    let clock = Clock::new();
+    let mut engine = engine_with_bridge_gps(&clock);
+
+    let batch = engine.handle(Event::Command(Command::SetGpsRate(2)), clock.at(2));
+    assert_eq!(batch.bulk.len(), 1, "one write and no status poll: {:?}", batch.bulk);
+    assert_eq!(gps_writes(&batch), [valset_rate(2, false)]);
+    assert_eq!(gps_writes(&engine.handle(Event::Tick, clock.at(7))), [valset_rate(2, false)]);
+    assert_eq!(engine.snapshot(clock.at(7), StoreStats::default()).gps_rate_hz, 2);
+}
+
+#[test]
+fn engine_clamps_gps_rate_when_command_is_out_of_range() {
+    let clock = Clock::new();
+    let mut engine = engine_with_bridge_gps(&clock);
+    engine.handle(Event::Command(Command::SetGpsRate(1)), clock.at(2));
+
+    let batch = engine.handle(Event::Command(Command::SetGpsRate(9)), clock.at(3));
+    assert_eq!(gps_writes(&batch), [valset_rate(5, false)]);
+    assert_eq!(engine.snapshot(clock.at(3), StoreStats::default()).gps_rate_hz, 5);
+}
+
+#[test]
+fn engine_keeps_gps_settings_for_next_poll_when_bridge_is_not_connected() {
+    let clock = Clock::new();
+    let config = config_with_receivers(&Gps::detached(), &Gps::detached());
+    let mut engine = engine(config, &clock);
+
+    assert!(
+        gps_writes(&engine.handle(Event::Command(Command::SetGpsRate(3)), clock.at(1))).is_empty()
+    );
+    assert!(
+        gps_writes(&engine.handle(Event::Command(Command::SetGpsSky(true)), clock.at(1)))
+            .is_empty()
+    );
+    assert_eq!(gps_writes(&engine.handle(connected(), clock.at(2))), [valset_rate(3, true)]);
+}
+
+#[test]
+fn engine_writes_no_gps_settings_when_chain_has_no_bridge_receiver() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(1));
+
+    assert!(
+        gps_writes(&engine.handle(Event::Command(Command::SetGpsRate(3)), clock.at(2))).is_empty()
+    );
+    assert!(
+        gps_writes(&engine.handle(Event::Command(Command::SetGpsSky(true)), clock.at(2)))
+            .is_empty()
+    );
+    // Still the rate in force, for the settings modal.
+    assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).gps_rate_hz, 3);
 }
 
 #[test]
