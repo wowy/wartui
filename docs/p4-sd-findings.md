@@ -231,10 +231,14 @@ while the nodes ran the burst:
 | 100 %, about 4,000 rpm, after 3 min | 31 °C | 15 °C |
 | 0 % again, after 3 min | 35 °C | 22 °C |
 
-**The P4's reading follows the fan and stays above the room's, so it is believed.** **The C6's
-reads low**: 15 °C with the fan on, at least 7 °C below the room's 22 °C, which a working die
-cannot be. Its PHY reading carries a per-chip offset, as `health.rs` says the node's may, so only
-a change in it means anything.
+An IR thermometer on the board's chips read about 47 °C (117 °F), idle with the fan off, the lid
+on and the board 4 minutes up. The bridge read itself at the same moment: P4 44 °C, C6 33 °C.
+
+**The P4's reading follows the fan, and sits within about 3 °C of the IR reading, so it is
+believed.** A die runs at or above its package's surface, so if anything it reads a few degrees
+low. **The C6's reads low, by about 14 °C**: 15 °C with the fan on, at least 7 °C below the room's
+22 °C, which a working die cannot be. Its PHY reading carries a per-chip offset, as `health.rs`
+says the node's may, so only a change in it means anything.
 
 ### The C6's readings on a live link
 
