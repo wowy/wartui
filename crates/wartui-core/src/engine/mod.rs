@@ -30,7 +30,9 @@
 //! operator as [`Snapshot::sd_answer`], as a power-cycle's does.
 //! [`Command::SetSdLog`] sets whether the bridge logs to that card, which the bridge keeps.
 //! [`Command::SetGpsRate`] sets the bridge GPS receiver's rate, and [`Command::SetGpsSky`] whether
-//! it sends the sky view's sentences. The host keeps both and writes them with every status poll.
+//! the view wants the sky view's sentences. The receiver sends them while the view wants them or
+//! the run waits for a fix ([`FleetEngine::gps_sky`]), so the log can say why a fix is slow. The
+//! host keeps both settings and writes them with every status poll.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -139,6 +141,12 @@ pub struct FleetEngine {
     /// a receiver has held one for [`FIX_WAIT`], on [`Command::StartWithoutFix`], and on
     /// [`Command::StopScan`].
     fix_wait: bool,
+    /// The first tick of the wait for a GPS fix, which the log's wait times count from. `None`
+    /// before it and once the gate opens.
+    fix_wait_since: Option<Instant>,
+    /// When the wait last logged what the bridge's receiver sees ([`scan::SEARCH_LOG_EVERY`]).
+    /// `None` until the first such line.
+    searched_at: Option<Instant>,
     /// The receiver's run of fix reports the last tick saw ([`PositionChain::fix_run`]), and the
     /// monotonic instant a tick first saw it. `None` while no receiver holds a fix.
     fix_run: Option<(i64, Instant)>,
@@ -214,6 +222,8 @@ impl FleetEngine {
             wanted: None,
             status_seen: false,
             fix_wait: config.auto_start && config.wait_for_fix,
+            fix_wait_since: None,
+            searched_at: None,
             fix_run: None,
             last_arrival: None,
             // Caught up, as on `Connected`.
@@ -365,13 +375,22 @@ impl FleetEngine {
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
+    /// Whether the bridge's receiver should send `GSA` and `GSV`: while the view wants them
+    /// ([`EngineConfig::gps_sky`]), and while the run waits for a fix, so the log can count the
+    /// sky it searches. The runtime reads this after each event to set whether those sentences
+    /// build the bridge receiver's sky lists.
+    #[must_use]
+    pub fn gps_sky(&self) -> bool {
+        self.config.gps_sky || self.fix_wait
+    }
+
     /// The receiver's configuration as it stands, rate and sky, for a connected bridge whose GPS
     /// is in the chain. `None` otherwise.
     fn gps_write(&self) -> Option<HostToBridge> {
         if !self.bridge_connected() || self.config.position.bridge_gps().is_none() {
             return None;
         }
-        let frame = ubx::valset_rate(self.config.gps_rate_hz, self.config.gps_sky);
+        let frame = ubx::valset_rate(self.config.gps_rate_hz, self.gps_sky());
         let bytes = GpsWriteBytes::from_slice(&frame).expect("a rate write fits one GpsWrite");
         Some(HostToBridge::GpsWrite { bytes })
     }

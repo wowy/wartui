@@ -9,9 +9,10 @@
 //! which satellites are in view, how strong, and which the solution uses. Nothing in the store or
 //! the position chain reads it, so they still report [`Report::Other`], and a malformed one is
 //! skipped rather than rejected. The host has the bridge's receiver send them only while the modal
-//! shows it, and turns [`Nmea::set_sky_lists`] off the rest of the time. Off, they still parse and
-//! count as sentences but change nothing in the [`Sky`], so one already in flight when the receiver
-//! is told to stop cannot leave a list behind that no later sentence replaces.
+//! shows it or the run waits for a fix, whose log counts them ([`SkyCounts`]), and turns
+//! [`Nmea::set_sky_lists`] off the rest of the time. Off, they still parse and count as sentences
+//! but change nothing in the [`Sky`], so one already in flight when the receiver is told to stop
+//! cannot leave a list behind that no later sentence replaces.
 //!
 //! A `GSV` group is keyed by constellation and signal ID, so a dual-band receiver's L1 and L5 lists
 //! do not overwrite each other, and it replaces the last one only once its final message arrives.
@@ -128,6 +129,40 @@ impl Sky {
             hdop: None,
             speed_kmh: None,
             satellites: Vec::new(),
+        }
+    }
+}
+
+/// The SNR, in dB-Hz, at and above which [`SkyCounts`] counts a satellite strong: enough for a
+/// receiver to download its orbit and use it.
+pub const STRONG_SNR: u8 = 30;
+
+/// A [`Sky`]'s satellites in numbers, for the log a run waiting for a fix writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkyCounts {
+    /// Satellites in view.
+    pub in_view: usize,
+    /// Satellites in view with an SNR: the receiver tracks them.
+    pub tracked: usize,
+    /// Satellites the solution uses.
+    pub used: usize,
+    /// The highest SNR in view, in dB-Hz. `None` while none is tracked.
+    pub best_snr: Option<u8>,
+    /// Satellites at or above [`STRONG_SNR`].
+    pub strong: usize,
+}
+
+impl SkyCounts {
+    /// Count `sky`'s satellites.
+    #[must_use]
+    pub fn of(sky: &Sky) -> Self {
+        let sats = &sky.satellites;
+        Self {
+            in_view: sats.len(),
+            tracked: sats.iter().filter(|s| s.snr.is_some()).count(),
+            used: sats.iter().filter(|s| s.used).count(),
+            best_snr: sats.iter().filter_map(|s| s.snr).max(),
+            strong: sats.iter().filter(|s| s.snr.is_some_and(|snr| snr >= STRONG_SNR)).count(),
         }
     }
 }
@@ -796,6 +831,33 @@ mod tests {
     /// A GPS group in view and a 3D `GSA` using one of it.
     const SKY: [&str; 2] =
         ["GPGSV,1,1,02,10,63,137,17,08,49,090,26,1", "GNGSA,A,3,10,,,,,,,,,,,,1.5,0.9,1.2,1"];
+
+    #[test]
+    fn sky_counts_counts_tracked_used_and_strong_when_sky_is_fed() {
+        let mut nmea = Nmea::new();
+        // Four GPS in view: one untracked, one weak, one at the line and one above it, used.
+        feed(
+            &mut nmea,
+            &[
+                "GPGSV,1,1,04,10,63,137,,08,49,090,17,12,30,200,30,15,20,050,41,1",
+                "GNGSA,A,3,15,,,,,,,,,,,,1.5,0.9,1.2,1",
+            ],
+        );
+        let counts = SkyCounts::of(nmea.sky());
+        assert_eq!(
+            counts,
+            SkyCounts { in_view: 4, tracked: 3, used: 1, best_snr: Some(41), strong: 2 }
+        );
+    }
+
+    #[test]
+    fn sky_counts_reports_no_best_snr_when_nothing_is_tracked() {
+        let mut nmea = Nmea::new();
+        feed(&mut nmea, &["GPGSV,1,1,02,10,63,137,,08,49,090,,1"]);
+        let counts = SkyCounts::of(nmea.sky());
+        assert_eq!(counts, SkyCounts { in_view: 2, ..SkyCounts::default() });
+        assert_eq!(SkyCounts::of(&Sky::default()), SkyCounts::default());
+    }
 
     #[test]
     fn nmea_drops_satellites_and_mode_but_keeps_gga_when_sky_lists_turned_off() {

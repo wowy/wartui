@@ -3931,6 +3931,86 @@ fn engine_restarts_at_once_when_bridge_resets_after_fix_wait() {
     assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }], "no second wait");
 }
 
+/// [`fix_capture`], waiting for a fix from the bridge's receiver `gps`.
+fn bridge_fix_capture(gps: &Gps, clock: &Clock, wait_for_fix: bool) -> (FleetEngine, ActionBatch) {
+    let config = EngineConfig {
+        auto_start: true,
+        wait_for_fix,
+        position: PositionChain::empty().with_bridge_gps(gps.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    let batch = engine.handle(connected(), clock.at(0));
+    (engine, batch)
+}
+
+#[test]
+fn engine_writes_gps_sky_on_when_run_waits_for_fix() {
+    // The modal is closed: the wait alone turns the sky on, for the log's search lines.
+    let clock = Clock::new();
+    let (mut engine, batch) = bridge_fix_capture(&Gps::bridged(DEFAULT_MAX_AGE), &clock, true);
+    assert!(engine.gps_sky());
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, true)]);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+    let poll = tick_at(&mut engine, &clock, 6_000);
+    assert_eq!(gps_writes(&poll), [valset_rate(DEFAULT_RATE_HZ, true)]);
+}
+
+#[test]
+fn engine_writes_gps_sky_off_with_start_when_fix_gate_opens() {
+    let clock = Clock::new();
+    let gps = Gps::bridged(DEFAULT_MAX_AGE);
+    let (mut engine, _) = bridge_fix_capture(&gps, &clock, true);
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    assert!(fixes_ticked(&mut engine, &gps, &clock, [1_000, 2_000]).is_empty());
+    fixes(&gps, &clock, [3_000]);
+    let batch = tick_at(&mut engine, &clock, 3_000);
+    assert_eq!(scans(&batch), [HostToBridge::StartScan { bluetooth: false }]);
+    // In the gate's own batch, not at the next poll.
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+    assert!(!engine.gps_sky());
+    let poll = tick_at(&mut engine, &clock, 6_000);
+    assert_eq!(gps_writes(&poll), [valset_rate(DEFAULT_RATE_HZ, false)]);
+}
+
+#[test]
+fn engine_keeps_gps_sky_on_when_modal_closes_during_fix_wait() {
+    let clock = Clock::new();
+    let (mut engine, _) = bridge_fix_capture(&Gps::bridged(DEFAULT_MAX_AGE), &clock, true);
+    engine.handle(Event::Command(Command::SetGpsSky(true)), clock.at(1));
+
+    let batch = engine.handle(Event::Command(Command::SetGpsSky(false)), clock.at(2));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, true)]);
+    assert!(engine.gps_sky());
+    // Once the wait ends, the closed modal decides.
+    let batch = engine.handle(Event::Command(Command::StartWithoutFix), clock.at(3));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+}
+
+#[test]
+fn engine_writes_gps_sky_off_when_run_does_not_wait_for_fix() {
+    let clock = Clock::new();
+    let (mut engine, batch) = bridge_fix_capture(&Gps::bridged(DEFAULT_MAX_AGE), &clock, false);
+    assert!(!engine.gps_sky());
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+
+    let batch = engine.handle(Event::Command(Command::SetGpsSky(true)), clock.at(1));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, true)]);
+    let batch = engine.handle(Event::Command(Command::SetGpsSky(false)), clock.at(2));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+}
+
+#[test]
+fn engine_writes_gps_sky_off_when_operator_stops_during_fix_wait() {
+    let clock = Clock::new();
+    let (mut engine, _) = bridge_fix_capture(&Gps::bridged(DEFAULT_MAX_AGE), &clock, true);
+
+    let batch = engine.handle(Event::Command(Command::StopScan), clock.at(1));
+    assert_eq!(gps_writes(&batch), [valset_rate(DEFAULT_RATE_HZ, false)]);
+    assert!(!engine.gps_sky());
+}
+
 #[test]
 fn engine_reports_awaiting_fix_in_snapshot_when_waiting_from_start() {
     let clock = Clock::new();
@@ -4217,7 +4297,7 @@ thread_local! {
     static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The engine's node-membership log lines, each as `field=value` pairs.
+/// The engine's node-membership and GPS wait log lines, each as `field=value` pairs.
 ///
 /// One global subscriber with a per-thread capture, not `with_default` per test: a scoped
 /// subscriber coming and going while other tests run lets tracing cache a callsite as disabled.
@@ -4249,8 +4329,12 @@ impl tracing::Subscriber for Logs {
         }
         let mut fields = Fields(String::new());
         event.record(&mut fields);
-        // Lag lines are not about membership.
-        if fields.0.starts_with("message=node ") || fields.0.starts_with("message=host needs") {
+        // Lag lines are not about membership or the GPS wait.
+        if fields.0.starts_with("message=node ")
+            || fields.0.starts_with("message=host needs")
+            || fields.0.starts_with("message=gps searching")
+            || fields.0.starts_with("message=gps fix held")
+        {
             CAPTURED.with_borrow_mut(|lines| lines.as_mut().map(|lines| lines.push(fields.0)));
         }
     }
@@ -4590,4 +4674,78 @@ fn engine_logs_nothing_when_link_outage_holds_heartbeats_past_timeout() {
     });
 
     assert!(lines.is_empty(), "{lines:?}");
+}
+
+/// Two satellites in view, tracked at 17 and 26 dB-Hz.
+const GSV_TWO: &[u8] = b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69";
+
+/// A stopped `Status` from a bridge up `uptime_ms`.
+fn stopped_up(uptime_ms: u32) -> Event {
+    let mut status = scan_status(ScanMode::Stopped);
+    if let Event::Link(LinkEvent::Message(BridgeToHost::Status { uptime_ms: up, .. })) = &mut status
+    {
+        *up = uptime_ms;
+    }
+    status
+}
+
+#[test]
+fn engine_logs_gps_search_every_30_s_when_waiting_for_bridge_fix() {
+    let clock = Clock::new();
+    let gps = Gps::bridged(DEFAULT_MAX_AGE);
+    // As the runtime sets them while the engine wants the sky.
+    gps.set_sky_lists(true);
+    let (mut engine, _) = bridge_fix_capture(&gps, &clock, true);
+    engine.handle(stopped_up(90_000), clock.at(0));
+    gps.feed(GSV_TWO, clock.at(1).unix_ms);
+
+    let lines = Logs::during(|| {
+        for ms in (0..=75_000).step_by(250) {
+            tick_at(&mut engine, &clock, ms);
+        }
+    });
+
+    // The first a whole interval in, once the lists have had time to fill.
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("message=gps searching"), "{lines:?}");
+    assert!(
+        lines[0].contains("waited_s=30 bridge_up_s=90 in_view=2 tracked=2 used=0"),
+        "{lines:?}"
+    );
+    assert!(lines[0].contains("best_snr=26 strong=0"), "{lines:?}");
+    assert!(lines[1].contains("waited_s=60"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_no_gps_search_when_waiting_for_host_fix() {
+    // The host's receiver keeps no sky the bridge's wait could explain.
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let mut engine = fix_capture(&gps, &clock);
+
+    let lines = Logs::during(|| {
+        for s in [0, 30, 60] {
+            engine.handle(Event::Tick, clock.at(s));
+        }
+    });
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_wait_and_bridge_uptime_when_fix_held() {
+    let clock = Clock::new();
+    let gps = Gps::bridged(DEFAULT_MAX_AGE);
+    let (mut engine, _) = bridge_fix_capture(&gps, &clock, true);
+    engine.handle(stopped_up(90_000), clock.at(0));
+    tick_at(&mut engine, &clock, 0);
+
+    let lines = Logs::during(|| {
+        fixes_ticked(&mut engine, &gps, &clock, [40_000, 41_000, 42_000]);
+    });
+
+    // The tick at 40 s, the first in 30 s, logs a search too.
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("message=gps searching"), "{lines:?}");
+    assert!(lines[1].starts_with("message=gps fix held"), "{lines:?}");
+    assert!(lines[1].contains("waited_s=42 bridge_up_s=90"), "{lines:?}");
 }

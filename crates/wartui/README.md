@@ -1314,7 +1314,11 @@ nothing and says how many networks it left out.
   wait back on from the next launch. The wait happens once: a
   bridge that reboots later in the run is restarted at once. There is no wait with `--no-gps`,
   with `--lat`/`--lon`, or under `--sim` unless `--gps PATH` names a port. A run whose receiver is
-  missing shows `no receiver found` in the pop-up until `Enter`.
+  missing shows `no receiver found` in the pop-up until `Enter`. While it waits, the bridge's
+  receiver sends its sky as though the GPS modal were open, and the log (`--log-file`) gets a
+  `gps searching` line every 30 s: satellites in view, tracked and used, the best signal, and how
+  many are strong (30 dB-Hz and up). The `gps fix held` line that ends the wait gives how long it
+  took and the bridge's uptime.
 - **The receiver runs on its own thread; nothing blocks on it.** The view comes up at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
   `gps no receiver`, or the port's error. The search keeps running there, so a puck replugged into
