@@ -29,9 +29,12 @@
 //! `wartui_proto::tsens::p4_tsens_c`, tested on the host. The bench checks the reading: it moves
 //! with the lid fan on and off, and sits near the C6's own reading beside it.
 
+use core::fmt::Write as _;
+
 use esp_hal::delay::Delay;
 use esp_hal::peripherals::{LP_I2C_ANA_MST, LP_PERI, PMU};
 use wartui_proto::bus::DieTemp;
+use wartui_proto::link::LogStr;
 use wartui_proto::tsens::p4_tsens_c;
 
 /// The analog I2C block of the SAR ADC and the temperature sensor.
@@ -68,6 +71,22 @@ impl Tsens {
     pub fn read(&self) -> DieTemp {
         let out = self.block.ctrl().read().out().bits();
         DieTemp::from_c(p4_tsens_c(out, self.calibration))
+    }
+
+    /// Say the eFuse calibration and one reading's raw code beside what it converts to, once
+    /// at boot, so a bench can check the correction by hand: `tsens: calibration 0x019, code 150,
+    /// 45 °C`. The SD log keeps it, and a host attached by then sees it.
+    #[inline(never)]
+    pub fn say_calibration(&self, shared: &crate::Shared) {
+        let out = self.block.ctrl().read().out().bits();
+        let mut line = LogStr::new();
+        let _ = write!(
+            line,
+            "tsens: calibration {:#05x}, code {out}, {}",
+            self.calibration,
+            DieTemp::from_c(p4_tsens_c(out, self.calibration))
+        );
+        shared.push_log(&line);
     }
 }
 

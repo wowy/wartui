@@ -772,6 +772,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         let log = SD_LOG.init(sd_log::SdLog::new(ring, log_boot));
         Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, log)
     });
+    shared.tsens.say_calibration(shared);
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(
         boot,
