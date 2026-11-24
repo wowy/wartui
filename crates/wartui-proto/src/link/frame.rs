@@ -28,9 +28,18 @@ const _: () = assert!(UPDATE_STATUS_MAX + 32 < MAX_BODY);
 const _: () = assert!(
     // variant index, four `u32`s, then 8 queues of a tag and three `u32`s, then nine `u32`s
     // and the last `u32`, then `sd`: two tags, the state and two `u32`s, then its log: a flag,
-    // the state, a tag, four `u32`s and a `u64`. Varint integers never exceed their fixed width
-    // by more than a byte each.
-    1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 9 * 5 + 5 + (3 + 2 * 5) + (3 + 4 * 5 + 10) < MAX_BODY,
+    // the state, a tag, four `u32`s and a `u64`, then `health`: the P4's reading, a tag, the
+    // C6's two readings and three `u32`s. Varint integers never exceed their fixed width by more
+    // than a byte each.
+    1 + 4 * 5
+        + 1
+        + 8 * (1 + 3 * 5)
+        + 9 * 5
+        + 5
+        + (3 + 2 * 5)
+        + (3 + 4 * 5 + 10)
+        + (1 + 1 + 2 + 3 * 5)
+        < MAX_BODY,
     "a Status with every queue and link stats must fit one frame"
 );
 const _: () = assert!(

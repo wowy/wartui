@@ -54,7 +54,9 @@
 //! place, then an `Opened` record when the file is new, a `Dropped` record when the ring lost
 //! records since the last, whole records from the ring while they fit, and a `Closed` record when
 //! the file ends. The rest of the last block is zeros, which the reader skips. Records are copied
-//! block by block, so one may span two, and staging yields after each block of them.
+//! block by block, so one may span two, and staging yields after each block of them. A flush that
+//! wrote an `Opened` record clears the P4's last panic from RTC memory, since the record carries
+//! it (`src/sd_log.rs`).
 //!
 //! **A failure stops only the writer.** A failed transfer counts an error, drops the file and
 //! reads block 0 at once: a card gone sends [`run`] back to identifying, and one that answers is
@@ -738,7 +740,7 @@ async fn flush(
 ) -> Result<Option<Staged>, MmcError> {
     let tail = w.app.tail().len();
     let start = Instant::now();
-    let (mut at, dropped, window) = stage_head(buf, w, shared);
+    let (mut at, dropped, window, opened) = stage_head(buf, w, shared);
     sd_log::note_busy(shared, start, window);
     yield_now().await;
     let mut taken = 0;
@@ -764,22 +766,26 @@ async fn flush(
         return Ok(None);
     }
     w.dropped_said = staged.dropped;
+    if opened {
+        sd_log::panic_on_card(shared);
+    }
     let grew = (staged.len - tail) as u64;
     sd_log::update(shared, |stats| stats.written = stats.written.saturating_add(grew));
     Ok(Some(staged))
 }
 
 /// Start a flush in `buf`: the file's tail, the `Opened` record owed, and a `Dropped` record when
-/// the log lost records since the last. Returns where the staged bytes end, the drops counted, and
-/// the window it was.
+/// the log lost records since the last. Returns where the staged bytes end, the drops counted, the
+/// window it was, and whether an `Opened` record went in.
 #[inline(never)]
 fn stage_head(
     buf: &mut [Block; TRANSFER_BLOCKS],
     w: &mut Writer,
     shared: &Shared,
-) -> (usize, u32, Window) {
+) -> (usize, u32, Window, bool) {
     let mut at = 0;
     let mut window = Window::Head;
+    let mut opened = false;
     put(buf, &mut at, w.app.tail());
     let mut record = [0; SMALL_RECORD];
     if let Some(part) = w.owed.take() {
@@ -788,7 +794,7 @@ fn stage_head(
         let card_mb = shared.sd.status.get().card_mb;
         let free_mb = w.app.free_mb();
         if let Some(n) = sd_log::encode_opened(shared, file, part, card_mb, free_mb, &mut record) {
-            put(buf, &mut at, &record[..n]);
+            opened = put(buf, &mut at, &record[..n]);
         }
     }
     let dropped = sd_log::dropped(shared);
@@ -798,7 +804,7 @@ fn stage_head(
     {
         put(buf, &mut at, &record[..n]);
     }
-    (at, dropped, window)
+    (at, dropped, window, opened)
 }
 
 /// End a flush in `buf` at `at`: `close`'s record when the ring has nothing left to give, zeros to

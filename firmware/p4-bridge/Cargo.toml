@@ -42,6 +42,9 @@ aligned = "0.4"
 # bridges, the updates on flash the node and the C6 use, and the GPS reader for a u-blox
 # receiver on I2C0, GPIO7 (SDA) and GPIO8 (SCL). No `radio`: the P4 has none.
 wartui-firmware = { path = "../common", features = ["esp32p4", "gps"] }
+# The PAC, for the one block esp-hal names no singleton for: the temperature sensor's `LP_TSENS`
+# (`src/tsens.rs`). Held at the version esp-hal builds against, so it is the same copy.
+esp32p4 = "0.3.0"
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 # `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.

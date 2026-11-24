@@ -36,13 +36,13 @@ use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, HOST_SILENCE_SECS, HostOwner, HostToBridge, PairWindow,
-    QueueStat, QueueStats, RadioInfo, RadioLinkStats,
+    BluetoothStatus, BridgeHealth, BridgeToHost, Central, HOST_SILENCE_SECS, HostOwner,
+    HostToBridge, PairWindow, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
 use wartui_proto::mac;
 use wartui_proto::radio_link::BleCounters;
 
-use crate::text::{SdForm, sd_log_text, sd_text};
+use crate::text::{SdForm, kib, sd_log_text, sd_text};
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the
@@ -125,6 +125,7 @@ pub async fn run(args: Args) -> Result<()> {
         members: _,
         sd,
         bluetooth,
+        health,
     } = status
     else {
         unreachable!("wait_for_status only returns Status")
@@ -135,6 +136,8 @@ pub async fn run(args: Args) -> Result<()> {
     println!("oversize   {rx_oversize} records");
     println!("uptime     {}", human_uptime(uptime_ms));
     println!("fan        {}", fan_text(fan));
+    println!("die temp   {}", die_text(&health));
+    println!("radio rail {}", radio_health_text(&health));
     println!("sd card    {}", sd_text(sd, SdForm::Line));
     println!("sd log     {}", sd_log_text(sd));
     println!("pool       {pool}");
@@ -179,6 +182,31 @@ pub(crate) fn fan_text(fan: Option<FanStats>) -> String {
         Some(FanStats { duty, rpm: None }) => format!("{duty}, rpm not read yet"),
         None => "no carrier, so no fan".to_owned(),
     }
+}
+
+/// The die temperature of each chip on the bridge: `P4 48 °C · radio 45 °C`. The radio's waits
+/// for its first report, which it sends every 10 s once its Bluetooth controller is up.
+pub(crate) fn die_text(health: &BridgeHealth) -> String {
+    match health.radio {
+        Some(radio) => format!("P4 {} · radio {}", health.p4_die_temp, radio.die_temp),
+        None => format!("P4 {} · radio not reported yet", health.p4_die_temp),
+    }
+}
+
+/// The radio's 3.3 V rail and heap: `3.30 V · heap 64K used 40K free 104K peak`.
+pub(crate) fn radio_health_text(health: &BridgeHealth) -> String {
+    health.radio.map_or_else(
+        || "not reported yet".to_owned(),
+        |radio| {
+            format!(
+                "{} · heap {} used {} free {} peak",
+                radio.vdd,
+                kib(radio.heap_used),
+                kib(radio.heap_free),
+                kib(radio.heap_high_water)
+            )
+        },
+    )
 }
 
 /// What the bridge's planner is asked to scan.
@@ -637,23 +665,26 @@ fn human_uptime(ms: u32) -> String {
 mod tests {
     use super::{
         Awaited, ReadyWait, Report, ScanMode, Taken, awaited, ble_text, board_line, counters_line,
-        diagnostic_lines, fan_text, host_text, human_uptime, pairing_deadline, pairing_text,
-        plan_lines, radio_line, scan_text, silence_note, slots_text, wardrive_esp_text,
+        diagnostic_lines, die_text, fan_text, host_text, human_uptime, pairing_deadline,
+        pairing_text, plan_lines, radio_health_text, radio_line, scan_text, silence_note,
+        slots_text, wardrive_esp_text,
     };
     use std::time::Duration;
 
     use crate::config::Link;
     use wartui_bridge::{DisconnectCause, LinkEvent};
     use wartui_proto::ble::ATT_MTU;
+    use wartui_proto::bus::{DieTemp, Vdd};
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::fleet::Share;
-    use wartui_proto::link::{BluetoothStatus, Central, HostOwner, PairWindow};
+    use wartui_proto::link::{BluetoothStatus, BridgeHealth, Central, HostOwner, PairWindow};
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
     use wartui_proto::radio_link::BleCounters;
+    use wartui_proto::radio_link::RadioHealth;
     use wartui_proto::reset::ResetCause;
 
     #[test]
@@ -856,6 +887,7 @@ mod tests {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         };
         let event = LinkEvent::Message(status.clone());
         assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));
@@ -879,6 +911,27 @@ mod tests {
     #[test]
     fn status_prints_none_when_no_slot_is_present() {
         assert_eq!(slots_text(NodeBoard::NoCarrier, 0), "none");
+    }
+
+    #[test]
+    fn status_prints_both_chips_when_radio_reported_health() {
+        let radio = RadioHealth {
+            die_temp: DieTemp::from_c(45),
+            vdd: Vdd::from_mv(3300),
+            heap_used: 64 * 1024,
+            heap_free: 40 * 1024,
+            heap_high_water: 104 * 1024,
+        };
+        let health = BridgeHealth { p4_die_temp: DieTemp::from_c(48), radio: Some(radio) };
+        assert_eq!(die_text(&health), "P4 48 °C · radio 45 °C");
+        assert_eq!(radio_health_text(&health), "3.30 V · heap 64K used 40K free 104K peak");
+    }
+
+    #[test]
+    fn status_prints_not_reported_when_radio_sent_no_health() {
+        let health = BridgeHealth { p4_die_temp: DieTemp::NONE, radio: None };
+        assert_eq!(die_text(&health), "P4 — · radio not reported yet");
+        assert_eq!(radio_health_text(&health), "not reported yet");
     }
 
     #[test]

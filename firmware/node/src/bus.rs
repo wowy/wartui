@@ -2,9 +2,9 @@
 //! (`docs/node-bus.md`), and the node's only link to the host.
 //!
 //! `wartui_proto::bus` has the framing, the handshake and the messages. A heartbeat goes up
-//! fire-and-forget ([`send`]): a newer one replaces one the P4 has not clocked. Sightings and
-//! update statuses go up stop-and-wait ([`deliver`]), and the main loop blocks until the P4
-//! acknowledges them. Records from the P4 wait in an inbox until the main loop takes them
+//! fire-and-forget ([`send`]): a newer one replaces one the P4 has not clocked. Sightings, update
+//! statuses and the last panic go up stop-and-wait ([`deliver`]), and the main loop blocks until
+//! the P4 acknowledges them, or gives up on a slot no P4 clocks ([`clocked`]). Records from the P4 wait in an inbox until the main loop takes them
 //! ([`take`]).
 //!
 //! **The re-arm lives in an interrupt on CS's rising edge.** esp-hal's SPI driver does one blocking
@@ -55,8 +55,9 @@ use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use static_cell::ConstStaticCell;
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, FlightTaker, HEADER_LEN, Header, PAYLOAD_MAX,
-    Packer, RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, Take, UpType, VerifyError, seal, verify,
+    ACK_TIMEOUT_MS, AckPoll, AckTracker, AckWait, FlightTaker, HEADER_LEN, Header, NodeBus,
+    PAYLOAD_MAX, Packer, RECORD_MAX, SeqCheck, SeqNote, TRANSFER_LEN, Take, UpType, VerifyError,
+    seal, verify,
 };
 use wartui_proto::heapless::{Deque, Vec};
 
@@ -119,6 +120,8 @@ struct Shared {
     wait: AckWait,
     /// The P4 acknowledged the transfer [`Shared::wait`] waits on.
     acked: bool,
+    /// When the last good transfer ended, in [`now_ms`].
+    last_good_ms: Option<u64>,
     /// Transfers completed.
     transfers: u32,
     good: u32,
@@ -214,6 +217,7 @@ pub fn start(
         taker: FlightTaker::new(),
         wait: AckWait::new(),
         acked: false,
+        last_good_ms: None,
         transfers: 0,
         good: 0,
         bad_magic: 0,
@@ -301,6 +305,7 @@ impl Shared {
         let queued = match verify(rx_bytes(&rx)) {
             Ok(transfer) => {
                 self.good = self.good.wrapping_add(1);
+                self.last_good_ms = Some(now_ms());
                 if self.peer.note(transfer.header.seq) == SeqNote::Gap {
                     self.gaps = self.gaps.wrapping_add(1);
                 }
@@ -556,6 +561,18 @@ pub fn deliver(kind: UpType, body: &[u8]) -> bool {
     delivered
 }
 
+/// Whether a P4 is clocking this slot: a good transfer ended within [`ACK_TIMEOUT_MS`].
+///
+/// Any P4 clocks a node whose IRQ is up well within that, the bus's frozen core, and this one
+/// clocks every present slot each 250 ms besides. So a record [`deliver`] sends on a `true` is
+/// clocked out at once, and a slot no P4 clocks reads `false` within a second rather than costing
+/// a delivery's whole wait.
+pub fn clocked() -> bool {
+    with_shared(|shared| {
+        shared.last_good_ms.is_some_and(|at| now_ms().saturating_sub(at) < ACK_TIMEOUT_MS)
+    }) == Some(true)
+}
+
 /// Run `f` on the shared state under its lock, or return `None` before [`start`].
 fn with_shared<T>(f: impl FnOnce(&mut Shared) -> T) -> Option<T> {
     STATE.with(|state| state.as_mut().map(f))
@@ -645,6 +662,35 @@ pub fn service() {
     if due {
         report();
     }
+}
+
+/// The counters a heartbeat carries: each count truncated to its wrapping `u16`, each gauge
+/// saturated. All zeros before [`start`].
+pub fn counters() -> NodeBus {
+    // A count's low 16 bits wrap as the full count does, which is how the host reads it.
+    let count = |n: u32| n as u16;
+    let gauge = |us: u32| u16::try_from(us).unwrap_or(u16::MAX);
+    let mut bus = with_shared(|s| NodeBus {
+        bad_magic: count(s.bad_magic),
+        bad_crc: count(s.bad_crc),
+        bad_len: count(s.bad_len),
+        gaps: count(s.gaps),
+        early: count(s.early),
+        arm_failed: count(s.arm_failed),
+        inbox_full: count(s.inbox_full),
+        out_of_order: count(s.out_of_order),
+        repeats: count(s.repeats),
+        handler_max_us: gauge(s.handler_max_us),
+        settle_max_us: gauge(s.settle_max_us),
+        ..NodeBus::default()
+    })
+    .unwrap_or_default();
+    MAIN.with(|m| {
+        bus.replaced = count(m.replaced);
+        bus.resent = count(m.resent);
+        bus.undelivered = count(m.undelivered);
+    });
+    bus
 }
 
 /// What the handler counted, for one console line.

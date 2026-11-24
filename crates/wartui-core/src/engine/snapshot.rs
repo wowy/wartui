@@ -2,7 +2,7 @@ use wartui_bridge::{BridgeInfo, DisconnectCause};
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::{BluetoothStatus, PowerOutcome, SdFormatOutcome, SdStatus};
+use wartui_proto::link::{BluetoothStatus, BridgeHealth, PowerOutcome, SdFormatOutcome, SdStatus};
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 #[cfg(doc)]
@@ -281,6 +281,8 @@ pub struct BridgeStatus {
     /// The Bluetooth host link: who the bridge serves, its bonds and pairing window, the central
     /// connected to its C6 and the C6's counters.
     pub bluetooth: BluetoothStatus,
+    /// The bridge's own chips: the P4's die temperature, and the C6's latest health.
+    pub health: BridgeHealth,
 }
 
 impl FleetEngine {

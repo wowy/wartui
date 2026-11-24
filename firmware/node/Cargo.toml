@@ -8,7 +8,7 @@
 [package]
 name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/wowy/wartui"
@@ -22,8 +22,9 @@ path = "src/main.rs"
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
 # `firmware/p4-radio/README.md` § "Dependency versions". Each `esp-*` crate that takes a chip
-# feature names the only one, the ESP32-C5.
-esp-alloc = { version = "0.11.0", features = ["esp32c5"] }
+# feature names the only one, the ESP32-C5. The heap stats give the heartbeat its bytes in use
+# and its high water.
+esp-alloc = { version = "0.11.0", features = ["esp32c5", "internal-heap-stats"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c5"] }
 esp-hal = { version = "1.2.2", features = ["esp32c5", "unstable"] }
 # Diagnostics on the USB serial port. Unlike the bridge, a node has no link

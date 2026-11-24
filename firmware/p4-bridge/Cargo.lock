@@ -1835,6 +1835,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-rtos",
+ "esp32p4",
  "sdio",
  "sha2",
  "static_cell",

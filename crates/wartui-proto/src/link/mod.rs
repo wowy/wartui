@@ -29,14 +29,14 @@
 //! [`crate::bus::UpdateChunk`] from it ([`cache_chunk_body`]), answered like a
 //! [`HostToBridge::ToNode`].
 
-use crate::bus::{MAX_SLOTS, NodeBoard, Slot};
+use crate::bus::{DieTemp, MAX_SLOTS, NodeBoard, Slot};
 use crate::fan::{FanDuty, FanStats};
 use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
 use crate::plan::ChannelPool;
-use crate::radio_link::BleCounters;
 use crate::radio_link::update::OP_MAX;
+use crate::radio_link::{BleCounters, RadioHealth};
 use crate::reset::ResetCause;
 use heapless::{String, Vec};
 use serde::Serialize;
@@ -152,6 +152,34 @@ pub const USB_TOOK_BRIDGE: &str = "the USB host took the bridge";
 /// that attaches: the C6 reports once, at its boot, when the host it restarted under has
 /// usually gone.
 pub const RADIO_PANICKED: &str = "C6 panicked: ";
+
+/// Split `text` over as many [`LogStr`] lines as it takes, the first led by `first` and each
+/// after it by `more`, and give each line to `each`. Cuts only at a character's end. A prefix
+/// that leaves no room for a character ends the split.
+///
+/// A bridge chip's last panic, which can run past one line, goes to the host this way
+/// (`firmware/p4-radio/src/last_panic.rs`, `firmware/p4-bridge/src/sd_log.rs`).
+pub fn split_lines(first: &str, more: &str, text: &str, mut each: impl FnMut(LogStr)) {
+    let mut rest = text;
+    let mut prefix = first;
+    loop {
+        let mut line = LogStr::new();
+        let _ = line.push_str(prefix);
+        let mut taken = 0;
+        for c in rest.chars() {
+            if line.push(c).is_err() {
+                break;
+            }
+            taken += c.len_utf8();
+        }
+        each(line);
+        rest = rest.get(taken..).unwrap_or_default();
+        if rest.is_empty() || taken == 0 {
+            break;
+        }
+        prefix = more;
+    }
+}
 
 /// What a bridge chip's firmware last marked before it reset.
 ///
@@ -405,6 +433,8 @@ pub enum BridgeToHost {
         /// The Bluetooth host link: who holds the host queue, the bonds and pairing window, the
         /// connected central and the C6's counters.
         bluetooth: BluetoothStatus,
+        /// The bridge's own chips: the P4's die temperature, and the C6's latest health.
+        health: BridgeHealth,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -494,6 +524,17 @@ pub struct BluetoothStatus {
     /// Whether the bridge offers the WardriveESP service to phones: the setting, not whether a
     /// phone is linked.
     pub wardrive_esp: bool,
+}
+
+/// The bridge's own chips, as a [`BridgeToHost::Status`] reports them. The default is no
+/// reading from either.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BridgeHealth {
+    /// The P4's die temperature, read when the `Status` was built ([`crate::tsens`]).
+    pub p4_die_temp: DieTemp,
+    /// The C6's latest [`crate::radio_link::Up::Health`], or `None` until this C6 life has sent
+    /// one.
+    pub radio: Option<RadioHealth>,
 }
 
 /// Which host the P4's host queue serves.

@@ -16,23 +16,24 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodeSeen, Observation,
-    RawFrame, Record, ShareChange,
+    BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostLink, HostStatus, NodePanic, NodeSeen,
+    Observation, RawFrame, Record, ShareChange,
 };
 use wartui_core::store::{
     CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
     UploadSite, capture_link, is_simulated, last_upload, open_readonly, open_readwrite,
     record_upload, set_upload_result,
 };
-use wartui_proto::bus::{BUS_VERSION, NodeBoard, RecordKind, Slot, UpType};
+use wartui_proto::bus::{BUS_VERSION, DieTemp, NodeBoard, NodeBus, RecordKind, Slot, UpType, Vdd};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{
-    BluetoothStatus, Central, HostOwner, PairWindow, QueueId, QueueStat, RadioLinkStats,
+    BluetoothStatus, BridgeHealth, Central, HostOwner, PairWindow, QueueId, QueueStat,
+    RadioLinkStats,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
-use wartui_proto::radio_link::BleCounters;
+use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -342,6 +343,24 @@ fn heartbeat() -> Heartbeat {
         vdd_mv: Some(3304),
         die_temp_c: Some(41),
         heap_free: 40_000,
+        heap_used: 24_000,
+        heap_high_water: 31_000,
+        bus: NodeBus {
+            bad_magic: 1,
+            bad_crc: 2,
+            bad_len: 3,
+            gaps: 4,
+            early: 5,
+            arm_failed: 6,
+            inbox_full: 7,
+            out_of_order: 8,
+            repeats: 9,
+            replaced: 10,
+            resent: 11,
+            undelivered: 12,
+            handler_max_us: 13,
+            settle_max_us: 14,
+        },
         live: true,
     }
 }
@@ -482,6 +501,63 @@ fn store_writes_heap_free_when_heartbeat_recorded() {
 }
 
 #[test]
+fn store_writes_heap_use_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Heartbeat(Heartbeat {
+            heap_used: 61_000,
+            heap_high_water: u32::MAX,
+            ..heartbeat()
+        })],
+    );
+    let row: (i64, i64) = conn
+        .query_row("SELECT heap_used, heap_high_water FROM heartbeat", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(row, (61_000, i64::from(u32::MAX)), "unsigned, never negative");
+}
+
+#[test]
+fn store_writes_each_bus_counter_to_its_column_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut beat = heartbeat();
+    beat.bus.undelivered = u16::MAX;
+    let bus = beat.bus;
+    let conn = write(&dir, vec![Record::Heartbeat(beat)]);
+    let row: Vec<i64> = conn
+        .query_row(
+            "SELECT bus_bad_magic, bus_bad_crc, bus_bad_len, bus_gaps, bus_early, bus_arm_failed,
+                    bus_inbox_full, bus_out_of_order, bus_repeats, bus_replaced, bus_resent,
+                    bus_undelivered, bus_handler_max_us, bus_settle_max_us
+             FROM heartbeat",
+            [],
+            |r| (0..14).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    // `heartbeat()` gives every field its own value, so two swapped columns fail here.
+    let want = [
+        bus.bad_magic,
+        bus.bad_crc,
+        bus.bad_len,
+        bus.gaps,
+        bus.early,
+        bus.arm_failed,
+        bus.inbox_full,
+        bus.out_of_order,
+        bus.repeats,
+        bus.replaced,
+        bus.resent,
+        bus.undelivered,
+        bus.handler_max_us,
+        bus.settle_max_us,
+    ]
+    .map(i64::from);
+    assert_eq!(row, want);
+}
+
+#[test]
 fn store_writes_every_node_column_when_node_recorded() {
     // The record sets every field, so any column the insert omits shows up as NULL or as a
     // default. `capabilities` is NULL for a node heard only by observation, so the record sets it.
@@ -545,8 +621,21 @@ fn bridge_status_with_fan(
         // A1, A3 and B3, and the top bit, so the column holds the whole u32.
         slots_present: 0x8000_0205,
         bluetooth: BLUETOOTH,
+        health: HEALTH,
     })
 }
+
+/// Both chips' readings, every figure distinct.
+const HEALTH: BridgeHealth = BridgeHealth {
+    p4_die_temp: DieTemp::from_c(51),
+    radio: Some(RadioHealth {
+        die_temp: DieTemp::from_c(-3),
+        vdd: Vdd::from_mv(3_304),
+        heap_used: 40_000,
+        heap_free: 4_000_000_005,
+        heap_high_water: 41_000,
+    }),
+};
 
 /// A bonded host on an encrypted 2M link holding the bridge, every counter distinct.
 const BLUETOOTH: BluetoothStatus = BluetoothStatus {
@@ -563,7 +652,6 @@ const BLUETOOTH: BluetoothStatus = BluetoothStatus {
         dropped_writes: 6,
         phy: 2,
         interval_us: 30_000,
-        heap_high_water: 41_000,
     },
     wardrive_esp: false,
 };
@@ -630,6 +718,45 @@ fn store_round_trips_every_column_when_bridge_status_written() {
     let present: i64 =
         conn.query_row("SELECT slots_present FROM bridge_status", [], |r| r.get(0)).unwrap();
     assert_eq!(present, 0x8000_0205);
+    let health: Vec<i64> = conn
+        .query_row(
+            "SELECT p4_die_temp_c, c6_die_temp_c, c6_vdd_mv, c6_heap_used, c6_heap_free,
+                    c6_heap_high_water
+             FROM bridge_status",
+            [],
+            |r| (0..6).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    assert_eq!(health, [51, -3, 3_304, 40_000, 4_000_000_005, 41_000]);
+}
+
+#[test]
+fn store_writes_null_health_columns_when_bridge_has_no_readings() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut none = bridge_status(&[], RADIO_LINK);
+    let mut failed = bridge_status(&[], RADIO_LINK);
+    let Record::BridgeStatus(seen) = &mut none else { unreachable!() };
+    seen.health = BridgeHealth::default();
+    // Both reads failed, and the C6 reported anyway.
+    let Record::BridgeStatus(seen) = &mut failed else { unreachable!() };
+    seen.health = BridgeHealth { p4_die_temp: DieTemp::NONE, radio: Some(RadioHealth::default()) };
+    let conn = write(&dir, vec![none, failed]);
+    type Row = (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let rows: Vec<Row> = conn
+        .prepare(
+            "SELECT p4_die_temp_c, c6_die_temp_c, c6_vdd_mv, c6_heap_used, c6_heap_free,
+                    c6_heap_high_water
+             FROM bridge_status ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(None, None, None, None, None, None), (None, None, None, Some(0), Some(0), Some(0))]
+    );
 }
 
 #[test]
@@ -710,13 +837,13 @@ fn store_round_trips_every_column_when_bluetooth_section_written() {
     let counters: Vec<i64> = conn
         .query_row(
             "SELECT pairings, failed_pairings, unbonded_kicks, last_disconnect, resynced_bytes,
-                    dropped_writes, phy, interval_us, heap_high_water
+                    dropped_writes, phy, interval_us
              FROM bridge_bluetooth",
             [],
-            |r| (0..9).map(|i| r.get(i)).collect(),
+            |r| (0..8).map(|i| r.get(i)).collect(),
         )
         .unwrap();
-    assert_eq!(counters, [3, 4, 5, 0x13, 4_000_000_004, 6, 2, 30_000, 41_000]);
+    assert_eq!(counters, [3, 4, 5, 0x13, 4_000_000_004, 6, 2, 30_000]);
 }
 
 #[test]
@@ -870,6 +997,41 @@ fn store_round_trips_every_column_when_batch_gap_written() {
         })
         .unwrap();
     assert_eq!(row, (NODE.to_vec(), EPOCH_MS + 7_000, 65535, 2, 2));
+}
+
+#[test]
+fn store_round_trips_every_column_when_node_panic_written() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let panic = |reset_cause| {
+        Record::NodePanic(NodePanic {
+            node_mac: NODE,
+            rx_at_ms: EPOCH_MS + 7_000,
+            slot: SLOT,
+            reset_cause,
+            message: "src/main.rs:9:5: oops".to_owned(),
+        })
+    };
+    let conn = write(&dir, vec![panic(Some(ResetCause::Software)), panic(None)]);
+
+    type Row = (Vec<u8>, i64, String, Option<String>, String);
+    let rows: Vec<Row> = conn
+        .prepare("SELECT node_mac, rx_at, slot, reset_cause, message FROM node_panic ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let row = |cause: Option<&str>| {
+        (
+            NODE.to_vec(),
+            EPOCH_MS + 7_000,
+            "A2".to_owned(),
+            cause.map(str::to_owned),
+            "src/main.rs:9:5: oops".to_owned(),
+        )
+    };
+    // No heartbeat yet stores no cause, rather than a guess.
+    assert_eq!(rows, [row(Some(ResetCause::Software.as_str())), row(None)]);
 }
 
 #[test]

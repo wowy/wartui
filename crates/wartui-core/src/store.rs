@@ -42,6 +42,7 @@ use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::PairWindow;
 use wartui_proto::plan::ChannelPool;
+use wartui_proto::reset::ResetCause;
 
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::{CaptureSettings, HostLink, Record};
@@ -58,7 +59,7 @@ use crate::record::{CaptureSettings, HostLink, Record};
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
@@ -98,9 +99,14 @@ CREATE TABLE IF NOT EXISTS node (
 -- `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
--- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
+-- `die_temp_c` its die temperature in whole degrees Celsius, calibrated, each NULL when
 -- the node's read failed. `heap_free` is the node's free heap in bytes; a steady fall
--- across a capture is a leak in the node firmware. `epoch` is the share the node holds, which
+-- across a capture is a leak in the node firmware. `heap_used` is the bytes in use, so
+-- `heap_used + heap_free` is the heap's size, and `heap_high_water` the most in use since boot.
+-- The `bus_` columns are the node's own view of the bus (`wartui_proto::bus::NodeBus`): each
+-- count a raw wrapping 16-bit since-boot count, read as a difference between rows, so a reboot
+-- shows as the value falling; `bus_handler_max_us` and `bus_settle_max_us` are since-boot
+-- maxima in µs, saturating at 65535. `epoch` is the share the node holds, which
 -- `assignment` says the bridge gave it.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
@@ -115,6 +121,22 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   vdd_mv INTEGER,
   die_temp_c INTEGER,
   heap_free INTEGER NOT NULL,
+  heap_used INTEGER NOT NULL,
+  heap_high_water INTEGER NOT NULL,
+  bus_bad_magic INTEGER NOT NULL,
+  bus_bad_crc INTEGER NOT NULL,
+  bus_bad_len INTEGER NOT NULL,
+  bus_gaps INTEGER NOT NULL,
+  bus_early INTEGER NOT NULL,
+  bus_arm_failed INTEGER NOT NULL,
+  bus_inbox_full INTEGER NOT NULL,
+  bus_out_of_order INTEGER NOT NULL,
+  bus_repeats INTEGER NOT NULL,
+  bus_replaced INTEGER NOT NULL,
+  bus_resent INTEGER NOT NULL,
+  bus_undelivered INTEGER NOT NULL,
+  bus_handler_max_us INTEGER NOT NULL,
+  bus_settle_max_us INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -182,7 +204,12 @@ CREATE TABLE IF NOT EXISTS observation (
 -- flash. `fan_duty` is the carrier's lid fan duty in force, in percent, and `fan_rpm` its speed
 -- over the bridge's last whole tach window: both NULL with no carrier, and `fan_rpm` NULL before
 -- the bridge's first window since boot. `slots_present` is the slots the bridge counted holding a
--- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7).
+-- node, bit n set for the slot whose byte is n (`A1` is 0, `B1` is 7). The rest are the bridge's
+-- own chips: `p4_die_temp_c` is the P4's die temperature in whole degrees Celsius, calibrated,
+-- read for the reply, NULL when the read failed. The `c6_*` columns are the C6's latest health
+-- report, all NULL before this C6 life has sent one: its die temperature in whole degrees Celsius,
+-- calibrated, and its 3.3 V rail in millivolts, each NULL when that read failed, and its heap in
+-- use, free and most in use since it booted, in bytes.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -203,7 +230,13 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   host_uart_errors INTEGER NOT NULL,
   fan_duty INTEGER,
   fan_rpm INTEGER,
-  slots_present INTEGER NOT NULL
+  slots_present INTEGER NOT NULL,
+  p4_die_temp_c INTEGER,
+  c6_die_temp_c INTEGER,
+  c6_vdd_mv INTEGER,
+  c6_heap_used INTEGER,
+  c6_heap_free INTEGER,
+  c6_heap_high_water INTEGER
 );
 
 -- One row per queue a bridge status reply reported, with the reply's since-boot figures:
@@ -228,8 +261,7 @@ CREATE TABLE IF NOT EXISTS bridge_queue (
 -- the values falling. `last_disconnect` is the latest disconnection's HCI reason code, 0 before
 -- the first; `resynced_bytes` is host stream bytes lost on the way from the P4 to the C6;
 -- `dropped_writes` is bytes a central wrote that the C6 dropped; `phy` and `interval_us` are the
--- C6's own reading of its connection, 0 with none; `heap_high_water` is the most heap the C6 has
--- used, in bytes.
+-- C6's own reading of its connection, 0 with none.
 CREATE TABLE IF NOT EXISTS bridge_bluetooth (
   status_id INTEGER PRIMARY KEY REFERENCES bridge_status(id),
   owner TEXT NOT NULL,
@@ -248,8 +280,7 @@ CREATE TABLE IF NOT EXISTS bridge_bluetooth (
   resynced_bytes INTEGER NOT NULL,
   dropped_writes INTEGER NOT NULL,
   phy INTEGER NOT NULL,
-  interval_us INTEGER NOT NULL,
-  heap_high_water INTEGER NOT NULL
+  interval_us INTEGER NOT NULL
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
@@ -289,6 +320,19 @@ CREATE TABLE IF NOT EXISTS batch_gap (
   after_seq INTEGER NOT NULL,
   seq INTEGER NOT NULL,
   lost INTEGER NOT NULL
+);
+
+-- One row per panic a node reported, which it sends once in the boot after the panic. `slot` is
+-- the bus name, as in `heartbeat`, and `message` the panic's `{file}:{line}:{column}: {message}`,
+-- cut at 240 bytes. `reset_cause` is what the node's latest heartbeat said when the row arrived,
+-- so that boot's cause, and NULL when no heartbeat had.
+CREATE TABLE IF NOT EXISTS node_panic (
+  id INTEGER PRIMARY KEY,
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  reset_cause TEXT,
+  message TEXT NOT NULL
 );
 
 -- One row per node record, kept only with `--record-raw`: the slot it came from, its type
@@ -1200,8 +1244,13 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, slot, wifi_refused, ble_refused,
-                        reset_cause, vdd_mv, die_temp_c, heap_free, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        reset_cause, vdd_mv, die_temp_c, heap_free, heap_used, heap_high_water,
+                        bus_bad_magic, bus_bad_crc, bus_bad_len, bus_gaps, bus_early,
+                        bus_arm_failed, bus_inbox_full, bus_out_of_order, bus_repeats,
+                        bus_replaced, bus_resent, bus_undelivered, bus_handler_max_us,
+                        bus_settle_max_us, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1215,6 +1264,22 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.vdd_mv,
                     hb.die_temp_c,
                     hb.heap_free,
+                    hb.heap_used,
+                    hb.heap_high_water,
+                    hb.bus.bad_magic,
+                    hb.bus.bad_crc,
+                    hb.bus.bad_len,
+                    hb.bus.gaps,
+                    hb.bus.early,
+                    hb.bus.arm_failed,
+                    hb.bus.inbox_full,
+                    hb.bus.out_of_order,
+                    hb.bus.repeats,
+                    hb.bus.replaced,
+                    hb.bus.resent,
+                    hb.bus.undelivered,
+                    hb.bus.handler_max_us,
+                    hb.bus.settle_max_us,
                     hb.live
                 ])?;
             }
@@ -1275,6 +1340,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             }
             Record::BridgeStatus(status) => {
                 let radio_link = status.radio_link;
+                let radio = status.health.radio;
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
                        (rx_at, rx_count, dropped_tx, uptime_ms, host_frames,
@@ -1282,8 +1348,10 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                         radio_link_bad_magic, radio_link_seq_gap, radio_link_uart_errors,
                         radio_link_radio_crc_fail, radio_link_radio_bad_magic,
                         radio_link_radio_seq_gap, radio_link_radio_uart_errors, host_uart_errors,
-                        fan_duty, fan_rpm, slots_present)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                        fan_duty, fan_rpm, slots_present, p4_die_temp_c, c6_die_temp_c,
+                        c6_vdd_mv, c6_heap_used, c6_heap_free, c6_heap_high_water)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,
+                             ?20,?21,?22,?23,?24,?25)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1305,6 +1373,12 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.fan.map(|fan| fan.duty.get()),
                     status.fan.and_then(|fan| fan.rpm),
                     status.slots_present,
+                    status.health.p4_die_temp.c(),
+                    radio.and_then(|radio| radio.die_temp.c()),
+                    radio.and_then(|radio| radio.vdd.mv()),
+                    radio.map(|radio| radio.heap_used),
+                    radio.map(|radio| radio.heap_free),
+                    radio.map(|radio| radio.heap_high_water),
                 ])?;
                 let status_id = tx.last_insert_rowid();
                 let mut insert = tx.prepare_cached(
@@ -1329,9 +1403,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                        (status_id, owner, bonds, pair_window, pair_window_secs,
                         central_encrypted, central_bonded, central_mtu, central_phy,
                         central_interval_us, pairings, failed_pairings, unbonded_kicks,
-                        last_disconnect, resynced_bytes, dropped_writes, phy, interval_us,
-                        heap_high_water)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                        last_disconnect, resynced_bytes, dropped_writes, phy, interval_us)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )?
                 .execute(params![
                     status_id,
@@ -1352,7 +1425,6 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     c.dropped_writes,
                     c.phy,
                     c.interval_us,
-                    c.heap_high_water,
                 ])?;
             }
             Record::HostStatus(host) => {
@@ -1394,6 +1466,19 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     gap.lost,
                 ])?;
             }
+            Record::NodePanic(panic) => {
+                tx.prepare_cached(
+                    "INSERT INTO node_panic (node_mac, rx_at, slot, reset_cause, message)
+                     VALUES (?1,?2,?3,?4,?5)",
+                )?
+                .execute(params![
+                    &panic.node_mac[..],
+                    panic.rx_at_ms,
+                    panic.slot.to_string(),
+                    panic.reset_cause.map(ResetCause::as_str),
+                    panic.message,
+                ])?;
+            }
             Record::Raw(raw) => {
                 tx.prepare_cached(
                     "INSERT INTO raw_frame (rx_at, slot, kind, bytes) VALUES (?1,?2,?3,?4)",
@@ -1431,6 +1516,7 @@ mod tests {
             fan: None,
             slots_present: 0,
             bluetooth: Default::default(),
+            health: Default::default(),
         })
     }
 

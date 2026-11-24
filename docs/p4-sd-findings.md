@@ -190,8 +190,100 @@ boot on the same card stopped with `Full` at its first flush and deleted nothing
 that flush had staged, the boot's first, were counted dropped, as any failed flush counts what it
 staged.
 
+## Health in the log
+
+Measured on 2026-11-23 on the bridge `D0:1C`, a carrier-10 with ten nodes, the lid fan fitted and
+the lid on, in a room at about 22 °C. The bridge and nodes ran `feat/sd-health-log`, the nodes at
+0.7.0. Since that build, the log keeps every node heartbeat and panic (`sd::log::logged`), each
+`Status` carries the P4's die temperature and the C6's die, rail and heap, and the P4 and every
+node keep their last panic across the reset it causes. The card was read on a Mac with
+`wartui sd-log` and `fsck_msdos -n`.
+
+### The burst load again
+
+The burst run above, repeated with the bench-only build rebased onto this one, so every heartbeat
+was logged. `wartui sniff` took every frame over USB, 5 minutes with the log on and then 5 off;
+loss was counted from each node's batch sequence numbers:
+
+| Log | Batches to the host | Lost | Heartbeats | Host link | Queues | Radio link | SD log |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| On | 27,010, 967,445 sightings | 0 on every node | 600, 60 a node | 0 UART errors | 0 dropped | 0 CRC, magic or UART errors | 0 dropped, 0 errors, longest step 473 µs |
+| Off | 26,992, 967,346 sightings | 0 on every node | 600, 60 a node | 0 UART errors | 0 dropped | the same | |
+
+**Logging heartbeats made no difference the bench could see either.** Over 280 s of the run the
+card held 56 heartbeats from each node, 560 in all: one every 5 s from every node, none missing.
+The five files of this session's boots decoded whole, 0 unreadable and 0 dropped, and `fsck` was
+clean after the board was powered off mid-write to take the card out.
+
+Under the burst each node's heap in use held at 69 KiB with 31 KiB free, and its high water rose
+to as much as 79 KiB: allocations the burst makes and frees again, which free heap alone never
+showed. Die temperatures ran 38 to 56 °C, and rails 3.15 to 3.34 V, each node near its own value.
+
+### The P4's die temperature
+
+The P4 logs its sensor's eFuse calibration and one raw code at boot: `tsens: calibration 0x049,
+code 169, 46 °C` on this board. 0x049 is +7.3 °C, subtracted. The fan, set to 100 % and back to 0
+while the nodes ran the burst:
+
+| Fan | P4 | C6 |
+| --- | --- | --- |
+| 0 %, before | 48 °C | 36 °C |
+| 100 %, about 4,000 rpm, after 3 min | 31 °C | 15 °C |
+| 0 % again, after 3 min | 35 °C | 22 °C |
+
+An IR thermometer on the board's chips read about 47 °C (117 °F), idle with the fan off, the lid
+on and the board 4 minutes up. The bridge read itself at the same moment: P4 44 °C, C6 33 °C.
+
+**The P4's reading follows the fan, and sits within about 3 °C of the IR reading, so it is
+believed.** A die runs at or above its package's surface, so if anything it reads a few degrees
+low. **The C6's reads low, by about 14 °C**: 15 °C with the fan on, at least 7 °C below the room's
+22 °C, which a working die cannot be. Its PHY reading carries a per-chip offset, as `health.rs`
+says the node's may, so only a change in it means anything.
+
+**Why the C6 read low.** The PHY's `phy_get_tsens_value`, which the C6 and the C5 nodes read
+their die through, applies no eFuse calibration, where ESP-IDF's driver subtracts it from every
+reading (`tsens_raw − deltaT / 10`). The C6 logged its field at boot: 0x18b, −13.9 °C. Its PHY
+read 33 °C while the IR thermometer read about 47 °C, and 33 + 13.9 = 46.9, so calibrated it reads
+47 °C. The fix applies the calibration on the C5 nodes and the C6 alike
+(`firmware/common/src/health.rs`).
+
+With the fix flashed, idle with the fan off, a few minutes apart:
+
+| Chip | Before | Calibrated |
+| --- | --- | --- |
+| C6 | 33 °C | 48 °C |
+| P4, its own calibration already applied | 45 °C | 45 °C |
+| Nodes N1 to N10 | 36 to 48 °C | 46 to 53 °C |
+
+The C6 now reads within a degree of the IR thermometer. Each node moved by its own chip's field,
+from 2 °C on `N10` to 11 °C on `N2` and `N6`, and the ten nodes' spread narrowed from 12 °C to
+7 °C, as a per-chip correction should. The node's 70 °C warning stays where it was.
+
+### The C6's readings on a live link
+
+`wartui sniff --link bluetooth` for 9 minutes, with a Wi-Fi and Bluetooth scan running and the C6
+reading its die, rail and heap every 10 s: 0 `dropped_writes`, 0 `resynced_bytes` and no
+disconnect, and all 1,080 heartbeats arrived with no batch lost. The rail read's moment on the
+PBUS, which a node keeps out of its dwells, costs a live Bluetooth link nothing the bench could
+see. The C6's heap ran 29 to 32 KiB in use, 64 to 67 KiB free, with a high water of 30 to 34 KiB.
+
+### A panic, kept across the reset
+
+A throwaway build of each panicked once, a set time after a boot that held no panic:
+
+- **A node, `N1`, 30 s after boot.** Its next boot's second heartbeat was followed by the panic
+  record, once: `last boot: src/main.rs:417:13: bench: deliberate node panic 30 s after boot`.
+  The host and the card both have it.
+- **The P4, a minute after boot.** It rebooted on its own, and the next file opened with the
+  panic in `Opened`, its header ending `panicked last boot`:
+  `src/sd_log.rs:450:13: bench: deliberate P4 panic after a minute`.
+
+Neither boot that reported a panic panicked again. A power cut between a panic and the next boot
+was not tested: the P4 reboots at once and a node sends its panic within a second, so there was no
+moment to cut. That a power-on forgets a stored panic rests on the code: the startup code zeroes
+the memory on power-on, and `last_panic::take` refuses on `PowerOn`.
+
 ## Not answered here
 
-The P4 keeps no record of its own last panic, as the C6 does; the bench build carried one, and
-the bridge does not. A real drive was not tested with the log, nor was a WardriveESP phone
-session, the case the log is for.
+A real drive was not tested with the log, nor was a WardriveESP phone session, the case the log is
+for.

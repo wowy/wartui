@@ -4,12 +4,15 @@
 //!
 //! **What is logged**, while the setting is on:
 //!
-//! - every frame the bridge produces for a host but node records, GPS bytes and delivery outcomes
-//!   (`log::logged`), whether or not a host holds the queue, so a phone session, which reads no
-//!   frames, still leaves its errors and logs;
+//! - every frame the bridge produces for a host but sighting batches, update statuses, GPS bytes
+//!   and delivery outcomes (`log::logged`), whether or not a host holds the queue, so a phone
+//!   session, which reads no frames, still leaves its errors and logs. That keeps every node
+//!   heartbeat and panic record as forwarded. A 63-byte heartbeat makes an 87-byte record, so 14
+//!   idle nodes, at one a second each, write about 1.2 KB/s, 4.4 MB an hour: minutes of the
+//!   256 KiB ring, and a 64 MiB file every 15 hours;
 //! - a `Status` every [`SNAPSHOT_EVERY`], when a file opens and after each change of who holds the
-//!   host queue. It is built from the C6's counters as last received: it never asks the C6 for
-//!   fresh ones, so it adds no radio-link traffic and waits for nothing;
+//!   host queue. It is built from the C6's counters and health as last received: it never asks the
+//!   C6 for fresh ones, so it adds no radio-link traffic and waits for nothing;
 //! - each change of who holds the host queue (`src/ble.rs`, `own`);
 //! - a phone's commands, and the lines it is sent but its `WD:AP` and `WD:BT` sightings.
 //!
@@ -27,6 +30,16 @@
 //! reboots. Each borrow covers one push or one read and nothing else, and a push that finds the
 //! ring borrowed anyway drops its record and counts it.
 //!
+//! **The P4's own last panic reaches a card or a host before it is forgotten.** At boot,
+//! [`last_panic`] copies the text out of RTC memory, and the record stays there. The text opens
+//! every file this boot writes, in `Opened`, and [`say_panic`] says it as `last boot panicked: …`
+//! log lines, which reach the ring when the setting is on. The first announcement to a host
+//! ([`tell_host_panic`]) says the lines again, since a host drops what was queued before it
+//! attached. The record is cleared by whichever comes first: a flush that wrote an `Opened`
+//! carrying the text ([`panic_on_card`]), or those lines queued for a host. Until then a reset
+//! that keeps RTC memory reports it again, so a boot with the log off, no card and no host loses
+//! nothing. A panic before then overwrites the record, and the newer text is the one reported.
+//!
 //! **Turning the setting off** stops the producers at once. The writer then flushes what the ring
 //! holds, ends the file with a `Closed` record and empties the ring; with no file open the ring is
 //! emptied at once. Turning it on opens a new file.
@@ -38,10 +51,14 @@ use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
+use static_cell::StaticCell;
+use wartui_proto::bus::PanicStr;
 use wartui_proto::frame_ring::FrameRingIn;
 use wartui_proto::heapless::String;
 use wartui_proto::host_owner::{Holder, Input};
-use wartui_proto::link::{self, LogStr, LoopPhase, MAX_FRAME, SdLogState, ShortStr, encode_frame};
+use wartui_proto::link::{
+    self, LogStr, LoopPhase, MAX_FRAME, SdLogState, ShortStr, encode_frame, split_lines,
+};
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::log::{self, FORMAT_VERSION, Kind, Opened, RECORD_MAX};
@@ -58,6 +75,10 @@ const URGE_BYTES: usize = 12 * 1024;
 /// The phone's sighting lines, which the log leaves out.
 const SIGHTING_LINES: [&[u8]; 2] = [b"WD:AP ", b"WD:BT "];
 
+/// What the first line of [`say_panic`]'s text starts with, and every line after it.
+const PANICKED: &str = "last boot panicked: ";
+const PANICKED_MORE: &str = "last boot panicked, cont.: ";
+
 /// Encoded records waiting for the card, over PSRAM.
 pub type Ring = FrameRingIn<&'static mut [u8]>;
 
@@ -67,6 +88,57 @@ pub struct Boot {
     pub cause: ResetCause,
     pub last_phase: LoopPhase,
     pub image: Option<[u8; DIGEST_LEN]>,
+    /// The text of the panic that ended the previous boot ([`last_panic`]). Every file of this
+    /// boot opens with it.
+    pub panic: Option<&'static PanicStr>,
+}
+
+/// The text of the panic that ended the previous boot, if this reset kept one, copied out of RTC
+/// memory into a static. The record stays until [`panic_kept`] (the module docs have when); with
+/// no text, it is cleared at once. Called once.
+///
+/// Out of line, so the text's copies stay off `main`'s frame.
+#[inline(never)]
+pub fn last_panic(cause: ResetCause) -> Option<&'static PanicStr> {
+    static TEXT: StaticCell<PanicStr> = StaticCell::new();
+    let text = wartui_firmware::last_panic::take(cause);
+    if text.is_none() {
+        wartui_firmware::last_panic::clear();
+    }
+    text.map(|text| &*TEXT.init(text))
+}
+
+/// Say the previous boot's panic, if it had one, as `last boot panicked: …` log lines. Once at
+/// boot, before any host attaches, so they reach only the ring, while the setting is on.
+#[inline(never)]
+pub fn say_panic(shared: &Shared) {
+    if let Some(text) = shared.sd_log.boot.panic {
+        split_lines(PANICKED, PANICKED_MORE, text, |line| shared.push_log(&line));
+    }
+}
+
+/// Say the previous boot's panic to the host that holds the queue, the first time one does, and
+/// clear the record. Called from `Shared::announce`, after its `Ready`.
+#[inline(never)]
+pub fn tell_host_panic(shared: &Shared) {
+    let log = &shared.sd_log;
+    if log.boot.panic.is_none() || !shared.host_open() || log.panic_told.replace(true) {
+        return;
+    }
+    say_panic(shared);
+    panic_kept(shared);
+}
+
+/// A flush wrote an `Opened` record, which carries the previous boot's panic, to the card.
+pub fn panic_on_card(shared: &Shared) {
+    panic_kept(shared);
+}
+
+/// The previous boot's panic is somewhere that keeps it: clear the RTC record, once.
+fn panic_kept(shared: &Shared) {
+    if !shared.sd_log.panic_cleared.replace(true) {
+        wartui_firmware::last_panic::clear();
+    }
 }
 
 /// A stretch of the writer's synchronous work between two yields, which [`note_busy`] times.
@@ -156,6 +228,10 @@ pub struct SdLog {
     maxima: [Cell<u32>; Window::COUNT],
     /// Whether a maximum grew since [`say_longest`] last said them.
     unsaid: Cell<bool>,
+    /// Whether a host has been told the previous boot's panic ([`tell_host_panic`]).
+    panic_told: Cell<bool>,
+    /// Whether the RTC record of the previous boot's panic is cleared ([`panic_kept`]).
+    panic_cleared: Cell<bool>,
     boot: Boot,
 }
 
@@ -178,6 +254,9 @@ impl SdLog {
             }),
             maxima: [const { Cell::new(0) }; Window::COUNT],
             unsaid: Cell::new(false),
+            panic_told: Cell::new(false),
+            // With no text, [`last_panic`] cleared the record already.
+            panic_cleared: Cell::new(boot.panic.is_none()),
             boot,
         }
     }
@@ -415,6 +494,7 @@ pub fn encode_opened(
         image: boot.image,
         card_mb,
         free_mb,
+        last_panic: boot.panic.cloned(),
     };
     log::encode_opened(&opened, ms(), out)
 }

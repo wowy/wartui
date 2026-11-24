@@ -11,7 +11,7 @@
 //! | 1 | [`Heartbeat`] | 1 | [`Assign`] |
 //! | 2 | [`SightingBatch`] | 2 | [`Stop`] |
 //! | 3 | [`UpdateStatus`] | 3 | [`UpdateBegin`] |
-//! | | | 4 | [`UpdateChunk`] |
+//! | 4 | [`PanicMsg`] | 4 | [`UpdateChunk`] |
 //! | | | 5 | [`UpdateCommit`] |
 //! | | | 6 | [`UpdateAbort`] |
 //! | | | 7 | [`UpdateConfirm`] |
@@ -25,7 +25,7 @@
 use core::fmt;
 
 use super::{
-    Assign, EXT_MAX, Heartbeat, SSID_MAX, SightingBatch, Stop, UpdateAbort, UpdateBegin,
+    Assign, EXT_MAX, Heartbeat, PanicMsg, SSID_MAX, SightingBatch, Stop, UpdateAbort, UpdateBegin,
     UpdateChunk, UpdateCommit, UpdateConfirm, UpdateStatus,
 };
 
@@ -33,6 +33,8 @@ use super::{
 ///
 /// [`Heartbeat`](Self::Heartbeat) and [`UpdateStatus`](Self::UpdateStatus) are in the bus's
 /// frozen core ([`crate::bus`]): their codes never change, and no code is reused.
+/// [`Panic`](Self::Panic) is not: it is a new message on a new code, which a receiver that does
+/// not know it skips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum UpType {
@@ -42,6 +44,8 @@ pub enum UpType {
     Sightings = 2,
     /// [`UpdateStatus`].
     UpdateStatus = 3,
+    /// [`PanicMsg`].
+    Panic = 4,
 }
 
 impl UpType {
@@ -58,6 +62,7 @@ impl UpType {
             1 => Some(Self::Heartbeat),
             2 => Some(Self::Sightings),
             3 => Some(Self::UpdateStatus),
+            4 => Some(Self::Panic),
             _ => None,
         }
     }
@@ -119,8 +124,8 @@ pub enum DecodeError {
         /// Bytes present.
         got: usize,
     },
-    /// A fixed-length body that was not its own length, or a [`SightingBatch`] with bytes past
-    /// its last record.
+    /// A fixed-length body that was not its own length, a [`SightingBatch`] with bytes past
+    /// its last record, or a [`PanicMsg`] past its longest.
     ///
     /// Either way, the body came from a build whose layout differs from this one's: a fleet
     /// half-way through a reflash. Longer is the dangerous case: the leading bytes would parse,
@@ -139,6 +144,9 @@ pub enum DecodeError {
     /// `ext_len` exceeded [`EXT_MAX`]. No parser in this build produces that, so the body is
     /// malformed.
     ExtTooLong(u8),
+    /// A [`PanicMsg`]'s text that is not UTF-8. The node cuts its text only at a character's
+    /// end, so the body is malformed.
+    NotUtf8,
 }
 
 impl fmt::Display for DecodeError {
@@ -149,6 +157,7 @@ impl fmt::Display for DecodeError {
             Self::UnknownType(t) => write!(f, "unknown type {t:#04x}"),
             Self::SsidTooLong(n) => write!(f, "ssid length {n} exceeds {SSID_MAX}"),
             Self::ExtTooLong(n) => write!(f, "ext length {n} exceeds {EXT_MAX}"),
+            Self::NotUtf8 => f.write_str("text is not UTF-8"),
         }
     }
 }
@@ -179,6 +188,8 @@ pub enum UpMsg<'a> {
     Sightings(SightingBatch<'a>),
     /// Where an update session stands.
     UpdateStatus(UpdateStatus),
+    /// Why the node's last life ended.
+    Panic(PanicMsg<'a>),
 }
 
 impl<'a> UpMsg<'a> {
@@ -192,6 +203,7 @@ impl<'a> UpMsg<'a> {
             UpType::Heartbeat => Heartbeat::decode(body).map(Self::Heartbeat),
             UpType::Sightings => SightingBatch::decode(body).map(Self::Sightings),
             UpType::UpdateStatus => UpdateStatus::decode(body).map(Self::UpdateStatus),
+            UpType::Panic => PanicMsg::decode(body).map(Self::Panic),
         }
     }
 
@@ -202,6 +214,7 @@ impl<'a> UpMsg<'a> {
             Self::Heartbeat(_) => UpType::Heartbeat,
             Self::Sightings(_) => UpType::Sightings,
             Self::UpdateStatus(_) => UpType::UpdateStatus,
+            Self::Panic(_) => UpType::Panic,
         }
     }
 }

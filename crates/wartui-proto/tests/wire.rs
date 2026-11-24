@@ -8,12 +8,12 @@
 use wartui_proto::bus::{
     ASSIGN_FLAG_BLE, ASSIGN_LEN, Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg,
     DownType, EXT_MAX, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN, HEARTBEAT_PREFIX_LEN, Heartbeat,
-    RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
-    SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, STOP_LEN, Security, SightingBatch,
-    SightingBatchWriter, SightingMsg, Stop, UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK,
-    UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX, UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN,
-    UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit,
-    UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
+    NodeBus, PANIC_MAX, PANIC_MIN, PANIC_TEXT_MAX, PanicMsg, RecordKind, SIGHTING_BATCH_HEADER,
+    SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX,
+    SSID_MAX, STOP_LEN, Security, SightingBatch, SightingBatchWriter, SightingMsg, Stop,
+    UPDATE_ABORT_LEN, UPDATE_BEGIN_LEN, UPDATE_CHUNK, UPDATE_CHUNK_HEADER, UPDATE_CHUNK_MAX,
+    UPDATE_COMMIT_LEN, UPDATE_CONFIRM_LEN, UPDATE_STATUS_LEN, UpMsg, UpType, UpdateAbort,
+    UpdateBegin, UpdateChunk, UpdateCommit, UpdateConfirm, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::link::{MAX_NODE_DOWN, MAX_NODE_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
@@ -32,7 +32,41 @@ const HEARTBEAT: &[u8] = &[
     0x43, // vdd: code 67, 3304 mV
     0x51, // die_temp: code 81, 41 °C
     0x40, 0x9C, 0x00, 0x00, // heap_free 40,000, little-endian
+    0x60, 0xEA, 0x00, 0x00, // heap_used 60,000, little-endian
+    0x2C, 0x0F, 0x01, 0x00, // heap_high_water 69,420, little-endian
+    0x01, 0x11, // bus.bad_magic 0x1101, little-endian, as every bus field
+    0x02, 0x12, // bus.bad_crc 0x1202
+    0x03, 0x13, // bus.bad_len 0x1303
+    0x04, 0x14, // bus.gaps 0x1404
+    0x05, 0x15, // bus.early 0x1505
+    0x06, 0x16, // bus.arm_failed 0x1606
+    0x07, 0x17, // bus.inbox_full 0x1707
+    0x08, 0x18, // bus.out_of_order 0x1808
+    0x09, 0x19, // bus.repeats 0x1909
+    0x0A, 0x1A, // bus.replaced 0x1A0A
+    0x0B, 0x1B, // bus.resent 0x1B0B
+    0x0C, 0x1C, // bus.undelivered 0x1C0C
+    0x0D, 0x1D, // bus.handler_max_us 0x1D0D
+    0x0E, 0x1E, // bus.settle_max_us 0x1E0E
 ];
+
+/// [`HEARTBEAT`]'s bus counters, field by field.
+const HEARTBEAT_BUS: NodeBus = NodeBus {
+    bad_magic: 0x1101,
+    bad_crc: 0x1202,
+    bad_len: 0x1303,
+    gaps: 0x1404,
+    early: 0x1505,
+    arm_failed: 0x1606,
+    inbox_full: 0x1707,
+    out_of_order: 0x1808,
+    repeats: 0x1909,
+    replaced: 0x1A0A,
+    resent: 0x1B0B,
+    undelivered: 0x1C0C,
+    handler_max_us: 0x1D0D,
+    settle_max_us: 0x1E0E,
+};
 
 /// A heartbeat from a node unassigned since boot: epoch 0, never sent by the host.
 const HEARTBEAT_NO_EPOCH: &[u8] = &[
@@ -48,6 +82,12 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, // vdd: no reading
     0xFF, // die_temp: no reading
     0x00, 0x00, 0x00, 0x00, // heap_free 0
+    0x00, 0x00, 0x00, 0x00, // heap_used 0
+    0x00, 0x00, 0x00, 0x00, // heap_high_water 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // bus: bad_magic to gaps 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // early to out_of_order 0
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // repeats to undelivered 0
+    0x00, 0x00, 0x00, 0x00, // handler_max_us and settle_max_us 0
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -222,7 +262,7 @@ fn bus_msg_codec_matches_expected_body_lengths_when_checking_constants() {
     // The ceiling is the 1024 bytes every body a node sends keeps to, and a batch is packed
     // to fill exactly that many.
     const {
-        assert!(HEARTBEAT_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
+        assert!(HEARTBEAT_LEN < 64 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
         assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
     };
 }
@@ -245,6 +285,9 @@ fn heartbeat_serializes_byte_for_byte_when_encoded_and_decoded() {
         vdd: Vdd(67),
         die_temp: DieTemp(81),
         heap_free: 40_000,
+        heap_used: 60_000,
+        heap_high_water: 69_420,
+        bus: HEARTBEAT_BUS,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(Heartbeat::decode(HEARTBEAT), Ok(msg));
@@ -268,6 +311,9 @@ fn heartbeat_serializes_epoch_zero_when_node_holds_no_assignment() {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(Heartbeat::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -341,6 +387,46 @@ fn heartbeat_serializes_heap_free_as_little_endian_when_encoded() {
     let msg = Heartbeat { heap_free: u32::MAX, ..decoded };
     assert_eq!(&msg.encode()[23..27], &[0xFF; 4]);
     assert_eq!(Heartbeat::decode(&msg.encode()), Ok(msg));
+}
+
+#[test]
+fn heartbeat_serializes_heap_used_and_high_water_as_little_endian_when_encoded() {
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!((decoded.heap_used, decoded.heap_high_water), (60_000, 69_420));
+    assert_eq!(&HEARTBEAT[27..31], &[0x60, 0xEA, 0, 0]);
+    assert_eq!(&HEARTBEAT[31..35], &[0x2C, 0x0F, 0x01, 0]);
+
+    let msg = Heartbeat { heap_used: 0x0403_0201, heap_high_water: 0x0807_0605, ..decoded };
+    let body = msg.encode();
+    assert_eq!(&body[27..35], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(Heartbeat::decode(&body), Ok(msg));
+}
+
+#[test]
+fn heartbeat_places_each_bus_field_at_its_offset_when_encoded() {
+    // Every field differs, so two swapped fields fail here rather than round-tripping.
+    let decoded = Heartbeat::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.bus, HEARTBEAT_BUS);
+    let b = HEARTBEAT_BUS;
+    for (at, value) in [
+        (35, b.bad_magic),
+        (37, b.bad_crc),
+        (39, b.bad_len),
+        (41, b.gaps),
+        (43, b.early),
+        (45, b.arm_failed),
+        (47, b.inbox_full),
+        (49, b.out_of_order),
+        (51, b.repeats),
+        (53, b.replaced),
+        (55, b.resent),
+        (57, b.undelivered),
+        (59, b.handler_max_us),
+        (61, b.settle_max_us),
+    ] {
+        assert_eq!(&HEARTBEAT[at..at + 2], &value.to_le_bytes(), "the field at {at}");
+    }
+    assert_eq!(61 + 2, HEARTBEAT_LEN, "settle_max_us ends the body");
 }
 
 #[test]
@@ -894,6 +980,7 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
     assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_1), Ok(UpMsg::Sightings(_))));
     assert!(matches!(up(UpType::Sightings, SIGHTING_BATCH_BLE), Ok(UpMsg::Sightings(_))));
     assert!(matches!(up(UpType::UpdateStatus, OTA_STATUS), Ok(UpMsg::UpdateStatus(_))));
+    assert!(matches!(up(UpType::Panic, PANIC), Ok(UpMsg::Panic(_))));
     assert!(matches!(down(DownType::Assign, ASSIGN), Ok(DownMsg::Assign(_))));
     assert!(matches!(down(DownType::Stop, STOP), Ok(DownMsg::Stop(_))));
     assert!(matches!(down(DownType::UpdateBegin, OTA_BEGIN), Ok(DownMsg::UpdateBegin(_))));
@@ -907,7 +994,7 @@ fn msg_decoder_dispatches_type_byte_to_corresponding_message_when_decoded() {
 /// change, and no code is reused.
 #[test]
 fn msg_types_number_each_direction_from_one_when_pinned() {
-    let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus];
+    let up = [UpType::Heartbeat, UpType::Sightings, UpType::UpdateStatus, UpType::Panic];
     for (byte, kind) in (1..).zip(up) {
         assert_eq!(kind.as_u8(), byte);
         assert_eq!(UpType::from_u8(byte), Some(kind));
@@ -926,8 +1013,64 @@ fn msg_types_number_each_direction_from_one_when_pinned() {
         assert_eq!(DownType::from_u8(byte), Some(kind));
     }
     assert_eq!(UpType::from_u8(0), None);
-    assert_eq!(UpType::from_u8(4), None);
+    assert_eq!(UpType::from_u8(5), None);
     assert_eq!(DownType::from_u8(8), None);
+}
+
+/// A panic record: the MAC, then the text.
+const PANIC: &[u8] = &[
+    0x02, 0x00, 0x00, 0x00, 0x0D, 0x20, // mac 02:00:00:00:0D:20
+    b's', b'r', b'c', b'/', b'm', b'a', b'i', b'n', b'.', b'r', b's', b':', b'9', b':', b'5', b':',
+    b' ', b'o', b'o', b'p', b's', // "src/main.rs:9:5: oops"
+];
+
+#[test]
+fn panic_msg_round_trips_body_when_pinned() {
+    let msg = PanicMsg::decode(PANIC).expect("valid");
+    assert_eq!(msg, PanicMsg { mac: [0x02, 0, 0, 0, 0x0D, 0x20], text: "src/main.rs:9:5: oops" });
+    let mut out = [0u8; PANIC_MAX];
+    let len = msg.encode_into(&mut out).expect("fits");
+    assert_eq!(&out[..len], PANIC);
+    assert_eq!(UpMsg::Panic(msg).kind(), UpType::Panic);
+}
+
+#[test]
+fn panic_msg_decodes_body_when_text_is_empty() {
+    let msg = PanicMsg::decode(&PANIC[..PANIC_MIN]).expect("valid");
+    assert_eq!(msg.text, "");
+    let mut out = [0u8; PANIC_MIN];
+    assert_eq!(msg.encode_into(&mut out), Some(PANIC_MIN));
+}
+
+#[test]
+fn panic_msg_rejects_body_when_shorter_than_mac() {
+    assert_eq!(
+        PanicMsg::decode(&PANIC[..PANIC_MIN - 1]),
+        Err(DecodeError::TooShort { need: PANIC_MIN, got: PANIC_MIN - 1 })
+    );
+}
+
+#[test]
+fn panic_msg_rejects_body_when_text_is_too_long() {
+    let body = [b'x'; PANIC_MAX + 1];
+    assert!(PanicMsg::decode(&body[..PANIC_MAX]).is_ok(), "the longest text is taken");
+    assert_eq!(
+        PanicMsg::decode(&body),
+        Err(DecodeError::BadLength { need: PANIC_MAX, got: PANIC_MAX + 1 })
+    );
+    // Nor is one encoded.
+    let text = core::str::from_utf8(&body[PANIC_MIN..]).expect("ascii");
+    assert_eq!(text.len(), PANIC_TEXT_MAX + 1);
+    let mut out = [0u8; PANIC_MAX + 1];
+    assert_eq!(PanicMsg { mac: [0x02, 0, 0, 0, 0, 1], text }.encode_into(&mut out), None);
+}
+
+#[test]
+fn panic_msg_rejects_body_when_text_is_not_utf8() {
+    let mut body = PANIC.to_vec();
+    // A lone continuation byte.
+    body.push(0x80);
+    assert_eq!(PanicMsg::decode(&body), Err(DecodeError::NotUtf8));
 }
 
 #[test]
@@ -990,7 +1133,7 @@ fn msg_decoder_rejects_truncated_body_when_body_is_too_short() {
 fn heartbeat_pins_prefix_and_mac_when_inspecting_body() {
     // Version, board and flags, then the MAC: what a host reads from a node on another
     // layout to name it.
-    assert_eq!(HEARTBEAT_LEN, 27);
+    assert_eq!(HEARTBEAT_LEN, 63);
     assert_eq!(HEARTBEAT_PREFIX_LEN, 5);
     assert_eq!(HEARTBEAT_IDENTITY_LEN, 11);
     assert_eq!(&HEARTBEAT[..11], &[0, 1, 2, 1, 1, 0x02, 0, 0, 0, 0x0D, 0x20]);

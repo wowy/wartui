@@ -98,8 +98,8 @@
 //! takes, which is the chip's limit rather than the image's; [`ACK_TIMEOUT_MS`] and
 //! [`SEND_TRIES`], as each sender's own policy; the P4's pins, and its scheduling beyond what it
 //! owes a node; up type 2 ([`SightingBatch`]), down types 1 and 2 ([`Assign`], [`Stop`]), and
-//! the heartbeat past its MAC. A core type code is never reused, and a new message takes a new
-//! code.
+//! the heartbeat past its MAC; and up type 4 ([`PanicMsg`]). A core type code is never reused,
+//! and a new message takes a new code.
 //!
 //! **The P4 checks this framing and forwards every record a node sends.** A record's type byte
 //! is the message type ([`UpType`], [`DownType`]) and its body the message body; the messages are
@@ -123,6 +123,7 @@ mod health;
 mod heartbeat;
 mod msg;
 mod node_board;
+mod panic;
 mod record;
 mod security;
 mod sighting;
@@ -137,10 +138,11 @@ pub use downlink::{Downlink, FLIGHT_MAX, Ids, RESEND_GAP_MS};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_IDENTITY_LEN, HEARTBEAT_LEN,
-    HEARTBEAT_PREFIX_LEN, Heartbeat,
+    HEARTBEAT_PREFIX_LEN, Heartbeat, NodeBus,
 };
 pub use msg::{DecodeError, DownMsg, DownType, UpMsg, UpType};
 pub use node_board::{NodeBoard, NodeBoardError, SlotLabel};
+pub use panic::{PANIC_MAX, PANIC_MIN, PANIC_TEXT_MAX, PanicMsg, PanicStr};
 pub use record::{Packer, RECORD_HEADER_LEN, RECORD_MAX, Record, Records, records};
 pub use security::Security;
 pub use sighting::{

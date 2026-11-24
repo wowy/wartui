@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DieTemp, Heartbeat, NODE_VERSION, Slot, Vdd, Version,
+    Assign, Board, Capabilities, DieTemp, HEARTBEAT_LEN, Heartbeat, NODE_VERSION, NodeBus, Slot,
+    Vdd, Version,
 };
 use wartui_proto::fleet::{
     BRIDGE_ID, Fleet, HEARTBEAT_TIMEOUT_MS, Report, ScanMode, SlotMsg, ToSlot, next_epoch,
@@ -25,7 +26,7 @@ fn mac(n: u8) -> Mac {
     [0x02, 0, 0, 0, 0xF1, n]
 }
 
-fn beat_body(mac: Mac, version: Version, counter: u32, epoch: u8) -> [u8; 27] {
+fn beat_body(mac: Mac, version: Version, counter: u32, epoch: u8) -> [u8; HEARTBEAT_LEN] {
     Heartbeat {
         capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
         mac,
@@ -37,6 +38,9 @@ fn beat_body(mac: Mac, version: Version, counter: u32, epoch: u8) -> [u8; 27] {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     }
     .encode()
 }

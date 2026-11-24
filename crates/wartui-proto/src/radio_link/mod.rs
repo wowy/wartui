@@ -50,8 +50,8 @@ pub use hello::{Chip, HELLO_LEN, Hello};
 pub use inflow::{Accept, Inflow};
 pub use message::{
     BleCounters, BleState, Down, HOST_BYTES_MAX, Held, LINK_REVISION, LastDrop, Packer, PhoneLink,
-    RECORD_MAX, RadioStatus, Stream, Up, WINDOW_UNTIL_BONDED, decode_down, decode_up, encode_down,
-    encode_up, host_bytes_fit, records,
+    RECORD_MAX, RadioHealth, RadioStatus, Stream, Up, WINDOW_UNTIL_BONDED, decode_down, decode_up,
+    encode_down, encode_up, host_bytes_fit, records,
 };
 
 /// The link's baud rate. Both ends take it exactly or not at all.

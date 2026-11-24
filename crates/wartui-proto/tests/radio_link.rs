@@ -2,14 +2,15 @@
 
 use heapless::Vec;
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, MAX_BONDS};
+use wartui_proto::bus::{DieTemp, Vdd};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{LogStr, LoopPhase, QueueId, QueueStat, ShortStr, crc16};
 use wartui_proto::radio_link::{
     Accept, BODY_MAX, BleCounters, BleState, CORE_VERSION, CRC_LEN, Chip, Down, HEADER_LEN,
     HELLO_LEN, HOST_BYTES_MAX, HOST_WINDOW_BYTES, Held, Hello, Inflow, Kind, LastDrop, MAGIC,
-    PAYLOAD_MAX, Packer, PacketReader, PhoneLink, RECORD_MAX, RadioStatus, SeqCheck, SeqNote,
-    Stream, Up, VerifyError, WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up, encode_down,
-    encode_packet, encode_up, host_bytes_fit, host_window, records, seal, verify,
+    PAYLOAD_MAX, Packer, PacketReader, PhoneLink, RECORD_MAX, RadioHealth, RadioStatus, SeqCheck,
+    SeqNote, Stream, Up, VerifyError, WINDOW_UNTIL_BONDED, WIRE_MAX, decode_down, decode_up,
+    encode_down, encode_packet, encode_up, host_bytes_fit, host_window, records, seal, verify,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::wardrive_esp::beacon::{Beacon, LinkEnd};
@@ -481,7 +482,6 @@ fn radio_link_largest_messages_fit_one_packet() {
             dropped_writes: u32::MAX,
             phy: u8::MAX,
             interval_us: u32::MAX,
-            heap_high_water: u32::MAX,
         },
     });
     let line = Up::Error { message: LogStr::try_from("x".repeat(96).as_str()).unwrap() };
@@ -509,7 +509,25 @@ fn radio_link_largest_messages_fit_one_packet() {
         heap_free: u32::MAX,
         heap_least: u32::MAX,
     });
-    let ups = [status, line, Up::HostBytes(&stream), credit, state, added, removed, command, phone];
+    let health = Up::Health(RadioHealth {
+        die_temp: DieTemp(u8::MAX),
+        vdd: Vdd(u8::MAX),
+        heap_used: u32::MAX,
+        heap_free: u32::MAX,
+        heap_high_water: u32::MAX,
+    });
+    let ups = [
+        status,
+        line,
+        Up::HostBytes(&stream),
+        credit,
+        state,
+        added,
+        removed,
+        command,
+        phone,
+        health,
+    ];
     for up in ups {
         let len = encode_up(&up, &mut out).unwrap();
         assert!(len <= RECORD_MAX, "{up:?} is {len} bytes");
@@ -634,7 +652,6 @@ fn radio_link_revision_golden_bytes() {
             dropped_writes: 4,
             phy: 2,
             interval_us: 7_500,
-            heap_high_water: 5,
         },
     });
     let len = encode_up(&up, &mut out).unwrap();
@@ -653,7 +670,6 @@ fn radio_link_revision_golden_bytes() {
         4,          // dropped_writes
         2,          // phy
         0xCC, 0x3A, // interval_us 7500, varint
-        5,          // heap_high_water
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), up);
@@ -749,6 +765,32 @@ fn radio_link_revision_golden_bytes() {
     let len = encode_up(&none, &mut out).unwrap();
     // Every number 0, and both options `None`.
     assert_eq!(out[..len], [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), none);
+
+    let health = Up::Health(RadioHealth {
+        die_temp: DieTemp::from_c(42),
+        vdd: Vdd::from_mv(3_300),
+        heap_used: 40_000,
+        heap_free: 300,
+        heap_high_water: 5,
+    });
+    let len = encode_up(&health, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        10,               // Up::Health
+        82,               // die_temp: 42 °C, offset by 40
+        67,               // vdd: 3.300 V, (3300 − 2500) / 12 rounded
+        0xC0, 0xB8, 0x02, // heap_used 40000, varint
+        0xAC, 0x02,       // heap_free 300, varint
+        5,                // heap_high_water
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), health);
+
+    let none = Up::Health(RadioHealth::default());
+    let len = encode_up(&none, &mut out).unwrap();
+    // No readings, each its own code for none, and no heap.
+    assert_eq!(out[..len], [10, 0xFF, 0, 0, 0, 0], "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), none);
 }
 

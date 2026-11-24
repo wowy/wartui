@@ -215,6 +215,7 @@ pub(super) fn busy() -> Snapshot {
             }),
             // What a bridge on USB with no Bluetooth host reports.
             bluetooth: BluetoothStatus { owner: HostOwner::Usb, ..BluetoothStatus::default() },
+            health: Default::default(),
         }),
         started_at_ms: EPOCH_MS,
         now_ms: EPOCH_MS + 60_000,

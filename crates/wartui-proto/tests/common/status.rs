@@ -2,14 +2,14 @@
 
 use heapless::Vec;
 use wartui_proto::ChannelPool;
-use wartui_proto::bus::Slot;
+use wartui_proto::bus::{DieTemp, Slot, Vdd};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, HostOwner, PairWindow, QueueId, QueueStat, QueueStats,
-    RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
+    BluetoothStatus, BridgeHealth, BridgeToHost, Central, HostOwner, PairWindow, QueueId,
+    QueueStat, QueueStats, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
-use wartui_proto::radio_link::BleCounters;
+use wartui_proto::radio_link::{BleCounters, RadioHealth};
 
 /// A member in every slot, each with a locally administered MAC.
 pub fn full_members() -> Vec<Member, 14> {
@@ -86,9 +86,18 @@ pub fn largest_status() -> BridgeToHost {
                 dropped_writes: u32::MAX,
                 phy: u8::MAX,
                 interval_us: u32::MAX,
-                heap_high_water: u32::MAX,
             },
             wardrive_esp: true,
+        },
+        health: BridgeHealth {
+            p4_die_temp: DieTemp(u8::MAX),
+            radio: Some(RadioHealth {
+                die_temp: DieTemp(u8::MAX),
+                vdd: Vdd(u8::MAX),
+                heap_used: u32::MAX,
+                heap_free: u32::MAX,
+                heap_high_water: u32::MAX,
+            }),
         },
     }
 }

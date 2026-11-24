@@ -67,6 +67,8 @@ pub struct NodeState {
     pub fault_restart: Option<ResetCause>,
     /// How many restarts the host saw were faults. [`Self::fault_restart`] is the latest.
     pub fault_restarts: u32,
+    /// Why this node's current boot started, as its latest heartbeat said. `None` before one.
+    pub reset_cause: Option<ResetCause>,
     /// The `seq` of this node's latest sighting batch. Reset on reboot, since `seq` restarts at
     /// boot and a gap across one is not a loss.
     pub last_seq: Option<u16>,
@@ -130,6 +132,7 @@ impl NodeState {
             held_epoch: None,
             fault_restart: None,
             fault_restarts: 0,
+            reset_cause: None,
             last_seq: None,
             last_seq_live: false,
             last_batch: None,

@@ -3,7 +3,7 @@
 
 use heapless::String;
 use wartui_proto::ChannelPool;
-use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::bus::{HEARTBEAT_LEN, NodeBoard, PANIC_TEXT_MAX, Slot, UpType};
 use wartui_proto::crc::crc32;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::host_owner::{Holder, Input};
@@ -38,6 +38,17 @@ fn opened() -> Opened {
         image: None,
         card_mb: 30_436,
         free_mb: Some(30_000),
+        last_panic: None,
+    }
+}
+
+/// A record from node A1 of `kind`, as the bridge forwards it.
+fn from_node(kind: UpType, body: &[u8]) -> BridgeToHost {
+    BridgeToHost::FromNode {
+        slot: Slot::new(0, 0).expect("A1"),
+        rx_us: u32::MAX,
+        kind: kind.as_u8(),
+        body: heapless::Vec::from_slice(body).expect("fits"),
     }
 }
 
@@ -318,15 +329,10 @@ fn sd_log_logged_pins_each_variant_when_bridge_sends_it() {
         (BridgeToHost::Error { message: LogStr::try_from("no").expect("short") }, true),
         (BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GP").expect("fits") }, false),
         (BridgeToHost::Update(status.clone()), true),
-        (
-            BridgeToHost::FromNode {
-                slot: Slot::new(0, 0).expect("A1"),
-                rx_us: 0,
-                kind: 1,
-                body: heapless::Vec::new(),
-            },
-            false,
-        ),
+        (from_node(UpType::Heartbeat, &[]), true),
+        (from_node(UpType::Sightings, &[]), false),
+        (from_node(UpType::UpdateStatus, &[]), false),
+        (from_node(UpType::Panic, &[]), true),
         (BridgeToHost::Delivered { id: 1 }, false),
         (BridgeToHost::Undelivered { id: 1, reason: Undelivered::Timeout }, false),
         (
@@ -351,6 +357,36 @@ fn sd_log_logged_pins_each_variant_when_bridge_sends_it() {
     for (msg, want) in &cases {
         assert_eq!(logged(msg), *want, "{msg:?}");
     }
+}
+
+#[test]
+fn sd_log_round_trips_opened_when_last_panic_is_longest() {
+    // Every field at its longest, so `OPENED_MAX` is checked against what postcard writes.
+    let longest = String::try_from("x".repeat(32).as_str()).expect("fits");
+    let opened = Opened {
+        file: u32::MAX,
+        part: u16::MAX,
+        opened_ms: u64::MAX,
+        fw_version: longest.clone(),
+        slot: longest,
+        image: Some([0xFF; 32]),
+        card_mb: u32::MAX,
+        free_mb: Some(u32::MAX),
+        last_panic: Some(String::try_from("é".repeat(PANIC_TEXT_MAX / 2).as_str()).expect("fits")),
+        ..opened()
+    };
+    let bytes = record(|o| encode_opened(&opened, 7, o));
+    assert_eq!(decoded(&bytes).2, debug(&Body::Opened(opened)));
+}
+
+#[test]
+fn sd_log_sizes_heartbeat_record_when_node_sends_one() {
+    // The figure `firmware/p4-bridge/src/sd_log.rs` sizes the log's node traffic by.
+    let heartbeat = from_node(UpType::Heartbeat, &[0xFF; HEARTBEAT_LEN]);
+    let bytes = record(|o| encode_message(Kind::Frame, &heartbeat, u32::MAX, o));
+    // The longest: `rx_us` is a postcard varint, five bytes at its largest. COBS adds a byte
+    // per 254 whatever the zeros, so the body's bytes do not move it.
+    assert_eq!(bytes.len(), 87);
 }
 
 #[test]
@@ -426,6 +462,7 @@ fn sd_log_pins_bytes_when_opened_recorded() {
         0,                                    // image: None
         0xE4, 0xED, 0x01,                     // card_mb: 30,436
         1, 0xB0, 0xEA, 0x01,                  // free_mb: Some(30,000)
+        0,                                    // last_panic: None
     ];
     let body = body_of(&bytes);
     assert_eq!(body[..body.len() - 4], want);

@@ -38,12 +38,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::health;
+use wartui_firmware::{health, last_panic};
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::bus::{
-    Assign, Board, Capabilities, DecodeError, DieTemp, DownMsg, Heartbeat, PAYLOAD_MAX,
-    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType, UpdateState, UpdateStatus,
-    Vdd, records,
+    Assign, Board, Capabilities, DecodeError, DownMsg, Heartbeat, PANIC_MAX, PAYLOAD_MAX, PanicMsg,
+    PanicStr, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, UpType, UpdateState,
+    UpdateStatus, Vdd, records,
 };
 use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB};
 use wartui_proto::mac::{self, Mac};
@@ -105,9 +105,16 @@ const POLL_MS: u64 = 2;
 /// The C5 failure [`reboot`] guards against is quieter on this end: a node that never
 /// comes back reads as `no heartbeat`, as one out of range does, so it would go
 /// unexplained for longer.
+///
+/// The text is recorded first, for the next life to send the P4 ([`send_panic`]): recording
+/// touches only RTC memory and needs no stack buffer. The console line formats on whatever stack
+/// is left, so it comes second and only on the first entry: a fault inside it re-enters here and
+/// resets at once.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    note!("panic: {}", info);
+    if last_panic::record(info) {
+        note!("panic: {}", info);
+    }
     reboot()
 }
 
@@ -166,6 +173,10 @@ struct Node {
     /// Whether this image is on trial, not yet confirmed by a record from the bridge. Every
     /// heartbeat carries it as [`Capabilities::trial`]; `ota` has the rest.
     trial: bool,
+    /// The last life's panic text, until the P4 acknowledges it ([`send_panic`]).
+    panic: Option<PanicStr>,
+    /// The earliest next try at [`send_panic`] after one failed.
+    panic_retry: Option<Instant>,
 }
 
 impl Node {
@@ -187,6 +198,8 @@ impl Node {
             // `main` replaces it before the first heartbeat.
             reset_cause: ResetCause::Unknown,
             trial: false,
+            panic: None,
+            panic_retry: None,
         }
     }
 
@@ -395,6 +408,10 @@ fn main() -> ! {
     node.trial = trial;
     node.mac = esp_radio::wifi::Interface::station().mac_address();
     note!("wartui node {} v{}", mac::full(&node.mac), env!("CARGO_PKG_VERSION"));
+    node.panic = last_panic::take(cause);
+    if let Some(text) = &node.panic {
+        note!("last boot panicked: {}", text);
+    }
 
     loop {
         drain(node, &mut ota);
@@ -402,7 +419,7 @@ fn main() -> ! {
             // Update mode: sniffing nothing and scanning no Bluetooth, servicing the bus
             // throughout. It heartbeats every second whatever the assignment, so the host
             // sees it alive, and keeps that assignment to return to.
-            heartbeat(node);
+            beat(node);
             listen(node, &mut ota, scanning, IDLE_BEAT_MS);
             ota.expire();
             continue;
@@ -414,7 +431,7 @@ fn main() -> ! {
             // answer to one, so this is how long joining a fleet takes. One idle beat is
             // this node's whole cycle, so the counter the heartbeat carries advances here
             // too.
-            heartbeat(node);
+            beat(node);
             node.counter = node.counter.wrapping_add(1).max(1);
             listen(node, &mut ota, scanning, IDLE_BEAT_MS);
             // An assignment adopted mid-listen: this node has just heartbeated, so its
@@ -489,8 +506,42 @@ fn beat_if_due(node: &mut Node) {
     let now = Instant::now();
     let deadline = node.next_beat.unwrap_or(now);
     if now >= deadline {
-        heartbeat(node);
+        beat(node);
         node.next_beat = Some(next_beat_after(deadline));
+    }
+}
+
+/// How long [`send_panic`] waits after a failed try before the next.
+const PANIC_RETRY: Duration = Duration::from_secs(30);
+
+/// Send a heartbeat, then the last life's panic while one is held.
+fn beat(node: &mut Node) {
+    heartbeat(node);
+    send_panic(node);
+}
+
+/// Deliver the last life's panic to the P4, and forget it once the P4 acknowledges it.
+///
+/// Tried once a beat, behind the heartbeat, which [`bus::deliver`] lets go first, so the host
+/// reads this life's reset cause ahead of the text. A delivery blocks the main loop until
+/// acknowledged or out of tries, seconds on a slot no P4 clocks, so it is tried only while one
+/// does ([`bus::clocked`]). A clocked slot can still lose every ack, so a failed try waits
+/// [`PANIC_RETRY`] before the next, which caps the scan loop's stalls at one every 30 s.
+fn send_panic(node: &mut Node) {
+    let Some(text) = node.panic.as_deref() else { return };
+    if !bus::clocked() || node.panic_retry.is_some_and(|at| Instant::now() < at) {
+        return;
+    }
+    let mut body = [0u8; PANIC_MAX];
+    // A `PanicStr` always fits.
+    let Some(len) = (PanicMsg { mac: node.mac, text }).encode_into(&mut body) else { return };
+    if bus::deliver(UpType::Panic, &body[..len]) {
+        last_panic::clear();
+        node.panic = None;
+        note!("last boot's panic delivered");
+    } else {
+        node.panic_retry = Some(Instant::now() + PANIC_RETRY);
+        note!("last boot's panic unacknowledged");
     }
 }
 
@@ -513,12 +564,14 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// the host; the bridge and the host treat 20 s of silence as a node that has left the fleet.
 /// `node.version` is the epoch this node holds, which is how the bridge and the host tell
 /// adoption from a bus ack. Fire-and-forget: a newer heartbeat replaces one the P4 has not clocked
-/// (`bus::send`). The rail voltage, die temperature and free heap are read between dwells, so
-/// the voltage read's PBUS excursion never lands in one.
+/// (`bus::send`). The rail voltage, die temperature and heap are read between dwells, so
+/// the voltage read's PBUS excursion never lands in one. The bus counters are this node's own,
+/// since boot (`bus::counters`).
 fn heartbeat(node: &Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped beat or stale after a reflash, and they are
-    // five bytes of twenty-seven.
+    // five bytes of sixty-three.
+    let heap = esp_alloc::HEAP.stats();
     let msg = Heartbeat {
         capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
         mac: node.mac,
@@ -528,16 +581,13 @@ fn heartbeat(node: &Node) {
         ble_refused: ble::refused(),
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
-        die_temp: die_temp(health::die_temp_c()),
-        heap_free: esp_alloc::HEAP.free() as u32,
+        die_temp: health::die_temp(),
+        heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
+        heap_used: heap.current_usage as u32,
+        heap_high_water: heap.max_usage as u32,
+        bus: bus::counters(),
     };
     bus::send(UpType::Heartbeat, &msg.encode());
-}
-
-/// Encode a die reading, sending a failed one as no reading.
-fn die_temp(c: i16) -> DieTemp {
-    // The PHY floors a failed read at −200 °C, and no running die is below −40 °C.
-    if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) }
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few batches as

@@ -40,7 +40,8 @@ updates:
   # `sdio` is held at the version `esp-hal` builds against: its SDMMC slot implements
   # `sdio`'s bus trait, so a higher one is a second copy whose trait the slot does not
   # implement. `firmware/p4-bridge` names it, with `block-device-driver` and `aligned`
-  # held at the versions `sdio` builds against, for its microSD card.
+  # held at the versions `sdio` builds against, for its microSD card. It names `esp32p4`,
+  # the PAC, held at the version `esp-hal` builds against, for its temperature sensor.
   # `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
@@ -85,6 +86,8 @@ updates:
       - dependency-name: "esp-sync"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-wifi-sys-*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp32p4"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "sdio"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]

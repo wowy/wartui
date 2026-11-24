@@ -1,6 +1,6 @@
 use wartui_proto::bus::{
-    ACK_TIMEOUT_MS, Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, RecordKind,
-    SightingBatch, SightingMsg, Slot, UpType,
+    ACK_TIMEOUT_MS, Capabilities, DecodeError, Heartbeat as HeartbeatMsg, NODE_VERSION, PanicMsg,
+    RecordKind, SightingBatch, SightingMsg, Slot, UpType,
 };
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::mac::{self, Mac};
@@ -9,7 +9,7 @@ use wartui_proto::plan::index_of;
 #[cfg(doc)]
 use super::Counters;
 use super::{ActionBatch, FleetEngine, NodeState, Now};
-use crate::record::{BatchGap, Heartbeat, NodeSeen, Observation, RawFrame, Record};
+use crate::record::{BatchGap, Heartbeat, NodePanic, NodeSeen, Observation, RawFrame, Record};
 
 /// Log a node's boot at `warn!` when its [`ResetCause`](wartui_proto::reset::ResetCause) is a
 /// fault, so a brownout, watchdog, lockup or panic mid-drive reaches the operator, and at
@@ -120,6 +120,19 @@ impl FleetEngine {
             }
             // A node's update status is the update session's to read, not the engine's.
             Some(UpType::UpdateStatus) => {}
+            Some(UpType::Panic) => {
+                // Read from a node this build drives only, as a batch is: the layout is not in
+                // the bus's frozen core.
+                if self.slots.get(&slot).is_some_and(|src| !self.drivable(*src)) {
+                    self.counters.incompatible += 1;
+                    return;
+                }
+                match PanicMsg::decode(body) {
+                    Ok(panic) => self.on_panic(rx, panic, now, batch),
+                    Err(DecodeError::BadLength { .. }) => self.counters.incompatible += 1,
+                    Err(_) => self.counters.undecodable += 1,
+                }
+            }
             None => self.counters.undecodable += 1,
         }
     }
@@ -226,6 +239,7 @@ impl FleetEngine {
             node.held_epoch = None;
         }
         node.capabilities = Some(heartbeat.capabilities);
+        node.reset_cause = Some(heartbeat.reset_cause);
         // A replayed heartbeat's epoch is history and must not overwrite a live one.
         if live {
             node.held_epoch = Some(heartbeat.epoch);
@@ -263,7 +277,31 @@ impl FleetEngine {
             vdd_mv: heartbeat.vdd.mv(),
             die_temp_c: heartbeat.die_temp.c(),
             heap_free: heartbeat.heap_free,
+            heap_used: heartbeat.heap_used,
+            heap_high_water: heartbeat.heap_high_water,
+            bus: heartbeat.bus,
             live,
+        }));
+    }
+
+    /// A node's last panic, which it sends once in the boot after it. Logged and stored, and
+    /// nothing else: the heartbeat ahead of it has already said the node restarted.
+    fn on_panic(&self, rx: &FromNode<'_>, panic: PanicMsg<'_>, now: Now, batch: &mut ActionBatch) {
+        let label = self.slot_label(rx.slot);
+        let reset_cause = self.nodes.get(&panic.mac).and_then(|node| node.reset_cause);
+        tracing::warn!(
+            mac = %mac::full(&panic.mac),
+            slot = %label,
+            reset = reset_cause.map(tracing::field::display),
+            "node panicked last boot: {}",
+            panic.text
+        );
+        batch.records.push(Record::NodePanic(NodePanic {
+            node_mac: panic.mac,
+            rx_at_ms: now.unix_ms,
+            slot: rx.slot,
+            reset_cause,
+            message: panic.text.to_owned(),
         }));
     }
 

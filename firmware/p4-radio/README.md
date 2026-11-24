@@ -44,8 +44,13 @@ advertises the WardriveESP status beacon.
   forwarded the write, so a central never overruns TrouBLE's queue of 8.
 - **A Bluetooth host that stops restarts the C6**, and the next boot reports the reason.
 - **Its counters ride on each `RadioStatus`:** pairings, failed pairings, centrals disconnected
-  for holding no bond (a cleared one included), the last disconnect reason, resynced and dropped bytes, the PHY, the interval and
-  the heap's high-water mark.
+  for holding no bond (a cleared one included), the last disconnect reason, resynced and dropped
+  bytes, the PHY and the interval.
+- **It reports its own health every 10 s** as `Up::Health`, once its Bluetooth controller has
+  started: its die temperature, less its eFuse calibration, and 3.3 V rail, read through the PHY, and its heap in use, free and
+  at its high-water mark. The P4 puts the latest in every `Status`. The rail read borrows the PBUS
+  for a moment while connection events run, so check a change near it on the bench against
+  `dropped_writes`, `resynced_bytes` and disconnects.
 - **The heap is 96 KB:** 64 KB of reclaimed bootloader RAM and 32 KB more. The Bluetooth controller
   and the scheduler under it are all that allocate.
 
@@ -85,8 +90,9 @@ An unanswered request ends the link at the link layer's 40 s timeout. All three 
 the sources and none is measured. The feature buys only the C6's interval request taking the
 link layer's procedure before L2CAP.
 
-The C6 keeps its last panic's text in RTC memory across the reset, and sends it to the P4 as
-`Error` lines once the link is up (`src/last_panic.rs`).
+The C6 keeps its last panic's text in RTC memory across the reset
+(`wartui_firmware::last_panic`), and sends it to the P4 as `Error` lines once the link is up
+(`src/last_panic.rs`).
 
 ## Boards
 

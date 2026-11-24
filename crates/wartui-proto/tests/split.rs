@@ -2,15 +2,15 @@
 
 use heapless::Vec;
 use wartui_proto::ChannelPool;
-use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::bus::{DieTemp, NodeBoard, Slot, Vdd};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, Central, HostOwner, LoopPhase, QueueId, QueueStat,
+    BluetoothStatus, BridgeHealth, BridgeToHost, Central, HostOwner, LoopPhase, QueueId, QueueStat,
     RADIO_UPDATING, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
-use wartui_proto::radio_link::{BleCounters, Chip, Hello, LINK_REVISION, RadioStatus};
+use wartui_proto::radio_link::{BleCounters, Chip, Hello, LINK_REVISION, RadioHealth, RadioStatus};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{
     INSTALL_WAIT_MS, P4Counters, Pair, PairEvent, RADIO_SILENT_MS, RADIO_WAIT_MS, RadioState,
@@ -191,6 +191,7 @@ fn pair_status_sums_host_and_radio_drops() {
         .collect(),
         sd: Some(SdStatus::card(SdState::Ready, 60_350, Some(60_340))),
         bluetooth: usb_bluetooth(),
+        p4_die_temp: DieTemp::from_c(45),
     };
     let sent = p4.members.clone();
     match pair.status(3_000, p4) {
@@ -210,8 +211,14 @@ fn pair_status_sums_host_and_radio_drops() {
             members,
             sd,
             bluetooth,
+            health,
         } => {
             assert_eq!((rx_count, rx_oversize), (40, 2));
+            assert_eq!(
+                health,
+                BridgeHealth { p4_die_temp: DieTemp::from_c(45), radio: None },
+                "the P4's reading, and none from a C6 that has sent none"
+            );
             assert_eq!(
                 sd,
                 Some(SdStatus::card(SdState::Ready, 60_350, Some(60_340))),
@@ -315,6 +322,45 @@ fn pair_status_leaves_central_none_when_radio_reports_a_phy() {
     };
     assert_eq!(bluetooth.central, None);
     assert_eq!(bluetooth.counters.phy, 2);
+}
+
+#[test]
+fn pair_status_carries_radio_health_when_radio_reported_it() {
+    let mut pair = up_pair();
+    pair.note_radio_health(RadioHealth { heap_used: 1, ..radio_health() });
+    // The latest report wins.
+    pair.note_radio_health(radio_health());
+    let p4 = P4Counters { p4_die_temp: DieTemp::from_c(51), ..p4_zero() };
+    let BridgeToHost::Status { health, .. } = pair.status(3_000, p4) else {
+        panic!("not a Status");
+    };
+    assert_eq!(
+        health,
+        BridgeHealth { p4_die_temp: DieTemp::from_c(51), radio: Some(radio_health()) }
+    );
+}
+
+#[test]
+fn pair_status_reports_no_radio_health_when_radio_sent_none() {
+    let pair = up_pair();
+    let BridgeToHost::Status { health, .. } = pair.status(3_000, p4_zero()) else {
+        panic!("not a Status");
+    };
+    assert_eq!(health, BridgeHealth::default());
+    assert_eq!(health.p4_die_temp, DieTemp::NONE, "the default is no reading, not -40 °C");
+}
+
+#[test]
+fn pair_drops_radio_health_when_radio_starts_a_new_life() {
+    let mut pair = up_pair();
+    pair.note_seq(5);
+    pair.note_radio_health(radio_health());
+    // A seq not past the last packet's is a restarted C6.
+    assert_eq!(pair.on_hello(hello(70), 0, 2_000), PairEvent::NewLife);
+    let BridgeToHost::Status { health, .. } = pair.status(3_000, p4_zero()) else {
+        panic!("not a Status");
+    };
+    assert_eq!(health.radio, None);
 }
 
 #[test]
@@ -477,6 +523,18 @@ fn p4_zero() -> P4Counters {
         members: Vec::new(),
         sd: None,
         bluetooth: usb_bluetooth(),
+        p4_die_temp: DieTemp::NONE,
+    }
+}
+
+/// A plausible C6 health report.
+fn radio_health() -> RadioHealth {
+    RadioHealth {
+        die_temp: DieTemp::from_c(42),
+        vdd: Vdd::from_mv(3_300),
+        heap_used: 40_000,
+        heap_free: 32_000,
+        heap_high_water: 51_000,
     }
 }
 

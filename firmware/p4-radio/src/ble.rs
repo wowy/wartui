@@ -217,6 +217,11 @@
 //! later send. The window's end is tracked here from each `Down::Bonds`' `window_ms`, the P4's
 //! time left as it sent it.
 //!
+//! **Once the controller has started, the C6 reports its own health every [`HEALTH_EVERY`]**
+//! ([`repeat_health`]): its die temperature, less the chip's eFuse calibration, and its rail, both
+//! read through the PHY, and its heap. A controller that would not start never powered the PHY,
+//! so no `Up::Health` goes.
+//!
 //! **The first start ends the image's trial** with the P4's hello (`src/link.rs`): [`advertise`]
 //! raises `advertising_started` once the controller takes its first start, of the wartui set
 //! alone or of both.
@@ -240,10 +245,12 @@ use trouble_host::att::AttClient;
 use trouble_host::prelude::*;
 use wartui_proto::ble::{ByteRing, ID_UUID, NAME_PREFIX, Rest, SERVICE_UUID, link_address};
 use wartui_proto::bonds::{BondAddr, BondLevel, BondRecord, Bonds};
+use wartui_proto::bus::Vdd;
 use wartui_proto::heapless::Deque;
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::{
-    Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, LastDrop, PhoneLink, Stream, Up,
+    Accept, BleCounters, BleState, HOST_WINDOW_BYTES, Inflow, LastDrop, PhoneLink, RadioHealth,
+    Stream, Up,
 };
 use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, EXTRAS_UUID, STATUS_MAX};
 use wartui_proto::wardrive_esp::command;
@@ -297,6 +304,9 @@ const _: () = assert!(
 
 /// How often the C6 repeats its `BleState` to the P4, changed or not.
 const STATE_EVERY: Duration = Duration::from_secs(1);
+
+/// How often the C6 sends `Up::Health` once its controller has started.
+const HEALTH_EVERY: Duration = Duration::from_secs(10);
 
 /// How long after a phone's stream starts the first `Up::PhoneLink` with a signal reading goes.
 const PHONE_LINK_FIRST: Duration = Duration::from_secs(1);
@@ -565,8 +575,12 @@ pub struct Ble {
     /// The `Up::Credit` last sent or repeated, or `None` before the first, and when.
     credited: Cell<Option<u32>>,
     credited_at: Cell<Instant>,
-    /// The counters kept here; [`counters`] adds the heap's.
+    /// The counters `RadioStatus.ble` reports.
     counters: Cell<BleCounters>,
+    /// The controller started, so the PHY is up and [`repeat_health`] may read through it.
+    controller_up: Cell<bool>,
+    /// When the last `Up::Health` went, or `None` before the first.
+    health_at: Cell<Option<Instant>>,
     /// Raised when the ring or the subscription changes, for the notifier.
     ready: Signal<NoopRawMutex, ()>,
     /// The bonds the P4 last sent, oldest first, and whether any `Down::Bonds` has arrived.
@@ -616,6 +630,8 @@ impl Ble {
             credited: Cell::new(None),
             credited_at: Cell::new(Instant::from_ticks(0)),
             counters: Cell::new(BleCounters::default()),
+            controller_up: Cell::new(false),
+            health_at: Cell::new(None),
             ready: Signal::new(),
             bonds: RefCell::new(Bonds::new()),
             bonds_heard: Cell::new(false),
@@ -778,9 +794,7 @@ pub fn take_beacon(shared: &Shared, beacon: Beacon) {
 
 /// The counters `RadioStatus.ble` reports.
 pub fn counters(shared: &Shared) -> BleCounters {
-    let mut counters = shared.ble.counters.get();
-    counters.heap_high_water = esp_alloc::HEAP.stats().max_usage as u32;
-    counters
+    shared.ble.counters.get()
 }
 
 /// Send the credit when it has moved and is due or `now`. Nothing goes before the P4 has named a
@@ -850,6 +864,58 @@ pub fn repeat_state(shared: &Shared) {
     }
 }
 
+/// Send `Up::Health` once [`HEALTH_EVERY`] has passed since the last, and at once the first time,
+/// while the controller is up.
+pub fn repeat_health(shared: &Shared) {
+    let ble = &shared.ble;
+    if !ble.controller_up.get() || ble.health_at.get().is_some_and(|at| at.elapsed() < HEALTH_EVERY)
+    {
+        return;
+    }
+    let first = ble.health_at.replace(Some(Instant::now())).is_none();
+    let phy = wartui_firmware::health::die_temp_c();
+    let health = read_health(phy);
+    shared.push(&Up::Health(health));
+    if first {
+        say_calibration(shared, phy, health);
+    }
+}
+
+/// Say the chip's TSENS eFuse calibration beside the PHY's reading and the calibrated one it
+/// reports, once a boot: `tsens: calibration 0x18b, PHY 33 °C, calibrated 47 °C`. The PHY's
+/// conversion applies no calibration, so `health::die_temp_from` subtracts it (`deltaT / 10`
+/// °C, bit 8 the sign), as ESP-IDF's driver does, and the line lets the bench check that by hand.
+#[inline(never)]
+fn say_calibration(shared: &Shared, phy: i16, health: RadioHealth) {
+    let calibration = wartui_firmware::health::tsens_calibration();
+    shared.log(format_args!(
+        "tsens: calibration {calibration:#05x}, PHY {phy} °C, calibrated {}",
+        health.die_temp
+    ));
+}
+
+/// The C6's die temperature, rail and heap, for `phy`, the die as the PHY read it
+/// (`health::die_temp_c`).
+///
+/// Both readings go through the PHY, which is up only once `BleConnector::new` has succeeded, so
+/// only [`repeat_health`] reads them, and only after then. `health::vdd_mv` borrows the PBUS for
+/// a moment and is meant for a parked radio, as a node's heartbeat reads it. Here the controller
+/// runs connection events on its own schedule, so the effect of that moment on a live link is
+/// unmeasured; the bench checks it with a central connected, in `dropped_writes`,
+/// `resynced_bytes` and disconnects.
+fn read_health(phy: i16) -> RadioHealth {
+    // A failed read is the PHY's reading's to decide, before the calibration moves it.
+    let die_temp = wartui_firmware::health::die_temp_from(phy);
+    let heap = esp_alloc::HEAP.stats();
+    RadioHealth {
+        die_temp,
+        vdd: Vdd::from_mv(wartui_firmware::health::vdd_mv()),
+        heap_used: heap.current_usage as u32,
+        heap_free: heap.size.saturating_sub(heap.current_usage) as u32,
+        heap_high_water: heap.max_usage as u32,
+    }
+}
+
 fn say_state(shared: &Shared, state: BleState) {
     let ble = &shared.ble;
     ble.said.set(Some(state));
@@ -871,6 +937,8 @@ pub async fn run(bt: BT<'static>, mac: &Mac, shared: &Shared) -> ! {
             core::future::pending().await
         }
     };
+    // The connector holds the PHY up for as long as it lives, which is forever.
+    shared.ble.controller_up.set(true);
     let controller: Controller<'_> = ExternalController::new(connector);
     let mut resources: HostResources<
         DefaultPacketPool,

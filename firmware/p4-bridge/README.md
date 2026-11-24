@@ -113,6 +113,11 @@ on the FIFO.
 The board pulls the four UART traces up (51 kΩ on its schematic). A C6 in reset therefore reads as
 CTS high, and the P4 waits rather than drops.
 
+**Each `Status` carries the bridge's own health** (`health`): the P4's die temperature, read from
+its temperature sensor for that `Status` (`src/tsens.rs`), and the C6's latest `Up::Health`, its die
+temperature, rail and heap, or none before the C6 has sent one. esp-hal has no P4 sensor driver, so
+`src/tsens.rs` follows ESP-IDF's by hand, at one range that reads up to about 91 °C.
+
 ## First flash
 
 The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is
@@ -369,12 +374,17 @@ settings modal's `log` row. `wartui sd-log` prints the files as text
 
 It logs whoever owns the host queue, and with no host at all:
 
-- every frame the P4 produces for a host but node records, GPS bytes, `Delivered` and
-  `Undelivered`;
+- every frame the P4 produces for a host but sighting batches, update statuses, GPS bytes,
+  `Delivered` and `Undelivered`, so every node heartbeat and panic record is kept as forwarded;
 - a `Status` snapshot every 30 s, when a file opens and at each change of who holds the host
-  queue, built from the C6's counters as last received;
+  queue, built from the C6's counters and health as last received and the P4's die temperature
+  read for it;
 - each change of who holds the host queue;
 - a phone's commands, and the lines it is sent but its `WD:AP` and `WD:BT` sightings.
+
+Each file's `Opened` record carries the text of the panic that ended the P4's previous boot, when
+that reset kept one. The panic handler keeps it in RTC memory (`wartui_firmware::last_panic`), and
+the boot copies it out and clears it.
 
 The log holds the addresses of the nodes and of Bluetooth peers, so a card identifies the fleet as
 a capture does.

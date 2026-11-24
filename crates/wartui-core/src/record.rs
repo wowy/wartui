@@ -8,10 +8,10 @@
 use std::time::Duration;
 
 use wartui_proto::beacon::visible_ssid;
-use wartui_proto::bus::{NodeBoard, RecordKind, Slot};
+use wartui_proto::bus::{NodeBoard, NodeBus, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{BluetoothStatus, HostOwner, QueueStats, RadioLinkStats};
+use wartui_proto::link::{BluetoothStatus, BridgeHealth, HostOwner, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -82,6 +82,12 @@ pub struct Heartbeat {
     pub die_temp_c: Option<i16>,
     /// Bytes free in the node's heap.
     pub heap_free: u32,
+    /// Bytes in use in the node's heap; with `heap_free`, the heap's size.
+    pub heap_used: u32,
+    /// The most bytes in use in the node's heap since its boot.
+    pub heap_high_water: u32,
+    /// The node's own bus counters since its boot, as the heartbeat carried them.
+    pub bus: NodeBus,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }
@@ -117,6 +123,8 @@ pub struct BridgeStatusSeen {
     /// Its Bluetooth host link: who held the host queue, the bonds and pairing window, the
     /// connected central and the C6's counters since the C6 booted.
     pub bluetooth: BluetoothStatus,
+    /// Its own chips: the P4's die temperature, and the C6's latest health.
+    pub health: BridgeHealth,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.
@@ -172,6 +180,21 @@ pub struct BatchGap {
     pub seq: u16,
     /// Batches missing between the two: `seq - after_seq - 1` modulo 2^16, from 1 to 1023.
     pub lost: u16,
+}
+
+/// The text of a node's last panic, as the node sent it once after the reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePanic {
+    /// Which node, by the MAC its record carries.
+    pub node_mac: Mac,
+    /// Unix milliseconds of receipt.
+    pub rx_at_ms: i64,
+    /// The node-bus slot it came from.
+    pub slot: Slot,
+    /// Why the node's next boot started, from its latest heartbeat. `None` before one.
+    pub reset_cause: Option<ResetCause>,
+    /// The panic's `{file}:{line}:{column}: {message}`.
+    pub message: String,
 }
 
 /// One network or advertiser a node reported.
@@ -341,6 +364,8 @@ pub enum Record {
     BridgeStatus(BridgeStatusSeen),
     /// Append a gap in a node's batch sequence.
     BatchGap(BatchGap),
+    /// Append a node's last panic.
+    NodePanic(NodePanic),
     /// Append a sample of the host's own state.
     HostStatus(HostStatus),
 }

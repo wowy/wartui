@@ -6,7 +6,7 @@ use crate::mac::Mac;
 use crate::reset::ResetCause;
 
 /// Length of a [`Heartbeat`] body.
-pub const HEARTBEAT_LEN: usize = 27;
+pub const HEARTBEAT_LEN: usize = 63;
 
 /// Length of the prefix and MAC that open every heartbeat body ([`Heartbeat::identity`]).
 ///
@@ -176,8 +176,8 @@ impl fmt::Display for Capabilities {
 /// Sent every [`IDLE_BEAT_MS`] while unassigned and every [`ASSIGNED_BEAT_MS`] while assigned.
 /// Never resent: a newer one replaces one the P4 has not clocked.
 ///
-/// Twenty-seven bytes: the [`Capabilities`] prefix, the node's MAC, then the counters and
-/// readings below in order.
+/// Sixty-three bytes: the [`Capabilities`] prefix, the node's MAC, then the counters and
+/// readings below in order, little-endian, [`NodeBus`] last.
 ///
 /// [`IDLE_BEAT_MS`]: crate::node::IDLE_BEAT_MS
 /// [`ASSIGNED_BEAT_MS`]: crate::node::ASSIGNED_BEAT_MS
@@ -214,10 +214,129 @@ pub struct Heartbeat {
     /// Bytes free in the node's heap just before this heartbeat. Only the radio's blobs
     /// allocate, so a figure that falls steadily across a capture is a leak.
     pub heap_free: u32,
+    /// Bytes in use in the node's heap just before this heartbeat. `heap_used + heap_free` is
+    /// the heap's size, so the size needs no field of its own.
+    pub heap_used: u32,
+    /// The most bytes in use in the node's heap since boot.
+    pub heap_high_water: u32,
+    /// The node's own view of the bus.
+    pub bus: NodeBus,
+}
+
+/// The node's own view of the bus, since boot.
+///
+/// Each count is a wrapping `u16` read like [`Heartbeat::wifi_refused`]: the host reads it as a
+/// difference between heartbeats, and a reboot shows as the value falling. The two `_max_us`
+/// gauges are maxima since boot and saturate at `u16::MAX`.
+///
+/// Left out: `transfers` and `good`, since the P4 counts its own good transfers per slot;
+/// `unread`, since nothing drops one today; `other_version`, which needs another `BUS_VERSION`
+/// to count anything; and the settle histogram, a console diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NodeBus {
+    /// Transfers from the P4 whose magic was wrong.
+    pub bad_magic: u16,
+    /// Transfers from the P4 whose CRC failed.
+    pub bad_crc: u16,
+    /// Transfers from the P4 with a `len` past [`PAYLOAD_MAX`] under a good CRC.
+    ///
+    /// [`PAYLOAD_MAX`]: super::PAYLOAD_MAX
+    pub bad_len: u16,
+    /// Good transfers from the P4 whose seq did not follow the last: transfers were lost, or the
+    /// P4 restarted.
+    pub gaps: u16,
+    /// CS edges with the transfer not done: the controller ended one early.
+    pub early: u16,
+    /// Arms the SPI driver refused.
+    pub arm_failed: u16,
+    /// Flights dropped unacknowledged because the node's inbox was full.
+    pub inbox_full: u16,
+    /// Flights dropped unacknowledged behind one not taken.
+    pub out_of_order: u16,
+    /// Resends of the flight last taken, acknowledged and not queued again.
+    pub repeats: u16,
+    /// Heartbeats replaced by a newer one before the P4 clocked them, or dropped behind a
+    /// reliable transfer.
+    pub replaced: u16,
+    /// Records sent again after [`ACK_TIMEOUT_MS`] without an ack.
+    ///
+    /// [`ACK_TIMEOUT_MS`]: super::ACK_TIMEOUT_MS
+    pub resent: u16,
+    /// Records the node gave up on after [`SEND_TRIES`].
+    ///
+    /// [`SEND_TRIES`]: super::SEND_TRIES
+    pub undelivered: u16,
+    /// The bus interrupt handler's longest run, edge to return, in µs.
+    pub handler_max_us: u16,
+    /// The longest wait after CS rose for the DMA to report the transfer done, in µs.
+    pub settle_max_us: u16,
+}
+
+/// Length of a [`NodeBus`] on the wire: fourteen `u16`s.
+const NODE_BUS_LEN: usize = 28;
+
+impl NodeBus {
+    /// The fields in wire order.
+    const fn to_array(self) -> [u16; NODE_BUS_LEN / 2] {
+        [
+            self.bad_magic,
+            self.bad_crc,
+            self.bad_len,
+            self.gaps,
+            self.early,
+            self.arm_failed,
+            self.inbox_full,
+            self.out_of_order,
+            self.repeats,
+            self.replaced,
+            self.resent,
+            self.undelivered,
+            self.handler_max_us,
+            self.settle_max_us,
+        ]
+    }
+
+    /// Rebuild from the fields in wire order.
+    const fn from_array(a: [u16; NODE_BUS_LEN / 2]) -> Self {
+        let [
+            bad_magic,
+            bad_crc,
+            bad_len,
+            gaps,
+            early,
+            arm_failed,
+            inbox_full,
+            out_of_order,
+            repeats,
+            replaced,
+            resent,
+            undelivered,
+            handler_max_us,
+            settle_max_us,
+        ] = a;
+        Self {
+            bad_magic,
+            bad_crc,
+            bad_len,
+            gaps,
+            early,
+            arm_failed,
+            inbox_full,
+            out_of_order,
+            repeats,
+            replaced,
+            resent,
+            undelivered,
+            handler_max_us,
+            settle_max_us,
+        }
+    }
 }
 
 const P: usize = HEARTBEAT_PREFIX_LEN;
 const M: usize = HEARTBEAT_IDENTITY_LEN;
+/// Where [`NodeBus`] starts.
+const B: usize = M + 24;
 
 impl Heartbeat {
     /// Decode a body.
@@ -239,6 +358,9 @@ impl Heartbeat {
             vdd: Vdd(body[M + 10]),
             die_temp: DieTemp(body[M + 11]),
             heap_free: le_u32(body, M + 12),
+            heap_used: le_u32(body, M + 16),
+            heap_high_water: le_u32(body, M + 20),
+            bus: NodeBus::from_array(core::array::from_fn(|i| le(B + 2 * i))),
         })
     }
 
@@ -271,8 +393,13 @@ impl Heartbeat {
         out[M + 10] = self.vdd.0;
         out[M + 11] = self.die_temp.0;
         out[M + 12..M + 16].copy_from_slice(&self.heap_free.to_le_bytes());
+        out[M + 16..M + 20].copy_from_slice(&self.heap_used.to_le_bytes());
+        out[M + 20..M + 24].copy_from_slice(&self.heap_high_water.to_le_bytes());
+        for (i, value) in self.bus.to_array().into_iter().enumerate() {
+            out[B + 2 * i..B + 2 * i + 2].copy_from_slice(&value.to_le_bytes());
+        }
         out
     }
 }
 
-const _: () = assert!(M + 16 == HEARTBEAT_LEN);
+const _: () = assert!(B + NODE_BUS_LEN == HEARTBEAT_LEN);

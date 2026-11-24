@@ -4,8 +4,8 @@
 //! something this host has never heard of is still a node.
 
 use wartui_proto::bus::{
-    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, Heartbeat, NODE_VERSION, Vdd,
-    Version,
+    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, DieTemp, Heartbeat, NODE_VERSION, NodeBus,
+    Vdd, Version,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -21,6 +21,9 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         vdd: Vdd::NONE,
         die_temp: DieTemp::NONE,
         heap_free: 0,
+        heap_used: 0,
+        heap_high_water: 0,
+        bus: NodeBus::default(),
     }
     .encode();
     Heartbeat::decode(&body).expect("we just encoded it").capabilities

@@ -7,7 +7,7 @@
 
 [package]
 name = "wartui-firmware"
-description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker and GPS reader, the node's health readings, and updates on flash."
+description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker and GPS reader, the last panic, the node's health readings, and updates on flash."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -56,7 +56,8 @@ embedded-storage = "0.3.2"
 esp-bootloader-esp-idf = "0.6.0"
 esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
 static_cell = "2.1.1"
-# The phase marker's atomics: `esp-hal` marks only `portable-atomic`'s as persistable.
+# The phase marker's and the last panic's atomics: `esp-hal` marks only `portable-atomic`'s as
+# persistable.
 portable-atomic = { version = "1.15.0", default-features = false }
 wartui-proto = { path = "../../crates/wartui-proto" }
 

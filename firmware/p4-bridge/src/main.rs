@@ -90,6 +90,7 @@ mod radio;
 mod sd;
 mod sd_log;
 mod settings;
+mod tsens;
 mod update;
 mod wardrive_esp;
 
@@ -117,7 +118,7 @@ use esp_hal::uart::{
 };
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::{gps as gps_bus, phase, reboot, reset_cause};
+use wartui_firmware::{gps as gps_bus, last_panic, phase, reboot, reset_cause};
 use wartui_proto::bus::PER_BUS;
 use wartui_proto::fleet::Fleet;
 use wartui_proto::frame_ring::FrameRing;
@@ -213,10 +214,12 @@ macro_rules! dma_buf {
 // After `dma_buf!`, which it uses.
 mod bus;
 
-/// Resets rather than hanging. The reset takes the C6 with it, and the host sees a new
-/// life in the next `Ready`.
+/// Resets rather than hanging, keeping the text for the next life's SD log and host
+/// (`wartui_firmware::last_panic`, `src/sd_log.rs`). The reset takes the C6 with it, and the host sees a new life
+/// in the next `Ready`.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    last_panic::record(info);
     reboot()
 }
 
@@ -296,6 +299,8 @@ pub struct Shared {
     /// The diagnostics log on the card: the setting, the ring of records waiting for the card, and
     /// the writer's figures (`src/sd_log.rs`). Static, to keep it out of `Shared::new`'s frame.
     sd_log: &'static sd_log::SdLog,
+    /// The P4's temperature sensor, read for each `Status` (`src/tsens.rs`).
+    tsens: tsens::Tsens,
 }
 
 impl Shared {
@@ -359,6 +364,9 @@ impl Shared {
             fleet_sleep: Cell::new(None),
             sd: sd::Sd::new(),
             sd_log,
+            // After `Cache::new` mapped the PSRAM, the last of esp-hal's analog I2C writes
+            // (`src/tsens.rs`).
+            tsens: tsens::init(),
         }
     }
 
@@ -444,8 +452,9 @@ impl Shared {
     }
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
-    /// GPS fault if there is one, the C6's last panic if it reported one, what the carrier and the
-    /// node image cache have to say, and what the P4's own image has to say.
+    /// GPS fault if there is one, the C6's last panic if it reported one, the P4's own to the
+    /// first host told this boot, what the carrier and the node image cache have to say, and what
+    /// the P4's own image has to say.
     ///
     /// Nothing while the pair is still waiting for the C6's first hello, since there is no
     /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
@@ -462,6 +471,7 @@ impl Shared {
         if let Some(line) = radio_panic {
             self.push_error(&line);
         }
+        sd_log::tell_host_panic(self);
         carrier::say(self);
         cache::say(self);
         fleet::say(self);
@@ -561,8 +571,9 @@ impl Shared {
         self.push_host(&status);
     }
 
-    /// The `Status` a poll gets, with the C6's counters as last received: it asks the C6 for
-    /// nothing, so the SD log's snapshots build it too (`src/sd_log.rs`).
+    /// The `Status` a poll gets, with the C6's counters and health as last received and the P4's
+    /// die temperature read now: it asks the C6 for nothing, so the SD log's snapshots build it
+    /// too (`src/sd_log.rs`).
     #[inline(never)]
     fn status_msg(&self) -> BridgeToHost {
         let host = self.host.borrow().stats();
@@ -595,6 +606,7 @@ impl Shared {
             members: fleet.members(),
             sd: sd::status(self),
             bluetooth: self.bluetooth(now),
+            p4_die_temp: self.tsens.read(),
         };
         drop(fleet);
         self.pair.borrow().status(now, counters)
@@ -748,8 +760,13 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let log_boot =
-        sd_log::Boot { fw_version: fw_version.clone(), cause, last_phase, image: own_image };
+    let log_boot = sd_log::Boot {
+        fw_version: fw_version.clone(),
+        cause,
+        last_phase,
+        image: own_image,
+        panic: sd_log::last_panic(cause),
+    };
     let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
         .with_own_image(own_image);
     let shared = SHARED.init_with(|| {
@@ -757,6 +774,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         let log = SD_LOG.init(sd_log::SdLog::new(ring, log_boot));
         Shared::new(pair, host, DOWN_QUEUE.take(), updates, cache, &carrier, log)
     });
+    shared.tsens.say_calibration(shared);
+    sd_log::say_panic(shared);
     let link_image = own_image.unwrap_or([0; DIGEST_LEN]);
     let link = RefCell::new(Link::new(
         boot,

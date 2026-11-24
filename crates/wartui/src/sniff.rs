@@ -20,7 +20,7 @@ use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::BridgeToHost;
 use wartui_proto::mac;
 
-use crate::text::{hex, message_text};
+use crate::text::{heartbeat_text, hex, message_text, node_bus_text};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -53,7 +53,8 @@ pub struct Args {
     #[arg(long)]
     raw: bool,
 
-    /// Print the bridge's own log lines, and its GPS receiver's bytes as text.
+    /// Print the bridge's own log lines, its GPS receiver's bytes as text, and each node's bus
+    /// counters under its heartbeat.
     #[arg(long)]
     verbose: bool,
 }
@@ -100,13 +101,14 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} records: {} sighting in {} batches, {} heartbeat, {} update status, \
+        "\n# {} records: {} sighting in {} batches, {} heartbeat, {} update status, {} panic, \
          {} undecodable",
         counts.total,
         counts.sighting,
         counts.batches,
         counts.heartbeat,
         counts.update_status,
+        counts.panic,
         counts.undecodable
     );
     if counts.update_status > 0 {
@@ -157,6 +159,8 @@ struct Counts {
     heartbeat: u64,
     /// Update statuses nodes sent, answering some host's session.
     update_status: u64,
+    /// Panic records: a node saying why its last boot ended.
+    panic: u64,
     /// Records in a layout this build does not read, as the engine counts them, which is what a
     /// fleet half-way through a reflash looks like.
     incompatible: u64,
@@ -209,7 +213,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         BridgeToHost::FromNode { slot, rx_us, kind, body } => {
             counts.total += 1;
             let head = head(*rx_us, *slot, counts);
-            record(*slot, &head, *kind, body, counts);
+            record(*slot, &head, *kind, body, args.verbose, counts);
             if args.raw {
                 println!("      {}", hex(body));
             }
@@ -284,8 +288,21 @@ fn head(rx_us: u32, slot: Slot, counts: &Counts) -> String {
     format!("{rx_us:>10}us  {}", board.label(slot))
 }
 
+/// A heartbeat's line behind `head`, and with `verbose` the node's bus counters under it.
+fn heartbeat_lines(head: &str, heartbeat: &Heartbeat, verbose: bool) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{head}  HEARTBEAT {} {}",
+        mac::full(&heartbeat.mac),
+        heartbeat_text(heartbeat)
+    )];
+    if verbose {
+        lines.push(format!("      {}", node_bus_text(&heartbeat.bus)));
+    }
+    lines
+}
+
 /// One record from the node in `slot`, decoded and counted as the engine reads it.
-fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
+fn record(slot: Slot, head: &str, kind: u8, body: &[u8], verbose: bool, counts: &mut Counts) {
     // A heartbeat from another major or minor opens with the prefix, which names the node's
     // firmware. The rest is not this build's layout, even when its length happens to match.
     let undrivable = (kind == UpType::Heartbeat.as_u8())
@@ -308,14 +325,9 @@ fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
         Ok(UpMsg::Heartbeat(heartbeat)) => {
             counts.heartbeat += 1;
             counts.compat.insert(slot, heartbeat.capabilities.version.compat_with_host());
-            println!(
-                "{head}  HEARTBEAT {} #{} e{} {}  {}",
-                mac::full(&heartbeat.mac),
-                heartbeat.counter,
-                heartbeat.epoch,
-                heartbeat.reset_cause,
-                heartbeat.capabilities
-            );
+            for line in heartbeat_lines(head, &heartbeat, verbose) {
+                println!("{line}");
+            }
         }
         // Not this build's layout once the slot's heartbeat has named another major or minor,
         // even when it parses, as the engine reads it.
@@ -344,6 +356,16 @@ fn record(slot: Slot, head: &str, kind: u8, body: &[u8], counts: &mut Counts) {
                 "{head}  UPDATE STATUS s{} {:?} next @{}",
                 status.session, status.state, status.next_offset
             );
+        }
+        Ok(UpMsg::Panic(_))
+            if counts.compat.get(&slot).is_some_and(|compat| !compat.drivable()) =>
+        {
+            counts.incompatible += 1;
+            println!("{head}  PANIC from a node on another minor, not read");
+        }
+        Ok(UpMsg::Panic(panic)) => {
+            counts.panic += 1;
+            println!("{head}  PANIC {} last boot: {}", mac::full(&panic.mac), panic.text);
         }
         // Named rather than left as "undecodable": a fleet half-way through a reflash is
         // exactly what this looks like.
@@ -442,6 +464,7 @@ mod tests {
             members: Default::default(),
             sd: None,
             bluetooth: Default::default(),
+            health: Default::default(),
         };
         assert!(heard(LinkEvent::Message(status)));
     }
@@ -542,7 +565,7 @@ mod tests {
     }
 
     fn heartbeat_with(version: wartui_proto::bus::Version) -> Vec<u8> {
-        use wartui_proto::bus::{Board, Capabilities, DieTemp, Vdd};
+        use wartui_proto::bus::{Board, Capabilities, DieTemp, NodeBus, Vdd};
         Heartbeat {
             capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
             mac: [0x02, 0, 0, 0, 0x57, 0x84],
@@ -554,9 +577,31 @@ mod tests {
             vdd: Vdd::NONE,
             die_temp: DieTemp::NONE,
             heap_free: 0,
+            heap_used: 0,
+            heap_high_water: 0,
+            bus: NodeBus::default(),
         }
         .encode()
         .to_vec()
+    }
+
+    #[test]
+    fn sniff_cmd_prints_heartbeat_text_when_heartbeat_decodes() {
+        let hb = Heartbeat::decode(&heartbeat_with(NODE_VERSION)).expect("decodes");
+        assert_eq!(
+            heartbeat_lines("         0us  N1", &hb, false),
+            [format!("         0us  N1  HEARTBEAT 02:00:00:00:57:84 {}", heartbeat_text(&hb))]
+        );
+    }
+
+    #[test]
+    fn sniff_cmd_prints_bus_counters_under_heartbeat_when_verbose() {
+        let mut hb = Heartbeat::decode(&heartbeat_with(NODE_VERSION)).expect("decodes");
+        hb.bus.bad_crc = 2;
+        hb.bus.handler_max_us = 14;
+        let lines = heartbeat_lines("         0us  N1", &hb, true);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], "      bus bad_crc 2 · handler max 14 µs, settle max 0 µs");
     }
 
     #[test]
@@ -565,6 +610,16 @@ mod tests {
         let status = UpdateStatus { session: 1, state: UpdateState::Receiving, next_offset: 4096 };
         let counts = counted(UpType::UpdateStatus, &status.encode());
         assert_eq!((counts.update_status, counts.undecodable), (1, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_panic_when_node_reports_last_boot() {
+        use wartui_proto::bus::{PANIC_MAX, PanicMsg};
+        let mut body = [0; PANIC_MAX];
+        let msg = PanicMsg { mac: [0x02, 0, 0, 0, 0x57, 0x84], text: "src/main.rs:1:1: oops" };
+        let len = msg.encode_into(&mut body).expect("fits");
+        let counts = counted(UpType::Panic, &body[..len]);
+        assert_eq!((counts.panic, counts.undecodable), (1, 0));
     }
 
     #[test]
