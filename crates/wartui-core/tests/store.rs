@@ -175,7 +175,7 @@ fn store_records_initial_provenance_when_capture_created() {
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
     assert!(settings.contains(";pool=none;mode=none;record_raw=true;gps=false;"), "{settings}");
     assert!(settings.contains("gps_max_age_ms=5000;"), "{settings}");
-    assert!(settings.starts_with("version=3;"), "{settings}");
+    assert!(settings.starts_with("version=2;"), "{settings}");
     assert!(
         settings.ends_with(";ble_slot=none;ble_node=none;planner=none;sparse_nodes=none"),
         "{settings}"

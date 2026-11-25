@@ -1106,7 +1106,7 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
     };
     format!(
-        "version=3;at_ms={at_ms};pool={};mode={};record_raw={};gps={};gps_max_age_ms={};\
+        "version=2;at_ms={at_ms};pool={};mode={};record_raw={};gps={};gps_max_age_ms={};\
          ble_slot={};ble_node={};planner={};sparse_nodes={}",
         pool_name(settings.pool),
         mode_name(settings.mode),

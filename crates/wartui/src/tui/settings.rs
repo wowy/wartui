@@ -849,12 +849,14 @@ fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
 }
 
 /// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
-/// the sd card row reads on every frame.
+/// the sd card row reads on every frame. The box is as tall as its lines. On a terminal too short
+/// for them it drops the blank separators, the last first, so the tip line stays on screen.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
-    let area = centered_rect(48, 25, frame.area());
-    frame.render_widget(Clear, area);
+    const WIDTH: u16 = 48;
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
+        let area = centered_rect(WIDTH, 25, frame.area());
+        frame.render_widget(Clear, area);
         let block = Block::bordered().title(" settings › excluded ssids ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -868,10 +870,6 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
         frame.render_widget(Paragraph::new(lines), inner);
         return;
     }
-
-    let block = Block::bordered().title(" settings ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     let styled = |field: Field| {
         if modal.selected == field {
@@ -887,14 +885,14 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
     let text_row = |label: &str, value: &str, field: Field| {
         Line::from(Span::styled(format!("{label:<18}  {value}"), styled(field)))
     };
-    // What fits right of the 18-wide label column and its two spaces.
-    let value_width = usize::from(inner.width).saturating_sub(20);
+    // What fits right of the border, the 18-wide label column and its two spaces.
+    let value_width = usize::from(WIDTH.min(frame.area().width)).saturating_sub(22);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
     let (sd_value, sd_action) = sd_row(snapshot);
     // A bridge that reported no card slot has no log to set.
     let no_slot =
         modal.bridge_up && snapshot.bridge_status.is_some_and(|status| status.sd.is_none());
-    let lines = vec![
+    let mut lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
             // Nothing to step, so no arrows.
@@ -973,6 +971,18 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
             _ => "enter save · esc cancel",
         }),
     ];
+    let room = usize::from(frame.area().height.saturating_sub(2));
+    while lines.len() > room {
+        let Some(blank) = lines.iter().rposition(|line| line.spans.is_empty()) else { break };
+        lines.remove(blank);
+    }
+
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(WIDTH, height, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered().title(" settings ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -3568,6 +3578,116 @@ mod tests {
         assert!(row(12).starts_with("│update rate       ◂ 5 Hz ▸"), "{rendered}");
         assert!(row(11).starts_with("│wait for gps      ◂ on ▸"), "{rendered}");
         assert!(row(10).starts_with("│gps "), "{rendered}");
+    }
+
+    /// The settings modal's rows, inside its border, at 80 columns and `rows` rows, with the
+    /// bottom border asserted on the terminal's last row.
+    fn short_modal(rows: u16) -> (Vec<String>, String) {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        let mut terminal = Terminal::new(TestBackend::new(80, rows)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        // 48 wide, centered in 80: columns 16 to 63.
+        let buffer = terminal.backend().buffer();
+        let row = |y: u16| -> String { (16..64).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(0).starts_with("┌ settings "), "{rendered}");
+        assert_eq!(row(rows - 1), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        let inside = (1..rows - 1)
+            .map(|y| row(y).trim_start_matches('│').trim_end_matches('│').trim_end().to_owned())
+            .collect();
+        (inside, rendered)
+    }
+
+    /// Asserts each of `rows` starts with the label `expected` holds for it, `""` for a blank.
+    fn assert_rows(rows: &[String], expected: &[&str], rendered: &str) {
+        assert_eq!(rows.len(), expected.len(), "{rendered}");
+        for (row, label) in rows.iter().zip(expected) {
+            if label.is_empty() {
+                assert!(row.is_empty(), "{row:?} should be blank\n{rendered}");
+            } else {
+                assert!(row.starts_with(label), "{row:?} should start {label:?}\n{rendered}");
+            }
+        }
+    }
+
+    const TOP_ROWS: [&str; 8] = [
+        "pool",
+        "planner",
+        "sparse nodes",
+        "fan",
+        "bluetooth",
+        "wardrive esp",
+        "remember bridge",
+        "excluded ssids",
+    ];
+
+    #[test]
+    fn draw_drops_blank_above_tip_and_keeps_every_row_when_terminal_is_80_by_24() {
+        let (rows, rendered) = short_modal(24);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "",
+            "gps",
+            "wait for gps",
+            "update rate",
+            "",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
+    }
+
+    #[test]
+    fn draw_drops_blanks_above_tip_and_sd_card_and_keeps_every_row_when_terminal_is_80_by_23() {
+        let (rows, rendered) = short_modal(23);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "",
+            "gps",
+            "wait for gps",
+            "update rate",
+            "",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
+    }
+
+    #[test]
+    fn draw_drops_every_blank_and_keeps_every_row_when_terminal_is_80_by_21() {
+        let (rows, rendered) = short_modal(21);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "gps",
+            "wait for gps",
+            "update rate",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
     }
 
     #[test]
