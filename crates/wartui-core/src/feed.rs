@@ -27,6 +27,10 @@
 //! **A mock position is refused**, as test data: it is what `--lat`/`--lon` is to the terminal,
 //! and a row it placed would be uploaded as a real sighting.
 //!
+//! **A coarse fix is refused here, not at export** ([`MAX_ACCURACY_M`]). Held by a tier, it would
+//! shadow a good fix in a tier below; refused, the row takes the next tier's position or is stored
+//! unpositioned.
+//!
 //! **`wanted` is advice.** The chain clears it while a tier above is placing the rows, so the
 //! platform's adapter may slow or stop its location updates to save power. A fix pushed while
 //! unwanted is still taken, and a feed in no chain stays wanted.
@@ -49,6 +53,16 @@ use crate::position::{Fix, PositionSource, is_fresh};
 /// never form a run and a wait for a fix never ends.
 pub const DEFAULT_FEED_GAP: Duration = Duration::from_secs(3);
 
+/// The worst horizontal accuracy, in meters, a fix may report and still be taken.
+///
+/// The ceiling keeps network-derived fixes out. A position worked out from nearby Wi-Fi networks
+/// is circular for a capture that places Wi-Fi networks, and a cell-tower fix is hundreds of
+/// meters wide. Satellite fixes report well under it, even between buildings, while Wi-Fi-derived
+/// ones commonly report more. The figure a platform reports is a radius it is about 68% sure of,
+/// not a bound, which argues for the tighter limit. It is a judgment to revisit against real
+/// phones, not a measurement.
+pub const MAX_ACCURACY_M: f64 = 50.0;
+
 /// One fix from a platform's location services.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocationFix {
@@ -58,7 +72,8 @@ pub struct LocationFix {
     pub lon: f64,
     /// Meters above mean sea level, if known.
     pub alt_msl: Option<f64>,
-    /// Horizontal accuracy in meters, if known.
+    /// Horizontal accuracy in meters, if known. A fix without one is refused
+    /// ([`Pushed::Coarse`]).
     pub accuracy_m: Option<f64>,
     /// When the fix was taken, in Unix milliseconds, on the same clock as the `now_ms` given to
     /// [`FixFeed::push`].
@@ -87,6 +102,8 @@ pub enum Pushed {
     Mock,
     /// Its coordinates name no place on Earth.
     Invalid,
+    /// Its accuracy is missing or worse than [`MAX_ACCURACY_M`].
+    Coarse,
 }
 
 /// Why a platform's location services stopped giving fixes.
@@ -185,6 +202,8 @@ impl FixFeed {
             Pushed::Mock
         } else if !is_a_place(fix.lat, fix.lon) {
             Pushed::Invalid
+        } else if !is_precise(fix.accuracy_m) {
+            Pushed::Coarse
         } else if !is_fresh(fix.at_ms, now_ms, inner.max_age) || (older && !held_ahead) {
             Pushed::Stale
         } else {
@@ -288,6 +307,12 @@ impl FixFeed {
     }
 }
 
+/// Whether `accuracy_m` is a reported accuracy no worse than [`MAX_ACCURACY_M`]. A negative one is
+/// how iOS reports an invalid fix.
+fn is_precise(accuracy_m: Option<f64>) -> bool {
+    accuracy_m.is_some_and(|m| m.is_finite() && (0.0..=MAX_ACCURACY_M).contains(&m))
+}
+
 /// Whether `lat` and `lon` are finite and on the globe.
 fn is_a_place(lat: f64, lon: f64) -> bool {
     lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0
@@ -348,6 +373,35 @@ mod tests {
         for (lat, lon) in [(f64::NAN, -122.4194), (91.0, -122.4194), (37.7749, 181.0)] {
             let fix = LocationFix { lat, lon, ..fix_at(10_000) };
             assert_eq!(feed.push(fix, 10_000), Pushed::Invalid, "{lat}, {lon}");
+        }
+        assert_eq!(feed.latest(), None);
+        assert_eq!(feed.view().refused, 3);
+    }
+
+    #[test]
+    fn fix_feed_rejects_fix_when_its_accuracy_is_worse_than_the_limit() {
+        let feed = FixFeed::new(MAX_AGE);
+        let coarse = LocationFix { accuracy_m: Some(50.1), ..fix_at(10_000) };
+        assert_eq!(feed.push(coarse, 10_000), Pushed::Coarse);
+        assert_eq!(feed.latest(), None);
+        assert_eq!(feed.view().refused, 1);
+    }
+
+    #[test]
+    fn fix_feed_takes_fix_when_its_accuracy_is_exactly_the_limit() {
+        let feed = FixFeed::new(MAX_AGE);
+        let edge = LocationFix { accuracy_m: Some(MAX_ACCURACY_M), ..fix_at(10_000) };
+        assert_eq!(feed.push(edge, 10_000), Pushed::Taken);
+        assert_eq!(feed.latest().and_then(|fix| fix.accuracy), Some(50.0));
+    }
+
+    #[test]
+    fn fix_feed_rejects_fix_when_it_reports_no_accuracy() {
+        // A negative accuracy is how iOS reports an invalid fix.
+        let feed = FixFeed::new(MAX_AGE);
+        for accuracy_m in [None, Some(f64::NAN), Some(-1.0)] {
+            let fix = LocationFix { accuracy_m, ..fix_at(10_000) };
+            assert_eq!(feed.push(fix, 10_000), Pushed::Coarse, "{accuracy_m:?}");
         }
         assert_eq!(feed.latest(), None);
         assert_eq!(feed.view().refused, 3);

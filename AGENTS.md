@@ -229,7 +229,8 @@ caller builds them. `wartui run` builds a host GPS pinned with `--gps` → the b
 bytes fed in by `runtime::drive`, never the engine) → a host GPS found by `discover` (NMEA on its
 own thread, standing down while the bridge's receiver is sending sentences) → static
 `--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) → nothing.
-A `FixFeed` tier takes typed fixes from a phone's location services and stores `platform`.
+A `FixFeed` tier takes typed fixes from a phone's location services and stores `platform`,
+and refuses a fix whose reported accuracy is missing or worse than 50 m.
 `runtime::drive` calls `PositionChain::stand_down`, which applies each tier's stand-down rule.
 Which tier answered is stored per row.
 

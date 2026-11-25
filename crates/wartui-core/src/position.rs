@@ -608,6 +608,19 @@ mod tests {
     }
 
     #[test]
+    fn position_chain_falls_to_receiver_below_when_feed_fix_is_coarse() {
+        // Refused at the feed, a network-derived fix cannot shadow the receiver below it.
+        let (gps, feed) = (Gps::detached(), FixFeed::new(DEFAULT_MAX_AGE));
+        gps.feed(GGA, 10_000);
+        let coarse = LocationFix { accuracy_m: Some(400.0), ..platform_fix(10_000) };
+        assert_eq!(feed.push(coarse, 10_000), Pushed::Coarse);
+        let chain = chain(vec![Tier::fixes(feed), Tier::receiver(gps)]);
+        let fix = chain.resolve(10_000);
+        assert_eq!(fix.source, PositionSource::Gps);
+        assert!((fix.lat.expect("a latitude") - 48.117_3).abs() < 1e-4, "{fix:?}");
+    }
+
+    #[test]
     fn position_chain_resolves_in_callers_order_when_receiver_is_above_feed() {
         let gps = Gps::detached();
         gps.feed(GGA, 10_000);
