@@ -590,6 +590,16 @@ mod tests {
     }
 
     #[test]
+    fn position_chain_falls_past_feed_when_fix_stamped_ahead_is_max_age_past_arrival() {
+        // Stamped two minutes ahead of the clock: it ages from its arrival, not its stamp.
+        let feed = FixFeed::new(DEFAULT_MAX_AGE);
+        assert_eq!(feed.push(platform_fix(130_000), 10_000), Pushed::Taken);
+        let chain = chain(vec![Tier::fixes(feed), fixed()]);
+        assert_eq!(chain.resolve(15_000).source, PositionSource::Platform, "exactly at the limit");
+        assert_eq!(chain.resolve(15_001).source, PositionSource::Static);
+    }
+
+    #[test]
     fn position_chain_resolves_in_callers_order_when_feed_is_above_receiver() {
         let gps = Gps::detached();
         gps.feed(GGA, 10_000);

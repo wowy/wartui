@@ -270,21 +270,19 @@ pub(crate) fn details(summary: &ExportSummary, names: &NodeNames) -> String {
     }
     let pos = &summary.positions;
     let share = |n: u64| n as f64 * 100.0 / sightings as f64;
-    // No `wartui` command feeds a phone's location services, so the share shows only when a
-    // capture holds some.
-    let platform = if pos.platform > 0 {
-        format!("  platform {:.1}%", share(pos.platform))
-    } else {
-        String::new()
-    };
     let _ = writeln!(
         text,
-        "  {:<11}gps {:.1}%{platform}  static {:.1}%  none {:.1}%",
+        "  {:<11}gps {:.1}%  static {:.1}%  none {:.1}%",
         "positions",
         share(pos.gps),
         share(pos.fixed),
         share(pos.none),
     );
+    // No `wartui` command feeds a phone's location services, so the share shows only when a
+    // capture holds some, on a line of its own so the line above reads the same for every capture.
+    if pos.platform > 0 {
+        let _ = writeln!(text, "  {:<11}platform {:.1}%", "", share(pos.platform));
+    }
 
     let heard_wifi = summary.nodes.iter().filter(|n| n.wifi > 0).count();
     let heard_ble = summary.nodes.iter().filter(|n| n.ble > 0).count();
@@ -514,7 +512,9 @@ mod tests {
             Positions { gps: 3_000_000, platform: 896_000, fixed: 0, none: 116_345 };
         let text = report(&summary, None, &tails());
         assert!(
-            text.contains("  positions  gps 74.8%  platform 22.3%  static 0.0%  none 2.9%\n"),
+            text.contains(
+                "  positions  gps 74.8%  static 0.0%  none 2.9%\n             platform 22.3%\n"
+            ),
             "{text}"
         );
     }

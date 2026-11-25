@@ -11,13 +11,18 @@
 //! taken longer ago than the feed's limit is refused, one older than the fix held is refused
 //! unless the host clock has stepped back behind the held one, and the chain ages the held fix by
 //! the same clock. A fix's time is on the host's clock, so an adapter whose platform stamps
-//! satellite time derives it from the fix's age instead ([`LocationFix::at_ms`]). A receiver
+//! satellite time derives it from the fix's age instead ([`LocationFix::at_ms`]). **A fix cannot
+//! have been taken after it arrived**, so one stamped ahead of the clock is held at its arrival
+//! and ages from there: read as stamped, a negative age would keep it fresh until the clock caught
+//! up. A held time ahead of the clock then means only that the clock stepped back. A receiver
 //! differs: its sentences arrive as they are made, and it ages its fix by arrival
 //! ([`crate::gps`]).
 //!
 //! **A fix run tolerates a wider gap than a receiver's** ([`DEFAULT_FEED_GAP`], against
 //! [`crate::gps::FIX_GAP`]). A phone delivers about once a second with jitter, and 1.5 s would
 //! break its run on an ordinary late fix. A reported loss ([`FixFeed::lost`]) ends the run at once.
+//! An adapter asking for fixes less often widens the gap ([`FixFeed::with_max_gap`]), and keeps it
+//! under the age limit.
 //!
 //! **A mock position is refused**, as test data: it is what `--lat`/`--lon` is to the terminal,
 //! and a row it placed would be uploaded as a real sighting.
@@ -39,7 +44,9 @@ use crate::position::{Fix, PositionSource, is_fresh};
 /// The longest gap between taken fixes, by their own times, that still counts as one fix run
 /// ([`FixFeed::fix_run`]).
 ///
-/// At about 1 Hz this rides out two late fixes.
+/// At about 1 Hz this rides out two late fixes. An adapter that asks its platform for fixes less
+/// often than about every two seconds sets a wider gap ([`FixFeed::with_max_gap`]), or its fixes
+/// never form a run and a wait for a fix never ends.
 pub const DEFAULT_FEED_GAP: Duration = Duration::from_secs(3);
 
 /// One fix from a platform's location services.
@@ -60,6 +67,9 @@ pub struct LocationFix {
     /// that clock: its adapter derives this from the fix's age instead, the wall clock less how
     /// long ago the platform says the fix was taken. Otherwise a phone whose clock is ahead of
     /// satellite time by more than the age limit has every fix refused.
+    ///
+    /// A time ahead of `now_ms` is read as `now_ms`: a fix cannot have been taken after it
+    /// arrived.
     pub at_ms: i64,
     /// Whether the platform marks this as a mock location.
     pub mock: bool,
@@ -148,6 +158,11 @@ impl FixFeed {
     }
 
     /// Use `max_gap` as the longest gap within one fix run.
+    ///
+    /// An adapter that asks its platform for fixes less often than about every two seconds sets a
+    /// wider gap than [`DEFAULT_FEED_GAP`], or its fixes never form a run and a wait for a fix
+    /// never ends. Keep it under the feed's `max_age`: a wider gap holds a run on a fix the chain
+    /// no longer believes.
     #[must_use]
     pub fn with_max_gap(self, max_gap: Duration) -> Self {
         self.lock().max_gap = max_gap;
@@ -156,6 +171,10 @@ impl FixFeed {
 
     /// Offer one fix, as of `now_ms`. A refused fix changes nothing but the refused count.
     pub fn push(&self, fix: LocationFix, now_ms: i64) -> Pushed {
+        // A fix cannot have been taken after it arrived. Held as stamped, one ahead of the clock
+        // would read as fresh until the clock caught up, and would make an adapter that stamps
+        // slightly ahead look like a clock stepping back.
+        let fix = LocationFix { at_ms: fix.at_ms.min(now_ms), ..fix };
         let mut inner = self.lock();
         // A held fix ahead of `now_ms` is the host clock stepping back, as `is_fresh` reads a
         // negative age. Refusing what is older than it would refuse every fix until the clock
@@ -360,12 +379,35 @@ mod tests {
     #[test]
     fn fix_feed_keeps_fix_run_when_fixes_are_stamped_ahead_of_the_clock() {
         // An adapter whose stamps run ahead of the clock it passes must still hold a run, or a
-        // wait for a fix would never end.
+        // wait for a fix would never end. Each fix is held at its arrival, which names the run.
         let feed = FixFeed::new(MAX_AGE);
         for at_ms in [10_500, 11_500, 12_500] {
             assert_eq!(feed.push(fix_at(at_ms), at_ms - 500), Pushed::Taken);
         }
-        assert_eq!(feed.fix_run(12_000), Some(10_500));
+        assert_eq!(feed.fix_run(12_000), Some(10_000));
+    }
+
+    #[test]
+    fn fix_feed_ages_fix_from_its_arrival_when_stamped_ahead_of_the_clock() {
+        // A phone whose clock runs two minutes behind satellite time, with an adapter passing the
+        // satellite stamp.
+        let feed = FixFeed::new(MAX_AGE);
+        assert_eq!(feed.push(fix_at(130_000), 10_000), Pushed::Taken);
+        assert_eq!(feed.latest().and_then(|fix| fix.at_ms), Some(10_000), "held at its arrival");
+        assert_eq!(feed.view().last_fix_ms, Some(10_000));
+        assert_eq!(feed.fix_run(13_000), Some(10_000));
+        assert_eq!(feed.fix_run(13_001), None, "the run lapses a gap after arrival");
+    }
+
+    #[test]
+    fn fix_feed_rejects_late_older_fix_when_adapter_stamps_ahead_of_the_clock() {
+        let feed = FixFeed::new(MAX_AGE);
+        assert_eq!(feed.push(fix_at(12_500), 12_000), Pushed::Taken);
+        // Taken before the held one, which is not ahead of the clock: no step back, just late.
+        let late = LocationFix { lat: 37.0, ..fix_at(11_800) };
+        assert_eq!(feed.push(late, 12_100), Pushed::Stale);
+        assert_eq!(feed.latest().and_then(|fix| fix.lat), Some(37.7749));
+        assert_eq!(feed.fix_run(12_100), Some(12_000), "the run is undisturbed");
     }
 
     #[test]
