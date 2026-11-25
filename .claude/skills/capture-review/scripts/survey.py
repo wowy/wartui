@@ -84,6 +84,10 @@ GROUPS = ("2.4 GHz", "busy 5 GHz", "quiet 5 GHz")
 GROUP_SQL = (f"CASE WHEN channel <= 14 THEN 0 WHEN channel IN "
              f"({','.join(map(str, BUSY_FIVE_GHZ))}) THEN 1 ELSE 2 END")
 
+# The rows a group counts, as SQL: Wi-Fi sightings naming a scan-table channel. A beacon naming
+# any other number is in no group; the observations section flags those.
+GROUPED_SQL = f"kind='wifi' AND channel IN ({','.join(map(str, SCAN_CHANNELS))})"
+
 
 def channel_group(channel):
     """The index into GROUPS of `channel`."""
@@ -365,9 +369,11 @@ def provenance(db, ctx):
         if values:
             later = "".join(f" -> {new} at {rel(at)}" for at, new in values[1:])
             print(f"  {title:<9} {values[0][1]}{later}")
-            ctx[key] = values[-1][1]
+            # `none` is a capture whose bridge never reported one.
+            if values[-1][1] != "none":
+                ctx[key] = values[-1][1]
     # The scan mode is the bridge's too: `none` until its first report, then each change.
-    modes =[(None, ctx["settings"]["mode"])] if "mode" in ctx.get("settings", {}) else []
+    modes = [(None, ctx["settings"]["mode"])] if "mode" in ctx.get("settings", {}) else []
     modes += [(at, ch["mode"][1]) for at, ch in ctx.get("settings_changes", []) if "mode" in ch]
     if modes:
         later = "".join(f" -> {new} at {rel(at)}" for at, new in modes[1:])
@@ -1348,6 +1354,20 @@ def observations(db, ctx):
             print(f"  empty 5-min windows at +{', +'.join(str(b * 5) + 'm' for b in empty[:10])}")
 
 
+# How far apart two fixes are before the survey counts the receiver as having moved: several
+# times the accuracy a drive's fixes report, so a parked receiver's scatter is not distance.
+MOVED_M = 25
+
+
+def meters_between(lat0, lon0, lat1, lon1):
+    """The great-circle distance between two positions, in meters."""
+    p0, p1 = math.radians(lat0), math.radians(lat1)
+    dl = math.radians(lon1 - lon0)
+    h = (math.sin((p1 - p0) / 2) ** 2
+         + math.cos(p0) * math.cos(p1) * math.sin(dl / 2) ** 2)
+    return 2 * 6_371_000 * math.asin(min(1, math.sqrt(h)))
+
+
 def gps(db, ctx):
     section("positions")
     total = db.one("SELECT COUNT(*) FROM observation") or 0
@@ -1379,25 +1399,32 @@ def gps(db, ctx):
                  "NULL GROUP BY pos_at ORDER BY pos_at")
     jumps = []
     speeds = []
-    meters = 0.0
     for (t0, a0, o0), (t1, a1, o1) in zip(fixes, fixes[1:]):
         dt = (t1 - t0) / 1000
         if dt <= 0:
             continue
-        p0, p1 = math.radians(a0), math.radians(a1)
-        dl = math.radians(o1 - o0)
-        h = (math.sin((p1 - p0) / 2) ** 2
-             + math.cos(p0) * math.cos(p1) * math.sin(dl / 2) ** 2)
-        d = 2 * 6_371_000 * math.asin(min(1, math.sqrt(h)))
+        d = meters_between(a0, o0, a1, o1)
         speeds.append(d / dt)
         if d / dt > 70 and d > 200:
             jumps.append((t1, d, dt))
-        else:
+    # Distance is summed between fixes at least MOVED_M apart, so the scatter of a parked
+    # receiver adds nothing. Only sightings carry positions, so a stretch with none adds its
+    # straight line, and a jump adds nothing.
+    meters = 0.0
+    anchor = fixes[0] if fixes else None
+    for t1, a1, o1 in fixes[1:]:
+        t0, a0, o0 = anchor
+        d = meters_between(a0, o0, a1, o1)
+        if d < MOVED_M:
+            continue
+        dt = (t1 - t0) / 1000
+        if not (dt > 0 and d / dt > 70 and d > 200):
             meters += d
+        anchor = (t1, a1, o1)
     if meters:
-        # Only sightings carry positions, so a stretch with none adds its straight line.
         ctx["km"] = meters / 1000
-        print(f"  ~distance km  {meters / 1000:.1f}  (summed between sighting fixes, jumps left out)")
+        print(f"  ~distance km  {meters / 1000:.1f}  (between fixes {MOVED_M} m apart or more, "
+              "jumps left out)")
     if speeds:
         print(f"  ~speed km/h between fixes  p50 {pctile(speeds, 50) * 3.6:.0f}  "
               f"p95 {pctile(speeds, 95) * 3.6:.0f}  (inferred from fix spacing)")
@@ -1443,12 +1470,12 @@ def channel_yield(db, ctx):
         print(f"  dealt by      {planner}, sparse nodes {ctx.get('sparse_nodes', 'none')}")
     # A network counts in each group a sighting of it names a channel of, as the beacon gave it.
     networks = dict(db.q(f"SELECT {GROUP_SQL}, COUNT(DISTINCT bssid) FROM observation "
-                         "WHERE kind='wifi' GROUP BY 1"))
+                         f"WHERE {GROUPED_SQL} GROUP BY 1"))
     # One stored row, and so one channel. A node reports a network again only after a 5 dB gain
     # or five minutes, so one row is not proof of one visit.
     single = dict(db.q(f"SELECT {GROUP_SQL}, COUNT(*) FROM (SELECT bssid, MIN(channel) channel "
-                       "FROM observation WHERE kind='wifi' GROUP BY bssid HAVING COUNT(*) = 1) "
-                       "GROUP BY 1"))
+                       f"FROM observation WHERE {GROUPED_SQL} GROUP BY bssid "
+                       "HAVING COUNT(*) = 1) GROUP BY 1"))
     time = radio_time(db, ctx)
     print(f"  {'group':<12} {'radio time':>10}  {'networks':>16}  {'single sighting':>16}")
     for g, title in enumerate(GROUPS):
