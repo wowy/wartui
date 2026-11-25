@@ -260,7 +260,7 @@ mod tests {
     fn flash_bridge_targets_named_board_when_bridge_answers() {
         let mut p4 = bridge("/dev/ttyACM0", &BRIDGE_MAC);
         p4.candidate.path =
-            "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00".to_owned();
+            "/dev/serial/by-id/usb-1a86_USB_Single_Serial_AAAAAAAAAA-if00".to_owned();
         let probed = [p4.clone()];
         let found = listed(&[board("/dev/ttyACM1", Some(&NODE_MAC))], &probed);
         for given in ["02:00:5e:10:44:c0", p4.candidate.path.as_str(), "/dev/ttyACM0"] {
@@ -426,11 +426,11 @@ mod tests {
         let text = "excluded-ssids = [\"HomeNet\"]\n[bridge]\nmac = \"02:00:5E:10:A1:B0\"\n";
         std::fs::write(&path, text).unwrap();
 
-        remember_flashed(&path, BRIDGE_MAC, Some("5CF7153520".to_owned())).unwrap();
+        remember_flashed(&path, BRIDGE_MAC, Some("AAAAAAAAAA".to_owned())).unwrap();
 
         let saved = config::load(Some(&path)).unwrap();
         assert_eq!(saved.bridge.mac, Some(BRIDGE_MAC), "the new bridge replaces the old");
-        assert_eq!(saved.bridge.serial.as_deref(), Some("5CF7153520"), "with its port");
+        assert_eq!(saved.bridge.serial.as_deref(), Some("AAAAAAAAAA"), "with its port");
         assert_eq!(saved.excluded_ssids, ["HomeNet"], "the rest is kept");
     }
 
@@ -456,7 +456,7 @@ mod tests {
         let original = "[bridge]\nremember = false\n";
         std::fs::write(&path, original).unwrap();
 
-        remember_flashed(&path, BRIDGE_MAC, Some("5CF7153520".to_owned())).unwrap();
+        remember_flashed(&path, BRIDGE_MAC, Some("AAAAAAAAAA".to_owned())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }

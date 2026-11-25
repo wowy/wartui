@@ -16,8 +16,8 @@ const OTHER_BRIDGE_MAC: &str = "02:F2:62:10:9D:24";
 const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
 /// The CH343 serial numbers of the two bridges' boards.
-const BRIDGE_SERIAL: &str = "5CF7153520";
-const OTHER_BRIDGE_SERIAL: &str = "5CF7153999";
+const BRIDGE_SERIAL: &str = "AAAAAAAAAA";
+const OTHER_BRIDGE_SERIAL: &str = "BBBBBBBBBB";
 
 fn esp(device: &str, serial: &str) -> PortCandidate {
     candidate(device, Some(ESPRESSIF_VID), Some(0x1001), Some(serial))
@@ -230,7 +230,7 @@ fn serial_discovery_rejects_unattached_mac_address_when_resolving_bridge() {
 fn serial_discovery_carries_listed_serial_when_named_path_is_an_attached_ch343() {
     // The serial number is what a connection remembers the bridge on, so a run named by
     // path must not save the bridge without one. Either name for the device finds it.
-    let by_id = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00";
+    let by_id = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_AAAAAAAAAA-if00";
     let mut listed = ch343("/dev/ttyACM0", BRIDGE_SERIAL);
     listed.path = by_id.to_owned();
     let boards = [listed, ch343("/dev/ttyACM1", OTHER_BRIDGE_SERIAL)];

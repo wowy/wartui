@@ -840,7 +840,7 @@ mod tests {
 
     /// A P4 bridge's CH343 as the OS lists it.
     fn p4_bridge(device: &str) -> PortCandidate {
-        candidate(device, Some(CH343_VID), Some(CH343_PID), Some("5CF7153520"))
+        candidate(device, Some(CH343_VID), Some(CH343_PID), Some("AAAAAAAAAA"))
     }
 
     #[test]

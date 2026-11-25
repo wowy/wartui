@@ -1314,8 +1314,8 @@ mod tests {
     use crate::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
     /// The CH343 serial numbers of the remembered bridge's board and of another.
-    const BRIDGE_SERIAL: &str = "5CF7153520";
-    const OTHER_SERIAL: &str = "5CF7153999";
+    const BRIDGE_SERIAL: &str = "AAAAAAAAAA";
+    const OTHER_SERIAL: &str = "BBBBBBBBBB";
 
     fn board(serial: &str) -> PortCandidate {
         candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), Some(serial))

@@ -406,7 +406,7 @@ excluded-ssids = ["HomeNet", "Pixel 9"]
 [bridge]
 remember = true
 mac = "AA:BB:CC:DD:EE:FF"
-serial = "5CF7153520"
+serial = "AAAAAAAAAA"
 bluetooth-address = "AA:BB:CC:DD:EE:00"
 link = "bluetooth"
 
@@ -1878,7 +1878,7 @@ nothing about which board it reaches. `wartui ports` names them:
 
 ```
 $ wartui ports
-/dev/serial/by-id/usb-1a86_USB_Single_Serial_5CF7153520-if00
+/dev/serial/by-id/usb-1a86_USB_Single_Serial_AAAAAAAAAA-if00
   02:00:5E:10:96:C4     P4 bridge on a CH343  (1a86:55d3)
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)

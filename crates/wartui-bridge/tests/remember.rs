@@ -90,18 +90,18 @@ fn bridge_memory_recalls_again_when_reenabled_after_remember() {
 #[test]
 fn bridge_memory_recalls_serial_when_remembered_on_a_port() {
     let memory = BridgeMemory::none();
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     assert_eq!(memory.recall(), Some(address()));
-    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
-    let seeded = BridgeMemory::holding(Some(address())).on_port(Some("5CF7153520".to_owned()));
-    assert_eq!(seeded.recall_serial().as_deref(), Some("5CF7153520"));
+    assert_eq!(memory.recall_serial().as_deref(), Some("AAAAAAAAAA"));
+    let seeded = BridgeMemory::holding(Some(address())).on_port(Some("AAAAAAAAAA".to_owned()));
+    assert_eq!(seeded.recall_serial().as_deref(), Some("AAAAAAAAAA"));
 }
 
 #[test]
 fn bridge_memory_drops_serial_when_another_address_is_remembered_without_port() {
     // A port held for another address would put the wrong board first.
     let memory = BridgeMemory::none();
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     let other = mac::parse("02:F2:62:10:9D:24").expect("an address");
     memory.remember_on(other, None);
     assert_eq!(memory.recall(), Some(other));
@@ -112,23 +112,23 @@ fn bridge_memory_drops_serial_when_another_address_is_remembered_without_port() 
 fn bridge_memory_keeps_serial_when_same_address_is_remembered_without_port() {
     // A caller that does not know the port has not learned that it moved.
     let memory = BridgeMemory::none();
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     memory.remember_on(address(), None);
     assert_eq!(memory.recall(), Some(address()));
-    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
+    assert_eq!(memory.recall_serial().as_deref(), Some("AAAAAAAAAA"));
 }
 
 #[test]
 fn bridge_memory_matches_when_given_exactly_what_it_recalls() {
     let memory = BridgeMemory::none();
     assert!(memory.matches(None, None, None));
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
-    assert!(memory.matches(Some(address()), Some("5CF7153520"), None));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
+    assert!(memory.matches(Some(address()), Some("AAAAAAAAAA"), None));
     assert!(!memory.matches(Some(address()), None, None));
-    assert!(!memory.matches(None, Some("5CF7153520"), None));
+    assert!(!memory.matches(None, Some("AAAAAAAAAA"), None));
     memory.remember_bluetooth(address(), BLUETOOTH.to_owned());
-    assert!(memory.matches(Some(address()), Some("5CF7153520"), Some(BLUETOOTH)));
-    assert!(!memory.matches(Some(address()), Some("5CF7153520"), None));
+    assert!(memory.matches(Some(address()), Some("AAAAAAAAAA"), Some(BLUETOOTH)));
+    assert!(!memory.matches(Some(address()), Some("AAAAAAAAAA"), None));
     memory.set_enabled(false);
     assert!(memory.matches(None, None, None), "off holds nothing");
 }
@@ -136,7 +136,7 @@ fn bridge_memory_matches_when_given_exactly_what_it_recalls() {
 #[test]
 fn bridge_memory_forgets_serial_when_disabled() {
     let memory = BridgeMemory::none();
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     memory.set_enabled(false);
     assert_eq!(memory.recall_serial(), None);
     memory.set_enabled(true);
@@ -147,10 +147,10 @@ fn bridge_memory_forgets_serial_when_disabled() {
 fn bridge_memory_keeps_serial_and_bluetooth_when_same_address_is_remembered_over_either_link() {
     // A bridge reached over USB one run and over Bluetooth the next is one board.
     let memory = BridgeMemory::none();
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     memory.remember_bluetooth(address(), BLUETOOTH.to_owned());
-    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
-    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    assert_eq!(memory.recall_serial().as_deref(), Some("AAAAAAAAAA"));
+    memory.remember_on(address(), Some("AAAAAAAAAA".to_owned()));
     assert_eq!(memory.recall_bluetooth().as_deref(), Some(BLUETOOTH));
 }
 
@@ -160,7 +160,7 @@ fn bridge_memory_drops_bluetooth_when_another_address_is_remembered() {
     let memory = BridgeMemory::none();
     memory.remember_bluetooth(address(), BLUETOOTH.to_owned());
     let other = mac::parse("02:F2:62:10:9D:24").expect("an address");
-    memory.remember_on(other, Some("5CF7153520".to_owned()));
+    memory.remember_on(other, Some("AAAAAAAAAA".to_owned()));
     assert_eq!(memory.recall_bluetooth(), None);
     memory.remember_bluetooth(address(), BLUETOOTH.to_owned());
     assert_eq!(memory.recall_serial(), None, "and the port goes the same way");

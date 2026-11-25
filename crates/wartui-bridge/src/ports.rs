@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn ch343(device: &str) -> PortCandidate {
-        candidate(device, Some(CH343_VID), Some(CH343_PID), Some("5CF7153520"))
+        candidate(device, Some(CH343_VID), Some(CH343_PID), Some("AAAAAAAAAA"))
     }
 
     #[test]
