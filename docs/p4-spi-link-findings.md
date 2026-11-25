@@ -264,8 +264,8 @@ released its EN.
   connects to nothing. Holding each of the four DTR/RTS combinations for 1.5 s drew no ROM
   output. Opening the port did coincide with a `rst:0x1 (POWERON)` twice, both times with the P4
   running an app, so expect a reboot when you open the console.
-- **The P4 moves to a new `/dev/ttyACM*` number when replugged.** Use
-  its name under `/dev/serial/by-id/`, `usb-1a86_USB_Single_Serial_<serial>-if00`.
+- **The P4 moves to a new `/dev/ttyACM*` number when replugged.** Use its name under
+  `/dev/serial/by-id/`, `usb-1a86_USB_Single_Serial_<serial>-if00`.
 - **The C6 flashes through header H7.** That needs IO9 jumpered to GND, the P4 held in its ROM
   by BOOT, and `espflash --before no-reset --after no-reset` on the USB-to-TTL adapter. Remove
   the jumper before the P4 next boots, because the P4 resets the C6 through EN.
