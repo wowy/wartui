@@ -1,6 +1,7 @@
 //! Naming the boards, and telling one from another.
 
 use wartui_bridge::TransportError;
+use wartui_bridge::desktop::SerialPorts;
 use wartui_bridge::ports::{
     self, CH343_PID, CH343_VID, ESPRESSIF_VID, PortCandidate, StableNames, candidate,
     is_usable_path, with_stable_paths,
@@ -54,7 +55,7 @@ fn discovery_filters_macos_tty_aliases_when_probing_serial_candidates() {
 #[test]
 fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
     // An empty list is the normal state, not an error; the transport retries.
-    let found = discover_ports().expect("listing ports should succeed");
+    let found = discover_ports(&SerialPorts).expect("listing ports should succeed");
     for port in found {
         assert!(is_usable_path(&port.path));
         assert!(ports::is_wartui_board(&port), "{port:?}");
@@ -63,7 +64,7 @@ fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
 
 #[test]
 fn discovery_lists_only_ch343s_when_looking_for_a_bridge() {
-    for port in discover_bridges().expect("listing ports should succeed") {
+    for port in discover_bridges(&SerialPorts).expect("listing ports should succeed") {
         assert!(ports::is_ch343(&port), "{port:?}");
     }
 }

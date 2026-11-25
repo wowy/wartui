@@ -1,10 +1,16 @@
 //! Talking to a real bridge through its board's CH343, at [`HOST_BAUD`].
 //!
-//! Deliberately built on blocking [`serialport`] reads and writes on dedicated
-//! threads rather than an async serial crate. A tty file descriptor is a poor
-//! fit for kqueue/epoll readiness, and the extra hop costs latency on every
-//! frame, an update's windowed records and the scan's start and stop among them.
-//! Two threads and a pair of channels are simpler and more predictable.
+//! Deliberately built on blocking reads and writes on dedicated threads rather than an async
+//! serial crate. A tty file descriptor is a poor fit for kqueue/epoll readiness, and the extra
+//! hop costs latency on every frame, an update's windowed records and the scan's start and stop
+//! among them. Two threads and a pair of channels are simpler and more predictable.
+//!
+//! Everything here is protocol: which ports a sweep opens, what goes into them and how long
+//! each is worth. The ports themselves are a [`Ports`] adapter's, opened as a
+//! [`SerialPipe`](crate::pipe::SerialPipe) whose contract (`pipe`) the threads below rely on;
+//! [`desktop::SerialPorts`](crate::desktop::SerialPorts) is the one built on `serialport`.
+//!
+//! [`HOST_BAUD`]: wartui_proto::link::HOST_BAUD
 
 use std::io::{ErrorKind, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,8 +19,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, MAX_FRAME, MAX_HOST_FRAME,
-    decode_frame,
+    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -22,14 +27,12 @@ use crate::gate::{Admitted, Gate};
 // The tests here pin the rule the gate applies, as serial's connections live it.
 #[cfg(test)]
 use crate::gate::is_a_new_life;
+use crate::pipe::{Abort, Ports, SerialParts};
 use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
 use crate::spec::BridgeSpec;
 use crate::wire::encode_for_wire;
 use crate::{DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair};
-
-/// Long enough not to spin, short enough that shutdown feels immediate.
-const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How long one tick of the patience below is, and how often a CH343 is asked again. The
 /// first tick of a tokio interval fires immediately, which is when the first `Identify` goes
@@ -85,8 +88,8 @@ const KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// How long a connection's end waits for its port's handles to close.
 ///
-/// A healthy port's threads end within one [`READ_TIMEOUT`]. One the kernel holds in `write`
-/// or `close` is left behind after this ([`connect`]).
+/// A healthy port's threads end within one [`READ_TIMEOUT`](crate::pipe::READ_TIMEOUT). One the
+/// kernel holds in `write` or `close` is left behind after this ([`connect`]).
 const PORT_CLOSE_WITHIN: Duration = Duration::from_secs(2);
 
 /// Slowest retry after a sweep that opened several boards and found no bridge.
@@ -101,8 +104,8 @@ const MAX_SWEEP_DELAY: Duration = Duration::from_secs(5);
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
-pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
-    let mut found = ports::list()?;
+pub fn discover_ports(ports: &dyn Ports) -> Result<Vec<PortCandidate>, TransportError> {
+    let mut found = ports.list()?;
     found.retain(|candidate| {
         ports::is_wartui_board(candidate) && ports::is_usable_path(&candidate.path)
     });
@@ -113,8 +116,8 @@ pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
-pub fn discover_bridges() -> Result<Vec<PortCandidate>, TransportError> {
-    Ok(bridges_among(ports::list()?))
+pub fn discover_bridges(ports: &dyn Ports) -> Result<Vec<PortCandidate>, TransportError> {
+    Ok(bridges_among(ports.list()?))
 }
 
 /// The CH343s out of everything the OS listed.
@@ -130,6 +133,21 @@ pub fn bridges_among(mut listed: Vec<PortCandidate>) -> Vec<PortCandidate> {
 /// `wartui_proto::split::RADIO_WAIT_MS` (2 s) passes, behind about 250 ms of bootloader. A
 /// probe right after a reset or a replug would otherwise read a booting bridge as absent.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
+
+/// How often a connection asks and how long it waits, which only a test sets to other than
+/// [`IDENTIFY_INTERVAL`], [`KEEPALIVE`] and [`PROBE_WAIT`].
+#[derive(Debug, Clone, Copy)]
+struct Cadence {
+    identify_every: Duration,
+    keepalive: Duration,
+    probe_wait: Duration,
+}
+
+impl Default for Cadence {
+    fn default() -> Self {
+        Self { identify_every: IDENTIFY_INTERVAL, keepalive: KEEPALIVE, probe_wait: PROBE_WAIT }
+    }
+}
 
 /// A CH343 asked which bridge it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,33 +174,55 @@ impl Probed {
 /// The one way to learn a P4 bridge's address, since its CH343 reports a serial number of its
 /// own (`ports`). Only CH343s are probed, and a CH343 always drains its UART, so asking again
 /// costs nothing and reaches a P4 that lost the first `Identify` while booting.
-pub async fn probe(candidate: PortCandidate) -> Probed {
-    let path = candidate.path.clone();
-    let asked = tokio::task::spawn_blocking(move || probe_port(&path)).await;
+pub async fn probe(ports: &Arc<dyn Ports>, candidate: PortCandidate) -> Probed {
+    probe_with(ports, candidate, PROBE_WAIT, IDENTIFY_INTERVAL).await
+}
+
+/// [`probe`] each candidate in turn, never at once, in the order given.
+pub async fn probe_all(ports: &Arc<dyn Ports>, candidates: &[PortCandidate]) -> Vec<Probed> {
+    probe_each(ports, candidates, PROBE_WAIT, IDENTIFY_INTERVAL).await
+}
+
+/// [`probe`], waiting up to `wait` and asking every `every`.
+async fn probe_with(
+    ports: &Arc<dyn Ports>,
+    candidate: PortCandidate,
+    wait: Duration,
+    every: Duration,
+) -> Probed {
+    let ports = Arc::clone(ports);
+    let asking = candidate.clone();
+    let asked =
+        tokio::task::spawn_blocking(move || probe_port(ports.as_ref(), &asking, wait, every)).await;
     let (opened, mac) = asked.unwrap_or((false, None));
     Probed { candidate, opened, mac }
 }
 
-/// [`probe`] each candidate in turn, never at once, in the order given.
-pub async fn probe_all(candidates: &[PortCandidate]) -> Vec<Probed> {
+/// [`probe_all`], waiting up to `wait` on each and asking every `every`.
+async fn probe_each(
+    ports: &Arc<dyn Ports>,
+    candidates: &[PortCandidate],
+    wait: Duration,
+    every: Duration,
+) -> Vec<Probed> {
     let mut probed = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        probed.push(probe(candidate.clone()).await);
+        probed.push(probe_with(ports, candidate.clone(), wait, every).await);
     }
     probed
 }
 
 /// [`probe`]'s blocking half: whether the port opened, and the address it answered with.
-fn probe_port(path: &str) -> (bool, Option<Mac>) {
-    let opened = serialport::new(path, HOST_BAUD)
-        .timeout(READ_TIMEOUT)
-        // As `connect` opens a port: see `ports` for why the modem lines stay where they are.
-        .flow_control(serialport::FlowControl::None)
-        .open();
-    let Ok(mut port) = opened else { return (false, None) };
-    let mac = identify(&mut port, PROBE_WAIT, IDENTIFY_INTERVAL);
+fn probe_port(
+    ports: &dyn Ports,
+    candidate: &PortCandidate,
+    wait: Duration,
+    every: Duration,
+) -> (bool, Option<Mac>) {
+    let Ok(mut port) = ports.open(candidate) else { return (false, None) };
+    let mac = identify(&mut *port, wait, every);
     if mac.is_none() {
-        tracing::debug!(port = %path, "probed, and nothing answered");
+        tracing::debug!(port = %candidate.path, "probed, and nothing answered");
     }
     (true, mac)
 }
@@ -191,7 +231,11 @@ fn probe_port(path: &str) -> (bool, Option<Mac>) {
 /// read for up to `wait` until a `Ready` names an address.
 ///
 /// Generic over the port only so a test can stand in for one.
-fn identify<P: Read + Write>(port: &mut P, wait: Duration, every: Duration) -> Option<Mac> {
+fn identify<P: Read + Write + ?Sized>(
+    port: &mut P,
+    wait: Duration,
+    every: Duration,
+) -> Option<Mac> {
     let mut frame = [0u8; MAX_HOST_FRAME + 1];
     let first = encode_for_wire(&HostToBridge::Identify, true, &mut frame).ok()?;
     port.write_all(&frame[..first]).ok()?;
@@ -337,32 +381,38 @@ pub fn unambiguous_bridge<'a>(
 /// A link to a real bridge, reconnecting on its own when the cable moves.
 #[derive(Debug, Clone)]
 pub struct SerialTransport {
+    ports: Arc<dyn Ports>,
     spec: Option<BridgeSpec>,
     memory: BridgeMemory,
     reconnect_delay: Duration,
-}
-
-impl Default for SerialTransport {
-    fn default() -> Self {
-        Self::new()
-    }
+    cadence: Cadence,
 }
 
 impl SerialTransport {
-    /// Find a bridge automatically.
+    /// Find a bridge automatically among `ports`.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(ports: Arc<dyn Ports>) -> Self {
         Self {
+            ports,
             spec: None,
             memory: BridgeMemory::none(),
             reconnect_delay: Duration::from_millis(750),
+            cadence: Cadence::default(),
         }
     }
 
-    /// Use the board the operator named, by path, by address or by the end of one.
+    /// Use the board among `ports` the operator named, by path, by address or by the end of one.
     #[must_use]
-    pub fn with_spec(spec: BridgeSpec) -> Self {
-        Self { spec: Some(spec), ..Self::new() }
+    pub fn with_spec(ports: Arc<dyn Ports>, spec: BridgeSpec) -> Self {
+        Self { spec: Some(spec), ..Self::new(ports) }
+    }
+
+    /// Ask and wait on `cadence` rather than the board's.
+    #[cfg(test)]
+    #[must_use]
+    const fn cadence(mut self, cadence: Cadence) -> Self {
+        self.cadence = cadence;
+        self
     }
 
     /// Start from the bridge `memory` holds, and hold there the bridge this transport
@@ -521,7 +571,7 @@ async fn sweep(
     remembered: Option<&str>,
     unreported: bool,
 ) -> Pass {
-    let attached = match discover_bridges() {
+    let attached = match discover_bridges(transport.ports.as_ref()) {
         Ok(attached) => attached,
         Err(e) => return Pass::Failed { reason: e.to_string(), opened: 0 },
     };
@@ -534,7 +584,13 @@ async fn sweep(
         // is opened to stay. A tail several answer to, or none, is refused here, so the
         // reason says which.
         (None, Some(spec @ (BridgeSpec::Mac(_) | BridgeSpec::Tail(_)))) => {
-            let probed = probe_all(&select(&attached, Some(spec), remembered)).await;
+            let probed = probe_each(
+                &transport.ports,
+                &select(&attached, Some(spec), remembered),
+                transport.cadence.probe_wait,
+                transport.cadence.identify_every,
+            )
+            .await;
             opened += probed.iter().filter(|board| board.opened).count();
             match named_board(&probed, spec) {
                 Ok(board) => vec![board.candidate.clone()],
@@ -573,15 +629,8 @@ async fn sweep(
             drains: ports::is_ch343(candidate),
             ..Attempt::default()
         });
-        let attempt = connect(
-            &candidate.path,
-            patience(alone),
-            alone,
-            &state,
-            &transport.memory,
-            plumbing,
-            unreported,
-        );
+        let attempt =
+            connect(transport, candidate, patience(alone), alone, &state, plumbing, unreported);
         match attempt.await {
             Ok(()) => return Pass::HandleDropped,
             Err(reason) => {
@@ -769,7 +818,8 @@ impl Tally {
     }
 }
 
-/// One candidate's turn. `Err` carries a reason to show the user.
+/// One candidate's turn, opened through `transport`'s ports and timed on its cadence. `Err`
+/// carries a reason to show the user.
 ///
 /// `patience` is the whole difference between a probe and settling on a board: the
 /// open, the guard, the threads and the frame are one code path either way, which
@@ -777,14 +827,17 @@ impl Tally {
 /// that wins needs no handing over, because the `identify` arm below is already
 /// gated off once a board has announced itself.
 async fn connect(
-    path: &str,
+    transport: &SerialTransport,
+    candidate: &PortCandidate,
     patience: u32,
     proven: bool,
     state: &Arc<Attempt>,
-    memory: &BridgeMemory,
     plumbing: &mut crate::LinkPlumbing,
     unreported: bool,
 ) -> Result<(), String> {
+    let path = candidate.path.as_str();
+    let memory = &transport.memory;
+    let cadence = transport.cadence;
     // An attempt that is retrying a failure already reported is not news, and
     // there is one of them every `reconnect_delay`. `RUST_LOG=debug` keeps them.
     macro_rules! progress {
@@ -794,22 +847,15 @@ async fn connect(
     }
     progress!(port = %path, "opening the bridge");
 
-    let port = serialport::new(path, HOST_BAUD)
-        .timeout(READ_TIMEOUT)
-        // Named rather than left to the default, because it is the setting that
-        // keeps the driver from moving RTS on its own; `ports` explains why that
-        // matters on a board whose reset line is a pair of modem signals.
-        .flow_control(serialport::FlowControl::None)
-        .open()
-        .map_err(|e| open_failure(path, &e))?;
+    let port = transport.ports.open(candidate).map_err(|e| e.to_string())?;
     // Distinct from being connected: the port is ours, and whether anything is
     // listening is the next question. Which line is last in the log is the diagnosis.
     state.opened.store(true, Ordering::Relaxed);
     progress!(port = %path, "port open; asking the bridge to identify itself");
-    let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
-    // A third handle, given to the guard below so that the cleanup it does is
-    // owned by a value rather than by a code path.
-    let flush = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
+    // The reader's, the writer's, and a third handle, given to the guard below so that the
+    // cleanup it does is owned by a value rather than by a code path.
+    let SerialParts { reader: port, writer, abort } =
+        port.split().map_err(|e| format!("could not split {path}: {e}"))?;
     let (hold, closed) = register_in(&OPEN_PORTS, path);
 
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
@@ -845,7 +891,7 @@ async fn connect(
     // Before the second spawn, not after both: a `?` there would otherwise
     // return with the reader thread still running on a port nobody will ever
     // stop, while `supervise` reopens the same path every `reconnect_delay`.
-    let shutdown = Shutdown { state: Arc::clone(state), handle: Some((flush, hold.clone())) };
+    let shutdown = Shutdown { state: Arc::clone(state), handle: Some((abort, hold.clone())) };
 
     let writer_thread = std::thread::Builder::new()
         .name(format!("wartui-serial-tx {path}"))
@@ -883,10 +929,12 @@ async fn connect(
     // hubs (`docs/p4-host-uart-findings.md`). No ask avoids that, so the end of a connection
     // never waits on its threads: one the kernel holds in `write` or `close` is left behind
     // after `PORT_CLOSE_WITHIN`, and the port stays in `OPEN_PORTS` for `main` to name.
-    let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
+    let mut identify = tokio::time::interval(cadence.identify_every);
     let mut waited = 0_u32;
-    let mut keepalive =
-        tokio::time::interval_at(tokio::time::Instant::now() + KEEPALIVE, KEEPALIVE);
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + cadence.keepalive,
+        cadence.keepalive,
+    );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Forward commands, preserving the urgent-first bias, until either the
@@ -915,7 +963,7 @@ async fn connect(
                     // stopped answering may still read every frame sent to it,
                     // which is why the remedy named here is a command rather than a
                     // shrug.
-                    let millis = IDENTIFY_INTERVAL.as_millis() * u128::from(patience);
+                    let millis = cadence.identify_every.as_millis() * u128::from(patience);
                     // A board that was named or remembered is the one the advice is
                     // for; one passed over in a sweep may be another fleet's bridge, and
                     // telling an operator to reset it would be telling them to reboot
@@ -1015,14 +1063,14 @@ async fn connect(
 struct Shutdown {
     state: Arc<Attempt>,
     /// Taken by the drop. Always `Some` until then.
-    handle: Option<(Box<dyn serialport::SerialPort>, PortHold)>,
+    handle: Option<(Box<dyn Abort>, PortHold)>,
 }
 
 impl Drop for Shutdown {
     fn drop(&mut self) {
         self.state.stop.store(true, Ordering::Relaxed);
-        let Some((port, hold)) = self.handle.take() else { return };
-        let _ = port.clear(serialport::ClearBuffer::Output);
+        let Some((mut port, hold)) = self.handle.take() else { return };
+        port.clear_output();
         // A spawn that fails drops the closure here, closing the handle inline.
         let _ =
             std::thread::Builder::new().name("wartui-serial-close".to_owned()).spawn(move || {
@@ -1030,18 +1078,6 @@ impl Drop for Shutdown {
                 drop(hold);
             });
     }
-}
-
-/// The OS's reason a port would not open, with the remedy for the one that has one.
-///
-/// Permission is the failure worth separating: on Linux a serial port belongs to
-/// `dialout`, and "no bridge found" is exactly the wrong thing to say about a board
-/// that was found and refused.
-fn open_failure(path: &str, error: &serialport::Error) -> String {
-    if matches!(error.kind(), serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied)) {
-        return TransportError::Forbidden { port: path.to_owned() }.to_string();
-    }
-    TransportError::Open { port: path.to_owned(), source: error.clone().into() }.to_string()
 }
 
 /// One line describing a frame that did not decode, for the debug log: its length, where it
@@ -1288,6 +1324,11 @@ fn asks_on_tick(waited: u32, drains: bool) -> bool {
 fn patience(alone: bool) -> u32 {
     if alone { SETTLE_TICKS } else { PROBE_TICKS }
 }
+
+#[cfg(test)]
+mod fake;
+#[cfg(test)]
+mod sweep_tests;
 
 #[cfg(test)]
 mod tests {

@@ -61,7 +61,7 @@ pub(super) fn seen_booting(address: Mac, within: Duration) -> bool {
 
 /// Open the board at `address`, wherever it is attached now.
 fn open(address: Mac) -> Option<Box<dyn serialport::SerialPort>> {
-    let found = discover_ports().ok()?;
+    let found = discover_ports(&wartui_bridge::desktop::SerialPorts).ok()?;
     let candidate = found.into_iter().find(|candidate| candidate.mac() == Some(address))?;
     serialport::new(&candidate.path, 115_200)
         .timeout(READ_TIMEOUT)
