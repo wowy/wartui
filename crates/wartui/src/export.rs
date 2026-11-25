@@ -22,11 +22,10 @@ use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{Connection, is_simulated, open_readonly};
-use wartui_proto::mac;
 
 use crate::capture;
 use crate::config::{self, Config};
-use crate::text::thousands;
+use crate::text::{NodeNames, thousands};
 
 /// Which capture to read and which of its rows to send, shared by `export`, `analyze` and
 /// `upload` so all three read a capture the same way.
@@ -119,18 +118,19 @@ pub fn run(args: Args) -> Result<()> {
     let warning = test_data_note(&conn, &db)?;
     let filter = args.selection.filter(&config);
     let version = env!("CARGO_PKG_VERSION");
+    let names = NodeNames::of(&conn);
 
     let summary = if out.as_os_str() == "-" {
         let stdout = std::io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
         let summary = wigle_csv(&conn, &filter, &mut writer, version)?;
         writer.flush().context("flushing the export")?;
-        eprint!("{}", report(&summary, None));
+        eprint!("{}", report(&summary, None, &names));
         summary
     } else {
         let summary =
             into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, &filter, writer, version)?))?;
-        eprint!("{}", report(&summary, Some(&out)));
+        eprint!("{}", report(&summary, Some(&out), &names));
         summary
     };
 
@@ -222,14 +222,14 @@ fn quality_warnings(summary: &ExportSummary) -> String {
 
 /// What the export wrote and what the capture held, for standard error: standard output
 /// may be the CSV. `out` is `None` for standard output.
-fn report(summary: &ExportSummary, out: Option<&Path>) -> String {
+fn report(summary: &ExportSummary, out: Option<&Path>, names: &NodeNames) -> String {
     let dest = out.map_or_else(|| "standard output".to_owned(), |p| p.display().to_string());
-    format!("{} rows written to {dest}\n{}", thousands(summary.rows), details(summary))
+    format!("{} rows written to {dest}\n{}", thousands(summary.rows), details(summary, names))
 }
 
 /// Everything [`report`] says after its first line: what the capture held, by kind,
-/// position source, node and span.
-pub(crate) fn details(summary: &ExportSummary) -> String {
+/// position source, node and span. Nodes go by `names`, in slot order.
+pub(crate) fn details(summary: &ExportSummary, names: &NodeNames) -> String {
     use std::fmt::Write as _;
 
     let mut text = String::new();
@@ -289,8 +289,12 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
         heard.push(format!("{heard_ble} heard Bluetooth"));
     }
     let _ = writeln!(text, "  {:<11}{}", "nodes", heard.join(", "));
-    for node in &summary.nodes {
-        let mut line = format!("    {}", mac::short(&node.mac));
+    let mut nodes: Vec<_> = summary.nodes.iter().collect();
+    nodes.sort_by_key(|node| names.order(&node.mac));
+    let labels: Vec<String> = nodes.iter().map(|node| names.name(&node.mac)).collect();
+    let width = labels.iter().map(String::len).max().unwrap_or(0);
+    for (node, label) in nodes.iter().zip(labels) {
+        let mut line = format!("    {label:<width$}");
         if node.wifi > 0 {
             let _ = write!(line, "  wifi {}", thousands(node.wifi));
         }
@@ -397,13 +401,23 @@ mod tests {
 
     use anyhow::bail;
 
+    use std::collections::BTreeMap;
+
     use wartui_core::export::{Bands, ExportSummary, KindStats, NodeStats, Positions};
+    use wartui_proto::bus::{NodeBoard, Slot};
+    use wartui_proto::mac::Mac;
 
     use super::{
         Args, Selection, create_csv, into_csv, is_the_capture, quality_warnings, report,
         test_data_note, test_data_warning,
     };
     use crate::testing::{EPOCH_MS, capture, capture_simulated, sighting};
+    use crate::text::NodeNames;
+
+    /// Names for a capture with no node on a slot, so every node goes by its tail.
+    fn tails() -> NodeNames {
+        NodeNames::new(NodeBoard::NoCarrier, &BTreeMap::new())
+    }
 
     /// A capture of two nodes, one on each kind, with sightings over an evening.
     fn evening() -> ExportSummary {
@@ -455,7 +469,7 @@ mod tests {
 
     #[test]
     fn export_report_lists_nodes_by_last_two_octets_when_nodes_present() {
-        let text = report(&evening(), Some(Path::new("wartui-2026-09-30-19-02-11.csv")));
+        let text = report(&evening(), Some(Path::new("wartui-2026-09-30-19-02-11.csv")), &tails());
         assert!(text.contains("\n    1C:5A  ble 112,233\n"), "{text}");
         assert!(text.contains("\n    57:84  wifi 3,900,112\n"), "{text}");
         assert!(text.contains("1 heard Wi-Fi, 1 heard Bluetooth"), "{text}");
@@ -463,11 +477,35 @@ mod tests {
     }
 
     #[test]
+    fn export_report_lists_nodes_by_slot_label_in_slot_order_when_on_a_carrier() {
+        const NODE_1C: Mac = [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A];
+        const NODE_57: Mac = [0x02, 0, 0x5E, 0x10, 0x57, 0x84];
+        const NODE_90: Mac = [0x02, 0, 0x5E, 0x10, 0x90, 0x01];
+        let mut summary = evening();
+        // In address order, as the export fold meets them; slots run the other way.
+        summary.nodes = vec![
+            NodeStats { mac: NODE_1C, wifi: 20, ble: 0 },
+            NodeStats { mac: NODE_57, wifi: 10, ble: 0 },
+            NodeStats { mac: NODE_90, wifi: 0, ble: 30 },
+        ];
+        let slots = BTreeMap::from([
+            (NODE_1C, Slot::new(0, 1).expect("A2")),
+            (NODE_57, Slot::new(0, 0).expect("A1")),
+        ]);
+        let names = NodeNames::new(NodeBoard::Carrier14, &slots);
+        let text = report(&summary, None, &names);
+        assert!(
+            text.contains("\n    N1     wifi 10\n    N2     wifi 20\n    90:01  ble 30\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn export_report_omits_ble_line_when_no_ble_sightings() {
         let mut summary = evening();
         summary.ble = KindStats::default();
         summary.nodes.retain(|n| n.wifi > 0);
-        let text = report(&summary, None);
+        let text = report(&summary, None, &tails());
         assert!(text.starts_with("47,952 rows written to standard output\n"), "{text}");
         assert!(!text.contains("BLE"), "{text}");
         assert!(!text.contains("Bluetooth"), "{text}");
@@ -479,7 +517,7 @@ mod tests {
         summary.wifi = KindStats::default();
         summary.wifi_bands = Bands::default();
         summary.nodes.retain(|n| n.ble > 0);
-        let text = report(&summary, None);
+        let text = report(&summary, None, &tails());
         assert!(!text.contains("Wi-Fi"), "{text}");
         assert!(text.contains("  BLE "), "{text}");
     }
@@ -491,13 +529,13 @@ mod tests {
         // the minutes shown.
         summary.first_rx = Some(1_790_794_979_000);
         summary.last_rx = Some(1_790_798_521_000);
-        let text = report(&summary, None);
+        let text = report(&summary, None, &tails());
         assert!(text.contains("2026-09-30 19:02 – 20:02 UTC (1h 0m)"), "{text}");
     }
 
     #[test]
     fn export_report_formats_thousands_when_counts_are_large() {
-        let text = report(&evening(), Some(Path::new("out.csv")));
+        let text = report(&evening(), Some(Path::new("out.csv")), &tails());
         assert!(text.starts_with("47,952 rows written to out.csv\n"), "{text}");
         assert!(
             text.contains(

@@ -29,6 +29,15 @@
 //! the link is down starts the scan on the next `Status` that reports the P4 stopped. The wait
 //! happens once: a P4 that resets later is restarted at once.
 //!
+//! **A wait for the bridge's receiver is logged**, because a slow first fix is otherwise
+//! unexplained: nothing in the capture records the sky while no rows flow. The receiver sends its
+//! sky sentences for the whole wait (`FleetEngine::gps_sky`), and every [`SEARCH_LOG_EVERY`] the
+//! log counts what it sees: satellites in view, tracked, used and strong, and the best signal. Few
+//! in view points at the sky view, many weak at the antenna or receiver, and many strong with no
+//! fix at a receiver without its almanac. The `fix held` line gives the wait and the bridge's
+//! uptime, so a run's time to first fix from power-on reads straight off it. The gate's own batch
+//! writes the receiver's sky off again, rather than leaving it to the next poll.
+//!
 //! **After that, the run keeps the scan it wants** (`FleetEngine::wanted`). The P4 boots stopped
 //! and keeps no mode, so a P4 that resets mid-run, often under a connection the CH343 holds up,
 //! reports stopped, and the run starts it again in the mode it wants. The first `Status` of a
@@ -42,19 +51,24 @@
 //! [`Command::StopScan`], which a clean quit sends too, clears what the run wants first, so
 //! nothing restarts a fleet the operator stopped.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wartui_proto::bus::Slot;
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::HostToBridge;
 
 use super::{ActionBatch, Command, FleetEngine, Now};
+use crate::nmea::SkyCounts;
 use crate::record::{Record, ShareChange};
 use crate::ubx;
 
 /// How long a receiver must hold a fix before a run waiting for one starts the scan. Long enough
 /// that a receiver's first fix, often a stray one ahead of a steady lock, does not open the gate.
 pub const FIX_WAIT: Duration = Duration::from_secs(2);
+
+/// How often a run waiting for a fix logs what the bridge's receiver sees, starting this long into
+/// the wait: the sky lists fill only once the receiver has been told to send them.
+pub const SEARCH_LOG_EVERY: Duration = Duration::from_secs(30);
 
 /// What reported a scan mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,8 +124,8 @@ impl FleetEngine {
                 // First, so the stopped mode the P4 reports next restarts nothing.
                 self.wanted = None;
                 self.startup = Startup::Done;
-                self.fix_wait = false;
                 batch.urgent.push(HostToBridge::StopScan);
+                self.end_fix_wait(batch);
                 batch.bulk.push(HostToBridge::GetStatus);
             }
             Command::StartWithoutFix => {
@@ -163,33 +177,87 @@ impl FleetEngine {
         if !self.fix_wait {
             return;
         }
-        let Some(run) = self.config.position.fix_run(now.unix_ms) else {
-            self.fix_run = None;
-            return;
-        };
-        let first_seen = match self.fix_run {
-            Some((seen, first_seen)) if seen == run => first_seen,
-            _ => {
-                self.fix_run = Some((run, now.mono));
-                now.mono
+        let since = *self.fix_wait_since.get_or_insert(now.mono);
+        let held = match self.config.position.fix_run(now.unix_ms) {
+            None => {
+                self.fix_run = None;
+                false
+            }
+            Some(run) => {
+                let first_seen = match self.fix_run {
+                    Some((seen, first_seen)) if seen == run => first_seen,
+                    _ => {
+                        self.fix_run = Some((run, now.mono));
+                        now.mono
+                    }
+                };
+                now.mono.duration_since(first_seen) >= FIX_WAIT
             }
         };
-        if now.mono.duration_since(first_seen) >= FIX_WAIT {
-            tracing::info!("gps fix held; the scan may start");
+        let waited_s = now.mono.duration_since(since).as_secs();
+        let bridge_up_s = self.bridge_up_s();
+        if held {
+            tracing::info!(waited_s, bridge_up_s, "gps fix held; the scan may start");
             self.open_fix_gate(batch);
+        } else {
+            self.log_search(since, now, waited_s, bridge_up_s);
         }
+    }
+
+    /// Log what the bridge's receiver sees, at most once per [`SEARCH_LOG_EVERY`] from the wait's
+    /// start, while a connected bridge's receiver is in the chain.
+    fn log_search(&mut self, since: Instant, now: Now, waited_s: u64, bridge_up_s: Option<u64>) {
+        let Some(gps) = self.config.position.bridge_gps() else {
+            return;
+        };
+        let last = self.searched_at.unwrap_or(since);
+        if !self.bridge_connected() || now.mono.duration_since(last) < SEARCH_LOG_EVERY {
+            return;
+        }
+        self.searched_at = Some(now.mono);
+        let SkyCounts { in_view, tracked, used, best_snr, strong } = SkyCounts::of(&gps.view().sky);
+        tracing::info!(
+            waited_s,
+            bridge_up_s,
+            in_view,
+            tracked,
+            used,
+            best_snr,
+            strong,
+            "gps searching"
+        );
+    }
+
+    /// The bridge's uptime in seconds, as the last `Status` on this connection gave it. `None`
+    /// before the first: the last connection's would be a bridge that may since have restarted.
+    fn bridge_up_s(&self) -> Option<u64> {
+        if !self.link_up || !self.status_seen {
+            return None;
+        }
+        self.bridge_status.map(|status| u64::from(status.uptime_ms / 1000))
     }
 
     /// Stop waiting for a GPS fix, and start the scan if the P4 has reported stopped and the link
     /// is up. With the link down, the next `Status` reporting stopped starts it.
     pub(super) fn open_fix_gate(&mut self, batch: &mut ActionBatch) {
-        self.fix_wait = false;
-        self.fix_run = None;
+        self.end_fix_wait(batch);
         if let Startup::AwaitingFix { bluetooth } = self.startup
             && self.link_up
         {
             self.startup = Startup::Done;
             self.start(bluetooth, batch);
+        }
+    }
+
+    /// Stop waiting for a GPS fix and forget the wait's timing. A wait that was running writes the
+    /// receiver's sky back to following the view alone, in the batch that ends it.
+    fn end_fix_wait(&mut self, batch: &mut ActionBatch) {
+        let waited = std::mem::replace(&mut self.fix_wait, false);
+        self.fix_run = None;
+        self.fix_wait_since = None;
+        self.searched_at = None;
+        if waited {
+            batch.bulk.extend(self.gps_write());
         }
     }
 

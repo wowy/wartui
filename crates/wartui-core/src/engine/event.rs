@@ -137,8 +137,8 @@ pub enum Command {
     SetGpsRate(u8),
 
     /// Have the bridge's GPS receiver send `GSA` and `GSV` when `true`, once a second
-    /// ([`EngineConfig::gps_sky`]). Only the view's sky list reads them, so the view turns them on
-    /// while it shows that list.
+    /// ([`EngineConfig::gps_sky`]). The view turns them on while it shows its sky list. A run
+    /// waiting for a fix has them sent whatever this says ([`FleetEngine::gps_sky`]).
     ///
     /// Written to the receiver at once, as every status poll writes it again.
     SetGpsSky(bool),

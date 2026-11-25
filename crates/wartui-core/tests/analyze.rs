@@ -6,7 +6,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use wartui_core::analyze::{
     BluetoothLoss, BridgeLoss, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, RadioLinkLoss,
-    losses, peaks,
+    losses, node_slots, peaks,
 };
 use wartui_core::position::Fix;
 use wartui_core::record::{
@@ -923,9 +923,10 @@ const THIRD: Mac = [0x02, 0x00, 0x5E, 0x10, 0x90, 0x01];
 /// Each node's address and slot, in the order a summary lists them.
 type Listed = Vec<(Mac, Option<Slot>)>;
 
-/// What `losses` and then `peaks` list.
+/// What `losses` and then `peaks` list. Also checks that `node_slots` agrees with `losses`.
 fn listed(conn: &Connection) -> (Listed, Listed) {
     let loss = losses(conn).expect("reading losses");
+    assert_eq!(node_slots(conn).expect("reading slots"), (loss.board, loss.slots()));
     let peak = peaks(conn, &loss.slots()).expect("reading peaks");
     (
         loss.nodes.iter().map(|n| (n.mac, n.slot)).collect(),
@@ -1020,6 +1021,8 @@ fn analyze_gives_no_slot_when_latest_heartbeat_slot_is_not_text() {
         .expect("writing a slot of the wrong type");
     let loss = losses(&conn).expect("a bad slot does not fail the report");
     assert_eq!(loss.nodes[0].slot, None, "not the older heartbeat's slot");
+    let (_, slots) = node_slots(&conn).expect("a bad slot does not fail the slots");
+    assert!(slots.is_empty(), "{slots:?}");
 }
 
 /// A node's capture holding one heartbeat per reading, then whether it reports a supply drop.

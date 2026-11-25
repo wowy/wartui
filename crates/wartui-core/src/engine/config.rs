@@ -46,8 +46,9 @@ pub struct EngineConfig {
     /// How often the bridge's GPS receiver reports a fix, in hertz. `FleetEngine::poll_bridge` says
     /// why every status poll carries it. [`Command::SetGpsRate`] changes it mid-run.
     pub gps_rate_hz: u8,
-    /// Whether the bridge's GPS receiver sends `GSA` and `GSV`, which feed only the view's sky
-    /// list. Off unless [`Command::SetGpsSky`] turns it on while the GPS view is open.
+    /// Whether the view wants the bridge's GPS receiver to send `GSA` and `GSV`, which feed the
+    /// view's sky list. Off unless [`Command::SetGpsSky`] turns it on while the GPS view is open.
+    /// The receiver also sends them while the run waits for a fix (`FleetEngine::gps_sky`).
     pub gps_sky: bool,
     /// The link the host reaches the bridge over, or `None` under `--sim`. It sets how far behind
     /// the bridge the host must read to count as behind (`engine::behind_us`).

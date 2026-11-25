@@ -194,11 +194,11 @@ of its output, after the export summary:
 | `batches`      | Sighting batches lost between node and host; the footer's `lost`                |
 | `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
-`peak by node` and `loss by node` name a node by the slot its latest heartbeat came from, in slot
-order, so one that moved appears once. A node with no heartbeat, or any node in a capture with no
-carrier, goes by the last two octets of its address and sorts after the labels. Two nodes whose
-latest heartbeats name one slot, as when a board is replaced, each get their address after the
-label (`N3 57:84`).
+`peak by node` and `loss by node`, and the export summary's node list, name a node by the slot its
+latest heartbeat came from, in slot order, so one that moved appears once. A node with no
+heartbeat, or any node in a capture with no carrier, goes by the last two octets of its address and
+sorts after the labels. Two nodes whose latest heartbeats name one slot, as when a board is
+replaced, each get their address after the label (`N3 57:84`).
 
 `supply drop` on a `loss by node` row means a node's rail reading fell 150 mV or more below its
 first in the capture, even if it later recovered. `analyze` prints no figure, and
@@ -327,11 +327,16 @@ has queued the job, the upload has happened, so only a failed import makes the e
 | The import fails                                       | Exits non-zero with the site's reason              |
 | A poll errors (network, timeout, 5xx)                  | Says so once per distinct error, and keeps polling |
 | A poll redirects to the login page, or answers 401/403 | Stops polling, prints the job's URL, exits zero    |
-| 30 seconds pass                                        | Stops polling, prints the job's URL, exits zero    |
+| The wait runs out                                      | Stops polling, prints the job's URL, exits zero    |
 
-When it stops early the import carries on; the job's URL or your profile on wdgwars.pl shows the
-result. The wait is short because someone sits at the terminal for it and nothing needs the result
-to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused
+The wait is 30 seconds plus 2 per thousand rows, at most two minutes: about 40 seconds for 5,000
+rows and 70 for 20,000. A larger file takes the site longer to import. When it stops early the
+import carries on; the job's URL or your profile on wdgwars.pl shows the result. The wait stays
+short because someone sits at the terminal for it and nothing needs the result to finish. A wait
+that runs out with no answer at all names the last poll's error, so a lost connection reads apart
+from a slow import. With `--log-file`, each poll error and how the wait ended (the job, its rows,
+the seconds waited, the result and its reason) are logged too, from `upload` and from `u` alike.
+Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused
 key (with the site's reason), an oversized file and any other error status are reported in plain
 words and exit non-zero. Redirects are not followed.
 
@@ -1314,7 +1319,11 @@ nothing and says how many networks it left out.
   wait back on from the next launch. The wait happens once: a
   bridge that reboots later in the run is restarted at once. There is no wait with `--no-gps`,
   with `--lat`/`--lon`, or under `--sim` unless `--gps PATH` names a port. A run whose receiver is
-  missing shows `no receiver found` in the pop-up until `Enter`.
+  missing shows `no receiver found` in the pop-up until `Enter`. While it waits, the bridge's
+  receiver sends its sky as though the GPS modal were open, and the log (`--log-file`) gets a
+  `gps searching` line every 30 s: satellites in view, tracked and used, the best signal, and how
+  many are strong (30 dB-Hz and up). The `gps fix held` line that ends the wait gives how long it
+  took and the bridge's uptime.
 - **The receiver runs on its own thread; nothing blocks on it.** The view comes up at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
   `gps no receiver`, or the port's error. The search keeps running there, so a puck replugged into

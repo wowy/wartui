@@ -4,7 +4,11 @@
 //! message the bridge sends now, and `wartui sd-log` for one its log kept, so a message reads
 //! alike in both.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use wartui_core::analyze::node_slots;
 use wartui_core::engine::power_cycled_text;
+use wartui_core::store::Connection;
 use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg};
 use wartui_proto::link::{
     BridgeHealth, BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus,
@@ -69,6 +73,57 @@ pub(crate) fn carrier_slot_named(
 /// the tail of its address for a node with no slot, which has nothing else to go by.
 pub(crate) fn node_name(board: NodeBoard, slot: Option<Slot>, mac: &Mac) -> String {
     slot.map_or_else(|| mac::short(mac).to_string(), |slot| board.label(slot).to_string())
+}
+
+/// What a capture's reports call its nodes, and the order they list them in: [`node_name`] for
+/// each, with the address tail after the label when two nodes' latest heartbeats name one slot, so
+/// every section of a report names a node alike.
+#[derive(Clone)]
+pub(crate) struct NodeNames {
+    board: NodeBoard,
+    /// Each node's slot (`wartui_core::analyze::node_slots`).
+    slots: BTreeMap<Mac, Slot>,
+    /// Slots more than one node's latest heartbeat names.
+    shared: BTreeSet<Slot>,
+}
+
+impl NodeNames {
+    /// Names for the nodes on `board` whose slots `slots` gives. A node missing from it has none.
+    pub(crate) fn new(board: NodeBoard, slots: &BTreeMap<Mac, Slot>) -> Self {
+        let mut seen = BTreeSet::new();
+        let shared = slots.values().copied().filter(|slot| !seen.insert(*slot)).collect();
+        Self { board, slots: slots.clone(), shared }
+    }
+
+    /// Names for the nodes of the capture `conn` holds. A capture whose slots cannot be read
+    /// names every node by its address tail: the names only label a summary, so they never fail
+    /// the export or upload it describes.
+    pub(crate) fn of(conn: &Connection) -> Self {
+        match node_slots(conn) {
+            Ok((board, slots)) => Self::new(board, &slots),
+            Err(error) => {
+                tracing::warn!(%error, "cannot read the capture's node slots; naming nodes by address");
+                Self::new(NodeBoard::NoCarrier, &BTreeMap::new())
+            }
+        }
+    }
+
+    /// What the reports call `mac`.
+    pub(crate) fn name(&self, mac: &Mac) -> String {
+        let slot = self.slots.get(mac).copied();
+        let name = node_name(self.board, slot, mac);
+        if slot.is_some_and(|slot| self.shared.contains(&slot)) {
+            format!("{name} {}", mac::short(mac))
+        } else {
+            name
+        }
+    }
+
+    /// Where `mac` sorts in a list of nodes: by slot, then slotless nodes, ties by address.
+    pub(crate) fn order(&self, mac: &Mac) -> (bool, Option<Slot>, Mac) {
+        let slot = self.slots.get(mac).copied();
+        (slot.is_none(), slot, *mac)
+    }
 }
 
 /// Where the bridge's microSD card is shown.
@@ -333,8 +388,8 @@ mod tests {
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        SdForm, bytes_text, channel_list, heartbeat_text, kib, message_text, node_bus_text,
-        node_name, sd_log_text, sd_text, slot_named, slot_range, thousands,
+        NodeNames, SdForm, bytes_text, channel_list, heartbeat_text, kib, message_text,
+        node_bus_text, node_name, sd_log_text, sd_text, slot_named, slot_range, thousands,
     };
 
     const MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -387,6 +442,14 @@ mod tests {
             bluetooth: Default::default(),
             health,
         }
+    }
+
+    #[test]
+    fn node_names_of_names_nodes_by_address_tail_when_slots_cannot_be_read() {
+        // No tables at all, so reading the slots fails.
+        let conn = wartui_core::store::Connection::open_in_memory().unwrap();
+        let names = NodeNames::of(&conn);
+        assert_eq!(names.name(&MAC), "57:84");
     }
 
     #[test]

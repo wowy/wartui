@@ -340,7 +340,7 @@ fn follow(client: &wdgwars::Client, job: &Job, say: impl Fn(String)) {
     let started = Instant::now();
     let waited = wdgwars::wait(
         id,
-        wdgwars::GIVE_UP,
+        wdgwars::give_up(job.rows),
         || client.poll(id),
         std::thread::sleep,
         || started.elapsed(),
@@ -363,7 +363,7 @@ fn follow(client: &wdgwars::Client, job: &Job, say: impl Fn(String)) {
             format!("upload: WDGWars job {id} failed: {message}")
         }
     };
-    if let Err(error) = finish(job, &waited) {
+    if let Err(error) = finish(job, &waited, started.elapsed()) {
         line.push_str(&format!("; {error:#}"));
     }
     say(line);

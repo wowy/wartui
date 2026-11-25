@@ -11,10 +11,11 @@
 //! puck search stands down (`stand_host_down`); it resumes when the last one ages past the limit
 //! or the bridge disconnects. Whether a bridge is connected is the engine's to say
 //! ([`FleetEngine::bridge_connected`]), read after the engine has seen each link event. Each
-//! connection, and each disconnect, starts the bridge's stream over. [`Command::SetGpsSky`] also
-//! sets whether the bridge receiver's `GSA` and `GSV` build its sky lists
-//! ([`crate::gps::Gps::set_sky_lists`]), so one in flight when the receiver stops sending them
-//! leaves no satellites behind.
+//! connection, and each disconnect, starts the bridge's stream over. Whether the bridge
+//! receiver's `GSA` and `GSV` build its sky lists ([`crate::gps::Gps::set_sky_lists`]) follows
+//! [`FleetEngine::gps_sky`], read after the engine has seen each event, so the lists stop in the
+//! same batch that tells the receiver to stop sending them, and one in flight leaves no satellites
+//! behind.
 //!
 //! **A capture ends by stopping the scan.** When `stop` fires, [`drive`] tells the engine to stop
 //! the P4's scan, and keeps reading until the P4 reports stopped or [`QUIT_WAIT`] passes. Dropping
@@ -101,6 +102,8 @@ pub async fn drive(
     let mut steerable = true;
     let bridge_gps = engine.position().bridge_gps().cloned();
     let host_gps = engine.position().gps().cloned();
+    // What the bridge receiver's sky lists were last set to: off, as `Gps::bridged` starts them.
+    let mut sky_lists = false;
     // Once `stop` has fired on a capture: when to give up waiting for the P4 to stop.
     let mut quitting: Option<tokio::time::Instant> = None;
 
@@ -156,11 +159,6 @@ pub async fn drive(
                     gps.reset_stream();
                 }
             }
-            Event::Command(Command::SetGpsSky(on)) => {
-                if let Some(gps) = &bridge_gps {
-                    gps.set_sky_lists(*on);
-                }
-            }
             // A quiet receiver sends nothing to age its fix by, nor to resume the host's search.
             Event::Tick => {
                 if let Some(gps) = &bridge_gps {
@@ -195,6 +193,12 @@ pub async fn drive(
         let now = now();
         let batch = engine.handle(event, now);
         settings.record(&store, engine.capture_settings(), now);
+        if engine.gps_sky() != sky_lists {
+            sky_lists = engine.gps_sky();
+            if let Some(gps) = &bridge_gps {
+                gps.set_sky_lists(sky_lists);
+            }
+        }
         if restands {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let connected = engine.bridge_connected();

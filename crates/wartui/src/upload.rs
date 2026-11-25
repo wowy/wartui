@@ -70,7 +70,7 @@ use crate::config::Config;
 use crate::export::{
     Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
 };
-use crate::text::thousands;
+use crate::text::{NodeNames, thousands};
 
 /// Every site, in the order an upload goes to them.
 pub(crate) const SITES: [UploadSite; 2] = [UploadSite::Wdgwars, UploadSite::Wigle];
@@ -265,13 +265,13 @@ fn follow_wdgwars(client: &wdgwars::Client, job: &Job) -> bool {
     let started = Instant::now();
     let waited = wdgwars::wait(
         id,
-        wdgwars::GIVE_UP,
+        wdgwars::give_up(job.rows),
         || client.poll(id),
         std::thread::sleep,
         || started.elapsed(),
         wdgwars::on_stderr(id),
     );
-    let recorded = finish(job, &waited);
+    let recorded = finish(job, &waited, started.elapsed());
     let imported = match &waited {
         Ok(wdgwars::Waited::Done(result)) => {
             print!("{}", wdgwars::outcome(result));
@@ -352,6 +352,8 @@ pub(crate) struct Prepared {
     /// The upload to this site this one follows on from. `None` with `--resend`, which follows
     /// on from nothing.
     pub(crate) previous: Option<UploadRecord>,
+    /// What the summary's details call the capture's nodes.
+    names: NodeNames,
 }
 
 impl Prepared {
@@ -364,7 +366,7 @@ impl Prepared {
     /// size, its compressed size and the upload this one follows on from, a line each.
     pub(crate) fn describe(&self) -> String {
         let mut text = self.rows_line();
-        text.push_str(&details(&self.summary));
+        text.push_str(&details(&self.summary, &self.names));
         text.push_str(&self.sizes());
         text
     }
@@ -496,11 +498,12 @@ pub(crate) fn prepare(
     if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
         return Err(Simulated { db: db.to_owned() }.into());
     }
+    let names = NodeNames::of(&conn);
     signed
         .into_iter()
         .map(|(site, credentials)| {
             let outcome = match credentials {
-                Ok(credentials) => prepare_site(&conn, credentials, options)?,
+                Ok(credentials) => prepare_site(&conn, credentials, options, &names)?,
                 Err(error) => Prepare::Refused(error),
             };
             Ok((site, outcome))
@@ -508,8 +511,13 @@ pub(crate) fn prepare(
         .collect()
 }
 
-/// [`prepare`] for the site `credentials` signs in to.
-fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) -> Result<Prepare> {
+/// [`prepare`] for the site `credentials` signs in to, its summary naming nodes by `names`.
+fn prepare_site(
+    conn: &Connection,
+    credentials: Credentials,
+    options: &Options,
+    names: &NodeNames,
+) -> Result<Prepare> {
     let site = credentials.site();
     let filter = ExportFilter {
         recapture_secs: options.recapture.unwrap_or_else(|| site.recapture_secs()),
@@ -526,7 +534,8 @@ fn prepare_site(conn: &Connection, credentials: Credentials, options: &Options) 
     if let Err(error) = site.check_size(csv_bytes, gz.len()) {
         return Ok(Prepare::Refused(error));
     }
-    Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous }))
+    let names = names.clone();
+    Ok(Prepare::Ready(Prepared { credentials, body: gz, csv_bytes, summary, previous, names }))
 }
 
 /// What [`body`] built.
@@ -601,6 +610,8 @@ pub(crate) enum Sent {
 /// A WDGWars job, and the capture's record of it.
 pub(crate) struct Job {
     pub(crate) id: u64,
+    /// The rows the upload carried, which the wait grows with ([`wdgwars::give_up`]).
+    pub(crate) rows: u64,
     record: i64,
     /// The capture, open for writing since before the upload went.
     conn: Connection,
@@ -626,7 +637,7 @@ pub(crate) fn send(
             let record =
                 record_upload(&conn, UploadSite::Wdgwars, through, now, &id.to_string(), rows)
                     .with_context(|| format!("recording job {id} in {}", db.display()))?;
-            Ok(Sent::Wdgwars { client, job: Job { id, record, conn } })
+            Ok(Sent::Wdgwars { client, job: Job { id, rows, record, conn } })
         }
         Credentials::Wigle { name, token } => {
             let client = wigle::Client::new(wigle_base, name, token);
@@ -642,12 +653,51 @@ pub(crate) fn send(
     }
 }
 
-/// Record how the wait for WDGWars' `job` ended.
-pub(crate) fn finish(job: &Job, waited: &Result<wdgwars::Waited>) -> Result<()> {
+/// Record how the wait for WDGWars' `job` ended, `elapsed` after it began, and log it. The
+/// store keeps only the result, so the log is where an unfollowed job's reason survives.
+pub(crate) fn finish(job: &Job, waited: &Result<wdgwars::Waited>, elapsed: Duration) -> Result<()> {
+    let (id, rows, elapsed_s) = (job.id, job.rows, elapsed.as_secs());
     let result = match waited {
-        Ok(wdgwars::Waited::Done(_)) => "done",
-        Ok(wdgwars::Waited::Unfollowed(_)) => "unfollowed",
-        Err(_) => "failed",
+        Ok(wdgwars::Waited::Done(_)) => {
+            tracing::info!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result = "done",
+                "WDGWars upload"
+            );
+            "done"
+        }
+        Ok(wdgwars::Waited::Unfollowed(reason)) => {
+            let result = "unfollowed";
+            tracing::info!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result,
+                reason,
+                "WDGWars upload"
+            );
+            result
+        }
+        Err(error) => {
+            let reason = error
+                .downcast_ref::<wdgwars::JobFailed>()
+                .map_or_else(|| format!("{error:#}"), |failed| failed.message.clone());
+            let result = "failed";
+            tracing::warn!(
+                site = "wdgwars",
+                job = id,
+                rows,
+                elapsed_s,
+                result,
+                reason,
+                "WDGWars upload"
+            );
+            result
+        }
     };
     set_upload_result(&job.conn, job.record, result)
         .with_context(|| format!("recording how job {} ended", job.id))?;
@@ -746,9 +796,11 @@ fn reason(object: &Map<String, Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Read;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use clap::Parser;
     use flate2::read::GzDecoder;
@@ -756,6 +808,7 @@ mod tests {
     use wartui_core::store::{
         UploadSite, last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
     };
+    use wartui_proto::bus::NodeBoard;
 
     use super::{
         Credentials, Job, Options, Prepare, Prepared, Sent, Site, To, body, finish, prepare, send,
@@ -763,6 +816,7 @@ mod tests {
     };
     use crate::config::Config;
     use crate::testing::{EPOCH_MS, capture, capture_simulated, serve_once, sighting};
+    use crate::text::NodeNames;
 
     fn keyed() -> Config {
         let mut config = Config::default();
@@ -842,6 +896,7 @@ mod tests {
             csv_bytes: 3_343_178,
             summary: ExportSummary { rows: 2, ..Default::default() },
             previous,
+            names: NodeNames::new(NodeBoard::NoCarrier, &BTreeMap::new()),
         }
     }
 
@@ -1230,7 +1285,8 @@ mod tests {
         let conn = open_readwrite(&db).unwrap();
         let record =
             record_upload(&conn, UploadSite::Wdgwars, 3, EPOCH_MS + 150_000, "8", 1).unwrap();
-        finish(&Job { id: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
+        let job = Job { id: 8, rows: 1, record, conn };
+        finish(&job, &Err(anyhow::anyhow!("failed")), Duration::from_secs(3)).unwrap();
 
         let previous = last_upload(&open_readonly(&db).unwrap(), UploadSite::Wdgwars)
             .unwrap()
