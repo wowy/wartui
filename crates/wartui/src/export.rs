@@ -270,9 +270,16 @@ pub(crate) fn details(summary: &ExportSummary, names: &NodeNames) -> String {
     }
     let pos = &summary.positions;
     let share = |n: u64| n as f64 * 100.0 / sightings as f64;
+    // No `wartui` command feeds a phone's location services, so the share shows only when a
+    // capture holds some.
+    let platform = if pos.platform > 0 {
+        format!("  platform {:.1}%", share(pos.platform))
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         text,
-        "  {:<11}gps {:.1}%  static {:.1}%  none {:.1}%",
+        "  {:<11}gps {:.1}%{platform}  static {:.1}%  none {:.1}%",
         "positions",
         share(pos.gps),
         share(pos.fixed),
@@ -427,7 +434,7 @@ mod tests {
             wifi: KindStats { networks: 38_211, sightings: 3_900_112, rows: 41_002 },
             ble: KindStats { networks: 6_402, sightings: 112_233, rows: 6_950 },
             wifi_bands: Bands { ghz2_4: 30_100, ghz5: 9_804, other: 0 },
-            positions: Positions { gps: 3_896_000, fixed: 0, none: 116_345 },
+            positions: Positions { gps: 3_896_000, platform: 0, fixed: 0, none: 116_345 },
             nodes: vec![
                 NodeStats { mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], wifi: 0, ble: 112_233 },
                 NodeStats { mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84], wifi: 3_900_112, ble: 0 },
@@ -498,6 +505,25 @@ mod tests {
             text.contains("\n    N1     wifi 10\n    N2     wifi 20\n    90:01  ble 30\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn export_report_shows_platform_share_when_sightings_were_placed_by_a_phone() {
+        let mut summary = evening();
+        summary.positions =
+            Positions { gps: 3_000_000, platform: 896_000, fixed: 0, none: 116_345 };
+        let text = report(&summary, None, &tails());
+        assert!(
+            text.contains("  positions  gps 74.8%  platform 22.3%  static 0.0%  none 2.9%\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn export_report_omits_platform_share_when_no_sighting_was_placed_by_a_phone() {
+        let text = report(&evening(), None, &tails());
+        assert!(text.contains("  positions  gps 97.1%  static 0.0%  none 2.9%\n"), "{text}");
+        assert!(!text.contains("platform"), "{text}");
     }
 
     #[test]

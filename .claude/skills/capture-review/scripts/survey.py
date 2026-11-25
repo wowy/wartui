@@ -32,7 +32,7 @@ NOT_FAULTS = ("power_on", "external")
 
 # Mirrors store::SCHEMA_VERSION in crates/wartui-core/src/store.rs. The survey reads this shape
 # only, as the store does.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Mirrors plan::MAX_NODES in crates/wartui-proto/src/plan/mod.rs.
 MAX_NODES = 14

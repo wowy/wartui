@@ -186,8 +186,8 @@ impl FleetEngine {
             record_raw: self.config.record_raw,
             // The bridge's receiver is built for every run, so it counts only while a bridge is
             // connected.
-            gps: self.config.position.gps().is_some()
-                || (self.bridge_connected() && self.config.position.bridge_gps().is_some()),
+            gps: self.config.position.host_receiver().is_some()
+                || (self.bridge_connected() && self.config.position.bridge_receiver().is_some()),
             gps_max_age: self.config.position.max_age(),
             ble_slot: self.ble_slot,
             ble_node: self.ble_slot.and_then(|slot| self.slots.get(&slot).copied()),
@@ -393,7 +393,7 @@ impl FleetEngine {
     /// The receiver's configuration as it stands, rate and sky, for a connected bridge whose GPS
     /// is in the chain. `None` otherwise.
     fn gps_write(&self) -> Option<HostToBridge> {
-        if !self.bridge_connected() || self.config.position.bridge_gps().is_none() {
+        if !self.bridge_connected() || self.config.position.bridge_receiver().is_none() {
             return None;
         }
         let frame = ubx::valset_rate(self.config.gps_rate_hz, self.gps_sky());
@@ -414,8 +414,7 @@ impl FleetEngine {
 
     /// Whether a bridge is connected now, and so a GPS port: every P4 reads one. `self.bridge`
     /// outlives a disconnect, so the link must be up too. The runtime reads this after each event
-    /// to decide whether the host's search stands down, so the two never disagree about the
-    /// bridge.
+    /// for [`PositionChain::stand_down`], so the two never disagree about the bridge.
     #[must_use]
     pub fn bridge_connected(&self) -> bool {
         self.link_up && self.bridge.is_some()

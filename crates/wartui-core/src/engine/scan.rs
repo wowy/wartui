@@ -211,7 +211,7 @@ impl FleetEngine {
     /// Log what the bridge's receiver sees, at most once per [`SEARCH_LOG_EVERY`] from the wait's
     /// start, while a connected bridge's receiver is in the chain.
     fn log_search(&mut self, since: Instant, now: Now, waited_s: u64, bridge_up_s: Option<u64>) {
-        let Some(gps) = self.config.position.bridge_gps() else {
+        let Some(gps) = self.config.position.bridge_receiver() else {
             return;
         };
         let last = self.searched_at.unwrap_or(since);

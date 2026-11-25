@@ -1312,7 +1312,9 @@ store rows.
 Each observation gets the best position available, resolved fresh: GPS, then `--lat`/`--lon`, then
 none. The GPS is a receiver named with `--gps PATH`, then the bridge's receiver, then one the host
 found, each while its fix is recent. Rows
-record which tier answered, so a garage-to-road capture is honest about both. No record is dropped
+record which tier answered, so a garage-to-road capture is honest about both. A row's stored source
+is `gps`, `static` or `none`. A fourth, `platform`, is a phone's location services, which no
+`wartui` command feeds. No record is dropped
 for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with none exports
 nothing and says how many networks it left out.
 

@@ -86,7 +86,7 @@ reasoning.
 |---|---|---|
 | Gaps over 15 s between `host_status` rows | The host process stalled, the machine slept, or power dipped. | `crates/wartui-core/src/runtime.rs` |
 | Pi under-voltage or throttling | Supply sag. Expect the bridge or USB to misbehave in the same minutes. | `crates/wartui-core/src/health.rs` |
-| `pos_source = none` stretches | GPS lost its fix, or the receiver was not found. Positions resolve per record through `PositionChain`. Never suggest `--lat/--lon` as a fallback. | `crates/wartui-core/src/position.rs`, `crates/wartui-core/src/gps.rs`, `crates/wartui-core/src/discover.rs` |
+| `pos_source = none` stretches | GPS lost its fix, or the receiver was not found. Positions resolve per record through `PositionChain`; `platform` is a phone's location services. Never suggest `--lat/--lon` as a fallback. | `crates/wartui-core/src/position.rs`, `crates/wartui-core/src/gps.rs`, `crates/wartui-core/src/discover.rs` |
 | Fix age above `gps_max_age_ms` | The chain handed out a stale fix, which would be a bug. | `crates/wartui-core/src/position.rs` |
 | Position jumps above 250 km/h | NMEA glitches or a cold-start fix. The exported rows carry the bad position. | `crates/wartui-core/src/nmea.rs`, `crates/wartui-core/src/gps.rs` |
 | A slow first fix (the scan started minutes into the capture) | Read the log's `gps searching` lines: few in view points at the sky view, many in view with little signal at the antenna or receiver, and many strong with no fix at a receiver that lost its almanac. The `gps fix held` line's `waited_s` and `bridge_up_s` give the wait and the time from the bridge's power-on. | `crates/wartui-core/src/engine/scan.rs` `check_fix_wait` |
