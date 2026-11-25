@@ -11,7 +11,7 @@ use wartui_bridge::ble::{
     dropped_as_unbonded, is_remembered, is_takeover, look, matches_octets, named_octets,
     refused_for_bonding, settled_spec,
 };
-use wartui_bridge::serial::BridgeSpec;
+use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
 use wartui_proto::bus::{NodeBoard, Slot};

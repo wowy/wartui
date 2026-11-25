@@ -29,7 +29,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{self, BridgeSpec, Probed, discover_bridges, probe_all};
+use wartui_bridge::serial::{self, Probed, discover_bridges, probe_all};
+use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, LinkEvent, TransportError};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
@@ -315,7 +316,8 @@ fn unreachable_notice(board: &str, waited: Duration) -> String {
 mod tests {
     use wartui_bridge::TransportError;
     use wartui_bridge::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
-    use wartui_bridge::serial::{BridgeSpec, Probed};
+    use wartui_bridge::serial::Probed;
+    use wartui_bridge::spec::BridgeSpec;
     use wartui_proto::mac;
 
     use super::{FRESH_UPTIME_MS, bluetooth_target, board_to_reset, rebooted, unreachable_notice};

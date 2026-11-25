@@ -765,7 +765,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use sha2::{Digest, Sha256};
-    use wartui_bridge::serial::BridgeSpec;
+    use wartui_bridge::spec::BridgeSpec;
     use wartui_proto::bus::UpdateStatus;
 
     const NEW: Version = Version::new(0, 1, 1);

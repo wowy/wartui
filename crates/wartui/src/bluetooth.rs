@@ -56,7 +56,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use wartui_bridge::DisconnectCause;
 #[cfg(any(target_os = "linux", test))]
 use wartui_bridge::ble::Advertiser;
-use wartui_bridge::serial::{self, BridgeSpec, Probed};
+use wartui_bridge::serial::{self, Probed};
+use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{LinkEvent, LinkHandle};
 #[cfg(any(target_os = "linux", test))]
 use wartui_proto::link::HOST_SILENCE_SECS;
@@ -437,7 +438,7 @@ mod linux {
     use wartui_bridge::LinkHandle;
     use wartui_bridge::ble::{Advertiser, BleTransport, find_advertiser};
     use wartui_bridge::bluez::{self, BluezError, Device};
-    use wartui_bridge::serial::BridgeSpec;
+    use wartui_bridge::spec::BridgeSpec;
     use wartui_proto::link::{BluetoothStatus, HOST_SILENCE_SECS};
     use wartui_proto::mac::{self, Mac};
 
@@ -862,7 +863,8 @@ fn stranded_notice(name: &str) -> String {
 mod tests {
     use wartui_bridge::ble::Advertiser;
     use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate};
-    use wartui_bridge::serial::{BridgeSpec, Probed};
+    use wartui_bridge::serial::Probed;
+    use wartui_bridge::spec::BridgeSpec;
     use wartui_bridge::{DisconnectCause, LinkEvent};
     use wartui_proto::link::{BluetoothStatus, PairWindow};
 

@@ -70,7 +70,7 @@
 //! reports `Connected` on the `Ready` that hands the queue back, though it is the same life, since
 //! the stream starts afresh there.
 //!
-//! **Writes.** Each host frame is encoded as on USB (`serial::encode_for_wire`). Down is a byte
+//! **Writes.** Each host frame is encoded as on USB (`wire::encode_for_wire`). Down is a byte
 //! stream: the C6 forwards each write's bytes, and the P4 reassembles frames at each `0x00`. So
 //! the frames queued together go as one run, a write group ([`DownWriter`]), cut into pieces of the
 //! ATT MTU less its 3-byte header, and at most `ble::DOWN_VALUE_MAX`: 179 bytes at the C6's MTU of
@@ -78,7 +78,7 @@
 //! central to that size, and the transport caps its pieces too, for a bridge whose C6 serves more
 //! (`wartui_proto::ble` `//!`). A write is a stream fragment, so the first frame after every
 //! connect goes behind a `0x00`, which ends whatever partial frame the P4's accumulator held from
-//! an earlier attachment. The byte shares that frame's first write (`serial::encode_for_wire`).
+//! an earlier attachment. The byte shares that frame's first write (`wire::encode_for_wire`).
 //!
 //! **Each group ends with a write request**, and every piece before it is a write without
 //! response. TrouBLE 0.8 queues 8 ATT PDUs per connection on the C6 and silently drops the rest,
@@ -182,7 +182,8 @@ use wartui_proto::mac::{self, Mac};
 
 use crate::gate::{Admitted, Gate};
 use crate::remember::BridgeMemory;
-use crate::serial::{BridgeSpec, encode_for_wire};
+use crate::spec::BridgeSpec;
+use crate::wire::encode_for_wire;
 use crate::{
     CommandRx, DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError,
     link_pair_awaited,
