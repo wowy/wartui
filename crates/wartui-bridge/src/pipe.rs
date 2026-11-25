@@ -16,7 +16,12 @@
 //! - A read or a write returns within about [`READ_TIMEOUT`], failing with
 //!   [`ErrorKind::TimedOut`] when nothing moved. The driver's threads poll a stop flag between
 //!   calls, so a call that blocks longer delays the end of a connection by as much.
-//! - [`Ports::list`] and [`Ports::open`] block.
+//! - A port that is gone fails its reads and writes with an error. A read returning `Ok(0)`
+//!   means nothing arrived, and the driver reads again at once, so an adapter must not report an
+//!   unplugged device as end-of-file.
+//! - [`Ports::list`] and [`Ports::open`] block. The driver calls both from its async task (only
+//!   a probe moves the open to a blocking thread), so each must return promptly, as a tty open
+//!   does.
 //! - The three [`SerialParts`] are handles on one port. The port closes once all three are
 //!   dropped, and [`Abort::clear_output`] on one releases a write blocked on another.
 //!

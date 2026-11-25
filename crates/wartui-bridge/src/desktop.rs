@@ -1,5 +1,5 @@
 //! The desktop adapters under the link drivers: [`SerialPorts`], the host's serial ports through
-//! the `serialport` crate. They move to `wartui-desktop` in phase 4b.
+//! the `serialport` crate.
 //!
 //! This is the one module in the crate that names `serialport`, so the driver above it
 //! ([`serial`](crate::serial)) runs on any adapter that keeps [`Ports`]' contract.
@@ -122,7 +122,7 @@ impl Abort for Clear {
 
 #[cfg(test)]
 mod tests {
-    use super::SerialPorts;
+    use super::{SerialPorts, open_failure};
     use crate::TransportError;
     use crate::pipe::Ports;
     use crate::ports::candidate;
@@ -136,6 +136,20 @@ mod tests {
             matches!(&opened, Err(TransportError::Open { port, .. }) if port == path),
             "{:?}",
             opened.err()
+        );
+    }
+
+    #[test]
+    fn desktop_ports_word_refusal_as_forbidden_when_open_is_denied() {
+        // A port that belongs to `dialout` was found and refused, which "no bridge found" is not.
+        let denied = serialport::Error::new(
+            serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+            "Permission denied",
+        );
+        let refused = open_failure("/dev/ttyACM0", &denied);
+        assert!(
+            matches!(&refused, TransportError::Forbidden { port } if port == "/dev/ttyACM0"),
+            "{refused:?}"
         );
     }
 }

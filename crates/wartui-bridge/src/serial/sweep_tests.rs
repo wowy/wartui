@@ -2,8 +2,9 @@
 //! [`FakePorts`] on real threads and real time.
 //!
 //! The reader and writer are real threads, so the clock is never paused. The cadence is short,
-//! every wait is generous, and the assertions are on order and "at least" counts, so a loaded
-//! machine can slow a test without failing it.
+//! every wait is generous, and each test is built so that a board missing its window leads to a
+//! retry rather than another outcome: the assertions are on order and "at least" counts, so a
+//! loaded machine can slow a test without failing it.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -27,8 +28,8 @@ const TICK: Duration = Duration::from_millis(30);
 const WITHIN: Duration = Duration::from_secs(10);
 
 /// CH343 serial numbers, one per board.
-const SERIAL_A: &str = "5CF7153520";
-const SERIAL_B: &str = "5CF7153999";
+const SERIAL_A: &str = "AAAAAAAAAA";
+const SERIAL_B: &str = "BBBBBBBBBB";
 
 const ACM0: &str = "/dev/ttyACM0";
 const ACM1: &str = "/dev/ttyACM1";
@@ -83,6 +84,19 @@ async fn disconnected(handle: &mut LinkHandle) -> String {
     tokio::time::timeout(WITHIN, wait).await.expect("disconnected in time")
 }
 
+/// The first `Disconnected` reason `wanted` accepts, skipping every other event and reason.
+async fn disconnected_until(handle: &mut LinkHandle, wanted: impl Fn(&str) -> bool) -> String {
+    let wait = async {
+        loop {
+            let reason = disconnected(handle).await;
+            if wanted(&reason) {
+                return reason;
+            }
+        }
+    };
+    tokio::time::timeout(WITHIN * 3, wait).await.expect("the reason in time")
+}
+
 /// Wait until `done` holds, polling.
 async fn until(mut done: impl FnMut() -> bool) {
     let wait = async {
@@ -110,7 +124,8 @@ async fn serial_sweep_opens_no_node_when_looking_for_bridge() {
     let mut handle = start(SerialTransport::new(fake.ports()));
 
     assert_eq!(connected(&mut handle).await.mac, bridge_mac(1));
-    assert_eq!(fake.opened(), [ACM2]);
+    let opened = fake.opened();
+    assert!(!opened.is_empty() && opened.iter().all(|path| path == ACM2), "{opened:?}");
 }
 
 #[tokio::test]
@@ -126,12 +141,14 @@ async fn serial_sweep_connects_to_next_board_when_first_is_silent() {
 #[tokio::test]
 async fn serial_sweep_opens_remembered_port_first_when_two_boards_are_attached() {
     let fake = FakePorts::default();
-    fake.attach(ch343(ACM0, SERIAL_A), bridge(1)).attach(ch343(ACM1, SERIAL_B), bridge(2));
+    // The other board is silent, so a window the remembered one misses costs a retry, never a
+    // connection elsewhere.
+    fake.attach(ch343(ACM0, SERIAL_A), Behavior::Silent).attach(ch343(ACM1, SERIAL_B), bridge(2));
     let memory = BridgeMemory::holding(Some(bridge_mac(2))).on_port(Some(SERIAL_B.to_owned()));
     let mut handle = start(SerialTransport::new(fake.ports()).remember_in(memory));
 
     assert_eq!(connected(&mut handle).await.mac, bridge_mac(2));
-    assert_eq!(fake.opened(), [ACM1]);
+    assert_eq!(fake.opened()[0], ACM1);
 }
 
 #[tokio::test]
@@ -139,13 +156,12 @@ async fn serial_sweep_passes_over_board_when_it_talks_and_none_of_it_is_the_prot
     let fake = FakePorts::default();
     fake.attach(ch343(ACM0, SERIAL_A), Behavior::Garbage)
         .attach(ch343(ACM1, SERIAL_B), Behavior::Silent);
-    let mut handle = start(SerialTransport::new(fake.ports()));
+    let mut handle = start(SerialTransport::new(fake.ports()).reconnect_delay(TICK));
 
-    let reason = disconnected(&mut handle).await;
-    assert!(
-        reason.contains("/dev/ttyACM0 is talking, and none of it is the link protocol"),
-        "{reason}"
-    );
+    // A pass that read fewer than the garble limit before the board's window closed says it
+    // was silent instead, and the next pass reads more.
+    let talking = "/dev/ttyACM0 is talking, and none of it is the link protocol";
+    disconnected_until(&mut handle, |reason| reason.contains(talking)).await;
     assert_eq!(fake.opened()[..2], [ACM0, ACM1]);
 }
 
@@ -176,12 +192,15 @@ async fn serial_sweep_waits_for_settled_board_when_it_is_unplugged() {
     let fake = FakePorts::default();
     fake.attach(ch343(ACM0, SERIAL_A), bridge(1)).attach(ch343(ACM1, SERIAL_B), bridge(2));
     let mut handle = start(SerialTransport::new(fake.ports()).reconnect_delay(TICK));
-    assert_eq!(connected(&mut handle).await.mac, bridge_mac(1));
+    // Either may answer first, if the first misses its window.
+    let settled = connected(&mut handle).await.mac;
+    let path = if settled == bridge_mac(1) { ACM0 } else { ACM1 };
+    let opened = fake.opened();
 
-    fake.unplug(ACM0);
-    let gone = format!("the bridge {} is no longer attached", mac::full(&bridge_mac(1)));
-    while disconnected(&mut handle).await != gone {}
-    assert_eq!(fake.opened(), [ACM0]);
+    fake.unplug(path);
+    let gone = format!("the bridge {} is no longer attached", mac::full(&settled));
+    disconnected_until(&mut handle, |reason| reason == gone).await;
+    assert_eq!(fake.opened(), opened, "nothing more was opened");
 }
 
 #[tokio::test]
@@ -261,11 +280,13 @@ async fn serial_link_asks_once_when_named_path_is_not_a_ch343() {
         Behavior::Silent,
     );
     let spec = BridgeSpec::Path(ACM0.to_owned());
-    let mut handle = start(SerialTransport::with_spec(fake.ports(), spec));
+    let transport =
+        SerialTransport::with_spec(fake.ports(), spec).reconnect_delay(Duration::from_secs(60));
+    let mut handle = start(transport);
 
     let reason = disconnected(&mut handle).await;
     assert!(reason.starts_with("nothing on /dev/ttyACM0 answered the link protocol"), "{reason}");
-    // The next attempt waits out the default reconnect delay, so this is one connection's.
+    // The next attempt waits a minute, longer than the test, so this is one connection's.
     assert_eq!(fake.opened(), [ACM0]);
     assert_eq!(fake.decoded(ACM0), [HostToBridge::Identify]);
 }

@@ -138,7 +138,7 @@ own.
   one place a link is picked. It also owns the host's serial ports generally (`ports`): what is
   attached and what the OS says it is, so anything else that opens a device shares one
   enumeration. The USB transport is generic over the byte pipes in `pipe` (`pipe::Ports`), and
-  `desktop::SerialPorts` is the `serialport` adapter under it, which moves to `wartui-desktop`.
+  `desktop::SerialPorts` is the `serialport` adapter under it.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
