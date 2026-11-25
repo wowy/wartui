@@ -29,6 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use wartui_bridge::ble::{BleTransport, SCAN_FOR, pairing_notice_allowance};
+use wartui_bridge::desktop::serial_ports;
 use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, SerialTransport, discover_ports};
@@ -315,7 +316,8 @@ fn logging(
 /// so each is asked with `Identify` (`serial::probe`), and the row names the bridge
 /// that answered. A node is the row `wartui sniff` attributes heartbeats to.
 async fn ports() -> Result<()> {
-    let found = discover_ports().context("listing serial ports")?;
+    let attached = serial_ports();
+    let found = discover_ports(attached.as_ref()).context("listing serial ports")?;
     if found.is_empty() {
         println!("{}", no_boards_notice());
         return Ok(());
@@ -323,7 +325,7 @@ async fn ports() -> Result<()> {
     for candidate in found {
         println!("{}", candidate.path);
         let (address, product) = if is_ch343(&candidate) {
-            let probed = serial::probe(candidate.clone()).await;
+            let probed = serial::probe(&attached, candidate.clone()).await;
             match (probed.mac, probed.opened) {
                 (Some(mac), _) => (mac::full(&mac).to_string(), "P4 bridge on a CH343"),
                 (None, true) => ("not answering".to_owned(), "CH343"),
@@ -420,8 +422,8 @@ fn open(
     }
     match link {
         Link::Usb => match bridge.map(spec) {
-            Some(spec) => SerialTransport::with_spec(spec),
-            None => SerialTransport::new(),
+            Some(spec) => SerialTransport::with_spec(serial_ports(), spec),
+            None => SerialTransport::new(serial_ports()),
         }
         .remember_in(memory)
         .start(),
@@ -464,11 +466,15 @@ async fn connect_one(
     let memory = memory_of(&remembered);
     let mut handle = match link {
         Link::Usb => {
+            let ports = serial_ports();
             let port = reset::board_to_reset(
                 named,
                 &remembered,
-                serial::discover_bridges,
-                |found| async move { serial::probe_all(&found).await },
+                || serial::discover_bridges(ports.as_ref()),
+                |found| {
+                    let ports = &ports;
+                    async move { serial::probe_all(ports, &found).await }
+                },
             )
             .await?;
             open(Some(&port), None, link, memory)?
@@ -661,7 +667,10 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// whether this PC is paired ([`listing_here`]).
 pub async fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
     match link {
-        Link::Usb => silence_notice(bridge, &serial::discover_bridges().unwrap_or_default()),
+        Link::Usb => silence_notice(
+            bridge,
+            &serial::discover_bridges(&wartui_bridge::desktop::SerialPorts).unwrap_or_default(),
+        ),
         Link::Bluetooth => bluetooth_silence_text(bridge, listing_here(bridge).await),
     }
 }

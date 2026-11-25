@@ -33,6 +33,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use wartui_bridge::desktop::SerialPorts;
+use wartui_bridge::pipe::Ports;
+
 use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report, Sky};
 use crate::position::{Fix, PositionSource, is_fresh};
@@ -755,7 +758,7 @@ impl Gps {
                 vec![wartui_bridge::ports::candidate(path, None, None, None)],
                 discover::SENTENCES_ON_A_NAMED_PORT,
             ),
-            None => match wartui_bridge::ports::list() {
+            None => match SerialPorts.list() {
                 Ok(attached) => (
                     discover::candidates(attached, &config.reserved),
                     discover::SENTENCES_TO_BELIEVE,
@@ -871,7 +874,7 @@ fn open_port(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::Se
 /// does. A failed enumeration counts as present: failing to list is no evidence a working port has
 /// gone.
 fn still_there(path: &str) -> bool {
-    wartui_bridge::ports::list().map_or(true, |attached| {
+    SerialPorts.list().map_or(true, |attached| {
         attached.iter().any(|candidate| candidate.path == path || candidate.device == path)
     })
 }

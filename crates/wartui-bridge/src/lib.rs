@@ -40,13 +40,17 @@
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
 //! Keeping that in one place is what lets anything else that opens a device share
-//! the enumeration rather than write a second one.
+//! the enumeration rather than write a second one. The USB transport reaches the ports through
+//! [`pipe::Ports`], so its protocol is one code path whatever lists and opens them;
+//! [`desktop::SerialPorts`] is the adapter built on `serialport`.
 
 pub mod ble;
 #[cfg(target_os = "linux")]
 pub mod bluez;
+pub mod desktop;
 mod gate;
 pub mod pace;
+pub mod pipe;
 pub mod ports;
 pub mod remember;
 pub mod serial;

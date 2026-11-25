@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use wartui_bridge::desktop::serial_ports;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, Probed, discover_bridges, probe_all};
@@ -89,9 +90,16 @@ pub async fn run(args: Args) -> Result<()> {
     if super::link_for(args.link_flag.link, named, remembered.link)? == Link::Bluetooth {
         return over_bluetooth(named, &remembered).await;
     }
-    let board = board_to_reset(named, &remembered, discover_bridges, |found| async move {
-        probe_all(&found).await
-    })
+    let ports = serial_ports();
+    let board = board_to_reset(
+        named,
+        &remembered,
+        || discover_bridges(ports.as_ref()),
+        |found| {
+            let ports = &ports;
+            async move { probe_all(ports, &found).await }
+        },
+    )
     .await?;
     let memory = BridgeMemory::holding(remembered.mac).on_port(remembered.serial);
     let mut link = super::open(Some(&board), None, Link::Usb, memory)?;

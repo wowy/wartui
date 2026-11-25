@@ -295,11 +295,12 @@ fn fresh_hint(octets: [u8; 2]) -> String {
 
 /// Open the pairing window of the bridge on USB, if one answers there.
 async fn open_window(named: Option<&BridgeSpec>, remembered: Option<Mac>) -> Window {
-    let attached = serial::discover_bridges().unwrap_or_default();
+    let ports = wartui_bridge::desktop::serial_ports();
+    let attached = serial::discover_bridges(ports.as_ref()).unwrap_or_default();
     if attached.is_empty() {
         return Window::NotOnUsb;
     }
-    let probed = serial::probe_all(&attached).await;
+    let probed = serial::probe_all(&ports, &attached).await;
     let board = match usb_bridge(&probed, named, remembered) {
         OnUsb::One(board) => board,
         OnUsb::None => return Window::NotOnUsb,

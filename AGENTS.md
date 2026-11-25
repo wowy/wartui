@@ -137,7 +137,8 @@ own.
   pairing `wartui bluetooth pair` drives (`src/lib.rs` `//!`). `wartui`'s `main.rs::open` is the
   one place a link is picked. It also owns the host's serial ports generally (`ports`): what is
   attached and what the OS says it is, so anything else that opens a device shares one
-  enumeration.
+  enumeration. The USB transport is generic over the byte pipes in `pipe` (`pipe::Ports`), and
+  `desktop::SerialPorts` is the `serialport` adapter under it.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
@@ -441,7 +442,8 @@ edit stops; follow the pointer before changing the rule.
   together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
   real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one
   without the other is the reset sequence, so `.dtr_on_open(false)` reboots the board it was being
-  polite to. → `crates/wartui-bridge/src/ports.rs` `//!`
+  polite to. → `crates/wartui-bridge/src/ports.rs` `//!`; `src/desktop.rs`, `SerialPorts::open`;
+  `src/pipe.rs`, `Ports::open`
 - **The planner deals only to a slot that is sniffing**, and what no slot can take comes back in
   `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
   fleet whose one member held the scan would report the whole pool, and the P4 gives Bluetooth to

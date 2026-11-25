@@ -292,10 +292,13 @@ fn check_app(image: &[u8]) -> Result<()> {
 async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeInfo)> {
     // By path: the probe that chose it has already asked, and the reboot leaves the CH343 where
     // it is.
-    let mut link = SerialTransport::with_spec(BridgeSpec::Path(path.to_owned()))
-        .remember_in(BridgeMemory::none())
-        .start()
-        .context("opening the link")?;
+    let mut link = SerialTransport::with_spec(
+        wartui_bridge::desktop::serial_ports(),
+        BridgeSpec::Path(path.to_owned()),
+    )
+    .remember_in(BridgeMemory::none())
+    .start()
+    .context("opening the link")?;
     let mut garbled = false;
     match tokio::time::timeout(READY_WAIT, wait_for_ready(&mut link, &mut garbled)).await {
         Ok(Ok(info)) => Ok((link, info)),

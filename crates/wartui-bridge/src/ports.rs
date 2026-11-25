@@ -1,11 +1,11 @@
 //! The host's serial ports, as the operating system describes them.
 //!
-//! Nothing here knows the link protocol. It answers "what is attached, and what
-//! does the OS say it is", which is [`serial`](crate::serial)'s input. It is kept
-//! separate from the judgment made on that answer so that a second thing looking
-//! for a device shares one enumeration rather than writing another: `wartui-proto`
-//! is `no_std` and cannot hold `serialport`, and `wartui-core` already depends on
-//! this crate, so this module is reachable from either without inverting a layer.
+//! Nothing here knows the link protocol. It describes "what is attached, and what
+//! does the OS say it is", which [`pipe::Ports::list`](crate::pipe::Ports::list) answers and
+//! [`serial`](crate::serial) reads. It is kept separate from the judgment made on that answer
+//! so that a second thing looking for a device shares one enumeration rather than writing
+//! another: `wartui-proto` is `no_std` and cannot list ports, and `wartui-core` already depends
+//! on this crate, so this module is reachable from either without inverting a layer.
 //!
 //! **A node's USB serial number is its MAC.** A node's native USB Serial/JTAG reports the
 //! address its radio transmits from, so the OS has already paired a device node with the
@@ -25,6 +25,8 @@
 //! moves one line and not the other. `esptool` reaches that state deliberately,
 //! routing through (1,1) to avoid the other. Leave both alone, and set
 //! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
+//! [`desktop::SerialPorts::open`](crate::desktop::SerialPorts) is where the rule is applied, and
+//! [`pipe::Ports::open`](crate::pipe::Ports::open) requires it of any adapter.
 //!
 //! **What a device is for is decided by its USB IDs.** The CH343's pair
 //! [`CH343_VID`]:[`CH343_PID`] could be the P4 bridge, and Espressif's vendor ID is a node.
@@ -46,8 +48,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use wartui_proto::mac::{self, Mac};
-
-use crate::TransportError;
 
 /// Espressif's USB vendor ID, which a node's native USB Serial/JTAG reports.
 pub const ESPRESSIF_VID: u16 = 0x303A;
@@ -104,9 +104,9 @@ impl PortCandidate {
 
 /// Build a candidate by hand.
 ///
-/// The normalization from `serialport`'s own types is deliberately private, so that
-/// nothing outside this module names `UsbPortInfo` — its shape depends on Cargo
-/// features any dependent crate can turn on, and a test written against it would
+/// The normalization from `serialport`'s own types is deliberately private to
+/// [`desktop`](crate::desktop), so that nothing else names `UsbPortInfo` — its shape depends
+/// on Cargo features any dependent crate can turn on, and a test written against it would
 /// break for a reason that has nothing to do with wartui.
 #[must_use]
 pub fn candidate(
@@ -124,15 +124,6 @@ pub fn candidate(
         manufacturer: None,
         serial: serial.map(str::to_owned),
     }
-}
-
-/// Every USB serial port attached, named by the most stable path the OS offers.
-///
-/// # Errors
-/// [`TransportError::Enumerate`] if the ports cannot be listed.
-pub fn list() -> Result<Vec<PortCandidate>, TransportError> {
-    let ports = serialport::available_ports().map_err(|e| TransportError::Enumerate(e.into()))?;
-    Ok(with_stable_paths(from_port_infos(ports), &StableNames::read()))
 }
 
 /// Whether this is a CH343, which the P4 bridge is reached through.
@@ -279,29 +270,6 @@ fn links_in(dir: &str) -> HashMap<String, String> {
 
 fn to_str(path: &Path) -> Option<String> {
     path.to_str().map(str::to_owned)
-}
-
-/// `serialport`'s enumeration, in this module's terms. Non-USB ports are dropped:
-/// nothing wartui talks to arrives over a motherboard serial header.
-fn from_port_infos(ports: Vec<serialport::SerialPortInfo>) -> Vec<PortCandidate> {
-    let mut found: Vec<PortCandidate> = ports
-        .into_iter()
-        .filter_map(|port| match port.port_type {
-            serialport::SerialPortType::UsbPort(usb) => Some(PortCandidate {
-                path: port.port_name.clone(),
-                device: port.port_name,
-                vid: Some(usb.vid),
-                pid: Some(usb.pid),
-                product: usb.product,
-                manufacturer: usb.manufacturer,
-                serial: usb.serial_number,
-            }),
-            _ => None,
-        })
-        .filter(|candidate| is_usable_path(&candidate.device))
-        .collect();
-    found.sort_by(|a, b| a.device.cmp(&b.device));
-    found
 }
 
 #[cfg(test)]
