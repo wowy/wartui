@@ -387,11 +387,13 @@ impl Radio for FakeRadio {
                     continue;
                 }
                 let shared = Arc::clone(&self.shared);
+                // This scan's own sender, held weakly: an advertisement due after the scan has
+                // stopped is heard by no later scan.
+                let tx = tx.downgrade();
                 tokio::spawn(async move {
                     tokio::time::sleep(after).await;
-                    let shared = lock(&shared);
-                    if let Some(tx) = &shared.sightings {
-                        let _ = tx.send(shared.sighting(bridge, true));
+                    if let Some(tx) = tx.upgrade() {
+                        let _ = tx.send(lock(&shared).sighting(bridge, true));
                     }
                 });
             }

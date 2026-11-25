@@ -20,8 +20,10 @@
 //! whenever the adapter reports service data under the id from it, since that is the bridge being
 //! heard: BlueZ keeps no service data across its own restart, so the id can come late. A bridge is
 //! read again until it is heard advertising, because BlueZ first replays every device it knows as
-//! discovered, so a bonded bridge is read before the scan has heard it. [`Radio::known`] reads the
-//! OS's listing against the same rationing as the scan under way.
+//! discovered, so a bonded bridge is read before the scan has heard it. That holds for every
+//! bridge, one the driver's spec does not name included: the radio knows no spec, and a second
+//! bridge costs a few reads. [`Radio::known`] reads the OS's listing against the same rationing as
+//! the scan under way.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -655,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn ble_rationing_wants_identified_bridge_until_it_is_read_live() {
+    fn ble_rationing_wants_identified_bridge_when_no_read_has_found_it_live() {
         // BlueZ replays a bonded bridge as discovered before the scan has heard it.
         let mut rationing = Rationing::default();
         rationing.noted(1, "peer".to_owned(), read([0x44, 0xC0], false));
