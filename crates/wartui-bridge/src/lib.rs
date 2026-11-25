@@ -42,7 +42,9 @@
 //! Keeping that in one place is what lets anything else that opens a device share
 //! the enumeration rather than write a second one. The USB transport reaches the ports through
 //! [`pipe::Ports`], so its protocol is one code path whatever lists and opens them;
-//! [`desktop::SerialPorts`] is the adapter built on `serialport`.
+//! [`desktop::SerialPorts`] is the adapter built on `serialport`. The Bluetooth transport reaches
+//! the radio through [`pipe::Radio`] the same way, and [`desktop::BleRadio`] is the adapter built
+//! on btleplug.
 
 pub mod ble;
 #[cfg(target_os = "linux")]
