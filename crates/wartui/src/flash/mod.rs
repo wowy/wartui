@@ -44,7 +44,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use wartui_bridge::ports::PortCandidate;
-use wartui_bridge::serial::BridgeSpec;
+use wartui_bridge::spec::BridgeSpec;
 use wartui_proto::mac::{self, Mac};
 
 /// The release this binary was built for, when it was built for one.

@@ -34,7 +34,8 @@
 //! carrying it is answered or has failed. Bluetooth also drops
 //! what was queued before a connection's `Ready`, as the gate drops what decodes before it: a
 //! command queued during a gap would reach the next connection stale. USB keeps it, since
-//! `wartui reset` writes before any `Ready`.
+//! `wartui reset` writes before any `Ready`. A transport outside this crate builds its link with
+//! [`link_pair`] or [`link_pair_awaited`].
 //!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
 //! and what the OS says it is, with no judgment about which of them is a bridge.
@@ -50,6 +51,8 @@ pub mod ports;
 pub mod remember;
 pub mod serial;
 pub mod sim;
+pub mod spec;
+pub mod wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -222,13 +225,13 @@ pub enum TransportError {
     Open {
         /// The port path.
         port: String,
-        /// The underlying failure.
+        /// The OS's reason.
         #[source]
-        source: serialport::Error,
+        source: std::io::Error,
     },
     /// Enumerating serial ports failed.
     #[error("could not list serial ports: {0}")]
-    Enumerate(#[source] serialport::Error),
+    Enumerate(#[source] std::io::Error),
     /// The bridge speaks a different revision of the link protocol.
     #[error("{0}")]
     Protocol(LinkError),
@@ -405,16 +408,24 @@ impl Written {
 }
 
 /// The transport's end of the same channels.
+///
+/// A transport sends [`LinkEvent`]s on `events` and takes commands from `commands`. It reports
+/// every command it takes done exactly once, through [`CommandRx::done`] or
+/// [`CommandRx::discard`] (the crate `//!`, "Every command a transport takes is reported done
+/// exactly once"). Dropping the plumbing ends the link.
 #[derive(Debug)]
-pub(crate) struct LinkPlumbing {
+pub struct LinkPlumbing {
+    /// Where the transport reports what happened on the link.
     pub events: mpsc::Sender<LinkEvent>,
+    /// The commands queued for the bridge.
     pub commands: CommandRx,
     /// Held while a transport that must finish before exit runs; dropped with it.
     _running: Option<watch::Sender<()>>,
 }
 
 /// Build a connected pair of endpoints.
-pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
+#[must_use]
+pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
     let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
     let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel(BULK_CAPACITY);
@@ -443,7 +454,8 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
 
 /// [`link_pair`] for a transport that must finish before the process exits: the handle's
 /// [`LinkHandle::close`] and [`close_all`] wait until the plumbing is dropped.
-pub(crate) fn link_pair_awaited() -> (LinkHandle, LinkPlumbing) {
+#[must_use]
+pub fn link_pair_awaited() -> (LinkHandle, LinkPlumbing) {
     let (mut handle, mut plumbing) = link_pair();
     let (tx, rx) = watch::channel(());
     running().push(Finished(rx.clone()));
@@ -486,7 +498,7 @@ pub async fn close_all(within: Duration) {
 ///
 /// It also keeps the count of commands the transport is done with, which the handle reads.
 #[derive(Debug)]
-pub(crate) struct CommandRx {
+pub struct CommandRx {
     urgent: mpsc::Receiver<HostToBridge>,
     bulk: mpsc::Receiver<HostToBridge>,
     /// A command taken and given back ([`Self::hold`]), returned before either queue.
@@ -683,6 +695,23 @@ mod tests {
         drop(plumbing);
         let woke = tokio::time::timeout(Duration::from_millis(50), written.changed()).await;
         assert!(woke.is_err());
+    }
+
+    #[test]
+    fn transport_error_words_open_failure_when_given_the_os_reason() {
+        let error = TransportError::Open {
+            port: "/dev/ttyACM0".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory"),
+        };
+        assert_eq!(error.to_string(), "could not open /dev/ttyACM0: No such file or directory");
+    }
+
+    #[test]
+    fn transport_error_keeps_os_reason_as_its_source_when_listing_fails() {
+        let error = TransportError::Enumerate(std::io::Error::other("udev is unavailable"));
+        let source = std::error::Error::source(&error).expect("the OS's reason");
+        assert_eq!(source.to_string(), "udev is unavailable");
+        assert_eq!(error.to_string(), "could not list serial ports: udev is unavailable");
     }
 
     #[tokio::test]

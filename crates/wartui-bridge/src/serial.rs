@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME,
-    decode_frame, encode_host_frame,
+    BridgeToHost, FrameAccumulator, HOST_BAUD, HostToBridge, MAX_FRAME, MAX_HOST_FRAME,
+    decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -24,6 +24,8 @@ use crate::gate::{Admitted, Gate};
 use crate::gate::is_a_new_life;
 use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
+use crate::spec::BridgeSpec;
+use crate::wire::encode_for_wire;
 use crate::{DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair};
 
 /// Long enough not to spin, short enough that shutdown feels immediate.
@@ -120,71 +122,6 @@ pub fn discover_bridges() -> Result<Vec<PortCandidate>, TransportError> {
 pub fn bridges_among(mut listed: Vec<PortCandidate>) -> Vec<PortCandidate> {
     listed.retain(ports::could_be_a_bridge);
     listed
-}
-
-/// How a bridge was named on the command line.
-///
-/// A MAC is worth accepting because it is the only name that survives everything:
-/// re-enumeration moves a device node, replugging into another socket moves a
-/// `by-path` name, and an ESP32's address moves only when the board does. Its last
-/// few octets are worth accepting too, because they are how the fleet table and
-/// `wartui ports` are read aloud: an operator says `00:08`, not the whole address.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeSpec {
-    /// A device path, opened as given and never traded for another.
-    Path(String),
-    /// A P4 bridge's address, matched against the `Ready.mac` a [`probe`] brings back.
-    Mac(Mac),
-    /// The last one to five octets of a P4 bridge's address, matched the same way. It
-    /// names a board only when exactly one attached bridge answers ending with them.
-    Tail(Vec<u8>),
-}
-
-impl BridgeSpec {
-    /// Whether a board at this address is one this spec could name.
-    ///
-    /// A path names no address, so it matches none: whether a path reaches a board is
-    /// a question for the OS, not for a list. A tail matching here is not yet a board
-    /// named — several may match, and [`named_board`] is where that is refused.
-    #[must_use]
-    pub fn matches_address(&self, mac: &Mac) -> bool {
-        match self {
-            Self::Path(_) => false,
-            Self::Mac(wanted) => wanted == mac,
-            Self::Tail(tail) => mac.ends_with(tail),
-        }
-    }
-}
-
-impl std::str::FromStr for BridgeSpec {
-    type Err = std::convert::Infallible;
-
-    /// Six colon-separated hex pairs is an address, and one to five is the end of
-    /// one; everything else is a path. Nothing else can be: no device node is spelled
-    /// that way. Each pair is exactly two hex digits, so `0:08` stays a path rather
-    /// than being read as a guess at what was meant.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if let Some(mac) = mac::parse(text) {
-            return Ok(Self::Mac(mac));
-        }
-        Ok(parse_tail(text).map_or_else(|| Self::Path(text.to_owned()), Self::Tail))
-    }
-}
-
-/// One to five colon-separated pairs of hex digits, as the octets they spell.
-fn parse_tail(text: &str) -> Option<Vec<u8>> {
-    let octets = text.split(':').map(mac::pair).collect::<Option<Vec<u8>>>()?;
-    (1..=5).contains(&octets.len()).then_some(octets)
-}
-
-impl std::fmt::Display for BridgeSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(path) => f.write_str(path),
-            Self::Mac(mac) => write!(f, "{}", mac::full(mac)),
-            Self::Tail(tail) => write!(f, "{}", mac::octets(tail)),
-        }
-    }
 }
 
 /// How long a probe waits for `Ready`, asking again every [`IDENTIFY_INTERVAL`].
@@ -1104,7 +1041,7 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
     if matches!(error.kind(), serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied)) {
         return TransportError::Forbidden { port: path.to_owned() }.to_string();
     }
-    TransportError::Open { port: path.to_owned(), source: error.clone() }.to_string()
+    TransportError::Open { port: path.to_owned(), source: error.clone().into() }.to_string()
 }
 
 /// One line describing a frame that did not decode, for the debug log: its length, where it
@@ -1298,25 +1235,6 @@ fn write_loop<W: Write>(
     }
 }
 
-/// Encode `cmd` into `buf`, behind one `0x00` when `lead` is set, and return the length.
-///
-/// The writer leads a connection's first frame with that byte. Whatever reached the
-/// board before this connection ends there, so the first frame decodes: a fresh tty
-/// echoes what the bridge sent before raw mode was set, with no terminator in the echo,
-/// and another program may have left bytes of its own. The byte shares the frame's
-/// buffer, so the two stay one write and one packet (`connect`).
-pub(crate) fn encode_for_wire(
-    cmd: &HostToBridge,
-    lead: bool,
-    buf: &mut [u8],
-) -> Result<usize, LinkError> {
-    let start = usize::from(lead);
-    if lead {
-        *buf.first_mut().ok_or(LinkError::BufferTooSmall)? = 0x00;
-    }
-    Ok(start + encode_host_frame(cmd, &mut buf[start..])?)
-}
-
 /// Whether this board's silence says it has stopped being the bridge.
 ///
 /// `remembered` is the CH343 serial number the bridge last answered on.
@@ -1380,17 +1298,18 @@ mod tests {
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::link::{
         BridgeToHost, FromNodeBody, HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, ShortStr,
-        encode_frame, encode_host_frame,
+        encode_frame,
     };
     use wartui_proto::reset::ResetCause;
 
     use super::{
         Attempt, Outgoing, PORT_CLOSE_WITHIN, PROBE_TICKS, SETTLE_TICKS, Tally, asks_on_tick,
-        describe_garbled, encode_for_wire, held_in, identify, is_a_new_life, is_remembered_port,
-        patience, port_closed, read_loop, register_in, silence_disowns_it, write_loop,
+        describe_garbled, held_in, identify, is_a_new_life, is_remembered_port, patience,
+        port_closed, read_loop, register_in, silence_disowns_it, write_loop,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
+    use crate::wire::encode_for_wire;
 
     use crate::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
@@ -1400,25 +1319,6 @@ mod tests {
 
     fn board(serial: &str) -> PortCandidate {
         candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), Some(serial))
-    }
-
-    #[test]
-    fn serial_link_leads_with_terminator_when_frame_is_first_on_connection() {
-        let mut expected = [0u8; MAX_HOST_FRAME];
-        let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
-        let mut buf = [0xFF_u8; MAX_HOST_FRAME + 1];
-        let n = encode_for_wire(&HostToBridge::Identify, true, &mut buf).unwrap();
-        assert_eq!(buf[0], 0x00);
-        assert_eq!(&buf[1..n], &expected[..len]);
-    }
-
-    #[test]
-    fn serial_link_writes_frame_alone_when_frame_is_not_first() {
-        let mut expected = [0u8; MAX_HOST_FRAME];
-        let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
-        let mut buf = [0xFF_u8; MAX_HOST_FRAME + 1];
-        let n = encode_for_wire(&HostToBridge::Identify, false, &mut buf).unwrap();
-        assert_eq!(&buf[..n], &expected[..len]);
     }
 
     #[test]

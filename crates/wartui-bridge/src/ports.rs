@@ -131,7 +131,7 @@ pub fn candidate(
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
 pub fn list() -> Result<Vec<PortCandidate>, TransportError> {
-    let ports = serialport::available_ports().map_err(TransportError::Enumerate)?;
+    let ports = serialport::available_ports().map_err(|e| TransportError::Enumerate(e.into()))?;
     Ok(with_stable_paths(from_port_infos(ports), &StableNames::read()))
 }
 

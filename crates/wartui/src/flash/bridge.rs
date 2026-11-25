@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::ports::{PortCandidate, could_be_a_bridge};
-use wartui_bridge::serial::{BridgeSpec, Probed, discover_ports, probe_all};
+use wartui_bridge::serial::{Probed, discover_ports, probe_all};
+use wartui_bridge::spec::BridgeSpec;
 use wartui_proto::mac::{self, Mac};
 
 use super::{canonical, matches, p4};

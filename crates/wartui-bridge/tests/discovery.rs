@@ -5,7 +5,8 @@ use wartui_bridge::ports::{
     self, CH343_PID, CH343_VID, ESPRESSIF_VID, PortCandidate, StableNames, candidate,
     is_usable_path, with_stable_paths,
 };
-use wartui_bridge::serial::{self, BridgeSpec, Probed, discover_bridges, discover_ports};
+use wartui_bridge::serial::{self, Probed, discover_bridges, discover_ports};
+use wartui_bridge::spec::BridgeSpec;
 use wartui_proto::mac;
 
 /// A P4 bridge on this bench, a second P4 bridge beside it, and a node, on adjacent device nodes
