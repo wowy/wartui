@@ -205,7 +205,7 @@ pub async fn run(args: Args) -> Result<()> {
             Some(baud) => config.at_baud(baud),
             None => config,
         };
-        Gps::spawn(GpsConfig { max_age, ..config })
+        Gps::spawn(GpsConfig { max_age, ..config }, wartui_desktop::receiver_ports())
     });
     // Built whatever the bridge turns out to be, simulated included: a bridge without a
     // receiver sends no bytes, and this one then says nothing.
@@ -291,7 +291,9 @@ pub async fn run(args: Args) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let health = Box::new(wartui_desktop::health::read);
+    let capture =
+        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
     let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the capture's end time.

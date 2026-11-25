@@ -25,7 +25,6 @@ flate2 = "1.1.10"
 ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
-serialport = "4.10.1"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 toml = "1"
@@ -38,6 +37,7 @@ tui-scrollview = "0.6"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls", "multipart"] }
 wartui-bridge = { path = "../wartui-bridge" }
 wartui-core = { path = "../wartui-core" }
+wartui-desktop = { path = "../wartui-desktop" }
 wartui-proto = { path = "../wartui-proto" }
 
 [dev-dependencies]

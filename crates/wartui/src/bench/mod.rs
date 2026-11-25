@@ -297,7 +297,9 @@ pub async fn run(args: Args) -> Result<()> {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let health = Box::new(wartui_desktop::health::read);
+    let capture =
+        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
     // Asked for before the bridge answers, so the run's start uses it. The node the bridge
     // gives it is the only source of addresses that never dedup. A fleet of one, which the
     // flags allow, keeps Wi-Fi: the bridge deals Bluetooth only once two nodes can scan.

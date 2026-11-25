@@ -4,8 +4,8 @@
 //! long it waits and when it gives up ([`serial`](crate::serial), [`ble`](crate::ble)). An adapter
 //! is the OS: how a port is listed, opened and read, or how a radio scans, connects and
 //! subscribes. The two meet here, so each driver is the same code whatever is under it, and is
-//! tested against a fake rather than a board. [`desktop`](crate::desktop) holds the adapters built
-//! on the `serialport` and `btleplug` crates.
+//! tested against a fake rather than a board. `wartui-desktop` holds the desktop's adapters, built
+//! on the `serialport` and `btleplug` crates: `SerialPorts` and `BleRadio`.
 //!
 //! **What a [`Ports`] adapter owes the driver**, which relies on each point:
 //!

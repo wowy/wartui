@@ -2979,7 +2979,6 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
- "serialport",
  "sha2 0.11.1",
  "tempfile",
  "tokio",
@@ -2993,6 +2992,7 @@ dependencies = [
  "ureq",
  "wartui-bridge",
  "wartui-core",
+ "wartui-desktop",
  "wartui-proto",
 ]
 
@@ -3000,10 +3000,7 @@ dependencies = [
 name = "wartui-bridge"
 version = "0.1.0"
 dependencies = [
- "btleplug",
- "dbus",
  "futures-util",
- "serialport",
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
@@ -3017,15 +3014,31 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "indexmap",
- "libc",
  "rusqlite",
- "serialport",
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "wartui-bridge",
+ "wartui-proto",
+]
+
+[[package]]
+name = "wartui-desktop"
+version = "0.1.0"
+dependencies = [
+ "btleplug",
+ "dbus",
+ "futures-util",
+ "libc",
+ "serialport",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wartui-bridge",
+ "wartui-core",
  "wartui-proto",
 ]
 

@@ -60,15 +60,10 @@ pub(super) fn seen_booting(address: Mac, within: Duration) -> bool {
 }
 
 /// Open the board at `address`, wherever it is attached now.
-fn open(address: Mac) -> Option<Box<dyn serialport::SerialPort>> {
-    let found = discover_ports(&wartui_bridge::desktop::SerialPorts).ok()?;
+fn open(address: Mac) -> Option<Box<dyn Read + Send>> {
+    let found = discover_ports(&wartui_desktop::SerialPorts).ok()?;
     let candidate = found.into_iter().find(|candidate| candidate.mac() == Some(address))?;
-    serialport::new(&candidate.path, 115_200)
-        .timeout(READ_TIMEOUT)
-        // The one setting that keeps the driver from moving RTS by itself.
-        .flow_control(serialport::FlowControl::None)
-        .open()
-        .ok()
+    wartui_desktop::serial::open_reader(&candidate.path, 115_200, READ_TIMEOUT).ok()
 }
 
 /// Lines read from one board, joined across reads, until one says it booted.

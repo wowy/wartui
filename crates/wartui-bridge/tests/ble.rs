@@ -1,5 +1,6 @@
 //! The Bluetooth transport's pure parts: matching the advertised id, where it looks, writes, and
-//! what a subscription admits, beside the desktop adapter's reading of the OS's words.
+//! what a subscription admits. The desktop adapter's reading of the OS's words is
+//! `wartui-desktop`'s (`crates/wartui-desktop/tests/radio.rs`).
 //!
 //! The driver's finding, connecting and serving run against a fake radio in its unit tests
 //! (`src/ble/link_tests.rs`). The btleplug adapter itself is checked on the bench.
@@ -10,7 +11,6 @@ use wartui_bridge::ble::{
     Advertiser, DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, choose,
     dropped_as_unbonded, is_takeover, look, matches_octets, named_octets, settled_spec,
 };
-use wartui_bridge::desktop::{is_remembered, refused_for_bonding};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
@@ -415,33 +415,6 @@ fn ble_inbound_admits_settled_bridge_when_it_reconnects() {
 }
 
 #[test]
-fn ble_failure_reads_as_not_bonded_when_os_words_att_authentication_or_encryption_refusal() {
-    for error in [
-        // BlueZ, for 0x05, 0x0c and 0x0f, as btleplug passes it on.
-        "Not paired",
-        // CoreBluetooth's CBATTError texts.
-        "Authentication is insufficient.",
-        "Encryption is insufficient.",
-    ] {
-        assert!(refused_for_bonding(error), "{error}");
-    }
-}
-
-#[test]
-fn ble_failure_reads_as_other_when_os_error_is_no_bonding_refusal() {
-    for error in [
-        "Write not permitted",
-        "Operation failed with ATT error: 0x11",
-        "Operation Not Authorized",
-        "le-connection-abort-by-local",
-        "Not connected",
-        "Timed out after 10s",
-    ] {
-        assert!(!refused_for_bonding(error), "{error}");
-    }
-}
-
-#[test]
 fn ble_drop_reads_as_maybe_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_with_no_ready() {
     let after = |secs| Some(Duration::from_secs(secs));
     assert!(dropped_as_unbonded(after(10), false));
@@ -455,14 +428,6 @@ fn ble_drop_reads_as_maybe_not_bonded_when_bridge_hangs_up_about_ten_seconds_in_
 fn ble_drop_proves_nothing_when_link_was_up_before_this_connect() {
     // BlueZ held the link already, so nothing says when the C6's deadline started.
     assert!(!dropped_as_unbonded(None, false));
-}
-
-#[test]
-fn ble_remembered_matches_address_or_identifier_when_case_differs() {
-    assert!(is_remembered("02:00:5e:10:44:c1", "02:00:5E:10:44:C1", "hci0/dev_02_00_5E_10_44_C1"));
-    let mac_id = "5c3e1a2b-0000-4000-8000-00805f9b34fb";
-    assert!(is_remembered(mac_id, "00:00:00:00:00:00", mac_id), "macOS hides the address");
-    assert!(!is_remembered("02:00:5E:10:44:C1", "02:00:5E:10:44:C2", "hci0/dev_02_00_5E_10_44_C2"));
 }
 
 #[test]

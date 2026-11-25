@@ -1,0 +1,32 @@
+[package]
+name = "wartui-desktop"
+description = "The desktop's serial ports, Bluetooth radio, BlueZ pairing and host health, under wartui's portable crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# BlueZ over D-Bus on Linux, which links libdbus; CoreBluetooth on macOS.
+btleplug = "0.13.5"
+futures-util = "0.3.34"
+serialport = "4.10.1"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["sync", "macros"] }
+tracing = "0.1.44"
+wartui-bridge = { path = "../wartui-bridge" }
+wartui-core = { path = "../wartui-core" }
+wartui-proto = { path = "../wartui-proto" }
+
+# btleplug and the pairing code (`bluez`) link the system's libdbus, which every machine running
+# BlueZ already has at run time. Building needs its headers (`dbus-devel` on Fedora,
+# `libdbus-1-dev` on Debian and Ubuntu), as `serialport` needs libudev's.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9.12"
+libc = "0.2.189"
+
+[dev-dependencies]
+tempfile = "3.27.0"

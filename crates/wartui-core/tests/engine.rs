@@ -6,9 +6,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexSet;
+use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::sim::minor_behind;
 use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_core::ActionBatch;
@@ -17,7 +19,7 @@ use wartui_core::engine::{
     StoreStats,
 };
 use wartui_core::feed::{FixFeed, LocationFix, Pushed};
-use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
+use wartui_core::gps::{Gps, GpsConfig, GpsStatus, ReceiverPorts};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource, StandDown, Tier};
 use wartui_core::record::{
@@ -1988,12 +1990,29 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
     assert!(!shows_bridge_gps(&engine, clock.at(3)), "the host's search resumes");
 }
 
+/// A host with no serial ports: it lists none and opens none.
+#[derive(Debug)]
+struct NoPorts;
+
+impl ReceiverPorts for NoPorts {
+    fn list(&self) -> std::io::Result<Vec<PortCandidate>> {
+        Ok(Vec::new())
+    }
+
+    fn open(&self, _: &str, _: u32) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+}
+
 #[test]
 fn engine_snapshot_shows_pinned_host_receiver_when_bridge_receiver_is_talking() {
     // `--gps PATH` positions the rows ahead of the bridge, so the view reports on it.
     let clock = Clock::new();
     let bridge = Gps::bridged(DEFAULT_MAX_AGE);
-    let host = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+    let host = Gps::spawn(
+        GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600),
+        Arc::new(NoPorts),
+    );
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
     engine.handle(connected(), clock.at(1));
     bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);

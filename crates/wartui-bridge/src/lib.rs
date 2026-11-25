@@ -37,19 +37,15 @@
 //! `wartui reset` writes before any `Ready`. A transport outside this crate builds its link with
 //! [`link_pair`] or [`link_pair_awaited`].
 //!
-//! It also owns the host's serial ports generally, in [`ports`]: what is attached
-//! and what the OS says it is, with no judgment about which of them is a bridge.
-//! Keeping that in one place is what lets anything else that opens a device share
-//! the enumeration rather than write a second one. The USB transport reaches the ports through
-//! [`pipe::Ports`], so its protocol is one code path whatever lists and opens them;
-//! [`desktop::SerialPorts`] is the adapter built on `serialport`. The Bluetooth transport reaches
-//! the radio through [`pipe::Radio`] the same way, and [`desktop::BleRadio`] is the adapter built
-//! on btleplug.
+//! It also owns what the OS says a serial port is, in [`ports`], with no judgment about which of
+//! them is a bridge, so anything else that opens a device reads the same description. The USB
+//! transport reaches the ports through [`pipe::Ports`], so its protocol is one code path whatever
+//! lists and opens them; `wartui-desktop`'s `SerialPorts` is the adapter built on `serialport`.
+//! The Bluetooth transport reaches the radio through [`pipe::Radio`] the same way, and
+//! `wartui-desktop`'s `BleRadio` is the adapter built on btleplug. This crate names no desktop I/O
+//! library, so it compiles for a phone.
 
 pub mod ble;
-#[cfg(target_os = "linux")]
-pub mod bluez;
-pub mod desktop;
 mod gate;
 pub mod pace;
 pub mod pipe;

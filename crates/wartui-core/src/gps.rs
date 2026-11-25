@@ -27,14 +27,26 @@
 //!
 //! The sky starts over whenever the reader settles on a port or gives one up, so a lost or replaced
 //! receiver shows none of the old one's satellites. The retained fix is not reset: the chain ages it.
+//!
+//! **What a [`ReceiverPorts`] adapter owes the reader**, which relies on each point. The search,
+//! the backoff and the retries are the reader's; listing and opening a port are the adapter's, so
+//! this crate names no serial library.
+//!
+//! - [`ReceiverPorts::open`] opens at the baud asked for with no flow control, and **never sets
+//!   DTR or RTS**: moving one modem line without the other resets a board
+//!   (`wartui_bridge::ports` has why). Nothing is ever written to the port.
+//! - A read returns within about [`READ_TIMEOUT`], failing with [`ErrorKind::TimedOut`] when
+//!   nothing arrived. The reader polls its stop and stand-down flags between reads, so a read that
+//!   blocks longer delays both by as much.
+//! - A read returning `Ok(0)` means the device closed the port.
+//! - A port that is gone fails its reads with an error.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wartui_bridge::desktop::SerialPorts;
-use wartui_bridge::pipe::Ports;
+use wartui_bridge::ports::PortCandidate;
 
 use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report, Sky};
@@ -46,8 +58,8 @@ use crate::ubx::{Demux, ValsetReply};
 /// buffer.
 const MAX_LINE: usize = 256;
 
-/// How long to block in a read before looking at the stop flag again.
-const READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// How long a read blocks before the reader looks at its stop flag again ([`ReceiverPorts`]).
+pub const READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// First retry delay after the port fails, doubling to [`MAX_BACKOFF`].
 const MIN_BACKOFF: Duration = Duration::from_millis(250);
@@ -69,6 +81,21 @@ const RETRIES_BEFORE_SEARCHING: u32 = 3;
 /// A report after a longer gap starts a new run.
 /// At 1 Hz this rides out one late report; a receiver that has gone quiet past it holds nothing.
 pub const FIX_GAP: Duration = Duration::from_millis(1_500);
+
+/// The host's serial ports, as the receiver search listens to them.
+pub trait ReceiverPorts: std::fmt::Debug + Send + Sync {
+    /// Every USB serial port attached, named by the most stable path the OS offers.
+    ///
+    /// # Errors
+    /// The OS's reason the ports cannot be listed.
+    fn list(&self) -> std::io::Result<Vec<PortCandidate>>;
+
+    /// Open `path` at `baud` to listen. Nothing is ever written to it.
+    ///
+    /// # Errors
+    /// The OS's reason the port would not open.
+    fn open(&self, path: &str, baud: u32) -> std::io::Result<Box<dyn std::io::Read + Send>>;
+}
 
 /// Which port to read, and how fast, or neither, and go and find out.
 #[derive(Debug, Clone)]
@@ -436,9 +463,9 @@ impl Gps {
 
     /// Open `config.port` on a background thread and keep it open, reconnecting if the receiver is
     /// unplugged and put back. Returns at once: observations with no position are still worth
-    /// having.
+    /// having. The thread lists and opens ports through `ports`.
     #[must_use]
-    pub fn spawn(config: GpsConfig) -> Self {
+    pub fn spawn(config: GpsConfig, ports: Arc<dyn ReceiverPorts>) -> Self {
         let gps = Self { pinned: config.port.is_some(), ..Self::detached() };
         {
             let mut inner = gps.lock();
@@ -448,7 +475,7 @@ impl Gps {
         let worker = gps.clone();
         let started = std::thread::Builder::new()
             .name("wartui-gps".to_owned())
-            .spawn(move || worker.read_forever(&config));
+            .spawn(move || worker.read_forever(&config, ports.as_ref()));
         if let Err(e) = started {
             gps.set_status(GpsStatus::Failed(format!("starting the reader thread: {e}")));
         }
@@ -651,7 +678,7 @@ impl Gps {
     /// as it is written, and a run waiting for a fix checks [`Self::fix_run`] on its tick, so
     /// seconds spent listening stall nothing. It also lets a receiver survive moving to another
     /// socket, which a reader given one literal path cannot.
-    fn read_forever(&self, config: &GpsConfig) {
+    fn read_forever(&self, config: &GpsConfig, ports: &dyn ReceiverPorts) {
         let mut backoff = MIN_BACKOFF;
         // What the search settled on, kept across reconnections: a puck put back is the same port
         // at the same rate.
@@ -673,12 +700,13 @@ impl Gps {
             }
             let searching = settled.is_none();
             let Some((port, baud)) =
-                settled.clone().or_else(|| self.search(config, lost.is_none() && searching))
+                settled.clone().or_else(|| self.search(config, ports, lost.is_none() && searching))
             else {
                 if self.halted() {
                     continue;
                 }
-                self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why_not));
+                let why = |path: &str| why_not(ports, path);
+                self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why));
                 self.pause(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
@@ -693,7 +721,7 @@ impl Gps {
                 tracing::info!(port = %port, baud, "reading a receiver");
             }
 
-            match open_port(&port, baud) {
+            match ports.open(&port, baud) {
                 Ok(handle) => {
                     if !matches!(self.view().status, GpsStatus::Fixed { .. }) {
                         self.set_status(GpsStatus::Searching);
@@ -719,7 +747,7 @@ impl Gps {
             // Look past a port that keeps failing or has gone, unless the operator named it:
             // searching would answer a question they did not ask.
             retries += 1;
-            let gone = !still_there(&port);
+            let gone = !still_there(ports, &port);
             if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || gone) {
                 // Say what was established. A port that left the enumeration was unplugged. One
                 // still there that stopped talking is reconfigured, a failing cable, or held by
@@ -743,7 +771,12 @@ impl Gps {
     /// Listen to each candidate port at each rate until one is a receiver. `announce` is false
     /// while re-searching after a loss, so the note saying it has gone stays up. The scan is most
     /// of each cycle, and the operator needs the reason, not the activity.
-    fn search(&self, config: &GpsConfig, announce: bool) -> Option<(String, u32)> {
+    fn search(
+        &self,
+        config: &GpsConfig,
+        ports: &dyn ReceiverPorts,
+        announce: bool,
+    ) -> Option<(String, u32)> {
         // Port and rate both named leaves detection nothing to decide. Reading is then the
         // operator's instruction, and a probe would refuse a working receiver for saying too little
         // in one window, as one set to a single sentence a second does.
@@ -751,14 +784,14 @@ impl Gps {
             return Some((path.clone(), baud));
         }
         let ladder = config.ladder();
-        let (ports, needed) = match &config.port {
+        let (candidates, needed) = match &config.port {
             // A named path says nothing about rate, so the ladder still runs. One sentence settles
             // each rate, since the operator has said what the device is.
             Some(path) => (
                 vec![wartui_bridge::ports::candidate(path, None, None, None)],
                 discover::SENTENCES_ON_A_NAMED_PORT,
             ),
-            None => match SerialPorts.list() {
+            None => match ports.list() {
                 Ok(attached) => (
                     discover::candidates(attached, &config.reserved),
                     discover::SENTENCES_TO_BELIEVE,
@@ -769,24 +802,22 @@ impl Gps {
                 }
             },
         };
-        discover::settle(&ports, &ladder, needed, |path, baud| {
+        discover::settle(&candidates, &ladder, needed, |path, baud| {
             if announce {
                 self.set_status(GpsStatus::Scanning { port: path.to_owned(), baud });
             }
-            self.listen(path, baud)
+            self.listen(ports, path, baud)
         })
         .map(|(path, baud)| (path.to_owned(), baud))
     }
 
     /// Read whatever a port has to say for [`PROBE_WINDOW`], and say nothing back.
-    fn listen(&self, path: &str, baud: u32) -> Vec<u8> {
-        use std::io::Read;
-
+    fn listen(&self, ports: &dyn ReceiverPorts, path: &str, baud: u32) -> Vec<u8> {
         // Standing down opens nothing, so the rest of the search falls through at once.
         if self.halted() {
             return Vec::new();
         }
-        let Ok(mut port) = open_port(path, baud) else { return Vec::new() };
+        let Ok(mut port) = ports.open(path, baud) else { return Vec::new() };
         let mut sample = Vec::new();
         let mut buf = [0u8; 512];
         let until = Instant::now() + PROBE_WINDOW;
@@ -804,9 +835,7 @@ impl Gps {
     }
 
     /// Read until the port fails, returning why in terms fit to show a user.
-    fn read_port(&self, mut port: Box<dyn serialport::SerialPort>) -> String {
-        use std::io::Read;
-
+    fn read_port(&self, mut port: Box<dyn Read + Send>) -> String {
         let mut lines = Lines::default();
         let mut buf = [0u8; 512];
         while !self.halted() {
@@ -850,8 +879,8 @@ fn nothing_found(
 }
 
 /// Why a named port produced no receiver, in the OS's own words where it has any.
-fn why_not(path: &str) -> String {
-    match open_port(path, BAUD_LADDER[0]) {
+fn why_not(ports: &dyn ReceiverPorts, path: &str) -> String {
+    match ports.open(path, BAUD_LADDER[0]) {
         Err(e) => format!("{path}: {e}"),
         // It opened, so it is there and it is not a receiver — or not one talking
         // NMEA, which a u-blox configured to emit only UBX binary is not.
@@ -859,22 +888,12 @@ fn why_not(path: &str) -> String {
     }
 }
 
-/// Open a serial port the one way this crate opens one.
-fn open_port(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::SerialPort>> {
-    serialport::new(path, baud)
-        .timeout(READ_TIMEOUT)
-        // As on the bridge's port: the one setting that keeps the driver from moving
-        // RTS by itself. `wartui_bridge::ports` has why that matters.
-        .flow_control(serialport::FlowControl::None)
-        .open()
-}
-
 /// Whether the search's path is still among the attached ports. A receiver moved to another socket
 /// returns under another name, and waiting for the old one is what a reader given one literal path
 /// does. A failed enumeration counts as present: failing to list is no evidence a working port has
 /// gone.
-fn still_there(path: &str) -> bool {
-    SerialPorts.list().map_or(true, |attached| {
+fn still_there(ports: &dyn ReceiverPorts, path: &str) -> bool {
+    ports.list().map_or(true, |attached| {
         attached.iter().any(|candidate| candidate.path == path || candidate.device == path)
     })
 }
@@ -910,6 +929,8 @@ impl Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+
     use crate::nmea::FixMode;
     use crate::position::DEFAULT_MAX_AGE;
     use crate::ubx::{ACK_VALSET, NAK_VALSET};
@@ -1466,12 +1487,230 @@ mod tests {
         done()
     }
 
+    /// A path the fake has no script for, which it refuses to open as the OS would.
+    const NO_SUCH_PORT: &str = "/dev/wartui-test-no-such-port";
+
+    /// What a scripted port does once opened.
+    #[derive(Debug, Clone)]
+    enum Script {
+        /// Refuse to open, for this reason.
+        Refuse(ErrorKind),
+        /// Yield these bytes, then report the port closed (`Ok(0)`).
+        Ends(Vec<u8>),
+        /// Yield these bytes, then time out on every read.
+        Quiet(Vec<u8>),
+    }
+
+    /// What the fake lists, what each path does, and what the reader opened.
+    #[derive(Debug, Default)]
+    struct Bench {
+        listed: Vec<PortCandidate>,
+        scripts: HashMap<String, Script>,
+        opened: Vec<(String, u32)>,
+        unplugged: HashSet<String>,
+    }
+
+    /// The host's ports as a test scripts them. Clones share one [`Bench`].
+    #[derive(Debug, Clone, Default)]
+    struct FakePorts(Arc<Mutex<Bench>>);
+
+    impl FakePorts {
+        /// List `candidate`, and script its path.
+        fn attach(self, candidate: PortCandidate, script: Script) -> Self {
+            self.script(&candidate.path.clone(), script);
+            self.bench().listed.push(candidate);
+            self
+        }
+
+        /// Script `path` without listing it, as a port only `--gps` names.
+        fn script(&self, path: &str, script: Script) {
+            self.bench().scripts.insert(path.to_owned(), script);
+        }
+
+        /// Take `path` out of the listing and fail its reads.
+        fn unplug(&self, path: &str) {
+            let mut bench = self.bench();
+            bench.listed.retain(|candidate| candidate.path != path);
+            bench.unplugged.insert(path.to_owned());
+        }
+
+        /// Every `(path, baud)` opened so far, in order.
+        fn opened(&self) -> Vec<(String, u32)> {
+            self.bench().opened.clone()
+        }
+
+        fn shared(&self) -> Arc<dyn ReceiverPorts> {
+            Arc::new(self.clone())
+        }
+
+        fn bench(&self) -> std::sync::MutexGuard<'_, Bench> {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    impl ReceiverPorts for FakePorts {
+        fn list(&self) -> std::io::Result<Vec<PortCandidate>> {
+            Ok(self.bench().listed.clone())
+        }
+
+        fn open(&self, path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+            let mut bench = self.bench();
+            bench.opened.push((path.to_owned(), baud));
+            if bench.unplugged.contains(path) {
+                return Err(ErrorKind::NotFound.into());
+            }
+            let (bytes, ends) = match bench.scripts.get(path) {
+                None => return Err(ErrorKind::NotFound.into()),
+                Some(Script::Refuse(kind)) => return Err((*kind).into()),
+                Some(Script::Ends(bytes)) => (bytes.clone(), true),
+                Some(Script::Quiet(bytes)) => (bytes.clone(), false),
+            };
+            let ports = self.clone();
+            Ok(Box::new(FakePort { ports, path: path.to_owned(), bytes, at: 0, ends }))
+        }
+    }
+
+    /// One open scripted port.
+    struct FakePort {
+        ports: FakePorts,
+        path: String,
+        bytes: Vec<u8>,
+        at: usize,
+        ends: bool,
+    }
+
+    impl Read for FakePort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.ports.bench().unplugged.contains(&self.path) {
+                return Err(std::io::Error::other("the device is gone"));
+            }
+            let left = &self.bytes[self.at..];
+            if !left.is_empty() {
+                let n = left.len().min(buf.len());
+                buf[..n].copy_from_slice(&left[..n]);
+                self.at += n;
+                return Ok(n);
+            }
+            if self.ends {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            Err(ErrorKind::TimedOut.into())
+        }
+    }
+
+    /// Two whole sentences, enough for the search to believe an unknown port.
+    fn talk() -> Vec<u8> {
+        [GGA, b"\r\n", GGA, b"\r\n"].concat()
+    }
+
+    /// A receiver on `path` that says nothing about itself.
+    fn puck(path: &str) -> PortCandidate {
+        wartui_bridge::ports::candidate(path, Some(0x1546), Some(0x01A7), None)
+    }
+
+    #[test]
+    fn gps_reader_reads_fix_when_named_port_and_rate_talk_nmea() {
+        let ports = FakePorts::default();
+        ports.script("/dev/ttyACM0", Script::Quiet(talk()));
+        let gps = Gps::spawn(GpsConfig::pinned("/dev/ttyACM0").at_baud(4_800), ports.shared());
+        assert!(eventually(|| matches!(gps.view().status, GpsStatus::Fixed { .. })));
+        assert!(gps.latest().is_some());
+        // Port and rate both named leave nothing to probe: the port is opened once, at that rate.
+        assert_eq!(ports.opened(), [("/dev/ttyACM0".to_owned(), 4_800)]);
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_settles_on_talking_port_when_search_meets_a_silent_one() {
+        // The silent port sorts first and closes at once at every rate, so the search moves on.
+        let ports = FakePorts::default()
+            .attach(puck("/dev/ttyACM0"), Script::Ends(Vec::new()))
+            .attach(puck("/dev/ttyACM1"), Script::Quiet(talk()));
+        let gps = Gps::spawn(GpsConfig::search(), ports.shared());
+        let want = Some(("/dev/ttyACM1".to_owned(), BAUD_LADDER[0]));
+        assert!(eventually(|| gps.view().settled == want), "{:?}", gps.view());
+        let opened = ports.opened();
+        for baud in BAUD_LADDER {
+            assert!(opened.contains(&("/dev/ttyACM0".to_owned(), baud)), "{opened:?}");
+        }
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_opens_no_fleet_board_when_searching() {
+        // Both boards would pass for receivers if read, so only the listing keeps them shut.
+        use wartui_bridge::ports::{
+            CH343_PID, CH343_VID, ESPRESSIF_VID, SERIAL_JTAG_PID, candidate,
+        };
+        let bridge = candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), None);
+        let node = candidate("/dev/ttyACM1", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), None);
+        let ports = FakePorts::default()
+            .attach(bridge, Script::Ends(talk()))
+            .attach(node, Script::Ends(talk()))
+            .attach(puck("/dev/ttyACM2"), Script::Quiet(talk()));
+        let gps = Gps::spawn(GpsConfig::search(), ports.shared());
+        let want = Some(("/dev/ttyACM2".to_owned(), BAUD_LADDER[0]));
+        assert!(eventually(|| gps.view().settled == want), "{:?}", gps.view());
+        let opened = ports.opened();
+        assert!(opened.iter().all(|(path, _)| path == "/dev/ttyACM2"), "{opened:?}");
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_opens_no_reserved_port_when_searching() {
+        let ports = FakePorts::default()
+            .attach(puck("/dev/ttyACM0"), Script::Ends(talk()))
+            .attach(puck("/dev/ttyACM1"), Script::Quiet(talk()));
+        let config = GpsConfig::search().reserving(vec!["/dev/ttyACM0".to_owned()]);
+        let gps = Gps::spawn(config, ports.shared());
+        let want = Some(("/dev/ttyACM1".to_owned(), BAUD_LADDER[0]));
+        assert!(eventually(|| gps.view().settled == want), "{:?}", gps.view());
+        let opened = ports.opened();
+        assert!(opened.iter().all(|(path, _)| path == "/dev/ttyACM1"), "{opened:?}");
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_reports_no_receiver_when_nothing_is_attached() {
+        let ports = FakePorts::default();
+        let gps = Gps::spawn(GpsConfig::search(), ports.shared());
+        assert!(eventually(|| gps.view().status == GpsStatus::NoReceiver), "{:?}", gps.view());
+        assert_eq!(ports.opened(), []);
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_fails_with_os_reason_when_named_port_will_not_open() {
+        let ports = FakePorts::default();
+        ports.script("/dev/ttyACM0", Script::Refuse(ErrorKind::PermissionDenied));
+        let gps = Gps::spawn(GpsConfig::pinned("/dev/ttyACM0"), ports.shared());
+        let reason = std::io::Error::from(ErrorKind::PermissionDenied);
+        let want = GpsStatus::Failed(format!("/dev/ttyACM0: {reason}"));
+        assert!(eventually(|| gps.view().status == want), "{:?}", gps.view());
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_reader_says_port_is_no_longer_attached_when_it_leaves_the_listing() {
+        let ports = FakePorts::default().attach(puck("/dev/ttyACM0"), Script::Quiet(talk()));
+        let gps = Gps::spawn(GpsConfig::search(), ports.shared());
+        assert!(eventually(|| matches!(gps.view().status, GpsStatus::Fixed { .. })));
+        ports.unplug("/dev/ttyACM0");
+        let want = GpsStatus::Failed("/dev/ttyACM0 is no longer attached".to_owned());
+        assert!(eventually(|| gps.view().status == want), "{:?}", gps.view());
+        gps.stop();
+    }
+
     #[test]
     fn gps_stands_down_without_a_fault_when_suspended() {
         // Rate and port both named skip the search, so the reader goes straight to opening a
         // port that is not there and reports it. A named port ignores `set_suspended`, so the
         // flag is set directly: this tests the reader standing down, not who may ask it to.
-        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        let gps = Gps::spawn(
+            GpsConfig::pinned(NO_SUCH_PORT).at_baud(9_600),
+            FakePorts::default().shared(),
+        );
         assert!(eventually(|| matches!(gps.view().status, GpsStatus::Failed(_))));
         gps.suspended.store(true, Ordering::Relaxed);
         assert!(eventually(|| gps.view().status == GpsStatus::Connecting));
@@ -1486,7 +1725,10 @@ mod tests {
 
     #[test]
     fn gps_ignores_suspension_when_port_is_pinned() {
-        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        let gps = Gps::spawn(
+            GpsConfig::pinned(NO_SUCH_PORT).at_baud(9_600),
+            FakePorts::default().shared(),
+        );
         gps.set_suspended(true);
         assert!(!gps.suspended());
         gps.stop();
@@ -1547,7 +1789,10 @@ mod tests {
 
     #[test]
     fn gps_reports_pinned_when_operator_names_the_port() {
-        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        let gps = Gps::spawn(
+            GpsConfig::pinned(NO_SUCH_PORT).at_baud(9_600),
+            FakePorts::default().shared(),
+        );
         assert!(gps.is_pinned());
         gps.stop();
         assert!(!Gps::detached().is_pinned());

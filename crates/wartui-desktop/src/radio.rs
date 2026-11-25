@@ -8,15 +8,15 @@
 //! whose notifications go nowhere (`docs/ble-host-link-findings.md` § "macOS"). Asking for the
 //! peripheral by its identifier (`retrieve_peripherals`) builds a live handle for one a disconnect
 //! dropped, as long as no rescan has re-added it to the backend's table, so every connect asks
-//! that way first ([`fresh`]), and a scan clears both of btleplug's tables before it starts. BlueZ
+//! that way first (`fresh`), and a scan clears both of btleplug's tables before it starts. BlueZ
 //! keeps its device object across a disconnect, so Linux needs neither. The same clear leaves
 //! CoreBluetooth's listing empty, so [`Radio::recall`] finds nothing on macOS and the driver
 //! scans.
 //!
 //! **A scan reads what it hears.** Its listing is unfiltered, and in dense RF the OS hears
 //! hundreds of devices, so it reads the properties of a device only when the adapter reports it
-//! discovered or heard again, at most [`ID_READS`] times while they carry no id, since each read
-//! is a serial D-Bus round trip ([`Rationing`]). A device left alone that way is read again
+//! discovered or heard again, at most `ID_READS` times while they carry no id, since each read
+//! is a serial D-Bus round trip (`Rationing`). A device left alone that way is read again
 //! whenever the adapter reports service data under the id from it, since that is the bridge being
 //! heard: BlueZ keeps no service data across its own restart, so the id can come late. A bridge is
 //! read again until it is heard advertising, because BlueZ first replays every device it knows as
@@ -39,12 +39,11 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{self, BoxStream};
 use futures_util::{FutureExt as _, Stream, StreamExt as _};
 use tokio::sync::OnceCell;
-use wartui_proto::ble::{DOWN_UUID, ID_UUID, UP_UUID, advertised_octets};
-
-use crate::pipe::{
+use wartui_bridge::pipe::{
     Connected, Connection, Incoming, Radio, RadioError, RadioErrorKind, RadioTraits, Recalled,
     Sighting, WriteKind,
 };
+use wartui_proto::ble::{DOWN_UUID, ID_UUID, UP_UUID, advertised_octets};
 
 /// How many times a scan reads a device that carries no id before it leaves it alone.
 const ID_READS: u8 = 3;
@@ -571,11 +570,11 @@ fn incoming(
 mod tests {
     use btleplug::api::PeripheralProperties;
     use btleplug::api::bleuuid::uuid_from_u16;
+    use wartui_bridge::pipe::Sighting;
     use wartui_proto::ble::ID_UUID;
     use wartui_proto::wardrive_esp::beacon::{self, Beacon, COMPANY, STATUS_MAX};
 
     use super::{ID_READS, Rationing, Read};
-    use crate::pipe::Sighting;
 
     /// A read that found the bridge `octets`, advertising now or not.
     fn read(octets: [u8; 2], live: bool) -> Option<Read> {

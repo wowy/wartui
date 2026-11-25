@@ -39,7 +39,13 @@ cargo test -p wartui-core --test engine                    # one test binary
 cargo test -p wartui-core --test engine engine_ignores_    # tests by name prefix
 
 cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
+
+cargo check -p wartui-bridge -p wartui-core --target aarch64-apple-ios
+cargo check -p wartui-bridge -p wartui-core --target aarch64-linux-android
 ```
+
+The Android check compiles bundled SQLite, so it needs the NDK's clang in
+`CC_aarch64_linux_android` (and its `llvm-ar` in `AR_aarch64_linux_android`).
 
 Run it without hardware — the simulator runs a fake fleet on a fake clock:
 
@@ -98,7 +104,7 @@ firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware direct
 
 ## Architecture
 
-Four host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
+Five host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
@@ -133,14 +139,20 @@ own.
   and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`), from the fake
   fleet (`sim`). The two transports differ only where their links do; what a connection admits
   from the bridge's stream is one rule both read through (`gate`), both take a bridge's name
-  (`spec`) and write host frames (`wire`) the same way, and `bluez` is the Linux
-  pairing `wartui bluetooth pair` drives (`src/lib.rs` `//!`). `wartui`'s `main.rs::open` is the
-  one place a link is picked. It also owns the host's serial ports generally (`ports`): what is
-  attached and what the OS says it is, so anything else that opens a device shares one
-  enumeration. Both transports are generic over the byte pipes in `pipe` (`pipe::Ports`,
-  `pipe::Radio`), and `desktop` holds the adapters under them: `desktop::SerialPorts` on
-  `serialport` and `desktop::BleRadio` on btleplug.
-- **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
+  (`spec`) and write host frames (`wire`) the same way (`src/lib.rs` `//!`). `wartui`'s
+  `main.rs::open` is the one place a link is picked. It also owns what the OS says a serial port
+  is (`ports`) and the judgments made on that, so anything else that opens a device shares one
+  description. Both transports are generic over the byte pipes in `pipe` (`pipe::Ports`,
+  `pipe::Radio`), whose adapters are `wartui-desktop`'s.
+- **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments. It reaches the
+  host's serial ports through `gps::ReceiverPorts` and its health through an injected
+  `health::HealthReader`.
+- **`crates/wartui-desktop`** — the desktop's adapters under those seams: `serial::SerialPorts`
+  (both `pipe::Ports` and `gps::ReceiverPorts`) on `serialport`, `radio::BleRadio` on btleplug,
+  `bluez` (the Linux pairing `wartui bluetooth pair` drives) and `health` (the Raspberry Pi
+  reader). It is the only host crate that names `serialport`, `btleplug`, `dbus` or `libc`, so
+  `wartui-bridge` and `wartui-core` compile for a phone; CI checks both for
+  `aarch64-linux-android` and `aarch64-apple-ios`.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and
@@ -386,7 +398,7 @@ is here rather than only in a `//!`.
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
 - **`clippy::all` is denied workspace-wide, in every firmware too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat and the C6's health, both PHY blob reads:
+  (`crates/wartui-desktop/src/health.rs`, `mailbox_call`). `firmware/common` allows two more for the node's heartbeat and the C6's health, both PHY blob reads:
   the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`).
   `firmware/p4-bridge` allows three: the slice over its mapped PSRAM (`cache::map`), and for its
   die temperature the PAC's `LP_TSENS` block, which esp-hal names no singleton for
@@ -443,8 +455,9 @@ edit stops; follow the pointer before changing the rule.
   together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
   real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one
   without the other is the reset sequence, so `.dtr_on_open(false)` reboots the board it was being
-  polite to. → `crates/wartui-bridge/src/ports.rs` `//!`; `src/desktop.rs`, `SerialPorts::open`;
-  `src/pipe.rs`, `Ports::open`
+  polite to. → `crates/wartui-bridge/src/ports.rs` `//!`; `crates/wartui-desktop/src/serial.rs`,
+  `open_port`; `crates/wartui-bridge/src/pipe.rs`, `Ports::open`; `crates/wartui-core/src/gps.rs`,
+  `ReceiverPorts`
 - **The planner deals only to a slot that is sniffing**, and what no slot can take comes back in
   `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
   fleet whose one member held the scan would report the whole pool, and the P4 gives Bluetooth to

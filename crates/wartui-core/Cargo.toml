@@ -13,15 +13,11 @@ workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 indexmap = "2.14.2"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
-serialport = "4.10.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1.44"
 wartui-bridge = { path = "../wartui-bridge" }
 wartui-proto = { path = "../wartui-proto" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2.189"
 
 [dev-dependencies]
 sha2 = "0.11.1"

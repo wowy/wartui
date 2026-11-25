@@ -128,7 +128,8 @@ wartui sd-log LOG/ # print the bridge's log as text, from the card's files
 |----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
-| `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
+| `crates/wartui-desktop`                                  | The desktop's adapters under core and bridge: serial ports, Bluetooth radio, BlueZ pairing, host health       |
+| `crates/wartui-bridge`                                   | Host-side link to the bridge: transport over USB and Bluetooth, what a serial port is, simulator              |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                 |
 | [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses, the C6 link and the fleet planner                  |
 | [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4, its updates and the Bluetooth host link                             |
