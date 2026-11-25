@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use wartui_bridge::ble::{BleTransport, SCAN_FOR, pairing_notice_allowance};
-use wartui_bridge::desktop::serial_ports;
+use wartui_bridge::desktop::{ble_radio, radio_traits, serial_ports};
 use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, SerialTransport, discover_ports};
@@ -399,7 +399,9 @@ fn link_for(flag: Option<Link>, bridge: Option<&str>, saved: Option<Link>) -> Re
 fn connect_wait(link: Link) -> Duration {
     match link {
         Link::Usb => CONNECT_NOTICE_AFTER,
-        Link::Bluetooth => SCAN_FOR + CONNECT_NOTICE_AFTER + pairing_notice_allowance(),
+        Link::Bluetooth => {
+            SCAN_FOR + CONNECT_NOTICE_AFTER + pairing_notice_allowance(radio_traits())
+        }
     }
 }
 
@@ -428,8 +430,8 @@ fn open(
         .remember_in(memory)
         .start(),
         Link::Bluetooth => match bridge.map(spec) {
-            Some(spec) => BleTransport::with_spec(spec),
-            None => BleTransport::new(),
+            Some(spec) => BleTransport::with_spec(ble_radio(), spec),
+            None => BleTransport::new(ble_radio()),
         }
         .remember_in(memory)
         .start(),

@@ -130,15 +130,16 @@ own.
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash, and the P4's planner testable without one.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
-  and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`, btleplug), from the fake
+  and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`), from the fake
   fleet (`sim`). The two transports differ only where their links do; what a connection admits
   from the bridge's stream is one rule both read through (`gate`), both take a bridge's name
   (`spec`) and write host frames (`wire`) the same way, and `bluez` is the Linux
   pairing `wartui bluetooth pair` drives (`src/lib.rs` `//!`). `wartui`'s `main.rs::open` is the
   one place a link is picked. It also owns the host's serial ports generally (`ports`): what is
   attached and what the OS says it is, so anything else that opens a device shares one
-  enumeration. The USB transport is generic over the byte pipes in `pipe` (`pipe::Ports`), and
-  `desktop::SerialPorts` is the `serialport` adapter under it.
+  enumeration. Both transports are generic over the byte pipes in `pipe` (`pipe::Ports`,
+  `pipe::Radio`), and `desktop` holds the adapters under them: `desktop::SerialPorts` on
+  `serialport` and `desktop::BleRadio` on btleplug.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/

@@ -439,6 +439,7 @@ mod linux {
     use wartui_bridge::LinkHandle;
     use wartui_bridge::ble::{Advertiser, BleTransport, find_advertiser};
     use wartui_bridge::bluez::{self, BluezError, Device};
+    use wartui_bridge::desktop::ble_radio;
     use wartui_bridge::spec::BridgeSpec;
     use wartui_proto::link::{BluetoothStatus, HOST_SILENCE_SECS};
     use wartui_proto::mac::{self, Mac};
@@ -562,7 +563,8 @@ mod linux {
         spec: Option<&BridgeSpec>,
         preferred: Option<&BridgeSpec>,
     ) -> Result<(Advertiser, Device)> {
-        let found = find_advertiser(spec, preferred).await?;
+        let radio = ble_radio();
+        let found = find_advertiser(&*radio, spec, preferred).await?;
         let address = found.address.clone();
         let device = blocking(move || bluez::device_at(&address)).await??.ok_or_else(|| {
             anyhow!(
@@ -597,7 +599,8 @@ mod linux {
     ///
     /// Named by its advertised octets, so a retry that scans reaches that bridge and no other.
     async fn prove(found: &Advertiser, window: &Window) -> Result<Proof> {
-        let mut link = BleTransport::with_spec(BridgeSpec::Tail(found.octets.to_vec())).start()?;
+        let spec = BridgeSpec::Tail(found.octets.to_vec());
+        let mut link = BleTransport::with_spec(ble_radio(), spec).start()?;
         if matches!(window, Window::Opened { .. }) {
             println!(
                 "waiting for the bridge to serve this PC, up to {HOST_SILENCE_SECS} s after its \

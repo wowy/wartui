@@ -1,8 +1,14 @@
 //! The desktop adapters under the link drivers: [`SerialPorts`], the host's serial ports through
-//! the `serialport` crate.
+//! the `serialport` crate, and [`BleRadio`], the host's Bluetooth radio through `btleplug`
+//! (`radio`).
 //!
-//! This is the one module in the crate that names `serialport`, so the driver above it
-//! ([`serial`](crate::serial)) runs on any adapter that keeps [`Ports`]' contract.
+//! This is the one module in the crate that names `serialport` or `btleplug`'s radio, so each
+//! driver above it ([`serial`](crate::serial), [`ble`](crate::ble)) runs on any adapter that keeps
+//! [`Ports`]' or [`Radio`](crate::pipe::Radio)'s contract.
+
+mod radio;
+
+pub use radio::{BleRadio, ble_radio, is_remembered, radio_traits, refused_for_bonding};
 
 use std::io::{self, Read, Write};
 use std::sync::Arc;

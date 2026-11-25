@@ -1,16 +1,16 @@
 //! The Bluetooth transport's pure parts: matching the advertised id, where it looks, writes, and
-//! what a subscription admits.
+//! what a subscription admits, beside the desktop adapter's reading of the OS's words.
 //!
-//! The radio itself is btleplug's, and has no fake: connecting, subscribing and the OS's errors
-//! are checked on the bench.
+//! The driver's finding, connecting and serving run against a fake radio in its unit tests
+//! (`src/ble/link_tests.rs`). The btleplug adapter itself is checked on the bench.
 
 use std::time::{Duration, Instant};
 
 use wartui_bridge::ble::{
     Advertiser, DownWrite, DownWriter, Heard, Inbound, Look, WriteKind, choose,
-    dropped_as_unbonded, is_remembered, is_takeover, look, matches_octets, named_octets,
-    refused_for_bonding, settled_spec,
+    dropped_as_unbonded, is_takeover, look, matches_octets, named_octets, settled_spec,
 };
+use wartui_bridge::desktop::{is_remembered, refused_for_bonding};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
