@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn flash_fleet_skips_p4_bridge_and_probes_node_when_no_bridge_is_known() {
-        let p4 = candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), Some("5CF7153520"));
+        let p4 = candidate("/dev/ttyACM0", Some(CH343_VID), Some(CH343_PID), Some("AAAAAAAAAA"));
         let node = board("/dev/ttyACM1", Some(&NODE_MAC));
         let verdicts = select(&[p4.clone(), node.clone()], &[]);
         assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge), Verdict::Probe(node)]);

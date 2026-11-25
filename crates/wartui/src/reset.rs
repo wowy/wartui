@@ -341,12 +341,12 @@ mod tests {
 
     /// What `discover_bridges` reads with one CH343 attached.
     fn attached() -> Result<Vec<PortCandidate>, TransportError> {
-        Ok(vec![ch343("/dev/ttyACM0", "5CF7153520")])
+        Ok(vec![ch343("/dev/ttyACM0", "AAAAAAAAAA")])
     }
 
     /// What `discover_bridges` reads with two CH343s attached.
     fn twins() -> Result<Vec<PortCandidate>, TransportError> {
-        Ok(vec![ch343("/dev/ttyACM0", "5CF7153520"), ch343("/dev/ttyACM1", "5CF7153999")])
+        Ok(vec![ch343("/dev/ttyACM0", "AAAAAAAAAA"), ch343("/dev/ttyACM1", "BBBBBBBBBB")])
     }
 
     /// A probe that hears `macs` from the CH343s, in order: `None` is one that stays silent.
@@ -401,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn reset_cmd_opens_remembered_port_without_probe_when_bridge_is_named_in_full() {
         // The board this command is for answers nothing, so its own address cannot be asked.
-        let known = remembered(BRIDGE_MAC, "5CF7153999");
+        let known = remembered(BRIDGE_MAC, "BBBBBBBBBB");
         let board = board_to_reset(Some(BRIDGE_MAC), &known, twins, unasked).await;
         assert_eq!(board.expect("the remembered port"), "/dev/ttyACM1");
     }
@@ -409,14 +409,14 @@ mod tests {
     #[tokio::test]
     async fn reset_cmd_opens_remembered_port_without_probe_when_bridge_is_named_by_tail() {
         // How an operator names the bridge, and a wedged one answers no probe either way.
-        let known = remembered(BRIDGE_MAC, "5CF7153999");
+        let known = remembered(BRIDGE_MAC, "BBBBBBBBBB");
         let board = board_to_reset(Some("44:C0"), &known, twins, unasked).await;
         assert_eq!(board.expect("the remembered port"), "/dev/ttyACM1");
     }
 
     #[tokio::test]
     async fn reset_cmd_probes_when_tail_does_not_end_remembered_address() {
-        let known = remembered(BRIDGE_MAC, "5CF7153999");
+        let known = remembered(BRIDGE_MAC, "BBBBBBBBBB");
         let probe = answers(&[Some(TWIN_MAC), None]);
         let board = board_to_reset(Some("12:44:C0"), &known, twins, probe).await;
         assert_eq!(board.expect("the twin"), "/dev/ttyACM0");
@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_cmd_picks_remembered_port_when_several_ch343s_are_attached() {
-        let known = remembered(TWIN_MAC, "5CF7153999");
+        let known = remembered(TWIN_MAC, "BBBBBBBBBB");
         let board = board_to_reset(None, &known, twins, unasked).await;
         assert_eq!(board.expect("the remembered one"), "/dev/ttyACM1");
     }
@@ -498,7 +498,7 @@ mod tests {
     fn reset_cmd_targets_named_or_remembered_bridge_when_over_bluetooth() {
         let named = bluetooth_target(Some("44:C0"), &Bridge::default(), "reset").unwrap();
         assert!(matches!(named, BridgeSpec::Tail(_)));
-        let mut known = remembered("02:00:5E:10:44:C0", "5CF7153520");
+        let mut known = remembered("02:00:5E:10:44:C0", "AAAAAAAAAA");
         known.bluetooth_address = Some("02:00:5E:10:44:C1".to_owned());
         let remembered_one = bluetooth_target(None, &known, "reset").unwrap();
         assert_eq!(remembered_one, BridgeSpec::Mac(mac::parse("02:00:5E:10:44:C0").unwrap()));
@@ -508,7 +508,7 @@ mod tests {
     fn reset_cmd_refuses_unnamed_bridge_when_over_bluetooth_with_none_remembered_there() {
         // Remembered over USB only: a scan would be the only way to find it, and a scan may
         // find another fleet's bridge.
-        let usb_only = remembered("02:00:5E:10:44:C0", "5CF7153520");
+        let usb_only = remembered("02:00:5E:10:44:C0", "AAAAAAAAAA");
         let refused = bluetooth_target(None, &usb_only, "reset").unwrap_err();
         assert!(refused.contains("`wartui reset`"), "{refused}");
         assert!(refused.contains("--bridge XX:YY"), "{refused}");

@@ -745,7 +745,7 @@ mod tests {
             bridge: Bridge {
                 remember: Some(true),
                 mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]),
-                serial: Some("5CF7153520".to_owned()),
+                serial: Some("AAAAAAAAAA".to_owned()),
                 bluetooth_address: Some("02:00:5E:10:44:C1".to_owned()),
                 link: Some(Link::Bluetooth),
             },
@@ -941,7 +941,7 @@ mod tests {
             text.contains("[bridge]\nremember = true\nmac = \"AA:BB:CC:01:02:03\""),
             "as `wartui ports` prints it: {text}"
         );
-        assert_eq!(saved.bridge.serial.as_deref(), Some("5CF7153520"));
+        assert_eq!(saved.bridge.serial.as_deref(), Some("AAAAAAAAAA"));
     }
 
     #[test]
@@ -1016,15 +1016,15 @@ mod tests {
     fn config_remembered_bridge_returns_serial_when_file_holds_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
-        let text = "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\nserial = \"5CF7153520\"\n";
+        let text = "[bridge]\nmac = \"AA:BB:CC:01:02:03\"\nserial = \"AAAAAAAAAA\"\n";
         std::fs::write(&path, text).unwrap();
         let bridge = remembered_bridge_from(None, || Some(path));
-        assert_eq!(bridge.serial.as_deref(), Some("5CF7153520"));
+        assert_eq!(bridge.serial.as_deref(), Some("AAAAAAAAAA"));
     }
 
     #[test]
     fn config_loader_rejects_bridge_serial_when_remember_is_off() {
-        let chain = load_error("[bridge]\nremember = false\nserial = \"5CF7153520\"\n");
+        let chain = load_error("[bridge]\nremember = false\nserial = \"AAAAAAAAAA\"\n");
         assert!(chain.contains("bridge.serial"), "{chain}");
     }
 
