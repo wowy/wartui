@@ -735,6 +735,36 @@ mod tests {
         assert_eq!(lines[1].trim(), "1", "{lines:?}");
     }
 
+    /// A sparse node's share under the weighted deal on ten `us` nodes: 52, 60, 104, 116, 124,
+    /// 132, 140 and 165, adopted.
+    fn sparse_node(last: u8) -> NodeView {
+        let mut view = node(last, 0, true);
+        let mut channels = ChannelSet::empty();
+        for channel in [52, 60, 104, 116, 124, 132, 140, 165] {
+            channels.insert(wartui_proto::plan::index_of(channel).expect("a scan channel"));
+        }
+        give(&mut view, 3, channels);
+        adopt(&mut view);
+        view
+    }
+
+    #[test]
+    fn blocks_show_eight_channel_count_when_node_holds_sparse_share() {
+        let lines = block_lines(&Snapshot { nodes: vec![sparse_node(0x84)], ..busy() }, " N7 ");
+        assert!(lines.iter().any(|l| l.trim_end() == " channels   8"), "{lines:?}");
+    }
+
+    #[test]
+    fn blocks_fit_sparse_share_in_narrow_block_when_terminal_is_58_by_26() {
+        // The handheld's narrow block has no count line; the list is cut at a comma to fit.
+        let snapshot = Snapshot { nodes: vec![sparse_node(0x84), assigned(0x85)], ..busy() };
+        let terminal = terminal(&snapshot, &mut Ui::default(), 58, 26);
+        let (_, lines) = block(terminal.backend().buffer(), " N7 ").expect("the sparse node");
+        let list = lines[1].trim();
+        assert!(list.starts_with("52,60,104,") && list.ends_with('…'), "{lines:?}");
+        assert!(!list.contains(",…"), "never cut mid-separator: {lines:?}");
+    }
+
     #[test]
     fn blocks_color_border_blue_when_node_scans_bluetooth() {
         let mut view = assigned(0x84);

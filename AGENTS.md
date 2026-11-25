@@ -105,16 +105,18 @@ own.
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
   slots, and the messages a node and the P4 exchange), `carrier` (the carrier board's I/O expander
   as the P4 reads it at boot), `fan` (the carrier's lid fan: its duty, PWM wave and tach reading),
-  `settings` (the records the P4 keeps its fan duty, channel pool, `wardrive esp` setting and SD
-  log setting in), `bonds` (the Bluetooth bonds the P4 keeps for its C6, and their records),
+  `settings` (the records the P4 keeps its fan duty, channel pool, `wardrive esp` setting, SD log
+  setting, planner and sparse node count in), `bonds` (the Bluetooth bonds the P4 keeps for its
+  C6, and their records),
   `host_owner` (who holds the P4's host queue: USB, a Bluetooth central, a phone or no one), `crc`,
   `beacon`, `hci`, `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and
   their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
   finds a bridge by, the address its set advertises from, and the rest of the phones' set after a
   silent central),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
-  lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools and the
-  round-robin deal that cuts a set of channels), `fleet` (the P4's fleet planner: membership, the
+  lines and session), `mac` (the `Mac` type and its text form), `plan` (channel pools, and the
+  `Dealer` trait with its two deals, even and weighted, that cut a set of channels), `fleet` (the
+  P4's fleet planner: membership, the
   cut, the Bluetooth pick and the records that tell each node), `node` (a node's timings and
   sweep cursor), `pending` (the buffers sightings wait in on a node), `sd` (the FAT32 layout the
   P4 formats its microSD card with, and the reading of a card it did not format; `sd::log`, the
@@ -150,8 +152,9 @@ own.
   linked, and no other kind. Its image carries the C6's, and
   updates it. It caches a node image in PSRAM for `wartui ota`, and builds `UpdateChunk`s from it,
   a layout in the bus's frozen core (`src/cache.rs`). On a carrier it drives the lid fan
-  (`src/fan.rs`). It keeps the fan's duty, the channel pool, the `wardrive esp` setting and the SD
-  log setting (`L`) in the `nvs` partition, the settings the bridge rather than the host holds
+  (`src/fan.rs`). It keeps the fan's duty, the channel pool, the `wardrive esp` setting, the SD
+  log setting (`L`), the planner and its sparse node count in the `nvs` partition, the settings
+  the bridge rather than the host holds
   (`src/settings.rs`); the scan mode is kept nowhere, so it boots stopped. A bonded central over
   Bluetooth, through the C6, can be its host instead of USB (`src/ble.rs`): it keeps the C6's
   bonds in `nvs` too (`src/bonds.rs`), and the host bulk ring in PSRAM, past the node image cache.
@@ -307,12 +310,13 @@ is here rather than only in a `//!`.
   per-node mode and no flag: `wartui_proto::fleet::Fleet` decides what every node scans and sends
   every `Assign` and `Stop`, and the host authors no node record but an update's. That is what
   lets the fleet table and the store read a node's share as the plan's without asking who put it
-  there. It has three inputs, all the bridge's: the pool, kept in NVS and set by `SetPool`; the
-  scan mode, set by `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session,
-  in Wi-Fi or Bluetooth mode, and kept nowhere; and a linked phone's channel list, which outranks
-  the pool while the phone holds it and is kept nowhere. Which node scans
-  Bluetooth is its pick, not an input. The host's `Command::SetPool`, `SetBluetooth` and
-  `StopScan` only ask, and the engine believes what the next `Status` or `Fleet` report says.
+  there. It has four inputs, all the bridge's: the pool, kept in NVS and set by `SetPool`; the
+  planner and its sparse node count, kept in NVS and set by `SetPlanner`; the scan mode, set by
+  `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session, in Wi-Fi or Bluetooth
+  mode, and kept nowhere; and a linked phone's channel list, which outranks the pool while the
+  phone holds it and is kept nowhere. Which node scans Bluetooth is its pick, not an input. The
+  host's `Command::SetPool`, `SetPlanner`, `SetBluetooth` and `StopScan` only ask, and the engine
+  believes what the next `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
 - **Only heartbeating nodes are assignable or in the plan.** The P4 plans by slot: a member is a
   present slot that has heartbeated within `fleet::HEARTBEAT_TIMEOUT_MS` (20 s), and its
@@ -352,11 +356,11 @@ is here rather than only in a `//!`.
   → `crates/wartui-proto/src/fleet.rs` `//!`, `next_epoch`;
   `crates/wartui-core/src/engine/snapshot.rs`, `NodeView::adopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
-  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so `plan_for` deals a `ChannelSet`, the
-  pool's channels or a phone's list, round-robin from one order (1, 6 and 11 first) rather than
-  steering around run boundaries. The plan has no phases and no timer; it changes when
-  membership, the scan mode, the Bluetooth pick, the pool or a phone's list changes, and at no
-  other time (`Fleet::settle`).
+  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so `plan_with` deals a `ChannelSet`, the
+  pool's channels or a phone's list, through the fleet's `Dealer` rather than steering around run
+  boundaries. The plan has no phases and no timer; it changes when membership, the scan mode, the
+  Bluetooth pick, the pool, a phone's list or the planner changes, and at no other time
+  (`Fleet::settle`).
 - **An updated node image is confirmed only by hearing the bridge.** The first record from the P4 a
   trial image decodes — assign, stop, update confirm or an update record — marks it valid; nothing
   else does, because hearing the bridge is the whole test. A stopped P4 sends an idle node
@@ -438,7 +442,7 @@ edit stops; follow the pointer before changing the rule.
   `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
   fleet whose one member held the scan would report the whole pool, and the P4 gives Bluetooth to
   no member below two.
-  → `crates/wartui-proto/src/plan/mod.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
+  → `crates/wartui-proto/src/plan/mod.rs`, `plan_with`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**

@@ -41,7 +41,7 @@ use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::bus::{BUS_VERSION, RecordKind};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::PairWindow;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, PlanSettings, Planner};
 use wartui_proto::reset::ResetCause;
 
 use crate::engine::{StorePeaks, StoreStats};
@@ -1064,6 +1064,31 @@ const fn pool_name(pool: Option<ChannelPool>) -> &'static str {
     }
 }
 
+/// The planner's name as a settings row stores it, `none` before the bridge has reported one.
+const fn planner_name(planner: Option<PlanSettings>) -> &'static str {
+    match planner {
+        Some(PlanSettings { planner: Planner::Even, .. }) => "even",
+        Some(PlanSettings { planner: Planner::Weighted, .. }) => "weighted",
+        None => "none",
+    }
+}
+
+/// The sparse node count as a settings row stores it, `auto` or `1` to `4`, and `none` before the
+/// bridge has reported one.
+const fn sparse_nodes_name(planner: Option<PlanSettings>) -> &'static str {
+    match planner {
+        Some(settings) => match settings.sparse_nodes.byte() {
+            0 => "auto",
+            1 => "1",
+            2 => "2",
+            3 => "3",
+            // `SparseNodes` holds nothing over its `MAX`, 4.
+            _ => "4",
+        },
+        None => "none",
+    }
+}
+
 /// The scan mode's name as a settings row stores it, `none` before the bridge has reported one.
 const fn mode_name(mode: Option<ScanMode>) -> &'static str {
     match mode {
@@ -1081,8 +1106,8 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
     };
     format!(
-        "version=2;at_ms={at_ms};pool={};mode={};record_raw={};gps={};gps_max_age_ms={};\
-         ble_slot={};ble_node={}",
+        "version=3;at_ms={at_ms};pool={};mode={};record_raw={};gps={};gps_max_age_ms={};\
+         ble_slot={};ble_node={};planner={};sparse_nodes={}",
         pool_name(settings.pool),
         mode_name(settings.mode),
         settings.record_raw,
@@ -1091,6 +1116,8 @@ fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
         // The bus name, as the store keeps every slot.
         settings.ble_slot.map_or_else(|| "none".to_owned(), |slot| slot.to_string()),
         mac(settings.ble_node),
+        planner_name(settings.planner),
+        sparse_nodes_name(settings.planner),
     )
 }
 

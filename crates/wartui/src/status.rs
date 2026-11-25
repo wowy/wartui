@@ -16,7 +16,8 @@
 //! the bridge's microSD card: its size and free space, `not FAT32` for a card `wartui sd format`
 //! has to format first, `no card`, or `no slot` for a bridge that drives none. `sd log` is the
 //! bridge's log on that card: the setting, then what its writer is doing. `pool` is
-//! the channel pool the bridge holds, which its planner deals. `slots` names the slots the
+//! the channel pool the bridge holds, which its planner deals, and `planner` the deal it uses and
+//! the sparse node count the weighted deal takes. `slots` names the slots the
 //! bridge counts a node in, as the operator reads them on its board. `scan`, `bluetooth` and the
 //! `share` lines are the planner's: its mode, the node it picked for Bluetooth, and each node's
 //! share, from the `Fleet` report the bridge sends behind every `Status`.
@@ -40,6 +41,7 @@ use wartui_proto::link::{
     HostToBridge, PairWindow, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
 };
 use wartui_proto::mac;
+use wartui_proto::plan::PlanSettings;
 use wartui_proto::radio_link::BleCounters;
 
 use crate::text::{SdForm, kib, sd_log_text, sd_text};
@@ -118,7 +120,7 @@ pub async fn run(args: Args) -> Result<()> {
         host_uart_errors,
         fan,
         pool,
-        planner: _,
+        planner,
         scan,
         ble,
         present,
@@ -142,6 +144,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!("sd card    {}", sd_text(sd, SdForm::Line));
     println!("sd log     {}", sd_log_text(sd));
     println!("pool       {pool}");
+    println!("planner    {}", planner_text(planner));
     println!("scan       {}", scan_text(scan));
     println!("bluetooth  {}", ble_text(info.node_board, ble));
     println!("host       {}", host_text(&bluetooth));
@@ -217,6 +220,11 @@ pub(crate) const fn scan_text(scan: ScanMode) -> &'static str {
         ScanMode::Wifi => "wifi",
         ScanMode::WifiBluetooth => "wifi + bluetooth",
     }
+}
+
+/// The deal the bridge's planner uses and its sparse node count: `weighted, sparse nodes auto`.
+pub(crate) fn planner_text(planner: PlanSettings) -> String {
+    format!("{}, sparse nodes {}", planner.planner, planner.sparse_nodes)
 }
 
 /// The slot the bridge's planner gave the Bluetooth scan, by its label, or `none`.
@@ -667,8 +675,8 @@ mod tests {
     use super::{
         Awaited, ReadyWait, Report, ScanMode, Taken, awaited, ble_text, board_line, counters_line,
         diagnostic_lines, die_text, fan_text, host_text, human_uptime, pairing_deadline,
-        pairing_text, plan_lines, radio_health_text, radio_line, scan_text, silence_note,
-        slots_text, wardrive_esp_text,
+        pairing_text, plan_lines, planner_text, radio_health_text, radio_line, scan_text,
+        silence_note, slots_text, wardrive_esp_text,
     };
     use std::time::Duration;
 
@@ -683,7 +691,9 @@ mod tests {
     use wartui_proto::link::{
         BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
-    use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+    use wartui_proto::plan::{
+        ChannelPool, ChannelSet, IndexRun, PlanSettings, Planner, SparseNodes,
+    };
     use wartui_proto::radio_link::BleCounters;
     use wartui_proto::radio_link::RadioHealth;
     use wartui_proto::reset::ResetCause;
@@ -724,6 +734,14 @@ mod tests {
         assert_eq!(scan_text(ScanMode::Stopped), "stopped");
         assert_eq!(scan_text(ScanMode::Wifi), "wifi");
         assert_eq!(scan_text(ScanMode::WifiBluetooth), "wifi + bluetooth");
+    }
+
+    #[test]
+    fn status_prints_planner_and_sparse_nodes_when_bridge_reports_them() {
+        assert_eq!(planner_text(PlanSettings::DEFAULT), "even, sparse nodes auto");
+        let three = SparseNodes::fixed(3).expect("three");
+        let weighted = PlanSettings { planner: Planner::Weighted, sparse_nodes: three };
+        assert_eq!(planner_text(weighted), "weighted, sparse nodes 3");
     }
 
     /// A plan holding `shares`, scanning Wi-Fi and Bluetooth over the `all` pool.

@@ -27,8 +27,9 @@ use wartui_proto::bus::{NodeBoard, Slot};
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
+use wartui_proto::plan::PlanSettings;
 
-use crate::status::{ble_text, plan_lines, scan_text};
+use crate::status::{ble_text, plan_lines, planner_text, scan_text};
 
 /// How long the bridge has to report a change, or to answer the status request.
 const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
@@ -165,13 +166,14 @@ async fn show(link: &mut LinkHandle, board: NodeBoard) -> Result<Vec<String>> {
         tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status_and_plan(link))
             .await
             .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { scan, ble, pool, .. } = status else {
+    let BridgeToHost::Status { scan, ble, pool, planner, .. } = status else {
         unreachable!("wait_for_status_and_plan only returns Status")
     };
     let mut lines = vec![
         format!("scan       {}", scan_text(scan)),
         format!("bluetooth  {}", pick_text(board, scan, ble)),
         format!("pool       {pool}"),
+        format!("planner    {}", planner_text(planner)),
     ];
     lines.extend(plan_lines(board, plan.as_ref()));
     Ok(lines)
@@ -190,6 +192,10 @@ async fn start(link: &mut LinkHandle, board: NodeBoard, bluetooth: bool) -> Resu
     let mut lines = vec![format!("scan       {}", scan_text(mode))];
     if bluetooth {
         lines.push(format!("bluetooth  {}", pick_text(board, mode, seen.pick)));
+    }
+    // The deal that cut the shares below.
+    if let Some(planner) = seen.planner {
+        lines.push(format!("planner    {}", planner_text(planner)));
     }
     lines.extend(plan_lines(board, seen.plan.as_ref()));
     Ok(lines)
@@ -215,15 +221,18 @@ struct Seen {
     pick: Option<Slot>,
     /// Its last `Fleet` report.
     plan: Option<Report>,
+    /// The planner its last `Status` reported.
+    planner: Option<PlanSettings>,
 }
 
 impl Seen {
     /// Take in one link event.
     fn note(&mut self, event: &BridgeToHost) {
         match event {
-            BridgeToHost::Status { scan, ble, .. } => {
+            BridgeToHost::Status { scan, ble, planner, .. } => {
                 self.mode = Some(*scan);
                 self.pick = *ble;
+                self.planner = Some(*planner);
             }
             BridgeToHost::Fleet(report) => {
                 self.mode = Some(report.mode);
@@ -287,6 +296,7 @@ mod tests {
         let (mut link, board) = sim(3).await;
         let lines = act(&mut link, board, Wanted::Start(false)).await.expect("the start");
         assert_eq!(lines[0], "scan       wifi", "{lines:?}");
+        assert_eq!(lines[1], "planner    even, sparse nodes auto", "the deal behind the shares");
         assert!(lines.iter().all(|line| !line.starts_with("bluetooth")), "{lines:?}");
     }
 
@@ -325,7 +335,16 @@ mod tests {
         // The simulator boots stopped, as a bridge does, and looking leaves it so.
         let (mut link, board) = sim(3).await;
         let lines = act(&mut link, board, Wanted::Show).await.expect("the status");
-        assert_eq!(lines[..2], ["scan       stopped", "bluetooth  none"], "{lines:?}");
+        assert_eq!(
+            lines[..4],
+            [
+                "scan       stopped",
+                "bluetooth  none",
+                "pool       All",
+                "planner    even, sparse nodes auto"
+            ],
+            "{lines:?}"
+        );
         let again = act(&mut link, board, Wanted::Show).await.expect("the status");
         assert_eq!(again[0], "scan       stopped", "{again:?}");
     }

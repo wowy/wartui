@@ -17,7 +17,7 @@ use wartui_proto::fleet::{ScanMode, Share};
 use wartui_proto::link::{
     BluetoothStatus, HostOwner, LoopPhase, SdLog, SdLogState, SdState, SdStatus,
 };
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS, PlanSettings};
 use wartui_proto::reset::ResetCause;
 
 use super::draw;
@@ -140,6 +140,8 @@ pub(super) fn busy() -> Snapshot {
         link_cause: None,
         // What a bridge with none stored reports.
         pool: Some(ChannelPool::All),
+        // What a bridge with none stored reports.
+        planner: Some(PlanSettings::DEFAULT),
         scan: Some(ScanMode::Wifi),
         ble_slot: None,
         wardrive_esp: Some(false),
@@ -278,6 +280,7 @@ pub(super) fn empty() -> Snapshot {
         bridge_status: None,
         wardrive_esp: None,
         sd_log: None,
+        planner: None,
         position: Fix::none(),
         ..busy()
     }

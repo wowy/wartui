@@ -13,7 +13,7 @@ use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{BluetoothStatus, BridgeHealth, HostOwner, QueueStats, RadioLinkStats};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, ChannelSet};
+use wartui_proto::plan::{ChannelPool, ChannelSet, PlanSettings};
 use wartui_proto::reset::ResetCause;
 
 use crate::position::Fix;
@@ -327,6 +327,9 @@ impl ShareChange {
 pub struct CaptureSettings {
     /// Pool the planner partitions, as the bridge reports it. `None` before its first `Status`.
     pub pool: Option<ChannelPool>,
+    /// The planner and sparse node count the bridge deals with, as it reports them. `None` before
+    /// its first `Status`.
+    pub planner: Option<PlanSettings>,
     /// The mode the bridge's planner scans in, as its last `Status` or `Fleet` report gave it.
     /// `None` before the first.
     pub mode: Option<ScanMode>,

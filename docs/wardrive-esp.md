@@ -261,14 +261,16 @@ queued as a command's answer is, so a backlog of stream lines never holds them.
 
 ## How the fleet maps onto one board
 
-- **The fleet scans the phone's channel list**, split across its nodes. With no list it scans the
-  pool, as it does for a wartui host. A list outranks the pool and may name any channel a node
+- **The fleet scans the phone's channel list**, dealt across its nodes by the bridge's planner,
+  `even` or `weighted`, as the pool is. With no list it scans the pool, as it does for a wartui
+  host. A list outranks the pool and may name any channel a node
   can tune: 2.4 GHz 1-13 and all of 5 GHz. A list naming none is refused with
   `WD:ERR reason=no_supported_channels`, and the list stays as it was. A list changed while
   scanning re-cuts the fleet at once, with no stop. The list resets when the phone links or lets
   go.
-- **Fewer channels than nodes means nodes double up**, on 1, 6 and 11 first. The planner keeps 1,
-  6 and 11 on different nodes (`crates/wartui/README.md` § "Channel pools").
+- **Fewer channels than nodes means nodes double up**, on 1, 6 and 11 first, under either
+  planner. The planner keeps 1, 6 and 11 on different nodes (`crates/wartui/README.md`
+  § "Channel pools").
 - **The phone is sent everything the nodes hear.** A node reports the channel a beacon names,
   which can be beside its share, so a phone that asked for 1 also hears what its node picks up
   from 2 and 3.

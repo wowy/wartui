@@ -7,7 +7,7 @@ use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
 #[cfg(doc)]
 use wartui_proto::plan::SCAN_CHANNELS;
-use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, PlanSettings};
 
 #[cfg(doc)]
 use super::rx::DUPLICATE_BATCH_WINDOW_US;
@@ -121,6 +121,8 @@ pub struct Snapshot {
     /// The channel pool the bridge reports, which its planner cuts. `None` before its first
     /// `Status`.
     pub pool: Option<ChannelPool>,
+    /// The planner and sparse node count the bridge reports. `None` before its first `Status`.
+    pub planner: Option<PlanSettings>,
     /// What the bridge's planner is asked to scan. `None` before the bridge first says.
     pub scan: Option<ScanMode>,
     /// The slot the bridge's planner gave the Bluetooth scan. `None` for no node, and before its
@@ -364,6 +366,7 @@ impl FleetEngine {
             link_error: self.link_error.clone(),
             link_cause: self.link_cause,
             pool: self.pool,
+            planner: self.planner,
             scan: self.scan,
             ble_slot: self.ble_slot,
             wardrive_esp: self.bridge_status.map(|status| status.bluetooth.wardrive_esp),
