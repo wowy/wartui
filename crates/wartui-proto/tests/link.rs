@@ -22,6 +22,7 @@ use wartui_proto::link::{
     UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
     image_tag,
 };
+use wartui_proto::plan::{PlanSettings, Planner, SparseNodes};
 use wartui_proto::radio_link::update::{OP_MAX, Op};
 use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
@@ -70,7 +71,16 @@ fn sample_commands() -> Vec<HostToBridge, 24> {
     v.push(HostToBridge::SetWardriveEsp { on: true }).expect("sample_commands has room");
     v.push(HostToBridge::FormatSd).expect("sample_commands has room");
     v.push(HostToBridge::SetSdLog { on: false }).expect("sample_commands has room");
+    v.push(HostToBridge::SetPlanner { planner: weighted(2) }).expect("sample_commands has room");
     v
+}
+
+/// The weighted planner with `n` sparse nodes.
+fn weighted(n: u8) -> PlanSettings {
+    PlanSettings {
+        planner: Planner::Weighted,
+        sparse_nodes: SparseNodes::fixed(n).expect("in range"),
+    }
 }
 
 /// A [`HostToBridge::ToNodeChunk`] with every field distinct, so a pin shows their order.
@@ -191,6 +201,7 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
         host_uart_errors: 0,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Us,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::WifiBluetooth,
         ble: Slot::new(1, 0),
         present: 0b11_1111,
@@ -694,7 +705,7 @@ fn link_codec_pins_variant_indices_when_encoded() {
     // Postcard writes a variant as its index, so these are the wire.
     let mut buf = [0u8; MAX_HOST_FRAME];
     let commands = sample_commands();
-    assert_eq!(commands.len(), 18, "one of each");
+    assert_eq!(commands.len(), 19, "one of each");
     for (want, cmd) in (0u8..).zip(&commands) {
         assert_eq!(postcard::to_slice(cmd, &mut buf).expect("encodes")[0], want, "{cmd:?}");
     }
@@ -763,6 +774,7 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::Eu,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
@@ -848,6 +860,7 @@ fn link_round_trips_status_with_queues_and_radio_link() {
         host_uart_errors: 9,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: None }),
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: u32::MAX,
@@ -939,11 +952,12 @@ fn link_refuses_set_fan_when_duty_is_over_100() {
 }
 
 #[test]
-fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_when_bridge_reports_them()
+fn link_codec_pins_fan_pool_planner_scan_ble_present_and_members_bytes_at_end_of_status_when_bridge_reports_them()
  {
     // `fan`: `None` is one tag byte; `Some` is the tag, the duty, then `rpm`'s tag and varint.
-    // `pool` and `scan`: postcard's variant indices. `ble`: an option's tag, then the slot's byte.
-    // `present`: a varint. `members`: a count, then each member's slot byte and MAC, last.
+    // `pool` and `scan`: postcard's variant indices. `planner`: its planner's variant index, then
+    // the sparse node byte. `ble`: an option's tag, then the slot's byte. `present`: a varint.
+    // `members`: a count, then each member's slot byte and MAC, last.
     let mut out = [0u8; MAX_FRAME];
     let mut status = BridgeToHost::Status {
         rx_count: 0,
@@ -955,6 +969,7 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
@@ -966,10 +981,13 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
     let n = encode_frame(&status, &mut out).expect("encodes");
     // `sd` and `bluetooth` follow `members`, each pinned in its own test.
     let none = without_sd_and_bluetooth(frame_body(&out[..n]));
-    assert_eq!(none[none.len() - 6..], [0, 2, 0, 0, 0, 0]);
-    if let BridgeToHost::Status { fan, pool, scan, ble, present, members, .. } = &mut status {
+    assert_eq!(none[none.len() - 8..], [0, 2, 0, 0, 0, 0, 0, 0]);
+    if let BridgeToHost::Status { fan, pool, planner, scan, ble, present, members, .. } =
+        &mut status
+    {
         *fan = Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(300) });
         *pool = ChannelPool::Us;
+        *planner = weighted(3);
         *scan = ScanMode::WifiBluetooth;
         *ble = Slot::new(1, 2);
         // A1, A3 and B3: bits 0, 2 and 9, 0x205.
@@ -985,12 +1003,12 @@ fn link_codec_pins_fan_pool_scan_ble_present_and_members_bytes_at_end_of_status_
     }
     let n = encode_frame(&status, &mut out).expect("encodes");
     let some = without_sd_and_bluetooth(frame_body(&out[..n]));
-    assert_eq!(some[..none.len() - 6], none[..none.len() - 6]);
+    assert_eq!(some[..none.len() - 8], none[..none.len() - 8]);
     assert_eq!(
-        some[none.len() - 6..],
+        some[none.len() - 8..],
         [
-            1, 40, 1, 0xAC, 0x02, 0, 2, 1, 9, 0x85, 0x04, 2, 2, 0x02, 0, 0, 0, 0, 0x03, 9, 0x02, 0,
-            0, 0, 0, 0x0B
+            1, 40, 1, 0xAC, 0x02, 0, 1, 3, 2, 1, 9, 0x85, 0x04, 2, 2, 0x02, 0, 0, 0, 0, 0x03, 9,
+            0x02, 0, 0, 0, 0, 0x0B
         ]
     );
     assert_eq!(round_trip(&status), status);
@@ -1011,6 +1029,7 @@ fn link_codec_pins_bluetooth_bytes_at_end_of_status_when_bridge_reports_a_centra
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
@@ -1098,6 +1117,7 @@ fn link_codec_pins_health_bytes_at_end_of_status_when_bridge_reports_both_chips(
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
@@ -1153,6 +1173,7 @@ fn link_codec_pins_sd_bytes_ahead_of_bluetooth_in_status_when_bridge_reports_a_c
         host_uart_errors: 0,
         fan: None,
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,
@@ -1287,6 +1308,51 @@ fn link_codec_pins_set_pool_bytes_when_host_sets_a_pool() {
         let n = encode_host_frame(&HostToBridge::SetPool { pool }, &mut out).expect("encodes");
         assert_eq!(frame_body(&out[..n]), [10, byte], "{pool}");
     }
+}
+
+#[test]
+fn link_codec_pins_set_planner_bytes_when_host_sets_a_planner() {
+    // Postcard's variant index, then the planner's, then the sparse node byte.
+    let mut out = [0u8; MAX_HOST_FRAME];
+    for (planner, bytes) in [(PlanSettings::DEFAULT, [18, 0, 0]), (weighted(2), [18, 1, 2])] {
+        let cmd = HostToBridge::SetPlanner { planner };
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]), bytes, "{planner:?}");
+        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        assert_eq!(decoded, cmd);
+    }
+}
+
+#[test]
+fn link_refuses_set_planner_when_sparse_nodes_is_over_max() {
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&HostToBridge::SetPlanner { planner: weighted(4) }, &mut out)
+        .expect("encodes");
+    let mut body = frame_body(&out[..n]);
+    assert_eq!(body, [18, 1, 4]);
+    body[2] = 5;
+    assert!(postcard::from_bytes::<HostToBridge>(&body).is_err());
+}
+
+#[test]
+fn link_refuses_status_when_sparse_nodes_is_over_max() {
+    // Two `Status` bodies that differ only in the sparse node count differ only in its byte.
+    let mut out = [0u8; MAX_FRAME];
+    let mut bodies = [3, 4].map(|n| {
+        let mut status = largest_status();
+        if let BridgeToHost::Status { planner, .. } = &mut status {
+            *planner = weighted(n);
+        }
+        let len = encode_frame(&status, &mut out).expect("encodes");
+        frame_body(&out[..len])
+    });
+    let [three, four] = &mut bodies;
+    let at: std::vec::Vec<usize> = (0..four.len()).filter(|&i| three[i] != four[i]).collect();
+    assert_eq!(at.len(), 1, "one byte differs");
+    assert_eq!(four[at[0]], 4);
+    assert!(postcard::from_bytes::<BridgeToHost>(four).is_ok());
+    four[at[0]] = 5;
+    assert!(postcard::from_bytes::<BridgeToHost>(four).is_err());
 }
 
 #[test]

@@ -36,7 +36,7 @@ use embassy_time::{Instant, Timer};
 use wartui_proto::bus::{DownType, Slot, Stop};
 use wartui_proto::fleet::{BRIDGE_ID, Report, SlotMsg, ToSlot};
 use wartui_proto::link::{BridgeToHost, Undelivered};
-use wartui_proto::plan::ChannelSet;
+use wartui_proto::plan::{ChannelSet, PlanSettings};
 
 use crate::{Shared, now_ms};
 
@@ -180,6 +180,12 @@ pub fn stop(shared: &Shared) {
 /// A `SetPool` the P4 runs from now on: cut `pool`, then pump.
 pub fn set_pool(shared: &Shared, pool: wartui_proto::ChannelPool) {
     shared.fleet.borrow_mut().set_pool(pool, now_ms());
+    after_input(shared);
+}
+
+/// A `SetPlanner` the P4 runs from now on: deal with `planner`, then pump.
+pub fn set_planner(shared: &Shared, planner: PlanSettings) {
+    shared.fleet.borrow_mut().set_dealer(planner, now_ms());
     after_input(shared);
 }
 

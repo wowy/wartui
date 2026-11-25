@@ -48,10 +48,10 @@
 //!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
-//! duty, the channel pool, the WardriveESP setting and the SD log setting, which `Status` reports.
-//! A host's `SetFan`, `SetPool`, `SetWardriveEsp` or `SetSdLog` stores its change there. The scan
-//! mode is not stored. The C6's Bluetooth bonds are read from flash at boot too, and go down to it
-//! after each hello (`src/bonds.rs`).
+//! duty, the channel pool, the WardriveESP setting, the SD log setting, the planner and its sparse
+//! node count, which `Status` reports. A host's `SetFan`, `SetPool`, `SetWardriveEsp`, `SetSdLog`
+//! or `SetPlanner` stores its change there. The scan mode is not stored. The C6's Bluetooth bonds
+//! are read from flash at boot too, and go down to it after each hello (`src/bonds.rs`).
 //!
 //! The host bulk ring is in PSRAM, past the node image cache (`src/config.rs` has why), and the SD
 //! log's ring past it; the rest of the queues are in internal RAM.
@@ -131,6 +131,7 @@ use wartui_proto::link::{
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::ota::SECTOR;
 use wartui_proto::ota::image::DIGEST_LEN;
+use wartui_proto::plan::PlanSettings;
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, BleCounters, Down, FIFO_FULL_THRESHOLD, HOST_BYTES_MAX, Held,
     PacketReader, RECORD_MAX, RTS_THRESHOLD, Stream, WIRE_MAX, encode_down,
@@ -321,6 +322,11 @@ impl Shared {
         sd_log.boot_setting(stored.sd_log.unwrap_or(true));
         let fleet = FLEET.take();
         fleet.set_pool(stored.pool.unwrap_or_default(), now_ms());
+        let planner = PlanSettings {
+            planner: stored.planner.unwrap_or_default(),
+            sparse_nodes: stored.sparse_nodes.unwrap_or_default(),
+        };
+        fleet.set_dealer(planner, now_ms());
         Self {
             // Here rather than in `main`, whose frame another `Pair` would grow.
             pair: RefCell::new(pair.with_node_board(carrier.board())),
@@ -600,6 +606,7 @@ impl Shared {
             rx_oversize,
             fan: self.fan.map(fan::Fan::stats),
             pool: fleet.pool(),
+            planner: *fleet.dealer(),
             scan: fleet.mode(),
             ble: fleet.bluetooth(),
             present: self.nodes.present(),

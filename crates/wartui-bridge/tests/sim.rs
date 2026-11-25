@@ -13,14 +13,16 @@ use wartui_proto::bus::{
     Assign, DecodeError, DownType, Heartbeat, NodeBoard, RecordKind, Slot, Stop, UpMsg, Version,
 };
 use wartui_proto::fan::{FanDuty, FanStats};
-use wartui_proto::fleet::{Report, ScanMode};
+use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, PowerOutcome, SdFormatOutcome, SdLog, SdLogState, SdState,
     SdStatus, ToNodeBody, Undelivered,
 };
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{
+    ChannelPool, ChannelSet, IndexRun, PlanSettings, Planner, SparseNodes, is_quiet,
+};
 use wartui_proto::sd::format;
 
 /// One record a node sent, as the bridge forwarded it.
@@ -888,6 +890,80 @@ async fn sim_bridge_reports_pool_set_when_host_sets_pool() {
 
     link.send_bulk(HostToBridge::SetPool { pool: ChannelPool::Us }).expect("queued");
     assert_eq!(next_pool(&mut link).await, ChannelPool::Us);
+}
+
+/// The planner the next `Status` reports.
+async fn next_planner(link: &mut LinkHandle) -> PlanSettings {
+    link.send_bulk(HostToBridge::GetStatus).expect("queued");
+    loop {
+        if let LinkEvent::Message(BridgeToHost::Status { planner, .. }) =
+            link.recv().await.expect("running")
+        {
+            return planner;
+        }
+    }
+}
+
+/// The weighted planner asking for `sparse_nodes`.
+const fn weighted(sparse_nodes: SparseNodes) -> PlanSettings {
+    PlanSettings { planner: Planner::Weighted, sparse_nodes }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_reports_planner_set_when_host_sets_planner() {
+    let one = SparseNodes::fixed(1).expect("in range");
+    let config = SimConfig { planner: weighted(one), ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    assert_eq!(next_planner(&mut link).await, weighted(one), "seeded from the config");
+
+    let planner = weighted(SparseNodes::fixed(3).expect("in range"));
+    link.send_bulk(HostToBridge::SetPlanner { planner }).expect("queued");
+    assert_eq!(next_planner(&mut link).await, planner);
+    link.send_bulk(HostToBridge::SetPlanner { planner: PlanSettings::DEFAULT }).expect("queued");
+    assert_eq!(next_planner(&mut link).await, PlanSettings::DEFAULT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_puts_quiet_channels_on_highest_slots_when_planner_is_set_to_weighted() {
+    let config = SimConfig {
+        node_count: 10,
+        ble_chance: 0.0,
+        pool: ChannelPool::Us,
+        ..SimConfig::default()
+    };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    for index in 0..10 {
+        next_heartbeat_from(&mut link, SimTransport::node_slot(index)).await;
+    }
+    start(&link, false);
+    let even = report_where(&mut link, |report| report.shares.len() == 10).await;
+    let busy = |share: &Share| !share.channels.indices().all(is_quiet);
+    assert!(even.shares[8..].iter().all(busy), "the even deal gives them busy channels too");
+
+    let planner = weighted(SparseNodes::AUTO);
+    link.send_urgent(HostToBridge::SetPlanner { planner }).expect("queued");
+    let report =
+        report_where(&mut link, |report| report.shares.len() == 10 && report.shares != even.shares)
+            .await;
+    // Ten Wi-Fi slots ask for two sparse nodes: the two highest, holding only quiet channels.
+    for share in &report.shares[8..] {
+        assert!(!share.channels.is_empty(), "{:?} holds a channel", share.slot);
+        assert!(
+            share.channels.indices().all(is_quiet),
+            "{:?} holds only quiet channels: {:?}",
+            share.slot,
+            share.channels
+        );
+    }
+    let mut union = ChannelSet::empty();
+    for share in &report.shares {
+        for channel in share.channels.indices() {
+            assert!(!union.contains(channel), "channel {channel} dealt twice");
+            union.insert(channel);
+        }
+    }
+    assert_eq!(union, ChannelPool::Us.channels(), "the whole pool is dealt");
+    assert_eq!(next_planner(&mut link).await, planner);
 }
 
 /// The WardriveESP setting the next `Status` reports.

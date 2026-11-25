@@ -1,6 +1,6 @@
 //! The settings the P4 keeps on its flash: the lid fan's duty, the channel pool, whether it
-//! offers the WardriveESP service and whether it logs to its microSD card, in the first sector of
-//! its `nvs` partition.
+//! offers the WardriveESP service, whether it logs to its microSD card, the planner and its sparse
+//! node count, in the first sector of its `nvs` partition.
 //!
 //! **No ESP-IDF NVS reads that partition**, and neither a USB flash nor an update over the host
 //! link writes it, so the layout is this module's own.
@@ -14,12 +14,13 @@
 //! **A full sector erases and rewrites what it holds** ([`sector_log::Write::Erase`]): every
 //! setting [`read`] gives, with the new one in its place, so one setting never costs another. A
 //! power cut between the erase and the rewrite loses them all, and the next boot runs the fan at
-//! [`FanDuty::FULL`] and the pool at [`ChannelPool::All`], with the WardriveESP and SD log
-//! settings unset.
+//! [`FanDuty::FULL`], the pool at [`ChannelPool::All`] and the even planner with automatic sparse
+//! nodes ([`crate::plan::PlanSettings::DEFAULT`]), with the WardriveESP and SD log settings
+//! unset. The rewrite order is fan, pool, WardriveESP, SD log, planner, then sparse nodes.
 
 use crate::fan::FanDuty;
 use crate::ota::SECTOR;
-use crate::plan::ChannelPool;
+use crate::plan::{ChannelPool, Planner, SparseNodes};
 use crate::sector_log;
 
 /// The tag of a fan duty's record.
@@ -34,6 +35,12 @@ pub const WARDRIVE_ESP: u8 = b'W';
 /// The tag of the SD log's record: 1 logging, 0 not.
 pub const SD_LOG: u8 = b'L';
 
+/// The tag of the planner's record: 0 even, 1 weighted.
+pub const PLANNER: u8 = b'D';
+
+/// The tag of the sparse node count's record: 0 automatic, else the count.
+pub const SPARSE_NODES: u8 = b'S';
+
 /// Bytes in a record: one flash word.
 pub const WORD: usize = 4;
 
@@ -41,7 +48,7 @@ pub const WORD: usize = 4;
 pub const RECORDS: usize = SECTOR / WORD;
 
 /// Settings a sector holds, one record each after an erase.
-pub const KINDS: usize = 4;
+pub const KINDS: usize = 6;
 
 /// One setting, as a record stores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +61,10 @@ pub enum Setting {
     WardriveEsp(bool),
     /// Whether the bridge logs to its microSD card.
     SdLog(bool),
+    /// The planner the fleet deals with.
+    Planner(Planner),
+    /// The sparse nodes the weighted planner asks for.
+    SparseNodes(SparseNodes),
 }
 
 /// What a sector holds: each setting's last valid record, or `None` for one with none.
@@ -67,6 +78,10 @@ pub struct Stored {
     pub wardrive_esp: Option<bool>,
     /// Whether the bridge logs to its microSD card.
     pub sd_log: Option<bool>,
+    /// The planner the fleet deals with.
+    pub planner: Option<Planner>,
+    /// The sparse nodes the weighted planner asks for.
+    pub sparse_nodes: Option<SparseNodes>,
 }
 
 impl Stored {
@@ -78,12 +93,14 @@ impl Stored {
             Setting::Pool(pool) => Self { pool: Some(pool), ..self },
             Setting::WardriveEsp(on) => Self { wardrive_esp: Some(on), ..self },
             Setting::SdLog(on) => Self { sd_log: Some(on), ..self },
+            Setting::Planner(planner) => Self { planner: Some(planner), ..self },
+            Setting::SparseNodes(sparse) => Self { sparse_nodes: Some(sparse), ..self },
         }
     }
 }
 
 /// The flash write a setting takes: one word, or an erase and every setting the sector holds,
-/// fan, pool, WardriveESP, then the SD log, the new one in its place.
+/// fan, pool, WardriveESP, SD log, planner, then sparse nodes, the new one in its place.
 pub type Write = sector_log::Write<WORD, { KINDS * WORD }>;
 
 /// The byte a pool's record stores.
@@ -105,6 +122,23 @@ const fn pool_from(byte: u8) -> Option<ChannelPool> {
     }
 }
 
+/// The byte a planner's record stores.
+const fn planner_byte(planner: Planner) -> u8 {
+    match planner {
+        Planner::Even => 0,
+        Planner::Weighted => 1,
+    }
+}
+
+/// The planner `byte` stores, or `None` for a byte no planner stores.
+const fn planner_from(byte: u8) -> Option<Planner> {
+    match byte {
+        0 => Some(Planner::Even),
+        1 => Some(Planner::Weighted),
+        _ => None,
+    }
+}
+
 /// The record for `setting`.
 #[must_use]
 pub const fn record(setting: Setting) -> [u8; WORD] {
@@ -113,6 +147,8 @@ pub const fn record(setting: Setting) -> [u8; WORD] {
         Setting::Pool(pool) => (POOL, pool_byte(pool)),
         Setting::WardriveEsp(on) => (WARDRIVE_ESP, on as u8),
         Setting::SdLog(on) => (SD_LOG, on as u8),
+        Setting::Planner(planner) => (PLANNER, planner_byte(planner)),
+        Setting::SparseNodes(sparse) => (SPARSE_NODES, sparse.byte()),
     };
     [tag, value, !value, 0]
 }
@@ -128,6 +164,8 @@ fn decode(word: &[u8; WORD]) -> Option<Setting> {
         POOL => pool_from(value).map(Setting::Pool),
         WARDRIVE_ESP => flag(value).map(Setting::WardriveEsp),
         SD_LOG => flag(value).map(Setting::SdLog),
+        PLANNER => planner_from(value).map(Setting::Planner),
+        SPARSE_NODES => SparseNodes::from_byte(value).map(Setting::SparseNodes),
         _ => None,
     }
 }
@@ -155,8 +193,8 @@ pub fn read(sector: &[u8; SECTOR]) -> Stored {
 /// The write that stores `setting` in `sector`, or `None` when the sector already holds it.
 ///
 /// At the first erased word while one is left; once the sector is full, an erase and every
-/// setting it holds rewritten, fan, pool, WardriveESP, then the SD log, with `setting` in its
-/// place.
+/// setting it holds rewritten, fan, pool, WardriveESP, SD log, planner, then sparse nodes, with
+/// `setting` in its place.
 #[must_use]
 pub fn write_for(sector: &[u8; SECTOR], setting: Setting) -> Option<Write> {
     let stored = read(sector);
@@ -170,7 +208,10 @@ pub fn write_for(sector: &[u8; SECTOR], setting: Setting) -> Option<Write> {
         let pool = kept.pool.map(Setting::Pool);
         let wardrive_esp = kept.wardrive_esp.map(Setting::WardriveEsp);
         let sd_log = kept.sd_log.map(Setting::SdLog);
-        for setting in [fan, pool, wardrive_esp, sd_log].into_iter().flatten() {
+        let planner = kept.planner.map(Setting::Planner);
+        let sparse_nodes = kept.sparse_nodes.map(Setting::SparseNodes);
+        let all = [fan, pool, wardrive_esp, sd_log, planner, sparse_nodes];
+        for setting in all.into_iter().flatten() {
             records[len..len + WORD].copy_from_slice(&record(setting));
             len += WORD;
         }

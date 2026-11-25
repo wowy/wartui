@@ -624,6 +624,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool,
+            planner: wartui_proto::plan::PlanSettings::DEFAULT,
             scan: wartui_proto::fleet::ScanMode::Stopped,
             ble,
             present: 0,

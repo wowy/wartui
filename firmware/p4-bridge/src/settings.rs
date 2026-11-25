@@ -1,6 +1,6 @@
 //! The settings the P4 keeps on flash: the lid fan's duty, the channel pool, whether it offers
-//! phones the WardriveESP service and whether it logs to its microSD card, in the first sector of
-//! its `nvs` partition.
+//! phones the WardriveESP service, whether it logs to its microSD card, the planner and its sparse
+//! node count, in the first sector of its `nvs` partition.
 //! `wartui_proto::settings` has the records' layout.
 //!
 //! **The P4 is the settings' system of record.** It reads the sector once at boot, on every
@@ -18,6 +18,7 @@ use wartui_firmware::ota::{Fault, SettingsSector};
 use wartui_proto::ChannelPool;
 use wartui_proto::link::LogStr;
 use wartui_proto::ota::SECTOR;
+use wartui_proto::plan::PlanSettings;
 use wartui_proto::sector_log::Write;
 use wartui_proto::settings::{self, Setting, Stored, write_for};
 
@@ -78,6 +79,24 @@ pub fn set_sd_log(shared: &Shared, on: bool) {
         let state = if on { "on" } else { "off" };
         let mut message = LogStr::new();
         let _ = write!(message, "sd log {state} not saved, so it holds until reboot: {why}");
+        shared.push_error(&message);
+    }
+}
+
+/// A `SetPlanner`: deal with `planner` now, and store the planner and its sparse node count when
+/// the sector does not hold them, so a repeat retries a save that failed.
+#[inline(never)]
+pub fn set_planner(shared: &Shared, planner: PlanSettings) {
+    crate::fleet::set_planner(shared, planner);
+    let PlanSettings { planner, sparse_nodes } = planner;
+    let saved = save(shared, Setting::Planner(planner));
+    if let Err(why) = saved.and(save(shared, Setting::SparseNodes(sparse_nodes))) {
+        let mut message = LogStr::new();
+        let _ = write!(
+            message,
+            "planner {planner}, sparse nodes {sparse_nodes} not saved, so it holds until reboot: \
+             {why}"
+        );
         shared.push_error(&message);
     }
 }

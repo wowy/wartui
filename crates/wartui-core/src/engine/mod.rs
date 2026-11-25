@@ -454,6 +454,7 @@ impl FleetEngine {
                 host_uart_errors,
                 fan,
                 pool,
+                planner: _,
                 scan,
                 ble,
                 present,
