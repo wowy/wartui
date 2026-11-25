@@ -3,9 +3,10 @@
 use wartui_proto::ChannelPool;
 use wartui_proto::fan::FanDuty;
 use wartui_proto::ota::SECTOR;
+use wartui_proto::plan::{Planner, SparseNodes};
 use wartui_proto::settings::{
-    self, FAN, KINDS, POOL, RECORDS, SD_LOG, Setting, Stored, WARDRIVE_ESP, WORD, Write, record,
-    write_for,
+    self, FAN, KINDS, PLANNER, POOL, RECORDS, SD_LOG, SPARSE_NODES, Setting, Stored, WARDRIVE_ESP,
+    WORD, Write, record, write_for,
 };
 
 fn duty(pct: u8) -> FanDuty {
@@ -83,7 +84,9 @@ fn settings_read_each_tags_last_record_when_fan_and_pool_interleave() {
             fan: Some(duty(30)),
             pool: Some(ChannelPool::Eu),
             wardrive_esp: None,
-            sd_log: None
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
         }
     );
 }
@@ -102,7 +105,9 @@ fn settings_skip_word_when_it_is_torn_or_its_tag_is_unknown() {
             fan: Some(duty(40)),
             pool: Some(ChannelPool::Us),
             wardrive_esp: None,
-            sd_log: None
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
         }
     );
 
@@ -126,7 +131,9 @@ fn settings_skip_record_when_value_is_unknown_or_check_byte_is_bad() {
             fan: Some(duty(30)),
             pool: Some(ChannelPool::Eu),
             wardrive_esp: None,
-            sd_log: None
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
         }
     );
 }
@@ -169,7 +176,14 @@ fn settings_erase_and_keep_fan_when_sector_is_full_and_pool_is_written() {
     store(&mut sector, pool);
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(last), pool: Some(ChannelPool::Us), wardrive_esp: None, sd_log: None }
+        Stored {
+            fan: Some(last),
+            pool: Some(ChannelPool::Us),
+            wardrive_esp: None,
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
+        }
     );
     assert_eq!(next_offset(&sector, fan(5)), 2 * WORD);
 }
@@ -215,7 +229,9 @@ fn settings_skip_record_when_tag_is_a_bluetooth_slot() {
             fan: Some(duty(40)),
             pool: Some(ChannelPool::Eu),
             wardrive_esp: None,
-            sd_log: None
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
         }
     );
 }
@@ -246,7 +262,14 @@ fn settings_read_wardrive_esp_when_written() {
     store(&mut sector, Setting::WardriveEsp(false));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: None, wardrive_esp: Some(false), sd_log: None }
+        Stored {
+            fan: Some(duty(40)),
+            pool: None,
+            wardrive_esp: Some(false),
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
+        }
     );
 }
 
@@ -274,7 +297,9 @@ fn settings_keep_every_kind_when_sector_is_rewritten() {
             fan: Some(duty(30)),
             pool: Some(ChannelPool::Us),
             wardrive_esp: Some(true),
-            sd_log: None
+            sd_log: None,
+            planner: None,
+            sparse_nodes: None
         }
     );
 }
@@ -300,7 +325,14 @@ fn settings_read_sd_log_when_written() {
     store(&mut sector, Setting::SdLog(true));
     assert_eq!(
         settings::read(&sector),
-        Stored { fan: Some(duty(40)), pool: None, wardrive_esp: None, sd_log: Some(true) }
+        Stored {
+            fan: Some(duty(40)),
+            pool: None,
+            wardrive_esp: None,
+            sd_log: Some(true),
+            planner: None,
+            sparse_nodes: None
+        }
     );
 }
 
@@ -314,7 +346,7 @@ fn settings_read_no_sd_log_when_none_is_written() {
 }
 
 #[test]
-fn settings_write_sd_log_last_when_sector_is_rewritten() {
+fn settings_write_sd_log_after_wardrive_esp_when_sector_is_rewritten() {
     let mut sector = [0xFF; SECTOR];
     store(&mut sector, Setting::SdLog(false));
     store(&mut sector, Setting::WardriveEsp(true));
@@ -327,7 +359,6 @@ fn settings_write_sd_log_last_when_sector_is_rewritten() {
         panic!("a full sector erases")
     };
     // Fan, pool, wardrive esp, then the SD log, the new pool in its place.
-    assert_eq!(len, KINDS * WORD);
     assert_eq!(len, 4 * WORD);
     assert_eq!(records[..WORD], record(fan(30)));
     assert_eq!(records[WORD..2 * WORD], record(pool));
@@ -341,6 +372,8 @@ fn settings_write_sd_log_last_when_sector_is_rewritten() {
             pool: Some(ChannelPool::Us),
             wardrive_esp: Some(true),
             sd_log: Some(false),
+            planner: None,
+            sparse_nodes: None
         }
     );
 }
@@ -352,4 +385,112 @@ fn settings_skip_sd_log_record_when_check_byte_is_bad_or_value_is_not_a_flag() {
     put(&mut sector, [SD_LOG, 1, !0, 0]);
     put(&mut sector, [SD_LOG, 2, !2, 0]);
     assert_eq!(settings::read(&sector).sd_log, Some(false));
+}
+
+fn sparse(n: u8) -> Setting {
+    Setting::SparseNodes(SparseNodes::fixed(n).expect("in range"))
+}
+
+#[test]
+fn settings_record_pins_bytes_when_setting_is_a_planner() {
+    assert_eq!(PLANNER, b'D');
+    assert_eq!(record(Setting::Planner(Planner::Even)), [b'D', 0, 0xFF, 0]);
+    assert_eq!(record(Setting::Planner(Planner::Weighted)), [b'D', 1, 0xFE, 0]);
+}
+
+#[test]
+fn settings_record_pins_bytes_when_setting_is_sparse_nodes() {
+    assert_eq!(SPARSE_NODES, b'S');
+    assert_eq!(record(Setting::SparseNodes(SparseNodes::AUTO)), [b'S', 0, 0xFF, 0]);
+    for n in 1..=SparseNodes::MAX {
+        assert_eq!(record(sparse(n)), [b'S', n, !n, 0]);
+    }
+}
+
+#[test]
+fn settings_read_planner_and_sparse_nodes_when_written() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::Planner(Planner::Weighted));
+    store(&mut sector, sparse(2));
+    store(&mut sector, fan(40));
+    store(&mut sector, Setting::Planner(Planner::Even));
+    assert_eq!(
+        settings::read(&sector),
+        Stored {
+            fan: Some(duty(40)),
+            pool: None,
+            wardrive_esp: None,
+            sd_log: None,
+            planner: Some(Planner::Even),
+            sparse_nodes: SparseNodes::fixed(2),
+        }
+    );
+}
+
+#[test]
+fn settings_write_nothing_when_planner_and_sparse_nodes_are_already_stored() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::Planner(Planner::Weighted));
+    store(&mut sector, Setting::SparseNodes(SparseNodes::AUTO));
+    assert_eq!(write_for(&sector, Setting::Planner(Planner::Weighted)), None);
+    assert_eq!(write_for(&sector, Setting::SparseNodes(SparseNodes::AUTO)), None);
+}
+
+#[test]
+fn settings_skip_planner_record_when_value_is_unknown() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, Setting::Planner(Planner::Weighted));
+    put(&mut sector, [PLANNER, 2, !2, 0]);
+    put(&mut sector, [PLANNER, 0, !1, 0]);
+    assert_eq!(settings::read(&sector).planner, Some(Planner::Weighted));
+}
+
+#[test]
+fn settings_skip_sparse_nodes_record_when_value_is_over_max() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, sparse(3));
+    put(&mut sector, [SPARSE_NODES, 5, !5, 0]);
+    put(&mut sector, [SPARSE_NODES, 1, !2, 0]);
+    assert_eq!(settings::read(&sector).sparse_nodes, SparseNodes::fixed(3));
+}
+
+#[test]
+fn settings_write_every_kind_in_order_when_sector_holding_all_six_is_rewritten() {
+    let mut sector = [0xFF; SECTOR];
+    store(&mut sector, sparse(4));
+    store(&mut sector, Setting::Planner(Planner::Weighted));
+    store(&mut sector, Setting::SdLog(false));
+    store(&mut sector, Setting::WardriveEsp(true));
+    store(&mut sector, Setting::Pool(ChannelPool::Eu));
+    for i in 0..RECORDS - 5 {
+        store(&mut sector, fan(if i % 2 == 0 { 30 } else { 20 }));
+    }
+    let new = sparse(1);
+    let Some(Write::Erase { records, len }) = write_for(&sector, new) else {
+        panic!("a full sector erases")
+    };
+    // Fan, pool, wardrive esp, SD log, planner, then sparse nodes, the new count in its place.
+    assert_eq!(len, KINDS * WORD);
+    assert_eq!(KINDS, 6);
+    let expected = [
+        record(fan(30)),
+        record(Setting::Pool(ChannelPool::Eu)),
+        record(Setting::WardriveEsp(true)),
+        record(Setting::SdLog(false)),
+        record(Setting::Planner(Planner::Weighted)),
+        record(new),
+    ];
+    assert_eq!(records[..len], *expected.as_flattened());
+    store(&mut sector, new);
+    assert_eq!(
+        settings::read(&sector),
+        Stored {
+            fan: Some(duty(30)),
+            pool: Some(ChannelPool::Eu),
+            wardrive_esp: Some(true),
+            sd_log: Some(false),
+            planner: Some(Planner::Weighted),
+            sparse_nodes: SparseNodes::fixed(1),
+        }
+    );
 }

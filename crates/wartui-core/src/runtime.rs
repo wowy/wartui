@@ -605,15 +605,20 @@ mod tests {
     }
     use crate::engine::EngineConfig;
     use crate::store::{CaptureInfo, StoreConfig, open_readonly};
-    use wartui_proto::plan::ChannelPool;
+    use wartui_proto::plan::{ChannelPool, PlanSettings, Planner, SparseNodes};
 
     /// A bridge `Status` reporting `pool`, which is how the engine's pool changes.
     fn pool_status(pool: ChannelPool) -> Event {
-        status(pool, None)
+        status(pool, None, PlanSettings::DEFAULT)
     }
 
-    /// A bridge `Status` reporting `pool` and the Bluetooth slot `ble` its planner picked.
-    fn status(pool: ChannelPool, ble: Option<wartui_proto::bus::Slot>) -> Event {
+    /// A bridge `Status` reporting `pool`, the Bluetooth slot `ble` its planner picked and the
+    /// `planner` it deals with.
+    fn status(
+        pool: ChannelPool,
+        ble: Option<wartui_proto::bus::Slot>,
+        planner: PlanSettings,
+    ) -> Event {
         Event::Link(wartui_bridge::LinkEvent::Message(BridgeToHost::Status {
             rx_count: 0,
             dropped_tx: 0,
@@ -624,6 +629,7 @@ mod tests {
             host_uart_errors: 0,
             fan: None,
             pool,
+            planner,
             scan: wartui_proto::fleet::ScanMode::Stopped,
             ble,
             present: 0,
@@ -657,9 +663,17 @@ mod tests {
         let reversed = Now { unix_ms: 999, ..clock };
         engine.handle(pool_status(ChannelPool::Eu), reversed);
         log.record(&store, engine.capture_settings(), reversed);
-        engine.handle(status(ChannelPool::Eu, wartui_proto::bus::Slot::new(0, 2)), reversed);
+        let a3 = wartui_proto::bus::Slot::new(0, 2);
+        engine.handle(status(ChannelPool::Eu, a3, PlanSettings::DEFAULT), reversed);
         log.record(&store, engine.capture_settings(), reversed);
-        assert_eq!(log.next_sequence, 4);
+        // A planner change is a settings change, as a pool change is.
+        let weighted = PlanSettings {
+            planner: Planner::Weighted,
+            sparse_nodes: SparseNodes::fixed(2).unwrap(),
+        };
+        engine.handle(status(ChannelPool::Eu, a3, weighted), reversed);
+        log.record(&store, engine.capture_settings(), reversed);
+        assert_eq!(log.next_sequence, 5);
         log.finish(&store);
         assert_eq!(store.close().dropped, 0);
         let conn = open_readonly(&path).expect("read-only");
@@ -671,12 +685,15 @@ mod tests {
             .expect("settings")
             .collect::<Result<Vec<_>, _>>()
             .expect("rows");
-        assert_eq!(values.len(), 4);
-        // No bridge has reported a pool yet.
+        assert_eq!(values.len(), 5);
+        // No bridge has reported a pool or a planner yet.
         assert!(values[0].contains("pool=none;"));
+        assert!(values[0].ends_with(";planner=none;sparse_nodes=none"), "{}", values[0]);
         assert!(values[1].contains("at_ms=1000;pool=us;"));
+        assert!(values[1].ends_with(";planner=even;sparse_nodes=auto"), "{}", values[1]);
         assert!(values[2].contains("at_ms=999;pool=eu;"));
         assert!(values[3].contains("ble_slot=A3;"));
+        assert!(values[4].ends_with(";planner=weighted;sparse_nodes=2"), "{}", values[4]);
     }
 
     /// A store whose one-slot queue is full, and the receiver that frees it.

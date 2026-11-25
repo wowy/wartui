@@ -255,12 +255,14 @@ the owner, the bonds, the window, the connected central and the C6's Bluetooth c
 
 ## Settings
 
-The P4 keeps four settings in the first sector of its `nvs` partition, on every board: the lid
-fan's duty, the channel pool, whether it offers the WardriveESP service and whether it logs to its
-microSD card. It reads them once at boot and runs them with no host present, or 100 %, `All`, off
-and on with none stored. A host's `SetFan`, `SetPool`, `SetWardriveEsp` or `SetSdLog` applies at
-once and is written only when the sector does not hold it. `Status` reports all four
-(`src/settings.rs`). The scan mode is not stored, so the P4 boots stopped.
+The P4 keeps six settings in the first sector of its `nvs` partition, on every board: the lid
+fan's duty, the channel pool, whether it offers the WardriveESP service, whether it logs to its
+microSD card, the planner and its sparse node count. It reads them once at boot and runs them with
+no host present, or 100 %, `All`, off, on, `even` and `auto` with none stored. A host's `SetFan`,
+`SetPool`, `SetWardriveEsp`, `SetSdLog` or `SetPlanner` applies at once and is written only when
+the sector does not hold it; `SetPlanner` sets both the planner and its sparse node count.
+`Status` reports all six (`src/settings.rs`). The scan mode is not stored, so the P4 boots
+stopped.
 
 ## The host link
 

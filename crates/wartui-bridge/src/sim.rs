@@ -46,8 +46,9 @@
 //!
 //! Its board is a carrier, so it has a lid fan: a `SetFan` sets the duty `Status` reports, with a
 //! speed made up from it. A `SetPool` sets the pool the core cuts, which starts at
-//! [`SimConfig::pool`]. A `SetWardriveEsp` sets the setting `Status` reports, off at the start; no
-//! phone links. It has no flash, and connects once and never reboots, so all three last the
+//! [`SimConfig::pool`], and a `SetPlanner` the planner it deals with, which starts at
+//! [`SimConfig::planner`]. A `SetWardriveEsp` sets the setting `Status` reports, off at the start;
+//! no phone links. It has no flash, and connects once and never reboots, so all four last the
 //! simulator's life, and the duty starts at full.
 //!
 //! Its microSD slot holds a 32 GB card with no FAT32 volume. A `FormatSd` shows it formatting
@@ -79,7 +80,7 @@ use wartui_proto::link::{
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::ota::{Receiver, SectorSink};
-use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, PlanSettings, SCAN_CHANNELS};
 use wartui_proto::radio_link::RadioHealth;
 use wartui_proto::radio_link::update::Op;
 use wartui_proto::reset::ResetCause;
@@ -149,6 +150,9 @@ pub struct SimConfig {
     /// The channel pool the bridge holds when the simulator starts, which `Status` reports until
     /// a `SetPool` changes it. [`ChannelPool::All`] by default, as a P4 with none stored.
     pub pool: ChannelPool,
+    /// The planner the bridge deals with when the simulator starts, which `Status` reports until
+    /// a `SetPlanner` changes it. [`PlanSettings::DEFAULT`] by default, as a P4 with none stored.
+    pub planner: PlanSettings,
     /// How long the bridge takes over each command before handling it, on the bridge's clock, as
     /// a slow link writes one command at a time. Zero by default. A test knob, for a sender's
     /// pacing over Bluetooth.
@@ -172,6 +176,7 @@ impl Default for SimConfig {
             no_image_answers: None,
             drop_cache_after: None,
             pool: ChannelPool::All,
+            planner: PlanSettings::DEFAULT,
             command_latency: Duration::ZERO,
         }
     }
@@ -408,7 +413,10 @@ impl SimTransport {
         }
 
         let planner = Arc::new(SimFleet {
-            core: tokio::sync::Mutex::new(Fleet::new(self.config.pool)),
+            core: tokio::sync::Mutex::new(Fleet::with_dealer(
+                self.config.pool,
+                self.config.planner,
+            )),
             routes,
             present,
             started,
@@ -654,6 +662,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 HostToBridge::StartScan { bluetooth } => Some(Plan::Start(*bluetooth)),
                 HostToBridge::StopScan => Some(Plan::Stop),
                 HostToBridge::SetPool { pool } => Some(Plan::Pool(*pool)),
+                HostToBridge::SetPlanner { planner } => Some(Plan::Planner(*planner)),
                 _ => None,
             };
             if let Some(plan) = planned {
@@ -663,6 +672,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     Plan::Start(bluetooth) => core.start(bluetooth, now),
                     Plan::Stop => core.stop(now),
                     Plan::Pool(pool) => core.set_pool(pool, now),
+                    Plan::Planner(planner) => core.set_dealer(planner, now),
                 }
                 let report = fleet.after_input(&mut core);
                 if fleet.say(report).await.is_err() {
@@ -683,6 +693,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     host_uart_errors: 0,
                     fan: Some(FanStats { duty: fan_duty, rpm: Some(sim_fan_rpm(fan_duty)) }),
                     pool: core.pool(),
+                    planner: *core.dealer(),
                     scan: core.mode(),
                     ble: core.bluetooth(),
                     present: present.load(Ordering::Relaxed),
@@ -713,7 +724,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 HostToBridge::GetStatus
                 | HostToBridge::StartScan { .. }
                 | HostToBridge::StopScan
-                | HostToBridge::SetPool { .. } => None,
+                | HostToBridge::SetPool { .. }
+                | HostToBridge::SetPlanner { .. } => None,
                 // It has no Bluetooth link to pair or bonds to clear.
                 HostToBridge::OpenPairing | HostToBridge::ClearBonds => None,
                 // Answered when the format ends, or at once while one runs.
@@ -812,6 +824,7 @@ enum Plan {
     Start(bool),
     Stop,
     Pool(ChannelPool),
+    Planner(PlanSettings),
 }
 
 /// `status` as the cache answers it.

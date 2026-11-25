@@ -2,8 +2,8 @@
 //! `wartui run` starts it by, and the plan mirrored from its reports.
 //!
 //! The P4 decides what every node scans (`wartui_proto::fleet`). The host asks it to start, in
-//! Wi-Fi or Wi-Fi and Bluetooth, or to stop, and reads back what it is doing: the mode and pool
-//! in each `Status`, and every share in each `Fleet` report. Nothing here is believed ahead of
+//! Wi-Fi or Wi-Fi and Bluetooth, or to stop, and reads back what it is doing: the mode, pool and
+//! planner in each `Status`, and every share in each `Fleet` report. Nothing here is believed ahead of
 //! the P4 saying so. Each share a report changes becomes an `assignment` row
 //! ([`FleetEngine::record_share_changes`]).
 //!
@@ -162,6 +162,10 @@ impl FleetEngine {
             }
             Command::SetPool { pool } => {
                 batch.bulk.push(HostToBridge::SetPool { pool });
+                batch.bulk.push(HostToBridge::GetStatus);
+            }
+            Command::SetPlanner(planner) => {
+                batch.bulk.push(HostToBridge::SetPlanner { planner });
                 batch.bulk.push(HostToBridge::GetStatus);
             }
         }

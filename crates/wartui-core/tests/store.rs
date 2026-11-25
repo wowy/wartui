@@ -32,7 +32,7 @@ use wartui_proto::link::{
     RadioLinkStats,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, PlanSettings, Planner, SparseNodes};
 use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
@@ -175,7 +175,11 @@ fn store_records_initial_provenance_when_capture_created() {
     assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
     assert!(settings.contains(";pool=none;mode=none;record_raw=true;gps=false;"), "{settings}");
     assert!(settings.contains("gps_max_age_ms=5000;"), "{settings}");
-    assert!(settings.ends_with(";ble_slot=none;ble_node=none"), "{settings}");
+    assert!(settings.starts_with("version=2;"), "{settings}");
+    assert!(
+        settings.ends_with(";ble_slot=none;ble_node=none;planner=none;sparse_nodes=none"),
+        "{settings}"
+    );
     assert_eq!(store.close().dropped, 0);
 }
 
@@ -312,6 +316,51 @@ fn store_records_mode_spelling_when_settings_are_written() {
         assert!(value.contains(&format!(";mode={spelling};")), "{value}");
     }
     assert_eq!(values.len(), 4);
+}
+
+#[test]
+fn store_records_planner_spelling_when_settings_are_written() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let engine = FleetEngine::new(
+        EngineConfig::default(),
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let settings = engine.capture_settings();
+    let weighted = |sparse_nodes| PlanSettings { planner: Planner::Weighted, sparse_nodes };
+    let planners = std::iter::once(None)
+        .chain(std::iter::once(Some(PlanSettings::DEFAULT)))
+        .chain(SparseNodes::ALL.into_iter().map(|sparse| Some(weighted(sparse))));
+    let records = (0u64..)
+        .zip(planners)
+        .map(|(sequence, planner)| Record::CaptureSettings {
+            sequence,
+            at_ms: EPOCH_MS,
+            settings: wartui_core::record::CaptureSettings { planner, ..settings },
+        })
+        .collect();
+    let conn = write(&dir, records);
+    let mut stmt = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings query");
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("settings rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata strings");
+    // `none` for both before the bridge has reported a planner.
+    let spellings = [
+        ("none", "none"),
+        ("even", "auto"),
+        ("weighted", "auto"),
+        ("weighted", "1"),
+        ("weighted", "2"),
+        ("weighted", "3"),
+        ("weighted", "4"),
+    ];
+    for (value, (planner, sparse)) in values.iter().zip(spellings) {
+        assert!(value.ends_with(&format!(";planner={planner};sparse_nodes={sparse}")), "{value}");
+    }
+    assert_eq!(values.len(), spellings.len());
 }
 
 #[test]

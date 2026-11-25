@@ -17,6 +17,7 @@ use wartui_core::gps::Gps;
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::plan::{PlanSettings, Planner};
 
 #[tokio::test(start_paused = true)]
 async fn drive_stores_sightings_that_export_when_fleet_simulated() {
@@ -145,7 +146,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth() {
+async fn drive_records_settings_history_when_operator_changes_pool_bluetooth_and_planner() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("settings.db");
     let link = SimTransport::new(SimConfig { node_count: 2, speed: 60.0, ..Default::default() })
@@ -185,6 +186,12 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth
         .wait_for(|s| s.ble_slot.is_some())
         .await
         .expect("the bridge gives one node the scan");
+    let weighted = PlanSettings { planner: Planner::Weighted, ..PlanSettings::DEFAULT };
+    command_tx.send(Command::SetPlanner(weighted)).await.expect("planner command");
+    snapshot_rx
+        .wait_for(|s| s.planner == Some(weighted))
+        .await
+        .expect("the bridge takes the planner");
     tokio::time::sleep(Duration::from_secs(1)).await;
     stop_tx.send(()).expect("stop");
     assert_eq!(capture.await.expect("capture").dropped, 0);
@@ -198,7 +205,7 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth
         .collect::<Result<Vec<_>, _>>()
         .expect("settings strings");
     // The scan mode changes in rows of its own as the run starts and stops the P4, so set it and
-    // the time aside to read the pool and Bluetooth history.
+    // the time aside to read the pool, Bluetooth and planner history.
     let mut history: Vec<String> = values
         .iter()
         .map(|v| {
@@ -209,8 +216,10 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth
         })
         .collect();
     history.dedup();
-    assert_eq!(history.len(), 4, "initial settings and three changes, not the repeated request");
+    assert_eq!(history.len(), 5, "initial settings and four changes, not the repeated request");
     assert!(history[0].contains("pool=none;"), "before the bridge's first `Status`");
+    assert!(history[0].ends_with(";planner=none;sparse_nodes=none"), "{}", history[0]);
+    assert!(history[1].ends_with(";planner=even;sparse_nodes=auto"), "{}", history[1]);
     assert!(history[1].contains("pool=all;"));
     assert!(history[2].contains("pool=us;") && history[2].contains("ble_slot=none;"));
     assert!(values.iter().any(|v| v.contains(";mode=wifi+bluetooth;")), "{values:?}");
@@ -218,8 +227,10 @@ async fn drive_records_settings_history_when_operator_changes_pool_and_bluetooth
     // The highest slot, which the bridge's planner picks.
     let node = wartui_proto::mac::full(&SimTransport::node_mac(1)).to_string();
     assert!(
-        history[3].contains("ble_slot=A2;") && history[3].ends_with(&format!("ble_node={node}"))
+        history[3].contains("ble_slot=A2;")
+            && history[3].contains(&format!(";ble_node={node};planner=even;"))
     );
+    assert!(history[4].ends_with(";planner=weighted;sparse_nodes=auto"), "{}", history[4]);
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written

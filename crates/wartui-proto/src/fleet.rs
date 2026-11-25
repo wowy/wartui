@@ -22,16 +22,20 @@
 //!   entry is cleared. A body that does not decode is read for its MAC alone, so a node that moved
 //!   to another layout leaves the plan at once rather than after the timeout. Every `Status`
 //!   lists the members and their MACs ([`Fleet::members`]).
-//! - **The plan** is [`plan_for`] over the members in ascending slot order: a member's index is
-//!   the number of members below it. It is cut again only when membership, the mode, the
-//!   Bluetooth pick, the pool or a phone's list changes, so a heartbeat that changes none of them
-//!   costs nothing.
+//! - **The plan** is [`plan_with`] over the members in ascending slot order, through the fleet's
+//!   [`Dealer`]: a member's index is the number of members below it. It is cut again only when
+//!   membership, the mode, the Bluetooth pick, the pool, a phone's list or the dealer changes, so
+//!   a heartbeat that changes none of them costs nothing.
 //! - **A phone's channel list** ([`Fleet::set_channels`]) is the third input, beside the pool and
 //!   the mode, and outranks the pool: with a list the cut deals the list's tunable channels and
 //!   the pool is not consulted; with none, or one naming no tunable channel, it deals the pool.
-//!   Channel 14 is never dealt. No [`Report`] carries the list, because a wartui host never sees
-//!   a plan cut from one: a host that takes the queue releases the phone, which stops the scan
-//!   and clears the list.
+//!   Channel 14 is never dealt. The list goes through the same dealer as the pool. No [`Report`]
+//!   carries the list, because a wartui host never sees a plan cut from one: a host that takes
+//!   the queue releases the phone, which stops the scan and clears the list.
+//! - **The dealer** ([`Fleet::set_dealer`]) is the fourth input: [`PlanSettings`] on the P4, and
+//!   any [`Dealer`] in a test, which is why [`Fleet`] is generic over it. A change re-cuts. No
+//!   [`Report`] carries the dealer, so only the shares it changes mark one, and only they are
+//!   sent.
 //! - **Bluetooth** goes to [`pick_bluetooth`]'s slot in [`ScanMode::WifiBluetooth`], and only
 //!   once two nodes are members, so a lone node keeps sniffing Wi-Fi. The pick is sticky: it
 //!   moves only when its node leaves.
@@ -58,7 +62,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bus::{Assign, Heartbeat, MAX_SLOTS, Slot, wire_epoch};
 use crate::mac::Mac;
-use crate::plan::{ChannelPool, ChannelSet, Job, plan_for};
+use crate::plan::{ChannelPool, ChannelSet, Dealer, Job, PlanSettings, plan_with};
 
 /// How long a slot stays a member after its last heartbeat.
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 20_000;
@@ -216,9 +220,9 @@ impl Entry {
     }
 }
 
-/// The P4's fleet planner. See the module documentation.
+/// The P4's fleet planner, dealing through `D`. See the module documentation.
 #[derive(Debug, Clone)]
-pub struct Fleet {
+pub struct Fleet<D = PlanSettings> {
     mode: ScanMode,
     pool: ChannelPool,
     /// The channels a phone asked for, or `None` for the pool.
@@ -230,7 +234,7 @@ pub struct Fleet {
     members: u32,
     /// The slot scanning Bluetooth in the current plan.
     bluetooth: Option<Slot>,
-    /// The mode, pool or list changed, or an entry lost its want, since the last cut.
+    /// The mode, pool, list or dealer changed, or an entry lost its want, since the last cut.
     recut: bool,
     unreachable: ChannelSet,
     /// The epoch counter, narrowed by [`wire_epoch`].
@@ -239,12 +243,22 @@ pub struct Fleet {
     next_id: u16,
     /// Something a [`Report`] carries changed since [`Fleet::take_report`].
     changed: bool,
+    /// What cuts the channels into shares.
+    dealer: D,
 }
 
 impl Fleet {
-    /// A stopped fleet cutting `pool`, which has heard nothing.
+    /// A stopped fleet cutting `pool` with [`PlanSettings::DEFAULT`], which has heard nothing.
     #[must_use]
     pub const fn new(pool: ChannelPool) -> Self {
+        Self::with_dealer(pool, PlanSettings::DEFAULT)
+    }
+}
+
+impl<D: Dealer + PartialEq> Fleet<D> {
+    /// A stopped fleet cutting `pool` with `dealer`, which has heard nothing.
+    #[must_use]
+    pub const fn with_dealer(pool: ChannelPool, dealer: D) -> Self {
         Self {
             mode: ScanMode::Stopped,
             pool,
@@ -258,6 +272,7 @@ impl Fleet {
             last_epoch: 0,
             next_id: 0,
             changed: false,
+            dealer,
         }
     }
 
@@ -296,6 +311,16 @@ impl Fleet {
         // No report carries the list, so only the shares it changes mark one.
         if self.only != only {
             self.only = only;
+            self.recut = true;
+        }
+        self.settle(now_ms);
+    }
+
+    /// Deal with `dealer` from now on.
+    pub fn set_dealer(&mut self, dealer: D, now_ms: u64) {
+        // No report carries the dealer, so only the shares it changes mark one.
+        if self.dealer != dealer {
+            self.dealer = dealer;
             self.recut = true;
         }
         self.settle(now_ms);
@@ -494,6 +519,12 @@ impl Fleet {
         self.bluetooth
     }
 
+    /// What cuts the channels into shares.
+    #[must_use]
+    pub const fn dealer(&self) -> &D {
+        &self.dealer
+    }
+
     /// The members at `now_ms`, bit n for slot byte n.
     fn member_mask(&self, now_ms: u64) -> u32 {
         let mut mask = 0;
@@ -509,7 +540,8 @@ impl Fleet {
         mask
     }
 
-    /// Cut again if membership, the mode, the Bluetooth pick, the pool or the list changed.
+    /// Cut again if membership, the mode, the Bluetooth pick, the pool, the list or the dealer
+    /// changed.
     fn settle(&mut self, now_ms: u64) {
         let members = self.member_mask(now_ms);
         let pick = match self.mode {
@@ -534,7 +566,7 @@ impl Fleet {
             .unwrap_or_else(|| self.pool.channels())
     }
 
-    /// Deal the channels to the members and give each slot its want.
+    /// Deal the channels to the members through the dealer and give each slot its want.
     fn cut(&mut self) {
         let mut jobs = [Job::Wifi; MAX_SLOTS];
         let mut count = 0;
@@ -546,7 +578,9 @@ impl Fleet {
         }
         let plan = match self.mode {
             ScanMode::Stopped => None,
-            ScanMode::Wifi | ScanMode::WifiBluetooth => plan_for(self.dealt(), &jobs[..count]),
+            ScanMode::Wifi | ScanMode::WifiBluetooth => {
+                plan_with(self.dealt(), &jobs[..count], &self.dealer)
+            }
         };
         let unreachable = plan.map_or(ChannelSet::empty(), |plan| plan.unreachable());
         if unreachable != self.unreachable {

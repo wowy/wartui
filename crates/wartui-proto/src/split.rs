@@ -53,7 +53,7 @@ use crate::link::{
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
 use crate::ota::image::DIGEST_LEN;
-use crate::plan::ChannelPool;
+use crate::plan::{ChannelPool, PlanSettings};
 use crate::radio_link::{Hello, LINK_REVISION, RadioHealth, RadioStatus};
 use crate::reset::ResetCause;
 
@@ -131,6 +131,8 @@ pub struct P4Counters {
     pub fan: Option<FanStats>,
     /// The channel pool in force.
     pub pool: ChannelPool,
+    /// The planner in force and its sparse node count.
+    pub planner: PlanSettings,
     /// What the fleet planner is asked to scan.
     pub scan: crate::fleet::ScanMode,
     /// The slot the fleet planner gave the Bluetooth scan, or `None` for no node.
@@ -537,6 +539,7 @@ impl Pair {
             rx_oversize,
             fan,
             pool,
+            planner,
             scan,
             ble,
             present,
@@ -580,6 +583,7 @@ impl Pair {
             host_uart_errors,
             fan,
             pool,
+            planner,
             scan,
             ble,
             present,

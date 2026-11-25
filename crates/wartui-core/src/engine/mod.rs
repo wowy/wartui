@@ -20,6 +20,7 @@
 //! picks the node that scans it. [`Command::StopScan`] asks it to idle every node.
 //! [`Command::StartWithoutFix`] ends a run's wait for a GPS fix.
 //! [`Command::SetPool`] asks the bridge to hold a new pool, which its next `Status` brings back.
+//! [`Command::SetPlanner`] does the same for the planner and its sparse node count.
 //! [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never captured.
 //! [`Command::PowerCycle`] asks the bridge's carrier to switch one node off and on, and the answer
 //! reaches the operator as [`Snapshot::power_answer`].
@@ -58,7 +59,7 @@ use wartui_proto::link::{
     NO_GPS_RECEIVER,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS, PlanSettings};
 
 pub use config::{EngineConfig, SEND_TIMEOUT};
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
@@ -116,6 +117,9 @@ pub struct FleetEngine {
     /// The channel pool the bridge's last `Status` reported, kept across a disconnect. `None`
     /// until the first.
     pool: Option<ChannelPool>,
+    /// The planner and sparse node count the bridge's last `Status` reported, kept across a
+    /// disconnect like [`Self::pool`]. `None` until the first.
+    planner: Option<PlanSettings>,
     /// The mode the bridge last reported, in a `Status` or a `Fleet` report, kept across a
     /// disconnect like [`Self::pool`]. `None` until the first.
     scan: Option<ScanMode>,
@@ -177,6 +181,7 @@ impl FleetEngine {
     pub fn capture_settings(&self) -> CaptureSettings {
         CaptureSettings {
             pool: self.pool,
+            planner: self.planner,
             mode: self.scan,
             record_raw: self.config.record_raw,
             // The bridge's receiver is built for every run, so it counts only while a bridge is
@@ -210,6 +215,7 @@ impl FleetEngine {
             last_status_poll: None,
             started_at_ms: now.unix_ms,
             pool: None,
+            planner: None,
             scan: None,
             ble_slot: None,
             fleet: None,
@@ -454,6 +460,7 @@ impl FleetEngine {
                 host_uart_errors,
                 fan,
                 pool,
+                planner,
                 scan,
                 ble,
                 present,
@@ -507,6 +514,7 @@ impl FleetEngine {
                     self.slots.entry(member.slot).or_insert(member.mac);
                 }
                 self.pool = Some(*pool);
+                self.planner = Some(*planner);
                 self.ble_slot = *ble;
                 self.on_scan_mode(*scan, scan::Source::Status, batch);
                 // A node off the bus leaves now, not on the next tick.

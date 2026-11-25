@@ -268,6 +268,42 @@ pub const fn is_five_ghz(idx: u8) -> bool {
     idx >= FIRST_FIVE_GHZ_INDEX
 }
 
+/// The [`SCAN_CHANNELS`] indices of the busy 5 GHz channels, most networks first: 36, 44, 157,
+/// 100, 149, 153, 48, 40, 161 and 112.
+///
+/// The weighted deal ([`super::Weighted`]) deals these to the busy shares and the rest of 5 GHz
+/// to the sparse nodes. The order is the networks per channel two 10-node `us` drives measured
+/// (issue #362).
+pub const BUSY_FIVE_GHZ: [u8; 10] = [14, 16, 36, 22, 34, 35, 17, 15, 37, 25];
+
+const _: () = {
+    let channels: [u8; 10] = [36, 44, 157, 100, 149, 153, 48, 40, 161, 112];
+    let mut i = 0;
+    while i < BUSY_FIVE_GHZ.len() {
+        assert!(
+            SCAN_CHANNELS[BUSY_FIVE_GHZ[i] as usize] == channels[i],
+            "BUSY_FIVE_GHZ must still name 36, 44, 157, 100, 149, 153, 48, 40, 161 and 112"
+        );
+        i += 1;
+    }
+};
+
+/// Whether `idx` is a quiet channel: 5 GHz, in [`SCAN_CHANNELS`] and not in [`BUSY_FIVE_GHZ`].
+#[must_use]
+pub const fn is_quiet(idx: u8) -> bool {
+    if idx >= NUM_SCAN_CHANNELS || !is_five_ghz(idx) {
+        return false;
+    }
+    let mut i = 0;
+    while i < BUSY_FIVE_GHZ.len() {
+        if BUSY_FIVE_GHZ[i] == idx {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// The [`SCAN_CHANNELS`] index of `channel`, or `None` when the table lacks it.
 #[must_use]
 pub const fn index_of(channel: u8) -> Option<u8> {

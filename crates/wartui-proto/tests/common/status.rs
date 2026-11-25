@@ -9,6 +9,7 @@ use wartui_proto::link::{
     BluetoothStatus, BridgeHealth, BridgeToHost, Central, HostOwner, PairWindow, QueueId,
     QueueStat, QueueStats, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
+use wartui_proto::plan::{PlanSettings, Planner, SparseNodes};
 use wartui_proto::radio_link::{BleCounters, RadioHealth};
 
 /// A member in every slot, each with a locally administered MAC.
@@ -48,6 +49,10 @@ pub fn largest_status() -> BridgeToHost {
         host_uart_errors: u32::MAX,
         fan: Some(FanStats { duty: FanDuty::FULL, rpm: Some(u16::MAX) }),
         pool: ChannelPool::All,
+        planner: PlanSettings {
+            planner: Planner::Weighted,
+            sparse_nodes: SparseNodes::fixed(SparseNodes::MAX).expect("in range"),
+        },
         scan: ScanMode::WifiBluetooth,
         ble: Slot::from_u8(13),
         present: u32::MAX,

@@ -14,7 +14,10 @@ use wartui_proto::fleet::{
     pick_bluetooth,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, ChannelSet, index_of};
+use wartui_proto::plan::{
+    ChannelPool, ChannelSet, Dealer, Even, Job, PlanSettings, Planner, SparseNodes, index_of,
+    is_quiet, plan_with,
+};
 use wartui_proto::reset::ResetCause;
 
 fn slot(byte: u8) -> Slot {
@@ -53,21 +56,27 @@ struct Node {
     epoch: u8,
 }
 
-struct Rig {
-    fleet: Fleet,
+struct Rig<D = PlanSettings> {
+    fleet: Fleet<D>,
     now: u64,
     nodes: [Option<Node>; 14],
 }
 
 impl Rig {
     fn new() -> Self {
-        Self { fleet: Fleet::new(ChannelPool::All), now: 1_000, nodes: [None; 14] }
+        Self::with_dealer(PlanSettings::DEFAULT)
     }
 
     fn started(bluetooth: bool) -> Self {
         let mut rig = Self::new();
         rig.fleet.start(bluetooth, rig.now);
         rig
+    }
+}
+
+impl<D: Dealer + PartialEq> Rig<D> {
+    fn with_dealer(dealer: D) -> Self {
+        Self { fleet: Fleet::with_dealer(ChannelPool::All, dealer), now: 1_000, nodes: [None; 14] }
     }
 
     fn plug(&mut self, byte: u8, n: u8) {
@@ -485,6 +494,123 @@ fn fleet_gives_every_member_a_channel_when_list_is_shorter_than_fleet() {
     assert_eq!(report.shares.len(), 5);
     assert!(report.shares.iter().all(|share| share.channels.len() == 1));
     assert_eq!(dealt(&report), channel_set(&[1, 6]));
+}
+
+// ---- the dealer ----
+
+const WEIGHTED: PlanSettings =
+    PlanSettings { planner: Planner::Weighted, sparse_nodes: SparseNodes::AUTO };
+
+/// The shares the report lists, by slot.
+fn channels_by_slot(report: &Report) -> Vec<(u8, ChannelSet)> {
+    report.shares.iter().map(|share| (share.slot.as_u8(), share.channels)).collect()
+}
+
+#[test]
+fn fleet_recuts_and_sends_changed_shares_when_dealer_changes_on_ten_members() {
+    let mut rig = settled(10);
+    rig.fleet.set_pool(ChannelPool::Us, rig.now);
+    rig.settle();
+    let before = channels_by_slot(&rig.report());
+    rig.fleet.take_report();
+
+    rig.fleet.set_dealer(WEIGHTED, rig.now);
+    let sends = rig.drain();
+    assert_no_empty_wifi(&sends);
+    let report = rig.fleet.take_report().expect("the shares changed");
+    let after = channels_by_slot(&report);
+    let want = plan_with(ChannelPool::Us.channels(), &[Job::Wifi; 10], &WEIGHTED).expect("valid");
+    for (member, (_, channels)) in (0u8..).zip(&after) {
+        assert_eq!(want.channels_for(member), Some(*channels), "member {member}");
+    }
+    let changed: Vec<u8> =
+        before.iter().zip(&after).filter(|(old, new)| old != new).map(|(old, _)| old.0).collect();
+    assert!(!changed.is_empty());
+    let sent: Vec<u8> = assigns(&sends).iter().map(|(byte, _)| *byte).collect();
+    assert_eq!(sent, changed, "every changed share and only those");
+    assert_eq!(*rig.fleet.dealer(), WEIGHTED);
+
+    rig.deliver(&sends);
+    rig.settle();
+    rig.fleet.set_dealer(WEIGHTED, rig.now);
+    assert!(rig.drain().is_empty(), "the same dealer again");
+    assert!(rig.fleet.take_report().is_none());
+}
+
+#[test]
+fn fleet_sends_nothing_when_dealer_changes_on_three_members() {
+    // Three Wi-Fi slots are too few to weight, so the weighted deal is the even one.
+    let mut rig = settled(3);
+    rig.fleet.take_report();
+    rig.fleet.set_dealer(WEIGHTED, rig.now);
+    assert!(rig.drain().is_empty());
+    assert!(rig.fleet.take_report().is_none());
+    assert_eq!(*rig.fleet.dealer(), WEIGHTED);
+}
+
+#[test]
+fn fleet_puts_quiet_channels_on_sparse_nodes_when_weighted_phone_list_holds_them() {
+    let mut rig = settled(10);
+    rig.fleet.set_dealer(WEIGHTED, rig.now);
+    let busy = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 44, 157, 100, 149, 153, 48, 40, 161, 112];
+    let list = channel_set(&[&busy[..], &[52, 56, 60, 64]].concat());
+    rig.fleet.set_channels(Some(list), rig.now);
+    rig.settle();
+    let report = rig.report();
+    assert_eq!(dealt(&report), list);
+    for share in &report.shares {
+        let quiet = share.channels.indices().filter(|idx| is_quiet(*idx)).count();
+        if share.slot.as_u8() >= 8 {
+            assert_eq!(quiet, share.channels.len() as usize, "slot {} is sparse", share.slot);
+        } else {
+            assert_eq!(quiet, 0, "slot {} is busy", share.slot);
+        }
+    }
+}
+
+#[test]
+fn fleet_deals_short_phone_list_as_even_when_weighted() {
+    let list = channel_set(&[1, 6, 36, 52, 56]);
+    let mut even = settled(10);
+    let mut weighted = settled(10);
+    weighted.fleet.set_dealer(WEIGHTED, weighted.now);
+    for rig in [&mut even, &mut weighted] {
+        rig.fleet.set_channels(Some(list), rig.now);
+        rig.settle();
+    }
+    assert_eq!(channels_by_slot(&weighted.report()), channels_by_slot(&even.report()));
+}
+
+/// The even deal, with the shares in reverse slot order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Backwards;
+
+impl Dealer for Backwards {
+    fn deal(&self, channels: ChannelSet, shares: &mut [ChannelSet]) {
+        Even.deal(channels, shares);
+        shares.reverse();
+    }
+}
+
+#[test]
+fn fleet_sends_fake_dealers_shares_when_built_with_dealer() {
+    let mut rig = Rig::with_dealer(Backwards);
+    rig.fleet.start(false, rig.now);
+    for byte in [0, 4, 9] {
+        rig.plug(byte, byte + 1);
+    }
+    let sends = rig.settle();
+    let want = plan_with(ChannelPool::All.channels(), &[Job::Wifi; 3], &Even).expect("valid");
+    let sent: Vec<(u8, ChannelSet)> =
+        assigns(&sends).iter().map(|(byte, assign)| (*byte, assign.channels)).collect();
+    let expected: Vec<(u8, ChannelSet)> = [(0, 2), (4, 1), (9, 0)]
+        .into_iter()
+        .map(|(byte, member)| (byte, want.channels_for(member).expect("assigned")))
+        .collect();
+    assert_eq!(channels_by_slot(&rig.report()), expected);
+    for (byte, channels) in &expected {
+        assert!(sent.contains(&(*byte, *channels)), "slot {byte} was sent its share");
+    }
 }
 
 #[test]

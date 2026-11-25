@@ -4,7 +4,7 @@ use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
 use wartui_proto::bus::Slot;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, PlanSettings};
 
 #[cfg(doc)]
 use super::{EngineConfig, FleetEngine};
@@ -78,6 +78,13 @@ pub enum Command {
         /// The pool for the bridge to hold.
         pool: ChannelPool,
     },
+
+    /// Ask the bridge to deal its channels with this planner and sparse node count, and keep both
+    /// across its reboots.
+    ///
+    /// Sent once, at once, with a `GetStatus` behind it, as [`Command::SetPool`] is. The P4's
+    /// planner deals again at once, and its next `Fleet` report shows the new shares.
+    SetPlanner(PlanSettings),
 
     /// Replace the SSIDs never captured ([`EngineConfig::excluded_ssids`]). Takes effect from the
     /// next sighting; nothing goes to the nodes.

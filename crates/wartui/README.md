@@ -75,8 +75,10 @@ The capture records the host build and its settings in SQLite metadata:
 
 Settings include the channel pool, the scan mode (`mode`: `stopped`, `wifi` or `wifi+bluetooth`),
 raw recording, positioning configuration, the slot the bridge gave the Bluetooth scan (`ble_slot`,
-by its bus name) and the node in it (`ble_node`). The pool, the mode and the slot are the ones the
-bridge reports, `none` before its first report; the rest are the host's own. A clean quit leaves
+by its bus name), the node in it (`ble_node`), and the planner (`planner`: `even` or `weighted`)
+with its sparse node count (`sparse_nodes`: `auto` or `1` to `4`). The pool, the mode, the slot and
+the planner are the ones the bridge reports, `none` before its first report; the rest are the
+host's own. A clean quit leaves
 a last row with `mode=stopped`.
 None of them says a node adopted anything.
 
@@ -1033,8 +1035,9 @@ save.
 In `run`, settings' `pool` row shows the pool the bridge last reported. `Enter` sends it only when
 the row moved; `no bridge` means the link is down or no status has reported a pool yet, so there is
 nothing to send it to. The header shows the
-pool once the bridge has reported one, and `wartui status` prints a `pool` line too. The strip's
-chart draws only that pool's channels.
+pool once the bridge has reported one, and `wartui status` and `wartui scan` print a `pool` line
+too, with a `planner` line under it (`planner    even, sparse nodes auto`). The strip's chart draws
+only that pool's channels.
 
 The bridge picks the node that scans Bluetooth; see "Bluetooth".
 
@@ -1046,7 +1049,7 @@ and scans until told to stop. Wi-Fi is the scan, and `--bluetooth` adds Bluetoot
 picks the node ("Bluetooth").
 
 ```sh
-wartui scan                     # the mode, the Bluetooth node and every share; changes nothing
+wartui scan                     # mode, Bluetooth node, pool, planner, shares; changes nothing
 wartui scan start               # scan Wi-Fi
 wartui scan start --bluetooth   # scan Wi-Fi, and give one node Bluetooth once two can scan
 wartui scan stop                # idle every node
@@ -1058,6 +1061,7 @@ $ wartui scan start --bluetooth
 starting the wifi and bluetooth scan on bridge 02:00:5E:10:9D:24
 scan       wifi + bluetooth
 bluetooth  N3
+planner    even, sparse nodes auto
 share      N1   21 channels  1,3,5,7,9,11,13,40,48,56,64,104,112,120,128,136,144,153,161,169,177
 share      N2   20 channels  2,4,6,8,10,12,36,44,52,60,100,108,116,124,132,140,149,157,165,173
 share      N3   bluetooth
@@ -1066,8 +1070,9 @@ share      N3   bluetooth
 It resolves one bridge and takes `--config PATH` as `pool` does, and `--sim` as `status` does. Each
 action waits up to 5 s for the bridge to report the change and fails if it does not. `start` then
 reads the bridge's reports for 3 s, so nodes joining on their next heartbeat are in the plan it
-prints. With one node that can scan, `bluetooth` reads `none yet: it needs two nodes that can scan,
-and a lone node stays on wifi`; the bridge gives Bluetooth to a node once a second joins.
+prints, under a `planner` line naming the deal that cut it. With one node that can scan,
+`bluetooth` reads `none yet: it needs two nodes that can scan, and a lone node stays on wifi`; the
+bridge gives Bluetooth to a node once a second joins.
 
 `run` holds the bridge's port, so `wartui scan` reaches a bridge only while no `run` is attached.
 In `run`, the scan starts on connecting, once a GPS receiver holds a fix (§ "How channels are
@@ -1114,16 +1119,16 @@ key help for a few seconds; see "Power-cycling a node".
 
 ### In settings (`c`)
 
-| Key                 | What it does                                                                                        |
-|---------------------|-----------------------------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`   | Move between rows                                                                                   |
-| `←` `→` / `h` `l`   | Change the selected row; the pool wraps, the fan and update rate stop at their ends                 |
-| Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)                |
-| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                          |
-| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it                      |
-| `Enter`             | Apply every row; pool, fan, bluetooth, wardrive esp and sd log to the bridge, rest to `wartui.toml` |
-| `Esc` / `q`         | Close without changing anything                                                                     |
-| `ctrl-c`            | Quit                                                                                                |
+| Key                 | What it does                                                                                                               |
+|---------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                                                                          |
+| `←` `→` / `h` `l`   | Change the selected row; the pool and planner wrap, the fan, sparse nodes and update rate stop at their ends               |
+| Type / paste        | On `wdgwars`, `wigle name` or `wigle token`: enter it (`Backspace`, `ctrl-u` clears)                                       |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                                                                                 |
+| `Enter`             | On the `format` row: ask to format the SD card, then `y` erases and formats it                                             |
+| `Enter`             | Apply every row; pool, planner, sparse nodes, fan, bluetooth, wardrive esp and sd log to the bridge, rest to `wartui.toml` |
+| `Esc` / `q`         | Close without changing anything                                                                                            |
+| `ctrl-c`            | Quit                                                                                                                       |
 
 On the `excluded ssids` page:
 
@@ -1137,44 +1142,48 @@ On the `excluded ssids` page:
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
-The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `fan` (0 to 100 %, by 5; see
-"The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"), `wardrive esp` (`off`, `on`; lets a
-phone link to the bridge as a WardriveESP board with no pairing; see "The Bluetooth link"),
-`remember bridge` (`off`, `on`), `excluded ssids`, under `gps` the `wait for gps` row (`off`,
-`on`; from the next launch, see "Positions") and the `update rate` row (1 to 5 Hz; the bridge
-receiver's fixes a second, at once), the API keys: `wdgwars`, `wigle name` and `wigle token`, and under `sd card` the `log` row (`off`,
-`on`; whether the bridge logs to its microSD card), then the `format` row, which formats the card
-(see "The SD card"). `log` reads `no bridge` while the link is down and `no slot` on a bridge with
-no card slot, and does not step. `excluded ssids` shows how many are listed, or
-`none`, and opens a page that lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
-one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
-the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns to
-the rows; edits to the rows stay pending. On a key row, letters type, so `h` `j` `k` `l` `q`
-neither move nor close; `↑` and `↓` leave it, and the footer shows the `ctrl-u` tip while the row
-holds text. `wigle name` shows in full, cut short with `…` when it is wider than the row.
-`wdgwars` and `wigle token` show their last three characters, up to six bullets before them, and
-from ten characters their first one to three. `Enter` sends the rows to the engine and writes
-every row shown but the pool, the fan, `bluetooth`, `wardrive esp` and `log` to `excluded-ssids`,
-`[bridge]`, `[gps]` and `[api-keys]`, whatever was there, and settings closes. `update rate` goes
-to the engine only when it moved, which sets the receiver at once; unmoved, `bridge-rate-hz` stays
-as the file had it. The
-pool, the fan, `bluetooth`, `wardrive esp` and `log` go to the bridge only when their rows moved,
-and none is written to `wartui.toml`. The bridge keeps the pool, the fan, `wardrive esp` and
-`log`; the run keeps `bluetooth` and asks for it
-again when the bridge reboots. While the bridge reports
+The rows are the `pool` (`all → eu → us`; see "The channel pool"), the `planner` (`even`,
+`weighted`; see "Channel pools"), `sparse nodes` (`auto`, 1 to 4; the count `weighted` asks for),
+the `fan` (0 to 100 %, by 5; see "The lid fan"), `bluetooth` (`off`, `on`; see "Bluetooth"),
+`wardrive esp` (`off`, `on`; lets a phone link to the bridge as a WardriveESP board with no pairing;
+see "The Bluetooth link"), `remember bridge` (`off`, `on`), `excluded ssids`, under `gps` the
+`wait for gps` row (`off`, `on`; from the next launch, see "Positions") and the `update rate` row (1
+to 5 Hz; the bridge receiver's fixes a second, at once), the API keys: `wdgwars`, `wigle name` and
+`wigle token`, and under `sd card` the `log` row (`off`, `on`; whether the bridge logs to its
+microSD card), then the `format` row, which formats the card (see "The SD card"). `planner` and
+`sparse nodes` read `no bridge` while the link is down, and `sparse nodes` reads `even deal` under
+`even`; neither steps then. `log` reads `no bridge` while the link is down and `no slot` on a bridge
+with no card slot, and does not step. `excluded ssids` shows how many are listed, or `none`, and
+opens a page that lists them. While an SSID is being typed there, every letter types, spaces
+included. `Enter` refuses one that is empty, over 32 bytes, or already listed, and says why. `Enter`
+in the list sends it to the engine, writes `excluded-ssids` and the remembered bridge but none of
+the rows, and returns to the rows; edits to the rows stay pending. On a key row, letters type, so
+`h` `j` `k` `l` `q` neither move nor close; `↑` and `↓` leave it, and the footer shows the `ctrl-u`
+tip while the row holds text. `wigle name` shows in full, cut short with `…` when it is wider than
+the row. `wdgwars` and `wigle token` show their last three characters, up to six bullets before
+them, and from ten characters their first one to three. `Enter` sends the rows to the engine and
+writes every row shown but the pool, the planner, `sparse nodes`, the fan, `bluetooth`,
+`wardrive esp` and `log` to `excluded-ssids`, `[bridge]`, `[gps]` and `[api-keys]`, whatever was
+there, and settings closes. `update rate` goes to the engine only when it moved, which sets the
+receiver at once; unmoved, `bridge-rate-hz` stays as the file had it. The pool, the planner,
+`sparse nodes`, the fan, `bluetooth`, `wardrive esp` and `log` go to the bridge only when their rows
+moved, and none is written to `wartui.toml`; the planner and `sparse nodes` go together when either
+moved. The bridge keeps the pool, the planner, `sparse nodes`, the fan, `wardrive esp` and `log`;
+the run keeps `bluetooth` and asks for it again when the bridge reboots. While the bridge reports
 the scan stopped, `bluetooth` reads `scan stopped` and does not step, since the run starts the scan
 once the bridge answers. Before the bridge has reported a scan, it reads `off`, and the run starts
 the scan in the mode it holds. If the engine is not accepting commands, nothing is sent or written,
-and settings stays open with its edits. The bridge re-cuts the fleet as soon as it takes a new pool,
-and sends each node its new share at once. A node empties its dedup ring when its share changes, and
-its next heartbeat shows the share held.
+and settings stays open with its edits. The bridge re-cuts the fleet as soon as it takes a new pool
+or planner, and sends each node its new share at once. A node empties its dedup ring when its share
+changes, and its next heartbeat shows the share held.
 
 ## How channels are assigned
 
 **The bridge's planner cuts the pool, and nothing else does.** It deals the pool across every
 heartbeating, sniffing node, sends each its share, and reports the plan to the host, which shows
-it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"), or the pool changes
-(§ "Channel pools"). The header shows `4 of 5`: four of the five nodes heard hold a share.
+it. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"), or the pool, the
+planner or its sparse node count changes (§ "Channel pools"). The header shows `4 of 5`: four of
+the five nodes heard hold a share.
 
 **`run` starts the scan, and a clean quit stops it.** A bridge found stopped starts on Wi-Fi. A
 `run` that is killed leaves the fleet scanning. One found scanning, left so by such a run or by
@@ -1230,17 +1239,59 @@ no pool; `esp-radio` cannot reach it.
 
 Set it from settings (`c`) or with `wartui pool`; see "The channel pool".
 
-An assignment's forty-two-bit mask can name any subset. The planner deals round-robin from one
-order: 1, 6 and 11, then the rest of the pool ascending. Position _k_ of that order goes to
-sniffing node _k mod n_, so 1, 6 and 11 land on the first three. They are the busiest channels, so
-no node carries two of them once three nodes sniff. Every node carries both bands while each band
-has a channel for it. A block split
-would put one node on all of 2.4 GHz, and losing it would blind the fleet to that band until the
-next re-cut landed.
+An assignment's forty-two-bit mask can name any subset, and the bridge deals it with one of two
+planners, set from settings (`c`): `planner` and `sparse nodes`. The bridge keeps both in its own
+flash, as it keeps the pool. A bridge with nothing stored deals `even`, with `sparse nodes` `auto`.
+
+**`even` deals round-robin from one order**: 1, 6 and 11, then the rest of the pool ascending.
+Position _k_ of that order goes to sniffing node _k mod n_, so 1, 6 and 11 land on the first
+three. They are the busiest channels, so no node carries two of them once three nodes sniff.
+Shares differ by at most one channel. Every node carries both bands while each band has a channel
+for it. A block split would put one node on all of 2.4 GHz, and losing it would blind the fleet to
+that band until the next re-cut landed.
+
+**`weighted` gives the quiet 5 GHz channels to a few sparse nodes**, because those channels take a
+large share of the fleet's radio time for few networks. The other nodes sweep shorter and visit the
+busy channels more often. The busy channels are all of 2.4 GHz and the ten 5 GHz channels that
+yield most: 36, 44, 157, 100, 149, 153, 48, 40, 161 and 112. Every other 5 GHz channel in the
+pool is quiet. The deal:
+
+1. **The sparse nodes are the highest sniffing slots.** `auto` asks for one per five sniffing
+   nodes, rounded up; `1` to `4` ask for that many. Either is capped so three busy nodes remain,
+   and so no sparse node is left without a quiet channel.
+2. **Each sparse node holds quiet channels only**, dealt round-robin across them, so it holds
+   5 GHz only.
+3. **The busy nodes take the busy channels** in the order 1, 6, 11, the rest of 2.4 GHz, then the
+   ten busy 5 GHz channels in yield order.
+4. **The first lap goes to every busy node in turn, and every later lap starts at the fourth**, so
+   the nodes holding 1, 6 and 11 never hold more than another busy node, and busy shares differ by
+   at most one.
+5. **It deals as `even` instead** when fewer than four nodes sniff, when the set holds no quiet
+   channel, or when it holds fewer busy channels than there are busy nodes.
+
+`us`, ten sniffing nodes, `auto`, two sparse nodes:
+
+| Node | Share                                | Sweep  |
+|------|--------------------------------------|--------|
+| N1   | 1, 157                               | 250 ms |
+| N2   | 6, 100                               | 250 ms |
+| N3   | 11, 149                              | 250 ms |
+| N4   | 2, 8, 153                            | 375 ms |
+| N5   | 3, 9, 48                             | 375 ms |
+| N6   | 4, 10, 40                            | 375 ms |
+| N7   | 5, 36, 161                           | 375 ms |
+| N8   | 7, 44, 112                           | 375 ms |
+| N9   | 52, 60, 104, 116, 124, 132, 140, 165 | 1 s    |
+| N10  | 56, 64, 108, 120, 128, 136, 144      | 875 ms |
+
+Every busy node holds both bands while each band has a busy channel for it. `eu` has six busy
+5 GHz channels, since it stops at 140, so with more than six busy nodes some hold 2.4 GHz only.
+`weighted` is unmeasured beside `even`, which is why `even` is the default.
 
 A phone linked over the WardriveESP service names its own channels, and its list replaces the pool
-for its scan ([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md) § "How the fleet maps onto one
-board").
+for its scan. The bridge deals it with the same planner, so a short list, or one with no quiet
+channel, deals as `even` does
+([`docs/wardrive-esp.md`](../../docs/wardrive-esp.md) § "How the fleet maps onto one board").
 
 Every fleet change re-cuts the _whole_ fleet. The bridge sends each changed share at once, and
 each node's next heartbeat shows it held, so the fleet converges within one heartbeat interval. A

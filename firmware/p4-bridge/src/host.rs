@@ -22,9 +22,9 @@
 //! for about 40 ms, the armed buffer lasts about 10 ms, and then the FIFO overflows. The link
 //! needs no flow control for it. An update of the P4's own image is the flash work a host causes,
 //! and `wartui_proto::radio_link::update::Sender` waits for each sector's status and rewinds on
-//! `next_offset` and on silence. A `SetFan`, `SetPool` or `SetWardriveEsp` for a value the sector
-//! does not hold writes one word, and one in 1024 erases a sector first, which can lose the host's
-//! next frames (`src/settings.rs`).
+//! `next_offset` and on silence. A `SetFan`, `SetPool`, `SetWardriveEsp`, `SetSdLog` or
+//! `SetPlanner` writes one word for each setting it changes that the sector does not hold, and one
+//! word in 1024 erases a sector first, which can lose the host's next frames (`src/settings.rs`).
 //! `Status.host_uart_errors` counts the reads that saw one or more line errors or overflows, not
 //! the errors themselves.
 //!
@@ -225,6 +225,7 @@ pub fn take_frame(frame: &mut [u8], source: Source, shared: &Shared) {
         HostToBridge::SetWardriveEsp { on } => crate::settings::set_wardrive_esp(shared, *on),
         HostToBridge::FormatSd => crate::sd::request_format(shared),
         HostToBridge::SetSdLog { on } => crate::settings::set_sd_log(shared, *on),
+        HostToBridge::SetPlanner { planner } => crate::settings::set_planner(shared, *planner),
     }
 }
 

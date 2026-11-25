@@ -34,7 +34,7 @@ use crate::fan::{FanDuty, FanStats};
 use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
 use crate::ota::image::DIGEST_LEN;
-use crate::plan::ChannelPool;
+use crate::plan::{ChannelPool, PlanSettings};
 use crate::radio_link::update::OP_MAX;
 use crate::radio_link::{BleCounters, RadioHealth};
 use crate::reset::ResetCause;
@@ -342,6 +342,13 @@ pub enum HostToBridge {
         /// Whether the bridge logs.
         on: bool,
     },
+    /// Deal with `planner`, and store it so the P4 boots into it ([`crate::settings`]). No
+    /// answer: the next [`BridgeToHost::Status`] shows the planner in force, and a failed save
+    /// answers [`BridgeToHost::Error`]. Every P4 takes it, carrier or not.
+    SetPlanner {
+        /// The planner and sparse node count to run and store.
+        planner: PlanSettings,
+    },
 }
 
 /// How long [`HostToBridge::OpenPairing`] opens the pairing window.
@@ -411,6 +418,8 @@ pub enum BridgeToHost {
         fan: Option<FanStats>,
         /// The channel pool the bridge holds and its planner cuts.
         pool: ChannelPool,
+        /// The planner the bridge deals with, and its sparse node count.
+        planner: PlanSettings,
         /// What the bridge's planner is asked to scan.
         scan: ScanMode,
         /// The slot the bridge's planner gave the Bluetooth scan, or `None` for no node.

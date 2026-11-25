@@ -38,7 +38,9 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
-use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{
+    ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, PlanSettings, Planner, SparseNodes,
+};
 use wartui_proto::radio_link::{BleCounters, RadioHealth};
 use wartui_proto::reset::ResetCause;
 
@@ -122,6 +124,7 @@ fn status_naming(pool: ChannelPool, present: u32, members: &[Member]) -> Event {
         host_uart_errors: 0,
         fan: None,
         pool,
+        planner: BRIDGE_PLANNER.get(),
         scan: BRIDGE_SCAN.get(),
         ble: BRIDGE_BLE.get(),
         present,
@@ -137,6 +140,8 @@ thread_local! {
     static BRIDGE_BLE: std::cell::Cell<Option<Slot>> = const { std::cell::Cell::new(None) };
     /// The mode the calling test's bridge scans in, which every `Status` above reports.
     static BRIDGE_SCAN: std::cell::Cell<ScanMode> = const { std::cell::Cell::new(ScanMode::Stopped) };
+    /// The planner the calling test's bridge deals with, which every `Status` above reports.
+    static BRIDGE_PLANNER: std::cell::Cell<PlanSettings> = const { std::cell::Cell::new(PlanSettings::DEFAULT) };
 }
 
 /// A `Status` reporting `mode`, on the default pool with every slot present.
@@ -2284,6 +2289,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            planner: wartui_proto::plan::PlanSettings::DEFAULT,
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
@@ -2344,6 +2350,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             host_uart_errors: 0,
             fan,
             pool: ChannelPool::All,
+            planner: wartui_proto::plan::PlanSettings::DEFAULT,
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
@@ -2446,6 +2453,7 @@ fn engine_passes_bluetooth_section_to_store_and_view_when_status_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            planner: wartui_proto::plan::PlanSettings::DEFAULT,
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
@@ -2576,6 +2584,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             host_uart_errors: 0,
             fan: None,
             pool: ChannelPool::All,
+            planner: wartui_proto::plan::PlanSettings::DEFAULT,
             scan: ScanMode::Stopped,
             ble: None,
             present: ALL_PRESENT,
@@ -4290,6 +4299,74 @@ fn engine_sends_set_pool_then_status_poll_when_operator_sets_pool() {
         Some(ChannelPool::default()),
         "the pool is the bridge's until its `Status` says otherwise"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The planner: the bridge's `Status` reports what it deals with, and `Command::SetPlanner` asks
+// the bridge to change it, as the pool's do.
+// ---------------------------------------------------------------------------
+
+/// A `Status` reporting `planner`, on the default pool with every slot present.
+fn planner_status(planner: PlanSettings) -> Event {
+    BRIDGE_PLANNER.set(planner);
+    pool_status(ChannelPool::default())
+}
+
+/// The weighted deal with `sparse_nodes`.
+fn weighted(sparse_nodes: SparseNodes) -> PlanSettings {
+    PlanSettings { planner: Planner::Weighted, sparse_nodes }
+}
+
+#[test]
+fn engine_sends_set_planner_then_status_poll_when_operator_sets_planner() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let asked = weighted(SparseNodes::AUTO);
+    let batch = engine.handle(Event::Command(Command::SetPlanner(asked)), clock.at(3));
+
+    // The bridge takes the planner before it answers the poll, so the `Status` carries it.
+    assert_eq!(batch.bulk, [HostToBridge::SetPlanner { planner: asked }, HostToBridge::GetStatus]);
+    assert!(batch.urgent.is_empty() && batch.records.is_empty());
+    assert_eq!(
+        engine.snapshot(clock.at(3), StoreStats::default()).planner,
+        Some(PlanSettings::DEFAULT),
+        "the planner is the bridge's until its `Status` says otherwise"
+    );
+}
+
+#[test]
+fn engine_snapshot_lacks_planner_when_no_status_arrived() {
+    let clock = Clock::new();
+    let engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    let snapshot = engine.snapshot(clock.at(0), StoreStats::default());
+    assert_eq!(snapshot.planner, None);
+    assert_eq!(engine.capture_settings().planner, None);
+}
+
+#[test]
+fn engine_snapshot_follows_planner_when_each_status_reports_it() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let three = weighted(SparseNodes::fixed(3).expect("three"));
+    for (at, planner) in [(1, weighted(SparseNodes::AUTO)), (2, three), (3, PlanSettings::DEFAULT)]
+    {
+        engine.handle(planner_status(planner), clock.at(at));
+        assert_eq!(engine.snapshot(clock.at(at), StoreStats::default()).planner, Some(planner));
+        assert_eq!(engine.capture_settings().planner, Some(planner));
+    }
+}
+
+#[test]
+fn engine_keeps_planner_when_link_drops() {
+    let clock = Clock::new();
+    let mut engine = FleetEngine::new(EngineConfig::default(), clock.at(0));
+    let planner = weighted(SparseNodes::fixed(2).expect("two"));
+    engine.handle(planner_status(planner), clock.at(0));
+    engine.handle(connected(), clock.at(1));
+    engine.handle(disconnected("unplugged"), clock.at(2));
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!(snapshot.planner, Some(planner));
 }
 
 thread_local! {

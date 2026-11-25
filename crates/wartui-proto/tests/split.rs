@@ -10,6 +10,7 @@ use wartui_proto::link::{
     RADIO_UPDATING, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
+use wartui_proto::plan::{PlanSettings, Planner, SparseNodes};
 use wartui_proto::radio_link::{BleCounters, Chip, Hello, LINK_REVISION, RadioHealth, RadioStatus};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{
@@ -180,6 +181,7 @@ fn pair_status_sums_host_and_radio_drops() {
         rx_oversize: 2,
         fan: Some(FanStats { duty: FanDuty::new(40).expect("in range"), rpm: Some(1830) }),
         pool: ChannelPool::Eu,
+        planner: weighted_two(),
         scan: ScanMode::WifiBluetooth,
         ble: Slot::new(0, 1),
         present: 0b101,
@@ -205,6 +207,7 @@ fn pair_status_sums_host_and_radio_drops() {
             host_uart_errors,
             fan,
             pool,
+            planner,
             scan,
             ble,
             present,
@@ -232,6 +235,7 @@ fn pair_status_sums_host_and_radio_drops() {
             assert_eq!(host_uart_errors, 9);
             assert_eq!(fan.and_then(|fan| fan.rpm), Some(1830), "passed through");
             assert_eq!(pool, ChannelPool::Eu, "passed through");
+            assert_eq!(planner, weighted_two(), "passed through");
             assert_eq!(scan, ScanMode::WifiBluetooth, "passed through");
             assert_eq!(ble, Slot::new(0, 1), "passed through");
             // The host's 6 and the C6's ring toward the P4, 4; never the node queues' refusals.
@@ -278,6 +282,24 @@ fn pair_status_carries_sd_when_p4_reports_a_card_or_none() {
         };
         assert_eq!(reported, sd);
     }
+}
+
+#[test]
+fn pair_status_carries_planner_when_p4_reports_one() {
+    let pair = up_pair();
+    for planner in [PlanSettings::DEFAULT, weighted_two()] {
+        let BridgeToHost::Status { planner: reported, .. } =
+            pair.status(3_000, P4Counters { planner, ..p4_zero() })
+        else {
+            panic!("not a Status");
+        };
+        assert_eq!(reported, planner);
+    }
+}
+
+/// The weighted planner with two sparse nodes.
+fn weighted_two() -> PlanSettings {
+    PlanSettings { planner: Planner::Weighted, sparse_nodes: SparseNodes::fixed(2).expect("2") }
 }
 
 #[test]
@@ -517,6 +539,7 @@ fn p4_zero() -> P4Counters {
         rx_oversize: 0,
         fan: None,
         pool: ChannelPool::All,
+        planner: PlanSettings::DEFAULT,
         scan: ScanMode::Stopped,
         ble: None,
         present: 0,

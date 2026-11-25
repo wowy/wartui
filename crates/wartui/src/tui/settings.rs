@@ -7,9 +7,12 @@
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
 //!
-//! The pool, fan, bluetooth, wardrive esp and sd card log rows are the bridge's, and are never
-//! written to `wartui.toml`. Each shows what the bridge last reported, and `Enter` sends it only
-//! when the row moved. The bridge stores the pool, fan, wardrive esp and log and boots into them.
+//! The pool, planner, sparse nodes, fan, bluetooth, wardrive esp and sd card log rows are the
+//! bridge's, and are never written to `wartui.toml`. Each shows what the bridge last reported, and
+//! `Enter` sends it only when the row moved. The bridge stores the pool, planner, sparse nodes,
+//! fan, wardrive esp and log and boots into them. The planner and sparse nodes rows travel
+//! together, as one `SetPlanner`, and sparse nodes steps only under the weighted planner, the one
+//! deal that reads it.
 //! It keeps no scan mode, so the bluetooth row is held by the run, which starts the scan in that
 //! mode again after the bridge reboots. The bridge picks which node scans Bluetooth.
 //!
@@ -45,7 +48,7 @@ use wartui_core::ubx;
 use wartui_proto::fan::FanDuty;
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::SdState;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, PlanSettings, Planner, SparseNodes};
 
 use super::UploadTarget;
 use super::centered_rect;
@@ -88,6 +91,8 @@ pub struct Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Pool,
+    Planner,
+    SparseNodes,
     Fan,
     Bluetooth,
     WardriveEsp,
@@ -103,8 +108,10 @@ enum Field {
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 13] = [
+const FIELDS: [Field; 15] = [
     Field::Pool,
+    Field::Planner,
+    Field::SparseNodes,
     Field::Fan,
     Field::Bluetooth,
     Field::WardriveEsp,
@@ -143,6 +150,11 @@ pub(super) struct ConfigModal {
     pool: Option<ChannelPool>,
     /// The pool the bridge reported when the modal opened, so `Enter` sends only a change.
     pool_seed: Option<ChannelPool>,
+    /// The planner and sparse nodes rows' values, or `None` while no bridge has reported a
+    /// planner.
+    planner: Option<PlanSettings>,
+    /// The planner the bridge reported when the modal opened, so `Enter` sends only a change.
+    planner_seed: Option<PlanSettings>,
     /// The fan row's duty, or `None` while no bridge has reported a fan.
     fan: Option<FanDuty>,
     /// The duty the bridge reported when the modal opened, so `Enter` sends only a change.
@@ -164,8 +176,8 @@ pub(super) struct ConfigModal {
     /// The log row as the bridge reported it when the modal opened, so `Enter` sends only a
     /// change.
     sd_log_seed: Option<bool>,
-    /// Whether the link was up when the modal opened. While it is down, the pool, fan, wardrive
-    /// esp and log rows are `None`: a value sent then would be dropped, not stored.
+    /// Whether the link was up when the modal opened. While it is down, the pool, planner, fan,
+    /// wardrive esp and log rows are `None`: a value sent then would be dropped, not stored.
     bridge_up: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
@@ -241,13 +253,39 @@ fn step_pool(current: ChannelPool, delta: i8) -> ChannelPool {
     POOL_STEPS[index]
 }
 
+/// Step `current` one place through [`Planner::ALL`], wrapping past either end.
+fn step_planner(current: Planner, delta: i8) -> Planner {
+    let len = Planner::ALL.len();
+    let index = Planner::ALL.iter().position(|&planner| planner == current).unwrap_or(0);
+    let index = match delta.signum() {
+        1 => (index + 1) % len,
+        -1 => (index + len - 1) % len,
+        _ => index,
+    };
+    Planner::ALL[index]
+}
+
+/// Step `current` one place through [`SparseNodes::ALL`], stopping at `auto` and at 4.
+fn step_sparse_nodes(current: SparseNodes, delta: i8) -> SparseNodes {
+    let last = SparseNodes::ALL.len() - 1;
+    let index = SparseNodes::ALL.iter().position(|&sparse| sparse == current).unwrap_or(0);
+    let index = match delta.signum() {
+        1 => (index + 1).min(last),
+        -1 => index.saturating_sub(1),
+        _ => index,
+    };
+    SparseNodes::ALL[index]
+}
+
 impl ConfigModal {
-    /// Step the selected row by one. The pool row wraps past its ends, and the fan and update
-    /// rate rows stop at them.
+    /// Step the selected row by one. The pool and planner rows wrap past their ends, and the fan,
+    /// sparse nodes and update rate rows stop at them.
     ///
     /// | Row | Step |
     /// |---|---|
     /// | pool | one place in [`POOL_STEPS`]; none at `no bridge` |
+    /// | planner | one place in [`Planner::ALL`]; none at `no bridge` |
+    /// | sparse nodes | one place in [`SparseNodes::ALL`], stopping at `auto` and 4; none at `even deal` or `no bridge` |
     /// | fan | [`FAN_STEP`], stopping at 0 and 100; none at `no fan` |
     /// | bluetooth | flips; none at `scan stopped` |
     /// | wardrive esp | flips; none at `no bridge` |
@@ -261,6 +299,19 @@ impl ConfigModal {
     fn step(&mut self, delta: i8) {
         match self.selected {
             Field::Pool => self.pool = self.pool.map(|pool| step_pool(pool, delta)),
+            Field::Planner => {
+                if let Some(settings) = self.planner.as_mut() {
+                    settings.planner = step_planner(settings.planner, delta);
+                }
+            }
+            // The even deal reads no sparse node count, so there is nothing to step.
+            Field::SparseNodes => {
+                if let Some(settings) =
+                    self.planner.as_mut().filter(|settings| settings.planner == Planner::Weighted)
+                {
+                    settings.sparse_nodes = step_sparse_nodes(settings.sparse_nodes, delta);
+                }
+            }
             Field::Fan => self.fan = self.fan.map(|duty| step_fan(duty, delta)),
             Field::Bluetooth => {
                 if delta != 0 {
@@ -317,10 +368,11 @@ pub(super) enum ModalAction {
 impl ConfigModal {
     /// Open the modal, seeded from what is in force.
     pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
-        // The bridge holds these four, so they are what its last `Status` said, and nothing
+        // The bridge holds these five, so they are what its last `Status` said, and nothing
         // while the link is down.
         let bridge_up = snapshot.link_up;
         let pool = snapshot.pool.filter(|_| bridge_up);
+        let planner = snapshot.planner.filter(|_| bridge_up);
         let wardrive_esp = snapshot.wardrive_esp.filter(|_| bridge_up);
         let sd_log = snapshot.sd_log.filter(|_| bridge_up);
         let fan = snapshot
@@ -339,6 +391,8 @@ impl ConfigModal {
             selected: Field::Pool,
             pool,
             pool_seed: pool,
+            planner,
+            planner_seed: planner,
             fan,
             fan_seed: fan,
             bluetooth,
@@ -371,6 +425,8 @@ impl ConfigModal {
             Field::WigleName => Some(&mut self.wigle_name),
             Field::WigleToken => Some(&mut self.wigle_token),
             Field::Pool
+            | Field::Planner
+            | Field::SparseNodes
             | Field::Fan
             | Field::Bluetooth
             | Field::WardriveEsp
@@ -542,15 +598,18 @@ pub(super) fn apply(
     // Reserve every slot first, so a full queue applies none of the modal rather than
     // part of it. The excluded list is not among them: its page sends it on its own
     // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The bridge's rows go only when they moved: the bridge stores every pool, duty, wardrive esp
-    // and log setting it is sent, and an unmoved bluetooth row would restate the scan.
+    // The bridge's rows go only when they moved: the bridge stores every pool, planner, duty,
+    // wardrive esp and log setting it is sent, and an unmoved bluetooth row would restate the scan.
     let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
+    // Either row moving sends both, since one command carries the pair.
+    let planner = modal.planner.filter(|_| modal.planner != modal.planner_seed);
     let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
     let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
     let wardrive_esp = modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed);
     let sd_log = modal.sd_log.filter(|_| modal.sd_log != modal.sd_log_seed);
     let gps_rate = (modal.gps_rate != modal.gps_rate_seed).then_some(modal.gps_rate);
     let wanted = usize::from(pool.is_some())
+        + usize::from(planner.is_some())
         + usize::from(fan.is_some())
         + usize::from(bluetooth.is_some())
         + usize::from(wardrive_esp.is_some())
@@ -560,6 +619,7 @@ pub(super) fn apply(
         return Err(ENGINE_BUSY);
     };
     let pool_command = pool.map(|pool| Command::SetPool { pool });
+    let planner_command = planner.map(Command::SetPlanner);
     let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
     let bluetooth_command = bluetooth.map(Command::SetBluetooth);
     let wardrive_esp_command = wardrive_esp.map(Command::SetWardriveEsp);
@@ -567,6 +627,7 @@ pub(super) fn apply(
     let gps_rate_command = gps_rate.map(Command::SetGpsRate);
     for command in pool_command
         .into_iter()
+        .chain(planner_command)
         .chain(fan_command)
         .chain(bluetooth_command)
         .chain(wardrive_esp_command)
@@ -581,6 +642,11 @@ pub(super) fn apply(
         Some(pool) => format!("pool {pool} sent to the bridge"),
         None => "settings applied".to_owned(),
     };
+    if let Some(PlanSettings { planner, sparse_nodes }) = planner {
+        text.push_str(&format!(
+            "; planner {planner}, sparse nodes {sparse_nodes} sent to the bridge"
+        ));
+    }
     if let Some(duty) = fan {
         text.push_str(&format!("; fan {duty} sent to the bridge"));
     }
@@ -783,12 +849,14 @@ fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
 }
 
 /// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
-/// the sd card row reads on every frame.
+/// the sd card row reads on every frame. The box is as tall as its lines. On a terminal too short
+/// for them it drops the blank separators, the last first, so the tip line stays on screen.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
-    let area = centered_rect(48, 23, frame.area());
-    frame.render_widget(Clear, area);
+    const WIDTH: u16 = 48;
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
+        let area = centered_rect(WIDTH, 25, frame.area());
+        frame.render_widget(Clear, area);
         let block = Block::bordered().title(" settings › excluded ssids ");
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -802,10 +870,6 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
         frame.render_widget(Paragraph::new(lines), inner);
         return;
     }
-
-    let block = Block::bordered().title(" settings ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     let styled = |field: Field| {
         if modal.selected == field {
@@ -821,20 +885,33 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
     let text_row = |label: &str, value: &str, field: Field| {
         Line::from(Span::styled(format!("{label:<18}  {value}"), styled(field)))
     };
-    // What fits right of the 18-wide label column and its two spaces.
-    let value_width = usize::from(inner.width).saturating_sub(20);
+    // What fits right of the border, the 18-wide label column and its two spaces.
+    let value_width = usize::from(WIDTH.min(frame.area().width)).saturating_sub(22);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
     let (sd_value, sd_action) = sd_row(snapshot);
     // A bridge that reported no card slot has no log to set.
     let no_slot =
         modal.bridge_up && snapshot.bridge_status.is_some_and(|status| status.sd.is_none());
-    let lines = vec![
+    let mut lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
             // Nothing to step, so no arrows.
             None => {
                 Line::from(Span::styled(format!("{:<18}  no bridge", "pool"), styled(Field::Pool)))
             }
+        },
+        match modal.planner {
+            Some(settings) => row("planner", &settings.planner, Field::Planner),
+            // Nothing to step, so no arrows.
+            None => text_row("planner", "no bridge", Field::Planner),
+        },
+        match modal.planner {
+            Some(PlanSettings { planner: Planner::Weighted, sparse_nodes }) => {
+                row("sparse nodes", &sparse_nodes, Field::SparseNodes)
+            }
+            // The even deal reads no count, so nothing to step and no arrows.
+            Some(_) => text_row("sparse nodes", "even deal", Field::SparseNodes),
+            None => text_row("sparse nodes", "no bridge", Field::SparseNodes),
         },
         match modal.fan {
             Some(duty) => row("fan", &duty, Field::Fan),
@@ -894,6 +971,18 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
             _ => "enter save · esc cancel",
         }),
     ];
+    let room = usize::from(frame.area().height.saturating_sub(2));
+    while lines.len() > room {
+        let Some(blank) = lines.iter().rposition(|line| line.spans.is_empty()) else { break };
+        lines.remove(blank);
+    }
+
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(WIDTH, height, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered().title(" settings ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1053,6 +1142,12 @@ mod tests {
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("still open").selected, Field::Planner);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal().expect("still open").selected, Field::SparseNodes);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("still open").selected, Field::Fan);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
@@ -1097,6 +1192,224 @@ mod tests {
                 "steps forward one at a time"
             );
         }
+    }
+
+    /// The weighted planner with `sparse_nodes`.
+    fn weighted(sparse_nodes: SparseNodes) -> PlanSettings {
+        PlanSettings { planner: Planner::Weighted, sparse_nodes }
+    }
+
+    /// [`busy`] with the bridge dealing with `planner`.
+    fn planner_snapshot(planner: PlanSettings) -> Snapshot {
+        Snapshot { planner: Some(planner), ..busy() }
+    }
+
+    #[test]
+    fn ui_seeds_planner_rows_from_snapshot_planner_when_modal_opened() {
+        let planner = weighted(SparseNodes::fixed(3).expect("three"));
+        let snapshot = planner_snapshot(planner);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+
+        let modal = ui.modal().expect("the modal opened");
+        assert_eq!((modal.planner, modal.planner_seed), (Some(planner), Some(planner)));
+        let rendered = modal_screen(&snapshot, &mut ui);
+        assert!(rendered.contains("planner           ◂ weighted ▸"), "{rendered}");
+        assert!(rendered.contains("sparse nodes      ◂ 3 ▸"), "{rendered}");
+    }
+
+    #[test]
+    fn ui_shows_no_bridge_and_steps_nothing_when_snapshot_planner_is_none() {
+        let snapshot = Snapshot { planner: None, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        for field in [Field::Planner, Field::SparseNodes] {
+            select(field, &mut ui, &snapshot, &tx);
+            ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+            ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+            assert_eq!(ui.modal().expect("open").planner, None, "{field:?}");
+
+            let rendered = modal_screen(&snapshot, &mut ui);
+            assert!(rendered.contains("planner             no bridge"), "{rendered}");
+            assert!(rendered.contains("sparse nodes        no bridge"), "{rendered}");
+
+            ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+            assert!(rx.try_recv().is_err(), "no planner to send");
+        }
+    }
+
+    #[test]
+    fn ui_shows_no_bridge_on_planner_rows_when_link_is_down() {
+        let snapshot = Snapshot { link_up: false, ..planner_snapshot(weighted(SparseNodes::AUTO)) };
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Planner, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        // A value sent while the link is down would be dropped, not stored.
+        assert_eq!(ui.modal().expect("open").planner, None);
+        let rendered = modal_screen(&snapshot, &mut ui);
+        assert!(rendered.contains("planner             no bridge"), "{rendered}");
+        assert!(rendered.contains("sparse nodes        no bridge"), "{rendered}");
+    }
+
+    #[test]
+    fn ui_steps_planner_and_wraps_at_ends_when_h_or_l_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::Planner, &mut ui, &snapshot, &tx);
+        let planner = |ui: &Ui| ui.modal().expect("open").planner.map(|p| p.planner);
+        assert_eq!(planner(&ui), Some(Planner::Even));
+
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        assert_eq!(planner(&ui), Some(Planner::Weighted), "wraps from the start to the end");
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(planner(&ui), Some(Planner::Even), "wraps from the end to the start");
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(planner(&ui), Some(Planner::Weighted));
+        assert_eq!(
+            ui.modal().expect("open").planner.map(|p| p.sparse_nodes),
+            Some(SparseNodes::AUTO),
+            "the planner row leaves the sparse node count alone"
+        );
+    }
+
+    #[test]
+    fn ui_steps_sparse_nodes_and_stops_at_ends_when_h_or_l_pressed() {
+        let snapshot = planner_snapshot(weighted(SparseNodes::AUTO));
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SparseNodes, &mut ui, &snapshot, &tx);
+        let sparse = |ui: &Ui| ui.modal().expect("open").planner.map(|p| p.sparse_nodes);
+        let fixed = |n| SparseNodes::fixed(n).expect("in range");
+
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        assert_eq!(sparse(&ui), Some(SparseNodes::AUTO), "stops at auto rather than wrapping");
+        for expected in [fixed(1), fixed(2), fixed(3), fixed(4), fixed(4)] {
+            ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+            assert_eq!(sparse(&ui), Some(expected), "stops at 4 rather than wrapping");
+        }
+        let rendered = modal_screen(&snapshot, &mut ui);
+        assert!(rendered.contains("sparse nodes      ◂ 4 ▸"), "{rendered}");
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        assert_eq!(sparse(&ui), Some(fixed(3)));
+    }
+
+    #[test]
+    fn ui_shows_even_deal_and_steps_nothing_on_sparse_nodes_when_planner_is_even() {
+        let planner = PlanSettings {
+            sparse_nodes: SparseNodes::fixed(2).expect("two"),
+            ..PlanSettings::DEFAULT
+        };
+        let snapshot = planner_snapshot(planner);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SparseNodes, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        assert_eq!(
+            ui.modal().expect("open").planner,
+            Some(planner),
+            "the even deal reads no count"
+        );
+
+        let rendered = modal_screen(&snapshot, &mut ui);
+        assert!(rendered.contains("planner           ◂ even ▸"), "{rendered}");
+        assert!(rendered.contains("sparse nodes        even deal"), "{rendered}");
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "nothing moved, so nothing goes out");
+    }
+
+    #[test]
+    fn ui_sends_planner_command_when_enter_pressed_with_planner_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        select(Field::Planner, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPlanner(weighted(SparseNodes::AUTO)));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(
+            notice.starts_with(
+                "settings applied; planner weighted, sparse nodes auto sent to the bridge;"
+            ),
+            "{notice}"
+        );
+        let file = std::fs::read_to_string(&target).expect("the other rows were saved");
+        assert!(!file.contains("planner") && !file.contains("sparse"), "{file}");
+    }
+
+    #[test]
+    fn ui_sends_planner_command_when_enter_pressed_with_only_sparse_nodes_changed() {
+        let snapshot = planner_snapshot(weighted(SparseNodes::AUTO));
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::SparseNodes, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        let two = weighted(SparseNodes::fixed(2).expect("two"));
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPlanner(two));
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(
+            notice.contains("; planner weighted, sparse nodes 2 sent to the bridge"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn ui_sends_no_planner_when_enter_pressed_with_planner_rows_moved_back() {
+        let snapshot = planner_snapshot(weighted(SparseNodes::AUTO));
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        // Out and back on both rows: what the bridge already holds.
+        select(Field::Planner, &mut ui, &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "no SetPlanner");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("planner"), "{notice}");
+    }
+
+    #[test]
+    fn ui_names_pool_then_planner_in_notice_when_enter_pressed_with_both_moved() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPlanner(weighted(SparseNodes::AUTO)));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(
+            notice.starts_with(
+                "pool EU sent to the bridge; planner weighted, sparse nodes auto sent to the bridge;"
+            ),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -1378,20 +1691,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = fan_snapshot(40);
-        let (tx, mut rx) = mpsc::channel(3);
+        let (tx, mut rx) = mpsc::channel(4);
         tx.try_send(Command::StopScan).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        // The pool, fan and bluetooth rows moved, so the modal sends three commands.
-        for row in [Field::Pool, Field::Fan, Field::Bluetooth] {
-            assert_eq!(ui.modal().expect("open").selected, row);
+        // The pool, planner, fan and bluetooth rows moved, so the modal sends four commands.
+        for row in [Field::Pool, Field::Planner, Field::Fan, Field::Bluetooth] {
+            while ui.modal().expect("open").selected != row {
+                ui.on_modal_key(key(KeyCode::Char('j')), &snapshot, &tx);
+            }
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         }
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for two of the modal's three commands, so none goes out.
+        // Room for three of the modal's four commands, so none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
@@ -2685,8 +2999,9 @@ mod tests {
         let right = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
         select(Field::Pool, &mut ui, &snapshot, &tx);
         ui.on_modal_key(right, &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal().expect("open").selected, Field::Fan);
+        while ui.modal().expect("open").selected != Field::Fan {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+        }
         ui.on_modal_key(right, &snapshot, &tx);
         let modal = ui.modal().expect("open");
         assert_eq!((modal.pool, modal.fan), (None, None));
@@ -3246,18 +3561,133 @@ mod tests {
         let terminal = handheld(&snapshot, &mut ui);
         let rendered = terminal.backend().to_string();
 
-        // 48×23, centered in 58×26: columns 5 to 52, rows 1 to 23.
+        // 48×25, centered in 58×26: columns 5 to 52, rows 0 to 24, so one row of the view
+        // shows below it and none above.
         let buffer = terminal.backend().buffer();
         let row = |y: u16| -> String { (5..53).map(|x| buffer[(x, y)].symbol()).collect() };
-        assert!(row(1).starts_with("┌ settings "), "{rendered}");
-        assert_eq!(row(23), format!("└{}┘", "─".repeat(46)), "{rendered}");
-        assert_eq!(row(22), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
-        assert!(row(20).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
-        assert!(row(19).starts_with("│log               ◂ on ▸"), "{rendered}");
-        assert!(row(18).starts_with("│sd card "), "{rendered}");
-        assert!(row(11).starts_with("│update rate       ◂ 5 Hz ▸"), "{rendered}");
-        assert!(row(10).starts_with("│wait for gps      ◂ on ▸"), "{rendered}");
-        assert!(row(9).starts_with("│gps "), "{rendered}");
+        assert!(row(0).starts_with("┌ settings "), "{rendered}");
+        assert!(row(1).starts_with("│pool              ◂ All ▸"), "{rendered}");
+        assert!(row(2).starts_with("│planner           ◂ even ▸"), "{rendered}");
+        assert!(row(3).starts_with("│sparse nodes        even deal"), "{rendered}");
+        assert!(row(4).starts_with("│fan "), "{rendered}");
+        assert_eq!(row(24), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        assert_eq!(row(23), format!("│{FORMAT_TIP:<46}│"), "{rendered}");
+        assert!(row(21).starts_with("│format              53.7 of 58.9 GB free"), "{rendered}");
+        assert!(row(20).starts_with("│log               ◂ on ▸"), "{rendered}");
+        assert!(row(19).starts_with("│sd card "), "{rendered}");
+        assert!(row(12).starts_with("│update rate       ◂ 5 Hz ▸"), "{rendered}");
+        assert!(row(11).starts_with("│wait for gps      ◂ on ▸"), "{rendered}");
+        assert!(row(10).starts_with("│gps "), "{rendered}");
+    }
+
+    /// The settings modal's rows, inside its border, at 80 columns and `rows` rows, with the
+    /// bottom border asserted on the terminal's last row.
+    fn short_modal(rows: u16) -> (Vec<String>, String) {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        let mut terminal = Terminal::new(TestBackend::new(80, rows)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        // 48 wide, centered in 80: columns 16 to 63.
+        let buffer = terminal.backend().buffer();
+        let row = |y: u16| -> String { (16..64).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(0).starts_with("┌ settings "), "{rendered}");
+        assert_eq!(row(rows - 1), format!("└{}┘", "─".repeat(46)), "{rendered}");
+        let inside = (1..rows - 1)
+            .map(|y| row(y).trim_start_matches('│').trim_end_matches('│').trim_end().to_owned())
+            .collect();
+        (inside, rendered)
+    }
+
+    /// Asserts each of `rows` starts with the label `expected` holds for it, `""` for a blank.
+    fn assert_rows(rows: &[String], expected: &[&str], rendered: &str) {
+        assert_eq!(rows.len(), expected.len(), "{rendered}");
+        for (row, label) in rows.iter().zip(expected) {
+            if label.is_empty() {
+                assert!(row.is_empty(), "{row:?} should be blank\n{rendered}");
+            } else {
+                assert!(row.starts_with(label), "{row:?} should start {label:?}\n{rendered}");
+            }
+        }
+    }
+
+    const TOP_ROWS: [&str; 8] = [
+        "pool",
+        "planner",
+        "sparse nodes",
+        "fan",
+        "bluetooth",
+        "wardrive esp",
+        "remember bridge",
+        "excluded ssids",
+    ];
+
+    #[test]
+    fn draw_drops_blank_above_tip_and_keeps_every_row_when_terminal_is_80_by_24() {
+        let (rows, rendered) = short_modal(24);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "",
+            "gps",
+            "wait for gps",
+            "update rate",
+            "",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
+    }
+
+    #[test]
+    fn draw_drops_blanks_above_tip_and_sd_card_and_keeps_every_row_when_terminal_is_80_by_23() {
+        let (rows, rendered) = short_modal(23);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "",
+            "gps",
+            "wait for gps",
+            "update rate",
+            "",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
+    }
+
+    #[test]
+    fn draw_drops_every_blank_and_keeps_every_row_when_terminal_is_80_by_21() {
+        let (rows, rendered) = short_modal(21);
+        let mut expected = TOP_ROWS.to_vec();
+        expected.extend([
+            "gps",
+            "wait for gps",
+            "update rate",
+            "api keys",
+            "wdgwars",
+            "wigle name",
+            "wigle token",
+            "sd card",
+            "log",
+            "format",
+            "enter save · esc cancel",
+        ]);
+        assert_rows(&rows, &expected, &rendered);
     }
 
     #[test]
