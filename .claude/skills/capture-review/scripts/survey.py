@@ -72,6 +72,25 @@ SCAN_CHANNELS = [
     149, 153, 157, 161, 165, 169, 173, 177,
 ]
 
+# Mirrors plan::BUSY_FIVE_GHZ in crates/wartui-proto/src/plan/channels.rs: the 5 GHz channels the
+# weighted planner deals with 2.4 GHz. Every other 5 GHz channel is quiet, and goes to the sparse
+# nodes.
+BUSY_FIVE_GHZ = [36, 44, 157, 100, 149, 153, 48, 40, 161, 112]
+
+# The channel groups the yield section splits a capture by, in print order.
+GROUPS = ("2.4 GHz", "busy 5 GHz", "quiet 5 GHz")
+
+# The index into GROUPS of a row's `channel`, as SQL.
+GROUP_SQL = (f"CASE WHEN channel <= 14 THEN 0 WHEN channel IN "
+             f"({','.join(map(str, BUSY_FIVE_GHZ))}) THEN 1 ELSE 2 END")
+
+
+def channel_group(channel):
+    """The index into GROUPS of `channel`."""
+    if channel <= 14:
+        return 0
+    return 1 if channel in BUSY_FIVE_GHZ else 2
+
 
 def is_fault(cause):
     return cause is not None and cause not in NOT_FAULTS
@@ -338,8 +357,17 @@ def provenance(db, ctx):
     if pools:
         later = "".join(f" -> {new} at {rel(at)}" for at, new in pools[1:])
         print(f"  pool      {pools[0][1]}{later}")
+    # The planner and its sparse node count are the bridge's too, and decide how the pool was
+    # dealt: compare two drives only when these match, or when they are what is being compared.
+    for key, title in (("planner", "planner"), ("sparse_nodes", "sparse nodes")):
+        values = [(None, ctx["settings"][key])] if key in ctx.get("settings", {}) else []
+        values += [(at, ch[key][1]) for at, ch in ctx.get("settings_changes", []) if key in ch]
+        if values:
+            later = "".join(f" -> {new} at {rel(at)}" for at, new in values[1:])
+            print(f"  {title:<9} {values[0][1]}{later}")
+            ctx[key] = values[-1][1]
     # The scan mode is the bridge's too: `none` until its first report, then each change.
-    modes = [(None, ctx["settings"]["mode"])] if "mode" in ctx.get("settings", {}) else []
+    modes =[(None, ctx["settings"]["mode"])] if "mode" in ctx.get("settings", {}) else []
     modes += [(at, ch["mode"][1]) for at, ch in ctx.get("settings_changes", []) if "mode" in ch]
     if modes:
         later = "".join(f" -> {new} at {rel(at)}" for at, new in modes[1:])
@@ -1351,6 +1379,7 @@ def gps(db, ctx):
                  "NULL GROUP BY pos_at ORDER BY pos_at")
     jumps = []
     speeds = []
+    meters = 0.0
     for (t0, a0, o0), (t1, a1, o1) in zip(fixes, fixes[1:]):
         dt = (t1 - t0) / 1000
         if dt <= 0:
@@ -1363,6 +1392,12 @@ def gps(db, ctx):
         speeds.append(d / dt)
         if d / dt > 70 and d > 200:
             jumps.append((t1, d, dt))
+        else:
+            meters += d
+    if meters:
+        # Only sightings carry positions, so a stretch with none adds its straight line.
+        ctx["km"] = meters / 1000
+        print(f"  ~distance km  {meters / 1000:.1f}  (summed between sighting fixes, jumps left out)")
     if speeds:
         print(f"  ~speed km/h between fixes  p50 {pctile(speeds, 50) * 3.6:.0f}  "
               f"p95 {pctile(speeds, 95) * 3.6:.0f}  (inferred from fix spacing)")
@@ -1375,6 +1410,58 @@ def gps(db, ctx):
     if jumps:
         flag("INFO", "gps", f"{len(jumps)} position jump(s) faster than 250 km/h",
              "SELECT DISTINCT pos_at, lat, lon FROM observation ORDER BY pos_at")
+
+
+def radio_time(db, ctx):
+    """Each channel group's share of the fleet's Wi-Fi radio time, from the assignment rows: a
+    share stands from its row to its slot's next row, or the capture's end, and a node splits its
+    time evenly over its share's channels."""
+    rows = db.q("SELECT rx_at, slot, epoch, channels, ble FROM assignment ORDER BY id")
+    end = ctx.get("end") or db.one("SELECT MAX(rx_at) FROM observation")
+    time = [0.0, 0.0, 0.0]
+    for k, (at, slot, epoch, bits, is_ble) in enumerate(rows):
+        chans = [c for i, c in enumerate(SCAN_CHANNELS) if bits >> i & 1]
+        if epoch == 0 or is_ble or not chans or end is None:
+            continue
+        until = next((r[0] for r in rows[k + 1:] if r[1] == slot), end)
+        for c in chans:
+            time[channel_group(c)] += max(0, until - at) / len(chans)
+    return time
+
+
+def channel_yield(db, ctx):
+    section("yield")
+    total = db.one("SELECT COUNT(DISTINCT bssid) FROM observation WHERE kind='wifi'") or 0
+    if not total:
+        print("  no wifi networks")
+        return
+    km = ctx.get("km")
+    per_km = f"  over ~{km:.1f} km  {total / km:.1f} per km" if km else "  (no distance: no fixes)"
+    print(f"  wifi networks {total}{per_km}")
+    planner = ctx.get("planner")
+    if planner:
+        print(f"  dealt by      {planner}, sparse nodes {ctx.get('sparse_nodes', 'none')}")
+    # A network counts in each group a sighting of it names a channel of, as the beacon gave it.
+    networks = dict(db.q(f"SELECT {GROUP_SQL}, COUNT(DISTINCT bssid) FROM observation "
+                         "WHERE kind='wifi' GROUP BY 1"))
+    # One stored row, and so one channel. A node reports a network again only after a 5 dB gain
+    # or five minutes, so one row is not proof of one visit.
+    single = dict(db.q(f"SELECT {GROUP_SQL}, COUNT(*) FROM (SELECT bssid, MIN(channel) channel "
+                       "FROM observation WHERE kind='wifi' GROUP BY bssid HAVING COUNT(*) = 1) "
+                       "GROUP BY 1"))
+    time = radio_time(db, ctx)
+    print(f"  {'group':<12} {'radio time':>10}  {'networks':>16}  {'single sighting':>16}")
+    for g, title in enumerate(GROUPS):
+        n = networks.get(g, 0)
+        one = single.get(g, 0)
+        print(f"  {title:<12} {pct(time[g], sum(time)):>10}  {n:>8} {pct(n, total):>7}  "
+              f"{one:>8} {pct(one, n):>7}")
+    per = db.q("SELECT channel, COUNT(DISTINCT bssid) FROM observation WHERE kind='wifi' "
+               "GROUP BY 1 ORDER BY 2 DESC")
+    for g, title in enumerate(GROUPS):
+        mine = [(c, n) for c, n in per if c in SCAN_CHANNELS and channel_group(c) == g]
+        if mine:
+            print(f"  {title} by channel  " + "  ".join(f"{c}:{n}" for c, n in mine))
 
 
 def uploads(db, ctx):
@@ -1566,6 +1653,7 @@ def main():
     host(db, ctx)
     observations(db, ctx)
     gps(db, ctx)
+    channel_yield(db, ctx)
     raw_frames(db, ctx)
     uploads(db, ctx)
     if args.log:
