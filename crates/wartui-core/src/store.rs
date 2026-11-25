@@ -59,7 +59,7 @@ use crate::record::{CaptureSettings, HostLink, Record};
 /// cannot see a change in meaning or a pragma, so the author bumps for a change in meaning by hand.
 ///
 /// Captures stamped 1 span several shapes, so 1 names no shape and the count starts at 2.
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"

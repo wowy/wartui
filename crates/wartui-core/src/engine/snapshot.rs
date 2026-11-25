@@ -292,21 +292,21 @@ pub struct BridgeStatus {
 
 impl FleetEngine {
     /// The receiver the view reports on, which is the one positioning the rows when any is. A host
-    /// receiver pinned with `--gps` first, as the chain resolves it; else the bridge's while a
-    /// bridge is connected and its receiver is sending sentences, the rule the host's search
-    /// stands down by (`runtime::stand_host_down`); else the host's, unless its search found
-    /// nothing; else the bridge's while a bridge is connected, so a bridge-only run shows it
-    /// connecting.
+    /// receiver pinned with `--gps` first, as `wartui run` orders the chain; else the bridge's
+    /// while a bridge is connected and its receiver is sending sentences, the rule the host's
+    /// search stands down by ([`crate::position::StandDown::WhileAboveTalks`]); else the host's,
+    /// unless its search found nothing; else the bridge's while a bridge is connected, so a
+    /// bridge-only run shows it connecting.
     ///
     /// The bridge's receiver shown silent reads [`GpsStatus::NoReceiver`] once the bridge says none
     /// answers its port, so the operator learns that neither end has one.
     fn shown_gps(&self, now_ms: i64) -> Option<GpsView> {
         let position = &self.config.position;
-        let host = position.gps();
+        let host = position.host_receiver();
         if let Some(pinned) = host.filter(|gps| gps.is_pinned()) {
             return Some(pinned.view());
         }
-        let Some(bridge) = position.bridge_gps().filter(|_| self.bridge_connected()) else {
+        let Some(bridge) = position.bridge_receiver().filter(|_| self.bridge_connected()) else {
             return host.map(Gps::view);
         };
         if bridge.is_talking(now_ms) {
@@ -436,14 +436,16 @@ mod tests {
 
     use super::super::{EngineConfig, Event};
     use super::*;
-    use crate::position::{DEFAULT_MAX_AGE, PositionChain};
+    use crate::position::{DEFAULT_MAX_AGE, PositionChain, StandDown, Tier};
 
     /// An engine whose chain holds `host` and the bridge's receiver, connected to a bridge that
     /// has said no receiver answers its port.
     fn engine_without_bridge_receiver(host: &Gps, start: Instant) -> FleetEngine {
-        let position = PositionChain::empty()
-            .with_gps(host.clone())
-            .with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+        let tiers = vec![
+            Tier::receiver(Gps::bridged(DEFAULT_MAX_AGE)),
+            Tier::receiver(host.clone()).standing_down(StandDown::WhileAboveTalks),
+        ];
+        let position = PositionChain::new(tiers, DEFAULT_MAX_AGE);
         let now = Now { mono: start, unix_ms: 0 };
         let mut engine = FleetEngine::new(EngineConfig { position, ..Default::default() }, now);
         let info = BridgeInfo {

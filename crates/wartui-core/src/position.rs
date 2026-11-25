@@ -1,15 +1,34 @@
 //! Where an observation was made.
 //!
-//! A fallback chain resolved per record: a host GPS whose port the operator named, then the
-//! bridge's GPS receiver, then a host GPS the search found, then a static configured position, then
-//! nothing. **A record is never dropped for want of a position**: an unpositioned observation still
-//! proves a network exists, and export decides whether it can be uploaded.
+//! A chain of tiers resolved per record, in the order the caller builds it: the first tier that
+//! holds a position places the row, and with none the row is unpositioned. **A record is never
+//! dropped for want of a position**: an unpositioned observation still proves a network exists, and
+//! export decides whether it can be uploaded.
 //!
-//! A named port goes first because `--gps PATH` is the operator's instruction. The bridge's
-//! receiver goes above a searched one because the host's search stands down while that receiver
-//! is sending sentences ([`Gps::set_suspended`]), and it is then the only receiver being read.
-//! Every receiver answers as [`PositionSource::Gps`]: a row records that a receiver placed it, not
-//! which one.
+//! A tier is one of three providers ([`Provider`]):
+//!
+//! | Provider | Yields | Stored as |
+//! |---|---|---|
+//! | [`Provider::Receiver`] | an NMEA receiver's last fix, aged by arrival | `gps` |
+//! | [`Provider::Fixes`] | a platform's typed fix ([`crate::feed`]), aged by its time | `platform` |
+//! | [`Provider::Static`] | a configured position, always | `static` |
+//!
+//! A static tier always yields, so it shadows every tier below it. With nothing yielding, the row
+//! stores `none`. Every receiver answers as [`PositionSource::Gps`]: a row records that a receiver
+//! placed it, not which one.
+//!
+//! `wartui run` builds a host receiver pinned with `--gps`, then the bridge's receiver, then a host
+//! receiver the search found, then `--lat`/`--lon`. A named port goes first because `--gps PATH`
+//! is the operator's instruction. The bridge's receiver goes above a searched one because the
+//! searched one stands down while the bridge's is sending sentences, and is then not read at all.
+//!
+//! **A tier may stand down for the tiers above it** ([`StandDown`]), so a device reads one source
+//! at a time: [`PositionChain::stand_down`] suspends a receiver's search ([`Gps::set_suspended`])
+//! or tells a feed's platform it may ease off ([`FixFeed::wanted`]). A rule keyed on sentences
+//! ([`StandDown::WhileAboveTalks`]) lets the operator watch the tier above acquire satellites; one
+//! keyed on a fix run ([`StandDown::WhileAboveFixed`]) keeps the lower tier until the upper one is
+//! actually placing rows. The bridge's receiver counts only while a bridge is connected: its last
+//! sentences outlive the link.
 //!
 //! Tiers are tried per record, so the source is stored per row: one capture can start indoors on a
 //! typed-in position, gain satellites in the car park, and lose them in a tunnel.
@@ -19,6 +38,7 @@
 
 use std::time::Duration;
 
+use crate::feed::FixFeed;
 use crate::gps::Gps;
 
 /// How old a GPS fix may be and still be believed.
@@ -28,11 +48,13 @@ use crate::gps::Gps;
 /// inside what a Wi-Fi observation means anyway.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
-/// Which tier of the chain produced a fix.
+/// Which kind of tier produced a fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionSource {
     /// A live NMEA fix from a GPS receiver, the bridge's or the host's.
     Gps,
+    /// A fix from a platform's location services, which may be network-derived.
+    Platform,
     /// The operator's configured lat/lon. Constant for the run.
     Static,
     /// No position was available.
@@ -45,6 +67,7 @@ impl PositionSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Gps => "gps",
+            Self::Platform => "platform",
             Self::Static => "static",
             Self::None => "none",
         }
@@ -58,11 +81,11 @@ pub struct Fix {
     pub lat: Option<f64>,
     /// Degrees east, if known.
     pub lon: Option<f64>,
-    /// Meters above the ellipsoid, if known.
+    /// Meters above mean sea level, if known.
     pub alt: Option<f64>,
     /// Horizontal accuracy in meters, if known.
     pub accuracy: Option<f64>,
-    /// Which tier of the chain this came from.
+    /// Which kind of tier this came from.
     pub source: PositionSource,
     /// When the fix itself was taken, in Unix milliseconds.
     ///
@@ -92,13 +115,125 @@ impl Fix {
     }
 }
 
-/// The configured fallback chain.
+/// What a tier reads its position from.
+#[derive(Debug, Clone)]
+pub enum Provider {
+    /// An NMEA receiver: a host puck or the bridge's.
+    Receiver(Gps),
+    /// Typed fixes from a platform's location services.
+    Fixes(FixFeed),
+    /// A configured position.
+    Static(Fix),
+}
+
+/// When a tier stands down for the tiers above it ([`PositionChain::stand_down`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandDown {
+    /// Never.
+    Never,
+    /// While a receiver tier above is sending sentences (`Gps::is_talking`), fix or not.
+    WhileAboveTalks,
+    /// While a tier above holds a fix run (`fix_run`).
+    WhileAboveFixed,
+}
+
+/// One tier of the chain: where it reads a position, and when it stands down.
+#[derive(Debug, Clone)]
+pub struct Tier {
+    /// Where the position comes from.
+    pub provider: Provider,
+    /// When this tier stands down for those above it.
+    pub stand_down: StandDown,
+}
+
+impl Tier {
+    /// A receiver's tier, which never stands down.
+    #[must_use]
+    pub const fn receiver(gps: Gps) -> Self {
+        Self { provider: Provider::Receiver(gps), stand_down: StandDown::Never }
+    }
+
+    /// A platform feed's tier, which never stands down.
+    #[must_use]
+    pub const fn fixes(feed: FixFeed) -> Self {
+        Self { provider: Provider::Fixes(feed), stand_down: StandDown::Never }
+    }
+
+    /// A position the operator typed in.
+    ///
+    /// `at_ms` is unset: a static position is as current as the operator's claim.
+    #[must_use]
+    pub const fn fixed(lat: f64, lon: f64, alt: Option<f64>) -> Self {
+        let fix = Fix {
+            lat: Some(lat),
+            lon: Some(lon),
+            alt,
+            accuracy: None,
+            source: PositionSource::Static,
+            at_ms: None,
+        };
+        Self { provider: Provider::Static(fix), stand_down: StandDown::Never }
+    }
+
+    /// Stand this tier down by `rule`.
+    #[must_use]
+    pub const fn standing_down(mut self, rule: StandDown) -> Self {
+        self.stand_down = rule;
+        self
+    }
+
+    /// The receiver's last fix, or the feed's, if recent within `max_age` of `now_ms`, or the
+    /// static position.
+    fn yields(&self, now_ms: i64, max_age: Duration) -> Option<Fix> {
+        match &self.provider {
+            Provider::Receiver(gps) => {
+                let (fix, received_at_ms) = gps.latest()?;
+                is_fresh(received_at_ms, now_ms, max_age).then_some(fix)
+            }
+            Provider::Fixes(feed) => {
+                let fix = feed.latest()?;
+                is_fresh(fix.at_ms?, now_ms, max_age).then_some(fix)
+            }
+            Provider::Static(fix) => Some(*fix),
+        }
+    }
+
+    /// The fix run this tier holds. A static tier holds none: it is test data.
+    fn fix_run(&self, now_ms: i64) -> Option<i64> {
+        match &self.provider {
+            Provider::Receiver(gps) => gps.fix_run(now_ms),
+            Provider::Fixes(feed) => feed.fix_run(now_ms),
+            Provider::Static(_) => None,
+        }
+    }
+
+    /// Whether this tier counts toward standing the tiers below it down. The bridge's receiver
+    /// counts only while a bridge is connected.
+    fn counts(&self, bridge_connected: bool) -> bool {
+        match &self.provider {
+            Provider::Receiver(gps) => bridge_connected || !gps.is_bridged(),
+            Provider::Fixes(_) => true,
+            Provider::Static(_) => false,
+        }
+    }
+
+    /// Whether this tier is a receiver sending sentences.
+    fn talks(&self, now_ms: i64, bridge_connected: bool) -> bool {
+        self.counts(bridge_connected)
+            && matches!(&self.provider, Provider::Receiver(gps) if gps.is_talking(now_ms))
+    }
+
+    /// Whether this tier holds a fix run.
+    fn is_fixed(&self, now_ms: i64, bridge_connected: bool) -> bool {
+        self.counts(bridge_connected) && self.fix_run(now_ms).is_some()
+    }
+}
+
+/// The configured chain: tiers in the caller's order.
 #[derive(Debug, Clone)]
 pub struct PositionChain {
-    bridge_gps: Option<Gps>,
-    gps: Option<Gps>,
+    tiers: Vec<Tier>,
     max_age: Duration,
-    fixed: Option<Fix>,
 }
 
 impl Default for PositionChain {
@@ -108,66 +243,16 @@ impl Default for PositionChain {
 }
 
 impl PositionChain {
-    /// A chain with no sources at all: every observation is unpositioned.
+    /// A chain trying `tiers` in order, believing a fix up to `max_age` old.
+    #[must_use]
+    pub const fn new(tiers: Vec<Tier>, max_age: Duration) -> Self {
+        Self { tiers, max_age }
+    }
+
+    /// A chain with no tiers at all: every observation is unpositioned.
     #[must_use]
     pub const fn empty() -> Self {
-        Self { bridge_gps: None, gps: None, max_age: DEFAULT_MAX_AGE, fixed: None }
-    }
-
-    /// A chain whose only tier is a position the operator typed in.
-    ///
-    /// `at_ms` is unset: a static position is as current as the operator's claim.
-    #[must_use]
-    pub const fn fixed(lat: f64, lon: f64, alt: Option<f64>) -> Self {
-        Self {
-            bridge_gps: None,
-            gps: None,
-            max_age: DEFAULT_MAX_AGE,
-            fixed: Some(Fix {
-                lat: Some(lat),
-                lon: Some(lon),
-                alt,
-                accuracy: None,
-                source: PositionSource::Static,
-                at_ms: None,
-            }),
-        }
-    }
-
-    /// Add the host's receiver, above the static position: that is what the rows carry until the
-    /// first fix lands, and whenever the receiver goes quiet for longer than [`Self::max_age`].
-    /// A pinned one ([`Gps::is_pinned`]) also goes above the bridge's receiver.
-    #[must_use]
-    pub fn with_gps(mut self, gps: Gps) -> Self {
-        self.gps = Some(gps);
-        self
-    }
-
-    /// Add the bridge's receiver, above a host receiver the search found.
-    #[must_use]
-    pub fn with_bridge_gps(mut self, gps: Gps) -> Self {
-        self.bridge_gps = Some(gps);
-        self
-    }
-
-    /// How old a fix may be before every receiver in the chain falls through. Defaults to
-    /// [`DEFAULT_MAX_AGE`].
-    #[must_use]
-    pub const fn with_max_age(mut self, max_age: Duration) -> Self {
-        self.max_age = max_age;
-        self
-    }
-
-    /// The host's receiver, if this chain has one, for the UI to report on.
-    #[must_use]
-    pub const fn gps(&self) -> Option<&Gps> {
-        self.gps.as_ref()
-    }
-
-    /// The bridge's receiver, if this chain has one: fed from the link by the runtime.
-    #[must_use]
-    pub const fn bridge_gps(&self) -> Option<&Gps> {
-        self.bridge_gps.as_ref()
+        Self::new(Vec::new(), DEFAULT_MAX_AGE)
     }
 
     /// How old a fix may be before the chain stops believing it.
@@ -176,36 +261,67 @@ impl PositionChain {
         self.max_age
     }
 
-    /// Resolve the best position available as of `now_ms`.
+    /// The bridge's receiver, if this chain has one: fed from the link by the runtime.
+    #[must_use]
+    pub fn bridge_receiver(&self) -> Option<&Gps> {
+        self.receivers().find(|gps| gps.is_bridged())
+    }
+
+    /// The host's receiver, if this chain has one, for the UI to report on.
+    #[must_use]
+    pub fn host_receiver(&self) -> Option<&Gps> {
+        self.receivers().find(|gps| !gps.is_bridged())
+    }
+
+    /// Resolve the best position available as of `now_ms`: the first tier that yields one.
     ///
     /// Takes the time rather than reading a clock, so the engine stays pure.
     #[must_use]
     pub fn resolve(&self, now_ms: i64) -> Fix {
-        let pinned = self.gps.as_ref().filter(|gps| gps.is_pinned());
-        let searched = self.gps.as_ref().filter(|gps| !gps.is_pinned());
-        [pinned, self.bridge_gps.as_ref(), searched]
-            .into_iter()
-            .find_map(|gps| self.fresh(gps?, now_ms))
-            .or(self.fixed)
+        self.tiers
+            .iter()
+            .find_map(|tier| tier.yields(now_ms, self.max_age))
             .unwrap_or_else(Fix::none)
     }
 
-    /// The run of fix reports the chain holds as of `now_ms` ([`Gps::fix_run`]): the earliest
-    /// among its receivers that hold one, so a second receiver flapping does not disturb a steady
-    /// one. `None` while none holds a fix. A static position holds no fix: it is test data.
+    /// The fix run the chain holds as of `now_ms` ([`Gps::fix_run`], [`FixFeed::fix_run`]): the
+    /// earliest among its tiers that hold one, so a second source flapping does not disturb a
+    /// steady one. `None` while none holds a fix. A static position holds no fix: it is test data.
     #[must_use]
     pub fn fix_run(&self, now_ms: i64) -> Option<i64> {
-        [self.gps.as_ref(), self.bridge_gps.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter_map(|gps| gps.fix_run(now_ms))
-            .min()
+        self.tiers.iter().filter_map(|tier| tier.fix_run(now_ms)).min()
     }
 
-    /// The receiver's last fix, if it arrived within [`Self::max_age`] of `now_ms`.
-    fn fresh(&self, gps: &Gps, now_ms: i64) -> Option<Fix> {
-        let (fix, received_at_ms) = gps.latest()?;
-        is_fresh(received_at_ms, now_ms, self.max_age).then_some(fix)
+    /// Apply each tier's [`StandDown`] rule as of `now_ms`, judged by the tiers above it: suspend
+    /// or resume a receiver's search, and want or unwant a feed's fixes. The bridge's receiver
+    /// counts only while `bridge_connected`. Cheap and idempotent, so the runtime calls it on every
+    /// tick; each provider logs only a change.
+    pub fn stand_down(&self, now_ms: i64, bridge_connected: bool) {
+        for (at, tier) in self.tiers.iter().enumerate() {
+            let above = &self.tiers[..at];
+            let down = match tier.stand_down {
+                StandDown::Never => continue,
+                StandDown::WhileAboveTalks => {
+                    above.iter().any(|tier| tier.talks(now_ms, bridge_connected))
+                }
+                StandDown::WhileAboveFixed => {
+                    above.iter().any(|tier| tier.is_fixed(now_ms, bridge_connected))
+                }
+            };
+            match &tier.provider {
+                Provider::Receiver(gps) => gps.set_suspended(down),
+                Provider::Fixes(feed) => feed.set_wanted(!down),
+                Provider::Static(_) => {}
+            }
+        }
+    }
+
+    /// Every receiver tier's receiver, in order.
+    fn receivers(&self) -> impl Iterator<Item = &Gps> {
+        self.tiers.iter().filter_map(|tier| match &tier.provider {
+            Provider::Receiver(gps) => Some(gps),
+            _ => None,
+        })
     }
 }
 
@@ -223,12 +339,25 @@ pub(crate) fn is_fresh(at_ms: i64, now_ms: i64, max_age: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::{LocationFix, Pushed};
 
     const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";
+    const GSV: &[u8] = b"$GPGSV,1,1,00*79\r\n";
+    const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76\r\n";
+
+    /// A chain of `tiers` at the default age limit.
+    fn chain(tiers: Vec<Tier>) -> PositionChain {
+        PositionChain::new(tiers, DEFAULT_MAX_AGE)
+    }
+
+    /// The tests' synthetic static position.
+    fn fixed() -> Tier {
+        Tier::fixed(37.7749, -122.4194, Some(16.0))
+    }
 
     fn chain_with_gps() -> (Gps, PositionChain) {
         let gps = Gps::detached();
-        let chain = PositionChain::fixed(37.7749, -122.4194, Some(16.0)).with_gps(gps.clone());
+        let chain = chain(vec![Tier::receiver(gps.clone()), fixed()]);
         (gps, chain)
     }
 
@@ -244,7 +373,7 @@ mod tests {
     #[test]
     fn position_chain_resolves_unlocated_when_gps_fix_old() {
         let gps = Gps::detached();
-        let chain = PositionChain::empty().with_gps(gps.clone());
+        let chain = chain(vec![Tier::receiver(gps.clone())]);
         gps.feed(GGA, 0);
         let fix = chain.resolve(5_001);
         assert!(!fix.is_located());
@@ -252,7 +381,7 @@ mod tests {
 
     #[test]
     fn position_chain_resolves_static_when_fixed() {
-        let fix = PositionChain::fixed(37.7749, -122.4194, Some(16.0)).resolve(0);
+        let fix = chain(vec![fixed()]).resolve(0);
         assert_eq!(fix.source, PositionSource::Static);
         assert!(fix.is_located());
         assert_eq!(fix.alt, Some(16.0));
@@ -289,16 +418,25 @@ mod tests {
     #[test]
     fn position_chain_falls_back_to_none_when_stale_and_no_static() {
         let gps = Gps::detached();
-        let chain = PositionChain::empty().with_gps(gps.clone());
+        let chain = chain(vec![Tier::receiver(gps.clone())]);
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(60_000).source, PositionSource::None);
     }
 
-    /// A chain with both receivers and a static position, and the two receivers.
+    #[test]
+    fn position_chain_shadows_lower_tiers_when_static_is_above_them() {
+        let gps = Gps::detached();
+        let chain = chain(vec![fixed(), Tier::receiver(gps.clone())]);
+        gps.feed(GGA, 10_000);
+        assert_eq!(chain.resolve(10_000).source, PositionSource::Static);
+    }
+
+    /// A chain of the bridge's receiver, a searched host receiver and a static position, and the
+    /// two receivers.
     fn chain_with_both() -> (Gps, Gps, PositionChain) {
-        let (host, chain) = chain_with_gps();
-        let bridge = Gps::detached();
-        (bridge.clone(), host, chain.with_bridge_gps(bridge))
+        let (bridge, host) = (Gps::detached(), Gps::detached());
+        let tiers = vec![Tier::receiver(bridge.clone()), Tier::receiver(host.clone()), fixed()];
+        (bridge, host, chain(tiers))
     }
 
     /// A fix whose latitude names which receiver gave it.
@@ -321,9 +459,9 @@ mod tests {
 
     #[test]
     fn position_chain_prefers_pinned_host_gps_over_bridge_gps_when_both_fresh() {
-        // `--gps PATH` is the operator's instruction, so it outranks the bridge's receiver.
+        // `--gps PATH` is the operator's instruction, so `wartui run` puts it above the bridge's.
         let (host, bridge) = (Gps::detached_pinned(), Gps::detached());
-        let chain = PositionChain::empty().with_gps(host.clone()).with_bridge_gps(bridge.clone());
+        let chain = chain(vec![Tier::receiver(host.clone()), Tier::receiver(bridge.clone())]);
         host.feed(&gga_at("07.038"), 10_000);
         bridge.feed(&gga_at("30.000"), 10_000);
         let fix = chain.resolve(11_000);
@@ -333,7 +471,7 @@ mod tests {
     #[test]
     fn position_chain_falls_back_to_bridge_gps_when_pinned_host_fix_past_max_age() {
         let (host, bridge) = (Gps::detached_pinned(), Gps::detached());
-        let chain = PositionChain::empty().with_gps(host.clone()).with_bridge_gps(bridge.clone());
+        let chain = chain(vec![Tier::receiver(host.clone()), Tier::receiver(bridge.clone())]);
         host.feed(&gga_at("07.038"), 1_000);
         bridge.feed(&gga_at("30.000"), 10_000);
         let fix = chain.resolve(10_000);
@@ -341,11 +479,9 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_applies_max_age_when_set_before_receivers() {
-        // One setting, whatever order the chain was built in.
+    fn position_chain_applies_max_age_when_not_the_default() {
         let gps = Gps::detached();
-        let chain =
-            PositionChain::empty().with_max_age(Duration::from_secs(1)).with_gps(gps.clone());
+        let chain = PositionChain::new(vec![Tier::receiver(gps.clone())], Duration::from_secs(1));
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(11_000).source, PositionSource::Gps);
         assert_eq!(chain.resolve(11_001).source, PositionSource::None);
@@ -370,12 +506,22 @@ mod tests {
 
     #[test]
     fn position_chain_uses_bridge_gps_when_chain_has_no_host_gps() {
-        let bridge = Gps::detached();
-        let chain = PositionChain::empty().with_bridge_gps(bridge.clone());
+        let bridge = Gps::bridged(DEFAULT_MAX_AGE);
+        let chain = chain(vec![Tier::receiver(bridge.clone())]);
         assert_eq!(chain.resolve(0).source, PositionSource::None);
         bridge.feed(GGA, 1_000);
         assert_eq!(chain.resolve(6_000).source, PositionSource::Gps);
         assert_eq!(chain.resolve(6_001).source, PositionSource::None);
+    }
+
+    #[test]
+    fn position_chain_names_receivers_by_whether_they_are_bridged() {
+        let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
+        let chain = chain(vec![Tier::receiver(bridge), Tier::receiver(host), fixed()]);
+        assert!(chain.bridge_receiver().is_some_and(Gps::is_bridged));
+        assert!(chain.host_receiver().is_some_and(|gps| !gps.is_bridged()));
+        assert!(PositionChain::empty().bridge_receiver().is_none());
+        assert!(PositionChain::empty().host_receiver().is_none());
     }
 
     #[test]
@@ -392,7 +538,7 @@ mod tests {
 
     #[test]
     fn position_chain_holds_no_fix_run_when_only_static() {
-        assert_eq!(PositionChain::fixed(37.7749, -122.4194, None).fix_run(0), None);
+        assert_eq!(chain(vec![Tier::fixed(37.7749, -122.4194, None)]).fix_run(0), None);
     }
 
     #[test]
@@ -400,5 +546,216 @@ mod tests {
         let (gps, chain) = chain_with_gps();
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(9_000).source, PositionSource::Gps);
+    }
+
+    /// A platform fix at a synthetic place, taken at `at_ms`.
+    fn platform_fix(at_ms: i64) -> LocationFix {
+        LocationFix {
+            lat: 37.8,
+            lon: -122.4,
+            alt_msl: Some(12.0),
+            accuracy_m: Some(9.0),
+            at_ms,
+            mock: false,
+        }
+    }
+
+    /// A feed holding a fix taken at `at_ms`, pushed then.
+    fn feed_holding(at_ms: i64) -> FixFeed {
+        let feed = FixFeed::new(DEFAULT_MAX_AGE);
+        assert_eq!(feed.push(platform_fix(at_ms), at_ms), Pushed::Taken);
+        feed
+    }
+
+    #[test]
+    fn position_chain_resolves_platform_when_feed_fix_is_fresh() {
+        let chain = chain(vec![Tier::fixes(feed_holding(10_000)), fixed()]);
+        let fix = chain.resolve(11_000);
+        assert_eq!(fix.source, PositionSource::Platform);
+        assert_eq!(fix.lat, Some(37.8));
+        assert_eq!(fix.alt, Some(12.0));
+        assert_eq!(fix.accuracy, Some(9.0));
+        assert_eq!(fix.at_ms, Some(10_000));
+    }
+
+    #[test]
+    fn position_chain_falls_past_feed_when_fix_time_is_past_max_age() {
+        // Pushed just now, but taken 4 s ago: the fix ages by its own time, so it is past the
+        // limit 2 s later, where a receiver's arrival stamp would still hold for 5.
+        let feed = FixFeed::new(DEFAULT_MAX_AGE);
+        assert_eq!(feed.push(platform_fix(6_000), 10_000), Pushed::Taken);
+        let chain = chain(vec![Tier::fixes(feed), fixed()]);
+        assert_eq!(chain.resolve(10_000).source, PositionSource::Platform);
+        assert_eq!(chain.resolve(12_000).source, PositionSource::Static);
+    }
+
+    #[test]
+    fn position_chain_falls_past_feed_when_fix_stamped_ahead_is_max_age_past_arrival() {
+        // Stamped two minutes ahead of the clock: it ages from its arrival, not its stamp.
+        let feed = FixFeed::new(DEFAULT_MAX_AGE);
+        assert_eq!(feed.push(platform_fix(130_000), 10_000), Pushed::Taken);
+        let chain = chain(vec![Tier::fixes(feed), fixed()]);
+        assert_eq!(chain.resolve(15_000).source, PositionSource::Platform, "exactly at the limit");
+        assert_eq!(chain.resolve(15_001).source, PositionSource::Static);
+    }
+
+    #[test]
+    fn position_chain_resolves_in_callers_order_when_feed_is_above_receiver() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 10_000);
+        let chain = chain(vec![Tier::fixes(feed_holding(10_000)), Tier::receiver(gps)]);
+        assert_eq!(chain.resolve(10_000).source, PositionSource::Platform);
+    }
+
+    #[test]
+    fn position_chain_falls_to_receiver_below_when_feed_fix_is_coarse() {
+        // Refused at the feed, a network-derived fix cannot shadow the receiver below it.
+        let (gps, feed) = (Gps::detached(), FixFeed::new(DEFAULT_MAX_AGE));
+        gps.feed(GGA, 10_000);
+        let coarse = LocationFix { accuracy_m: Some(400.0), ..platform_fix(10_000) };
+        assert_eq!(feed.push(coarse, 10_000), Pushed::Coarse);
+        let chain = chain(vec![Tier::fixes(feed), Tier::receiver(gps)]);
+        let fix = chain.resolve(10_000);
+        assert_eq!(fix.source, PositionSource::Gps);
+        assert!((fix.lat.expect("a latitude") - 48.117_3).abs() < 1e-4, "{fix:?}");
+    }
+
+    #[test]
+    fn position_chain_resolves_in_callers_order_when_receiver_is_above_feed() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 10_000);
+        let chain = chain(vec![Tier::receiver(gps), Tier::fixes(feed_holding(10_000))]);
+        assert_eq!(chain.resolve(10_000).source, PositionSource::Gps);
+    }
+
+    #[test]
+    fn position_chain_reports_feed_fix_run_when_feed_holds_one() {
+        let chain = chain(vec![Tier::fixes(feed_holding(1_000)), fixed()]);
+        assert_eq!(chain.fix_run(2_000), Some(1_000));
+        assert_eq!(chain.fix_run(4_001), None, "past the feed's gap");
+    }
+
+    #[test]
+    fn position_chain_unwants_feed_when_receiver_above_holds_fix() {
+        let (gps, feed) = (Gps::detached(), FixFeed::new(DEFAULT_MAX_AGE));
+        let lower = Tier::fixes(feed.clone()).standing_down(StandDown::WhileAboveFixed);
+        let chain = chain(vec![Tier::receiver(gps.clone()), lower]);
+        chain.stand_down(1_000, true);
+        assert!(*feed.wanted().borrow(), "the receiver holds no fix yet");
+        gps.feed(GGA, 1_000);
+        chain.stand_down(1_000, true);
+        assert!(!*feed.wanted().borrow());
+    }
+
+    #[test]
+    fn position_chain_keeps_feed_wanted_when_receiver_above_talks_without_fix() {
+        let (gps, feed) = (Gps::bridged(DEFAULT_MAX_AGE), FixFeed::new(DEFAULT_MAX_AGE));
+        let lower = Tier::fixes(feed.clone()).standing_down(StandDown::WhileAboveFixed);
+        let chain = chain(vec![Tier::receiver(gps.clone()), lower]);
+        gps.feed_bytes(GGA_NO_FIX, 1_000);
+        assert!(gps.is_talking(1_000));
+        chain.stand_down(1_000, true);
+        assert!(*feed.wanted().borrow());
+    }
+
+    #[test]
+    fn position_chain_wants_feed_again_when_receiver_above_loses_its_fix_run() {
+        let (gps, feed) = (Gps::detached(), FixFeed::new(DEFAULT_MAX_AGE));
+        let lower = Tier::fixes(feed.clone()).standing_down(StandDown::WhileAboveFixed);
+        let chain = chain(vec![Tier::receiver(gps.clone()), lower]);
+        gps.feed(GGA, 1_000);
+        chain.stand_down(1_000, true);
+        assert!(!*feed.wanted().borrow());
+        // Past `gps::FIX_GAP` with no report.
+        chain.stand_down(2_501, true);
+        assert!(*feed.wanted().borrow());
+    }
+
+    #[test]
+    fn position_chain_keeps_feed_wanted_when_feed_is_above_the_receiver() {
+        let (gps, feed) = (Gps::detached(), FixFeed::new(DEFAULT_MAX_AGE));
+        let upper = Tier::fixes(feed.clone()).standing_down(StandDown::WhileAboveFixed);
+        let chain = chain(vec![upper, Tier::receiver(gps.clone())]);
+        gps.feed(GGA, 1_000);
+        chain.stand_down(1_000, true);
+        assert!(*feed.wanted().borrow(), "nothing is above the feed");
+    }
+
+    #[test]
+    fn position_chain_keeps_feed_wanted_when_bridge_receiver_is_fixed_but_no_bridge_is_connected() {
+        let (bridge, feed) = (Gps::bridged(DEFAULT_MAX_AGE), FixFeed::new(DEFAULT_MAX_AGE));
+        let lower = Tier::fixes(feed.clone()).standing_down(StandDown::WhileAboveFixed);
+        let chain = chain(vec![Tier::receiver(bridge.clone()), lower]);
+        bridge.feed(GGA, 1_000);
+        chain.stand_down(1_000, false);
+        assert!(*feed.wanted().borrow());
+        chain.stand_down(1_000, true);
+        assert!(!*feed.wanted().borrow(), "the same fix counts once a bridge is connected");
+    }
+
+    #[test]
+    fn position_chain_leaves_tier_alone_when_its_rule_is_never() {
+        let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
+        let feed = FixFeed::new(DEFAULT_MAX_AGE);
+        let tiers = vec![
+            Tier::receiver(bridge.clone()),
+            Tier::receiver(host.clone()),
+            Tier::fixes(feed.clone()),
+        ];
+        let chain = chain(tiers);
+        bridge.feed_bytes(GSV, 1_000);
+        bridge.feed(GGA, 1_000);
+        chain.stand_down(1_000, true);
+        assert!(!host.suspended());
+        assert!(*feed.wanted().borrow());
+    }
+
+    /// The chain `wartui run` builds for a searched host receiver: the bridge's, then the host's
+    /// standing down while the bridge's talks.
+    fn searched_under_bridge() -> (Gps, Gps, PositionChain) {
+        let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
+        let tiers = vec![
+            Tier::receiver(bridge.clone()),
+            Tier::receiver(host.clone()).standing_down(StandDown::WhileAboveTalks),
+        ];
+        (host, bridge, chain(tiers))
+    }
+
+    #[test]
+    fn position_chain_suspends_host_gps_when_bridge_sends_no_fix_sentences() {
+        // No sky: sentences every epoch, and the operator watches the bridge's receiver acquire.
+        let (host, bridge, chain) = searched_under_bridge();
+        chain.stand_down(1_000, true);
+        assert!(!host.suspended(), "a bridge whose receiver says nothing");
+        bridge.feed_bytes(GGA_NO_FIX, 1_000);
+        bridge.feed_bytes(GSV, 1_000);
+        chain.stand_down(1_000, false);
+        assert!(!host.suspended(), "sentences with no bridge connected");
+        chain.stand_down(1_000, true);
+        assert!(host.suspended());
+    }
+
+    #[test]
+    fn position_chain_resumes_host_gps_when_bridge_sentences_go_stale() {
+        let (host, bridge, chain) = searched_under_bridge();
+        bridge.feed_bytes(GSV, 1_000);
+        chain.stand_down(6_000, true);
+        assert!(host.suspended());
+        chain.stand_down(6_001, true);
+        assert!(!host.suspended());
+    }
+
+    #[test]
+    fn position_chain_keeps_host_gps_searching_when_bridge_reconnects_until_a_new_sentence() {
+        let (host, bridge, chain) = searched_under_bridge();
+        bridge.feed_bytes(GSV, 1_000);
+        // What `runtime::drive` does on `Connected`: the old sentence is within the age limit, but
+        // from before.
+        bridge.reset_stream();
+        chain.stand_down(2_000, true);
+        assert!(!host.suspended());
+        bridge.feed_bytes(GSV, 3_000);
+        chain.stand_down(3_000, true);
+        assert!(host.suspended());
     }
 }

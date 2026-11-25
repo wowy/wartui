@@ -16,9 +16,10 @@ use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, NodeView, Now, StorePeaks,
     StoreStats,
 };
+use wartui_core::feed::{FixFeed, LocationFix, Pushed};
 use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
 use wartui_core::health::Health;
-use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
+use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource, StandDown, Tier};
 use wartui_core::record::{
     BatchGap, BridgeStatusSeen, HostLink, HostStatus, NodePanic, Record, ShareChange,
 };
@@ -1814,10 +1815,21 @@ fn engine_polls_bridge_when_connected_and_each_interval() {
     assert_eq!(engine.handle(Event::Tick, clock.at(6)).bulk, vec![HostToBridge::GetStatus]);
 }
 
-/// A config whose chain holds both receivers, the bridge's and the host's.
+/// A chain of `tiers` at the default age limit.
+fn chain(tiers: Vec<Tier>) -> PositionChain {
+    PositionChain::new(tiers, DEFAULT_MAX_AGE)
+}
+
+/// A config whose chain holds both receivers, the bridge's and the host's, in the order
+/// `wartui run` builds them.
 fn config_with_receivers(bridge: &Gps, host: &Gps) -> EngineConfig {
-    let position = PositionChain::empty().with_gps(host.clone()).with_bridge_gps(bridge.clone());
-    EngineConfig { position, ..Default::default() }
+    let tiers = if host.is_pinned() {
+        vec![Tier::receiver(host.clone()), Tier::receiver(bridge.clone())]
+    } else {
+        let searched = Tier::receiver(host.clone()).standing_down(StandDown::WhileAboveTalks);
+        vec![Tier::receiver(bridge.clone()), searched]
+    };
+    EngineConfig { position: chain(tiers), ..Default::default() }
 }
 
 /// The rate writes in `batch`.
@@ -1837,7 +1849,7 @@ fn engine_writes_gps_rate_on_every_poll_when_bridge_is_connected() {
     let clock = Clock::new();
     let config = EngineConfig {
         gps_rate_hz: 2,
-        ..config_with_receivers(&Gps::detached(), &Gps::detached())
+        ..config_with_receivers(&Gps::bridged(DEFAULT_MAX_AGE), &Gps::detached())
     };
     let mut engine = engine(config, &clock);
     // The sky sentences start off: only the GPS view reads them.
@@ -1848,7 +1860,8 @@ fn engine_writes_gps_rate_on_every_poll_when_bridge_is_connected() {
 
 /// An engine connected at second 1 to a bridge whose receiver is in the chain.
 fn engine_with_bridge_gps(clock: &Clock) -> FleetEngine {
-    let mut engine = engine(config_with_receivers(&Gps::detached(), &Gps::detached()), clock);
+    let mut engine =
+        engine(config_with_receivers(&Gps::bridged(DEFAULT_MAX_AGE), &Gps::detached()), clock);
     engine.handle(connected(), clock.at(1));
     engine
 }
@@ -1897,7 +1910,7 @@ fn engine_clamps_gps_rate_when_command_is_out_of_range() {
 #[test]
 fn engine_keeps_gps_settings_for_next_poll_when_bridge_is_not_connected() {
     let clock = Clock::new();
-    let config = config_with_receivers(&Gps::detached(), &Gps::detached());
+    let config = config_with_receivers(&Gps::bridged(DEFAULT_MAX_AGE), &Gps::detached());
     let mut engine = engine(config, &clock);
 
     assert!(
@@ -1993,7 +2006,7 @@ fn engine_snapshot_shows_bridge_receiver_when_chain_has_no_host_receiver_and_bri
     // `--gps bridge`: the bridge's receiver is the only one, so it is shown connecting before its
     // first fix.
     let clock = Clock::new();
-    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let position = chain(vec![Tier::receiver(Gps::bridged(DEFAULT_MAX_AGE))]);
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     engine.handle(connected(), clock.at(1));
     assert!(shows_bridge_gps(&engine, clock.at(2)));
@@ -2003,7 +2016,7 @@ fn engine_snapshot_shows_bridge_receiver_when_chain_has_no_host_receiver_and_bri
 fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_no_bridge_is_connected() {
     // Nothing is being read, so nothing is shown rather than a receiver that never connects.
     let clock = Clock::new();
-    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let position = chain(vec![Tier::receiver(Gps::bridged(DEFAULT_MAX_AGE))]);
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     let gps = |engine: &FleetEngine| engine.snapshot(clock.at(2), StoreStats::default()).gps;
     assert_eq!(gps(&engine), None, "no bridge yet");
@@ -2014,7 +2027,7 @@ fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_no_brid
 
 /// An engine whose chain holds the bridge's receiver only, as under `--sim`, connected.
 fn bridge_only_engine(clock: &Clock) -> FleetEngine {
-    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let position = chain(vec![Tier::receiver(Gps::bridged(DEFAULT_MAX_AGE))]);
     let mut engine = engine(EngineConfig { position, ..Default::default() }, clock);
     engine.handle(connected(), clock.at(1));
     engine
@@ -2084,7 +2097,7 @@ fn engine_records_gps_setting_when_bridge_is_connected() {
     // `run` builds the bridge's receiver for every capture, so its presence in the chain alone
     // says nothing about whether a receiver is being read.
     let clock = Clock::new();
-    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let position = chain(vec![Tier::receiver(Gps::bridged(DEFAULT_MAX_AGE))]);
     let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     assert!(!engine.capture_settings().gps, "no bridge yet");
     engine.handle(connected(), clock.at(2));
@@ -2096,7 +2109,7 @@ fn engine_records_gps_setting_when_bridge_is_connected() {
 #[test]
 fn engine_records_gps_setting_when_chain_has_host_receiver() {
     let clock = Clock::new();
-    let position = PositionChain::empty().with_gps(Gps::detached());
+    let position = chain(vec![Tier::receiver(Gps::detached())]);
     let engine = engine(EngineConfig { position, ..Default::default() }, &clock);
     assert!(engine.capture_settings().gps);
 }
@@ -2159,7 +2172,7 @@ fn engine_renders_tail_ssid_as_text_when_ssid_cloaked_or_has_nul() {
 fn engine_attaches_position_when_sighting_arrives() {
     let clock = Clock::new();
     let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
+        position: chain(vec![Tier::fixed(37.7749, -122.4194, Some(16.0))]),
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
@@ -2194,7 +2207,10 @@ fn engine_switches_to_gps_when_fix_arrives() {
     let clock = Clock::new();
     let gps = Gps::detached();
     let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)).with_gps(gps.clone()),
+        position: chain(vec![
+            Tier::receiver(gps.clone()),
+            Tier::fixed(37.7749, -122.4194, Some(16.0)),
+        ]),
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
@@ -2219,7 +2235,10 @@ fn engine_falls_back_to_static_when_gps_fix_stale() {
     let clock = Clock::new();
     let gps = Gps::detached();
     let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)).with_gps(gps.clone()),
+        position: chain(vec![
+            Tier::receiver(gps.clone()),
+            Tier::fixed(37.7749, -122.4194, Some(16.0)),
+        ]),
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
@@ -3715,7 +3734,7 @@ fn fix_capture(gps: &Gps, clock: &Clock) -> FleetEngine {
     let config = EngineConfig {
         auto_start: true,
         wait_for_fix: true,
-        position: PositionChain::empty().with_gps(gps.clone()),
+        position: chain(vec![Tier::receiver(gps.clone())]),
         ..EngineConfig::default()
     };
     let mut engine = FleetEngine::new(config, clock.at(0));
@@ -3782,6 +3801,41 @@ fn engine_starts_scan_when_fix_held_for_fix_wait() {
     assert_eq!(sent, [HostToBridge::StartScan { bluetooth: false }]);
     assert!(!awaiting_fix(&engine, &clock));
     assert!(fixes_ticked(&mut engine, &gps, &clock, [4_000, 5_000]).is_empty(), "started once");
+}
+
+#[test]
+fn engine_opens_fix_gate_when_feed_holds_fix_for_the_wait() {
+    // A phone's location services, with no receiver in the chain.
+    let clock = Clock::new();
+    let feed = FixFeed::new(DEFAULT_MAX_AGE);
+    let config = EngineConfig {
+        auto_start: true,
+        wait_for_fix: true,
+        position: chain(vec![Tier::fixes(feed.clone())]),
+        ..EngineConfig::default()
+    };
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    engine.handle(connected(), clock.at(0));
+    engine.handle(scan_status(ScanMode::Stopped), clock.at(1));
+
+    let mut pushed_ticked = |ms: u64| {
+        let at_ms = clock.at_ms(ms).unix_ms;
+        let fix = LocationFix {
+            lat: 37.7749,
+            lon: -122.4194,
+            alt_msl: None,
+            accuracy_m: Some(8.0),
+            at_ms,
+            mock: false,
+        };
+        assert_eq!(feed.push(fix, at_ms), Pushed::Taken);
+        scans(&tick_at(&mut engine, &clock, ms))
+    };
+    for ms in [1_000, 2_000, 2_900] {
+        assert!(pushed_ticked(ms).is_empty(), "1.9 s at most");
+    }
+    assert_eq!(pushed_ticked(3_000), [HostToBridge::StartScan { bluetooth: false }]);
+    assert!(!awaiting_fix(&engine, &clock));
 }
 
 #[test]
@@ -3945,7 +3999,7 @@ fn bridge_fix_capture(gps: &Gps, clock: &Clock, wait_for_fix: bool) -> (FleetEng
     let config = EngineConfig {
         auto_start: true,
         wait_for_fix,
-        position: PositionChain::empty().with_bridge_gps(gps.clone()),
+        position: chain(vec![Tier::receiver(gps.clone())]),
         ..EngineConfig::default()
     };
     let mut engine = FleetEngine::new(config, clock.at(0));

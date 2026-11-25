@@ -7,8 +7,10 @@
 //! **A bridge's receiver has no thread.** Its bytes arrive on the link, and the runtime hands them
 //! to [`Gps::feed_bytes`], which splits UBX from NMEA ([`crate::ubx::Demux`]) and feeds the same
 //! parser a puck does. While the connected bridge's receiver is sending sentences
-//! ([`Gps::is_talking`]), the puck reader stands down ([`Gps::set_suspended`]): it lets go of its
-//! port and opens nothing, so one capture reads one receiver. The rule keys on sentences rather
+//! ([`Gps::is_talking`]), the puck reader stands down ([`Gps::set_suspended`], which
+//! [`crate::PositionChain::stand_down`] calls for a tier standing down
+//! [`crate::position::StandDown::WhileAboveTalks`]): it lets go of its port and opens nothing, so
+//! one capture reads one receiver. The rule keys on sentences rather
 //! than on a fix, so the view can follow the bridge's receiver acquiring satellites. A receiver
 //! that stops sending lets the search resume after the staleness limit. A port the operator named
 //! with `--gps` never stands down: reading it is their instruction.
@@ -205,7 +207,6 @@ struct Inner {
     diagnostic: Option<Diagnostic>,
     last_failure: Option<String>,
     max_age: Duration,
-    via_bridge: bool,
     /// The bridge's stream, split and reassembled. Unused by the puck reader, which keeps its own
     /// [`Lines`] on its thread.
     demux: Demux,
@@ -378,6 +379,9 @@ pub struct Gps {
     suspended: Arc<AtomicBool>,
     /// Whether the operator named the port, which [`Gps::set_suspended`] then leaves alone.
     pinned: bool,
+    /// Whether this is the bridge's receiver ([`Gps::bridged`]). A field rather than in `inner`,
+    /// so the chain finds the bridge's receiver without taking the reader thread's lock.
+    bridged: bool,
 }
 
 impl Gps {
@@ -399,7 +403,6 @@ impl Gps {
                 diagnostic: None,
                 last_failure: None,
                 max_age: GpsConfig::default().max_age,
-                via_bridge: false,
                 demux: Demux::new(),
                 lines: Lines::default(),
                 heard_in_stream: false,
@@ -409,6 +412,7 @@ impl Gps {
             stop: Arc::new(AtomicBool::new(false)),
             suspended: Arc::new(AtomicBool::new(false)),
             pinned: false,
+            bridged: false,
         }
     }
 
@@ -418,10 +422,9 @@ impl Gps {
     /// the host's configuration of the receiver does.
     #[must_use]
     pub fn bridged(max_age: Duration) -> Self {
-        let gps = Self::detached();
+        let gps = Self { bridged: true, ..Self::detached() };
         {
             let mut inner = gps.lock();
-            inner.via_bridge = true;
             inner.max_age = max_age;
             inner.nmea.set_sky_lists(false);
         }
@@ -484,6 +487,12 @@ impl Gps {
         self.pinned
     }
 
+    /// Whether this is the bridge's receiver ([`Self::bridged`]), fed from the link.
+    #[must_use]
+    pub const fn is_bridged(&self) -> bool {
+        self.bridged
+    }
+
     /// [`Self::detached`], as if the operator had named its port.
     #[cfg(test)]
     pub(crate) fn detached_pinned() -> Self {
@@ -542,7 +551,7 @@ impl Gps {
             sky: inner.nmea.sky().clone(),
             heard_ms: inner.heard_ms,
             max_age: inner.max_age,
-            via_bridge: inner.via_bridge,
+            via_bridge: self.bridged,
         }
     }
 

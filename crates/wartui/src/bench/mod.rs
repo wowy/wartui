@@ -44,7 +44,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::export::{ExportFilter, wigle_csv};
-use wartui_core::position::PositionChain;
+use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
@@ -286,7 +286,7 @@ pub async fn run(args: Args) -> Result<()> {
             record_raw: args.record_raw,
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.
-            position: PositionChain::fixed(0.0, 0.0, None),
+            position: PositionChain::new(vec![Tier::fixed(0.0, 0.0, None)], DEFAULT_MAX_AGE),
             link: info.link,
             ..EngineConfig::default()
         },

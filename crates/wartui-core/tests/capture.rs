@@ -13,8 +13,9 @@ use tokio::sync::{oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, StoreStats};
 use wartui_core::export::{ExportFilter, wigle_csv};
+use wartui_core::feed::{FixFeed, LocationFix, Pushed};
 use wartui_core::gps::Gps;
-use wartui_core::position::PositionChain;
+use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::plan::{PlanSettings, Planner};
@@ -36,7 +37,10 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
 
     let config = EngineConfig {
         auto_start: true,
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
+        position: PositionChain::new(
+            vec![Tier::fixed(37.7749, -122.4194, Some(16.0))],
+            DEFAULT_MAX_AGE,
+        ),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
@@ -261,9 +265,10 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
         auto_start: true,
         // A static position underneath, to prove the receiver is what the rows
         // actually used rather than the only thing they could have used.
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
-            .with_max_age(Duration::from_secs(60))
-            .with_gps(gps.clone()),
+        position: PositionChain::new(
+            vec![Tier::receiver(gps.clone()), Tier::fixed(37.7749, -122.4194, Some(16.0))],
+            Duration::from_secs(60),
+        ),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
@@ -322,6 +327,55 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn drive_stores_platform_positions_when_chain_has_a_feed() {
+    // A phone's location services, as a platform adapter pushes them.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("platform.db");
+    let link = SimTransport::new(SimConfig { node_count: 2, speed: 60.0, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+
+    let feed = FixFeed::new(Duration::from_secs(60));
+    // Taken before it arrived, as a platform's fixes are.
+    let taken_ms = started.unix_ms - 1_500;
+    let fix = LocationFix {
+        lat: 37.7749,
+        lon: -122.4194,
+        alt_msl: Some(16.0),
+        accuracy_m: Some(8.0),
+        at_ms: taken_ms,
+        mock: false,
+    };
+    assert_eq!(feed.push(fix, started.unix_ms), Pushed::Taken);
+    let config = EngineConfig {
+        auto_start: true,
+        position: PositionChain::new(vec![Tier::fixes(feed)], Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let engine = FleetEngine::new(config, started);
+    let (snapshot_tx, _snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+
+    let conn = open_readonly(&path).expect("reopening the capture");
+    let positions: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT DISTINCT pos_source, pos_at FROM observation")
+        .and_then(|mut q| {
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).and_then(Iterator::collect)
+        })
+        .expect("reading back the positions");
+    assert_eq!(positions, vec![("platform".to_owned(), Some(taken_ms))], "the fix's own time");
+}
+
 /// Two satellites in view.
 const GSV: &[u8] = b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69";
 
@@ -339,7 +393,7 @@ async fn drive_keeps_no_bridge_satellites_when_sky_command_turns_them_off() {
     let gps = Gps::bridged(Duration::from_secs(5));
     gps.feed(FIRST, started.unix_ms);
     let config = EngineConfig {
-        position: PositionChain::empty().with_bridge_gps(gps.clone()),
+        position: PositionChain::new(vec![Tier::receiver(gps.clone())], DEFAULT_MAX_AGE),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
@@ -384,7 +438,7 @@ async fn drive_builds_bridge_satellites_when_run_waits_for_fix() {
     let config = EngineConfig {
         auto_start: true,
         wait_for_fix: true,
-        position: PositionChain::empty().with_bridge_gps(gps.clone()),
+        position: PositionChain::new(vec![Tier::receiver(gps.clone())], DEFAULT_MAX_AGE),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

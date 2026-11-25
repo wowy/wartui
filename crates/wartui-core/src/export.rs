@@ -192,6 +192,8 @@ pub struct Bands {
 pub struct Positions {
     /// Positioned by the GPS.
     pub gps: u64,
+    /// Positioned by a phone's location services.
+    pub platform: u64,
     /// Positioned by the static `--lat`/`--lon`.
     pub fixed: u64,
     /// With no position.
@@ -351,6 +353,7 @@ impl Tally {
         match pos_source {
             0 => summary.positions.gps += 1,
             1 => summary.positions.fixed += 1,
+            3 => summary.positions.platform += 1,
             _ => summary.positions.none += 1,
         }
         let at = match summary.nodes.iter().position(|n| n.mac == node) {
@@ -424,17 +427,19 @@ fn close(
 
 /// Every sighting in the filter, in fold order: address, kind, then time, with `id` breaking ties
 /// so the submitted sighting is deterministic. Columns 0 to 12 are a [`Candidate`], and the last
-/// three feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for `static`
-/// and `2` otherwise: every column rides through the whole-table sort, and a small integer is the
-/// narrowest a sort row carries. That measured a quarter of what the node and source columns cost
-/// the export.
+/// three feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for `static`,
+/// `3` for `platform` and `2` otherwise: every column rides through the whole-table sort, and a
+/// small integer is the narrowest a sort row carries. That measured a quarter of what the node and
+/// source columns cost the export.
 ///
 /// `?1` is the name of [`ExportFilter::after_uploads`]'s site, or NULL for none. The cutoff is an
 /// uncorrelated scalar evaluated once, not per sighting. No index on purpose: a scan and a sort
 /// beat one random lookup per sighting (`docs/store-io-findings.md`).
 const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
-       node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END, o.id
+       node_mac,
+       CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 WHEN 'platform' THEN 3 ELSE 2 END,
+       o.id
 FROM observation o
 WHERE ?1 IS NULL
    OR o.id > (SELECT COALESCE(MAX(through_id), 0) FROM upload

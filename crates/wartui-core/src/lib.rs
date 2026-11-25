@@ -17,6 +17,7 @@ pub mod discover;
 pub mod distinct;
 pub mod engine;
 pub mod export;
+pub mod feed;
 pub mod gps;
 pub mod health;
 pub mod nmea;
@@ -28,8 +29,9 @@ pub mod store;
 pub mod ubx;
 
 pub use engine::{ActionBatch, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot};
+pub use feed::{FixFeed, LocationFix};
 pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
-pub use position::{Fix, PositionChain, PositionSource};
+pub use position::{Fix, PositionChain, PositionSource, Provider, StandDown, Tier};
 pub use record::Record;
 pub use store::{
     BatchTiming, CaptureInfo, Checkpoint, CheckpointPass, CheckpointReport, Store, StoreConfig,

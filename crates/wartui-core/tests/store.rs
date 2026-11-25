@@ -2571,7 +2571,10 @@ fn wigle_csv_skips_invalid_wifi_addresses_when_capture_preserves_them() {
     assert_eq!(summary.rows, 2);
     assert_eq!((summary.wifi.networks, summary.wifi.sightings), (1, 1));
     assert_eq!((summary.ble.networks, summary.ble.sightings), (1, 1));
-    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 0, fixed: 2, none: 0 });
+    assert_eq!(
+        summary.positions,
+        wartui_core::export::Positions { gps: 0, platform: 0, fixed: 2, none: 0 }
+    );
     assert_eq!(summary.unpositioned, 0);
     assert_eq!(summary.unknown_kind, 0);
     assert_eq!(summary.invalid_address, 4);
@@ -2763,7 +2766,24 @@ fn wigle_csv_tallies_position_sources_when_fix_source_varies() {
     );
 
     let (_, summary) = export(&conn);
-    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 2, fixed: 1, none: 1 });
+    assert_eq!(
+        summary.positions,
+        wartui_core::export::Positions { gps: 2, platform: 0, fixed: 1, none: 1 }
+    );
+}
+
+#[test]
+fn wigle_csv_counts_platform_sighting_when_a_phone_placed_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let platform =
+        Fix { source: PositionSource::Platform, at_ms: Some(EPOCH_MS), ..fixed(37.0, -122.0) };
+    let conn = write(&dir, vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, platform)]);
+
+    let (csv, summary) = export(&conn);
+    let positions = wartui_core::export::Positions { gps: 0, platform: 1, fixed: 0, none: 0 };
+    assert_eq!(summary.positions, positions);
+    assert_eq!(macs(&csv), ["AA:AA:AA:AA:AA:AA"], "{csv}");
+    assert_eq!(summary.rows, 1);
 }
 
 /// Three networks heard a minute apart, stored as ids 1, 2 and 3, so a cutoff can fall
@@ -2817,7 +2837,10 @@ fn wigle_csv_leaves_out_wifi_sightings_when_ssid_is_excluded() {
     assert_eq!(summary.excluded_ssid, 3);
     assert_eq!(summary.rows, 1);
     assert_eq!((summary.wifi.networks, summary.wifi.sightings, summary.wifi.rows), (1, 1, 1));
-    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 0, fixed: 1, none: 0 });
+    assert_eq!(
+        summary.positions,
+        wartui_core::export::Positions { gps: 0, platform: 0, fixed: 1, none: 0 }
+    );
 }
 
 #[test]

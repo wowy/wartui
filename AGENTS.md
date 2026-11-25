@@ -224,11 +224,14 @@ written once at creation (`store.rs` `//!`). `SCHEMA` changes shape as freely as
 Each change bumps `store::SCHEMA_VERSION`, and a capture stamped anything else is refused rather
 than migrated.
 
-Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
-bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) → a host GPS found by
-`discover` (NMEA on its own thread, standing down while the bridge's receiver is sending
-sentences) → static `--lat`/`--lon` (test only: it marks the capture as test data, which is never
-uploaded) → nothing.
+Positions resolve fresh per record through `PositionChain`, trying its tiers in the order the
+caller builds them. `wartui run` builds a host GPS pinned with `--gps` → the bridge's GPS (its
+bytes fed in by `runtime::drive`, never the engine) → a host GPS found by `discover` (NMEA on its
+own thread, standing down while the bridge's receiver is sending sentences) → static
+`--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) → nothing.
+A `FixFeed` tier takes typed fixes from a phone's location services and stores `platform`,
+and refuses a fix whose reported accuracy is missing or worse than 50 m.
+`runtime::drive` calls `PositionChain::stand_down`, which applies each tier's stand-down rule.
 Which tier answered is stored per row.
 
 ## Invariants that are easy to break

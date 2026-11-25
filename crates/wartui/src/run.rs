@@ -28,7 +28,7 @@ use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
-use wartui_core::position::PositionChain;
+use wartui_core::position::{PositionChain, StandDown, Tier};
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
@@ -168,9 +168,9 @@ pub async fn run(args: Args) -> Result<()> {
         return Err(StoreError::Exists(db).into());
     }
 
-    let position = match (args.lat, args.lon) {
-        (Some(lat), Some(lon)) => PositionChain::fixed(lat, lon, args.alt),
-        (None, None) => PositionChain::empty(),
+    let fixed = match (args.lat, args.lon) {
+        (Some(lat), Some(lon)) => Some(Tier::fixed(lat, lon, args.alt)),
+        (None, None) => None,
         // `requires` should have caught this, but a position half-given is
         // worse than none: it would silently record a wrong place.
         _ => bail!("--lat and --lon must be given together"),
@@ -210,13 +210,21 @@ pub async fn run(args: Args) -> Result<()> {
     // Built whatever the bridge turns out to be, simulated included: a bridge without a
     // receiver sends no bytes, and this one then says nothing.
     let bridge_gps = (choice != GpsChoice::Off).then(|| Gps::bridged(max_age));
-    let mut position = position.with_max_age(max_age);
-    if let Some(gps) = &gps {
-        position = position.with_gps(gps.clone());
-    }
-    if let Some(gps) = &bridge_gps {
-        position = position.with_bridge_gps(gps.clone());
-    }
+    // `--gps PATH` is the operator's instruction, so it goes above the bridge's receiver. A
+    // searched one goes below it, and stands down while the bridge's is sending sentences.
+    let pinned = gps.as_ref().filter(|gps| gps.is_pinned());
+    let searched = gps.as_ref().filter(|gps| !gps.is_pinned());
+    let tiers = pinned
+        .map(|gps| Tier::receiver(gps.clone()))
+        .into_iter()
+        .chain(bridge_gps.as_ref().map(|gps| Tier::receiver(gps.clone())))
+        .chain(
+            searched
+                .map(|gps| Tier::receiver(gps.clone()).standing_down(StandDown::WhileAboveTalks)),
+        )
+        .chain(fixed)
+        .collect();
+    let position = PositionChain::new(tiers, max_age);
 
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
