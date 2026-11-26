@@ -2,23 +2,24 @@
 //!
 //! Each type here is a remote declaration of the app's own, field for field and variant for
 //! variant, so the phone sees the app's shape: nothing renamed, reordered or flattened. A field or
-//! variant added on one side only fails to compile. The five plain enums the view uses from the
+//! variant added on one side only fails to compile. The ten plain enums the view uses from the
 //! crates below are declared here too.
 //!
 //! The view words nothing: a `String` is a datum (an address, a label, a port) or the transport's
 //! own account of a failure. The phone words the rest.
 
 use wartui_app::view::{
-    Augmentation, BridgeView, ChannelBar, FanShown, Fault, FirmwareShown, FixShown, FleetView,
-    HostShown, LinkFault, LinkFaultKind, LinkView, NodeRow, NodeStatus, Note, Planning,
-    PositionView, PowerCycle, ReceiverPort, ReceiverStatus, ReceiverSummary, ReceiverView,
-    RejectsFrom, SatelliteShown, ScanShown, Severity, ShareShown, SkyDate, SkyView, SlotShown,
-    Totals, View,
+    Answers, Augmentation, BridgeView, ChannelBar, FanShown, Fault, FirmwareShown, FixShown,
+    FleetView, HostShown, LinkFault, LinkFaultKind, LinkView, NodeRow, NodeStatus, Note,
+    PlannerShown, Planning, PositionView, PowerAnswered, PowerCycle, ReceiverPort, ReceiverStatus,
+    ReceiverSummary, ReceiverView, RejectsFrom, SatelliteShown, ScanShown, SdAnswered, SdLogShown,
+    SdShown, SettingsShown, Severity, ShareShown, SkyDate, SkyView, SlotShown, Totals, View,
 };
 use wartui_core::nmea::Constellation;
 use wartui_core::position::PositionSource;
 use wartui_proto::bus::Board;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::link::{PowerOutcome, SdFormatOutcome, SdLogState, SdState};
+use wartui_proto::plan::{ChannelPool, Planner};
 use wartui_proto::reset::ResetCause;
 
 /// A channel pool: the channels the bridge's planner deals.
@@ -88,6 +89,73 @@ pub enum Constellation {
     NavIc,
 }
 
+/// A deal the bridge's planner cuts channels with.
+#[uniffi::remote(Enum)]
+pub enum Planner {
+    /// Shares within one channel of each other.
+    Even,
+    /// The quiet 5 GHz channels on a few sparse nodes.
+    Weighted,
+}
+
+/// What the bridge's SD card holds.
+#[uniffi::remote(Enum)]
+pub enum SdState {
+    /// No card answered.
+    NoCard,
+    /// A card answered and holds no FAT32 volume the bridge reads.
+    NoFat32,
+    /// The card holds a FAT32 volume.
+    Ready,
+    /// A format is running.
+    Formatting,
+    /// The card answered, then failed a read or the last format.
+    Failed,
+}
+
+/// What the bridge's SD log writer is doing.
+#[uniffi::remote(Enum)]
+pub enum SdLogState {
+    /// The setting is off.
+    Off,
+    /// The setting is on, and no writable card is in yet, or the writer is paused.
+    Waiting,
+    /// A file is open.
+    Writing,
+    /// The card has no room above the reserve, and deleting the old logs cannot restore it.
+    Full,
+    /// The card's volume is one the writer will not touch.
+    Refused,
+    /// The writer stopped on a card error or a corrupt volume.
+    Failed,
+}
+
+/// How a power-cycle went.
+#[uniffi::remote(Enum)]
+pub enum PowerOutcome {
+    /// The node was switched off, then on again, and is powered now.
+    Done,
+    /// The bridge has no carrier board, so nothing switches node power.
+    NoCarrier,
+    /// The carrier does not drive that slot.
+    NotDriven,
+    /// The carrier's I/O expander did not answer.
+    Failed,
+}
+
+/// How a format of the SD card went.
+#[uniffi::remote(Enum)]
+pub enum SdFormatOutcome {
+    /// The card holds a fresh FAT32 volume.
+    Done,
+    /// No card answered.
+    NoCard,
+    /// A format is already running.
+    Busy,
+    /// The card refused a write, or is too small or too large for the layout.
+    Failed,
+}
+
 /// Everything a fleet view shows of one snapshot.
 #[uniffi::remote(Record)]
 pub struct View {
@@ -119,6 +187,112 @@ pub struct View {
     pub faults: Vec<Fault>,
     /// The capture holds its scan for a GPS fix.
     pub awaiting_fix: bool,
+    /// The settings in force, as a settings screen seeds its rows.
+    pub settings: SettingsShown,
+    /// The bridge's latest answers to a power-cycle and a format.
+    pub answers: Answers,
+}
+
+/// The settings in force, as a settings screen seeds its rows.
+#[uniffi::remote(Record)]
+pub struct SettingsShown {
+    /// The channel pool the bridge holds. `None` with the link down or before its first `Status`.
+    pub pool: Option<ChannelPool>,
+    /// The planner the bridge deals with. `None` likewise.
+    pub planner: Option<PlannerShown>,
+    /// The lid fan's duty, in percent. `None` likewise, and with no carrier.
+    pub fan_duty_pct: Option<u8>,
+    /// Whether a phone may link as a WardriveESP board. `None` likewise.
+    pub wardrive_esp: Option<bool>,
+    /// Whether the bridge logs to its SD card. `None` likewise, and with no card slot.
+    pub sd_log: Option<bool>,
+    /// Whether Bluetooth is in the scan. `None` while the scan is stopped.
+    pub bluetooth: Option<bool>,
+    /// The bridge receiver's rate, in hertz.
+    pub gps_rate_hz: u8,
+    /// The Wi-Fi networks never captured.
+    pub excluded_ssids: Vec<String>,
+    /// The bridge's SD card, and whether it can be formatted now.
+    pub sd: SdShown,
+}
+
+/// The planner and its sparse node count.
+#[uniffi::remote(Record)]
+pub struct PlannerShown {
+    /// The deal.
+    pub planner: Planner,
+    /// The sparse nodes the weighted deal asks for, or `None` for automatic.
+    pub sparse_nodes: Option<u8>,
+}
+
+/// The bridge's SD card.
+#[uniffi::remote(Enum)]
+pub enum SdShown {
+    /// The link is down.
+    NoBridge,
+    /// The bridge has sent no `Status` yet.
+    Waiting,
+    /// The bridge has no card slot.
+    NoSlot,
+    /// The slot, and the card in it if any.
+    Card {
+        state: SdState,
+        /// Its size in MiB, 0 with no card.
+        card_mb: u32,
+        /// The volume's free space in MiB, when it is ready and says.
+        free_mb: Option<u32>,
+        log: SdLogShown,
+        /// A format can be asked for.
+        can_format: bool,
+    },
+}
+
+/// The log the bridge writes to its SD card.
+#[uniffi::remote(Record)]
+pub struct SdLogShown {
+    /// The setting.
+    pub on: bool,
+    /// What the writer is doing.
+    pub state: SdLogState,
+    /// The number of the file open, `LOG/NNNNNNNN.BIN`, or `None` with none open.
+    pub file: Option<u32>,
+    /// Bytes written since the bridge booted.
+    pub written: u64,
+    /// Records dropped since boot.
+    pub dropped: u32,
+    /// Card transfers that failed since boot.
+    pub errors: u32,
+    /// The longest synchronous stretch of one writer step, in microseconds.
+    pub busy_max_us: u32,
+}
+
+/// The bridge's latest answers, each to show once.
+#[uniffi::remote(Record)]
+pub struct Answers {
+    /// The last answer to a power-cycle.
+    pub power: Option<PowerAnswered>,
+    /// The last answer to a format of the SD card.
+    pub sd: Option<SdAnswered>,
+}
+
+/// The bridge's answer to a power-cycle.
+#[uniffi::remote(Record)]
+pub struct PowerAnswered {
+    /// Counts the answers, from 1, so a new one is told from the last.
+    pub id: u64,
+    /// The slot answered for.
+    pub slot: SlotShown,
+    /// What happened.
+    pub outcome: PowerOutcome,
+}
+
+/// The bridge's answer to a format of its SD card.
+#[uniffi::remote(Record)]
+pub struct SdAnswered {
+    /// Counts the answers, from 1, so a new one is told from the last.
+    pub id: u64,
+    /// What happened.
+    pub outcome: SdFormatOutcome,
 }
 
 /// The host link and whether it is up.

@@ -150,15 +150,18 @@ own.
   serial port. It reads the host's health through an injected `health::HealthReader`, and a host
   GPS receiver's reader drives its `gps::Gps` from outside the crate.
 - **`crates/wartui-app`** — the headless app layer a phone binds to, and the TUI too: `settings`
-  (the schema of `wartui.toml` and its rules, the `SettingsStore` seam, and `Settings`, the one
-  path that saves them) and `session` (assembles and runs a capture for `run`, `bench` and a phone
+  (the schema of `wartui.toml` and its rules, the `SettingsStore` seam, `Split`, which keeps the
+  API keys in a `SecretStore`, and `Settings`, the one path that saves them, with a capture
+  running or none) and `session` (assembles and runs a capture for `run`, `bench` and a phone
   alike, follows it, saving the bridge and the link and asking for the bridge receiver's sky lists
   whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
   front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
   started; typed, and handing each fault the bridge reports to the caller) and `view` (what a
   fleet view shows of a snapshot, decided once as plain data: the faults and their order, the
-  notes, each node's state, the planner and the receiver) and `upload` (a capture sent to WDGWars
+  notes, each node's state, the planner and the receiver, the settings in force and the bridge's
+  answers to a power-cycle and a format) and `export` (a capture written as a WiGLE CSV, and
+  what a report calls its nodes) and `upload` (a capture sent to WDGWars
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and

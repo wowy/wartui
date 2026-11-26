@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
+use wartui_app::export::node_name;
 use wartui_app::update::image::NodeImage;
 use wartui_app::update::nodes::{
     self, Action, CutShort, Failed, Plan, Progress as Said, Row, SelectError, Target,
@@ -44,7 +45,6 @@ use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::update;
 
 use crate::flash::app::{self, board_name};
-use crate::text::node_name;
 
 #[derive(ClapArgs)]
 pub struct Args {

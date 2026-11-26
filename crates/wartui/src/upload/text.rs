@@ -5,12 +5,13 @@
 use std::path::Path;
 
 use chrono::DateTime;
+use wartui_app::export::NodeNames;
 use wartui_app::upload::wdgwars::{Count, CountValue, JobState, Last, Unfollowed};
 use wartui_app::upload::{Missing, Prepare, Prepared, Refusal, SendError, SiteError, SiteRefusal};
 use wartui_core::store::{StoreError, UploadSite, open_readonly};
 
 use crate::export::details;
-use crate::text::{NodeNames, thousands};
+use crate::text::thousands;
 
 /// What the bin crate says of a site.
 pub(crate) trait Site {
@@ -316,7 +317,7 @@ mod tests {
         brief, describe, end_unrecorded_text, import_failed_text, outcome, queued_unrecorded_text,
         refusal_text, send_error_text, site_error_text, site_refusal_text, size, unfollowed_text,
     };
-    use crate::text::NodeNames;
+    use wartui_app::export::NodeNames;
 
     const W: UploadSite = UploadSite::Wdgwars;
     const G: UploadSite = UploadSite::Wigle;

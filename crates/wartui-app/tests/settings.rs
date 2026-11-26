@@ -4,17 +4,18 @@
 mod common;
 
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use wartui_app::session::Controls;
 use wartui_app::settings::{
-    ApiKeys, Bridge, Config, Gps, Link, SaveError, Settings, SettingsEdit, SettingsStore,
-    excluded_ssid_bytes, load, parse, serialize,
+    ApiKeys, Bridge, Config, Gps, Link, SaveError, SecretStore, Settings, SettingsEdit,
+    SettingsStore, Split, excluded_ssid_bytes, load, parse, serialize,
 };
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::fan::FanDuty;
+use wartui_proto::plan::{ChannelPool, PlanSettings};
 
 use common::{BRIDGE, Fake, OTHER_BRIDGE, snapshot};
 
@@ -405,6 +406,7 @@ fn settings_save_reports_nowhere_when_there_is_no_store() {
     assert!(matches!(applied.saved, Err(SaveError::Nowhere)), "{applied:?}");
     let excluded = controls(&tx, &settings).apply_excluded(&[]);
     assert!(matches!(excluded, Ok(Err(SaveError::Nowhere))));
+    assert!(matches!(settings.save(&unmoved(&Config::default(), true)), Err(SaveError::Nowhere)));
     assert!(matches!(rx.try_recv(), Ok(Command::SetExcludedSsids { .. })), "applied anyway");
     assert_eq!(settings.saved(), Config::default(), "nothing saved, nothing changed");
 }
@@ -657,4 +659,221 @@ fn settings_take_the_latest_run_when_one_handle_serves_a_simulated_run_then_a_re
     let real = settings.clone().simulated().over(Link::Bluetooth);
     assert_eq!(real.link(), Some(Link::Bluetooth));
     assert_eq!(settings.link(), Some(Link::Bluetooth), "clones share the state");
+}
+
+#[test]
+fn settings_save_writes_each_host_row_when_no_capture_runs() {
+    let store = Fake::empty();
+    let settings = kept(&store, Config::default(), &BridgeMemory::none());
+    let edit = SettingsEdit {
+        gps_rate: Some(2),
+        remember_bridge: true,
+        wait_for_fix: false,
+        api_keys: ApiKeys {
+            wdgwars: " abc123def456 ".to_owned(),
+            wigle_name: "AIDexamplename".to_owned(),
+            wigle_token: "exampletoken789\n".to_owned(),
+        },
+        excluded_ssids: vec!["HomeNet".to_owned()],
+        ..SettingsEdit::default()
+    };
+
+    assert_eq!(settings.save(&edit).unwrap(), "wartui.toml");
+
+    let saved = store.config();
+    assert_eq!(saved.gps, Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) });
+    assert_eq!(saved.bridge.remember, Some(true));
+    assert_eq!(saved.excluded_ssids, ["HomeNet"]);
+    let keys = ApiKeys {
+        wdgwars: "abc123def456".to_owned(),
+        wigle_name: "AIDexamplename".to_owned(),
+        wigle_token: "exampletoken789".to_owned(),
+    };
+    assert_eq!(saved.api_keys, keys, "trimmed");
+    assert_eq!(settings.saved(), saved);
+}
+
+#[test]
+fn settings_save_changes_nothing_when_only_bridge_rows_move() {
+    let store = Fake::empty();
+    let memory = full().bridge.memory();
+    let settings = kept(&store, full(), &memory);
+    let edit = SettingsEdit {
+        pool: Some(ChannelPool::Eu),
+        planner: Some(PlanSettings::DEFAULT),
+        fan: FanDuty::new(40),
+        bluetooth: Some(true),
+        wardrive_esp: Some(true),
+        sd_log: Some(false),
+        ..unmoved(&full(), true)
+    };
+
+    settings.save(&edit).unwrap();
+
+    assert_eq!(store.config(), full(), "the rate unmoved keeps the saved one too");
+}
+
+#[test]
+fn settings_save_forgets_remembered_bridge_when_remember_bridge_is_off() {
+    let store = Fake::empty();
+    let memory = full().bridge.memory();
+    let settings = kept(&store, full(), &memory);
+
+    settings.save(&unmoved(&full(), false)).unwrap();
+
+    assert!(!memory.is_enabled());
+    let bridge = store.config().bridge;
+    assert_eq!(bridge.remember, Some(false));
+    assert_eq!((bridge.mac, bridge.serial, bridge.bluetooth_address), (None, None, None));
+    assert_eq!(bridge.link, Some(Link::Bluetooth), "not a row, so kept");
+}
+
+/// A secret store held in memory, which fails its saves while `failing`.
+#[derive(Debug, Default)]
+struct Secrets {
+    text: Mutex<Option<String>>,
+    failing: Mutex<bool>,
+}
+
+impl Secrets {
+    fn holding(text: &str) -> Arc<Self> {
+        Arc::new(Self { text: Mutex::new(Some(text.to_owned())), ..Self::default() })
+    }
+
+    fn text(&self) -> Option<String> {
+        self.text.lock().unwrap().clone()
+    }
+}
+
+impl SecretStore for Secrets {
+    fn load(&self) -> std::io::Result<Option<String>> {
+        Ok(self.text())
+    }
+
+    fn save(&self, text: &str) -> std::io::Result<()> {
+        if *self.failing.lock().unwrap() {
+            return Err(std::io::Error::other("the keychain is locked"));
+        }
+        *self.text.lock().unwrap() = Some(text.to_owned());
+        Ok(())
+    }
+}
+
+/// `settings` and `secrets` split, as a phone keeps them.
+fn split(settings: &Arc<Fake>, secrets: &Arc<Secrets>) -> Split {
+    Split::new(settings.clone(), secrets.clone())
+}
+
+/// [`full`]'s keys alone, as the secret store keeps them.
+fn full_keys() -> Config {
+    Config { api_keys: full().api_keys, ..Config::default() }
+}
+
+#[test]
+fn settings_split_keeps_keys_only_in_secret_store_when_saving() {
+    let (settings, secrets) = (Fake::empty(), Arc::new(Secrets::default()));
+
+    split(&settings, &secrets).save(&serialize(&full()).unwrap(), true).unwrap();
+
+    let secret = secrets.text().expect("the keys saved");
+    assert_eq!(parse(&secret).unwrap(), full_keys(), "the keys and nothing else: {secret}");
+}
+
+#[test]
+fn settings_split_leaves_no_key_in_settings_text_when_saving() {
+    let (settings, secrets) = (Fake::empty(), Arc::new(Secrets::default()));
+
+    split(&settings, &secrets).save(&serialize(&full()).unwrap(), true).unwrap();
+
+    let text = settings.text().expect("the rest saved");
+    assert!(!text.contains("api-keys"), "{text}");
+    assert_eq!(parse(&text).unwrap(), Config { api_keys: ApiKeys::default(), ..full() });
+}
+
+#[test]
+fn settings_split_merges_secret_keys_when_loading() {
+    let (settings, secrets) = (Fake::empty(), Arc::new(Secrets::default()));
+    let store = split(&settings, &secrets);
+    store.save(&serialize(&full()).unwrap(), true).unwrap();
+
+    assert_eq!(load(&store).unwrap(), full());
+    let secrets_only = split(&Fake::empty(), &secrets);
+    assert_eq!(load(&secrets_only).unwrap(), full_keys(), "with no other settings stored");
+}
+
+#[test]
+fn settings_split_moves_keys_to_secret_store_when_settings_text_holds_them() {
+    // Written before the split, or by hand.
+    let settings = Fake::holding(&serialize(&full()).unwrap());
+    let secrets = Secrets::holding("[api-keys]\nwdgwars = \"fromkeychain\"\n");
+    let store: Arc<dyn SettingsStore> = Arc::new(split(&settings, &secrets));
+
+    let loaded = load(store.as_ref()).unwrap();
+    assert_eq!(loaded.api_keys.wdgwars, "fromkeychain", "the secret store's wins");
+    assert_eq!(loaded.api_keys.wigle_name, full().api_keys.wigle_name, "the text's survives");
+    let saved = Settings::new(Some(store), loaded.clone(), full().bridge.memory());
+    saved.save_wait_for_fix(false).unwrap();
+
+    assert!(!settings.text().unwrap().contains("wigle"), "moved out of the settings");
+    let secret = parse(&secrets.text().unwrap()).unwrap();
+    assert_eq!(secret.api_keys, loaded.api_keys);
+}
+
+#[test]
+fn settings_split_clears_key_in_secret_store_when_key_is_cleared() {
+    let (settings, secrets) = (Fake::empty(), Arc::new(Secrets::default()));
+    let store = split(&settings, &secrets);
+    store.save(&serialize(&full()).unwrap(), true).unwrap();
+    let cleared =
+        Config { api_keys: ApiKeys { wdgwars: String::new(), ..full().api_keys }, ..full() };
+
+    store.save(&serialize(&cleared).unwrap(), true).unwrap();
+
+    assert_eq!(parse(&secrets.text().unwrap()).unwrap().api_keys.wdgwars, "");
+    assert_eq!(load(&store).unwrap(), cleared);
+}
+
+#[test]
+fn settings_split_fails_save_and_keeps_settings_text_when_secret_store_fails() {
+    let settings = Fake::holding("excluded-ssids = [\"HomeNet\"]\n");
+    let secrets = Arc::new(Secrets::default());
+    *secrets.failing.lock().unwrap() = true;
+
+    let error = split(&settings, &secrets).save(&serialize(&full()).unwrap(), true).unwrap_err();
+
+    assert_eq!(error.to_string(), "the keychain is locked");
+    assert_eq!(settings.saves(), 0);
+    assert_eq!(settings.text().as_deref(), Some("excluded-ssids = [\"HomeNet\"]\n"));
+}
+
+#[test]
+fn settings_split_fails_load_when_secret_text_is_malformed() {
+    for text in ["wdgwars = ", "[api-keys]\nwdgwars = \"a\"\n[gps]\nwait-for-fix = false\n"] {
+        let store = split(&Fake::empty(), &Secrets::holding(text));
+        let error = store.load().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{text:?}");
+    }
+}
+
+#[test]
+fn settings_split_hands_back_settings_text_when_it_does_not_parse() {
+    // So `load` refuses it with the place, as it does for a file.
+    let settings = Fake::holding("pool = \"eu\"\n");
+    let store = split(&settings, &Secrets::holding(&serialize(&full_keys()).unwrap()));
+    assert!(load_error_of(&store).contains("wartui pool"), "{}", load_error_of(&store));
+    let unparsable =
+        split(&Fake::holding("[gps"), &Secrets::holding(&serialize(&full_keys()).unwrap()));
+    assert_eq!(unparsable.load().unwrap().as_deref(), Some("[gps"));
+}
+
+/// What `store` refuses to load, each error in the chain joined by `: `.
+fn load_error_of(store: &dyn SettingsStore) -> String {
+    let error = load(store).unwrap_err();
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        chain.push_str(&format!(": {next}"));
+        source = next.source();
+    }
+    chain
 }

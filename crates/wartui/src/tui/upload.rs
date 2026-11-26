@@ -29,6 +29,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
+use wartui_app::export::NodeNames;
 use wartui_app::settings::Settings;
 use wartui_app::upload::wdgwars::{Count, Waited};
 use wartui_app::upload::{
@@ -39,7 +40,6 @@ use wartui_core::store::UploadSite;
 
 use super::centered_rect;
 use crate::config;
-use crate::text::NodeNames;
 use crate::upload::text::{
     Site, brief, count_value, describe, end_unrecorded_text, names, queued_unrecorded_text,
     refusal_text, send_error_text, site_error_text, site_refusal_text, size, state_name,

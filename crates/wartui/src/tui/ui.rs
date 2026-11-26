@@ -1,8 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_scrollview::ScrollViewState;
 use wartui_app::session::Controls;
-use wartui_app::view::{PowerCycle, View};
-use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
+use wartui_app::view::{PowerCycle, SdShown, View};
+use wartui_core::engine::{Command, NO_CARRIER, Snapshot, power_cycled_text, sd_formatted_text};
 use wartui_proto::bus::Slot;
 
 use super::blocks::LOST_SLOT;
@@ -305,10 +305,10 @@ impl Ui {
     }
 
     /// Open the confirm to format the bridge's SD card, over the settings modal.
-    fn ask_format_sd(&mut self, snapshot: &Snapshot) {
-        let Some(sd) = snapshot.bridge_status.and_then(|status| status.sd) else { return };
+    fn ask_format_sd(&mut self, sd: &SdShown) {
+        let SdShown::Card { card_mb, .. } = *sd else { return };
         self.notice = None;
-        self.sd_confirm = Some(sd.card_mb);
+        self.sd_confirm = Some(card_mb);
     }
 
     /// Whether the format confirm is open, and so takes every key.
@@ -351,35 +351,38 @@ impl Ui {
 
     /// Show the bridge's answer to a format, once.
     pub(super) fn poll_sd(&mut self, snapshot: &Snapshot) {
-        let Some(answer) = &snapshot.sd_answer else { return };
+        let Some(answer) = View::of(snapshot, self.link()).answers.sd else { return };
         if self.sd_shown == Some(answer.id) {
             return;
         }
         self.sd_shown = Some(answer.id);
-        self.say(answer.text.clone(), snapshot);
+        self.say(sd_formatted_text(answer.outcome), snapshot);
     }
 
-    /// Show the bridge's answer to a power-cycle, once.
+    /// Show the bridge's answer to a power-cycle, once, worded on the board the bridge announced.
     pub(super) fn poll_power(&mut self, snapshot: &Snapshot) {
-        let Some(answer) = &snapshot.power_answer else { return };
+        let Some(answer) = View::of(snapshot, self.link()).answers.power else { return };
         if self.power_shown == Some(answer.id) {
             return;
         }
         self.power_shown = Some(answer.id);
-        self.say(answer.text.clone(), snapshot);
+        let Some(slot) = Slot::from_u8(answer.slot.index) else { return };
+        self.say(power_cycled_text(snapshot.node_board(), slot, answer.outcome), snapshot);
     }
 
     /// Open the settings modal, seeded from what is in force.
     fn open_modal(&mut self, snapshot: &Snapshot) {
         self.notice = None;
-        self.modal = Some(ConfigModal::open(snapshot, self.controls.settings()));
+        let view = View::of(snapshot, self.link());
+        self.modal = Some(ConfigModal::open(&view, self.controls.settings()));
     }
 
     /// A key while the settings modal is open. `view` routes each key to this or to
     /// [`Self::on_key`], never both.
     pub(super) fn on_modal_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
+        let sd = View::of(snapshot, self.link()).settings.sd;
         let Some(modal) = self.modal.as_mut() else { return };
-        match modal.on_key(key, snapshot) {
+        match modal.on_key(key, &sd) {
             // As in `on_key`, unbound keys leave the notice alone.
             ModalAction::Stay => {}
             ModalAction::Close => self.modal = None,
@@ -391,7 +394,7 @@ impl Ui {
                 // The modal stays open with its edits, for another `Enter`.
                 Err(busy) => self.say(busy.to_owned(), snapshot),
             },
-            ModalAction::FormatSd => self.ask_format_sd(snapshot),
+            ModalAction::FormatSd => self.ask_format_sd(&sd),
             ModalAction::SaveExcluded => {
                 match apply_excluded(modal, &self.controls) {
                     Ok(text) => {
@@ -565,9 +568,13 @@ mod tests {
     #[test]
     fn ui_shows_power_cycle_answer_once_when_it_arrives() {
         use wartui_core::engine::PowerAnswer;
-        let mut snapshot = busy();
+        use wartui_proto::bus::NodeBoard;
+        use wartui_proto::link::PowerOutcome;
+        let mut snapshot = on_board(NodeBoard::Carrier14);
         let mut ui = idle();
-        let answer = PowerAnswer { id: 1, text: "N3 power-cycled".to_owned() };
+        let slot = Slot::new(0, 2).expect("A3");
+        let board = NodeBoard::Carrier14;
+        let answer = PowerAnswer { id: 1, slot, board, outcome: PowerOutcome::Done };
         snapshot.power_answer = Some(answer);
         ui.poll_power(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("N3 power-cycled"));
@@ -581,9 +588,10 @@ mod tests {
     #[test]
     fn ui_shows_sd_format_answer_once_when_it_arrives() {
         use wartui_core::engine::SdAnswer;
+        use wartui_proto::link::SdFormatOutcome;
         let mut snapshot = busy();
         let mut ui = idle();
-        snapshot.sd_answer = Some(SdAnswer { id: 1, text: "SD card formatted".to_owned() });
+        snapshot.sd_answer = Some(SdAnswer { id: 1, outcome: SdFormatOutcome::Done });
         ui.poll_sd(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("SD card formatted"));
 
@@ -593,7 +601,7 @@ mod tests {
         assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
 
         // A new answer, even in the same words, is shown.
-        snapshot.sd_answer = Some(SdAnswer { id: 2, text: "SD card formatted".to_owned() });
+        snapshot.sd_answer = Some(SdAnswer { id: 2, outcome: SdFormatOutcome::Done });
         ui.poll_sd(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("SD card formatted"));
     }

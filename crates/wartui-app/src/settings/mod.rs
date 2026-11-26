@@ -13,13 +13,15 @@
 //! `[bluetooth]` table is refused with a hint saying where that setting is set.
 //!
 //! [`SettingsStore`] is the seam: where the text is kept, a file on a desktop
-//! (`wartui_desktop::config`) and app storage on a phone. [`Settings`] holds the copy last loaded
+//! (`wartui_desktop::config`) and app storage on a phone. [`Split`] is one over two, which keeps
+//! the API keys in a [`SecretStore`], a phone's keychain. [`Settings`] holds the copy last loaded
 //! or saved, and is the one path that writes it.
 //!
 //! This lives in `wartui-app` rather than `wartui-core`: the core crate parses no operator input,
 //! and the settings are operator input just like a flag is.
 
 mod saved;
+mod secret;
 
 use std::ops::RangeInclusive;
 
@@ -29,6 +31,7 @@ use wartui_proto::mac::{self, Mac};
 
 pub use saved::{Applied, Busy, SaveError, Settings, SettingsEdit};
 pub(crate) use saved::{apply, apply_excluded};
+pub use secret::{SecretStore, Split};
 
 /// Everything the settings hold. Add a field and a table to grow it; every struct denies unknown
 /// fields, so a typo is caught rather than silently ignored. [`serialize`] omits a table with

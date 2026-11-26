@@ -6,7 +6,7 @@
 //! second. Drawing per observation would back-pressure the link, since a busy fleet sends tens
 //! of rows a second. The view holds every decision the fleet view draws, so a phone shows a
 //! capture by the same rules; what is left here is the terminal's own: words, colors, widths and
-//! layout. The settings modal reads the snapshot, for the settings in force.
+//! layout.
 
 mod blocks;
 mod chart;
@@ -179,7 +179,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
         draw_confirm_modal(frame, " waiting for GPS ", &lines);
     }
     if let Some(modal) = ui.modal() {
-        draw_settings_modal(frame, modal, snapshot);
+        draw_settings_modal(frame, modal, &view);
     }
     if ui.gps_open() {
         draw_gps_modal(frame, &view);

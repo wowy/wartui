@@ -14,7 +14,7 @@ use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, NodeView, Now, StorePeaks,
-    StoreStats,
+    StoreStats, power_cycled_text, sd_formatted_text,
 };
 use wartui_core::feed::{FixFeed, LocationFix, Pushed};
 use wartui_core::gps::{Gps, GpsStatus};
@@ -4191,7 +4191,9 @@ fn engine_names_power_cycle_outcome_when_bridge_answers() {
         engine.handle(answer, clock.at(1));
         let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
         let said = snapshot.power_answer.expect("an answer");
-        assert!(said.text.starts_with(want), "{outcome:?}: {}", said.text);
+        assert_eq!((said.slot, said.board, said.outcome), (slot, NodeBoard::Carrier6, outcome));
+        let text = power_cycled_text(said.board, said.slot, said.outcome);
+        assert!(text.starts_with(want), "{outcome:?}: {text}");
         // The view shows each answer once, telling them apart by this.
         assert!(said.id > last_id, "{outcome:?}");
         last_id = said.id;
@@ -4308,7 +4310,8 @@ fn engine_names_sd_format_outcome_and_polls_status_when_bridge_answers() {
         assert_eq!(batch.bulk, [HostToBridge::GetStatus], "{outcome:?}");
         let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
         let said = snapshot.sd_answer.expect("an answer");
-        assert_eq!(said.text, want, "{outcome:?}");
+        assert_eq!(said.outcome, outcome);
+        assert_eq!(sd_formatted_text(said.outcome), want, "{outcome:?}");
         // The view shows each answer once, telling them apart by this.
         assert!(said.id > last_id, "{outcome:?}");
         last_id = said.id;

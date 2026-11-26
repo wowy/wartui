@@ -7,13 +7,14 @@ use std::time::Duration;
 use chrono::{NaiveDate, NaiveTime};
 use wartui_app::settings::Link;
 use wartui_app::view::{
-    Augmentation, BridgeView, ChannelBar, FanShown, Fault, FirmwareShown, FixShown, HostShown,
-    LinkFault, LinkFaultKind, NodeRow, NodeStatus, Note, Planning, PowerCycle, ReceiverPort,
-    ReceiverStatus, ReceiverSummary, RejectsFrom, SatelliteShown, ScanShown, Severity, ShareShown,
-    SkyDate, SlotShown, View,
+    Answers, Augmentation, BridgeView, ChannelBar, FanShown, Fault, FirmwareShown, FixShown,
+    HostShown, LinkFault, LinkFaultKind, NodeRow, NodeStatus, Note, PlannerShown, Planning,
+    PowerAnswered, PowerCycle, ReceiverPort, ReceiverStatus, ReceiverSummary, RejectsFrom,
+    SatelliteShown, ScanShown, SdAnswered, SdLogShown, SdShown, SettingsShown, Severity,
+    ShareShown, SkyDate, SlotShown, View,
 };
 use wartui_bridge::DisconnectCause;
-use wartui_core::engine::{NodeView, Snapshot};
+use wartui_core::engine::{NodeView, PowerAnswer, SdAnswer, Snapshot};
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
@@ -22,8 +23,8 @@ use wartui_proto::bus::{
 };
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::Central;
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::link::{Central, PowerOutcome, SdFormatOutcome, SdLog, SdState, SdStatus};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, PlanSettings, Planner, SparseNodes};
 use wartui_proto::reset::ResetCause;
 
 use common::{node, receiver, running, snapshot};
@@ -978,4 +979,117 @@ fn view_lists_no_gps_rejects_when_lines_are_few_or_a_fix_arrived() {
     assert!(rejects(300, 1, |_| {}).is_empty());
     let none = usb(&with_gps(GpsStatus::NoReceiver, PositionSource::Static));
     assert!(none.faults.is_empty(), "a missing receiver is no fault");
+}
+
+/// A running capture whose bridge reports `sd` in its slot, a weighted planner and the scan.
+fn with_settings(sd: Option<SdStatus>) -> Snapshot {
+    let mut snapshot = with_fan(40, Some(1830));
+    snapshot.pool = Some(ChannelPool::Eu);
+    let sparse_nodes = SparseNodes::fixed(2).expect("in range");
+    snapshot.planner = Some(PlanSettings { planner: Planner::Weighted, sparse_nodes });
+    snapshot.wardrive_esp = Some(true);
+    snapshot.sd_log = sd.map(|sd| sd.log.on);
+    snapshot.scan = Some(ScanMode::WifiBluetooth);
+    snapshot.gps_rate_hz = 2;
+    snapshot.excluded_ssids = vec!["HomeNet".to_owned()];
+    if let Some(status) = &mut snapshot.bridge_status {
+        status.sd = sd;
+    }
+    snapshot
+}
+
+#[test]
+fn view_shows_bridge_settings_when_link_is_up() {
+    let card = SdStatus {
+        log: SdLog { on: true, ..SdLog::OFF },
+        ..SdStatus::card(SdState::Ready, 60_350, Some(55_000))
+    };
+    let shown = usb(&with_settings(Some(card))).settings;
+    let log = SdLogShown { on: true, ..SdLogShown::from(SdLog::OFF) };
+    let sd = SdShown::Card {
+        state: SdState::Ready,
+        card_mb: 60_350,
+        free_mb: Some(55_000),
+        log,
+        can_format: true,
+    };
+    let want = SettingsShown {
+        pool: Some(ChannelPool::Eu),
+        planner: Some(PlannerShown { planner: Planner::Weighted, sparse_nodes: Some(2) }),
+        fan_duty_pct: Some(40),
+        wardrive_esp: Some(true),
+        sd_log: Some(true),
+        bluetooth: Some(true),
+        gps_rate_hz: 2,
+        excluded_ssids: vec!["HomeNet".to_owned()],
+        sd,
+    };
+    assert_eq!(shown, want);
+}
+
+#[test]
+fn view_shows_no_bridge_settings_when_link_is_down() {
+    let mut down = with_settings(Some(SdStatus::card(SdState::Ready, 60_350, None)));
+    down.link_up = false;
+    let shown = usb(&down).settings;
+    assert_eq!(
+        (shown.pool, shown.planner, shown.fan_duty_pct, shown.wardrive_esp, shown.sd_log),
+        (None, None, None, None, None)
+    );
+    assert_eq!(shown.sd, SdShown::NoBridge);
+    // The run holds the scan, and these the host, so they stay.
+    assert_eq!(shown.bluetooth, Some(true));
+    assert_eq!(shown.gps_rate_hz, 2);
+    assert_eq!(shown.excluded_ssids, ["HomeNet"]);
+}
+
+#[test]
+fn view_shows_nothing_to_toggle_when_scan_is_stopped() {
+    let stopped = Snapshot { scan: Some(ScanMode::Stopped), ..with_settings(None) };
+    assert_eq!(usb(&stopped).settings.bluetooth, None);
+    let unreported = Snapshot { scan: None, ..with_settings(None) };
+    assert_eq!(usb(&unreported).settings.bluetooth, Some(false), "off before the first report");
+}
+
+#[test]
+fn view_reads_planner_count_as_automatic_when_sparse_nodes_is_auto() {
+    let settings = PlanSettings { planner: Planner::Even, sparse_nodes: SparseNodes::AUTO };
+    let shown = PlannerShown::from(settings);
+    assert_eq!(shown, PlannerShown { planner: Planner::Even, sparse_nodes: None });
+    assert_eq!(PlanSettings::from(shown), settings);
+}
+
+#[test]
+fn view_offers_format_only_when_card_is_not_fat32_ready_or_failed() {
+    let can_format =
+        |state| match usb(&with_settings(Some(SdStatus::card(state, 30_436, None)))).settings.sd {
+            SdShown::Card { can_format, .. } => can_format,
+            other => panic!("{state:?}: {other:?}"),
+        };
+    assert!(can_format(SdState::NoFat32));
+    assert!(can_format(SdState::Ready));
+    assert!(can_format(SdState::Failed));
+    assert!(!can_format(SdState::NoCard));
+    assert!(!can_format(SdState::Formatting));
+}
+
+#[test]
+fn view_shows_sd_waiting_or_no_slot_when_bridge_has_not_reported_one() {
+    assert_eq!(usb(&with_settings(None)).settings.sd, SdShown::NoSlot);
+    let waiting = Snapshot { bridge_status: None, ..with_settings(None) };
+    assert_eq!(usb(&waiting).settings.sd, SdShown::Waiting);
+}
+
+#[test]
+fn view_carries_bridge_answers_when_bridge_has_answered() {
+    let mut snapshot = running(Vec::new());
+    assert_eq!(usb(&snapshot).answers, Answers { power: None, sd: None });
+    let slot = Slot::new(1, 0).expect("B1");
+    let board = NodeBoard::Carrier14;
+    snapshot.power_answer = Some(PowerAnswer { id: 3, slot, board, outcome: PowerOutcome::Failed });
+    snapshot.sd_answer = Some(SdAnswer { id: 1, outcome: SdFormatOutcome::Busy });
+    let answers = usb(&snapshot).answers;
+    let slot = SlotShown { index: slot.as_u8(), label: "N8".to_owned() };
+    assert_eq!(answers.power, Some(PowerAnswered { id: 3, slot, outcome: PowerOutcome::Failed }));
+    assert_eq!(answers.sd, Some(SdAnswered { id: 1, outcome: SdFormatOutcome::Busy }));
 }

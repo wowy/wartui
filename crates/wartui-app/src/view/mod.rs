@@ -5,8 +5,9 @@
 //!
 //! **Plain data.** A `Snapshot` cannot cross a phone binding: it carries instants, byte arrays,
 //! bit sets and protocol newtypes. Every field here is a `bool`, an integer, an `f64`, a `String`,
-//! an `Option` or `Vec` of these, a type of this module, or one of five plain enums:
-//! [`ChannelPool`], [`ResetCause`], [`Board`], [`PositionSource`] and [`Constellation`].
+//! an `Option` or `Vec` of these, a type of this module, or one of ten plain enums:
+//! [`ChannelPool`], [`ResetCause`], [`Board`], [`PositionSource`], [`Constellation`], [`Planner`],
+//! [`SdState`], [`SdLogState`], [`PowerOutcome`] and [`SdFormatOutcome`].
 //! Milliseconds are `i64`, the engine's `u64` totals stay `u64`, and counts of nodes are `u32`.
 //!
 //! **Data, never sentences.** A `String` here holds a datum: an address, a slot's label, a port, a
@@ -19,6 +20,7 @@
 mod faults;
 mod nodes;
 mod receiver;
+mod settings;
 
 use wartui_core::engine::Snapshot;
 #[cfg(doc)]
@@ -27,7 +29,11 @@ use wartui_core::position::PositionSource;
 #[cfg(doc)]
 use wartui_proto::bus::Board;
 use wartui_proto::fleet::ScanMode;
+#[cfg(doc)]
+use wartui_proto::link::{PowerOutcome, SdFormatOutcome, SdLogState, SdState};
 use wartui_proto::mac;
+#[cfg(doc)]
+use wartui_proto::plan::Planner;
 use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
 #[cfg(doc)]
 use wartui_proto::reset::ResetCause;
@@ -37,6 +43,9 @@ pub use nodes::{FirmwareShown, NodeRow, NodeStatus, PowerCycle, Severity, ShareS
 pub use receiver::{
     Augmentation, FixShown, ReceiverPort, ReceiverStatus, ReceiverSummary, ReceiverView,
     SatelliteShown, SkyDate, SkyView,
+};
+pub use settings::{
+    Answers, PlannerShown, PowerAnswered, SdAnswered, SdLogShown, SdShown, SettingsShown,
 };
 
 use crate::settings::Link;
@@ -72,6 +81,10 @@ pub struct View {
     pub faults: Vec<Fault>,
     /// The run holds its scan for a GPS fix.
     pub awaiting_fix: bool,
+    /// The settings in force, as a settings screen seeds its rows.
+    pub settings: SettingsShown,
+    /// The bridge's latest answers to a power-cycle and a format.
+    pub answers: Answers,
 }
 
 impl View {
@@ -107,6 +120,8 @@ impl View {
             notes,
             faults,
             awaiting_fix: snapshot.awaiting_fix,
+            settings: settings::of(snapshot),
+            answers: settings::answers(snapshot),
         }
     }
 }

@@ -436,16 +436,17 @@ impl FleetEngine {
             }
             BridgeToHost::Fleet(report) => self.on_fleet(report, now, batch),
             BridgeToHost::PowerCycled { slot, outcome } => {
-                let text = power_cycled_text(self.node_board(), *slot, *outcome);
+                let board = self.node_board();
+                let text = power_cycled_text(board, *slot, *outcome);
                 tracing::info!(slot = %self.slot_label(*slot), ?outcome, "{text}");
-                let id = self.power_answer.as_ref().map_or(1, |answer| answer.id + 1);
-                self.power_answer = Some(PowerAnswer { id, text });
+                let id = self.power_answer.map_or(1, |answer| answer.id + 1);
+                self.power_answer = Some(PowerAnswer { id, slot: *slot, board, outcome: *outcome });
             }
             BridgeToHost::SdFormatted { outcome } => {
                 let text = sd_formatted_text(*outcome);
                 tracing::info!(?outcome, "{text}");
-                let id = self.sd_answer.as_ref().map_or(1, |answer| answer.id + 1);
-                self.sd_answer = Some(SdAnswer { id, text });
+                let id = self.sd_answer.map_or(1, |answer| answer.id + 1);
+                self.sd_answer = Some(SdAnswer { id, outcome: *outcome });
                 // The card's new state, now rather than at the next poll.
                 batch.bulk.push(HostToBridge::GetStatus);
             }
