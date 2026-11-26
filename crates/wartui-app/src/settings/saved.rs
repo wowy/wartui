@@ -222,20 +222,22 @@ impl Settings {
     /// the excluded list), with no engine to tell. The rows a bridge holds are not saved anywhere
     /// on the host and are ignored. `remember` switches the bridge memory as a running capture's
     /// [`Controls::apply`](crate::session::Controls::apply) does, whether or not the save lands:
-    /// a failed save loses only the stored copy. A bridge already connected is remembered when
-    /// the next capture starts over its link. `edit.gps_rate` is the rate saved when given, else
+    /// a failed save loses only the stored copy. `connected` is the bridge an open link has
+    /// announced, remembered when the switch turns on, since a reconnect may never come; a front
+    /// end with no link open passes `None`. `edit.gps_rate` is the rate saved when given, else
     /// the one already saved.
     ///
     /// # Errors
     /// Why nothing was saved. The remember switch has moved all the same.
-    pub fn save(&self, edit: &SettingsEdit) -> Result<String, SaveError> {
-        self.keep(edit, None, None).saved
+    pub fn save(&self, edit: &SettingsEdit, connected: Option<Mac>) -> Result<String, SaveError> {
+        self.keep(edit, connected, None).saved
     }
 
     /// Remember `mac`, the bridge a capture's link announced before it, when remembering is on
     /// and holds no bridge: the switch turned on after the link connected, which a connection
-    /// made with it on has remembered already. Nothing under the simulator. [`Self::follow`]
-    /// saves it.
+    /// made with it on has remembered already. This covers a save made while the link was in
+    /// use, which [`Self::save`] is handed no bridge for. Nothing under the simulator.
+    /// [`Self::follow`] saves it.
     pub(crate) fn remember_announced(&self, mac: Mac) {
         let state = self.lock();
         if !state.simulated && state.memory.is_enabled() && state.memory.recall().is_none() {
