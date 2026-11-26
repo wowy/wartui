@@ -1,8 +1,7 @@
 //! Uploading from the fleet view: `u`.
 //!
-//! The steps are `wartui upload`'s own: [`prepare`], [`send`], [`wdgwars::wait`], [`finish`].
-//! The view sends what the command would, to every site with credentials, and records it the
-//! same way.
+//! The steps are `wartui upload`'s own, [`wartui_app::upload`]'s `prepare` and `upload`. The view
+//! sends what the command would, to every site with credentials, and records it the same way.
 //!
 //! Each step runs on its own thread, so the view keeps drawing. One thread prepares every site,
 //! since building a body takes seconds on a long capture. After `y`, each site sends on a
@@ -17,39 +16,52 @@
 //! store's WAL gives the read its snapshot, as it does for `export` on a running capture.
 //!
 //! The credentials are read when `u` is pressed, not at startup, so a key pasted in settings
-//! works without a restart. Nothing is sent until the operator presses `y` on what will go.
+//! works without a restart. Nothing is sent until the operator presses `y` on what will go: the
+//! keypress is where each site's [`Consent`] is made.
 //!
 //! Quitting needs no handling. A send still in flight is abandoned with nothing queued at
 //! the site, and an upload the site queued is already recorded in the capture.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::time::Instant;
 
-use anyhow::Result;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
-use serde_json::{Map, Value};
 use wartui_app::settings::Settings;
+use wartui_app::upload::wdgwars::{Count, Waited};
+use wartui_app::upload::{
+    Consent, Endpoints, Options, Outcome, Prepare, Progress, Refusal, involved, prepare, upload,
+    wigle,
+};
 use wartui_core::store::UploadSite;
 
 use super::centered_rect;
 use crate::config;
-use crate::upload::{
-    Job, Options, Prepare, Prepared, Sent, Simulated, Site, finish, involved, prepare, send, size,
-    wdgwars, wigle,
+use crate::text::NodeNames;
+use crate::upload::text::{
+    Site, brief, count_value, describe, end_unrecorded_text, names, queued_unrecorded_text,
+    refusal_text, send_error_text, site_error_text, site_refusal_text, size, state_name,
+    unfollowed_text,
 };
 
 /// Where `u` uploads to: this run's capture, and the sites.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UploadTarget {
     pub db: PathBuf,
-    /// [`wdgwars::BASE`], or a local server under test.
-    pub wdgwars_base: String,
-    /// [`wigle::BASE`], or a local server under test.
-    pub wigle_base: String,
+    /// [`Endpoints::live`], or local servers under test.
+    pub endpoints: Endpoints,
+}
+
+impl Default for UploadTarget {
+    /// A view that never uploads: no capture, and no site reachable.
+    fn default() -> Self {
+        Self {
+            db: PathBuf::new(),
+            endpoints: Endpoints { wdgwars: String::new(), wigle: String::new() },
+        }
+    }
 }
 
 /// The width a site's label is padded to in the two-site confirm.
@@ -66,13 +78,26 @@ pub(super) struct Upload {
     wigle: Option<String>,
 }
 
+/// What the prepare thread found.
+struct Found {
+    outcomes: Result<Vec<(UploadSite, Prepare)>, Refusal>,
+    /// What the summaries call the capture's nodes.
+    names: NodeNames,
+    /// The capture, and where the settings live: a refusal names both.
+    db: PathBuf,
+    config: Option<PathBuf>,
+}
+
 #[derive(Default)]
 enum Stage {
     #[default]
     Idle,
-    Preparing(Receiver<Result<Vec<(UploadSite, Prepare)>>>),
+    Preparing(Receiver<Found>),
     /// Every site involved, at least one of them ready.
-    Confirming(Vec<(UploadSite, Prepare)>),
+    Confirming {
+        outcomes: Vec<(UploadSite, Prepare)>,
+        names: NodeNames,
+    },
     /// Each line a site's thread sends replaces that site's line. The stage ends when every
     /// thread has hung up.
     Sending(Receiver<(UploadSite, String)>),
@@ -84,7 +109,7 @@ impl std::fmt::Debug for Upload {
         let stage = match self.stage {
             Stage::Idle => "idle",
             Stage::Preparing(_) => "preparing",
-            Stage::Confirming(_) => "confirming",
+            Stage::Confirming { .. } => "confirming",
             Stage::Sending(_) => "sending",
         };
         f.debug_struct("Upload")
@@ -111,21 +136,25 @@ impl Upload {
         self.general = None;
         self.wdgwars = None;
         self.wigle = None;
-        let config = settings.saved();
-        if involved(&config).is_empty() {
+        let keys = settings.saved().api_keys;
+        if involved(&keys).is_empty() {
             return Some("no upload credentials; paste a key in settings (c)".to_owned());
         }
         // Only named in a refusal, so the place serves as the path.
-        let config_path = settings.place().map(PathBuf::from);
+        let config = settings.place().map(PathBuf::from);
         let db = target.db.clone();
         let options = Options {
             excluded_ssids: config::excluded_ssid_bytes(excluded).collect(),
-            ..Options::default()
+            ..Options::new(env!("CARGO_PKG_VERSION"))
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let prepared = prepare(&config, config_path.as_deref(), &db, &options);
-            let _ = tx.send(prepared);
+            let outcomes = prepare(&keys, &db, &options);
+            let names = match &outcomes {
+                Ok(outcomes) => names(&db, outcomes),
+                Err(_) => NodeNames::by_address(),
+            };
+            let _ = tx.send(Found { outcomes, names, db, config });
         });
         self.stage = Stage::Preparing(rx);
         self.general = Some("upload: preparing…".to_owned());
@@ -136,7 +165,7 @@ impl Upload {
     pub(super) fn poll(&mut self) -> Option<String> {
         match &self.stage {
             Stage::Preparing(rx) => match rx.try_recv() {
-                Ok(prepared) => self.prepared(prepared),
+                Ok(found) => self.prepared(found),
                 Err(TryRecvError::Empty) => None,
                 Err(TryRecvError::Disconnected) => {
                     self.stage = Stage::Idle;
@@ -164,28 +193,31 @@ impl Upload {
                 }
                 None
             }
-            Stage::Idle | Stage::Confirming(_) => None,
+            Stage::Idle | Stage::Confirming { .. } => None,
         }
     }
 
-    fn prepared(&mut self, prepared: Result<Vec<(UploadSite, Prepare)>>) -> Option<String> {
+    fn prepared(&mut self, found: Found) -> Option<String> {
         self.stage = Stage::Idle;
         self.general = None;
-        let outcomes = match prepared {
+        let (db, config) = (found.db.as_path(), found.config.as_deref());
+        let outcomes = match found.outcomes {
             Ok(outcomes) => outcomes,
-            Err(error) if error.is::<Simulated>() => return Some(error.to_string()),
-            Err(error) => {
-                self.general = Some(format!("upload failed: {error:#}"));
+            Err(refusal @ Refusal::TestData) => return Some(refusal_text(&refusal, db, config)),
+            Err(refusal) => {
+                self.general =
+                    Some(format!("upload failed: {}", refusal_text(&refusal, db, config)));
                 return None;
             }
         };
         for (site, outcome) in &outcomes {
-            if let Prepare::Refused(error) = outcome {
-                *self.line_mut(*site) = Some(format!("upload: {} failed: {error:#}", site.label()));
+            if let Prepare::Refused(refusal) = outcome {
+                let why = site_refusal_text(*site, refusal, config);
+                *self.line_mut(*site) = Some(format!("upload: {} failed: {why}", site.label()));
             }
         }
         if outcomes.iter().any(|(_, outcome)| matches!(outcome, Prepare::Ready(_))) {
-            self.stage = Stage::Confirming(outcomes);
+            self.stage = Stage::Confirming { outcomes, names: found.names };
             return None;
         }
         nothing_to_send(&outcomes)
@@ -201,7 +233,7 @@ impl Upload {
 
     /// Whether the confirm modal is open, and so takes every key.
     pub(super) fn confirming(&self) -> bool {
-        matches!(self.stage, Stage::Confirming(_))
+        matches!(self.stage, Stage::Confirming { .. })
     }
 
     /// A key while the confirm modal is open: `y` sends to every ready site, anything else
@@ -211,7 +243,9 @@ impl Upload {
         key: KeyEvent,
         target: &UploadTarget,
     ) -> Option<String> {
-        let Stage::Confirming(outcomes) = std::mem::take(&mut self.stage) else { return None };
+        let Stage::Confirming { outcomes, .. } = std::mem::take(&mut self.stage) else {
+            return None;
+        };
         if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
             return Some("not uploaded".to_owned());
         }
@@ -219,12 +253,19 @@ impl Upload {
         for (site, outcome) in outcomes {
             let Prepare::Ready(prepared) = outcome else { continue };
             *self.line_mut(site) =
-                Some(format!("upload: {} sending {}", site.label(), size(prepared.body.len())));
+                Some(format!("upload: {} sending {}", site.label(), size(prepared.file_bytes())));
+            // The operator's `y`, made here at the keypress, for this upload alone.
+            let consent = Consent::to(&prepared);
             let (tx, target) = (tx.clone(), target.clone());
             std::thread::spawn(move || {
-                upload(&prepared, &target, |line| {
+                let say = |line| {
                     let _ = tx.send((site, line));
-                });
+                };
+                let outcome =
+                    upload(&prepared, consent, &target.db, &target.endpoints, |progress| {
+                        say(progress_line(&progress));
+                    });
+                say(outcome_line(site, &outcome, &target.db));
             });
         }
         self.stage = Stage::Sending(rx);
@@ -233,7 +274,7 @@ impl Upload {
 
     /// The confirm modal's title, while it is open.
     pub(super) fn confirm_title(&self) -> Option<String> {
-        let Stage::Confirming(outcomes) = &self.stage else { return None };
+        let Stage::Confirming { outcomes, .. } = &self.stage else { return None };
         Some(match outcomes.as_slice() {
             [(site, _)] => format!(" upload to {} ", site.label()),
             _ => " upload ".to_owned(),
@@ -242,10 +283,10 @@ impl Upload {
 
     /// The confirm modal's lines, while it is open.
     pub(super) fn confirm_lines(&self) -> Option<Vec<String>> {
-        let Stage::Confirming(outcomes) = &self.stage else { return None };
+        let Stage::Confirming { outcomes, names } = &self.stage else { return None };
         let mut lines = Vec::new();
         if let [(_, Prepare::Ready(prepared))] = outcomes.as_slice() {
-            lines.extend(prepared.describe().lines().map(str::to_owned));
+            lines.extend(describe(prepared, names).lines().map(str::to_owned));
         } else {
             for (at, (site, outcome)) in outcomes.iter().enumerate() {
                 if at > 0 {
@@ -280,7 +321,7 @@ fn section(lines: &mut Vec<String>, site: UploadSite, outcome: &Prepare) {
     let label = format!("{:<LABEL_WIDTH$}", site.label());
     match outcome {
         Prepare::Ready(prepared) => {
-            let brief = prepared.brief();
+            let brief = brief(prepared);
             let mut brief = brief.lines();
             lines.push(format!("{label}{}", brief.next().unwrap_or_default()));
             lines.extend(brief.map(str::to_owned));
@@ -314,20 +355,47 @@ fn nothing_to_send(outcomes: &[(UploadSite, Prepare)]) -> Option<String> {
     }
 }
 
-/// Send `prepared` to its site, then follow a WDGWars job and record how it ended, saying each
-/// step through `say`.
-fn upload(prepared: &Prepared, target: &UploadTarget, say: impl Fn(String)) {
-    let label = prepared.site().label();
-    match send(prepared, &target.db, &target.wdgwars_base, &target.wigle_base) {
-        Err(error) => say(format!("upload: {label} failed: {error:#}")),
-        Ok(Sent::Wigle { queued, unrecorded }) => {
-            let mut line = queued_line(&queued);
-            if let Some(error) = unrecorded {
-                line.push_str(&format!("; {error:#}"));
-            }
-            say(line);
+/// A WDGWars job's footer line while it is followed.
+fn progress_line(progress: &Progress) -> String {
+    match progress {
+        Progress::Queued { job } => format!("upload: WDGWars job {job} queued"),
+        Progress::State { job, state } => {
+            format!("upload: WDGWars job {job} {}", state_name(*state))
         }
-        Ok(Sent::Wdgwars { client, job }) => follow(&client, &job, say),
+        Progress::PollFailed { job, error } => format!(
+            "upload: WDGWars job {job}: asking after it failed ({}); trying again",
+            site_error_text(UploadSite::Wdgwars, error)
+        ),
+    }
+}
+
+/// `site`'s footer line once its upload of `db` has ended.
+fn outcome_line(site: UploadSite, outcome: &Outcome, db: &Path) -> String {
+    match outcome {
+        Outcome::NotSent(error) => {
+            format!("upload: {} failed: {}", site.label(), send_error_text(site, error, db))
+        }
+        Outcome::Wigle { queued, unrecorded } => {
+            let mut line = queued_line(queued);
+            if let Some(error) = unrecorded {
+                line.push_str(&format!("; {}", queued_unrecorded_text(&queued.trans_id, error)));
+            }
+            line
+        }
+        Outcome::Wdgwars { job, waited, unrecorded, .. } => {
+            let mut line = match waited {
+                Waited::Done(counts) => done_line(*job, counts),
+                Waited::Unfollowed(reason) => format!(
+                    "upload: WDGWars job {job} queued; check wdgwars.pl for the result ({})",
+                    unfollowed_text(reason)
+                ),
+                Waited::Failed(message) => format!("upload: WDGWars job {job} failed: {message}"),
+            };
+            if let Some(error) = unrecorded {
+                line.push_str(&format!("; {}", end_unrecorded_text(*job, error)));
+            }
+            line
+        }
     }
 }
 
@@ -340,46 +408,12 @@ fn queued_line(queued: &wigle::Queued) -> String {
     line
 }
 
-/// Follow WDGWars' `job` and record how it ended, saying each step through `say`.
-fn follow(client: &wdgwars::Client, job: &Job, say: impl Fn(String)) {
-    let id = job.id;
-    say(format!("upload: WDGWars job {id} queued"));
-    let started = Instant::now();
-    let waited = wdgwars::wait(
-        id,
-        wdgwars::give_up(job.rows),
-        || client.poll(id),
-        std::thread::sleep,
-        || started.elapsed(),
-        |progress| match progress {
-            wdgwars::Progress::State(name) => say(format!("upload: WDGWars job {id} {name}")),
-            wdgwars::Progress::PollError(message) => say(format!(
-                "upload: WDGWars job {id}: asking after it failed ({message}); trying again"
-            )),
-        },
-    );
-    let mut line = match &waited {
-        Ok(wdgwars::Waited::Done(result)) => done_line(id, result),
-        Ok(wdgwars::Waited::Unfollowed(reason)) => {
-            format!("upload: WDGWars job {id} queued; check wdgwars.pl for the result ({reason})")
-        }
-        Err(error) => {
-            let message = error
-                .downcast_ref::<wdgwars::JobFailed>()
-                .map_or_else(|| format!("{error:#}"), |failed| failed.message.clone());
-            format!("upload: WDGWars job {id} failed: {message}")
-        }
-    };
-    if let Err(error) = finish(job, &waited, started.elapsed()) {
-        line.push_str(&format!("; {error:#}"));
-    }
-    say(line);
-}
-
 /// A finished job's counts on one line.
-fn done_line(job: u64, result: &Map<String, Value>) -> String {
-    let counts: Vec<String> =
-        wdgwars::counts(result).into_iter().map(|(key, value)| format!("{key} {value}")).collect();
+fn done_line(job: u64, counts: &[Count]) -> String {
+    let counts: Vec<String> = counts
+        .iter()
+        .map(|count| format!("{} {}", count.name, count_value(&count.value)))
+        .collect();
     if counts.is_empty() {
         return format!("upload: WDGWars job {job} done; WDGWars sent no counts");
     }
@@ -403,7 +437,7 @@ pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, title: &str, lines: &[St
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -421,11 +455,9 @@ mod tests {
 
     /// A view whose `u` uploads `db` with `saved`'s credentials to local servers.
     fn view(db: PathBuf, saved: config::Config, wdgwars_base: &str, wigle_base: &str) -> Ui {
-        let upload = UploadTarget {
-            db,
-            wdgwars_base: wdgwars_base.to_owned(),
-            wigle_base: wigle_base.to_owned(),
-        };
+        let endpoints =
+            Endpoints { wdgwars: wdgwars_base.to_owned(), wigle: wigle_base.to_owned() };
+        let upload = UploadTarget { db, endpoints };
         idle_with(Settings::new(None, saved, BridgeMemory::default())).uploading_to(upload)
     }
 
@@ -449,9 +481,9 @@ mod tests {
 
     /// A capture holding two positioned networks.
     fn two_rows(dir: &tempfile::TempDir) -> PathBuf {
-        use crate::testing::{capture, sighting};
+        use wartui_app::upload::testing::{capture, sighting};
         capture(
-            dir,
+            dir.path(),
             vec![
                 sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
@@ -576,9 +608,9 @@ mod tests {
 
     #[test]
     fn upload_key_shows_notice_when_neither_site_has_rows() {
-        use crate::testing::{capture, sighting};
+        use wartui_app::upload::testing::{capture, sighting};
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
+        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
         let snapshot = busy();
         let mut ui = view(db, both(true), NOWHERE, NOWHERE);
         press_u(&mut ui, &snapshot);
@@ -590,7 +622,7 @@ mod tests {
     #[test]
     fn upload_footer_shows_job_result_when_import_done() {
         let dir = tempfile::tempdir().unwrap();
-        let (base, server) = crate::testing::serve_sequence(&[
+        let (base, server) = wartui_app::upload::testing::serve_sequence(&[
             ("202 Accepted", r#"{"ok":true,"job_id":42}"#),
             (
                 "200 OK",
@@ -617,11 +649,11 @@ mod tests {
     #[test]
     fn upload_footer_shows_line_per_site_when_both_sent() {
         let dir = tempfile::tempdir().unwrap();
-        let (wdgwars_base, wdgwars) = crate::testing::serve_sequence(&[
+        let (wdgwars_base, wdgwars) = wartui_app::upload::testing::serve_sequence(&[
             ("202 Accepted", r#"{"ok":true,"job_id":42}"#),
             ("200 OK", r#"{"ok":true,"job_id":42,"status":"done","result":{"imported":2}}"#),
         ]);
-        let (wigle_base, wigle) = crate::testing::serve_once(
+        let (wigle_base, wigle) = wartui_app::upload::testing::serve_once(
             "200 OK",
             r#"{"success":true,"warning":"duplicate file",
                 "results":{"transids":[{"transId":"20261122-00017"}]}}"#,
@@ -662,7 +694,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
             )
             .unwrap();
-        let (base, server) = crate::testing::serve_once(
+        let (base, server) = wartui_app::upload::testing::serve_once(
             "200 OK",
             r#"{"success":true,"results":{"transids":[{"transId":"20261122-00017"}]}}"#,
         );
@@ -705,8 +737,10 @@ mod tests {
     #[test]
     fn upload_footer_shows_error_when_send_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let (base, server) =
-            crate::testing::serve_once("401 Unauthorized", r#"{"ok":false,"error":"bad key"}"#);
+        let (base, server) = wartui_app::upload::testing::serve_once(
+            "401 Unauthorized",
+            r#"{"ok":false,"error":"bad key"}"#,
+        );
         let snapshot = busy();
         let mut ui = uploading(two_rows(&dir), base);
         press_u(&mut ui, &snapshot);

@@ -156,8 +156,9 @@ own.
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
   started; typed, and handing each fault the bridge reports to the caller) and `view` (what a
   fleet view shows of a snapshot, decided once as plain data: the faults and their order, the
-  notes, each node's state, the planner and the receiver). It words nothing for the operator, and
-  names no desktop I/O and no terminal.
+  notes, each node's state, the planner and the receiver) and `upload` (a capture sent to WDGWars
+  and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed).
+  It words nothing for the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what

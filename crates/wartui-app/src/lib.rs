@@ -4,7 +4,8 @@
 //! they are stored and the one path that writes them ([`settings`]), and the capture it runs,
 //! assembled, followed and stopped the same way whatever starts it ([`session`]), what it asks
 //! a bridge outside a capture: its status, a setting, the pairing window, a power-cycle ([`ops`]),
-//! and what a fleet view shows of a capture's snapshot, as plain data ([`view`]).
+//! what a fleet view shows of a capture's snapshot, as plain data ([`view`]), and a capture sent
+//! to WDGWars and WiGLE once the operator has said yes ([`upload`]).
 //! It words nothing for the operator, so each front end says what happened in its own way.
 //!
 //! It compiles for a phone, so it names no desktop I/O library and no terminal. The desktop's
@@ -13,4 +14,5 @@
 pub mod ops;
 pub mod session;
 pub mod settings;
+pub mod upload;
 pub mod view;

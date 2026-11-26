@@ -20,37 +20,38 @@
 //!
 //! The wait gives up after 30 seconds and 2 more per thousand rows, at most two minutes
 //! ([`give_up`]): the site takes longer to import a larger file, and a fixed wait leaves the
-//! largest uploads unfollowed. A person sits at the terminal for it, and nothing needs the result
-//! to finish: the job's URL and the profile on the site show it later, so the wait stays short of
-//! what a slow import could take. Each poll has its own short deadline and no sleep crosses the
-//! give-up time, so one hung poll cannot stretch the wait. A wait that ends with no answer at all
-//! names the last poll's error, which tells a lost connection from a slow import.
+//! largest uploads unfollowed. A person waits on it, and nothing needs the result to finish: the
+//! job's URL and the profile on the site show it later, so the wait stays short of what a slow
+//! import could take. Each poll has its own short deadline and no sleep crosses the give-up time,
+//! so one hung poll cannot stretch the wait. A wait that ends with no answer at all names the last
+//! poll's error, which tells a lost connection from a slow import.
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 use ureq::unversioned::multipart::{Form, Part};
-use wartui_core::store::UploadSite;
 
-use super::{agent, location, object, quote, reason, site_reason};
-use crate::text::thousands;
+use super::Progress;
+use super::http::{
+    Body, GZIP, SiteError, agent, body, location, object, quote, reason, site_reason,
+};
 
 /// The leaderboard.
-pub(crate) const BASE: &str = "https://wdgwars.pl";
+pub const BASE: &str = "https://wdgwars.pl";
 
 /// The largest CSV the queue accepts, counted before compression. The site counts a gzipped
 /// file by its decompressed size and says 40 MB; the decimal reading is the smaller, so it is
 /// the safe one.
-pub(crate) const MAX_CSV: usize = 40_000_000;
+pub const MAX_CSV: u64 = 40_000_000;
 
 /// How long to wait before the first poll, and the ceiling the wait grows to.
 const FIRST_POLL: Duration = Duration::from_secs(2);
 const MAX_POLL: Duration = Duration::from_secs(10);
 
 /// How long to keep asking after a job of `rows` before leaving it to the site: 30 seconds, and
-/// 2 more per thousand rows, at most [`MAX_GIVE_UP`].
-pub(crate) fn give_up(rows: u64) -> Duration {
+/// 2 more per thousand rows, at most two minutes.
+#[must_use]
+pub fn give_up(rows: u64) -> Duration {
     Duration::from_millis(30_000u64.saturating_add(rows.saturating_mul(2))).min(MAX_GIVE_UP)
 }
 
@@ -60,105 +61,115 @@ const MAX_GIVE_UP: Duration = Duration::from_secs(120);
 /// How long one poll may take, start to finish.
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The site reports `job` failed, with its reason.
-#[derive(Debug)]
-pub(crate) struct JobFailed {
-    pub(crate) job: u64,
-    pub(crate) message: String,
+/// Where a job stands while it has not ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Queued,
+    Processing,
 }
 
-impl std::fmt::Display for JobFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WDGWars could not import job {}: {}", self.job, self.message)
-    }
+/// One count a finished job reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Count {
+    /// The site's name for it, such as `imported`.
+    pub name: String,
+    pub value: CountValue,
 }
 
-impl std::error::Error for JobFailed {}
+/// A count's value: a whole number, or whatever else the site sent, as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountValue {
+    Number(u64),
+    Text(String),
+}
 
-/// How a wait for a job ended, short of the job failing.
+/// Where an import job stands.
 #[derive(Debug, PartialEq)]
-pub(crate) enum Waited {
+pub enum JobStatus {
+    Queued,
+    Processing,
+    /// Imported, with the counts the site sent: `imported`, `captured` and `updated` first, then
+    /// the rest in the order the site's JSON sorts into.
+    Done(Vec<Count>),
+    /// Refused, with the site's reason.
+    Failed(String),
+    /// Not said to an API key: the site sent it to the login page or refused the key.
+    Unreadable(SiteError),
+}
+
+/// How a wait for a job ended.
+#[derive(Debug, PartialEq)]
+pub enum Waited {
     /// Imported, with the counts the site sent.
-    Done(Map<String, Value>),
-    /// Not followed to the end, and why. The upload stands.
-    Unfollowed(String),
+    Done(Vec<Count>),
+    /// Not followed to the end. The upload stands.
+    Unfollowed(Unfollowed),
+    /// The site reports the import failed, with its reason. It imported nothing.
+    Failed(String),
 }
 
-/// What a wait has to report while it polls.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Progress {
-    /// The job is `queued` or `processing`.
-    State(&'static str),
-    /// A poll failed, and the wait carries on.
-    PollError(String),
+/// Why a wait stopped before the job ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unfollowed {
+    /// The site will not tell an API key about the job: `LoginRequired` or `CredentialsRejected`.
+    Unreadable(SiteError),
+    /// The give-up time passed, `secs` rounded to the second. `last`: the state the job was last
+    /// in, else the last poll's error, else nothing.
+    TimedOut { secs: u64, last: Option<Last> },
 }
 
-/// Poll `job` until it ends or `give_up` has passed on `elapsed`, sleeping between polls
-/// with `sleep` but never past `give_up`, and telling `say` of every poll that did not end
-/// it. An error only when the site reports the job failed.
-pub(crate) fn wait(
+/// What the polls last heard of a job that timed out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Last {
+    State(JobState),
+    PollFailed(SiteError),
+}
+
+/// Poll `job` until it ends or `give_up` has passed on `elapsed`, sleeping between polls with
+/// `sleep` but never past `give_up`, and telling `say` of every poll that did not end it.
+pub fn wait(
     job: u64,
     give_up: Duration,
-    mut poll: impl FnMut() -> Result<JobStatus>,
+    mut poll: impl FnMut() -> Result<JobStatus, SiteError>,
     mut sleep: impl FnMut(Duration),
     elapsed: impl Fn() -> Duration,
     mut say: impl FnMut(Progress),
-) -> Result<Waited> {
+) -> Waited {
     let mut delay = FIRST_POLL;
     let mut said = None;
-    let mut last_error = None;
+    let mut last_error: Option<SiteError> = None;
     loop {
         sleep(delay.min(give_up.saturating_sub(elapsed())));
         match poll() {
-            Ok(JobStatus::Done(result)) => return Ok(Waited::Done(result)),
-            Ok(JobStatus::Unreadable(reason)) => return Ok(Waited::Unfollowed(reason)),
-            Ok(JobStatus::Failed(message)) => return Err(JobFailed { job, message }.into()),
-            Ok(state) => {
-                let name = if state == JobStatus::Queued { "queued" } else { "processing" };
-                said = Some(name);
-                say(Progress::State(name));
+            Ok(JobStatus::Done(counts)) => return Waited::Done(counts),
+            Ok(JobStatus::Unreadable(error)) => {
+                return Waited::Unfollowed(Unfollowed::Unreadable(error));
+            }
+            Ok(JobStatus::Failed(message)) => return Waited::Failed(message),
+            Ok(JobStatus::Queued) => {
+                said = Some(JobState::Queued);
+                say(Progress::State { job, state: JobState::Queued });
+            }
+            Ok(JobStatus::Processing) => {
+                said = Some(JobState::Processing);
+                say(Progress::State { job, state: JobState::Processing });
             }
             Err(error) => {
-                let message = format!("{error:#}");
-                // Once per distinct error, as `on_stderr` prints them.
-                if last_error.as_ref() != Some(&message) {
-                    tracing::warn!(job, error = %message, "WDGWars poll failed");
+                // Once per distinct error.
+                if last_error.as_ref() != Some(&error) {
+                    tracing::warn!(job, error = %error, "WDGWars poll failed");
                 }
-                say(Progress::PollError(message.clone()));
-                last_error = Some(message);
+                say(Progress::PollFailed { job, error: error.clone() });
+                last_error = Some(error);
             }
         }
         if elapsed() >= give_up {
-            let why = match (said, last_error) {
-                (Some(name), _) => format!("; it is still {name}"),
-                (None, Some(error)) => format!("; the last poll failed: {error}"),
-                (None, None) => String::new(),
-            };
+            let last = said.map(Last::State).or(last_error.map(Last::PollFailed));
             // Rounded, since the wait is in milliseconds.
-            let secs = (give_up.as_millis() + 500) / 1000;
-            return Ok(Waited::Unfollowed(format!("no answer within {secs} seconds{why}")));
+            let secs = u64::try_from((give_up.as_millis() + 500) / 1000).unwrap_or(u64::MAX);
+            return Waited::Unfollowed(Unfollowed::TimedOut { secs, last });
         }
         delay = next_delay(delay);
-    }
-}
-
-/// A `say` for [`wait`] that prints each change of state and each distinct poll error.
-pub(crate) fn on_stderr(job: u64) -> impl FnMut(Progress) {
-    let mut said = None;
-    let mut last_error = None;
-    move |progress| match progress {
-        Progress::State(name) => {
-            if said != Some(name) {
-                eprintln!("job {job}: {name}");
-                said = Some(name);
-            }
-        }
-        Progress::PollError(message) => {
-            if last_error.as_ref() != Some(&message) {
-                eprintln!("job {job}: asking after it failed ({message}); trying again");
-                last_error = Some(message);
-            }
-        }
     }
 }
 
@@ -167,9 +178,9 @@ fn next_delay(delay: Duration) -> Duration {
     delay.mul_f64(1.5).min(MAX_POLL)
 }
 
-/// A finished job's counts as `(key, value)`, `imported`, `captured` and `updated` first,
-/// then the rest in the order the site's JSON sorts into.
-pub(crate) fn counts(result: &Map<String, Value>) -> Vec<(String, String)> {
+/// A finished job's counts, `imported`, `captured` and `updated` first, then the rest in the
+/// order the site's JSON sorts into.
+fn counts(result: &Map<String, Value>) -> Vec<Count> {
     const FIRST: [&str; 3] = ["imported", "captured", "updated"];
     let ordered = FIRST
         .iter()
@@ -178,76 +189,16 @@ pub(crate) fn counts(result: &Map<String, Value>) -> Vec<(String, String)> {
     ordered
         .map(|(key, value)| {
             let value = match value {
-                Value::Number(n) => n.as_u64().map_or_else(|| n.to_string(), thousands),
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
+                Value::Number(n) => {
+                    n.as_u64().map_or_else(|| CountValue::Text(n.to_string()), CountValue::Number)
+                }
+                Value::String(s) => CountValue::Text(s.clone()),
+                other => CountValue::Text(other.to_string()),
             };
-            (key.clone(), value)
+            Count { name: key.clone(), value }
         })
         .collect()
 }
-
-/// A finished job's [`counts`], a line each.
-pub(crate) fn outcome(result: &Map<String, Value>) -> String {
-    let mut text = String::new();
-    for (key, value) in counts(result) {
-        text.push_str(&format!("{key:<10} {value}\n"));
-    }
-    if text.is_empty() {
-        text.push_str("done; WDGWars sent no counts\n");
-    }
-    text
-}
-
-/// Where an import job stands.
-#[derive(Debug, PartialEq)]
-pub enum JobStatus {
-    Queued,
-    Processing,
-    /// Imported, with the counts the site sent.
-    Done(Map<String, Value>),
-    /// Refused, with the site's reason.
-    Failed(String),
-    /// Not said to an API key, and why: the site sent it to the login page or refused it.
-    Unreadable(String),
-}
-
-/// The site redirected a request to its login page: it wants a logged-in session, not the
-/// API key.
-#[derive(Debug)]
-struct LoginRequired {
-    location: String,
-}
-
-impl std::fmt::Display for LoginRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "WDGWars redirected to its login page ({}): the endpoint wants a logged-in \
-             session rather than the API key",
-            self.location
-        )
-    }
-}
-
-impl std::error::Error for LoginRequired {}
-
-/// The site answered 401 or 403, with its reason when it gave one.
-#[derive(Debug)]
-struct KeyRejected {
-    reason: Option<String>,
-}
-
-impl std::fmt::Display for KeyRejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.reason {
-            Some(reason) => write!(f, "WDGWars rejected the API key: {reason}"),
-            None => write!(f, "WDGWars rejected the API key"),
-        }
-    }
-}
-
-impl std::error::Error for KeyRejected {}
 
 /// The leaderboard's CSV queue.
 pub struct Client {
@@ -258,28 +209,35 @@ pub struct Client {
 
 impl Client {
     /// A client for the site at `base`.
+    #[must_use]
     pub fn new(base: &str, key: String) -> Self {
         Self { base: base.trim_end_matches('/').to_owned(), key, agent: agent() }
     }
 
     /// Hand over `body` as `filename` and return the job it was queued as.
-    pub fn submit(&self, body: &[u8], filename: &str) -> Result<u64> {
+    ///
+    /// # Errors
+    /// [`SiteError`] when the site did not queue it.
+    pub fn submit(&self, body: &[u8], filename: &str) -> Result<u64, SiteError> {
         let url = format!("{}/api/v2/upload-csv", self.base);
-        let part = Part::bytes(body).file_name(filename).mime_str("application/gzip")?;
+        let part = Part::bytes(body).file_name(filename).mime_str(GZIP).expect("a valid MIME type");
         let form = Form::new().part("file", part);
         let response = self
             .agent
             .post(&url)
             .header("X-API-Key", &self.key)
             .send(form)
-            .with_context(|| format!("sending the upload to {url}"))?;
+            .map_err(|error| SiteError::Unsent { url, error: error.to_string() })?;
         parse_submit(&answer(response)?)
     }
 
     /// Ask where `job` stands. A redirect to the login page, or a refused key, is
     /// [`JobStatus::Unreadable`]: the job exists, and the site will not tell an API key
     /// about it.
-    pub fn poll(&self, job: u64) -> Result<JobStatus> {
+    ///
+    /// # Errors
+    /// [`SiteError`] when the poll had no answer.
+    pub fn poll(&self, job: u64) -> Result<JobStatus, SiteError> {
         let url = self.job_url(job);
         let response = self
             .agent
@@ -289,68 +247,68 @@ impl Client {
             .timeout_global(Some(POLL_TIMEOUT))
             .build()
             .call()
-            .with_context(|| format!("reaching {url}"))?;
+            .map_err(|error| SiteError::Unreached { url: url.clone(), error: error.to_string() })?;
         match answer(response) {
             Ok(text) => parse_job(&text),
-            Err(error) if error.is::<LoginRequired>() || error.is::<KeyRejected>() => {
-                Ok(JobStatus::Unreadable(error.to_string()))
-            }
+            Err(
+                error @ (SiteError::LoginRequired { .. } | SiteError::CredentialsRejected { .. }),
+            ) => Ok(JobStatus::Unreadable(error)),
             Err(error) => Err(error),
         }
     }
 
-    pub(crate) fn job_url(&self, job: u64) -> String {
+    /// Where `job`'s status is.
+    #[must_use]
+    pub fn job_url(&self, job: u64) -> String {
         format!("{}/api/v2/upload-job/{job}", self.base)
     }
 }
 
 /// A response's body, or why its status means it has none worth reading. The status decides
 /// first: a refusal's body is read only to quote, so one that cannot be read or is not UTF-8
-/// still gives the status's message. A redirect's body is not read: it is the page being
+/// still gives the status's error. A redirect's body is not read: it is the page being
 /// redirected from, not an answer.
-fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String> {
+fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String, SiteError> {
     let status = response.status();
     if status.is_redirection() {
         let location = location(&response);
         if location.contains("/login") {
-            return Err(LoginRequired { location }.into());
+            return Err(SiteError::LoginRequired { location });
         }
-        bail!("WDGWars redirected to {location}");
+        return Err(SiteError::Redirected { location });
     }
-    let body = response.body_mut().with_config().limit(1024 * 1024).read_to_vec();
-    if status.is_success() {
-        let bytes = body.context("reading WDGWars' answer")?;
-        return String::from_utf8(bytes).context("WDGWars' answer is not UTF-8");
-    }
-    let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-    match status.as_u16() {
-        401 | 403 => Err(KeyRejected { reason: site_reason(&text) }.into()),
-        413 => bail!("WDGWars refused the upload as too large"),
-        code => bail!("WDGWars answered {code}: {}", quote(&text)),
-    }
+    let text = match body(&mut response) {
+        Body::Success(text) => return text,
+        Body::Refusal(text) => text,
+    };
+    Err(match status.as_u16() {
+        401 | 403 => SiteError::CredentialsRejected { reason: site_reason(&text) },
+        413 => SiteError::TooLarge,
+        code => SiteError::Status { code, said: Some(quote(&text)) },
+    })
 }
 
 /// The job a submit was queued as.
-fn parse_submit(text: &str) -> Result<u64> {
-    let object = object(UploadSite::Wdgwars, text)?;
+fn parse_submit(text: &str) -> Result<u64, SiteError> {
+    let object = object(text)?;
     refused(&object, text)?;
     object
         .get("job_id")
         .and_then(Value::as_u64)
-        .with_context(|| format!("WDGWars accepted the upload but named no job: {}", quote(text)))
+        .ok_or_else(|| SiteError::Unnamed { quoted: quote(text) })
 }
 
 /// Where a job stands, from a poll's answer.
-fn parse_job(text: &str) -> Result<JobStatus> {
-    let object = object(UploadSite::Wdgwars, text)?;
+fn parse_job(text: &str) -> Result<JobStatus, SiteError> {
+    let object = object(text)?;
     refused(&object, text)?;
     match object.get("status").and_then(Value::as_str) {
         Some("queued") => Ok(JobStatus::Queued),
         Some("processing") => Ok(JobStatus::Processing),
         Some("done") => {
             let result = match object.get("result") {
-                Some(Value::Object(result)) => result.clone(),
-                _ => Map::new(),
+                Some(Value::Object(result)) => counts(result),
+                _ => Vec::new(),
             };
             Ok(JobStatus::Done(result))
         }
@@ -360,14 +318,14 @@ fn parse_job(text: &str) -> Result<JobStatus> {
                 reason(&object).or_else(|| result.and_then(reason)).unwrap_or_else(|| quote(text));
             Ok(JobStatus::Failed(message))
         }
-        _ => bail!("WDGWars sent a job status this build does not know: {}", quote(text)),
+        _ => Err(SiteError::UnknownState { quoted: quote(text) }),
     }
 }
 
-/// Refuse an answer that says `"ok": false`, in its own words.
-fn refused(object: &Map<String, Value>, text: &str) -> Result<()> {
+/// Refuse an answer that says `"ok": false`, with its reason.
+fn refused(object: &Map<String, Value>, text: &str) -> Result<(), SiteError> {
     if object.get("ok").and_then(Value::as_bool) == Some(false) {
-        bail!("WDGWars refused: {}", reason(object).unwrap_or_else(|| quote(text)));
+        return Err(SiteError::Refused { reason: reason(object).unwrap_or_else(|| quote(text)) });
     }
     Ok(())
 }
@@ -377,9 +335,20 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Client, JobStatus, Waited, give_up, next_delay, outcome, parse_job, parse_submit, wait,
+        Client, Count, CountValue, JobState, JobStatus, Last, Unfollowed, Waited, give_up,
+        next_delay, parse_job, parse_submit, wait,
     };
-    use crate::testing::{serve_once, serve_once_with};
+    use crate::upload::testing::{serve_once, serve_once_with};
+    use crate::upload::{Progress, SiteError};
+
+    fn count(name: &str, value: u64) -> Count {
+        Count { name: name.to_owned(), value: CountValue::Number(value) }
+    }
+
+    /// A poll's transport failure, saying `error`.
+    fn unreached(error: &str) -> SiteError {
+        SiteError::Unreached { url: "http://127.0.0.1:9".to_owned(), error: error.to_owned() }
+    }
 
     #[test]
     fn upload_parser_reads_job_id_when_submit_returns_accepted() {
@@ -403,14 +372,25 @@ mod tests {
     fn upload_parser_returns_done_with_result_when_job_finished() {
         let status = parse_job(
             r#"{"ok":true,"job_id":42,"status":"done",
-                "result":{"updated":3,"imported":1200,"captured":17,"skipped":4}}"#,
+                "result":{"updated":3,"imported":1200,"captured":17,"skipped":4,
+                "note":"ok","ratio":0.5,"flag":true}}"#,
         )
         .unwrap();
-        let JobStatus::Done(result) = status else { panic!("{status:?}") };
-        assert_eq!(result.get("imported").and_then(|v| v.as_u64()), Some(1200));
+        let text = |name: &str, value: &str| Count {
+            name: name.to_owned(),
+            value: CountValue::Text(value.to_owned()),
+        };
         assert_eq!(
-            outcome(&result),
-            "imported   1,200\ncaptured   17\nupdated    3\nskipped    4\n"
+            status,
+            JobStatus::Done(vec![
+                count("imported", 1200),
+                count("captured", 17),
+                count("updated", 3),
+                text("flag", "true"),
+                text("note", "ok"),
+                text("ratio", "0.5"),
+                count("skipped", 4),
+            ])
         );
     }
 
@@ -423,6 +403,22 @@ mod tests {
         // With neither, the operator gets the raw answer rather than nothing.
         let raw = r#"{"ok":true,"job_id":42,"status":"failed"}"#;
         assert_eq!(parse_job(raw).unwrap(), JobStatus::Failed(raw.to_owned()));
+    }
+
+    #[test]
+    fn upload_parser_reports_unknown_state_when_status_is_new() {
+        let raw = r#"{"ok":true,"job_id":42,"status":"paused"}"#;
+        assert_eq!(parse_job(raw), Err(SiteError::UnknownState { quoted: raw.to_owned() }));
+    }
+
+    #[test]
+    fn upload_parser_reports_refusal_when_answer_says_not_ok() {
+        let answer = parse_submit(r#"{"ok":false,"error":"quota"}"#);
+        assert_eq!(answer, Err(SiteError::Refused { reason: "quota".to_owned() }));
+        let answer = parse_submit(r#"{"ok":true}"#);
+        assert_eq!(answer, Err(SiteError::Unnamed { quoted: r#"{"ok":true}"#.to_owned() }));
+        let answer = parse_submit("<html>");
+        assert_eq!(answer, Err(SiteError::NotJson { quoted: "<html>".to_owned() }));
     }
 
     #[test]
@@ -447,6 +443,7 @@ mod tests {
         assert!(request.to_ascii_lowercase().contains("x-api-key: secret\r\n"), "{request}");
         assert!(request.contains("name=\"file\""), "{request}");
         assert!(request.contains("filename=\"wartui-2026-09-30-19-02-11.csv.gz\""), "{request}");
+        assert!(request.contains("application/gzip"), "{request}");
         assert!(request.contains("gzipped bytes"), "{request}");
     }
 
@@ -454,8 +451,8 @@ mod tests {
     fn upload_client_reports_key_rejected_when_server_returns_401() {
         let (base, server) = serve_once("401 Unauthorized", r#"{"ok":false,"error":"bad key"}"#);
         let client = Client::new(&base, "wrong".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("rejected the API key"), "{error}");
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::CredentialsRejected { reason: Some("bad key".to_owned()) });
         server.join().unwrap();
     }
 
@@ -463,8 +460,8 @@ mod tests {
     fn upload_client_quotes_answer_when_server_returns_unexpected_status() {
         let (base, server) = serve_once("500 Internal Server Error", "it broke");
         let client = Client::new(&base, "secret".to_owned());
-        let error = client.poll(42).unwrap_err().to_string();
-        assert!(error.contains("WDGWars answered 500: it broke"), "{error}");
+        let error = client.poll(42).unwrap_err();
+        assert_eq!(error, SiteError::Status { code: 500, said: Some("it broke".to_owned()) });
         let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
         assert!(request.starts_with("GET /api/v2/upload-job/42 "), "{request}");
     }
@@ -476,8 +473,10 @@ mod tests {
             serve_once_with("302 Found", &format!("Location: {location}\r\n"), b"");
         let client = Client::new(&base, "secret".to_owned());
         let status = client.poll(42).unwrap();
-        let JobStatus::Unreadable(reason) = status else { panic!("{status:?}") };
-        assert!(reason.contains(location), "{reason}");
+        assert_eq!(
+            status,
+            JobStatus::Unreadable(SiteError::LoginRequired { location: location.to_owned() })
+        );
         // `serve_once` panics, failing the join, if the redirect was followed.
         let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
         assert!(request.starts_with("GET /api/v2/upload-job/42 "), "{request}");
@@ -487,8 +486,8 @@ mod tests {
     fn upload_client_reports_redirect_when_submit_redirects() {
         let (base, server) = serve_once_with("302 Found", "Location: /elsewhere\r\n", b"");
         let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("WDGWars redirected to /elsewhere"), "{error}");
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Redirected { location: "/elsewhere".to_owned() });
         server.join().unwrap();
     }
 
@@ -497,8 +496,8 @@ mod tests {
         // Unlike a poll, a submit sent to the login page uploaded nothing.
         let (base, server) = serve_once_with("302 Found", "Location: /login/\r\n", b"");
         let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("wants a logged-in session"), "{error}");
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::LoginRequired { location: "/login/".to_owned() });
         server.join().unwrap();
     }
 
@@ -507,8 +506,11 @@ mod tests {
         let (base, server) =
             serve_once("401 Unauthorized", r#"{"ok":false,"error":"key revoked"}"#);
         let client = Client::new(&base, "wrong".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WDGWars rejected the API key: key revoked");
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(
+            error,
+            SiteError::CredentialsRejected { reason: Some("key revoked".to_owned()) }
+        );
         server.join().unwrap();
     }
 
@@ -521,7 +523,9 @@ mod tests {
         let status = client.poll(42).unwrap();
         assert_eq!(
             status,
-            JobStatus::Unreadable("WDGWars rejected the API key: no scope".to_owned())
+            JobStatus::Unreadable(SiteError::CredentialsRejected {
+                reason: Some("no scope".to_owned())
+            })
         );
         server.join().unwrap();
     }
@@ -530,48 +534,81 @@ mod tests {
     fn upload_client_reports_status_when_error_body_is_not_utf8() {
         let (base, server) = serve_once_with("413 Payload Too Large", "", b"\xff\xfe too big");
         let client = Client::new(&base, "secret".to_owned());
-        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(error.contains("refused the upload as too large"), "{error}");
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::TooLarge);
         server.join().unwrap();
     }
 
+    #[test]
+    fn upload_client_reports_unsent_when_nothing_listens() {
+        // Bound then dropped, so the port refuses the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let error = Client::new(&base, "secret".to_owned()).submit(b"bytes", "x.csv.gz");
+        let Err(SiteError::Unsent { url, .. }) = error else { panic!("{error:?}") };
+        assert_eq!(url, format!("{base}/api/v2/upload-csv"));
+    }
+
     /// `wait` on a fake clock that advances only by what it sleeps, answering each poll
-    /// from `answers` in turn.
+    /// from `answers` in turn, with what it said.
     fn wait_on(
         give_up: Duration,
-        answers: Vec<anyhow::Result<JobStatus>>,
-    ) -> anyhow::Result<Waited> {
+        answers: Vec<Result<JobStatus, SiteError>>,
+    ) -> (Waited, Vec<Progress>) {
         let clock = std::cell::Cell::new(Duration::ZERO);
         let mut answers = answers.into_iter();
-        wait(
+        let mut said = Vec::new();
+        let waited = wait(
             42,
             give_up,
             || answers.next().unwrap_or(Ok(JobStatus::Processing)),
             |delay| clock.set(clock.get() + delay),
             || clock.get(),
-            |_| {},
-        )
+            |progress| said.push(progress),
+        );
+        (waited, said)
     }
 
     #[test]
     fn upload_wait_returns_done_when_transient_error_precedes_done() {
-        let waited = wait_on(
+        let bad_gateway = SiteError::Status { code: 502, said: Some("bad gateway".to_owned()) };
+        let (waited, said) = wait_on(
             Duration::from_secs(900),
             vec![
                 Ok(JobStatus::Queued),
-                Err(anyhow::anyhow!("WDGWars answered 502: bad gateway")),
-                Err(anyhow::anyhow!("WDGWars answered 502: bad gateway")),
-                Ok(JobStatus::Done(serde_json::Map::new())),
+                Err(bad_gateway.clone()),
+                Err(bad_gateway.clone()),
+                Ok(JobStatus::Done(Vec::new())),
             ],
         );
-        assert_eq!(waited.unwrap(), Waited::Done(serde_json::Map::new()));
+        assert_eq!(waited, Waited::Done(Vec::new()));
+        // Every poll that did not end the wait, repeats included.
+        let failed = Progress::PollFailed { job: 42, error: bad_gateway };
+        assert_eq!(
+            said,
+            [Progress::State { job: 42, state: JobState::Queued }, failed.clone(), failed]
+        );
     }
 
     #[test]
     fn upload_wait_returns_unfollowed_when_give_up_reached() {
-        let waited = wait_on(give_up(0), vec![Ok(JobStatus::Queued)]).unwrap();
-        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
-        assert_eq!(reason, "no answer within 30 seconds; it is still processing");
+        let (waited, _) = wait_on(give_up(0), vec![Ok(JobStatus::Queued)]);
+        assert_eq!(
+            waited,
+            Waited::Unfollowed(Unfollowed::TimedOut {
+                secs: 30,
+                last: Some(Last::State(JobState::Processing))
+            })
+        );
+    }
+
+    #[test]
+    fn upload_wait_returns_unfollowed_when_poll_unreadable() {
+        let error = SiteError::CredentialsRejected { reason: None };
+        let (waited, _) =
+            wait_on(Duration::from_secs(60), vec![Ok(JobStatus::Unreadable(error.clone()))]);
+        assert_eq!(waited, Waited::Unfollowed(Unfollowed::Unreadable(error)));
     }
 
     #[test]
@@ -585,30 +622,31 @@ mod tests {
 
     #[test]
     fn upload_wait_names_last_poll_error_when_every_poll_fails() {
-        let errors = (0..100).map(|n| Err(anyhow::anyhow!("timed out {n}"))).collect();
-        let waited = wait_on(give_up(9_615), errors).unwrap();
-        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
+        let errors = (0..100).map(|n| Err(unreached(&format!("timed out {n}")))).collect();
+        let (waited, _) = wait_on(give_up(9_615), errors);
         // 49.2 s, rounded; and the error the wait ended on, not the first.
-        assert!(
-            reason.starts_with("no answer within 49 seconds; the last poll failed: timed out ")
-        );
-        assert!(!reason.ends_with("timed out 0"), "{reason}");
+        let Waited::Unfollowed(Unfollowed::TimedOut { secs: 49, last: Some(Last::PollFailed(e)) }) =
+            waited
+        else {
+            panic!("{waited:?}")
+        };
+        let SiteError::Unreached { error, .. } = e else { panic!("{e:?}") };
+        assert!(error.starts_with("timed out "), "{error}");
+        assert_ne!(error, "timed out 0");
     }
 
     #[test]
     fn upload_wait_names_state_when_errors_follow_a_state() {
-        let answers = vec![
-            Ok(JobStatus::Queued),
-            Err(anyhow::anyhow!("timed out")),
-            Err(anyhow::anyhow!("timed out")),
-            Err(anyhow::anyhow!("timed out")),
-            Err(anyhow::anyhow!("timed out")),
-            Err(anyhow::anyhow!("timed out")),
-            Err(anyhow::anyhow!("timed out")),
-        ];
-        let waited = wait_on(give_up(0), answers).unwrap();
-        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
-        assert_eq!(reason, "no answer within 30 seconds; it is still queued");
+        let mut answers = vec![Ok(JobStatus::Queued)];
+        answers.extend((0..6).map(|_| Err(unreached("timed out"))));
+        let (waited, _) = wait_on(give_up(0), answers);
+        assert_eq!(
+            waited,
+            Waited::Unfollowed(Unfollowed::TimedOut {
+                secs: 30,
+                last: Some(Last::State(JobState::Queued))
+            })
+        );
     }
 
     #[test]
@@ -624,25 +662,29 @@ mod tests {
                 || slept.get(),
                 |_| {},
             );
-            assert!(matches!(waited, Ok(Waited::Unfollowed(_))), "{waited:?}");
+            assert!(matches!(waited, Waited::Unfollowed(_)), "{waited:?}");
             assert!(slept.get() <= give_up, "{secs}s: slept {:?}", slept.get());
         }
     }
 
     #[test]
     fn upload_wait_returns_unfollowed_when_only_errors_until_give_up() {
-        let errors = (0..100).map(|_| Err(anyhow::anyhow!("timed out"))).collect();
-        let waited = wait_on(Duration::from_secs(60), errors).unwrap();
-        let Waited::Unfollowed(reason) = waited else { panic!("{waited:?}") };
+        let errors = (0..100).map(|_| Err(unreached("timed out"))).collect();
+        let (waited, _) = wait_on(Duration::from_secs(60), errors);
         // Repeats logged once still name the error.
-        assert_eq!(reason, "no answer within 60 seconds; the last poll failed: timed out");
+        assert_eq!(
+            waited,
+            Waited::Unfollowed(Unfollowed::TimedOut {
+                secs: 60,
+                last: Some(Last::PollFailed(unreached("timed out")))
+            })
+        );
     }
 
     #[test]
     fn upload_wait_fails_when_job_failed() {
-        let error = wait_on(Duration::from_secs(60), vec![Ok(JobStatus::Failed("bad".to_owned()))])
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "WDGWars could not import job 42: bad");
+        let (waited, _) =
+            wait_on(Duration::from_secs(60), vec![Ok(JobStatus::Failed("bad".to_owned()))]);
+        assert_eq!(waited, Waited::Failed("bad".to_owned()));
     }
 }

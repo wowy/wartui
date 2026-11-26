@@ -5,8 +5,7 @@
 //! takes, under the same name.
 //!
 //! WiGLE authenticates an upload with HTTP Basic: the account's API Name is the username and
-//! its API Token the password. Both come from `[api-keys]`, and `ureq` has no helper for it, so
-//! the header is built here.
+//! its API Token the password. `ureq` has no helper for it, so the header is built here.
 //!
 //! Nothing is polled. The upload's answer is the last word wartui reads: the API names no
 //! states for a transaction's import, so there is nothing to tell the operator but where to
@@ -17,34 +16,34 @@
 //! WiGLE's size limit is on the file sent, so it counts the gzipped body, not the CSV inside it.
 //!
 //! Statuses are mapped here and redirects are not followed, as for WDGWars, so a refusal is
-//! reported in WiGLE's own words and an HTML page is never read as the API's answer.
+//! reported in WiGLE's own terms and an HTML page is never read as the API's answer.
 
-use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 use ureq::unversioned::multipart::{Form, Part};
-use wartui_core::store::UploadSite;
 
-use super::{agent, location, object, quote, reason, site_reason};
+use super::http::{
+    Body, GZIP, SiteError, agent, body, location, object, quote, reason, site_reason,
+};
 
 /// WiGLE's API.
-pub(crate) const BASE: &str = "https://api.wigle.net";
+pub const BASE: &str = "https://api.wigle.net";
 
 /// The largest file WiGLE takes, counted on the file as sent: the gzipped body.
-pub(crate) const MAX_FILE: usize = 180 * 1024 * 1024;
+pub const MAX_FILE: u64 = 180 * 1024 * 1024;
 
 /// How long a network's sightings fold into one row in an upload to WiGLE, in seconds: one row
 /// per network per ~70 m at 50 km/h.
-pub(crate) const RECAPTURE_SECS: u64 = 5;
+pub const RECAPTURE_SECS: u64 = 5;
 
 /// An upload WiGLE queued.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Queued {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Queued {
     /// WiGLE's name for it.
-    pub(crate) trans_id: String,
+    pub trans_id: String,
     /// What WiGLE warned of, when it warned.
-    pub(crate) warning: Option<String>,
+    pub warning: Option<String>,
 }
 
 /// WiGLE's upload endpoint.
@@ -57,57 +56,55 @@ pub struct Client {
 
 impl Client {
     /// A client for WiGLE at `base`, signing in as `name` with `token`.
+    #[must_use]
     pub fn new(base: &str, name: &str, token: &str) -> Self {
         let authorization = format!("Basic {}", STANDARD.encode(format!("{name}:{token}")));
         Self { base: base.trim_end_matches('/').to_owned(), authorization, agent: agent() }
     }
 
     /// Hand over `body` as `filename` and return the transaction it was queued as.
-    pub(crate) fn submit(&self, body: &[u8], filename: &str) -> Result<Queued> {
+    ///
+    /// # Errors
+    /// [`SiteError`] when WiGLE did not queue it.
+    pub fn submit(&self, body: &[u8], filename: &str) -> Result<Queued, SiteError> {
         let url = format!("{}/api/v3/upload", self.base);
-        let part = Part::bytes(body).file_name(filename).mime_str("application/gzip")?;
+        let part = Part::bytes(body).file_name(filename).mime_str(GZIP).expect("a valid MIME type");
         let form = Form::new().part("file", part);
         let response = self
             .agent
             .post(&url)
             .header("Authorization", &self.authorization)
             .send(form)
-            .with_context(|| format!("sending the upload to {url}"))?;
+            .map_err(|error| SiteError::Unsent { url, error: error.to_string() })?;
         answer(response)
     }
 }
 
 /// The transaction a response names, or why it names none. A refusal's body is read only to
-/// quote, so one that cannot be read still gives the status's message. A redirect's body is not
+/// quote, so one that cannot be read still gives the status's error. A redirect's body is not
 /// read.
-fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<Queued> {
+fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<Queued, SiteError> {
     let status = response.status();
     if status.is_redirection() {
-        bail!("WiGLE redirected to {}", location(&response));
+        return Err(SiteError::Redirected { location: location(&response) });
     }
-    let body = response.body_mut().with_config().limit(1024 * 1024).read_to_vec();
-    if status.is_success() {
-        let bytes = body.context("reading WiGLE's answer")?;
-        let text = String::from_utf8(bytes).context("WiGLE's answer is not UTF-8")?;
-        return parse_upload(&text);
-    }
-    let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-    let head = match status.as_u16() {
-        401 => "WiGLE rejected the API name and token".to_owned(),
-        429 => "WiGLE has taken too many uploads today".to_owned(),
-        code => format!("WiGLE answered {code}"),
+    let text = match body(&mut response) {
+        Body::Success(text) => return parse_upload(&text?),
+        Body::Refusal(text) => text,
     };
-    Err(match site_reason(&text) {
-        Some(reason) => anyhow!("{head}: {reason}"),
-        None => anyhow!(head),
+    let reason = site_reason(&text);
+    Err(match status.as_u16() {
+        401 => SiteError::CredentialsRejected { reason },
+        429 => SiteError::TooManyUploads { reason },
+        code => SiteError::Status { code, said: reason },
     })
 }
 
 /// The transaction an accepted upload's answer names.
-fn parse_upload(text: &str) -> Result<Queued> {
-    let object = object(UploadSite::Wigle, text)?;
+fn parse_upload(text: &str) -> Result<Queued, SiteError> {
+    let object = object(text)?;
     if object.get("success").and_then(Value::as_bool) != Some(true) {
-        bail!("WiGLE refused: {}", reason(&object).unwrap_or_else(|| quote(text)));
+        return Err(SiteError::Refused { reason: reason(&object).unwrap_or_else(|| quote(text)) });
     }
     let trans_id = object
         .get("results")
@@ -116,9 +113,7 @@ fn parse_upload(text: &str) -> Result<Queued> {
         .and_then(|id| id.get("transId"))
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .with_context(|| {
-            format!("WiGLE accepted the upload but named no transaction: {}", quote(text))
-        })?;
+        .ok_or_else(|| SiteError::Unnamed { quoted: quote(text) })?;
     let warning = object
         .get("warning")
         .and_then(Value::as_str)
@@ -131,7 +126,8 @@ fn parse_upload(text: &str) -> Result<Queued> {
 #[cfg(test)]
 mod tests {
     use super::{Client, Queued};
-    use crate::testing::{serve_once, serve_once_with};
+    use crate::upload::SiteError;
+    use crate::upload::testing::{serve_once, serve_once_with};
 
     /// An answer accepting the upload as `20261122-00017`, warning `warning`.
     fn accepted(warning: &str) -> String {
@@ -184,12 +180,10 @@ mod tests {
 
     #[test]
     fn wigle_client_reports_no_transaction_when_accepted_answer_names_none() {
-        let (base, server) = serve_once("200 OK", r#"{"success":true,"results":{"transids":[]}}"#);
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert!(
-            error.starts_with("WiGLE accepted the upload but named no transaction: {"),
-            "{error}"
-        );
+        let answer = r#"{"success":true,"results":{"transids":[]}}"#;
+        let (base, server) = serve_once("200 OK", answer);
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Unnamed { quoted: answer.to_owned() });
         server.join().unwrap();
     }
 
@@ -197,22 +191,30 @@ mod tests {
     fn wigle_client_reports_refusal_when_answer_says_no_success() {
         let (base, server) =
             serve_once("200 OK", r#"{"success":false,"message":"file too small"}"#);
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE refused: file too small");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Refused { reason: "file too small".to_owned() });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn wigle_client_reports_not_text_when_accepted_answer_is_not_utf8() {
+        let (base, server) = serve_once_with("200 OK", "", b"\xff\xfe");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::NotText);
         server.join().unwrap();
     }
 
     #[test]
     fn wigle_client_reports_credentials_rejected_when_server_returns_401() {
         let (base, server) = serve_once("401 Unauthorized", "");
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE rejected the API name and token");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::CredentialsRejected { reason: None });
         server.join().unwrap();
 
         let (base, server) =
             serve_once("401 Unauthorized", r#"{"success":false,"message":"bad token"}"#);
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE rejected the API name and token: bad token");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::CredentialsRejected { reason: Some("bad token".to_owned()) });
         server.join().unwrap();
     }
 
@@ -222,16 +224,19 @@ mod tests {
             "429 Too Many Requests",
             r#"{"success":false,"message":"Too many uploads today"}"#,
         );
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE has taken too many uploads today: Too many uploads today");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(
+            error,
+            SiteError::TooManyUploads { reason: Some("Too many uploads today".to_owned()) }
+        );
         server.join().unwrap();
     }
 
     #[test]
     fn wigle_client_reports_redirect_when_submit_redirects() {
         let (base, server) = serve_once_with("302 Found", "Location: /elsewhere\r\n", b"");
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE redirected to /elsewhere");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Redirected { location: "/elsewhere".to_owned() });
         // `serve_once` panics, failing the join, if the redirect was followed.
         server.join().unwrap();
     }
@@ -240,13 +245,16 @@ mod tests {
     fn wigle_client_quotes_answer_when_server_returns_unexpected_status() {
         let (base, server) =
             serve_once("400 Bad Request", r#"{"success":false,"message":"filename required"}"#);
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE answered 400: filename required");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(
+            error,
+            SiteError::Status { code: 400, said: Some("filename required".to_owned()) }
+        );
         server.join().unwrap();
 
         let (base, server) = serve_once("500 Internal Server Error", "it broke");
-        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err().to_string();
-        assert_eq!(error, "WiGLE answered 500: it broke");
+        let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Status { code: 500, said: Some("it broke".to_owned()) });
         server.join().unwrap();
     }
 }

@@ -21,12 +21,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{capture, config, tui, upload};
+use crate::{capture, config, tui};
 use anyhow::{Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use wartui_app::session::{HostBuild, Session, SessionConfig};
 use wartui_app::settings::{Settings, SettingsStore};
+use wartui_app::upload::Endpoints;
 use wartui_core::gps::Gps;
 use wartui_core::position::{PositionChain, StandDown, Tier};
 use wartui_core::store::{StoreConfig, StoreError};
@@ -255,11 +256,7 @@ pub async fn run(args: Args) -> Result<()> {
             release_tag: option_env!("WARTUI_RELEASE_TAG").map(str::to_owned),
         }),
     };
-    let upload = tui::UploadTarget {
-        db: db.clone(),
-        wdgwars_base: upload::wdgwars::BASE.to_owned(),
-        wigle_base: upload::wigle::BASE.to_owned(),
-    };
+    let upload = tui::UploadTarget { db: db.clone(), endpoints: Endpoints::live() };
     let store = file.map(|file| Arc::new(file) as Arc<dyn SettingsStore>);
     let settings = Settings::new(store, config, memory);
     let settings = match args.sim {
