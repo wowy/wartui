@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use wartui_app::settings::{ApiKeys, Invalid, SsidRefusal};
 use wartui_ffi::{
-    Link, Saved, Session, Settings, SettingsEdit, SettingsError, SteerError, check_excluded_ssid,
-    settings_limits,
+    Link, Radio, Saved, Session, Settings, SettingsEdit, SettingsError, SteerError,
+    check_excluded_ssid, settings_limits,
 };
 
 use common::{
@@ -54,6 +54,61 @@ async fn settings_save_remembered_bridge_when_bluetooth_link_announces() {
     .expect("saved in time");
     assert!(saved.contains("bluetooth-address = \"loopback\""), "{saved}");
     session.stop().await.expect("stopped");
+    link.close().await.expect("closed");
+}
+
+/// How long a test gives the bridge to announce itself, in milliseconds.
+const READY_MS: u32 = 15_000;
+
+/// Settings that remember no bridge, over `store`, and a Bluetooth link opened with them over
+/// `radio` that has announced its bridge.
+async fn announced(store: &Arc<Memory>, radio: Arc<Radio>) -> (Arc<Settings>, Arc<Link>) {
+    let settings = Settings::open(store.clone(), None).expect("the store opens");
+    let link = Link::bluetooth(radio, Arc::clone(&settings), None).expect("opened");
+    link.ready(READY_MS, None).await.expect("announced");
+    // The transport connected with remembering off, so it remembered nothing.
+    assert_eq!(settings.saved().bridge_mac, None);
+    (settings, link)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_save_remembers_connected_bridge_when_remember_turns_on_between_captures() {
+    let store = Memory::holding("[bridge]\nremember = false\n");
+    let (settings, link) = announced(&store, Loopback::radio()).await;
+
+    let saved = settings.save(host_rows(true, true)).expect("converted");
+
+    assert_eq!(saved, Saved::At { place: "memory".to_owned() });
+    let mac = settings.saved().bridge_mac.expect("remembered in the same save");
+    let text = store.text().expect("saved");
+    assert!(text.contains(&mac) && text.contains("remember = true"), "{mac}: {text}");
+    link.close().await.expect("closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_save_remembers_no_bridge_when_link_is_closed() {
+    let store = Memory::holding("[bridge]\nremember = false\n");
+    let (settings, link) = announced(&store, Loopback::radio()).await;
+    link.close().await.expect("closed");
+
+    settings.save(host_rows(true, true)).expect("converted");
+
+    assert_eq!(settings.saved().bridge_mac, None);
+    assert!(store.text().is_some_and(|text| !text.contains("mac = ")), "{:?}", store.text());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_save_remembers_no_bridge_when_bridge_goes_while_idle() {
+    let store = Memory::holding("[bridge]\nremember = false\n");
+    let (radio, driver) = Loopback::steered();
+    let (settings, link) = announced(&store, radio).await;
+    driver.go();
+    // The parked link reads the drop at once; this is room for it.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    settings.save(host_rows(true, true)).expect("converted");
+
+    assert_eq!(settings.saved().bridge_mac, None);
     link.close().await.expect("closed");
 }
 

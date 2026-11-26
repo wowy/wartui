@@ -17,7 +17,7 @@
 //! throws is called [`UNNAMED_PLACE`] in what the app reports, since a place is only a name.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use wartui_app::settings::{
     self as app, ApiKeys, GPS_RATE_HZ, Invalid, SSID_MAX_BYTES, SaveError, SerializeError,
@@ -25,9 +25,10 @@ use wartui_app::settings::{
 };
 use wartui_app::view::PlannerShown;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::mac;
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{ChannelPool, PlanSettings, SparseNodes};
 
+use crate::link::Inner as LinkInner;
 use crate::session::SteerError;
 
 /// What a store whose `place` throws is called.
@@ -320,6 +321,9 @@ pub fn check_excluded_ssid(ssid: String, listed: Vec<String>) -> Option<SsidRefu
 #[derive(Debug, uniffi::Object)]
 pub struct Settings {
     inner: app::Settings,
+    /// The Bluetooth links opened with these settings, oldest first, read for the bridge a save
+    /// remembers. Never held across a call into phone code.
+    links: Mutex<Vec<Weak<LinkInner>>>,
 }
 
 #[uniffi::export]
@@ -341,14 +345,14 @@ impl Settings {
         };
         let config = app::load(store.as_ref())?;
         let memory = config.bridge.memory();
-        Ok(Arc::new(Self { inner: app::Settings::new(Some(store), config, memory) }))
+        Ok(Arc::new(Self::holding(app::Settings::new(Some(store), config, memory))))
     }
 
     /// Defaults, saved nowhere: for a simulated capture.
     #[uniffi::constructor]
     #[must_use]
     pub fn unsaved() -> Arc<Self> {
-        Arc::new(Self { inner: app::Settings::default() })
+        Arc::new(Self::holding(app::Settings::default()))
     }
 
     /// Where they are saved, when they are.
@@ -374,22 +378,48 @@ impl Settings {
     }
 
     /// Save the rows the host holds, with no capture running. Rows a bridge holds are ignored,
-    /// once the edit converts. A bridge a [`Link`](crate::Link) has announced already is
-    /// remembered when the next capture starts over that link.
+    /// once the edit converts. Turning remember on remembers the bridge an idle
+    /// [`Link`](crate::Link) opened with these settings has announced, in the same save; a link
+    /// in use at that moment has its bridge remembered when the next capture starts over it.
     ///
     /// # Errors
     /// A value the app's types refuse, or [`SteerError::ExcludedSsid`] for an excluded list the
     /// settings' rules refuse; then nothing is saved.
     pub fn save(&self, edit: SettingsEdit) -> Result<Saved, SteerError> {
         let edit = edit.into_app()?;
-        Ok(self.inner.save(&edit).into())
+        // Read before the save, which calls the phone's store with no lock of ours held.
+        let connected = self.connected();
+        Ok(self.inner.save(&edit, connected).into())
     }
 }
 
 impl Settings {
+    fn holding(inner: app::Settings) -> Self {
+        Self { inner, links: Mutex::default() }
+    }
+
     /// The app's settings, shared with every capture that saves through them.
     pub(crate) fn app(&self) -> app::Settings {
         self.inner.clone()
+    }
+
+    /// Read `link` for the bridge a save remembers, dropping the links that have gone.
+    pub(crate) fn attach(&self, link: &Arc<LinkInner>) {
+        let mut links = self.links();
+        links.retain(|held| held.strong_count() > 0);
+        links.push(Arc::downgrade(link));
+    }
+
+    /// The bridge the most recently attached idle link has announced, if any has.
+    fn connected(&self) -> Option<Mac> {
+        let live: Vec<Arc<LinkInner>> =
+            self.links().iter().rev().filter_map(Weak::upgrade).collect();
+        live.iter().find_map(|link| link.announced_mac())
+    }
+
+    fn links(&self) -> MutexGuard<'_, Vec<Weak<LinkInner>>> {
+        // Each change is a whole push or retain, so a panic elsewhere leaves nothing torn.
+        self.links.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
