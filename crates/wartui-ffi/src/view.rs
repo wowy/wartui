@@ -216,12 +216,13 @@ pub struct SettingsShown {
     pub sd: SdShown,
 }
 
-/// The planner and its sparse node count.
+/// The planner and its sparse node count, as the view shows it and a `SettingsEdit` sends it.
 #[uniffi::remote(Record)]
 pub struct PlannerShown {
     /// The deal.
     pub planner: Planner,
-    /// The sparse nodes the weighted deal asks for, or `None` for automatic.
+    /// The sparse nodes the weighted deal asks for, 1 to `settings_limits().sparse_nodes_max`,
+    /// or `None` for automatic.
     pub sparse_nodes: Option<u8>,
 }
 
@@ -236,13 +237,15 @@ pub enum SdShown {
     NoSlot,
     /// The slot, and the card in it if any.
     Card {
+        /// What the card holds.
         state: SdState,
         /// Its size in MiB, 0 with no card.
         card_mb: u32,
         /// The volume's free space in MiB, when it is ready and says.
         free_mb: Option<u32>,
+        /// The log the bridge writes to it.
         log: SdLogShown,
-        /// A format can be asked for.
+        /// A format can be asked for: a card that is not FAT32, is ready, or failed.
         can_format: bool,
     },
 }

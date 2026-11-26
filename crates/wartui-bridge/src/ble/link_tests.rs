@@ -15,8 +15,9 @@ use super::{
     ALIVE_EVERY, Advertiser, BleTransport, CONNECT_WITHIN, IDENTIFY_EVERY, LIST_WITHIN, LISTEN_FOR,
     MAX_RETRY_DELAY, PAIRING_NOTICE_AFTER, RECALL_WITHIN, SCAN_FOR, SCAN_START_WITHIN,
     WRITE_WITHIN, WriteKind, connect_timeout_text, find_advertiser, pairing_notice, ready_notice,
+    survey,
 };
-use crate::pipe::{RadioError, RadioErrorKind};
+use crate::pipe::{RadioError, RadioErrorKind, Sighting};
 use crate::remember::BridgeMemory;
 use crate::spec::BridgeSpec;
 use crate::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle, TransportError};
@@ -339,6 +340,57 @@ async fn ble_find_advertiser_names_bridge_when_it_advertises() {
         address: PEER_A.to_owned(),
     };
     assert_eq!(found.expect("found"), want);
+    assert_eq!(fake.did(), [Did::ScanStarted, Did::ScanStopped]);
+}
+
+/// What a survey lists of `peer` at `mac`.
+fn sighted(peer: &str, mac: Mac, live: bool) -> Sighting {
+    Sighting { peer: peer.to_owned(), octets: [mac[4], mac[5]], name: None, live }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_survey_lists_every_bridge_heard_when_several_advertise() {
+    // Added out of order, and listed by octets.
+    let fake = radio([bridge_b(), bridge_a()]);
+
+    let heard = survey(&*fake.radio(), LISTEN_FOR).await.expect("surveyed");
+    assert_eq!(heard, [sighted(PEER_A, MAC_A, true), sighted(PEER_B, MAC_B, true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_survey_lists_a_listed_bridge_when_it_does_not_advertise() {
+    // One BlueZ still holds a connection to advertises nothing.
+    let held = FakeBridge { advertises: None, listed: true, ..bridge_b() };
+    let fake = radio([bridge_a(), held]);
+
+    let heard = survey(&*fake.radio(), LISTEN_FOR).await.expect("surveyed");
+    assert_eq!(heard, [sighted(PEER_A, MAC_A, true), sighted(PEER_B, MAC_B, false)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_survey_stops_the_scan_when_time_is_up() {
+    let fake = radio([bridge_a()]);
+    let start_at = Instant::now();
+
+    survey(&*fake.radio(), Duration::from_secs(3)).await.expect("surveyed");
+    assert_eq!(start_at.elapsed(), Duration::from_secs(3));
+    assert_eq!(fake.did(), [Did::ScanStarted, Did::Known, Did::ScanStopped]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_survey_fails_when_scan_cannot_start() {
+    let fake = FakeRadio::without_adapter();
+    let error = survey(&*fake.radio(), LISTEN_FOR).await.expect_err("no adapter");
+    assert_eq!(error.kind, RadioErrorKind::NoAdapter);
+    assert_eq!(fake.did(), [Did::ScanStopped]);
+
+    // A start the OS never answers is timed, and the scan it may yet start is stopped.
+    let fake = radio([bridge_a()]);
+    fake.never_answers(Call::Scan);
+    let start_at = Instant::now();
+    let error = survey(&*fake.radio(), LISTEN_FOR).await.expect_err("never started");
+    assert_eq!(error.kind, RadioErrorKind::Other);
+    assert_eq!(start_at.elapsed(), SCAN_START_WITHIN);
     assert_eq!(fake.did(), [Did::ScanStarted, Did::ScanStopped]);
 }
 

@@ -22,6 +22,7 @@ mod nodes;
 mod receiver;
 mod settings;
 
+use wartui_bridge::BridgeInfo;
 use wartui_core::engine::Snapshot;
 #[cfg(doc)]
 use wartui_core::nmea::Constellation;
@@ -98,11 +99,7 @@ impl View {
             now_ms: snapshot.now_ms,
             started_at_ms: snapshot.started_at_ms,
             link: LinkView { up: snapshot.link_up, host: host(snapshot, over) },
-            bridge: snapshot.bridge.as_ref().map(|bridge| BridgeView {
-                mac: mac::full(&bridge.mac).to_string(),
-                mac_tail: mac::short(&bridge.mac).to_string(),
-                firmware: bridge.fw_version.clone(),
-            }),
+            bridge: snapshot.bridge.as_ref().map(BridgeView::of),
             fan: fan(snapshot),
             fleet: FleetView {
                 pool: snapshot.pool,
@@ -161,6 +158,18 @@ pub struct BridgeView {
     pub mac_tail: String,
     /// Its firmware version, `0.7.0`.
     pub firmware: String,
+}
+
+impl BridgeView {
+    /// What a front end shows of the bridge `bridge` announced.
+    #[must_use]
+    pub fn of(bridge: &BridgeInfo) -> Self {
+        Self {
+            mac: mac::full(&bridge.mac).to_string(),
+            mac_tail: mac::short(&bridge.mac).to_string(),
+            firmware: bridge.fw_version.clone(),
+        }
+    }
 }
 
 /// The carrier's lid fan.

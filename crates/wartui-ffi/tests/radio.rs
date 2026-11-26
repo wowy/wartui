@@ -1,6 +1,8 @@
 //! `Radio`, the phone's Bluetooth stack as the link driver's radio, driven as the driver drives
 //! it, against a driver whose every request the test answers by hand.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +10,11 @@ use futures_util::StreamExt as _;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use wartui_bridge::pipe::{self, Incoming, RadioError, RadioErrorKind, Sighting, WriteKind};
-use wartui_ffi::{Completion, DriverError, Heard, Radio, RadioDriver};
+use wartui_ffi::{
+    BridgeNearby, Completion, DriverError, Heard, Radio, RadioDriver, bridges_nearby,
+};
+
+use common::{Loopback, PEER};
 
 /// The longest any wait takes before the test fails rather than hangs.
 const WAIT: Duration = Duration::from_secs(5);
@@ -238,4 +244,12 @@ async fn radio_yields_drop_once_when_dropped_twice() {
     radio.dropped("p".to_owned(), gone());
     let read = timeout(WAIT, incoming.collect::<Vec<_>>()).await.expect("ended in time");
     assert_eq!(read, vec![Incoming::Dropped(gone())]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn radio_lists_the_bridge_nearby_when_driver_hears_one() {
+    let (radio, driver) = Loopback::steered();
+    let nearby = timeout(WAIT, bridges_nearby(radio, 500)).await.expect("in time");
+    let want = BridgeNearby { peer: PEER.to_owned(), tail: driver.tail(), name: None, live: true };
+    assert_eq!(nearby.expect("listed"), [want]);
 }

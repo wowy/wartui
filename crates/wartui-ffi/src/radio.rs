@@ -29,11 +29,16 @@
 //!
 //! **Nothing here retries, times out or decides.** The driver in `wartui-bridge` does, so a phone
 //! and a desktop follow one policy. No lock is held across a call into the phone's code.
+//!
+//! **[`bridges_nearby`] is a picker's listen**, `wartui_bridge::ble::survey` on the library's
+//! runtime: every bridge heard or listed, none chosen. A radio holds one scan, so a link searching
+//! over the same radio meanwhile loses its scan, and the survey or the link's try fails.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::{self, BoxStream};
@@ -44,6 +49,9 @@ use wartui_bridge::pipe::{
     Sighting, WriteKind,
 };
 use wartui_proto::ble::{DOWN_UUID, ID_UUID, SERVICE_UUID, UP_UUID, advertised_octets};
+use wartui_proto::mac;
+
+use crate::runtime::spawn;
 
 /// The smallest ATT MTU, which the driver assumes when the OS says nothing.
 const MIN_MTU: u16 = 23;
@@ -207,6 +215,80 @@ pub fn link_uuids() -> LinkUuids {
 fn uuid(value: u128) -> String {
     let hex = format!("{value:032x}");
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+}
+
+/// A bridge the radio hears or the OS lists.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BridgeNearby {
+    /// The key to connect by.
+    pub peer: String,
+    /// The last two octets of its address, as `44:C0`: what [`Link::bluetooth`] takes as
+    /// `bridge`.
+    ///
+    /// [`Link::bluetooth`]: crate::Link::bluetooth
+    pub tail: String,
+    /// The name it advertises, when the OS heard one: a label, never matched.
+    pub name: Option<String>,
+    /// Heard advertising now, rather than only listed.
+    pub live: bool,
+}
+
+/// Why [`bridges_nearby`] listed nothing: the radio's kind where it names a remedy.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum NearbyError {
+    /// The OS has no Bluetooth adapter to use.
+    #[error("no Bluetooth adapter")]
+    NoAdapter,
+    /// The OS's Bluetooth is turned off.
+    #[error("Bluetooth is off")]
+    PoweredOff,
+    /// The OS does not let this app use Bluetooth.
+    #[error("Bluetooth is not authorized")]
+    Unauthorized,
+    /// Anything else: the stack's failure, or a call it did not answer in time.
+    #[error("the survey failed: {detail}")]
+    Failed { detail: String },
+}
+
+impl From<RadioError> for NearbyError {
+    fn from(error: RadioError) -> Self {
+        match error.kind {
+            RadioErrorKind::NoAdapter => Self::NoAdapter,
+            RadioErrorKind::PoweredOff => Self::PoweredOff,
+            RadioErrorKind::Unauthorized => Self::Unauthorized,
+            RadioErrorKind::NotBonded
+            | RadioErrorKind::Disconnected
+            | RadioErrorKind::NoService
+            | RadioErrorKind::PeerForgotBond
+            | RadioErrorKind::Other => Self::Failed { detail: error.text },
+        }
+    }
+}
+
+/// Listen for `for_ms` and list every bridge heard or listed, for a picker, sorted by octets.
+///
+/// # Errors
+/// Why the radio could not listen or list.
+#[uniffi::export]
+pub async fn bridges_nearby(
+    radio: Arc<Radio>,
+    for_ms: u32,
+) -> Result<Vec<BridgeNearby>, NearbyError> {
+    let listen_for = Duration::from_millis(u64::from(for_ms));
+    let surveyed = spawn(async move { wartui_bridge::ble::survey(&*radio, listen_for).await });
+    let heard = match surveyed.await {
+        Ok(heard) => heard?,
+        Err(error) => return Err(NearbyError::Failed { detail: error.to_string() }),
+    };
+    Ok(heard
+        .into_iter()
+        .map(|Sighting { peer, octets, name, live }| BridgeNearby {
+            peer,
+            tail: mac::octets(&octets).to_string(),
+            name,
+            live,
+        })
+        .collect())
 }
 
 /// The phone's Bluetooth stack as the link driver's radio. The phone reports what its stack heard

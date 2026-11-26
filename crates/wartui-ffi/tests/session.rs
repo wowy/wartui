@@ -12,10 +12,15 @@ use wartui_core::feed::{LocationFix, Pushed};
 use wartui_core::position::PositionSource;
 use wartui_core::store::{is_simulated, open_readonly};
 use wartui_ffi::{
-    Link, LocationFeed, PositionSources, Session, Settings, StartError, SteerError, StopError,
+    Link, LocationFeed, PositionSources, Saved, Session, Settings, StartError, SteerError,
+    StopError,
 };
+use wartui_proto::link::PowerOutcome;
+use wartui_proto::plan::ChannelPool;
 
-use common::{Loopback, WAIT, capture, nowhere, start, three_nodes, until};
+use common::{
+    Loopback, Memory, WAIT, capture, nowhere, saving, start, three_nodes, unmoved, until,
+};
 
 #[tokio::test]
 async fn session_shows_the_fleet_when_link_is_simulated() {
@@ -254,6 +259,108 @@ async fn session_shows_no_bridge_receiver_when_wire_sim_bridge_has_none() {
     .await;
     session.stop().await.expect("stopped");
     link.close().await.expect("closed");
+}
+
+/// A pool other than `pool`.
+fn another(pool: ChannelPool) -> ChannelPool {
+    if pool == ChannelPool::Eu { ChannelPool::Us } else { ChannelPool::Eu }
+}
+
+#[tokio::test]
+async fn session_apply_sends_pool_and_saves_when_row_moved() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(Memory::default());
+    let settings = Settings::open(store.clone(), None).expect("an empty store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    let shown = until(&session, |view| view.settings.pool.is_some()).await.view;
+    let pool = another(shown.settings.pool.expect("a pool"));
+
+    let edit = wartui_ffi::SettingsEdit { pool: Some(pool), ..unmoved(&shown, &settings) };
+    let applied = session.apply(edit).expect("applied");
+    assert_eq!(applied.saved, Saved::At { place: "memory".to_owned() });
+    assert!(store.text().is_some(), "the store was saved");
+    until(&session, |view| view.settings.pool == Some(pool)).await;
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_apply_refuses_edit_when_fan_duty_is_out_of_range() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(Memory::default());
+    let settings = Settings::open(store.clone(), None).expect("an empty store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    let shown = until(&session, |view| view.settings.pool.is_some()).await.view;
+    let pool = shown.settings.pool;
+
+    let edit = wartui_ffi::SettingsEdit {
+        pool: pool.map(another),
+        fan_duty_pct: Some(101),
+        ..unmoved(&shown, &settings)
+    };
+    let refused = session.apply(edit);
+    assert!(matches!(refused, Err(SteerError::FanDuty { pct: 101 })), "{refused:?}");
+    assert_eq!(store.text(), None, "nothing saved");
+    // Room for a pool sent to land, as it does when an edit is applied.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(session.view().view.settings.pool, pool, "nothing sent");
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_apply_is_busy_when_capture_has_stopped() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(Memory::default());
+    let settings = Settings::open(store.clone(), None).expect("an empty store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    let shown = until(&session, |view| view.link.up).await.view;
+    session.stop().await.expect("stopped");
+
+    let edit = wartui_ffi::SettingsEdit { wait_for_fix: false, ..unmoved(&shown, &settings) };
+    assert!(matches!(session.apply(edit), Err(SteerError::Busy)));
+    assert!(matches!(session.apply_excluded(vec!["HomeNet".to_owned()]), Err(SteerError::Busy)));
+    assert_eq!(store.text(), None, "nothing saved");
+}
+
+#[tokio::test]
+async fn session_apply_excluded_saves_only_the_list() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Memory::holding("[gps]\nwait-for-fix = false\n");
+    let settings = Settings::open(store.clone(), None).expect("the store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    until(&session, |view| view.link.up).await;
+
+    let saved = session.apply_excluded(vec!["HomeNet".to_owned()]).expect("applied");
+    assert_eq!(saved, Saved::At { place: "memory".to_owned() });
+    let text = store.text().expect("saved");
+    let config = wartui_app::settings::parse(&text).expect("valid settings");
+    assert_eq!(config.excluded_ssids, ["HomeNet"]);
+    assert_eq!(config.gps.wait_for_fix, Some(false), "the rest kept: {text}");
+    until(&session, |view| view.settings.excluded_ssids == ["HomeNet"]).await;
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_power_cycle_answers_in_the_view_when_slot_is_named() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let session = start(&dir.path().join("capture.db"), &Link::simulated(3)).await;
+    let shown = until(&session, |view| view.nodes.first().is_some_and(|n| n.slot.is_some())).await;
+    let slot = shown.view.nodes[0].slot.clone().expect("a slot");
+
+    session.power_cycle(slot.index).expect("taken");
+    let answered = until(&session, |view| view.answers.power.is_some()).await;
+    let power = answered.view.answers.power.expect("an answer");
+    assert_eq!(power.slot, slot);
+    assert_eq!(power.outcome, PowerOutcome::Done);
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_power_cycle_refuses_slot_when_it_names_none() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let session = start(&dir.path().join("capture.db"), &Link::simulated(3)).await;
+    let refused = session.power_cycle(0xFF);
+    assert!(matches!(refused, Err(SteerError::NoSuchSlot { slot: 0xFF })), "{refused:?}");
+    session.stop().await.expect("stopped");
 }
 
 /// Unix milliseconds now, the clock a phone stamps a fix with.
