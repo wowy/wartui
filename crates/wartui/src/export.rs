@@ -416,8 +416,8 @@ mod tests {
         Args, Selection, create_csv, into_csv, is_the_capture, quality_warnings, report,
         test_data_note, test_data_warning,
     };
-    use crate::testing::{EPOCH_MS, capture, capture_simulated, sighting};
     use crate::text::NodeNames;
+    use wartui_app::upload::testing::{EPOCH_MS, capture, capture_simulated, sighting};
 
     /// Names for a capture with no node on a slot, so every node goes by its tail.
     fn tails() -> NodeNames {
@@ -653,8 +653,8 @@ mod tests {
     #[test]
     fn export_writes_rows_when_capture_holds_test_data() {
         let dir = tempfile::tempdir().unwrap();
-        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
-        let db = capture_simulated(&dir, records, true);
+        let records = vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let db = capture_simulated(dir.path(), records, true);
         let out = dir.path().join("tonight.csv");
         // An empty file of its own, so the operator's `wartui.toml` plays no part.
         let config = dir.path().join("wartui.toml");
@@ -663,13 +663,13 @@ mod tests {
         let args = Args { selection, out: Some(out.clone()) };
         super::run(args).unwrap();
         let csv = std::fs::read_to_string(&out).unwrap();
-        assert!(csv.contains("10:00:00:00:00:01"), "{csv}");
+        assert!(csv.contains("02:00:00:00:00:01"), "{csv}");
     }
 
     #[test]
     fn export_warns_when_capture_holds_test_data() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture_simulated(&dir, Vec::new(), true);
+        let db = capture_simulated(dir.path(), Vec::new(), true);
         let conn = wartui_core::store::open_readonly(&db).unwrap();
         assert_eq!(test_data_note(&conn, &db).unwrap(), Some(test_data_warning(&db)));
     }
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn export_stays_quiet_when_capture_holds_no_test_data() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(&dir, Vec::new());
+        let db = capture(dir.path(), Vec::new());
         let conn = wartui_core::store::open_readonly(&db).unwrap();
         assert_eq!(test_data_note(&conn, &db).unwrap(), None);
     }

@@ -95,6 +95,11 @@ impl NodeNames {
         Self { board, slots: slots.clone(), shared }
     }
 
+    /// Names for a capture whose slots are unknown: every node goes by its address tail.
+    pub(crate) fn by_address() -> Self {
+        Self::new(NodeBoard::NoCarrier, &BTreeMap::new())
+    }
+
     /// Names for the nodes of the capture `conn` holds. A capture whose slots cannot be read
     /// names every node by its address tail: the names only label a summary, so they never fail
     /// the export or upload it describes.
@@ -103,7 +108,7 @@ impl NodeNames {
             Ok((board, slots)) => Self::new(board, &slots),
             Err(error) => {
                 tracing::warn!(%error, "cannot read the capture's node slots; naming nodes by address");
-                Self::new(NodeBoard::NoCarrier, &BTreeMap::new())
+                Self::by_address()
             }
         }
     }
