@@ -199,7 +199,7 @@ pub enum Failure {
     /// The node answered with a state this build has no name for.
     UnknownState(u8),
     /// The operator stopped it.
-    Cancelled,
+    Canceled,
     /// The link to the bridge closed.
     LinkClosed,
     /// The P4 answered a chunk `NoImage`: its cache lost the image it had checked.
@@ -232,7 +232,7 @@ impl fmt::Display for Failure {
                 "the new image was never confirmed; the node rolls back by itself after 3 boots",
             ),
             Self::UnknownState(byte) => write!(f, "the node answered with unknown state {byte}"),
-            Self::Cancelled => f.write_str("cancelled"),
+            Self::Canceled => f.write_str("canceled"),
             Self::LinkClosed => f.write_str("the link to the bridge closed"),
             Self::CacheLost => f.write_str("the bridge lost the node image"),
         }
@@ -532,7 +532,7 @@ impl OtaSession {
             let abort = UpdateAbort { session: self.begin.session }.encode();
             self.send(now.mono, Sent::Abort, DownType::UpdateAbort, &abort, &mut out);
         }
-        self.fail(now.mono, Failure::Cancelled);
+        self.fail(now.mono, Failure::Canceled);
         out
     }
 
@@ -858,7 +858,7 @@ impl OtaSession {
     /// cancel sends its own.
     fn fail(&mut self, now: Instant, failure: Failure) {
         self.abort_owed = self.accepted
-            && failure != Failure::Cancelled
+            && failure != Failure::Canceled
             && matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing);
         self.finish(now, Outcome::Failed(failure));
     }

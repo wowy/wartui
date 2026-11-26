@@ -124,19 +124,19 @@ wartui sd-log LOG/ # print the bridge's log as text, from the card's files
 
 ## Subprojects
 
-| Path                                                     | What it is                                                                                                            |
-|----------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
-| [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual**         |
-| `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                           |
-| `crates/wartui-app`                                      | The headless app layer a phone binds to: settings and their save path, the `Session`, bridge ops, the `View`, uploads |
-| `crates/wartui-desktop`                                  | The desktop's adapters: serial ports, Bluetooth radio, BlueZ pairing, host health, the `wartui.toml` file             |
-| `crates/wartui-bridge`                                   | Host-side link to the bridge: transport over USB and Bluetooth, what a serial port is, simulator                      |
-| `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                         |
-| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses, the C6 link and the fleet planner                          |
-| [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4, its updates and the Bluetooth host link                                     |
-| [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                         |
-| `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                                      |
-| `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                              |
+| Path                                                     | What it is                                                                                                                     |
+|----------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
+| [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual**                  |
+| `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                                    |
+| `crates/wartui-app`                                      | The headless app layer a phone binds to: settings and their save path, the `Session`, bridge ops, the `View`, uploads, updates |
+| `crates/wartui-desktop`                                  | The desktop's adapters: serial ports, Bluetooth radio, BlueZ pairing, host health, the `wartui.toml` file                      |
+| `crates/wartui-bridge`                                   | Host-side link to the bridge: transport over USB and Bluetooth, what a serial port is, simulator                               |
+| `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                                  |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge, on an ESP32-P4: the host link, the node buses, the C6 link and the fleet planner                                   |
+| [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The board's ESP32-C6: its link to the P4, its updates and the Bluetooth host link                                              |
+| [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                                  |
+| `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                                               |
+| `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                                       |
 
 The nodes connect by SPI to a USB-attached ESP32-P4 board, the bridge, on two buses
 ([`docs/node-bus.md`](docs/node-bus.md)). The bridge assigns their channels. wartui reaches them

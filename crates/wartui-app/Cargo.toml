@@ -10,8 +10,9 @@ repository.workspace = true
 workspace = true
 
 [features]
-# Fixtures for upload tests, here and in `wartui`: captures to send and a local listener to
-# send them to, so no test reaches a real site. No shipped build enables it.
+# Fixtures for upload and update tests, here and in `wartui`: captures to send and a local
+# listener to send them to, so no test reaches a real site, and app images that pass every
+# check. No shipped build enables it.
 testing = []
 
 [dependencies]
@@ -21,6 +22,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 flate2 = "1.1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 toml = "1"

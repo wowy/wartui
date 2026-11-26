@@ -157,8 +157,11 @@ own.
   started; typed, and handing each fault the bridge reports to the caller) and `view` (what a
   fleet view shows of a snapshot, decided once as plain data: the faults and their order, the
   notes, each node's state, the planner and the receiver) and `upload` (a capture sent to WDGWars
-  and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed).
-  It words nothing for the operator, and names no desktop I/O and no terminal.
+  and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
+  and `update` (the nodes and the bridge updated over the link: the app-only images and their
+  checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and
+  the bridge's update read across its reboot). It words nothing for the operator, and names no
+  desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what
@@ -633,7 +636,7 @@ edit stops; follow the pointer before changing the rule.
   `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's
   reboot and its C6's update each drop the link, so `flash-bridge` reads its outcome across the
   reconnects, and nothing resumes a partly sent image.
-  → `crates/wartui/src/flash/p4.rs` `//!`
+  → `crates/wartui-app/src/update/bridge.rs` `//!`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A
   `StopScan` pumped only after the `StartScan` behind it loses its `Stop` to the new `Assign`, and

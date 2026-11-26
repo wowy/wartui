@@ -523,11 +523,11 @@ fn ota_session_holds_chunks_when_image_is_not_cached() {
 }
 
 #[test]
-fn ota_session_sends_nothing_when_cancelled_before_any_heartbeat() {
+fn ota_session_sends_nothing_when_canceled_before_any_heartbeat() {
     let mut bench = Bench::new(&image(NEW));
     let sends = bench.session.cancel(bench.now());
     assert!(sends.is_empty(), "no slot to send the abort to: {sends:?}");
-    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::Cancelled)));
+    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::Canceled)));
 }
 
 #[test]
@@ -894,14 +894,14 @@ fn ota_session_fails_when_new_image_is_never_confirmed() {
 }
 
 #[test]
-fn ota_session_sends_abort_when_cancelled() {
+fn ota_session_sends_abort_when_canceled() {
     let mut bench = Bench::new(&image(NEW));
     bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 4096);
     let sends = bench.session.cancel(bench.now());
     bench.queue.extend(sends);
     bench.settle(&mut deliver);
     assert_eq!(bench.sent.last(), Some(&Out::Abort));
-    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::Cancelled)));
+    assert_eq!(bench.session.outcome(), Some(&Outcome::Failed(Failure::Canceled)));
     assert!(!bench.node.receiver.is_active(), "the node dropped the session");
 }
 

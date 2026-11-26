@@ -16,11 +16,9 @@
 //!
 //! **A release pins its images by tag.** The host, the fleet and the bridge are flashed from one
 //! tree, and the crate version does not move before 1.0, so the version cannot name a tree and the
-//! tag can. A build carrying `WARTUI_RELEASE_TAG` fetches that release's image, checks it against
-//! the same release's `SHA256SUMS`, and keeps both under the state directory, so a laptop with no
-//! signal can still reflash. One `SHA256SUMS` covers every image of a release, so both firmwares
-//! share one cache directory per tag. A build without the tag is a checkout, and builds the
-//! firmware beside it.
+//! tag can. A build carrying `WARTUI_RELEASE_TAG` fetches that release's image into the state
+//! directory (`wartui_app::update::release`). A build without the tag is a checkout, and builds
+//! the firmware beside it.
 //!
 //! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware,
 //! and over which link, from `[bridge]`, so a `wartui.toml` that does not load stops it
@@ -42,29 +40,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
-use sha2::{Digest, Sha256};
+use wartui_app::update::image::{Chip, ImageError, find_header};
+use wartui_app::update::release::{self, ReleaseError, Releases};
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::spec::BridgeSpec;
 use wartui_proto::mac::{self, Mac};
 
 /// The release this binary was built for, when it was built for one.
 const RELEASE_TAG: Option<&str> = option_env!("WARTUI_RELEASE_TAG");
-
-/// Where a release's assets are published.
-const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/download");
-
-/// The release asset naming every other asset's digest.
-const SUMS: &str = "SHA256SUMS";
-
-/// An ESP image header's first byte.
-const IMAGE_MAGIC: u8 = 0xE9;
-
-/// Where `esp_image_header_t` keeps the chip ID: after the 8-byte common header and the four
-/// SPI pin and drive bytes of the extended one, as a little-endian `u16`.
-const CHIP_ID_AT: usize = 12;
-
-/// The whole header, common and extended, which a file must hold to be read at all.
-const HEADER_LEN: usize = 24;
 
 /// The `[bridge]` table saved in `wartui.toml`, from `explicit` (`--config`) or the default file.
 /// A missing default file is none remembered; a file that does not load is an error naming it.
@@ -104,49 +87,17 @@ const NODE: Firmware = Firmware {
 };
 
 /// The node firmware's app-only images, which an over-the-air update carries.
-const NODE_APP: Firmware = Firmware { merged: false, asset: "wartui-node-app-esp32c5.bin", ..NODE };
+const NODE_APP: Firmware = Firmware { merged: false, asset: release::NODE_APP_ASSET, ..NODE };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
     mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 02:00:5E:10:44:C0"))
 }
 
-/// The chips the firmwares are built for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Chip {
-    Esp32c5,
-    Esp32c6,
-    Esp32p4,
-}
-
-impl Chip {
-    /// Every chip an image header here may name.
-    const ALL: [Self; 3] = [Self::Esp32c5, Self::Esp32c6, Self::Esp32p4];
-
-    /// Spelled as the firmware's feature, espflash's `--chip` and `board-info`'s `Chip type:`
-    /// all spell it.
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Esp32c5 => "esp32c5",
-            Self::Esp32c6 => "esp32c6",
-            Self::Esp32p4 => "esp32p4",
-        }
-    }
-
-    /// IDF's `esp_chip_id_t`, as an image header carries it.
-    const fn image_id(self) -> u16 {
-        match self {
-            Self::Esp32c5 => 23,
-            Self::Esp32c6 => 13,
-            Self::Esp32p4 => 18,
-        }
-    }
-
-    /// Where the bootloader sits in flash, and so in a merged image.
-    const fn boot_offset(self) -> usize {
-        match self {
-            Self::Esp32c5 | Self::Esp32p4 => 0x2000,
-            Self::Esp32c6 => 0x0,
-        }
+/// Where `chip`'s bootloader sits in flash, and so in a merged image.
+const fn boot_offset(chip: Chip) -> usize {
+    match chip {
+        Chip::Esp32c5 | Chip::Esp32p4 => 0x2000,
+        Chip::Esp32c6 => 0x0,
     }
 }
 
@@ -409,7 +360,8 @@ fn fetch(firmware: &Firmware, source: &Source) -> Result<PathBuf> {
         Source::Release { tag, asset } => {
             let cache =
                 state_dir().unwrap_or_else(|| std::env::temp_dir().join("wartui")).join("images");
-            release_image(RELEASES, tag, asset, &cache, &http_get)
+            let cached = release::fetch(&Releases::live(), tag, asset, &cache);
+            Ok(cached.map_err(release_error)?.path().to_owned())
         }
     }
 }
@@ -441,30 +393,18 @@ fn read(path: &Path) -> Result<Vec<u8>> {
 /// Refuse an image not built for `chip`: a merged one by its bootloader's header, an app-only
 /// one by its own.
 fn check_image(image: &[u8], chip: Chip, merged: bool) -> Result<()> {
-    // Erased flash ahead of the bootloader, when the chip boots from further in than 0x0.
-    let at = image.iter().take_while(|byte| **byte == 0xFF).count();
-    ensure!(
-        image.get(at) == Some(&IMAGE_MAGIC),
-        "not an ESP image: no header where a bootloader should start"
-    );
-    ensure!(image.len() >= at + HEADER_LEN, "too short to hold an image header");
-    let id = u16::from_le_bytes([image[at + CHIP_ID_AT], image[at + CHIP_ID_AT + 1]]);
-    if id != chip.image_id() {
-        let built_for = Chip::ALL
-            .into_iter()
-            .find(|other| other.image_id() == id)
-            .map_or_else(|| format!("chip ID {id}"), |other| other.name().to_owned());
-        bail!("the image is built for {built_for}, not {}", chip.name());
-    }
+    // Past erased flash ahead of the bootloader, when the chip boots from further in than 0x0.
+    let at =
+        find_header(image, chip).map_err(|error| anyhow::anyhow!(app::image_error_text(&error)))?;
     if merged {
         ensure!(
-            at == chip.boot_offset(),
+            at == boot_offset(chip),
             "the image's bootloader is at {at:#x}, and an {} boots from {:#x}",
             chip.name(),
-            chip.boot_offset()
+            boot_offset(chip)
         );
     } else {
-        ensure!(at == 0, "the image's header is at {at:#x}, and an app-only image starts with it");
+        ensure!(at == 0, "{}", app::image_error_text(&ImageError::NotAtStart { at }));
     }
     Ok(())
 }
@@ -507,71 +447,30 @@ fn build_image(firmware: &Firmware, dir: &Path) -> Result<PathBuf> {
     Ok(bin)
 }
 
-/// Where a release keeps one of its assets.
-fn asset_url(base: &str, tag: &str, asset: &str) -> String {
-    format!("{base}/{tag}/{asset}")
-}
-
-/// The digest `SHA256SUMS` gives for `asset`, in the `sha256sum` format: a hex digest, a space,
-/// then a space or a `*`, then the name.
-fn listed_digest<'a>(sums: &'a str, asset: &str) -> Option<&'a str> {
-    sums.lines().find_map(|line| {
-        let (digest, rest) = line.trim().split_once(' ')?;
-        let name = rest.trim_start_matches([' ', '*']);
-        (name == asset).then_some(digest)
-    })
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// Refuse `bytes` unless `SHA256SUMS` lists exactly their digest for `asset`.
-fn verify(bytes: &[u8], sums: &str, asset: &str) -> Result<()> {
-    let Some(listed) = listed_digest(sums, asset) else {
-        bail!("{SUMS} does not list {asset}");
-    };
-    let actual = sha256_hex(bytes);
-    ensure!(listed.eq_ignore_ascii_case(&actual), "{asset} is {actual}, and {SUMS} says {listed}");
-    Ok(())
-}
-
-/// A release's image, from the cache when it still matches the cached digest, else fetched from
-/// `base` and cached. `fetch` is the network, and is a parameter so a test can be without one.
-fn release_image(
-    base: &str,
-    tag: &str,
-    asset: &str,
-    cache: &Path,
-    fetch: &dyn Fn(&str) -> Result<Vec<u8>>,
-) -> Result<PathBuf> {
-    let dir = cache.join(tag);
-    let (sums_path, image_path) = (dir.join(SUMS), dir.join(asset));
-    if let (Ok(sums), Ok(image)) = (std::fs::read_to_string(&sums_path), std::fs::read(&image_path))
-        && verify(&image, &sums, asset).is_ok()
-    {
-        return Ok(image_path);
+/// Why a release's image could not be had, as an operator reads it.
+fn release_error(error: ReleaseError) -> anyhow::Error {
+    let sums = release::SUMS;
+    match error {
+        ReleaseError::Fetch { url, error } => {
+            anyhow::Error::msg(error).context(format!("fetching {url}"))
+        }
+        ReleaseError::Read { url, error } => {
+            anyhow::Error::msg(error).context(format!("reading {url}"))
+        }
+        ReleaseError::SumsNotText(error) => {
+            anyhow::Error::new(error).context(format!("{sums} is not text"))
+        }
+        ReleaseError::Unlisted { asset } => anyhow::anyhow!("{sums} does not list {asset}"),
+        ReleaseError::Mismatch { asset, actual, listed } => {
+            anyhow::anyhow!("{asset} is {actual}, and {sums} says {listed}")
+        }
+        ReleaseError::CreateDir { dir, error } => {
+            anyhow::Error::new(error).context(format!("creating {}", dir.display()))
+        }
+        ReleaseError::Write { path, error } => {
+            anyhow::Error::new(error).context(format!("writing {}", path.display()))
+        }
     }
-    let sums = fetch(&asset_url(base, tag, SUMS))?;
-    let sums = String::from_utf8(sums).with_context(|| format!("{SUMS} is not text"))?;
-    let image = fetch(&asset_url(base, tag, asset))?;
-    verify(&image, &sums, asset)?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::write(&sums_path, &sums)
-        .with_context(|| format!("writing {}", sums_path.display()))?;
-    std::fs::write(&image_path, &image)
-        .with_context(|| format!("writing {}", image_path.display()))?;
-    Ok(image_path)
-}
-
-fn http_get(url: &str) -> Result<Vec<u8>> {
-    let mut response = ureq::get(url).call().with_context(|| format!("fetching {url}"))?;
-    response
-        .body_mut()
-        .with_config()
-        .limit(16 * 1024 * 1024)
-        .read_to_vec()
-        .with_context(|| format!("reading {url}"))
 }
 
 /// Refuse the run up front when there is no `espflash` to run.
@@ -616,6 +515,7 @@ fn espflash<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Ran {
 /// Fixtures the tests of every flashing command share.
 #[cfg(test)]
 mod testing {
+    pub(super) use wartui_app::update::testing::{C5_HEADER, C6_HEADER, P4_APP_HEADER};
     use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate};
     use wartui_proto::mac::{self, Mac};
 
@@ -623,21 +523,6 @@ mod testing {
 
     pub(super) const BRIDGE_MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
     pub(super) const NODE_MAC: Mac = [0x02, 0x00, 0x5E, 0x10, 0xA1, 0xB0];
-
-    /// The first 24 bytes `espflash save-image --merge` wrote for each chip, from one ELF.
-    pub(super) const C6_HEADER: [u8; 24] = [
-        0xe9, 0x03, 0x02, 0x20, 0x1a, 0xb9, 0x86, 0x40, 0xee, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00,
-        0x00, 0x00, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-    ];
-    pub(super) const C5_HEADER: [u8; 24] = [
-        0xe9, 0x03, 0x02, 0x20, 0xaa, 0xbb, 0x84, 0x40, 0xee, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00,
-        0x64, 0x00, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-    ];
-    /// The first 24 bytes `espflash save-image` 4.6 wrote for the P4 bridge's app-only image.
-    pub(super) const P4_APP_HEADER: [u8; 24] = [
-        0xe9, 0x05, 0x02, 0x20, 0x76, 0x8a, 0x08, 0x40, 0xee, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00,
-        0x2c, 0x01, 0x8f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01,
-    ];
 
     /// `espflash board-info` 4.6 against a C5, laid out as `print_board_info` writes it.
     pub(super) const BOARD_INFO: &str = "\
@@ -688,8 +573,6 @@ Chip ID: 23
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::testing::*;
     use super::*;
 
@@ -808,14 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_pins_chip_ids_when_reading_image_headers() {
-        // IDF's `esp_chip_id_t`, which espflash's `Chip::id` also carries.
-        assert_eq!(Chip::Esp32c6.image_id(), 13);
-        assert_eq!(Chip::Esp32c5.image_id(), 23);
-        assert_eq!(Chip::Esp32p4.image_id(), 18);
-    }
-
-    #[test]
     fn flash_accepts_app_image_when_header_names_the_p4() {
         check_image(&p4_app_image(), Chip::Esp32p4, false).unwrap();
     }
@@ -903,63 +778,36 @@ mod tests {
     }
 
     #[test]
-    fn flash_builds_download_url_when_given_tag_and_asset() {
-        let url = asset_url(RELEASES, "v0.2.0", "wartui-node-fw-esp32c5.bin");
-        assert_eq!(
-            url,
-            "https://github.com/wowy/wartui/releases/download/v0.2.0/wartui-node-fw-esp32c5.bin"
-        );
+    fn flash_words_release_refusal_when_sums_do_not_match() {
+        let error = release_error(ReleaseError::Unlisted { asset: "x.bin".to_owned() });
+        assert_eq!(format!("{error:?}"), "SHA256SUMS does not list x.bin");
+        let (asset, actual, listed) = ("x.bin".to_owned(), "ab".to_owned(), "cd".to_owned());
+        let error = release_error(ReleaseError::Mismatch { asset, actual, listed });
+        assert_eq!(format!("{error:?}"), "x.bin is ab, and SHA256SUMS says cd");
     }
 
     #[test]
-    fn flash_verifies_digest_when_sums_list_the_asset() {
-        let sums = format!("{}  a.bin\n{} *b.bin\n", sha256_hex(b"a"), sha256_hex(b"b"));
-        verify(b"a", &sums, "a.bin").unwrap();
-        verify(b"b", &sums, "b.bin").unwrap();
+    fn flash_words_release_refusal_when_a_fetch_fails() {
+        let url = "http://test/v1/x.bin".to_owned();
+        let failed = ReleaseError::Fetch { url: url.clone(), error: "io: refused".to_owned() };
+        let error = format!("{:?}", release_error(failed));
+        assert_eq!(error, "fetching http://test/v1/x.bin\n\nCaused by:\n    io: refused");
+        let failed = ReleaseError::Read { url, error: "too big".to_owned() };
+        let error = format!("{:?}", release_error(failed));
+        assert_eq!(error, "reading http://test/v1/x.bin\n\nCaused by:\n    too big");
     }
 
     #[test]
-    fn flash_rejects_download_when_digest_mismatches() {
-        let sums = format!("{}  a.bin\n", sha256_hex(b"a"));
-        assert!(verify(b"tampered", &sums, "a.bin").is_err());
-        assert!(verify(b"a", &sums, "missing.bin").is_err());
-    }
-
-    #[test]
-    fn flash_fetches_and_caches_image_when_cache_is_empty() {
-        let cache = tempfile::tempdir().unwrap();
-        let image = c5_image();
-        let sums = format!("{}  x.bin\n", sha256_hex(&image));
-        let asked = RefCell::new(Vec::new());
-        let fetch = |url: &str| -> Result<Vec<u8>> {
-            asked.borrow_mut().push(url.to_owned());
-            Ok(if url.ends_with(SUMS) { sums.clone().into_bytes() } else { image.clone() })
-        };
-        let path = release_image("http://test", "v1", "x.bin", cache.path(), &fetch).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), image);
-        assert_eq!(*asked.borrow(), ["http://test/v1/SHA256SUMS", "http://test/v1/x.bin"]);
-    }
-
-    #[test]
-    fn flash_uses_cached_image_when_offline() {
-        let cache = tempfile::tempdir().unwrap();
-        let dir = cache.path().join("v1");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("x.bin"), c5_image()).unwrap();
-        std::fs::write(dir.join(SUMS), format!("{}  x.bin\n", sha256_hex(&c5_image()))).unwrap();
-        let offline = |_: &str| -> Result<Vec<u8>> { bail!("offline") };
-        let path = release_image("http://test", "v1", "x.bin", cache.path(), &offline).unwrap();
-        assert_eq!(path, dir.join("x.bin"));
-    }
-
-    #[test]
-    fn flash_rejects_download_when_fetched_image_mismatches_sums() {
-        let cache = tempfile::tempdir().unwrap();
-        let sums = format!("{}  x.bin\n", sha256_hex(b"the real one"));
-        let fetch = |url: &str| -> Result<Vec<u8>> {
-            Ok(if url.ends_with(SUMS) { sums.clone().into_bytes() } else { b"another".to_vec() })
-        };
-        assert!(release_image("http://test", "v1", "x.bin", cache.path(), &fetch).is_err());
-        assert!(!cache.path().join("v1/x.bin").exists(), "a rejected image is not cached");
+    fn flash_words_release_refusal_when_the_cache_cannot_be_written() {
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let failed = ReleaseError::CreateDir { dir: "/c/v1".into(), error };
+        assert_eq!(release_error(failed).to_string(), "creating /c/v1");
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let failed = ReleaseError::Write { path: "/c/v1/x.bin".into(), error };
+        assert_eq!(release_error(failed).to_string(), "writing /c/v1/x.bin");
+        let sums = String::from_utf8(vec![0xFF]).unwrap_err();
+        let error = release_error(ReleaseError::SumsNotText(sums));
+        assert_eq!(error.to_string(), "SHA256SUMS is not text");
+        assert_eq!(error.chain().count(), 2, "the decode error follows");
     }
 }

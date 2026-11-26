@@ -135,7 +135,7 @@ confirmed, its 6 s listen and the image build included.
 - **The rate is one round trip per chunk.** One chunk is in flight at a time, and each waits
   for the node's ack, which the P4 fetches on its 25 ms ack poll, then for `Delivered` to reach the
   host. That is about 42 ms per KB. Pipelining chunks, or a faster clock, would raise it.
-- **Rollback.** An update cancelled at `rebooting` sends no confirm. The node booted the new image
+- **Rollback.** An update canceled at `rebooting` sends no confirm. The node booted the new image
   as `trial boot 1 of 3`. Two resets through its USB counted boots 2 and 3, and the third rolled it
   back to the old slot and rebooted. It then heartbeated off trial, with nothing sent to it.
 
