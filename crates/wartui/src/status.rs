@@ -30,29 +30,22 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle};
+use wartui_app::ops::{self, LinkError, NotReady, ReadyNotice, Request, Status};
+use wartui_bridge::{BridgeInfo, LinkHandle};
 use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeHealth, BridgeToHost, Central, HOST_SILENCE_SECS, HostOwner,
-    HostToBridge, PairWindow, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
+    BluetoothStatus, BridgeHealth, Central, HOST_SILENCE_SECS, HostOwner, PairWindow, QueueStat,
+    QueueStats, RadioInfo, RadioLinkStats,
 };
 use wartui_proto::mac;
 use wartui_proto::plan::PlanSettings;
 use wartui_proto::radio_link::BleCounters;
 
 use crate::text::{SdForm, kib, sd_log_text, sd_text};
-
-/// Generous enough for a bridge that is busy forwarding a fleet, short enough
-/// that a wedged one is reported rather than waited on. The same figure the
-/// notice quotes, so the two cannot disagree about how long was waited.
-const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
-
-/// How long to wait for the `Fleet` report the bridge sends behind a `Status`.
-const PLAN_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -104,13 +97,11 @@ pub async fn run(args: Args) -> Result<()> {
         println!("{}", radio_line(radio));
     }
 
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-
-    let (status, plan) = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status_and_plan(&mut link))
+    let (status, plan) = ops::status_and_plan(&mut link, ops::REPLY_TIMEOUT, &mut print_fault)
         .await
-        .context("the bridge did not answer a status request")??;
+        .map_err(|error| link_error(error, NO_STATUS))?;
 
-    let BridgeToHost::Status {
+    let Status {
         rx_count,
         dropped_tx,
         uptime_ms,
@@ -129,10 +120,7 @@ pub async fn run(args: Args) -> Result<()> {
         sd,
         bluetooth,
         health,
-    } = status
-    else {
-        unreachable!("wait_for_status only returns Status")
-    };
+    } = status;
 
     println!("received   {rx_count} records");
     println!("dropped    {dropped_tx} frames");
@@ -421,7 +409,7 @@ fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
 }
 
 /// The bridge's announcement over `over` within `within`, or why the link went down first.
-/// `None` when the wait runs out with no failure to name ([`ReadyWait`]).
+/// `None` when the wait runs out with no failure to name (`wartui_app::ops::ready`).
 pub(crate) async fn wait_for_ready(
     link: &mut LinkHandle,
     over: crate::config::Link,
@@ -444,43 +432,18 @@ pub(crate) struct ReadyWaited {
 }
 
 /// [`wait_for_ready`], keeping the reason as text and noting whether a frame arrived that did not
-/// decode: a bridge running firmware from another tree.
+/// decode: a bridge running firmware from another tree. Each pairing notice goes to standard error
+/// as it comes.
 pub(crate) async fn wait_for_ready_or_why(
     link: &mut LinkHandle,
     over: crate::config::Link,
     within: Duration,
 ) -> ReadyWaited {
-    let mut until = tokio::time::Instant::now() + within;
-    let mut wait = ReadyWait::new(over);
-    let mut garbled = false;
-    loop {
-        let Ok(event) = tokio::time::timeout_at(until, link.recv()).await else {
-            let ready = wait.timed_out().map_or(Ok(None), Err);
-            return ReadyWaited { ready, garbled };
-        };
-        garbled |= matches!(event, Some(LinkEvent::Garbled(_)));
-        match wait.take(event) {
-            Taken::Waiting => {}
-            Taken::Pairing(notice) => {
-                eprintln!("{notice}");
-                until = pairing_deadline(until, tokio::time::Instant::now());
-            }
-            // The pairing already stretched the deadline.
-            Taken::Through(notice) => eprintln!("{notice}"),
-            Taken::Ended(ready) => return ReadyWaited { ready: ready.map(Some), garbled },
-        }
-    }
-}
-
-/// The wait's deadline once the transport, at `now`, waits on the OS's pairing dialog: `until`,
-/// or when that is sooner, the transport's own deadline for the subscription and the usual wait
-/// for a `Ready` behind it. The notice comes a few seconds into the subscription, so its
-/// deadline alone leaves the bridge little time to announce itself.
-fn pairing_deadline(
-    until: tokio::time::Instant,
-    now: tokio::time::Instant,
-) -> tokio::time::Instant {
-    until.max(now + wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER)
+    let mut notice = |notice: ReadyNotice| match notice {
+        ReadyNotice::Pairing(text) | ReadyNotice::Through(text) => eprintln!("{text}"),
+    };
+    let waited = ops::ready(link, over, within, crate::CONNECT_NOTICE_AFTER, &mut notice).await;
+    ReadyWaited { ready: waited.ready.map_err(not_ready_text), garbled: waited.garbled }
 }
 
 /// Why a wait that announced the OS's pairing dialog ran out, when no failure is retried.
@@ -497,166 +460,50 @@ fn ready_ran_out() -> String {
     )
 }
 
-/// A wait for the bridge's announcement, fed one link event at a time.
-///
-/// Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
-/// as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
-/// the wait goes on. The bridge's refusal of this PC and a USB takeover still end it at once. The
-/// first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to
-/// the transport's pairing window; a later one returns no notice. A
-/// [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
-/// the bridge's `Ready`; the first is the operator's notice that the click landed, and a later
-/// one returns no notice. A wait that runs out names a failure that is retried, else the bridge's
-/// silence once the subscription went through, else the pairing wait once it was announced.
-#[derive(Debug)]
-struct ReadyWait {
-    over: crate::config::Link,
-    /// The last failure the transport is retrying.
-    retried: Option<String>,
-    /// Whether the transport's wait on the OS's pairing has been announced.
-    pairing: bool,
-    /// Whether the subscription went through since the pairing wait last began.
-    through: bool,
-    /// Whether the subscription going through has been announced. `through` resets when a
-    /// pairing wait begins again, so it cannot say this.
-    through_said: bool,
-}
-
-/// What one link event does to a [`ReadyWait`].
-#[derive(Debug, PartialEq, Eq)]
-enum Taken {
-    /// The wait goes on.
-    Waiting,
-    /// The transport waits on the OS's pairing dialog: this notice says so, and the wait goes on.
-    Pairing(String),
-    /// The subscription that waited on the pairing is through: this notice says so, and the wait
-    /// goes on.
-    Through(String),
-    /// The wait is over, with the announcement or the reason.
-    Ended(Result<BridgeInfo, String>),
-}
-
-impl ReadyWait {
-    const fn new(over: crate::config::Link) -> Self {
-        Self { over, retried: None, pairing: false, through: false, through_said: false }
-    }
-
-    /// What `event` does to the wait.
-    fn take(&mut self, event: Option<LinkEvent>) -> Taken {
-        match event {
-            Some(LinkEvent::Connected(info)) => Taken::Ended(Ok(info)),
-            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing }) => {
-                self.through = false;
-                if std::mem::replace(&mut self.pairing, true) {
-                    Taken::Waiting
-                } else {
-                    Taken::Pairing(reason)
-                }
-            }
-            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::Other })
-                if self.over == crate::config::Link::Bluetooth =>
-            {
-                self.retried = Some(reason);
-                Taken::Waiting
-            }
-            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingReady }) => {
-                // The failures before it came before a subscription that went through.
-                self.through = true;
-                self.retried = None;
-                if std::mem::replace(&mut self.through_said, true) {
-                    Taken::Waiting
-                } else {
-                    Taken::Through(reason)
-                }
-            }
-            Some(LinkEvent::Disconnected { reason, .. }) => Taken::Ended(Err(reason)),
-            Some(_) => Taken::Waiting,
-            None => Taken::Ended(Err("the link closed".to_owned())),
-        }
-    }
-
-    /// Why the wait ran out: the last failure the transport was retrying, else the bridge's
-    /// silence once the subscription went through, else the pairing wait once it was announced,
-    /// if any.
-    fn timed_out(self) -> Option<String> {
-        if self.retried.is_some() {
-            self.retried
-        } else if self.through {
-            Some(ready_ran_out())
-        } else {
-            self.pairing.then(|| PAIRING_RAN_OUT.to_owned())
-        }
+/// Why the bridge did not announce itself, as every command says it.
+fn not_ready_text(why: NotReady) -> String {
+    match why {
+        NotReady::Down(reason) | NotReady::Retried(reason) => reason,
+        NotReady::Closed => "the link closed".to_owned(),
+        NotReady::SilentAfterPairing => ready_ran_out(),
+        NotReady::PairingRanOut => PAIRING_RAN_OUT.to_owned(),
     }
 }
 
-/// Waits for the `Status` answer, printing each fault the bridge reports meanwhile.
-///
-/// A bridge announces a standing fault as an `Error` once a host connects, such as a P4
-/// updating its radio, and still answers the poll. The caller's timeout bounds the wait.
-pub(crate) async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Result<BridgeToHost> {
-    loop {
-        match awaited(link.recv().await)? {
-            Awaited::Status(status) => return Ok(*status),
-            Awaited::Fault(line) => println!("{line}"),
-            Awaited::Fleet(_) | Awaited::Other => {}
+/// What every command says when the bridge does not answer its status request in time.
+pub(crate) const NO_STATUS: &str = "the bridge did not answer a status request";
+
+/// Print a fault the bridge reports while a command waits, as `status` prints it. The bridge
+/// announces a standing fault as an `Error` once a host connects, such as a P4 updating its
+/// radio, and still answers.
+pub(crate) fn print_fault(message: &str) {
+    println!("fault      {message}");
+}
+
+/// `error`, from a wait whose answer, when it did not come in time, `no_answer` names. A command
+/// that could not be queued says which; the link's own failures say themselves.
+pub(crate) fn link_error(error: LinkError, no_answer: &str) -> anyhow::Error {
+    match &error {
+        LinkError::Queue { request, .. } => {
+            let queueing = queueing(*request);
+            anyhow::Error::new(error).context(queueing)
         }
+        LinkError::NoAnswer(_) => anyhow::Error::new(error).context(no_answer.to_owned()),
+        LinkError::Down(_) | LinkError::Closed => anyhow::Error::new(error),
     }
 }
 
-/// [`wait_for_status`], then the `Fleet` report the bridge sends behind it, or the last one
-/// before it when none follows within [`PLAN_AFTER`].
-pub(crate) async fn wait_for_status_and_plan(
-    link: &mut wartui_bridge::LinkHandle,
-) -> Result<(BridgeToHost, Option<Report>)> {
-    let mut plan = None;
-    let status = loop {
-        match awaited(link.recv().await)? {
-            Awaited::Status(status) => break *status,
-            Awaited::Fleet(report) => plan = Some(*report),
-            Awaited::Fault(line) => println!("{line}"),
-            Awaited::Other => {}
-        }
-    };
-    let deadline = tokio::time::Instant::now() + PLAN_AFTER;
-    loop {
-        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
-            return Ok((status, plan));
-        };
-        match awaited(event)? {
-            Awaited::Fleet(report) => return Ok((status, Some(*report))),
-            Awaited::Fault(line) => println!("{line}"),
-            Awaited::Status(_) | Awaited::Other => {}
-        }
-    }
-}
-
-/// What one link event means while waiting for the `Status` answer.
-#[derive(Debug, PartialEq)]
-enum Awaited {
-    /// The answer.
-    Status(Box<BridgeToHost>),
-    /// The planner's report.
-    Fleet(Box<Report>),
-    /// A fault the bridge reported, as the line to print.
-    Fault(String),
-    /// Nothing `status` prints.
-    Other,
-}
-
-fn awaited(event: Option<LinkEvent>) -> Result<Awaited> {
-    match event {
-        Some(LinkEvent::Message(status @ BridgeToHost::Status { .. })) => {
-            Ok(Awaited::Status(Box::new(status)))
-        }
-        Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
-            Ok(Awaited::Fault(format!("fault      {message}")))
-        }
-        Some(LinkEvent::Message(BridgeToHost::Fleet(report))) => {
-            Ok(Awaited::Fleet(Box::new(report)))
-        }
-        Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-        Some(_) => Ok(Awaited::Other),
-        None => bail!("the link closed"),
+/// What a command that could not be queued was for.
+const fn queueing(request: Request) -> &'static str {
+    match request {
+        Request::Status => "queueing the status request",
+        Request::FanDuty => "queueing the fan duty",
+        Request::Pool => "queueing the pool",
+        Request::SdLog | Request::WardriveEsp => "queueing the setting",
+        Request::OpenPairing | Request::ClearBonds => "queueing the request",
+        Request::PowerCycle => "queueing the power-cycle",
+        Request::FormatSd => "queueing the format",
+        Request::StartScan => "queueing the start",
     }
 }
 
@@ -673,15 +520,14 @@ fn human_uptime(ms: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Awaited, ReadyWait, Report, ScanMode, Taken, awaited, ble_text, board_line, counters_line,
-        diagnostic_lines, die_text, fan_text, host_text, human_uptime, pairing_deadline,
-        pairing_text, plan_lines, planner_text, radio_health_text, radio_line, scan_text,
-        silence_note, slots_text, wardrive_esp_text,
+        LinkError, NO_STATUS, NotReady, Report, Request, ScanMode, ble_text, board_line,
+        counters_line, diagnostic_lines, die_text, fan_text, host_text, human_uptime, link_error,
+        not_ready_text, pairing_text, plan_lines, planner_text, radio_health_text, radio_line,
+        scan_text, silence_note, slots_text, wardrive_esp_text,
     };
     use std::time::Duration;
 
-    use crate::config::Link;
-    use wartui_bridge::{DisconnectCause, LinkEvent};
+    use wartui_bridge::SendError;
     use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{DieTemp, Vdd};
     use wartui_proto::bus::{NodeBoard, Slot};
@@ -689,7 +535,7 @@ mod tests {
     use wartui_proto::fleet::Share;
     use wartui_proto::link::{BluetoothStatus, BridgeHealth, Central, HostOwner, PairWindow};
     use wartui_proto::link::{
-        BridgeToHost, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
+        LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats,
     };
     use wartui_proto::plan::{
         ChannelPool, ChannelSet, IndexRun, PlanSettings, Planner, SparseNodes,
@@ -788,13 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn status_cmd_keeps_plan_when_fleet_report_arrives() {
-        let report = plan(&[], ChannelSet::empty());
-        let event = LinkEvent::Message(BridgeToHost::Fleet(report.clone()));
-        assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Fleet(Box::new(report)));
-    }
-
-    #[test]
     fn status_prints_board_as_no_carrier_when_bridge_has_no_carrier() {
         assert_eq!(board_line(NodeBoard::NoCarrier), "no carrier");
     }
@@ -876,41 +715,6 @@ mod tests {
     #[test]
     fn status_cmd_omits_silence_note_when_a_node_record_arrived() {
         assert_eq!(silence_note(1, 3), None);
-    }
-
-    #[test]
-    fn status_cmd_prints_fault_and_keeps_waiting_when_bridge_reports_error() {
-        let message = "updating the radio to the bundled image (40%)".try_into().expect("short");
-        let event = LinkEvent::Message(BridgeToHost::Error { message });
-        assert_eq!(
-            awaited(Some(event)).expect("not an error"),
-            Awaited::Fault("fault      updating the radio to the bundled image (40%)".into())
-        );
-    }
-
-    #[test]
-    fn status_cmd_returns_answer_when_status_arrives() {
-        let status = BridgeToHost::Status {
-            rx_count: 2,
-            dropped_tx: 0,
-            uptime_ms: 3,
-            rx_oversize: 0,
-            queues: QueueStats::new(),
-            radio_link: RadioLinkStats::default(),
-            host_uart_errors: 0,
-            fan: None,
-            pool: wartui_proto::plan::ChannelPool::All,
-            planner: wartui_proto::plan::PlanSettings::DEFAULT,
-            scan: ScanMode::Stopped,
-            ble: None,
-            present: 0,
-            members: Default::default(),
-            sd: None,
-            bluetooth: Default::default(),
-            health: Default::default(),
-        };
-        let event = LinkEvent::Message(status.clone());
-        assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));
     }
 
     #[test]
@@ -1041,145 +845,42 @@ mod tests {
     }
 
     #[test]
-    fn status_cmd_fails_when_link_closes_before_answer() {
-        assert!(awaited(None).is_err());
-    }
-
-    fn down(reason: &str, cause: DisconnectCause) -> Option<LinkEvent> {
-        Some(LinkEvent::Disconnected { reason: reason.to_owned(), cause })
-    }
-
-    #[test]
-    fn ready_wait_ends_on_first_disconnect_when_over_usb() {
-        let mut wait = ReadyWait::new(Link::Usb);
-        let ended = wait.take(down("could not open", DisconnectCause::Other));
-        assert_eq!(ended, Taken::Ended(Err("could not open".to_owned())));
-    }
-
-    #[test]
-    fn ready_wait_keeps_waiting_and_names_last_failure_when_bluetooth_retries() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
-        assert_eq!(wait.take(down("not found", DisconnectCause::Other)), Taken::Waiting);
-        assert_eq!(wait.timed_out(), Some("not found".to_owned()));
-    }
-
-    #[test]
-    fn ready_wait_ends_at_once_when_bridge_refuses_or_usb_takes_it_over_bluetooth() {
-        for cause in [
-            DisconnectCause::NotBonded,
-            DisconnectCause::MaybeNotBonded,
-            DisconnectCause::UsbTookBridge,
-        ] {
-            let mut wait = ReadyWait::new(Link::Bluetooth);
-            assert_eq!(wait.take(down("refused", cause)), Taken::Ended(Err("refused".to_owned())));
-        }
-    }
-
-    #[test]
-    fn ready_wait_returns_pairing_notice_once_when_transport_awaits_pairing() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        let notice = "pairing: click Connect if macOS shows a dialog for 44:C0";
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert_eq!(wait.take(down(notice, pairing)), Taken::Pairing(notice.to_owned()));
-        assert_eq!(wait.take(down(notice, pairing)), Taken::Waiting, "said once");
-    }
-
-    #[test]
-    fn ready_wait_names_pairing_wait_when_it_runs_out_after_notice() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
+    fn status_cmd_words_each_ready_reason_when_bridge_does_not_announce_itself() {
+        assert_eq!(not_ready_text(NotReady::Down("could not open".to_owned())), "could not open");
+        assert_eq!(not_ready_text(NotReady::Retried("not found".to_owned())), "not found");
+        assert_eq!(not_ready_text(NotReady::Closed), "the link closed");
         assert_eq!(
-            wait.timed_out().as_deref(),
-            Some("no answer after waiting on the OS's pairing dialog; run the command again")
+            not_ready_text(NotReady::PairingRanOut),
+            "no answer after waiting on the OS's pairing dialog; run the command again"
+        );
+        assert_eq!(
+            not_ready_text(NotReady::SilentAfterPairing),
+            "the bridge did not answer after the pairing. A USB host may hold it: it serves \
+             this PC 15 s after its USB link goes quiet; run the command again"
         );
     }
 
     #[test]
-    fn ready_wait_names_retried_failure_when_it_runs_out_after_notice() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        assert_eq!(wait.timed_out(), Some("timed out".to_owned()));
-    }
-
-    #[test]
-    fn ready_wait_returns_ready_notice_once_when_subscription_is_through() {
-        // Without its own arm, the first pairing of a one-shot command would fail at the click.
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        let ready = "waiting for 44:C0 to answer";
-        let through = DisconnectCause::AwaitingReady;
-        assert_eq!(wait.take(down(ready, through)), Taken::Through(ready.to_owned()));
-        assert_eq!(wait.take(down(ready, through)), Taken::Waiting, "said once");
-    }
-
-    #[test]
-    fn ready_wait_names_bridge_wait_when_it_runs_out_after_subscription_is_through() {
-        // The failure before the subscription went through is not why the wait ran out.
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        let ready = "waiting for 44:C0 to answer";
-        assert!(matches!(
-            wait.take(down(ready, DisconnectCause::AwaitingReady)),
-            Taken::Through(_)
-        ));
+    fn status_cmd_words_link_errors_when_a_status_request_fails() {
+        let no_answer = format!("{:?}", link_error(LinkError::Closed, NO_STATUS));
+        assert_eq!(no_answer, "the link closed");
+        let down = format!("{:?}", link_error(LinkError::Down("gone".to_owned()), NO_STATUS));
+        assert_eq!(down, "gone");
+        let queue = LinkError::Queue { request: Request::Status, error: SendError::Full };
         assert_eq!(
-            wait.timed_out().as_deref(),
-            Some(
-                "the bridge did not answer after the pairing. A USB host may hold it: it serves \
-                 this PC 15 s after its USB link goes quiet; run the command again"
-            )
+            format!("{:?}", link_error(queue, NO_STATUS)),
+            "queueing the status request\n\nCaused by:\n    command queue full"
         );
-    }
-
-    #[test]
-    fn ready_wait_names_retried_failure_when_it_runs_out_after_subscription_is_through() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        let pairing = DisconnectCause::AwaitingPairing;
-        assert!(matches!(wait.take(down("pairing", pairing)), Taken::Pairing(_)));
-        let ready = "waiting for 44:C0 to answer";
-        assert!(matches!(
-            wait.take(down(ready, DisconnectCause::AwaitingReady)),
-            Taken::Through(_)
-        ));
-        let failed = "the bridge disconnected";
-        assert_eq!(wait.take(down(failed, DisconnectCause::Other)), Taken::Waiting);
-        assert_eq!(wait.timed_out().as_deref(), Some(failed));
-    }
-
-    #[test]
-    fn ready_wait_names_nothing_when_it_runs_out_with_no_failure() {
-        let mut wait = ReadyWait::new(Link::Bluetooth);
-        assert_eq!(
-            wait.take(Some(LinkEvent::Garbled(wartui_proto::link::LinkError::Corrupt))),
-            Taken::Waiting
-        );
-        assert_eq!(wait.timed_out(), None);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn ready_wait_stretches_to_pairing_window_when_notice_comes_before_deadline() {
-        // A one-shot command's 17 s wait, and the transport's notice 3 s in.
-        let start = tokio::time::Instant::now();
-        let until = start + Duration::from_secs(17);
-        let now = start + Duration::from_secs(3);
-        let stretched = pairing_deadline(until, now);
-        // The subscription's deadline, and room for the `Ready` behind it.
-        assert_eq!(stretched, now + wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER);
-        assert!(stretched > until);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn ready_wait_keeps_deadline_when_it_is_past_pairing_window() {
-        let now = tokio::time::Instant::now();
-        let window = wartui_bridge::ble::PAIR_WITHIN + crate::CONNECT_NOTICE_AFTER;
-        let until = now + window + Duration::from_secs(1);
-        assert_eq!(pairing_deadline(until, now), until);
+    async fn status_cmd_words_no_answer_as_a_timed_out_request_when_status_never_comes() {
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("runs out");
+        assert_eq!(
+            format!("{:?}", link_error(LinkError::NoAnswer(elapsed), NO_STATUS)),
+            "the bridge did not answer a status request\n\nCaused by:\n    deadline has elapsed"
+        );
     }
 }

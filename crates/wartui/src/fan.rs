@@ -5,25 +5,19 @@
 //! board as `wartui power-cycle` resolves it. A bridge with no carrier has no fan, and is refused
 //! before anything is sent.
 //!
-//! With a duty, the bridge applies it at once and the command waits two of its tach windows, so
-//! the speed it prints is read at the new duty.
+//! With a duty, the bridge applies it at once and the command waits two of its tach windows
+//! (`wartui_app::ops::FAN_SETTLE`), so the speed it prints is read at the new duty.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
+use wartui_app::ops;
 use wartui_proto::bus::NodeBoard;
-use wartui_proto::fan::{FanDuty, TACH_WINDOW_MS};
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::fan::FanDuty;
 use wartui_proto::mac;
 
-/// How long the bridge has to answer the status request.
-const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
-
-/// How long a new duty runs before its speed is read: two tach windows, so one whole window ran
-/// at it.
-const SETTLE: Duration = Duration::from_millis(2 * TACH_WINDOW_MS as u64);
+use crate::status::{NO_STATUS, link_error, print_fault};
 
 /// What a bridge with no carrier answers.
 const NO_FAN: &str = "this bridge has no carrier board, so it has no fan";
@@ -57,23 +51,20 @@ pub async fn run(args: Args) -> Result<()> {
     has_fan(info.node_board).map_err(anyhow::Error::msg)?;
 
     let duty = args.duty.and_then(FanDuty::new);
-    if let Some(duty) = duty {
-        link.send_bulk(HostToBridge::SetFan { duty }).context("queueing the fan duty")?;
-        println!("setting the fan to {duty} on bridge {}", mac::full(&info.mac));
-        super::settle(&mut link, SETTLE).await?;
-    }
-
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let status = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status(&mut link))
-        .await
-        .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { fan, .. } = status else {
-        unreachable!("wait_for_status only returns Status")
+    let (status, taken) = match duty {
+        Some(duty) => {
+            println!("setting the fan to {duty} on bridge {}", mac::full(&info.mac));
+            let set = ops::set_fan(&mut link, duty, &mut print_fault).await;
+            let set = set.map_err(|error| link_error(error, NO_STATUS))?;
+            (set.status, set.taken)
+        }
+        None => {
+            let status = ops::status(&mut link, ops::REPLY_TIMEOUT, &mut print_fault).await;
+            (status.map_err(|error| link_error(error, NO_STATUS))?, true)
+        }
     };
-    println!("fan        {}", crate::status::fan_text(fan));
-    if let Some(duty) = duty
-        && fan.map(|fan| fan.duty) != Some(duty)
-    {
+    println!("fan        {}", crate::status::fan_text(status.fan));
+    if !taken {
         bail!("the bridge did not take the duty");
     }
     Ok(())

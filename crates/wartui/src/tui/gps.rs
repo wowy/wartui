@@ -182,12 +182,11 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
-    use crate::tui::ui::Ui;
 
     /// `snapshot` drawn at 120×30 with the GPS modal open, as text.
     fn modal(snapshot: &Snapshot) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
-        let mut ui = Ui::default();
+        let mut ui = idle();
         ui.open_gps();
         terminal.draw(|frame| draw(frame, snapshot, &mut ui)).expect("drawing");
         terminal.backend().to_string()

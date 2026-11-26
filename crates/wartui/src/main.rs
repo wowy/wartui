@@ -36,7 +36,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
 use wartui_desktop::{ble_radio, radio_traits, serial_ports};
-use wartui_proto::link::{BridgeToHost, LoopPhase};
+use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -503,22 +503,6 @@ impl OnOff {
     }
 }
 
-/// Wait `wait`, printing each fault the bridge reports meanwhile, such as a setting not saved.
-async fn settle(link: &mut LinkHandle, wait: Duration) -> Result<()> {
-    let until = tokio::time::Instant::now() + wait;
-    loop {
-        match tokio::time::timeout_at(until, link.recv()).await {
-            Err(_) => return Ok(()),
-            Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
-                println!("fault      {message}");
-            }
-            Ok(Some(LinkEvent::Disconnected { reason, .. })) => anyhow::bail!("{reason}"),
-            Ok(Some(_)) => {}
-            Ok(None) => anyhow::bail!("the link closed"),
-        }
-    }
-}
-
 /// How a `--bridge` value was meant. Parsing it cannot fail: what is not an address
 /// is a path, and whether that path exists is the transport's question.
 fn spec(bridge: &str) -> BridgeSpec {
@@ -660,8 +644,9 @@ impl Default for Terminate {
 ///
 /// The bridge answers in about two milliseconds when it is well, so this is not
 /// a latency budget — it is long enough that a dongle still bringing its radio
-/// up is not accused of being wedged.
-pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
+/// up is not accused of being wedged. The time a bridge has to answer any request, so the notice
+/// and every command's wait cannot disagree about how long was waited.
+pub const CONNECT_NOTICE_AFTER: Duration = wartui_app::ops::REPLY_TIMEOUT;
 
 /// What to say when no bridge has answered over `link`: over USB, [`silence_notice`] over the
 /// CH343s attached now, where a listing that fails reads as none attached, and the transport

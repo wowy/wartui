@@ -5,8 +5,8 @@
 //! wardriving box boots from, where many small scattered writes cost far more than the
 //! same bytes written in a few long runs. Whether a change helps can only be told by
 //! measuring on that card, and a real drive is not repeatable. This runs the pipeline
-//! `run` does — simulator, engine, store, through [`drive`] — for a fixed time against a
-//! seeded world, so two builds or two settings can be compared on one device.
+//! `run` does — simulator, engine, store, started as one [`Session`] — for a fixed time against
+//! a seeded world, so two builds or two settings can be compared on one device.
 //!
 //! The figures are only comparable if the load is the same throughout, so every node is
 //! kept busy for the whole measured window, and the report proves it rather than
@@ -40,15 +40,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::watch;
+use wartui_app::session::{Session, SessionConfig};
+use wartui_app::settings::Settings;
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
+use wartui_core::engine::{Command, Snapshot};
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
-use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
-use wartui_core::store::{
-    CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
-};
+use wartui_core::store::{Checkpoint, CheckpointPass, StoreConfig, open_readonly};
+use wartui_core::ubx;
 use wartui_proto::dedup::DEDUP_RING;
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac::Mac;
@@ -270,46 +270,39 @@ pub async fn run(args: Args) -> Result<()> {
     let on_battery = io::on_battery();
 
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
-    let started = now();
-    let info = CaptureInfo {
+    let session = SessionConfig {
+        // A copy, since the report names what the store was tuned with.
+        store: store_config.clone(),
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
-        simulated: true,
+        test_data: true,
         // The simulator stands in for the link.
         link: None,
+        // Somewhere, so every row is exportable and the export timing below is of a
+        // real export. Null Island, so nobody mistakes it for a place.
+        position: PositionChain::new(vec![Tier::fixed(0.0, 0.0, None)], DEFAULT_MAX_AGE),
+        wait_for_fix: false,
+        record_raw: args.record_raw,
+        excluded_ssids: Vec::new(),
+        gps_rate_hz: ubx::DEFAULT_RATE_HZ,
+        // A benchmark records no provenance.
+        build: None,
     };
-    let store = Store::create(&store_config, &info, started.unix_ms)
-        .with_context(|| format!("creating {}", args.db.display()))?;
-    let engine = FleetEngine::new(
-        EngineConfig {
-            // A capture, so the engine starts the bridge's scan.
-            auto_start: true,
-            record_raw: args.record_raw,
-            // Somewhere, so every row is exportable and the export timing below is of a
-            // real export. Null Island, so nobody mistakes it for a place.
-            position: PositionChain::new(vec![Tier::fixed(0.0, 0.0, None)], DEFAULT_MAX_AGE),
-            link: info.link,
-            ..EngineConfig::default()
-        },
-        started,
-    );
-
-    let (snapshot_tx, mut snapshot_rx) =
-        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
-    let (stop_tx, stop_rx) = oneshot::channel();
-    let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
     let health = Box::new(wartui_desktop::health::read);
-    let capture =
-        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
+    // Its settings are saved nowhere: a benchmark remembers no bridge.
+    let session = Session::start(session, link, None, Some(health), Settings::default())
+        .map_err(|refused| refused.error)
+        .with_context(|| format!("creating {}", args.db.display()))?;
+    let mut snapshot_rx = session.snapshots();
+    let controls = session.controls();
     // Asked for before the bridge answers, so the run's start uses it. The node the bridge
     // gives it is the only source of addresses that never dedup. A fleet of one, which the
     // flags allow, keeps Wi-Fi: the bridge deals Bluetooth only once two nodes can scan.
     let bluetooth = nodes > 1;
     let scan =
         crate::status::scan_text(if bluetooth { ScanMode::WifiBluetooth } else { ScanMode::Wifi });
-    command_tx
-        .send(Command::SetBluetooth(bluetooth))
-        .await
-        .context("the capture stopped before it began")?;
+    controls
+        .command(Command::SetBluetooth(bluetooth))
+        .map_err(|_| anyhow::anyhow!("the capture stopped before it began"))?;
 
     if !args.json {
         eprintln!("scanning {scan}; waiting for {nodes} nodes to take their shares ...");
@@ -321,8 +314,7 @@ pub async fn run(args: Args) -> Result<()> {
     )
     .await
     else {
-        let _ = stop_tx.send(());
-        let _ = capture.await;
+        let _ = session.stop().await;
         bail!(
             "the fleet did not settle within {}s; nothing was measured",
             SETTLE_TIMEOUT.as_secs()
@@ -357,12 +349,10 @@ pub async fn run(args: Args) -> Result<()> {
     .await;
     let last = snapshot_rx.borrow().clone();
 
-    let _ = stop_tx.send(());
     // Includes the final flush and the checkpoint SQLite runs when the last connection
     // closes, both of which a real capture pays too.
-    let store_report = capture.await.context("the capture task panicked")?;
+    let store_report = session.stop().await?.report;
     let elapsed = measured_from.elapsed();
-    drop(command_tx);
 
     let process =
         process_before.zip(io::ProcessIo::read()).map(|(before, after)| after.since(before));

@@ -56,7 +56,7 @@ pub struct Args {
     /// when omitted, else `usb`; a `--bridge` path is always USB. Over Bluetooth it goes to the
     /// bridge `--bridge` names or the one remembered there, slower than over USB, and a failed
     /// update is recovered over USB.
-    #[arg(long, value_name = "LINK")]
+    #[arg(long, value_name = "LINK", value_parser = crate::config::link_parser())]
     pub link: Option<Link>,
 
     /// Read and save the remembered bridge in this file instead of the default `wartui.toml`. A
@@ -137,7 +137,7 @@ fn remember(args: &Args, named: bool, board: &PortCandidate, mac: Mac) {
 /// every other key. A missing file is created. Writes nothing when the file says
 /// `remember = false`.
 fn remember_flashed(path: &Path, mac: Mac, serial: Option<String>) -> Result<()> {
-    let mut config = config::load_from(None, || Some(path.to_path_buf()))?;
+    let mut config = config::load_at(path)?;
     if config.bridge.remember == Some(false) {
         return Ok(());
     }

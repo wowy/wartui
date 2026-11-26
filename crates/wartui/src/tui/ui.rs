@@ -1,17 +1,13 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tokio::sync::mpsc;
 use tui_scrollview::ScrollViewState;
+use wartui_app::session::Controls;
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
-use wartui_proto::mac::Mac;
 
-use super::Settings;
 use super::blocks::LOST_SLOT;
 use super::gps;
-use super::settings::{
-    ConfigModal, ModalAction, apply, apply_excluded, link_written, save_bridge, save_fix_wait,
-};
-use super::upload::Upload;
+use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, unsaved};
+use super::upload::{Upload, UploadTarget};
 use crate::config;
 use crate::text::{gb, node_name};
 
@@ -28,8 +24,8 @@ const NOT_CONNECTED: &str = "the bridge is not connected, so it cannot switch no
 const SD_NOT_CONNECTED: &str = "the bridge is not connected, so it cannot format its SD card";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
-/// GPS modal, saved settings and upload.
-#[derive(Debug, Default)]
+/// GPS modal, the capture's controls and upload.
+#[derive(Debug)]
 pub(super) struct Ui {
     /// The node block under the cursor.
     selected: usize,
@@ -45,17 +41,12 @@ pub(super) struct Ui {
     modal: Option<ConfigModal>,
     /// Whether the GPS modal is open.
     gps_open: bool,
-    /// What [`Self::poll_gps_sky`] last told the engine it wants of the bridge's sky sentences.
-    sky_sent: bool,
-    /// Where to save, and what was last saved there.
-    settings: Settings,
+    /// What steers the capture: its commands, and the settings it saves.
+    controls: Controls,
+    /// Where `u` uploads to.
+    upload_target: UploadTarget,
     /// The upload `u` started.
     upload: Upload,
-    /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
-    /// the next change rather than repeating every frame.
-    bridge_tried: Option<(Option<Mac>, Option<String>, Option<String>)>,
-    /// Whether [`Self::poll_link`] has tried to save the link, which it does once.
-    link_tried: bool,
     /// The slot `p` asks to power-cycle, while its confirm is open.
     power_confirm: Option<Slot>,
     /// The last power-cycle answer shown, so each is shown once.
@@ -70,15 +61,34 @@ pub(super) struct Ui {
 const NOTICE_MS: i64 = 4_000;
 
 impl Ui {
-    /// A fresh view that saves through `settings`.
-    pub(super) fn new(settings: Settings) -> Self {
-        Self { settings, ..Self::default() }
+    /// A fresh view that steers the capture through `controls`.
+    pub(super) fn new(controls: Controls) -> Self {
+        Self {
+            selected: 0,
+            grid: ScrollViewState::default(),
+            grid_cols: 0,
+            notice: None,
+            modal: None,
+            gps_open: false,
+            controls,
+            upload_target: UploadTarget::default(),
+            upload: Upload::default(),
+            power_confirm: None,
+            power_shown: None,
+            sd_confirm: None,
+            sd_shown: None,
+        }
+    }
+
+    /// This view, with `u` uploading to `target`.
+    pub(super) fn uploading_to(self, target: UploadTarget) -> Self {
+        Self { upload_target: target, ..self }
     }
 
     /// The link this run reaches its bridge over. The simulator stands in for a bridge on USB, and
     /// reports USB as the bridge's host.
     pub(super) fn link(&self) -> config::Link {
-        self.settings.link.unwrap_or_default()
+        self.controls.settings().link().unwrap_or_default()
     }
 
     /// The block under the cursor, and the grid's scroll and blocks per row, for
@@ -100,27 +110,29 @@ impl Ui {
     /// Open the GPS modal.
     pub(super) fn open_gps(&mut self) {
         self.notice = None;
-        self.gps_open = true;
+        self.show_gps(true);
     }
 
     /// A key while the GPS modal is open. It is read-only, so `esc`, `q` and `g` close it
     /// and every other key does nothing.
     pub(super) fn on_gps_key(&mut self, key: KeyEvent) {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'g')) {
-            self.gps_open = false;
+            self.show_gps(false);
         }
     }
 
-    /// Tell the engine, once per change, whether the GPS modal is showing the bridge's receiver,
-    /// so that receiver sends its sky lists only while the modal shows them
-    /// ([`Command::SetGpsSky`]). A modal showing a host port wants nothing of the bridge. One rule
-    /// here covers every key that opens or closes the modal, and a change of the receiver it
-    /// shows ([`Snapshot::gps`]). A full queue is tried again on the next call.
-    pub(super) fn poll_gps_sky(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        let wanted = self.gps_open && snapshot.gps.as_ref().is_some_and(|gps| gps.via_bridge);
-        if wanted != self.sky_sent && commands.try_send(Command::SetGpsSky(wanted)).is_ok() {
-            self.sky_sent = wanted;
-        }
+    /// Open or close the GPS modal, which shows the receiver's sky. Every key that opens or closes
+    /// it comes through here, so the session asks the bridge's receiver for its sky lists only
+    /// while the modal shows them ([`Controls::show_sky`]).
+    fn show_gps(&mut self, open: bool) {
+        self.gps_open = open;
+        self.controls.show_sky(open);
+    }
+
+    /// What steers the capture.
+    #[cfg(test)]
+    pub(super) fn controls(&self) -> &Controls {
+        &self.controls
     }
 
     /// The upload `u` started.
@@ -141,12 +153,7 @@ impl Ui {
 
     /// A key while no modal is open. No key here sends a command: the settings modal and the
     /// confirms do.
-    pub(super) fn on_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        _commands: &mpsc::Sender<Command>,
-    ) {
+    pub(super) fn on_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         let last = snapshot.nodes.len().saturating_sub(1);
         let row = self.grid_cols.max(1);
         match key.code {
@@ -165,7 +172,12 @@ impl Ui {
             KeyCode::Char('g') => self.open_gps(),
             KeyCode::Char('p') => self.ask_power_cycle(snapshot),
             KeyCode::Char('u') => {
-                if let Some(text) = self.upload.press(&self.settings, &snapshot.excluded_ssids) {
+                let pressed = self.upload.press(
+                    self.controls.settings(),
+                    &self.upload_target,
+                    &snapshot.excluded_ssids,
+                );
+                if let Some(text) = pressed {
                     self.say(text, snapshot);
                 }
             }
@@ -215,12 +227,7 @@ impl Ui {
     }
 
     /// A key while the power-cycle confirm is open: `y` sends, anything else cancels.
-    pub(super) fn on_power_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
+    pub(super) fn on_power_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         let Some(slot) = self.power_confirm.take() else { return };
         let name = snapshot.node_board().label(slot);
         if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
@@ -232,7 +239,7 @@ impl Ui {
             self.say(NOT_CONNECTED.to_owned(), snapshot);
             return;
         }
-        let said = match commands.try_send(Command::PowerCycle { slot }) {
+        let said = match self.controls.command(Command::PowerCycle { slot }) {
             Ok(()) => format!("power-cycling {name}"),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
@@ -255,22 +262,19 @@ impl Ui {
     /// every key but a quit here. `Space` ticks or unticks the box and saves it at once,
     /// `Enter` starts this run's scan without a fix, `g` opens the GPS modal over the pop-up,
     /// and every other key does nothing.
-    pub(super) fn on_fix_wait_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
+    pub(super) fn on_fix_wait_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         match key.code {
             KeyCode::Char(' ') => {
-                let wait = !self.settings.saved.gps.waits_for_fix();
+                let settings = self.controls.settings();
+                let wait = !settings.saved().gps.waits_for_fix();
                 // A failed save leaves the box as the file has it.
-                if let Err(why) = save_fix_wait(&mut self.settings, wait) {
+                if let Err(why) = settings.save_wait_for_fix(wait) {
+                    let why = unsaved(&why);
                     self.say(format!("not saved: {}", why.trim_start_matches("; ")), snapshot);
                 }
             }
             KeyCode::Enter => {
-                let sent = commands.try_send(Command::StartWithoutFix);
+                let sent = self.controls.command(Command::StartWithoutFix);
                 if sent.is_err() {
                     self.say(ENGINE_BUSY.to_owned(), snapshot);
                 }
@@ -286,7 +290,7 @@ impl Ui {
         if !snapshot.awaiting_fix {
             return None;
         }
-        let tick = if self.settings.saved.gps.waits_for_fix() { ' ' } else { 'x' };
+        let tick = if self.controls.settings().waits_for_fix() { ' ' } else { 'x' };
         Some(vec![
             "Waiting for a GPS fix before the scan starts.".to_owned(),
             format!("gps: {}", gps::status(snapshot).0),
@@ -311,12 +315,7 @@ impl Ui {
 
     /// A key while the format confirm is open: `y` sends, anything else cancels. The settings
     /// modal stays open either way, its edits untouched.
-    pub(super) fn on_sd_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
+    pub(super) fn on_sd_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         if self.sd_confirm.take().is_none() {
             return;
         }
@@ -329,7 +328,7 @@ impl Ui {
             self.say(SD_NOT_CONNECTED.to_owned(), snapshot);
             return;
         }
-        let said = match commands.try_send(Command::FormatSd) {
+        let said = match self.controls.command(Command::FormatSd) {
             Ok(()) => "formatting the SD card…".to_owned(),
             Err(_) => ENGINE_BUSY.to_owned(),
         };
@@ -370,23 +369,18 @@ impl Ui {
     /// Open the settings modal, seeded from what is in force.
     fn open_modal(&mut self, snapshot: &Snapshot) {
         self.notice = None;
-        self.modal = Some(ConfigModal::open(snapshot, &self.settings));
+        self.modal = Some(ConfigModal::open(snapshot, self.controls.settings()));
     }
 
     /// A key while the settings modal is open. `view` routes each key to this or to
     /// [`Self::on_key`], never both.
-    pub(super) fn on_modal_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
+    pub(super) fn on_modal_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         let Some(modal) = self.modal.as_mut() else { return };
         match modal.on_key(key, snapshot) {
             // As in `on_key`, unbound keys leave the notice alone.
             ModalAction::Stay => {}
             ModalAction::Close => self.modal = None,
-            ModalAction::Apply => match apply(modal, snapshot, commands, &mut self.settings) {
+            ModalAction::Apply => match apply(modal, snapshot, &self.controls) {
                 Ok(text) => {
                     self.modal = None;
                     self.say(text, snapshot);
@@ -396,7 +390,7 @@ impl Ui {
             },
             ModalAction::FormatSd => self.ask_format_sd(snapshot),
             ModalAction::SaveExcluded => {
-                match apply_excluded(modal, commands, &mut self.settings) {
+                match apply_excluded(modal, &self.controls) {
                     Ok(text) => {
                         modal.leave_page();
                         self.say(text, snapshot);
@@ -422,53 +416,9 @@ impl Ui {
         }
     }
 
-    /// Save the bridge the transport remembered or forgot since the last save.
-    ///
-    /// Silent, since nothing the operator did changed it: a failure is logged at `debug`
-    /// and tried again only once the bridge changes.
-    pub(super) fn poll_bridge(&mut self) {
-        // Compared in place, since this runs every frame; cloned only once it has changed.
-        let memory = &self.settings.bridge_memory;
-        let saved = &self.settings.saved.bridge;
-        if memory.matches(saved.mac, saved.serial.as_deref(), saved.bluetooth_address.as_deref()) {
-            // In step with the file, so a bridge whose save failed is tried again when it
-            // comes back.
-            self.bridge_tried = None;
-            return;
-        }
-        if let Some((mac, serial, bluetooth)) = &self.bridge_tried
-            && memory.matches(*mac, serial.as_deref(), bluetooth.as_deref())
-        {
-            return;
-        }
-        self.bridge_tried =
-            Some((memory.recall(), memory.recall_serial(), memory.recall_bluetooth()));
-        if let Err(error) = save_bridge(&mut self.settings) {
-            tracing::debug!(error = error.trim_start_matches("; "), "could not save the bridge");
-        }
-    }
-
-    /// Save the link this run reaches its bridge over, once the bridge has announced itself
-    /// over it, so the next run takes the same link. Silent, and tried once.
-    pub(super) fn poll_link(&mut self, snapshot: &Snapshot) {
-        let Some(link) = self.settings.link else { return };
-        if self.link_tried || snapshot.bridge.is_none() {
-            return;
-        }
-        self.settings.link_proved = true;
-        let saved = self.settings.saved.bridge.link;
-        if link_written(link, saved) == saved {
-            return;
-        }
-        self.link_tried = true;
-        if let Err(error) = save_bridge(&mut self.settings) {
-            tracing::debug!(error = error.trim_start_matches("; "), "could not save the link");
-        }
-    }
-
     /// A key while the upload's confirm is open. Only `y` sends.
     pub(super) fn on_confirm_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
-        if let Some(text) = self.upload.on_confirm_key(key, &self.settings.upload) {
+        if let Some(text) = self.upload.on_confirm_key(key, &self.upload_target) {
             self.say(text, snapshot);
         }
     }
@@ -480,8 +430,8 @@ impl Ui {
 
     /// The file as last loaded or saved.
     #[cfg(test)]
-    pub(super) fn saved(&self) -> &config::Config {
-        &self.settings.saved
+    pub(super) fn saved(&self) -> config::Config {
+        self.controls.settings().saved()
     }
 
     /// The block grid's scroll offset, in rows.
@@ -503,6 +453,8 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::KeyModifiers;
+    use tokio::sync::mpsc;
+    use wartui_app::settings::Settings;
 
     use super::*;
     use crate::tui::fixtures::*;
@@ -517,15 +469,15 @@ mod tests {
         let snapshot = on_board(NodeBoard::Carrier14);
         let slot = snapshot.nodes[0].state.slot.expect("a slot");
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('p'), &snapshot, &tx);
+        ui.on_key(press('p'), &snapshot);
         assert!(ui.power_confirming());
         assert!(rx.try_recv().is_err(), "nothing before the answer");
         let lines = ui.power_confirm_lines(&snapshot).expect("the confirm");
         assert_eq!(lines[0], "power-cycle N7?", "{lines:?}");
 
-        ui.on_power_key(press('y'), &snapshot, &tx);
+        ui.on_power_key(press('y'), &snapshot);
         assert_eq!(rx.try_recv().expect("a command"), Command::PowerCycle { slot });
         assert!(!ui.power_confirming());
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -537,10 +489,10 @@ mod tests {
         use wartui_proto::bus::NodeBoard;
         let snapshot = on_board(NodeBoard::Carrier14);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('p'), &snapshot, &tx);
-        ui.on_power_key(press('n'), &snapshot, &tx);
+        ui.on_key(press('p'), &snapshot);
+        ui.on_power_key(press('n'), &snapshot);
         assert!(rx.try_recv().is_err());
         assert!(!ui.power_confirming());
         assert_eq!(ui.notice(snapshot.now_ms), Some("N7 not power-cycled"));
@@ -551,9 +503,9 @@ mod tests {
         use wartui_proto::bus::NodeBoard;
         let snapshot = Snapshot { link_up: false, ..on_board(NodeBoard::Carrier14) };
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('p'), &snapshot, &tx);
+        ui.on_key(press('p'), &snapshot);
         assert!(!ui.power_confirming());
         assert!(rx.try_recv().is_err());
         assert_eq!(ui.notice(snapshot.now_ms), Some(NOT_CONNECTED));
@@ -564,12 +516,12 @@ mod tests {
         use wartui_proto::bus::NodeBoard;
         let snapshot = on_board(NodeBoard::Carrier14);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('p'), &snapshot, &tx);
+        ui.on_key(press('p'), &snapshot);
         assert!(ui.power_confirming());
         let down = Snapshot { link_up: false, ..snapshot };
-        ui.on_power_key(press('y'), &down, &tx);
+        ui.on_power_key(press('y'), &down);
         assert!(rx.try_recv().is_err());
         assert!(!ui.power_confirming());
         assert_eq!(ui.notice(down.now_ms), Some(NOT_CONNECTED));
@@ -579,9 +531,9 @@ mod tests {
     fn ui_refuses_power_cycle_without_asking_when_bridge_has_no_carrier() {
         let snapshot = on_board(wartui_proto::bus::NodeBoard::NoCarrier);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('p'), &snapshot, &tx);
+        ui.on_key(press('p'), &snapshot);
         assert!(!ui.power_confirming());
         assert!(rx.try_recv().is_err());
         let notice = ui.notice(snapshot.now_ms).expect("a reason");
@@ -598,8 +550,8 @@ mod tests {
             let mut row = row;
             row.state.slot = None;
             let snapshot = Snapshot { nodes: vec![row], ..on_board(NodeBoard::Carrier6) };
-            let mut ui = Ui::default();
-            ui.on_key(press('p'), &snapshot, &tx);
+            let mut ui = steering(&tx, Settings::default());
+            ui.on_key(press('p'), &snapshot);
             assert!(!ui.power_confirming(), "{want}");
             let notice = ui.notice(snapshot.now_ms).expect("a reason");
             assert!(notice.contains(want), "{notice}");
@@ -611,7 +563,7 @@ mod tests {
     fn ui_shows_power_cycle_answer_once_when_it_arrives() {
         use wartui_core::engine::PowerAnswer;
         let mut snapshot = busy();
-        let mut ui = Ui::default();
+        let mut ui = idle();
         let answer = PowerAnswer { id: 1, text: "N3 power-cycled".to_owned() };
         snapshot.power_answer = Some(answer);
         ui.poll_power(&snapshot);
@@ -627,7 +579,7 @@ mod tests {
     fn ui_shows_sd_format_answer_once_when_it_arrives() {
         use wartui_core::engine::SdAnswer;
         let mut snapshot = busy();
-        let mut ui = Ui::default();
+        let mut ui = idle();
         snapshot.sd_answer = Some(SdAnswer { id: 1, text: "SD card formatted".to_owned() });
         ui.poll_sd(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("SD card formatted"));
@@ -647,9 +599,9 @@ mod tests {
     fn ui_opens_gps_modal_when_g_pressed() {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
         ui.say("an old notice".to_owned(), &snapshot);
-        ui.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &snapshot);
         assert!(ui.gps_open());
         assert!(rx.try_recv().is_err(), "nothing reaches the engine");
         assert_eq!(ui.notice(snapshot.now_ms), None);
@@ -658,7 +610,7 @@ mod tests {
     #[test]
     fn ui_closes_gps_modal_when_esc_q_or_g_pressed() {
         for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('g')] {
-            let mut ui = Ui { gps_open: true, ..Default::default() };
+            let mut ui = Ui { gps_open: true, ..idle() };
             ui.on_gps_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
             assert!(ui.gps_open(), "other keys leave it open");
             ui.on_gps_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -667,68 +619,34 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_gps_sky_once_per_change_when_gps_modal_opens_and_closes() {
+    fn ui_shows_sky_when_gps_modal_is_open() {
         let snapshot = with_bridge_sky(4);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.poll_gps_sky(&snapshot, &tx);
+        let mut ui = steering(&tx, Settings::default());
+        ui.controls().follow(&snapshot);
         assert!(rx.try_recv().is_err(), "closed from the start: the engine's default");
 
-        ui.on_key(press('g'), &snapshot, &tx);
+        ui.on_key(press('g'), &snapshot);
         assert!(rx.try_recv().is_err(), "the key itself sends nothing");
-        ui.poll_gps_sky(&snapshot, &tx);
+        ui.controls().follow(&snapshot);
         assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
-        ui.poll_gps_sky(&snapshot, &tx);
+        ui.controls().follow(&snapshot);
         assert!(rx.try_recv().is_err(), "once per change");
 
         ui.on_gps_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        ui.poll_gps_sky(&snapshot, &tx);
+        ui.controls().follow(&snapshot);
         assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(false)));
-        ui.poll_gps_sky(&snapshot, &tx);
+        ui.controls().follow(&snapshot);
         assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn ui_sends_no_gps_sky_when_gps_modal_shows_host_port() {
-        let host = with_sky(4);
-        assert!(!host.gps.as_ref().expect("a receiver").via_bridge);
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-
-        ui.on_key(press('g'), &host, &tx);
-        ui.poll_gps_sky(&host, &tx);
-        assert!(rx.try_recv().is_err(), "the bridge's receiver is not on screen");
-
-        // The modal's source turns to the bridge while it is open, and back.
-        let bridge = with_bridge_sky(4);
-        ui.poll_gps_sky(&bridge, &tx);
-        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
-        ui.poll_gps_sky(&host, &tx);
-        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(false)));
-    }
-
-    #[test]
-    fn ui_retries_gps_sky_when_command_queue_is_full() {
-        let snapshot = with_bridge_sky(4);
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(Command::StopScan).expect("room for one");
-        let mut ui = Ui::default();
-        ui.on_key(press('g'), &snapshot, &tx);
-
-        ui.poll_gps_sky(&snapshot, &tx);
-        assert_eq!(rx.try_recv(), Ok(Command::StopScan), "the full queue took nothing more");
-        assert!(rx.try_recv().is_err());
-        ui.poll_gps_sky(&snapshot, &tx);
-        assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
     }
 
     #[test]
     fn ui_clamps_cursor_to_valid_row_when_navigating_or_fleet_size_changes() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
         for _ in 0..10 {
-            ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+            ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot);
         }
         assert_eq!(ui.selected, snapshot.nodes.len() - 1);
 
@@ -741,18 +659,18 @@ mod tests {
     fn ui_moves_selection_by_row_when_down_is_pressed_on_grid() {
         let snapshot = fleet_of(14);
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui { grid_cols: 5, ..Default::default() };
+        let mut ui = Ui { grid_cols: 5, ..steering(&tx, Settings::default()) };
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        ui.on_key(key(KeyCode::Down), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Down), &snapshot);
         assert_eq!(ui.selected, 5, "one row down");
-        ui.on_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Char('l')), &snapshot);
         assert_eq!(ui.selected, 6, "one block right");
-        ui.on_key(key(KeyCode::Char('j')), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Char('j')), &snapshot);
         assert_eq!(ui.selected, 11);
-        ui.on_key(key(KeyCode::Up), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Up), &snapshot);
         assert_eq!(ui.selected, 6);
-        ui.on_key(key(KeyCode::Char('h')), &snapshot, &tx);
-        ui.on_key(key(KeyCode::Char('k')), &snapshot, &tx);
+        ui.on_key(key(KeyCode::Char('h')), &snapshot);
+        ui.on_key(key(KeyCode::Char('k')), &snapshot);
         assert_eq!(ui.selected, 0);
     }
 
@@ -761,13 +679,13 @@ mod tests {
         let snapshot = fleet_of(14);
         let (tx, _rx) = mpsc::channel(4);
         let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-        let mut ui = Ui { grid_cols: 5, selected: 10, ..Default::default() };
-        ui.on_key(key, &snapshot, &tx);
+        let mut ui = Ui { grid_cols: 5, selected: 10, ..steering(&tx, Settings::default()) };
+        ui.on_key(key, &snapshot);
         assert_eq!(ui.selected, 10, "N11 has no block below it");
         ui.selected = 4;
-        ui.on_key(key, &snapshot, &tx);
+        ui.on_key(key, &snapshot);
         assert_eq!(ui.selected, 9);
-        ui.on_key(key, &snapshot, &tx);
+        ui.on_key(key, &snapshot);
         assert_eq!(ui.selected, 9, "N10 has no block below it either");
     }
 
@@ -775,8 +693,8 @@ mod tests {
     fn ui_keeps_selection_when_up_is_pressed_on_first_row() {
         let snapshot = fleet_of(14);
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui { grid_cols: 5, selected: 3, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &snapshot, &tx);
+        let mut ui = Ui { grid_cols: 5, selected: 3, ..steering(&tx, Settings::default()) };
+        ui.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &snapshot);
         assert_eq!(ui.selected, 3);
     }
 
@@ -786,12 +704,12 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = steering(&tx, saving_to(&target));
         let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
         assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
         assert!(lines.contains(&"gps: searching".to_owned()), "{lines:?}");
 
-        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+        ui.on_fix_wait_key(press(' '), &snapshot);
 
         assert!(rx.try_recv().is_err(), "the box sends nothing");
         let saved = config::load(Some(&target)).expect("a valid file");
@@ -799,7 +717,7 @@ mod tests {
         let lines = ui.fix_wait_lines(&snapshot).expect("still up");
         assert!(lines.contains(&"[x] skip this wait at every launch".to_owned()), "{lines:?}");
 
-        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+        ui.on_fix_wait_key(press(' '), &snapshot);
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.gps.wait_for_fix, None, "unticked, the key drops out");
     }
@@ -808,9 +726,9 @@ mod tests {
     fn ui_keeps_box_and_says_why_when_space_pressed_with_nowhere_to_save() {
         let snapshot = awaiting_fix();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_fix_wait_key(press(' '), &snapshot, &tx);
+        ui.on_fix_wait_key(press(' '), &snapshot);
 
         let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
         assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
@@ -822,9 +740,9 @@ mod tests {
     fn ui_sends_start_without_fix_when_enter_pressed_while_waiting_for_fix() {
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot);
 
         assert_eq!(rx.try_recv().unwrap(), Command::StartWithoutFix);
     }
@@ -835,12 +753,12 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = steering(&tx, saving_to(&target));
 
         for key in ['b', 'c', 'p', 'u', 'x', 'j'] {
-            ui.on_fix_wait_key(press(key), &snapshot, &tx);
+            ui.on_fix_wait_key(press(key), &snapshot);
         }
-        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_fix_wait_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot);
 
         assert!(rx.try_recv().is_err());
         assert!(ui.modal().is_none() && !ui.gps_open());
@@ -852,9 +770,9 @@ mod tests {
     fn ui_opens_gps_modal_when_g_pressed_while_waiting_for_fix() {
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_fix_wait_key(press('g'), &snapshot, &tx);
+        ui.on_fix_wait_key(press('g'), &snapshot);
 
         assert!(ui.gps_open());
         assert!(rx.try_recv().is_err(), "nothing goes to the engine");
@@ -868,17 +786,17 @@ mod tests {
         let mut snapshot = awaiting_fix();
         snapshot.gps.as_mut().expect("a receiver").via_bridge = true;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_fix_wait_key(press('g'), &snapshot, &tx);
-        ui.poll_gps_sky(&snapshot, &tx);
+        ui.on_fix_wait_key(press('g'), &snapshot);
+        ui.controls().follow(&snapshot);
 
         assert_eq!(rx.try_recv(), Ok(Command::SetGpsSky(true)));
     }
 
     #[test]
     fn ui_shows_no_fix_wait_lines_when_not_waiting() {
-        assert_eq!(Ui::default().fix_wait_lines(&busy()), None);
+        assert_eq!(idle().fix_wait_lines(&busy()), None);
     }
 
     #[test]
@@ -886,9 +804,9 @@ mod tests {
         // The Bluetooth scan is a settings row, so `b` is unbound.
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
 
-        ui.on_key(press('b'), &snapshot, &tx);
+        ui.on_key(press('b'), &snapshot);
 
         assert!(rx.try_recv().is_err());
         assert!(ui.modal().is_none());

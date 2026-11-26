@@ -223,6 +223,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use wartui_app::settings::Settings;
     use wartui_core::gps::GpsCounters;
     use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{NodeBoard, Slot};
@@ -231,19 +232,17 @@ mod tests {
     use wartui_proto::plan::ChannelPool;
 
     use super::*;
-    use crate::tui::Settings;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
-    use crate::tui::ui::Ui;
 
     #[test]
     fn view_displays_pos_none_indicator_when_capture_lacks_position_fix() {
         let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        positioned.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
+        positioned.draw(|frame| draw(frame, &busy(), &mut idle())).expect("drawing");
         assert!(!positioned.backend().to_string().contains("pos none"));
 
         let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        without.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
+        without.draw(|frame| draw(frame, &empty(), &mut idle())).expect("drawing");
         assert!(without.backend().to_string().contains("pos none"));
     }
 
@@ -393,7 +392,7 @@ mod tests {
         snapshot.assignable = 0;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("3 alive, none usable"), "got {rendered}");
         assert!(!rendered.contains("all nodes silent"), "they are all heartbeating");
@@ -409,7 +408,7 @@ mod tests {
         snapshot.needs_update = 2;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("2 need update"), "got {rendered}");
         assert!(!rendered.contains("all nodes silent"), "they are heartbeating: {rendered}");
@@ -422,7 +421,7 @@ mod tests {
         empty.alive = 0;
         empty.assignable = 0;
         let mut waiting = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        waiting.draw(|frame| draw(frame, &empty, &mut Ui::default())).expect("drawing");
+        waiting.draw(|frame| draw(frame, &empty, &mut idle())).expect("drawing");
         assert!(waiting.backend().to_string().contains("waiting for nodes"));
 
         let mut snapshot = busy();
@@ -431,7 +430,7 @@ mod tests {
         }
         snapshot.nodes[1].share = None;
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         assert!(terminal.backend().to_string().contains("4 of 5"));
 
         // A lone node holds the whole pool. The header says nothing extra about it.
@@ -440,7 +439,7 @@ mod tests {
             node.share = None;
         }
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &lone, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &lone, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("1 of 5"));
         assert!(!rendered.contains("rotating"));
@@ -449,7 +448,7 @@ mod tests {
     /// The color of the header's top-left border corner.
     fn header_border(snapshot: &Snapshot) -> Option<Color> {
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, snapshot, &mut idle())).expect("drawing");
         terminal.backend().buffer()[(0, 0)].style().fg
     }
 
@@ -529,9 +528,9 @@ mod tests {
             central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
-        let settings = Settings { link: Some(Link::Bluetooth), ..Settings::default() };
+        let settings = Settings::default().over(Link::Bluetooth);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle_with(settings))).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("— host bluetooth, MTU 182, link up"), "{screen}");
     }
@@ -550,9 +549,11 @@ mod tests {
                     ..Default::default()
                 };
             }
-            let settings = Settings { link: Some(link), ..Settings::default() };
+            let settings = Settings::default().over(link);
             let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
-            terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
+            terminal
+                .draw(|frame| draw(frame, &snapshot, &mut idle_with(settings)))
+                .expect("drawing");
             let screen = terminal.backend().to_string();
             assert!(screen.contains(", link up  fan 40% 1830 rpm"), "{screen}");
         }

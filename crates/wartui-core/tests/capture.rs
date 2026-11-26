@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 use tokio::sync::{oneshot, watch};
+use wartui_bridge::LinkEvent;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, StoreStats};
 use wartui_core::export::{ExportFilter, wigle_csv};
@@ -20,6 +21,7 @@ use wartui_core::health::{Health, HealthReader};
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::plan::{PlanSettings, Planner};
 
 #[tokio::test(start_paused = true)]
@@ -51,7 +53,10 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     let (stop_tx, stop_rx) = oneshot::channel();
 
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
     tokio::time::sleep(Duration::from_secs(2)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
@@ -167,7 +172,10 @@ async fn drive_records_settings_history_when_operator_changes_pool_bluetooth_and
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
     // The bridge's first `Status`, so the change below is told apart from it, and both nodes,
     // so the bridge has two to give Bluetooth to one of.
     snapshot_rx
@@ -279,7 +287,10 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
     // One node scans Bluetooth, which is what keeps observations arriving for the
     // whole drive: advertisers rotate their addresses and never fall into the dedup
     // ring, while the access points are all reported in the first sweep. Without a
@@ -363,7 +374,10 @@ async fn drive_stores_platform_positions_when_chain_has_a_feed() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
     tokio::time::sleep(Duration::from_secs(2)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
@@ -403,7 +417,10 @@ async fn drive_keeps_no_bridge_satellites_when_sky_command_turns_them_off() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
 
     // As the GPS modal leaves it: the sky lists on, and a list in view.
     command_tx.send(Command::SetGpsSky(true)).await.expect("the engine is listening");
@@ -448,7 +465,10 @@ async fn drive_builds_bridge_satellites_when_run_waits_for_fix() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
 
     // No GPS modal: the wait alone turns the lists on.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -478,7 +498,10 @@ async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+    });
     // One sample at the start, two more on the timer, then the one at shutdown.
     tokio::time::sleep(Duration::from_secs(12)).await;
     stop_tx.send(()).expect("the capture is still running");
@@ -525,8 +548,10 @@ async fn host_health_rows(health: Option<HealthReader>) -> Vec<[Option<i64>; 4]>
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
-    let capture =
-        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, health));
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, health).await
+    });
     tokio::time::sleep(Duration::from_secs(7)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
@@ -572,4 +597,88 @@ async fn drive_records_no_health_when_no_reader_is_given() {
     for row in rows {
         assert_eq!(row, [None; 4]);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_leaves_link_open_when_it_stops() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let link = SimTransport::new(SimConfig { node_count: 2, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+    let engine = FleetEngine::new(EngineConfig { auto_start: true, ..Default::default() }, started);
+    let (snapshot_tx, _snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await;
+        link
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop_tx.send(()).expect("the capture is still running");
+    let mut link = capture.await.expect("the capture task should not panic");
+
+    // The handle the capture borrowed still reaches the bridge.
+    link.send_bulk(HostToBridge::GetStatus).expect("the link takes a command");
+    let answered = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = link.recv().await {
+            if matches!(event, LinkEvent::Message(BridgeToHost::Status { .. })) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("an answer within five seconds");
+    assert!(answered, "the simulator answered GetStatus");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_connects_engine_when_bridge_was_announced_already() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut link = SimTransport::new(SimConfig { node_count: 2, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    // The caller takes the announcement, as a front end's wait for `Ready` does.
+    let announced = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(LinkEvent::Connected(info)) = link.recv().await {
+                return info;
+            }
+        }
+    })
+    .await
+    .expect("the simulator announces itself");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+    let engine = FleetEngine::new(EngineConfig::default(), started);
+    let (snapshot_tx, mut snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let mac = announced.mac;
+    let capture = tokio::spawn(async move {
+        let mut link = link;
+        drive(&mut link, Some(announced), store, engine, snapshot_tx, command_rx, stop_rx, None)
+            .await
+    });
+
+    let up = tokio::time::timeout(
+        Duration::from_secs(5),
+        snapshot_rx.wait_for(|snapshot| snapshot.link_up),
+    )
+    .await
+    .expect("the engine comes up without a second announcement")
+    .expect("the capture is running")
+    .clone();
+    assert_eq!(up.bridge.as_ref().map(|bridge| bridge.mac), Some(mac));
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
 }

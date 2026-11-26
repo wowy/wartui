@@ -1,15 +1,22 @@
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, NaiveTime};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use tokio::sync::mpsc;
+use wartui_app::session::Controls;
+use wartui_app::settings::{Settings, SettingsStore};
 use wartui_bridge::BridgeInfo;
+use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{
-    BridgeStatus, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
+    BridgeStatus, Command, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
 };
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
+use wartui_desktop::config::ConfigFile;
 use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
@@ -22,6 +29,40 @@ use wartui_proto::reset::ResetCause;
 
 use super::draw;
 use super::ui::Ui;
+use crate::config::Config;
+
+/// The `wartui.toml` at `path`, as the view's store.
+pub(super) fn file_store(path: &Path) -> Option<Arc<dyn SettingsStore>> {
+    Some(Arc::new(ConfigFile::at(path.to_path_buf())))
+}
+
+/// Settings saved to the `wartui.toml` at `path`, last loaded as `saved`.
+pub(super) fn saving(path: &Path, saved: Config) -> Settings {
+    Settings::new(file_store(path), saved, BridgeMemory::default())
+}
+
+/// Settings saved to the `wartui.toml` at `path`, which held nothing.
+pub(super) fn saving_to(path: &Path) -> Settings {
+    saving(path, Config::default())
+}
+
+/// A view steering a capture through `tx`, the test's end of whose queue it reads, saving through
+/// `settings`.
+pub(super) fn steering(tx: &mpsc::Sender<Command>, settings: Settings) -> Ui {
+    Ui::new(Controls::new(tx.clone(), settings))
+}
+
+/// A view saving through `settings`, for a test that reads none of its commands. Its queue's other
+/// end is gone, so a command it sends is refused as though the engine had stopped.
+pub(super) fn idle_with(settings: Settings) -> Ui {
+    let (tx, _rx) = mpsc::channel(1);
+    steering(&tx, settings)
+}
+
+/// A view saving nowhere, for a test that reads none of its commands.
+pub(super) fn idle() -> Ui {
+    idle_with(Settings::default())
+}
 
 /// The fixtures' wall-clock start, in unix milliseconds.
 pub(super) const EPOCH_MS: i64 = 1_777_642_477_000;
@@ -384,6 +425,6 @@ pub(super) fn awaiting_fix() -> Snapshot {
 /// `snapshot` drawn at 200×40, as text.
 pub(super) fn rendered(snapshot: &Snapshot) -> String {
     let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-    terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
+    terminal.draw(|frame| draw(frame, snapshot, &mut idle())).expect("drawing");
     terminal.backend().to_string()
 }

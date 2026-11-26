@@ -16,26 +16,18 @@
 //! port, so this runs only while none is attached; in `run`, settings' `format` row does the same.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_app::ops::{self, FORMAT_TIMEOUT};
+use wartui_bridge::LinkHandle;
 use wartui_core::engine::sd_formatted_text;
-use wartui_proto::link::{BridgeToHost, HostToBridge, SdFormatOutcome, SdStatus};
+use wartui_proto::link::{SdFormatOutcome, SdStatus};
 use wartui_proto::mac;
 
 use crate::OnOff;
+use crate::status::{NO_STATUS, link_error, print_fault};
 use crate::text::{SdForm, sd_log_text, sd_text};
-
-/// How long the bridge has to answer the status request.
-const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
-
-/// How long the bridge has to finish a format: room past the few seconds a large card takes.
-const FORMAT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// How long `log` listens for a fault once the setting is sent, as `wartui pool` does.
-const SETTING_SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(ClapArgs)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -138,12 +130,14 @@ async fn log(wanted: Option<bool>, target: &Target) -> Result<()> {
 /// Send the log setting `wanted` when given, then return the `sd log` line from a fresh status
 /// and whether the bridge holds what was wanted.
 async fn set_log(link: &mut LinkHandle, wanted: Option<bool>) -> Result<(String, bool)> {
-    if let Some(on) = wanted {
-        link.send_bulk(HostToBridge::SetSdLog { on }).context("queueing the setting")?;
-        crate::settle(link, SETTING_SETTLE).await?;
-    }
-    let sd = sd_status(link).await?;
-    let taken = wanted.is_none_or(|on| sd.map(|sd| sd.log.on) == Some(on));
+    let (sd, taken) = match wanted {
+        Some(on) => {
+            let set = ops::set_sd_log(link, on, &mut print_fault).await;
+            let set = set.map_err(|error| link_error(error, NO_STATUS))?;
+            (set.status.sd, set.taken)
+        }
+        None => (sd_status(link).await?, true),
+    };
     Ok((format!("sd log     {}", sd_log_text(sd)), taken))
 }
 
@@ -158,9 +152,10 @@ async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeIn
         .await;
     }
     let mut link = super::open(None, target.sim, crate::config::Link::Usb, super::memory(None))?;
-    let info = crate::status::wait_for_ready(&mut link, crate::config::Link::Usb, REPLY_TIMEOUT)
-        .await?
-        .context("the simulator did not announce itself")?;
+    let info =
+        crate::status::wait_for_ready(&mut link, crate::config::Link::Usb, ops::REPLY_TIMEOUT)
+            .await?
+            .context("the simulator did not announce itself")?;
     Ok((link, info))
 }
 
@@ -169,12 +164,11 @@ async fn connect(target: &Target) -> Result<(LinkHandle, wartui_bridge::BridgeIn
 async fn act(link: &mut LinkHandle, wanted: Wanted) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     if wanted == Wanted::Format {
-        link.send_bulk(HostToBridge::FormatSd).context("queueing the format")?;
-        let outcome = tokio::time::timeout(FORMAT_TIMEOUT, wait_for_answer(link))
+        let no_answer =
+            format!("the bridge did not finish the format within {}s", FORMAT_TIMEOUT.as_secs());
+        let outcome = ops::format_sd(link, &mut print_fault)
             .await
-            .with_context(|| {
-                format!("the bridge did not finish the format within {}s", FORMAT_TIMEOUT.as_secs())
-            })??;
+            .map_err(|error| link_error(error, &no_answer))?;
         let text = sd_formatted_text(outcome);
         if outcome != SdFormatOutcome::Done {
             bail!("{text}");
@@ -192,29 +186,8 @@ async fn card_line(link: &mut LinkHandle) -> Result<String> {
 
 /// The card as a fresh status request reports it.
 async fn sd_status(link: &mut LinkHandle) -> Result<Option<SdStatus>> {
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let status = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status(link))
-        .await
-        .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { sd, .. } = status else {
-        unreachable!("wait_for_status only returns Status")
-    };
-    Ok(sd)
-}
-
-/// Wait for the format's answer, printing each fault the bridge reports meanwhile.
-async fn wait_for_answer(link: &mut LinkHandle) -> Result<SdFormatOutcome> {
-    loop {
-        match link.recv().await {
-            Some(LinkEvent::Message(BridgeToHost::SdFormatted { outcome })) => return Ok(outcome),
-            Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
-                println!("fault      {message}");
-            }
-            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
-        }
-    }
+    let status = ops::status(link, ops::REPLY_TIMEOUT, &mut print_fault).await;
+    Ok(status.map_err(|error| link_error(error, NO_STATUS))?.sd)
 }
 
 #[cfg(test)]
@@ -230,7 +203,7 @@ mod tests {
         let ready = crate::status::wait_for_ready(
             &mut link,
             crate::config::Link::Usb,
-            super::REPLY_TIMEOUT,
+            wartui_app::ops::REPLY_TIMEOUT,
         );
         ready.await.expect("the simulator connects").expect("in time");
         link

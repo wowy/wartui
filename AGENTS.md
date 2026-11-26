@@ -40,8 +40,8 @@ cargo test -p wartui-core --test engine engine_ignores_    # tests by name prefi
 
 cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
 
-cargo check -p wartui-bridge -p wartui-core --target aarch64-apple-ios
-cargo check -p wartui-bridge -p wartui-core --target aarch64-linux-android
+cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-apple-ios
+cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-linux-android
 ```
 
 The Android check compiles bundled SQLite, so it needs the NDK's clang in
@@ -104,7 +104,7 @@ firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware direct
 
 ## Architecture
 
-Five host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
+Six host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
@@ -147,14 +147,23 @@ own.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments, and opens no
   serial port. It reads the host's health through an injected `health::HealthReader`, and a host
   GPS receiver's reader drives its `gps::Gps` from outside the crate.
+- **`crates/wartui-app`** — the headless app layer a phone binds to, and the TUI too: `settings`
+  (the schema of `wartui.toml` and its rules, the `SettingsStore` seam, and `Settings`, the one
+  path that saves them) and `session` (assembles and runs a capture for `run`, `bench` and a phone
+  alike, follows it, saving the bridge and the link and asking for the bridge receiver's sky lists
+  whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
+  front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
+  sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
+  started; typed, and handing each fault the bridge reports to the caller). It words nothing for
+  the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what
   counts as a receiver), `radio::BleRadio` on btleplug, `bluez` (the Linux pairing
-  `wartui bluetooth pair` drives) and `health` (the Raspberry Pi reader). It is the only host
-  crate that names `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge` and
-  `wartui-core` compile for a phone; CI checks both for `aarch64-linux-android` and
-  `aarch64-apple-ios`.
+  `wartui bluetooth pair` drives), `health` (the Raspberry Pi reader) and `config` (the
+  `wartui.toml` file, the desktop's `SettingsStore`). It is the only host crate that names
+  `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge`, `wartui-core` and `wartui-app`
+  compile for a phone; CI checks all three for `aarch64-linux-android` and `aarch64-apple-ios`.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and
@@ -222,8 +231,8 @@ running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is 
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
 ordered against each other. Only `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
-far, beside the `StopScan` a quit sends and the `SetGpsSky` opening or closing the GPS modal
-sends; channels are the P4's.
+far, beside the `StopScan` a quit sends and the `SetGpsSky` the session sends as the GPS modal
+opens or closes (`wartui_app::session::Controls`); channels are the P4's.
 
 ### Store is the system of record
 

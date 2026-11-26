@@ -378,11 +378,11 @@ mod tests {
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {
         let mut clean = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        clean.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
+        clean.draw(|frame| draw(frame, &empty(), &mut idle())).expect("drawing");
         assert!(!clean.backend().to_string().contains("dropped"));
 
         let mut faulty = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        faulty.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
+        faulty.draw(|frame| draw(frame, &busy(), &mut idle())).expect("drawing");
         let rendered = faulty.backend().to_string();
         assert!(rendered.contains("store dropped 7"));
         assert!(rendered.contains("older firmware"));
@@ -568,7 +568,7 @@ mod tests {
         let mut snapshot = empty();
         snapshot.link_error = Some(BUSY.to_owned());
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("link down"), "{screen}");
         // The tail of the reason names the fix.
@@ -581,7 +581,7 @@ mod tests {
         let mut snapshot = empty();
         snapshot.link_error = Some(TransportError::NoBridgeFound.to_string());
         let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("First flash"), "{screen}");
     }
@@ -594,7 +594,7 @@ mod tests {
         snapshot.link_error = Some(TransportError::NoBridgeFound.to_string());
         assert_eq!(faults(&snapshot).len(), 1, "{:?}", faults(&snapshot));
         let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("┌ N8 "), "a node block's title: {screen}");
         assert!(screen.contains("340 sightings"), "a node block's body: {screen}");
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn view_displays_link_error_details_when_link_is_down() {
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &empty(), &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("waiting for bridge"));
@@ -839,7 +839,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.counters.wifi_refused = 12;
         snapshot.counters.ble_refused = 4;
-        let mut ui = Ui::default();
+        let mut ui = idle();
         ui.say("a notice".to_owned(), &snapshot);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
@@ -952,7 +952,7 @@ mod tests {
         snapshot.unreachable = ChannelSet::from_run(IndexRun::new(14, 38));
         assert_eq!(faults(&snapshot), ["pool US: 36-165 unswept, no node can tune them"]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("36-165 unswept, no node can tune them"), "got {rendered}");
     }

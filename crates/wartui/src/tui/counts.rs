@@ -175,11 +175,10 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
-    use crate::tui::ui::Ui;
 
     fn screen(snapshot: &Snapshot, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
-        terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, snapshot, &mut idle())).expect("drawing");
         terminal.backend().to_string()
     }
 

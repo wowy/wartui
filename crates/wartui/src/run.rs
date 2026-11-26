@@ -22,16 +22,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{capture, config, tui, upload};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
-use tokio::sync::{mpsc, oneshot, watch};
-use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
+use wartui_app::session::{HostBuild, Session, SessionConfig};
+use wartui_app::settings::{Settings, SettingsStore};
 use wartui_core::gps::Gps;
 use wartui_core::position::{PositionChain, StandDown, Tier};
-use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
-use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
+use wartui_core::store::{StoreConfig, StoreError};
 use wartui_core::ubx;
+use wartui_desktop::config::ConfigFile;
 use wartui_desktop::gps::GpsConfig;
 
 #[derive(ClapArgs, Debug)]
@@ -147,11 +147,11 @@ pub async fn run(args: Args) -> Result<()> {
     // A broken `wartui.toml` stops the run, naming the file and the problem.
     let config = config::load(args.config.as_deref())?;
     // Where the settings modal saves to: the same file `load` just read.
-    let config_path = config::path(args.config.as_deref());
+    let file = ConfigFile::new(args.config.as_deref());
     // A first run gets a file holding the empty API key, so there is a place to paste
     // one. Not under `--sim`, which leaves no files behind, and a directory that cannot
     // be written is no reason to stop a capture.
-    if let Some(path) = &config_path
+    if let Some(path) = file.as_ref().map(ConfigFile::path)
         && args.sim.is_none()
         && let Err(error) = config::create_if_missing(path)
     {
@@ -234,71 +234,53 @@ pub async fn run(args: Args) -> Result<()> {
     let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), config.bridge.link)?;
     let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
-    let started = now();
-    let info = CaptureInfo {
-        notes: args.notes.clone(),
-        simulated: test_data(args.sim, args.lat),
-        link: args.sim.is_none().then_some(over.into()),
-    };
-    let store_config = StoreConfig::new(&db);
-
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
     let wait_for_fix = config.gps.waits_for_fix()
         && args.lat.is_none()
         && (gps.is_some() || (bridge_gps.is_some() && args.sim.is_none()));
-    let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
+    let holds_test_data = test_data(args.sim, args.lat);
+    let session = SessionConfig {
+        store: StoreConfig::new(&db),
+        notes: args.notes.clone(),
+        test_data: holds_test_data,
+        link: args.sim.is_none().then_some(over.into()),
+        position,
+        wait_for_fix,
+        record_raw: args.record_raw,
+        excluded_ssids: config.excluded_ssids.clone(),
+        gps_rate_hz,
+        build: Some(HostBuild {
+            host_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            host_commit: option_env!("WARTUI_HOST_COMMIT").map(str::to_owned),
+            release_tag: option_env!("WARTUI_RELEASE_TAG").map(str::to_owned),
+        }),
+    };
     let upload = tui::UploadTarget {
         db: db.clone(),
         wdgwars_base: upload::wdgwars::BASE.to_owned(),
         wigle_base: upload::wigle::BASE.to_owned(),
     };
-    let settings = tui::Settings {
-        config_path,
-        saved: config,
-        bridge_memory: memory,
-        simulated: args.sim.is_some(),
+    let store = file.map(|file| Arc::new(file) as Arc<dyn SettingsStore>);
+    let settings = Settings::new(store, config, memory);
+    let settings = match args.sim {
         // The simulator's link is no link to save.
-        link: args.sim.is_none().then_some(over),
-        link_proved: false,
-        upload,
+        Some(_) => settings.simulated(),
+        None => settings.over(over),
     };
-    let config = EngineConfig {
-        // A capture starts the scan, and stops it when it ends.
-        auto_start: true,
-        wait_for_fix,
-        record_raw: args.record_raw,
-        position,
-        excluded_ssids,
-        gps_rate_hz,
-        link: info.link,
-        ..Default::default()
-    };
-    let engine = FleetEngine::new(config, started);
-    let provenance = CaptureProvenance {
-        host_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-        host_commit: option_env!("WARTUI_HOST_COMMIT").map(str::to_owned),
-        release_tag: option_env!("WARTUI_RELEASE_TAG").map(str::to_owned),
-        initial_settings: Some(engine.capture_settings()),
-    };
-    let store = Store::create_with_provenance(&store_config, &info, started.unix_ms, &provenance)
-        .map_err(|e| match e {
-        // Already names the path and says what to do.
-        StoreError::Exists(_) => anyhow::Error::new(e),
-        e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
-    })?;
-
-    let (snapshot_tx, snapshot_rx) =
-        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
-    let (stop_tx, stop_rx) = oneshot::channel();
-    let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
 
     let health = Box::new(wartui_desktop::health::read);
-    let capture =
-        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
-    let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
-    // Always waited on, even when the view failed: this is what commits the
-    // last batch and writes the capture's end time.
-    capture.await.context("the capture task panicked")?;
+    let session =
+        Session::start(session, link, None, Some(health), settings).map_err(|refused| {
+            match refused.error {
+                // Already names the path and says what to do.
+                e @ StoreError::Exists(_) => anyhow::Error::new(e),
+                e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
+            }
+        })?;
+    let outcome = tui::run(session.snapshots(), session.controls(), upload).await;
+    // Always stopped, even when the view failed: this is what commits the last batch and writes
+    // the capture's end time. The link it gives back closes as `main` returns.
+    session.stop().await?;
     if let Some(gps) = &gps {
         // Worth having even though the reader's timeout is short: a thread left
         // reading a port the next run wants to open is a confusing failure.
@@ -307,7 +289,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     outcome?;
     println!("Capture written to {}", db.display());
-    if info.simulated {
+    if holds_test_data {
         println!(
             "It holds test data (made with --sim or --lat/--lon), so it is never uploaded. \n\
              Do not submit its export to WiGLE, WDGWars or any other service."
