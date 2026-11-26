@@ -97,8 +97,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # One directory named for both, since `avdmanager` and the emulator do not agree on a
+      # default.
       - name: Install the emulator and the API 31 image
         run: |
+          export ANDROID_AVD_HOME=$RUNNER_TEMP/avd
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           tools=$ANDROID_HOME/cmdline-tools/latest/bin
           yes | "$tools/sdkmanager" --licenses > /dev/null
           "$tools/sdkmanager" emulator platform-tools "system-images;android-31;default;x86_64"
@@ -109,10 +114,14 @@ jobs:
         run: |
           nohup "$ANDROID_HOME/emulator/emulator" -avd api31 -no-window -no-audio \
             -no-boot-anim -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator=$!
           adb=$ANDROID_HOME/platform-tools/adb
-          timeout 300 "$adb" wait-for-device
           for _ in $(seq 120); do
-            booted=$("$adb" shell getprop sys.boot_completed 2> /dev/null | tr -d '\r')
+            if ! kill -0 "$emulator" 2> /dev/null; then
+              echo "the emulator exited" >&2
+              exit 1
+            fi
+            booted=$("$adb" shell getprop sys.boot_completed 2> /dev/null | tr -d '\r' || true)
             [[ $booted == 1 ]] && exit 0
             sleep 5
           done
