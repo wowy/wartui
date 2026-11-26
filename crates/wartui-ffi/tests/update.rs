@@ -9,20 +9,22 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use wartui_app::update::image::BRIDGE_PROJECT;
 use wartui_app::update::release::{BRIDGE_APP_ASSET, NODE_APP_ASSET, SUMS};
 use wartui_app::update::testing::{P4_APP_HEADER, fixture, fixture_with};
 use wartui_app::view::SlotShown;
 use wartui_ffi::{
-    BridgeImage, BridgeUpdateFailed, FetchError, ImageError, Link, NodeAction, NodeImage,
-    NodeOutcome, NodeUpdateListener, NodeUpdateProgress, NodesFailed, ReleaseFailure, SelectFailed,
+    Announced, BridgeImage, BridgeUpdateFailed, BridgeUpdateListener, BridgeUpdateProgress,
+    FetchError, ImageError, Link, NodeAction, NodeEnded, NodeFailure, NodeImage, NodeOutcome,
+    NodeUpdateListener, NodeUpdateProgress, NodesFailed, ReadyError, ReleaseFailure, SelectFailed,
     Settings, SinkError, Stopper, UpdateError, fetch_bridge_image_from, fetch_node_image_from,
     testing_node_image,
 };
 use wartui_proto::bus::{Board, NODE_VERSION};
 
-use common::{Loopback, Memory, start};
+use common::{Loopback, Memory, WAIT, start};
 
 /// How long a listen gives the simulator's nodes, which heartbeat every second while idle.
 const LISTEN_MS: u32 = 3_000;
@@ -39,25 +41,65 @@ fn current_image() -> Arc<NodeImage> {
     NodeImage::parse(bytes).expect("the testing image passes")
 }
 
-/// Counts the progress an update reports, and stops `stopper` on the first node's.
+/// Counts the progress an update reports, keeps each fleet's outcomes, and on the first node's
+/// progress stops `stopper` and notifies `started`.
 #[derive(Default)]
 struct Counted {
     calls: AtomicU32,
     nodes: Mutex<Vec<String>>,
+    ended: Mutex<Vec<NodeEnded>>,
     stopper: Option<Arc<Stopper>>,
+    started: Notify,
 }
 
 impl NodeUpdateListener for Counted {
     fn progress(&self, progress: NodeUpdateProgress) -> Result<(), SinkError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if let NodeUpdateProgress::Node { node, .. } = progress {
-            self.nodes.lock().unwrap_or_else(PoisonError::into_inner).push(node);
-            if let Some(stopper) = &self.stopper {
-                stopper.stop();
+        match progress {
+            NodeUpdateProgress::Node { node, .. } => {
+                self.nodes.lock().unwrap_or_else(PoisonError::into_inner).push(node);
+                if let Some(stopper) = &self.stopper {
+                    stopper.stop();
+                }
+                self.started.notify_one();
             }
+            NodeUpdateProgress::FleetEnded { outcomes } => {
+                self.ended.lock().unwrap_or_else(PoisonError::into_inner).extend(outcomes);
+            }
+            _ => {}
         }
         Ok(())
     }
+}
+
+/// Keeps what a bridge update reports.
+#[derive(Default)]
+struct Said(Mutex<Vec<BridgeUpdateProgress>>);
+
+impl BridgeUpdateListener for Said {
+    fn progress(&self, progress: BridgeUpdateProgress) -> Result<(), SinkError> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(progress);
+        Ok(())
+    }
+}
+
+/// A bridge image the simulator does not run.
+fn bridge_image() -> Arc<BridgeImage> {
+    BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
+        .expect("a bridge image")
+}
+
+/// `link`'s answer to a short `ready` once a call has given it back, within [`WAIT`].
+async fn once_idle(link: &Link) -> Result<Announced, ReadyError> {
+    let idle = async {
+        loop {
+            match link.ready(100, None).await {
+                Err(ReadyError::InUse) => tokio::time::sleep(Duration::from_millis(50)).await,
+                answered => return answered,
+            }
+        }
+    };
+    timeout(WAIT, idle).await.expect("the link is given back in time")
 }
 
 #[test]
@@ -100,7 +142,7 @@ async fn update_nodes_plan_skips_a_node_when_it_already_runs_the_image() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn update_nodes_plan_refuses_two_images_for_one_board() {
+async fn update_nodes_plan_refuses_two_images_when_both_are_for_one_board() {
     let link = Link::simulated(3);
     let heard = link.hear_nodes(LISTEN_MS).await.expect("heard");
     let refused = heard.plan(Vec::new(), vec![current_image(), current_image()], true);
@@ -162,11 +204,56 @@ async fn update_nodes_refuse_link_when_it_is_in_use() {
     let session = start(&dir.path().join("capture.db"), &link).await;
     let refused = link.hear_nodes(LISTEN_MS).await;
     assert!(matches!(refused, Err(UpdateError::InUse)), "{refused:?}");
-    let image = BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
-        .expect("a bridge image");
+    let image = bridge_image();
     let refused = link.update_bridge(image, None, None).await;
     assert!(matches!(refused, Err(BridgeUpdateFailed::InUse)), "{refused:?}");
     session.stop().await.expect("stopped");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_nodes_cancels_each_node_when_its_await_is_dropped() {
+    let link = Link::simulated(3);
+    let heard = link.hear_nodes(LISTEN_MS).await.expect("heard");
+    let plan = heard.plan(Vec::new(), vec![current_image()], true).expect("a plan");
+    let listener = Arc::new(Counted::default());
+    let updating = link.update_nodes(plan, None, Some(listener.clone()));
+    // The phone stops awaiting once a node is under way.
+    tokio::select! {
+        updated = updating => panic!("the update ended before a node's progress: {updated:?}"),
+        () = listener.started.notified() => {}
+    }
+    once_idle(&link).await.expect("the link is idle again, holding the announcement");
+    // Run to the end, the nodes would be done; stopped, each was told.
+    let ended = listener.ended.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let canceled = NodeOutcome::Failed { failure: NodeFailure::Canceled };
+    assert!(!ended.is_empty() && ended.iter().all(|ended| ended.outcome == canceled), "{ended:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_listen_gives_the_link_back_when_its_await_is_dropped() {
+    let link = Link::simulated(3);
+    link.ready(READY_MS, None).await.expect("announced");
+    // A listen far longer than the wait for the link below.
+    let listening = timeout(Duration::from_millis(300), link.hear_nodes(60_000)).await;
+    assert!(listening.is_err(), "the listen ended early: {listening:?}");
+    once_idle(&link).await.expect("the link is idle again, holding the announcement");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_listen_leaves_no_announcement_when_bridge_goes_during_it() {
+    let (radio, driver) = Loopback::steered();
+    let link = Link::bluetooth(radio, Settings::unsaved(), Some(driver.tail())).expect("opened");
+    link.ready(READY_MS, None).await.expect("announced");
+    let going = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        driver.go();
+    };
+    let (heard, ()) = tokio::join!(link.hear_nodes(LISTEN_MS), going);
+    assert!(heard.is_ok(), "{heard:?}");
+    // The announcement went with the bridge, so the wait has none to answer with at once.
+    let waited = link.ready(500, None).await;
+    assert!(waited.is_err(), "{waited:?}");
+    link.close().await.expect("closed");
 }
 
 /// Settings remembering the loopback's bridge over Bluetooth, as a capture over it saves them.
@@ -186,8 +273,7 @@ async fn update_refuses_bluetooth_link_when_no_bridge_is_named_or_remembered() {
     let link = Link::bluetooth(radio, Settings::unsaved(), None).expect("opened");
     let refused = link.hear_nodes(LISTEN_MS).await;
     assert!(matches!(refused, Err(UpdateError::NotPinned)), "{refused:?}");
-    let image = BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
-        .expect("a bridge image");
+    let image = bridge_image();
     let refused = link.update_bridge(image, None, None).await;
     assert!(matches!(refused, Err(BridgeUpdateFailed::NotPinned)), "{refused:?}");
     link.close().await.expect("closed");
@@ -219,8 +305,7 @@ async fn update_bridge_refuses_when_no_bridge_is_announced() {
     // The bridge is gone before the link opens, so it never announces itself.
     driver.go();
     let link = Link::bluetooth(radio, Settings::unsaved(), Some(driver.tail())).expect("opened");
-    let image = BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
-        .expect("a bridge image");
+    let image = bridge_image();
     let refused = link.update_bridge(image, None, None).await;
     assert!(matches!(refused, Err(BridgeUpdateFailed::NotAnnounced)), "{refused:?}");
     link.close().await.expect("closed");
@@ -230,15 +315,59 @@ async fn update_bridge_refuses_when_no_bridge_is_announced() {
 async fn update_bridge_abandons_the_update_when_stopped() {
     let link = Link::simulated(3);
     link.ready(READY_MS, None).await.expect("announced");
-    let image = BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
-        .expect("a bridge image");
+    let image = bridge_image();
     let stopper = Stopper::new();
     stopper.stop();
     let stopping = link.update_bridge(image, Some(stopper), None);
     let stopped = timeout(Duration::from_secs(5), stopping).await.expect("at once");
     assert!(matches!(stopped, Err(BridgeUpdateFailed::Stopped)), "{stopped:?}");
-    // Given back idle.
-    link.hear_nodes(100).await.expect("the link is idle again");
+    // Given back idle, holding the announcement.
+    timeout(Duration::from_secs(1), link.ready(100, None))
+        .await
+        .expect("at once")
+        .expect("the announcement held");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_bridge_keeps_the_announcement_when_the_send_fails() {
+    let link = Link::simulated(3);
+    link.ready(READY_MS, None).await.expect("announced");
+    // The simulator answers each update op with a fault, so the sender gives up.
+    let failed = timeout(UPDATE_WAIT, link.update_bridge(bridge_image(), None, None))
+        .await
+        .expect("in time");
+    assert!(matches!(failed, Err(BridgeUpdateFailed::Sender { .. })), "{failed:?}");
+    // The connection is up and announces nothing again, so the link answers from what it holds.
+    timeout(Duration::from_secs(1), link.ready(100, None))
+        .await
+        .expect("at once")
+        .expect("the announcement held");
+    let stopper = Stopper::new();
+    stopper.stop();
+    let again = link.update_bridge(bridge_image(), Some(stopper), None).await;
+    assert!(matches!(again, Err(BridgeUpdateFailed::Stopped)), "{again:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_bridge_says_each_percent_once_in_a_row_when_sending() {
+    let link = Link::simulated(3);
+    link.ready(READY_MS, None).await.expect("announced");
+    let said = Arc::new(Said::default());
+    let updating = link.update_bridge(bridge_image(), None, Some(said.clone()));
+    let _ = timeout(UPDATE_WAIT, updating).await.expect("in time");
+    let percents = said
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter_map(|progress| match progress {
+            BridgeUpdateProgress::Sending { percent } => Some(*percent),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // The send says its percent on every turn, many over the sender's wait for an answer.
+    assert!(!percents.is_empty(), "the send was said");
+    assert!(percents.windows(2).all(|pair| pair[0] != pair[1]), "{percents:?}");
 }
 
 /// A local listener serving each `(path, body)` it is asked for, for `requests` requests, and

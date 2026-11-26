@@ -318,6 +318,9 @@ pub enum SendError {
 }
 
 /// The engine's end of the link.
+///
+/// A transport announces a bridge once per life, as [`LinkEvent::Connected`], so the handle keeps
+/// the announcement it has read ([`LinkHandle::announced`]) for whoever holds it next.
 #[derive(Debug)]
 pub struct LinkHandle {
     events: mpsc::Receiver<LinkEvent>,
@@ -329,6 +332,9 @@ pub struct LinkHandle {
     written: watch::Receiver<u64>,
     /// Ends when a transport that must finish before exit has finished; `None` for the rest.
     running: Option<Finished>,
+    /// The bridge the link has announced now: the last `Connected` read, until a
+    /// `Disconnected` or the transport's end.
+    announced: Option<BridgeInfo>,
 }
 
 impl LinkHandle {
@@ -343,9 +349,23 @@ impl LinkHandle {
         }
     }
 
-    /// Wait for the next event, or `None` once the transport has stopped.
+    /// Wait for the next event, or `None` once the transport has stopped. Cancel-safe: the
+    /// announcement it keeps ([`Self::announced`]) moves in the poll that returns the event.
     pub async fn recv(&mut self) -> Option<LinkEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await;
+        match &event {
+            Some(LinkEvent::Connected(info)) => self.announced = Some(info.clone()),
+            Some(LinkEvent::Disconnected { .. }) | None => self.announced = None,
+            Some(LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
+        }
+        event
+    }
+
+    /// The bridge the link has announced now, as [`Self::recv`] has read it: the last
+    /// `Connected`, or `None` once a `Disconnected` or the transport's end follows it.
+    #[must_use]
+    pub fn announced(&self) -> Option<&BridgeInfo> {
+        self.announced.as_ref()
     }
 
     /// Queue a command that answers a node's heartbeat.
@@ -451,6 +471,7 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
             queued: AtomicU64::new(0),
             written: written_rx,
             running: None,
+            announced: None,
         },
         LinkPlumbing {
             events: event_tx,
@@ -725,6 +746,56 @@ mod tests {
         let source = std::error::Error::source(&error).expect("the OS's reason");
         assert_eq!(source.to_string(), "udev is unavailable");
         assert_eq!(error.to_string(), "could not list serial ports: udev is unavailable");
+    }
+
+    /// A bridge announcing itself.
+    fn bridge() -> BridgeInfo {
+        BridgeInfo {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            fw_version: "0.1.0".to_owned(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            uptime_ms: 800,
+            node_board: NodeBoard::Carrier14,
+            radio: None,
+            image: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn link_handle_holds_the_announcement_when_bridge_connects() {
+        let (mut handle, plumbing) = link_pair();
+        assert_eq!(handle.announced(), None);
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        let fault = BridgeToHost::Error { message: "after".try_into().expect("short") };
+        plumbing.events.send(LinkEvent::Message(fault)).await.expect("the link reads");
+        handle.recv().await.expect("the announcement");
+        handle.recv().await.expect("the fault");
+        assert_eq!(handle.announced(), Some(&bridge()), "a message keeps it");
+    }
+
+    #[tokio::test]
+    async fn link_handle_holds_no_announcement_when_link_goes_down() {
+        let (mut handle, plumbing) = link_pair();
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        let gone = LinkEvent::Disconnected {
+            reason: "the bridge disconnected".to_owned(),
+            cause: DisconnectCause::UsbTookBridge,
+        };
+        plumbing.events.send(gone).await.expect("the link reads");
+        handle.recv().await.expect("the announcement");
+        handle.recv().await.expect("the drop");
+        assert_eq!(handle.announced(), None);
+    }
+
+    #[tokio::test]
+    async fn link_handle_holds_no_announcement_when_transport_ended() {
+        let (mut handle, plumbing) = link_pair();
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        drop(plumbing);
+        handle.recv().await.expect("the announcement");
+        assert_eq!(handle.recv().await, None);
+        assert_eq!(handle.announced(), None);
     }
 
     #[tokio::test]

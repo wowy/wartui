@@ -157,7 +157,7 @@ async fn upload_prepare_leaves_out_ssid_when_settings_exclude_it() {
 }
 
 #[tokio::test]
-async fn upload_prepare_names_nodes_in_the_summary() {
+async fn upload_prepare_names_nodes_in_the_summary_when_capture_holds_their_heartbeats() {
     let dir = tempfile::tempdir().expect("temp dir");
     // The node `upload::testing`'s sightings come from, heartbeating from N2 of a carrier.
     let node = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -223,7 +223,7 @@ async fn upload_send_queues_at_wigle_and_records_it_when_site_answers() {
 }
 
 #[tokio::test]
-async fn upload_send_follows_the_wdgwars_job_and_reports_progress() {
+async fn upload_send_follows_the_wdgwars_job_and_reports_progress_when_site_queues_it() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = one_row(dir.path());
     let (base, server) = serve_sequence(&[
@@ -272,7 +272,7 @@ async fn upload_send_fails_and_asks_for_a_retry_when_site_refuses() {
 }
 
 #[tokio::test]
-async fn upload_send_refuses_a_second_send() {
+async fn upload_send_refuses_a_second_send_when_the_first_went_out() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = one_row(dir.path());
     let (base, server) = serve_once("200 OK", WIGLE_QUEUED);
