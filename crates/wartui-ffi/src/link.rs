@@ -8,15 +8,15 @@
 //! life and the next capture is handed the announcement (`wartui_app::session` `//!`). Taking a
 //! parked link back waits on that task, so lending and closing are async.
 //!
-//! [`Link::bluetooth`] picks the bridge as `wartui run` does over Bluetooth: the bridge named,
-//! else the one the settings remember, else the only one heard. The transport remembers into the
-//! settings' bridge memory, so a capture saves the bridge it connected to, and the settings read an
-//! idle link's announcement for a save ([`Settings::save`]).
+//! **[`Link::bluetooth`] pins the link to the bridge named, else to the one the settings remember
+//! when it opens.** Its transport refuses every other bridge through each reconnect, so a capture
+//! or an update over it reaches that bridge and no other (`update.rs`). Only with neither does it
+//! take the only bridge heard, which a capture may and an update may not. This differs from
+//! `wartui run`, which takes another bridge in the remembered one's absence: a phone moves to
+//! another bridge by naming it.
 //!
-//! **A link opened with a bridge named is pinned to it.** Its transport refuses every other
-//! bridge, through each reconnect, so an update over it reaches that bridge's fleet and no other
-//! (`update.rs`). One opened unnamed prefers the remembered bridge and may take another, which a
-//! capture is free to do and an update is not.
+//! The transport remembers into the settings' bridge memory, so a capture saves the bridge it
+//! connected to. The settings read an idle link's announcement for a save ([`Settings::save`]).
 //!
 //! **[`Link::ready`] waits for the announcement before a capture**, so a phone can show the
 //! bridge, or why none answered, before it starts one. It is `wartui_app::ops::ready`, run whole
@@ -150,7 +150,7 @@ pub struct Link {
 pub(crate) struct Inner {
     simulated: bool,
     /// The bridge the transport was opened for, which it refuses every other for. `None` for the
-    /// simulator, and for a Bluetooth link opened with no bridge named.
+    /// simulator, and for a Bluetooth link opened with no bridge named or remembered.
     pinned: Option<BridgeSpec>,
     held: Mutex<Held>,
 }
@@ -176,8 +176,9 @@ impl Link {
     }
 
     /// The Bluetooth link to the bridge `bridge` names (a whole address, or its last octets as
-    /// `44:C0`), else the one `settings` remember, else the only one heard. The settings remember
-    /// the bridge it connects to. Only a link opened with `bridge` given takes an update.
+    /// `44:C0`), else the one `settings` remember now, pinned to it whatever the settings do
+    /// afterwards. With neither it takes the only bridge heard and takes no update. The settings
+    /// remember the bridge it connects to.
     ///
     /// # Errors
     /// [`LinkError::NotABridgeName`] when `bridge` names no bridge, and [`LinkError::Start`]
@@ -192,7 +193,9 @@ impl Link {
             Some(Ok(BridgeSpec::Path(given))) => return Err(LinkError::NotABridgeName { given }),
             Some(Ok(spec)) => Some(spec),
             Some(Err(never)) => match never {},
-            None => None,
+            // The address alone: a save that turns remembering on holds it before a connection
+            // has stored the Bluetooth one.
+            None => settings.app().memory().recall().map(BridgeSpec::Mac),
         };
         let transport = match spec.clone() {
             Some(spec) => BleTransport::with_spec(radio, spec),
@@ -307,7 +310,7 @@ impl Inner {
     }
 
     /// Whether an update may go over the link: the simulator's, or a Bluetooth link pinned to the
-    /// bridge named when it was opened.
+    /// bridge named or remembered when it was opened.
     pub(crate) fn takes_updates(&self) -> bool {
         self.simulated || self.pinned.is_some()
     }
