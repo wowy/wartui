@@ -172,21 +172,18 @@ pub struct UploadOptions {
     /// Send everything, ignoring what earlier uploads sent.
     #[uniffi(default)]
     pub resend: bool,
-    /// Wi-Fi networks left out, matched byte for byte.
-    #[uniffi(default)]
-    pub excluded_ssids: Vec<String>,
     /// The app's version, which the CSV's header names.
     pub app_version: String,
 }
 
 impl UploadOptions {
-    fn into_app(self) -> app::Options {
+    /// The app's options, leaving out `excluded`, the settings' excluded SSIDs.
+    fn into_app(self, excluded: &[String]) -> app::Options {
         app::Options {
             to: self.to,
             recapture: self.recapture_secs.map(u64::from),
             resend: self.resend,
-            excluded_ssids: wartui_app::settings::excluded_ssid_bytes(&self.excluded_ssids)
-                .collect(),
+            excluded_ssids: wartui_app::settings::excluded_ssid_bytes(excluded).collect(),
             app_version: self.app_version,
         }
     }
@@ -443,8 +440,9 @@ impl PreparedUpload {
     }
 }
 
-/// Read the capture at `db_path` and build each site's upload, with the API keys `settings` hold,
-/// one outcome per site. Contacts nothing.
+/// Read the capture at `db_path` and build each site's upload, with the API keys `settings` hold
+/// and without the Wi-Fi networks they exclude, as `wartui upload` does, one outcome per site.
+/// Contacts nothing.
 ///
 /// # Errors
 /// [`UploadRefusal`] refuses the whole upload: no site has credentials, or the capture holds
@@ -489,10 +487,11 @@ async fn prepare(
     options: UploadOptions,
     endpoints: Endpoints,
 ) -> Result<Vec<SitePrepared>, UploadRefusal> {
-    let keys = settings.app().saved().api_keys;
+    let saved = settings.app().saved();
+    let (keys, excluded) = (saved.api_keys, saved.excluded_ssids);
     let preparing = runtime().spawn_blocking(move || {
         let db = PathBuf::from(db_path);
-        let outcomes = app::prepare(&keys, &db, &options.into_app())?;
+        let outcomes = app::prepare(&keys, &db, &options.into_app(&excluded))?;
         let names = names(&db, &outcomes);
         let prepared = outcomes.into_iter().map(|(site, prepare)| match prepare {
             Prepare::Ready(prepared) => {

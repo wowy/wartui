@@ -65,9 +65,9 @@ a `Saved`, its rule typed when the settings break one.
 ## Uploads
 
 `prepareUpload` reads a capture and builds each site's upload, with the API keys the settings
-hold, and contacts nothing. A site ready to send is a `PreparedUpload`, whose `shown` is what a
-confirm screen shows. A capture of test data, simulated or placed by a typed-in position, is
-refused for every site.
+hold and without the networks they exclude, and contacts nothing. A site ready to send is a
+`PreparedUpload`, whose `shown` is what a confirm screen shows. A capture of test data, simulated
+or placed by a typed-in position, is refused for every site.
 
 - **`send` is the operator's yes.** An upload publishes to the operator's profile and cannot be
   taken back, so call it only from the operator's confirmation of what `shown` showed. It sends

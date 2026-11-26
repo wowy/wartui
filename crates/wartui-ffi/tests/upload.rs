@@ -44,13 +44,7 @@ fn wigle_keys() -> Arc<Settings> {
 
 /// Every site with credentials, each over its own window.
 fn options() -> UploadOptions {
-    UploadOptions {
-        to: None,
-        recapture_secs: None,
-        resend: false,
-        excluded_ssids: Vec::new(),
-        app_version: "0.1.0".to_owned(),
-    }
+    UploadOptions { to: None, recapture_secs: None, resend: false, app_version: "0.1.0".to_owned() }
 }
 
 fn at(wdgwars: &str, wigle: &str) -> UploadEndpoints {
@@ -137,6 +131,29 @@ async fn upload_prepare_refuses_site_when_wigle_token_is_missing() {
         ),
         "{wigle:?}"
     );
+}
+
+#[tokio::test]
+async fn upload_prepare_leaves_out_ssid_when_settings_exclude_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // `upload::testing`'s sightings are all of the network `example`.
+    let records = vec![
+        sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+        sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS, Some(37.0)),
+    ];
+    let db = capture(dir.path(), records);
+    let settings = keyed("wdgwars = \"AAAAAAAAAA\"");
+    let kept = prepare_upload_at(settings, path(&db), options(), at(NOWHERE, NOWHERE));
+    assert_eq!(ready(kept.await.expect("prepared")).shown().summary.rows, 2);
+
+    let text = "excluded-ssids = [\"example\"]\n[api-keys]\nwdgwars = \"AAAAAAAAAA\"\n";
+    let settings = Settings::open(Memory::holding(text), None).expect("the settings load");
+    let prepared = prepare_upload_at(settings, path(&db), options(), at(NOWHERE, NOWHERE));
+    let prepared = prepared.await.expect("prepared");
+    let [SitePrepared::NoRows { summary, .. }] = prepared.as_slice() else {
+        panic!("rows to send: {prepared:?}")
+    };
+    assert_eq!((summary.rows, summary.excluded_ssid), (0, 2), "{summary:?}");
 }
 
 #[tokio::test]
