@@ -12,8 +12,9 @@
 //! | [`LogSink`] | [`log_to`] |
 //! | | [`Link`]: `simulated`, `bluetooth`, `is_simulated`, `close` (`disconnect` in Kotlin) |
 //! | | [`LocationFeed`]: `push`, `lost`, `wanted`, `next_wanted`, `state` |
+//! | | [`max_fix_accuracy_m`], the coarsest fix a `LocationFeed` takes |
 //! | | [`HealthFeed`]: `set` |
-//! | | [`Session`]: `start`, `view`, `next_view`, `show_sky`, `stop` |
+//! | | [`Session`]: `start`, `view`, `next_view`, `show_sky`, `start_without_fix`, `stop` |
 //!
 //! **Threads.** Calls arrive on any thread, a new one each time on Kotlin. Every task runs on the
 //! library's one runtime (`runtime`), and no exported function blocks on it: an exported
@@ -21,8 +22,10 @@
 //!
 //! **A call into the phone's code returns at once and never takes the library down.** Each
 //! method the phone implements returns a `Result`, so an exception it throws is a value here, and
-//! each caller says what it does with one. No lock is held across such a call. A request the
-//! phone answers later carries an id, and the answer comes through the object it was asked of.
+//! each caller says what it does with one. No lock is held across such a call, but one: a save
+//! is in progress across [`SettingsStore::save`], so a `save` that saves the settings itself
+//! deadlocks (`wartui_app::settings`, `saved.rs`). A request the phone answers later carries an
+//! id, and the answer comes through the object it was asked of.
 //!
 //! **Typed values, no sentences**, as in `wartui-app`: an error or a state crosses as an enum the
 //! phone words. A `String` is a datum, or the detail of a failure from a layer below, in a field
@@ -40,12 +43,12 @@ mod settings;
 mod testing;
 mod view;
 
-pub use feeds::{HealthFeed, LocationFeed};
+pub use feeds::{HealthFeed, LocationFeed, max_fix_accuracy_m};
 pub use link::{Link, LinkError};
 pub use log::{LogLevel, LogSink, SinkError, log_to};
 pub use radio::{Completion, DriverError, Heard, LinkUuids, Radio, RadioDriver, link_uuids};
 pub use session::{
-    CaptureConfig, CaptureEnd, PositionSources, Session, StartError, StopError, Viewed,
+    CaptureConfig, CaptureEnd, PositionSources, Session, StartError, SteerError, StopError, Viewed,
 };
 pub use settings::{Settings, SettingsError, SettingsStore, StoreFailure, UNNAMED_PLACE};
 #[cfg(feature = "testing")]

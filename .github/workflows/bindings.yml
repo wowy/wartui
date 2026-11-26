@@ -18,7 +18,8 @@ env:
 jobs:
   smoke:
     name: Kotlin and Swift smoke tests
-    runs-on: macos-latest
+    # Xcode 27 carries Swift 6.4, which the Swift written against the binding needs.
+    runs-on: xcode-27
 
     steps:
       - uses: actions/checkout@v7

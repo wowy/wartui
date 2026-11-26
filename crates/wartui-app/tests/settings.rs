@@ -409,6 +409,52 @@ fn settings_save_reports_nowhere_when_there_is_no_store() {
     assert_eq!(settings.saved(), Config::default(), "nothing saved, nothing changed");
 }
 
+/// A store that reads the settings it saves for from inside its `save`, as a phone's code may.
+#[derive(Debug, Default)]
+struct CallsBack {
+    settings: std::sync::OnceLock<Settings>,
+    /// What each `save` read back: the saved copy's wait for a fix, and the place.
+    read: std::sync::Mutex<Vec<(bool, Option<String>)>>,
+}
+
+impl SettingsStore for CallsBack {
+    fn load(&self) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn save(&self, _text: &str, _secret: bool) -> std::io::Result<()> {
+        let settings = self.settings.get().expect("given before the save");
+        let read = (settings.saved().gps.waits_for_fix(), settings.place());
+        self.read.lock().unwrap().push(read);
+        Ok(())
+    }
+
+    fn place(&self) -> String {
+        "calls back".to_owned()
+    }
+}
+
+#[test]
+fn settings_save_lets_the_store_read_settings_when_it_calls_back() {
+    let store = Arc::new(CallsBack::default());
+    let settings = Settings::new(
+        Some(store.clone() as Arc<dyn SettingsStore>),
+        Config::default(),
+        BridgeMemory::default(),
+    );
+    store.settings.set(settings.clone()).expect("set once");
+    // On a thread of its own, so a deadlock fails the test rather than hanging it.
+    let (done, saved) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(settings.save_wait_for_fix(false).map_err(|error| error.to_string()));
+    });
+    let saved = saved.recv_timeout(std::time::Duration::from_secs(5)).expect("the save completes");
+    assert_eq!(saved.as_deref(), Ok("calls back"));
+    // Read before the save landed, so the copy is the one before it.
+    let read = store.read.lock().unwrap().clone();
+    assert_eq!(read, [(true, Some("calls back".to_owned()))]);
+}
+
 #[test]
 fn settings_save_keeps_link_as_store_had_it_when_bridge_has_not_announced_itself() {
     let store = Fake::holding("[bridge]\nlink = \"usb\"\n");

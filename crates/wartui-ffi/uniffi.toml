@@ -1,6 +1,6 @@
 # What the generated bindings are called. `smoke/run.sh` and a phone app's build read the same.
 [bindings.kotlin]
-package_name = "io.github.wowy.wartui"
+package_name = "racing.deadbear.wartui.core"
 
 # Every Kotlin object is `AutoCloseable`, whose `close()` frees the handle, so `Link::close`
 # would clash with it.
@@ -8,5 +8,5 @@ package_name = "io.github.wowy.wartui"
 "Link.close" = "disconnect"
 
 [bindings.swift]
-module_name = "Wartui"
-ffi_module_name = "WartuiFFI"
+module_name = "WartuiCore"
+ffi_module_name = "WartuiCoreFFI"

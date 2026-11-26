@@ -107,7 +107,8 @@ final class LoopbackDriver: RadioDriver, @unchecked Sendable {
     func startScan(request: UInt64) {
         answer(request, .done)
         let id = sim.id()
-        gatt.async { self.attached?.heard(device: Heard(peer: peer, id: id, name: nil, live: true)) }
+        let heard = Heard(peer: peer, id: id, name: nil, live: true)
+        gatt.async { self.attached?.heard(device: heard) }
     }
 
     func stopScan() {}
@@ -123,7 +124,8 @@ final class LoopbackDriver: RadioDriver, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard pump == nil else { return }
-        // Each notification's value, as `peripheral(_:didUpdateValueFor:error:)` would hand it over.
+        // Each notification's value, as `peripheral(_:didUpdateValueFor:error:)` would hand it
+        // over.
         pump = Task { [sim] in
             while !Task.isCancelled, let value = await sim.notified() {
                 self.attached?.notified(peer: peer, bytes: value)
@@ -168,7 +170,7 @@ func capture(_ db: URL) -> CaptureConfig {
 func simulated(_ dir: URL) async throws {
     let db = dir.appendingPathComponent("simulated.db")
     let location = LocationFeed()
-    let session = try Session.start(
+    let session = try await Session.start(
         config: capture(db),
         link: Link.simulated(nodes: 3),
         settings: Settings.unsaved(),
@@ -202,7 +204,7 @@ func loopback(_ dir: URL) async throws {
     let store = MemoryStore()
     let settings = try Settings.open(store: store)
     let link = try Link.bluetooth(radio: radio, settings: settings, bridge: nil)
-    let session = try Session.start(
+    let session = try await Session.start(
         config: capture(dir.appendingPathComponent("loopback.db")),
         link: link,
         settings: settings,

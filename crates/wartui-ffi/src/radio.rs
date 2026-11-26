@@ -95,6 +95,11 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for DriverError {
 /// What a phone's Bluetooth stack does for the link. Every method returns at once. A method that
 /// takes a `request` answers later, exactly once, through [`Radio::completed`] with that id, from
 /// any thread. Calls arrive on arbitrary threads.
+///
+/// A notification or a drop is reported for the peer's current link only, since [`Radio`] finds
+/// the subscription by peer alone. Ignore the callbacks of a link closed, or one the OS replaced:
+/// on Android those of an old `BluetoothGatt`, on iOS those for a peripheral since reconnected.
+/// Report a link's drop before answering a later `connect` to the same peer.
 #[uniffi::export(with_foreign)]
 pub trait RadioDriver: Send + Sync {
     /// Whether the OS pairs on the first connection behind a dialog of its own (iOS and Android
@@ -297,7 +302,7 @@ impl Radio {
         }
     }
 
-    /// One notification's value from `peer`'s Up.
+    /// One notification's value from `peer`'s Up, on its current link.
     pub fn notified(&self, peer: String, bytes: Vec<u8>) {
         let state = self.inner.lock();
         if let Some(subscription) = state.subscriptions.get(&peer) {
@@ -307,7 +312,8 @@ impl Radio {
     }
 
     /// The link to `peer` dropped. A second drop, or one for a peer with no subscription, is
-    /// ignored.
+    /// ignored. Report it for the peer's current link only, and before answering a later
+    /// `connect` to it: a late drop for a link since replaced ends the new one's subscription.
     pub fn dropped(&self, peer: String, error: RadioError) {
         let subscription = self.inner.lock().subscriptions.remove(&peer);
         if let Some(subscription) = subscription {
@@ -563,6 +569,9 @@ impl Connection for PeerLink {
 
     fn subscribe(&mut self) -> BoxFuture<'_, Result<BoxStream<'static, Incoming>, RadioError>> {
         async move {
+            // Unbounded: the transport drains it into the link's events, which a capture or a
+            // parked link's task always reads (`wartui_app::ops::park`), so the link's own rate
+            // bounds it.
             let (incoming, received) = mpsc::unbounded_channel();
             let subscription = Subscription { connection: self.serial, incoming };
             // Before the request, so nothing sent on its answer is missed.

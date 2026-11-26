@@ -3,8 +3,9 @@
 //! Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
 //! as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
 //! the wait goes on, as is each cause the transport names and retries alike ([`retried`]). The
-//! bridge's refusal of this host and a USB takeover still end it at once. The first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches
-//! to the transport's pairing window; a later one returns no notice. A
+//! bridge's refusal of this host and a USB takeover still end it at once. The first
+//! [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to the
+//! transport's pairing window; a later one returns no notice. A
 //! [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
 //! the bridge's `Ready`; the first is the operator's notice that the click landed, and a later one
 //! returns no notice. A wait that runs out names a failure that is retried, else the bridge's

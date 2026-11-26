@@ -83,6 +83,14 @@ pub(super) enum Writes {
     Refused,
 }
 
+/// A search call the fake OS can be made never to answer, as a phone's stack with a callback lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Call {
+    Recall,
+    Scan,
+    Known,
+}
+
 /// One fake bridge, as a test describes it.
 #[derive(Debug, Clone)]
 pub(super) struct FakeBridge {
@@ -167,6 +175,8 @@ struct Link {
 struct Shared {
     traits: RadioTraits,
     no_adapter: bool,
+    /// The calls that never answer.
+    unanswered: Vec<Call>,
     bridges: Vec<FakeBridge>,
     /// `Identify`s each bridge has heard, against its `answers`.
     identifies: Vec<u32>,
@@ -191,6 +201,7 @@ impl FakeRadio {
         let shared = Shared {
             traits,
             no_adapter: false,
+            unanswered: Vec::new(),
             bridges: Vec::new(),
             identifies: Vec::new(),
             links: Vec::new(),
@@ -206,6 +217,11 @@ impl FakeRadio {
         let radio = Self::new(LINUX);
         radio.lock().no_adapter = true;
         radio
+    }
+
+    /// Make `call` never answer from now on. It is still recorded as asked.
+    pub(super) fn never_answers(&self, call: Call) {
+        self.lock().unanswered.push(call);
     }
 
     /// Put `bridge` in range.
@@ -316,6 +332,18 @@ impl FakeRadio {
         self.lock().record(did);
     }
 
+    /// Record `did`, then pend forever when `call` never answers.
+    async fn ask(&self, call: Call, did: Did) {
+        let unanswered = {
+            let mut shared = self.lock();
+            shared.record(did);
+            shared.unanswered.contains(&call)
+        };
+        if unanswered {
+            std::future::pending::<()>().await;
+        }
+    }
+
     /// `NoAdapter` when the OS has none.
     fn adapter(&self) -> Result<(), RadioError> {
         if self.lock().no_adapter {
@@ -368,8 +396,8 @@ impl Radio for FakeRadio {
     fn recall<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Recalled>, RadioError>> {
         async move {
             self.adapter()?;
-            let mut shared = self.lock();
-            shared.record(Did::Recall(key.to_owned()));
+            self.ask(Call::Recall, Did::Recall(key.to_owned())).await;
+            let shared = self.lock();
             let recalled =
                 shared.bridges.iter().find(|bridge| bridge.recalled && bridge.peer == key);
             Ok(recalled.map(|bridge| Recalled {
@@ -383,9 +411,9 @@ impl Radio for FakeRadio {
     fn scan(&self) -> BoxFuture<'_, Result<BoxStream<'static, Sighting>, RadioError>> {
         async move {
             self.adapter()?;
+            self.ask(Call::Scan, Did::ScanStarted).await;
             let (tx, mut rx) = mpsc::unbounded_channel();
             let mut shared = self.lock();
-            shared.record(Did::ScanStarted);
             for bridge in 0..shared.bridges.len() {
                 let Some(after) = shared.bridges[bridge].advertises else { continue };
                 if after.is_zero() {
@@ -422,8 +450,8 @@ impl Radio for FakeRadio {
     fn known(&self) -> BoxFuture<'_, Result<Vec<Sighting>, RadioError>> {
         async move {
             self.adapter()?;
-            let mut shared = self.lock();
-            shared.record(Did::Known);
+            self.ask(Call::Known, Did::Known).await;
+            let shared = self.lock();
             let listed = (0..shared.bridges.len()).filter(|&b| shared.bridges[b].listed);
             Ok(listed.map(|bridge| shared.sighting(bridge, false)).collect())
         }

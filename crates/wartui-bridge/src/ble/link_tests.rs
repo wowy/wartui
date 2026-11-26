@@ -9,12 +9,12 @@ use wartui_proto::link::{BridgeToHost, HostToBridge, LogStr, ToNodeBody, USB_TOO
 use wartui_proto::mac::{self, Mac};
 
 use super::fake::{
-    Connects, Did, Discovers, FakeBridge, FakeRadio, LINUX, MACOS, Subscribes, Writes, frame,
+    Call, Connects, Did, Discovers, FakeBridge, FakeRadio, LINUX, MACOS, Subscribes, Writes, frame,
 };
 use super::{
-    ALIVE_EVERY, Advertiser, BleTransport, CONNECT_WITHIN, IDENTIFY_EVERY, LISTEN_FOR,
-    MAX_RETRY_DELAY, PAIRING_NOTICE_AFTER, SCAN_FOR, WRITE_WITHIN, WriteKind, connect_timeout_text,
-    find_advertiser, pairing_notice, ready_notice,
+    ALIVE_EVERY, Advertiser, BleTransport, CONNECT_WITHIN, IDENTIFY_EVERY, LIST_WITHIN, LISTEN_FOR,
+    MAX_RETRY_DELAY, PAIRING_NOTICE_AFTER, RECALL_WITHIN, SCAN_FOR, SCAN_START_WITHIN,
+    WRITE_WITHIN, WriteKind, connect_timeout_text, find_advertiser, pairing_notice, ready_notice,
 };
 use crate::pipe::{RadioError, RadioErrorKind};
 use crate::remember::BridgeMemory;
@@ -269,6 +269,53 @@ async fn ble_link_scans_every_later_try_when_direct_connection_failed() {
     }
     assert_eq!(count(&fake, |did| matches!(did, Did::Recall(_))), 1);
     assert_eq!(count(&fake, |did| *did == Did::ScanStarted), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_retries_when_scan_never_starts() {
+    let fake = radio([bridge_a()]);
+    fake.never_answers(Call::Scan);
+    let start_at = Instant::now();
+    let mut handle = start(named(&fake));
+
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!(reason, "Bluetooth: the Bluetooth adapter did not start a scan");
+    assert_eq!(cause, DisconnectCause::Other);
+    assert_eq!(start_at.elapsed(), SCAN_START_WITHIN);
+    // The scan the OS may yet start is stopped.
+    assert_eq!(fake.did()[..2], [Did::ScanStarted, Did::ScanStopped]);
+    until(|| count(&fake, |did| *did == Did::ScanStarted) == 2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_retries_when_recall_never_answers() {
+    let fake = radio([FakeBridge { recalled: true, ..bridge_a() }]);
+    fake.never_answers(Call::Recall);
+    let memory = BridgeMemory::holding(Some(MAC_A)).on_bluetooth(Some(PEER_A.to_owned()));
+    let start_at = Instant::now();
+    let mut handle = start(named(&fake).remember_in(memory));
+
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!(reason, "Bluetooth: the Bluetooth adapter did not look up the remembered bridge");
+    assert_eq!(cause, DisconnectCause::Other);
+    assert_eq!(start_at.elapsed(), RECALL_WITHIN);
+    until(|| count(&fake, |did| matches!(did, Did::Recall(_))) == 2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_retries_when_listing_never_answers() {
+    // Heard only late, so the listen reads the OS's listing first.
+    let late = FakeBridge { advertises: Some(Duration::from_secs(5)), ..bridge_a() };
+    let fake = radio([late]);
+    fake.never_answers(Call::Known);
+    let start_at = Instant::now();
+    let mut handle = start(BleTransport::new(fake.radio()));
+
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!(reason, "Bluetooth: the Bluetooth adapter did not list its devices");
+    assert_eq!(cause, DisconnectCause::Other);
+    assert_eq!(start_at.elapsed(), LISTEN_FOR + LIST_WITHIN);
+    until(|| count(&fake, |did| *did == Did::Known) == 2).await;
 }
 
 #[tokio::test(start_paused = true)]
