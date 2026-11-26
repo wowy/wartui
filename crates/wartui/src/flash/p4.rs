@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use wartui_app::update::bridge::{self, Failed, Line, Progress, Proof, Updated};
-use wartui_app::update::image::{BridgeImage, Chip, ImageError};
+use wartui_app::update::image::{BridgeImage, Chip};
 use wartui_app::update::release;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
@@ -87,11 +87,8 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     println!("image  {}", source.describe(args.dry_run));
     if args.dry_run {
         if let Source::File(path) = &source {
-            // Every check the update makes, short of the digest it is sent by.
-            let checked = BridgeImage::parse(read(path)?).map(drop);
-            if checked != Err(ImageError::NoAppendedDigest) {
-                app::checked(path, checked)?;
-            }
+            // Every check the update makes, so a file the update would refuse is refused here.
+            app::checked(path, BridgeImage::parse(read(path)?))?;
         }
         match target {
             Target::Usb { .. } => println!("{label:<6} would update over its link"),
@@ -368,6 +365,9 @@ impl ProgressLine {
 mod tests {
     use std::path::Path;
 
+    use wartui_app::update::image::BRIDGE_PROJECT;
+    use wartui_app::update::testing::{P4_APP_HEADER, fixture_with};
+
     use super::super::normalize;
     use super::*;
 
@@ -397,6 +397,34 @@ mod tests {
             source(&P4_BRIDGE_APP, None, None, Some("v1")),
             Source::Release { tag: "v1".to_owned(), asset }
         );
+    }
+
+    #[tokio::test]
+    async fn flash_p4_refuses_image_in_a_dry_run_when_it_carries_no_appended_digest() {
+        // As the real run refuses it: the digest is what names the image to the P4.
+        let mut image = fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000);
+        // The header's `hash_appended` flag, cleared, and the SHA-256 it promised taken off.
+        image[23] = 0;
+        image.truncate(image.len() - 32);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p4.bin");
+        std::fs::write(&path, image).unwrap();
+        let args = Args {
+            bridge: None,
+            link: Some(Link::Bluetooth),
+            config: None,
+            image: Some(path.clone()),
+            firmware_dir: None,
+            dry_run: true,
+        };
+        let bridge = BridgeSpec::Mac([0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0]);
+        let target = Target::Bluetooth { bridge, memory: BridgeMemory::none() };
+        let refused = run(&args, target).await.unwrap_err();
+        let expected = format!(
+            "{} carries no appended digest, which names the image to the P4",
+            path.display()
+        );
+        assert_eq!(format!("{refused:?}"), expected);
     }
 
     #[test]
@@ -460,14 +488,14 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_reads_confirm_when_bridge_says_image_confirmed() {
+    fn flash_p4_words_confirm_when_image_is_confirmed() {
         assert_eq!(proof_text(Proof::Confirmed), "installed and confirmed");
         let text = proof_text(Proof::OutlivedTrial);
         assert_eq!(text, "installed, and confirmed: it outlived its trial watchdog");
     }
 
     #[test]
-    fn flash_p4_reads_failed_confirm_when_bridge_reports_error() {
+    fn flash_p4_words_failed_confirm_when_bridge_reports_error() {
         let line = "the image was not confirmed: flash write failed".to_owned();
         let text = failed_error("71:F4", Failed::NotConfirmed { why: line.clone() }).to_string();
         assert!(text.contains(&line) && text.contains("rolls back"), "{text}");

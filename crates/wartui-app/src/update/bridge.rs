@@ -253,7 +253,7 @@ pub async fn update(
         Outcome::RolledBack => return Err(Failed::RolledBack),
         Outcome::Other => return Err(Failed::OtherImage),
     }
-    match await_confirm(link, say).await {
+    match await_confirm(link, say).await? {
         Confirm::Confirmed => say(Progress::Confirmed(Proof::Confirmed)),
         Confirm::Failed(why) => return Err(Failed::NotConfirmed { why }),
         Confirm::Unseen => return Err(Failed::NoConfirm { secs: Some(CONFIRM_WAIT.as_secs()) }),
@@ -589,20 +589,23 @@ enum Confirm {
 
 /// Wait up to [`CONFIRM_WAIT`] for the P4's line about confirming its image, handing on any
 /// other line on the way.
-async fn await_confirm(link: &mut LinkHandle, say: &mut dyn FnMut(Progress)) -> Confirm {
+async fn await_confirm(
+    link: &mut LinkHandle,
+    say: &mut dyn FnMut(Progress),
+) -> Result<Confirm, Failed> {
     let deadline = tokio::time::Instant::now() + CONFIRM_WAIT;
     let mut poll = tokio::time::interval(POLL);
     loop {
         let Some(event) = next_event(link, &mut poll, deadline).await else {
-            return Confirm::Unseen;
+            return Ok(Confirm::Unseen);
         };
         match event {
             Some(LinkEvent::Message(message)) => match confirm_of(&message) {
-                Some(confirm) => return confirm,
+                Some(confirm) => return Ok(confirm),
                 None => line(&message, say),
             },
             Some(_) => {}
-            None => return Confirm::Unseen,
+            None => return Err(Failed::Closed),
         }
     }
 }
@@ -1126,9 +1129,15 @@ mod tests {
 
     /// A P4 at the bridge's end of the link: it takes the update into a slot as its receiver
     /// does, and on `Install` reboots into `boots`, announcing it and then saying it confirmed
-    /// the image. Over Bluetooth the link drops first, and the new life's C6 is just up. Every
+    /// the image. Over Bluetooth the link drops first, and the new life's C6 is just up. Unless it
+    /// `confirms`, it drops its end of the link after the new life instead of saying so. Every
     /// command counts done.
-    fn scripted_p4(mut plumbing: LinkPlumbing, over: Link, boots: [u8; DIGEST_LEN]) {
+    fn scripted_p4(
+        mut plumbing: LinkPlumbing,
+        over: Link,
+        boots: [u8; DIGEST_LEN],
+        confirms: bool,
+    ) {
         tokio::spawn(async move {
             let mut receiver = Receiver::new(Board::Esp32p4);
             let mut slot = Slot(vec![0xFF; 64 * SECTOR]);
@@ -1156,11 +1165,16 @@ mod tests {
                         } else {
                             events.push(LinkEvent::Connected(ready(Some(boots), 800)));
                         }
-                        events.push(LinkEvent::Message(confirmed));
+                        if confirms {
+                            events.push(LinkEvent::Message(confirmed));
+                        }
                         for event in events {
                             if plumbing.events.send(event).await.is_err() {
                                 return;
                             }
+                        }
+                        if !confirms {
+                            return;
                         }
                         continue;
                     }
@@ -1191,7 +1205,7 @@ mod tests {
     ) -> (Result<Updated, Failed>, Vec<Progress>, usize) {
         let image = bridge_image();
         let (mut link, plumbing) = link_pair();
-        scripted_p4(plumbing, Link::Usb, boots(&image));
+        scripted_p4(plumbing, Link::Usb, boots(&image), true);
         let mut said = Vec::new();
         let mut sending = 0;
         let updated = update(&mut link, Link::Usb, Some(OLD), &image, |progress| match progress {
@@ -1227,7 +1241,7 @@ mod tests {
         // no `StopScan`, so the scan is not reported stopped first.
         let image = bridge_image();
         let (mut link, plumbing) = link_pair();
-        scripted_p4(plumbing, Link::Bluetooth, image.digest());
+        scripted_p4(plumbing, Link::Bluetooth, image.digest(), true);
         let mut said = Vec::new();
         let mut sending = 0;
         let updated =
@@ -1245,6 +1259,22 @@ mod tests {
             Progress::Confirmed(Proof::Confirmed),
         ];
         assert_eq!(said, expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_fails_closed_when_link_closes_before_the_confirm() {
+        let image = bridge_image();
+        let (mut link, plumbing) = link_pair();
+        scripted_p4(plumbing, Link::Usb, image.digest(), false);
+        let mut said = Vec::new();
+        let updated = update(&mut link, Link::Usb, Some(OLD), &image, |progress| {
+            if !matches!(progress, Progress::Sending { .. }) {
+                said.push(progress);
+            }
+        })
+        .await;
+        assert_eq!(updated, Err(Failed::Closed));
+        assert_eq!(said, [Progress::Installing], "never confirmed");
     }
 
     #[tokio::test(start_paused = true)]

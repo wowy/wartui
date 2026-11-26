@@ -159,7 +159,9 @@ pub async fn run(args: Args) -> Result<()> {
     println!("bridge  {}, firmware {}", mac::full(&info.mac), info.fw_version);
     println!("listening {} s for heartbeats", args.listen);
     let listen_for = Duration::from_secs(args.listen);
-    let heard = unless_stopped(&mut stop, nodes::listen(&mut link, listen_for)).await??;
+    let heard = unless_stopped(&mut stop, nodes::listen(&mut link, listen_for))
+        .await?
+        .map_err(|nodes::LinkClosed| anyhow!("the link closed"))?;
     let targets = nodes::select(&heard, &named)
         .map_err(|error| anyhow!(select_text(error, board, listen_for)))?;
     let names: HashMap<Mac, String> = targets
@@ -231,7 +233,7 @@ fn failed_text(failed: Failed) -> String {
                               new image, and running `wartui ota` again updates the rest from \
                               the start"
             .to_owned(),
-        Failed::Cancelled => "cancelled".to_owned(),
+        Failed::Canceled => "canceled".to_owned(),
         Failed::Nodes { failed, total } => format!("{failed} of {total} nodes failed to update"),
     }
 }
@@ -700,7 +702,7 @@ mod tests {
     fn ota_cmd_words_each_failure_when_a_run_fails() {
         let error = failed_text(Failed::CacheLost);
         assert!(error.starts_with("the bridge lost the node image;"), "{error}");
-        assert_eq!(failed_text(Failed::Cancelled), "cancelled");
+        assert_eq!(failed_text(Failed::Canceled), "canceled");
         let error = failed_text(Failed::Nodes { failed: 1, total: 4 });
         assert_eq!(error, "1 of 4 nodes failed to update");
     }

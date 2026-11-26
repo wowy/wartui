@@ -288,8 +288,8 @@ pub enum Failed {
     #[error("the bridge lost the node image")]
     CacheLost,
     /// The run was stopped.
-    #[error("cancelled")]
-    Cancelled,
+    #[error("canceled")]
+    Canceled,
     /// `failed` of `total` nodes did not update.
     #[error("{failed} of {total} nodes failed")]
     Nodes { failed: usize, total: usize },
@@ -297,7 +297,7 @@ pub enum Failed {
 
 impl Ended {
     /// `Ok` when every node with an outcome updated. A cut short upload names how many updated
-    /// before it, and a stop or any cancelled session is [`Failed::Cancelled`].
+    /// before it, and a stop or any canceled session is [`Failed::Canceled`].
     ///
     /// # Errors
     /// How the run failed.
@@ -305,16 +305,15 @@ impl Ended {
         let done =
             || self.outcomes.iter().filter(|(_, outcome)| matches!(outcome, Outcome::Done(_)));
         match self.cut_short {
-            Some(CutShort::BeforeStart) => return Err(Failed::Cancelled),
+            Some(CutShort::BeforeStart) => return Err(Failed::Canceled),
             Some(CutShort::Upload(failure)) => {
                 return Err(Failed::Upload { failure, done: done().count() });
             }
             Some(CutShort::CacheLost) => return Err(Failed::CacheLost),
             None => {}
         }
-        if self.outcomes.iter().any(|(_, outcome)| *outcome == Outcome::Failed(Failure::Cancelled))
-        {
-            return Err(Failed::Cancelled);
+        if self.outcomes.iter().any(|(_, outcome)| *outcome == Outcome::Failed(Failure::Canceled)) {
+            return Err(Failed::Canceled);
         }
         let failed = self.outcomes.len() - done().count();
         if failed > 0 {
@@ -432,7 +431,7 @@ async fn run_from(
             };
             return Ended { outcomes, cut_short: Some(cut_short) };
         }
-        if outcomes.iter().any(|(_, outcome)| *outcome == Outcome::Failed(Failure::Cancelled)) {
+        if outcomes.iter().any(|(_, outcome)| *outcome == Outcome::Failed(Failure::Canceled)) {
             break;
         }
     }
@@ -647,12 +646,12 @@ mod tests {
 
     #[test]
     fn update_nodes_counts_earlier_updates_when_a_later_upload_fails() {
-        let cancelled = Outcome::Failed(Failure::Cancelled);
+        let canceled = Outcome::Failed(Failure::Canceled);
         let failure = update::Failure::Silent;
-        let outcomes = vec![Outcome::Done(NEW), Outcome::Done(NEW), cancelled.clone()];
+        let outcomes = vec![Outcome::Done(NEW), Outcome::Done(NEW), canceled.clone()];
         let verdict = ended(outcomes, Some(CutShort::Upload(failure))).verdict();
         assert_eq!(verdict, Err(Failed::Upload { failure, done: 2 }));
-        let verdict = ended(vec![cancelled], Some(CutShort::Upload(failure))).verdict();
+        let verdict = ended(vec![canceled], Some(CutShort::Upload(failure))).verdict();
         assert_eq!(verdict, Err(Failed::Upload { failure, done: 0 }));
     }
 
@@ -663,10 +662,10 @@ mod tests {
     }
 
     #[test]
-    fn update_nodes_fails_cancelled_when_stopped_before_start_or_a_session_was_cancelled() {
-        assert_eq!(ended(vec![], Some(CutShort::BeforeStart)).verdict(), Err(Failed::Cancelled));
-        let outcomes = vec![Outcome::Done(NEW), Outcome::Failed(Failure::Cancelled)];
-        assert_eq!(ended(outcomes, None).verdict(), Err(Failed::Cancelled));
+    fn update_nodes_fails_canceled_when_stopped_before_start_or_a_session_was_canceled() {
+        assert_eq!(ended(vec![], Some(CutShort::BeforeStart)).verdict(), Err(Failed::Canceled));
+        let outcomes = vec![Outcome::Done(NEW), Outcome::Failed(Failure::Canceled)];
+        assert_eq!(ended(outcomes, None).verdict(), Err(Failed::Canceled));
     }
 
     #[test]
@@ -745,7 +744,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn update_nodes_sends_one_abort_per_session_when_cancelled() {
+    async fn update_nodes_sends_one_abort_per_session_when_canceled() {
         let (mut link, heard) = sim(sim_config(4, None)).await;
         // Long enough that every node is still streaming when the cancel lands.
         let plan = plan(&heard, sim_image(128), false);
@@ -763,8 +762,8 @@ mod tests {
             }
         };
         let ended = run_from(&mut link, &plan, 0x40, streaming.notified(), say).await;
-        assert_eq!(outcomes(&ended), vec![Outcome::Failed(Failure::Cancelled); 4]);
-        assert_eq!(ended.verdict(), Err(Failed::Cancelled));
+        assert_eq!(outcomes(&ended), vec![Outcome::Failed(Failure::Canceled); 4]);
+        assert_eq!(ended.verdict(), Err(Failed::Canceled));
         // A sim node answers an abort with `Idle`, and nothing else in a stream draws one.
         let mut idle: HashMap<u8, usize> = HashMap::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -830,11 +829,11 @@ mod tests {
         let plan = plan(&heard, sim_image(6), false);
         let ended = run(&mut link, &plan, std::future::pending(), |_| {}).await;
         assert_eq!(ended.cut_short, Some(CutShort::CacheLost));
-        // One session met the `NoImage`, and the rest were cancelled, not left to meet it too.
+        // One session met the `NoImage`, and the rest were canceled, not left to meet it too.
         let got = outcomes(&ended);
         let lost = got.iter().filter(|o| **o == Outcome::Failed(Failure::CacheLost)).count();
-        let cancelled = Outcome::Failed(Failure::Cancelled);
-        assert_eq!((lost, got.iter().filter(|o| **o == cancelled).count()), (1, 3));
+        let canceled = Outcome::Failed(Failure::Canceled);
+        assert_eq!((lost, got.iter().filter(|o| **o == canceled).count()), (1, 3));
         assert_eq!(ended.verdict(), Err(Failed::CacheLost));
     }
 
