@@ -2,43 +2,39 @@
 //! as refused sightings and duplicate batches, sit outside it, so a clean run looks
 //! clean.
 //!
-//! A Bluetooth link the bridge let go because a USB host took it is down, but nothing is broken:
-//! the bridge serves one host, USB first, and hands the link back once USB goes quiet. So its
-//! reason is a plain line of its own ([`takeover_line`]) rather than a fault. So is the
-//! transport's notice that it waits on the OS's pairing dialog, or past it on the bridge's answer
-//! ([`waiting_line`]): the link is connected, and the operator has a dialog to answer or nothing
-//! to do.
+//! What the operator should know that is no fault takes a plain line of its own
+//! ([`note_line`]): a full pending buffer, a USB host holding the bridge this Bluetooth host
+//! reaches, or the transport waiting on the OS's pairing dialog or past it on the bridge's
+//! answer. The link is down in the last three, but nothing is broken.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use wartui_bridge::{BridgeInfo, DisconnectCause};
-use wartui_core::engine::{Counters, Snapshot};
-use wartui_core::gps::GpsStatus;
-use wartui_proto::fan::FanDuty;
+use wartui_app::view::{Fault, Note, RejectsFrom, View};
 use wartui_proto::link::{HOST_SILENCE_SECS, USB_TOOK_BRIDGE};
 use wartui_proto::reset::ResetCause;
 
+use super::format::channel_set;
 use super::ui::Ui;
-use crate::text::{node_name, thousands};
+use crate::text::thousands;
 
 /// Draw the footer into `area`. `faults` are already wrapped by [`fault_lines`].
 pub(super) fn draw_footer(
     frame: &mut Frame<'_>,
     area: Rect,
-    snapshot: &Snapshot,
+    view: &View,
     ui: &Ui,
     faults: &[String],
 ) {
-    let c = snapshot.counters;
+    let t = view.totals;
     let mut lines = Vec::new();
 
     // A notice replaces the key help and totals for a few seconds. It says what just
     // happened, a refused key or an upload's progress, and the totals will still be
     // there next frame.
-    if let Some(notice) = ui.notice(snapshot.now_ms) {
+    if let Some(notice) = ui.notice(view.now_ms) {
         lines.push(Line::from(Span::styled(
             format!(" {notice}"),
             Style::new().fg(Color::Black).bg(Color::Yellow),
@@ -50,35 +46,23 @@ pub(super) fn draw_footer(
         )];
         spans.push(Span::raw(format!(
             "  frames {}  obs {}  beats {}  stored {}",
-            thousands(c.frames),
-            thousands(c.observations),
-            thousands(c.heartbeats),
-            thousands(snapshot.store.written)
+            thousands(t.frames),
+            thousands(t.sightings),
+            thousands(t.heartbeats),
+            thousands(t.stored)
         )));
-        if c.batches_lost > 0 {
-            spans.push(Span::raw(format!("  lost {}", thousands(c.batches_lost))));
+        if t.batches_lost > 0 {
+            spans.push(Span::raw(format!("  lost {}", thousands(t.batches_lost))));
         }
-        if c.duplicate_batches > 0 {
-            spans.push(Span::raw(format!("  dup {}", thousands(c.duplicate_batches))));
+        if t.duplicate_batches > 0 {
+            spans.push(Span::raw(format!("  dup {}", thousands(t.duplicate_batches))));
         }
         lines.push(Line::from(spans));
     }
 
-    // Its own line, so a notice never hides it. Plain, not yellow, because a full
-    // pending buffer is normal in a dense area.
-    if let Some(buffer_full) = buffer_full_line(&c) {
-        lines.push(Line::from(buffer_full));
-    }
-
-    // Its own line, plain, since the bridge serving another host is no fault.
-    if let Some(takeover) = takeover_line(snapshot) {
-        lines.push(Line::from(takeover));
-    }
-
-    // Its own line too, since a pairing dialog waiting on the operator, or a bridge yet to
-    // answer once it is through, is no fault.
-    if let Some(waiting) = waiting_line(snapshot) {
-        lines.push(Line::from(waiting));
+    // Each on its own line, plain, so a notice never hides it and nothing reads it as a fault.
+    for note in &view.notes {
+        lines.push(Line::from(note_line(note)));
     }
 
     // A line per site for the same reason, since the two uploads end separately. Each stays
@@ -95,167 +79,90 @@ pub(super) fn draw_footer(
     frame.render_widget(Paragraph::new(lines).dim(), area);
 }
 
-/// Sightings a full pending buffer refused this session, or `None`. Most are re-reported
-/// on a later dwell or scan, so this measures how dense the area is, not a fault. Worded
-/// as `wartui analyze` words it.
-pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
-    crate::text::buffer_full(c.wifi_refused, c.ble_refused).map(|line| format!("  {line}"))
-}
-
-/// Why the link is down when a USB host took the bridge from this Bluetooth host, or `None`.
-/// The line is not wrapped, so it stays short of an 80-column terminal.
-pub(super) fn takeover_line(snapshot: &Snapshot) -> Option<String> {
-    taken_by_usb(snapshot).then(|| {
-        format!("  link down: {USB_TOOK_BRIDGE}; back {HOST_SILENCE_SECS} s after USB goes quiet")
-    })
-}
-
-/// Whether the link is down because a USB host took the bridge.
-fn taken_by_usb(snapshot: &Snapshot) -> bool {
-    !snapshot.link_up && snapshot.link_cause == Some(DisconnectCause::UsbTookBridge)
-}
-
-/// The transport's notice that it waits on the OS's pairing dialog, or on the bridge's answer
-/// once the subscription is through, or `None`. The transport words it to fit an 80-column
-/// terminal, since the line is not wrapped.
-pub(super) fn waiting_line(snapshot: &Snapshot) -> Option<String> {
-    let error = snapshot.link_error.as_ref().filter(|_| waiting(snapshot))?;
-    Some(format!("  {error}"))
-}
-
-/// Whether the link waits on the OS's pairing dialog or, past it, on the bridge's answer.
-fn waiting(snapshot: &Snapshot) -> bool {
-    !snapshot.link_up
-        && matches!(
-            snapshot.link_cause,
-            Some(DisconnectCause::AwaitingPairing | DisconnectCause::AwaitingReady)
-        )
-}
-
-/// Every fault so far, most urgent first. Empty on a clean run.
-pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
-    let c = snapshot.counters;
-    let mut faults = Vec::new();
-    // First, because with the link down nothing else here updates.
-    // A takeover is the bridge serving USB, said by `takeover_line`, and a pairing dialog or the
-    // wait past it is said by `waiting_line`.
-    if let Some(error) = &snapshot.link_error
-        && !snapshot.link_up
-        && !taken_by_usb(snapshot)
-        && !waiting(snapshot)
-    {
-        faults.push(format!("link down: {error}"));
-    }
-    if snapshot.store.dropped > 0 {
-        faults.push(format!("store dropped {}", thousands(snapshot.store.dropped)));
-    }
-    // Channels of the pool in no share of the bridge's plan, which nothing else reports.
-    if let Some(line) = unswept(snapshot) {
-        faults.push(line);
-    }
-    if let Some(gps) = &snapshot.gps {
-        if let GpsStatus::Failed(reason) = &gps.status {
-            faults.push(format!("gps unreadable: {reason}"));
+/// A note's line. None is wrapped, so each stays short of an 80-column terminal: the transport
+/// words its notices to fit.
+///
+/// A full pending buffer is worded as `wartui analyze` words it. Plain, not yellow, because it is
+/// normal in a dense area.
+pub(super) fn note_line(note: &Note) -> String {
+    match note {
+        Note::BufferFull { wifi, bluetooth } => {
+            let line = crate::text::buffer_full(*wifi, *bluetooth).unwrap_or_default();
+            format!("  {line}")
         }
-        // Lines failing their checksum with no fix suggest the wrong baud rate. Blame
-        // `--gps-baud` only when the operator set it. An auto-detected rate already
-        // decoded, so later rejects mean a changed receiver or a bad cable. The bridge's
-        // receiver has no baud rate or port to name.
-        if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
-            let rejected = thousands(gps.counters.rejected);
-            faults.push(if gps.via_bridge {
-                format!("gps: {rejected} unreadable lines and no fix from the bridge's receiver")
-            } else if gps.pinned_baud {
-                format!("gps: {rejected} unreadable lines and no fix — wrong --gps-baud?")
-            } else {
-                match &gps.settled {
-                    Some((port, baud)) => {
-                        format!("gps: {rejected} unreadable lines and no fix from {port} @{baud}")
-                    }
-                    None => format!("gps: {rejected} unreadable lines and no fix"),
+        Note::UsbHoldsBridge => {
+            format!(
+                "  link down: {USB_TOOK_BRIDGE}; back {HOST_SILENCE_SECS} s after USB goes quiet"
+            )
+        }
+        Note::WaitingOnPairing { notice } | Note::WaitingOnReady { notice } => {
+            format!("  {notice}")
+        }
+    }
+}
+
+/// Every fault's line, most urgent first.
+pub(super) fn fault_texts(view: &View) -> Vec<String> {
+    view.faults.iter().map(fault_line).collect()
+}
+
+/// A fault's line, before [`fault_lines`] fits it to the width.
+fn fault_line(fault: &Fault) -> String {
+    match fault {
+        Fault::LinkDown(link) => format!("link down: {}", link.detail),
+        Fault::StoreDropped { rows } => format!("store dropped {}", thousands(*rows)),
+        Fault::Unswept { pool, channels } => format!(
+            "pool {pool}: {} unswept, no node can tune them",
+            crate::text::channel_list(channel_set(channels))
+        ),
+        Fault::GpsUnreadable { reason } => format!("gps unreadable: {reason}"),
+        // `--gps-baud` is blamed only when the operator set it.
+        Fault::GpsRejects { lines, from } => {
+            let rejected = thousands(*lines);
+            match from {
+                RejectsFrom::Bridge => {
+                    format!(
+                        "gps: {rejected} unreadable lines and no fix from the bridge's receiver"
+                    )
                 }
-            });
+                RejectsFrom::PinnedBaud => {
+                    format!("gps: {rejected} unreadable lines and no fix — wrong --gps-baud?")
+                }
+                RejectsFrom::Port { port, baud } => {
+                    format!("gps: {rejected} unreadable lines and no fix from {port} @{baud}")
+                }
+                RejectsFrom::Unknown => format!("gps: {rejected} unreadable lines and no fix"),
+            }
+        }
+        Fault::Undecodable { frames } => format!("undecodable {}", thousands(*frames)),
+        Fault::Garbled { frames } => format!("garbled {}", thousands(*frames)),
+        Fault::Incompatible { frames } => {
+            format!("{} frames from an older firmware — update", thousands(*frames))
+        }
+        Fault::BridgeDropped { frames } => format!("bridge dropped {}", thousands(*frames)),
+        Fault::BridgeRestarted { cause } => restart_line(*cause).to_owned(),
+        Fault::FanStopped { duty_pct } => {
+            format!("fan stopped at {duty_pct}%: unplugged or stalled")
+        }
+        Fault::NodeRestarted { node, cause, times } => {
+            let times = if *times > 1 { format!(" (×{times})") } else { String::new() };
+            format!("{node} restarted: {cause}{times}")
         }
     }
-    if c.undecodable > 0 {
-        faults.push(format!("undecodable {}", thousands(c.undecodable)));
-    }
-    if c.garbled > 0 {
-        faults.push(format!("garbled {}", thousands(c.garbled)));
-    }
-    // A fleet half-way through a reflash is invisible to the node blocks, so this
-    // is the only place it shows.
-    if c.incompatible > 0 {
-        faults
-            .push(format!("{} frames from an older firmware — update", thousands(c.incompatible)));
-    }
-    // Only this capture's loss. The bridge's own count runs from its boot, mostly
-    // frames dropped before anyone was listening.
-    if let Some(status) = snapshot.bridge_status
-        && status.dropped_since_attach > 0
-    {
-        faults
-            .push(format!("bridge dropped {}", thousands(u64::from(status.dropped_since_attach))));
-    }
-    // A restart under a running capture is a fault even when nothing fails now: the data
-    // has a gap. A power-on is how a capture starts, so it is not one.
-    if let Some(bridge) = &snapshot.bridge
-        && let Some(reason) = restart_fault(bridge)
-    {
-        faults.push(reason);
-    }
-    // No tach pulses at a duty the fan turns at: unplugged or stalled. Below that, the fan may
-    // stop by design, so nothing is raised there. With the link down the reading is stale.
-    if snapshot.link_up
-        && let Some(fan) = snapshot.bridge_status.and_then(|status| status.fan)
-        && fan.duty >= FanDuty::TURNS_FROM
-        && fan.rpm == Some(0)
-    {
-        faults.push(format!("fan stopped at {}: unplugged or stalled", fan.duty));
-    }
-    // Each node's own faults come after the bridge's: a bridge fault touches every node,
-    // and these touch one. The operator sees neither in the car any other way, since the
-    // log goes only to `--log-file`.
-    for view in &snapshot.nodes {
-        let node = &view.state;
-        let name = node_name(snapshot.node_board(), node.slot, &node.mac);
-        if let Some(cause) = node.fault_restart {
-            let times = if node.fault_restarts > 1 {
-                format!(" (×{})", node.fault_restarts)
-            } else {
-                String::new()
-            };
-            faults.push(format!("{name} restarted: {cause}{times}"));
-        }
-    }
-    faults
 }
 
-/// The fault-box line for the channels of the pool the bridge's plan leaves to no node, or `None`
-/// when every one is in a share: `pool All: 36-177 unswept, no node can tune them`.
-fn unswept(snapshot: &Snapshot) -> Option<String> {
-    if snapshot.unreachable.is_empty() {
-        return None;
+/// The fault-box line for a bridge restart.
+fn restart_line(cause: ResetCause) -> &'static str {
+    match cause {
+        // Never a fault, so never asked for.
+        ResetCause::PowerOn => "bridge powered on",
+        ResetCause::Software => "bridge rebooted (firmware reset)",
+        ResetCause::Watchdog => "bridge rebooted (watchdog)",
+        ResetCause::Lockup => "bridge rebooted (CPU lockup)",
+        ResetCause::Brownout => "bridge rebooted (brownout)",
+        ResetCause::External => "bridge rebooted (reset over USB)",
+        ResetCause::Unknown => "bridge rebooted (cause unknown)",
     }
-    let pool = snapshot.pool?;
-    Some(format!(
-        "pool {pool}: {} unswept, no node can tune them",
-        crate::text::channel_list(snapshot.unreachable)
-    ))
-}
-
-/// The fault-box line for a bridge restart, or `None` for a power-on.
-fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
-    let reason = match bridge.reset_cause {
-        ResetCause::PowerOn => None,
-        ResetCause::Software => Some("bridge rebooted (firmware reset)"),
-        ResetCause::Watchdog => Some("bridge rebooted (watchdog)"),
-        ResetCause::Lockup => Some("bridge rebooted (CPU lockup)"),
-        ResetCause::Brownout => Some("bridge rebooted (brownout)"),
-        ResetCause::External => Some("bridge rebooted (reset over USB)"),
-        ResetCause::Unknown => Some("bridge rebooted (cause unknown)"),
-    };
-    reason.map(str::to_owned)
 }
 
 /// The width under which the fault box takes a line more.
@@ -365,8 +272,9 @@ fn chunks(fault: &str, width: usize) -> Vec<String> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use wartui_bridge::TransportError;
-    use wartui_core::gps::GpsCounters;
+    use wartui_bridge::{DisconnectCause, TransportError};
+    use wartui_core::engine::{Counters, Snapshot};
+    use wartui_core::gps::{GpsCounters, GpsStatus};
     use wartui_core::position::PositionSource;
     use wartui_proto::fan::{FanDuty, FanStats};
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -374,6 +282,28 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+
+    /// The fault box's lines for `snapshot`, before they are fitted.
+    fn faults(snapshot: &Snapshot) -> Vec<String> {
+        fault_texts(&view(snapshot))
+    }
+
+    /// The line of the first of `snapshot`'s notes that `pick` takes.
+    fn note(snapshot: &Snapshot, pick: fn(&Note) -> bool) -> Option<String> {
+        view(snapshot).notes.iter().find(|note| pick(note)).map(note_line)
+    }
+
+    /// The takeover's line, while a USB host holds the bridge.
+    fn takeover_line(snapshot: &Snapshot) -> Option<String> {
+        note(snapshot, |note| matches!(note, Note::UsbHoldsBridge))
+    }
+
+    /// The transport's waiting notice, while it waits on pairing or the bridge's answer.
+    fn waiting_line(snapshot: &Snapshot) -> Option<String> {
+        note(snapshot, |note| {
+            matches!(note, Note::WaitingOnPairing { .. } | Note::WaitingOnReady { .. })
+        })
+    }
 
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {

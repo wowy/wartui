@@ -18,53 +18,40 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-use wartui_core::engine::Snapshot;
-use wartui_core::gps::{GpsStatus, GpsView};
-use wartui_core::position::PositionSource;
-use wartui_proto::fleet::ScanMode;
-use wartui_proto::mac;
+use wartui_app::view::{FanShown, HostShown, Planning, ReceiverSummary, ScanShown, View};
 
 use super::format::elapsed;
-use crate::config::Link;
 
 /// Draw the header box into `area`.
-pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, over: Link) {
-    let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
-        let state = if snapshot.link_up { "up" } else { "down" };
+pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, view: &View) {
+    let host = host(view.link.host);
+    let (link, border_color) = if let Some(bridge) = &view.bridge {
+        let state = if view.link.up { "up" } else { "down" };
         (
-            format!(
-                "bridge {}, fw v{} — {}, link {state}",
-                mac::short(&bridge.mac),
-                bridge.fw_version,
-                host(snapshot, over)
-            ),
-            if snapshot.link_up && snapshot.position.is_located() {
-                Color::Green
-            } else {
-                Color::Red
-            },
+            format!("bridge {}, fw v{} — {host}, link {state}", bridge.mac_tail, bridge.firmware),
+            if view.link.up && view.position.located { Color::Green } else { Color::Red },
         )
     } else {
-        (format!("waiting for bridge — {}", host(snapshot, over)), Color::Red)
+        (format!("waiting for bridge — {host}"), Color::Red)
     };
 
     // The link-down reason goes in the fault box, which wraps. Here a narrow
     // terminal would clip it.
     let mut first = vec![Span::raw(link)];
-    if let Some(fan) = fan(snapshot) {
+    if let Some(fan) = fan(view.fan) {
         first.push(Span::raw(format!("  {fan}")));
     }
 
     // No pool before the bridge's first `Status`, and a placeholder for the scan.
     let mut second: Vec<Span> =
-        snapshot.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
-    second.extend(scan(snapshot));
+        view.fleet.pool.map(|pool| Span::raw(format!("pool {pool}  "))).into_iter().collect();
+    second.extend(scan(&view.fleet.scan));
     second.push(Span::raw("  "));
     second.extend([
-        planning(snapshot),
-        Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms))),
+        planning(view.fleet.planning),
+        Span::raw(format!("  session {}  ", elapsed(view.now_ms - view.started_at_ms))),
     ]);
-    second.extend(position(snapshot));
+    second.extend(position(view));
 
     let body = vec![Line::from(first), Line::from(second)];
     frame.render_widget(
@@ -75,8 +62,8 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     );
 }
 
-/// The host link the run uses, and what the bridge's latest `Status` says of it. The status is
-/// read only while the link is up, since a stale one would describe a host that has gone.
+/// The host link the run uses, and what the bridge's latest `Status` says of it while the link is
+/// up.
 ///
 /// | Shown | Meaning |
 /// |---|---|
@@ -87,32 +74,21 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 ///
 /// A central the bridge would not serve, one with no bond or no encryption, is not waiting for
 /// USB: the C6 drops it. `wartui status` names it.
-fn host(snapshot: &Snapshot, link: Link) -> String {
-    let central = snapshot
-        .bridge_status
-        .filter(|_| snapshot.link_up)
-        .and_then(|status| status.bluetooth.central);
-    match (link, central) {
-        (Link::Usb, Some(central)) if central.encrypted && central.bonded => {
-            "host usb; Bluetooth waits".to_owned()
-        }
-        (Link::Usb, _) => "host usb".to_owned(),
-        (Link::Bluetooth, None) => "host bluetooth".to_owned(),
-        (Link::Bluetooth, Some(central)) => format!("host bluetooth, MTU {}", central.mtu),
+fn host(host: HostShown) -> String {
+    match host {
+        HostShown::Usb { bluetooth_waits: true } => "host usb; Bluetooth waits".to_owned(),
+        HostShown::Usb { bluetooth_waits: false } => "host usb".to_owned(),
+        HostShown::Bluetooth { mtu: None } => "host bluetooth".to_owned(),
+        HostShown::Bluetooth { mtu: Some(mtu) } => format!("host bluetooth, MTU {mtu}"),
     }
 }
 
-/// The carrier's lid fan as the bridge last reported it: `fan 40% 1830 rpm`, or `fan 40%` with no
-/// tach reading. `None` with no carrier, before the bridge's first `Status`, and with the link
-/// down, when that report is stale.
-fn fan(snapshot: &Snapshot) -> Option<String> {
-    if !snapshot.link_up {
-        return None;
-    }
-    let fan = snapshot.bridge_status?.fan?;
+/// The carrier's lid fan: `fan 40% 1830 rpm`, or `fan 40%` with no tach reading.
+fn fan(fan: Option<FanShown>) -> Option<String> {
+    let fan = fan?;
     Some(match fan.rpm {
-        Some(rpm) => format!("fan {} {rpm} rpm", fan.duty),
-        None => format!("fan {}", fan.duty),
+        Some(rpm) => format!("fan {}% {rpm} rpm", fan.duty_pct),
+        None => format!("fan {}%", fan.duty_pct),
     })
 }
 
@@ -125,20 +101,18 @@ fn fan(snapshot: &Snapshot) -> Option<String> {
 /// | `scan wifi` | plain | every node sniffs Wi-Fi |
 /// | `scan wifi +bt N7` | plain | and the bridge gave N7 the Bluetooth scan |
 /// | `scan wifi +bt waiting for a second node` | yellow hint | Bluetooth asked for, no node picked |
-fn scan(snapshot: &Snapshot) -> Vec<Span<'static>> {
-    let Some(mode) = snapshot.scan else {
-        return vec![Span::styled("scan —", Style::new().fg(Color::DarkGray))];
-    };
-    match (mode, snapshot.ble_slot) {
-        (ScanMode::Stopped, _) => {
+fn scan(scan: &ScanShown) -> Vec<Span<'static>> {
+    match scan {
+        ScanShown::Unknown => vec![Span::styled("scan —", Style::new().fg(Color::DarkGray))],
+        ScanShown::Stopped => {
             vec![Span::styled("scan stopped", Style::new().fg(Color::Yellow))]
         }
-        (ScanMode::Wifi, _) => vec![Span::raw("scan wifi")],
-        (ScanMode::WifiBluetooth, Some(slot)) => {
-            vec![Span::raw(format!("scan wifi +bt {}", snapshot.node_board().label(slot)))]
+        ScanShown::Wifi => vec![Span::raw("scan wifi")],
+        ScanShown::WifiBluetooth { node: Some(node) } => {
+            vec![Span::raw(format!("scan wifi +bt {node}"))]
         }
         // The bridge keeps a lone node on Wi-Fi, so Bluetooth waits for a second to join.
-        (ScanMode::WifiBluetooth, None) => vec![
+        ScanShown::WifiBluetooth { node: None } => vec![
             Span::raw("scan wifi +bt "),
             Span::styled(SECOND_NODE, Style::new().fg(Color::Yellow)),
         ],
@@ -157,21 +131,26 @@ const SECOND_NODE: &str = "waiting for a second node";
 /// | `waiting for nodes` | yellow | none heard yet, normal at startup |
 /// | `2 need update` | red | heartbeating on another major or minor, nothing drivable |
 /// | `all nodes silent` | red | every node heard has stopped heartbeating |
-fn planning(snapshot: &Snapshot) -> Span<'static> {
-    let shares = snapshot.nodes.iter().filter(|node| node.share.is_some()).count();
-    let (text, color) = match shares {
-        1.. => (format!("{shares} of {}", snapshot.nodes.len()), Color::Green),
-        0 if snapshot.alive > 0 => (format!("{} alive, none usable", snapshot.alive), Color::Red),
-        0 if snapshot.nodes.is_empty() => ("waiting for nodes".to_owned(), Color::Yellow),
-        0 if let Some(text) = snapshot.undrivable_text() => (text, Color::Red),
-        0 => ("all nodes silent".to_owned(), Color::Red),
+///
+/// Nodes on another major or minor read `1 needs update` or `2 need update` (older),
+/// `1 host behind` (newer), or `3 undrivable` for both.
+fn planning(planning: Planning) -> Span<'static> {
+    let (text, color) = match planning {
+        Planning::Shares { held, of } => (format!("{held} of {of}"), Color::Green),
+        Planning::NoneUsable { alive } => (format!("{alive} alive, none usable"), Color::Red),
+        Planning::WaitingForNodes => ("waiting for nodes".to_owned(), Color::Yellow),
+        Planning::NeedUpdate { nodes: 1 } => ("1 needs update".to_owned(), Color::Red),
+        Planning::NeedUpdate { nodes } => (format!("{nodes} need update"), Color::Red),
+        Planning::HostBehind { nodes } => (format!("{nodes} host behind"), Color::Red),
+        Planning::Undrivable { nodes } => (format!("{nodes} undrivable"), Color::Red),
+        Planning::AllSilent => ("all nodes silent".to_owned(), Color::Red),
     };
     Span::styled(text, Style::new().fg(color))
 }
 
 /// The header's no-position warning, then the receiver's state.
-fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
-    let fix = if snapshot.position.is_located() {
+fn position(view: &View) -> Vec<Span<'static>> {
+    let fix = if view.position.located {
         Span::default()
     } else {
         Span::styled(
@@ -180,8 +159,8 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
         )
     };
     let mut spans = vec![fix];
-    if let Some(gps) = &snapshot.gps {
-        spans.push(receiver(gps, snapshot.position.source));
+    if let Some(receiver) = &view.receiver {
+        spans.push(receiver_span(&receiver.summary));
     }
     spans
 }
@@ -193,28 +172,20 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
 ///
 /// `gps no receiver` when neither the host nor the bridge has one. Every P4 reads a GPS port,
 /// so its absence is worth a word.
-fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
-    // Checked first: for `max_age` after an unplug, the source is still GPS but the
-    // port is dead.
-    if let GpsStatus::Failed(reason) = &gps.status {
-        return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
-    }
-    if source == PositionSource::Gps {
-        let sats = match gps.status {
-            GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
-            _ => String::new(),
-        };
-        return Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green));
-    }
-    let text = match &gps.status {
-        GpsStatus::Connecting => "  gps connecting".to_owned(),
+fn receiver_span(summary: &ReceiverSummary) -> Span<'static> {
+    let text = match summary {
+        ReceiverSummary::Failed { reason } => format!("  gps: {reason}"),
+        ReceiverSummary::Positioning { satellites } => {
+            let sats = satellites.map_or_else(String::new, |n| format!(", {n} sats"));
+            return Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green));
+        }
+        ReceiverSummary::Connecting => "  gps connecting".to_owned(),
         // The port and rate show because the operator is watching the search try
         // each rate their receiver might use.
-        GpsStatus::Scanning { port, baud } => format!("  gps scanning {port} @{baud}"),
-        GpsStatus::Searching => "  gps searching".to_owned(),
-        GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
-        GpsStatus::Failed(_) => "  gps unreadable".to_owned(),
-        GpsStatus::NoReceiver => "  gps no receiver".to_owned(),
+        ReceiverSummary::Scanning { port, baud } => format!("  gps scanning {port} @{baud}"),
+        ReceiverSummary::Searching => "  gps searching".to_owned(),
+        ReceiverSummary::StaleFix => "  gps fix is stale".to_owned(),
+        ReceiverSummary::NoReceiver => "  gps no receiver".to_owned(),
     };
     Span::styled(text, Style::new().fg(Color::Yellow))
 }
@@ -224,14 +195,18 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wartui_app::settings::Settings;
-    use wartui_core::gps::GpsCounters;
+    use wartui_core::engine::Snapshot;
+    use wartui_core::gps::{GpsCounters, GpsStatus};
+    use wartui_core::position::PositionSource;
     use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::fan::{FanDuty, FanStats};
+    use wartui_proto::fleet::ScanMode;
     use wartui_proto::link::{BluetoothStatus, Central, HostOwner};
     use wartui_proto::plan::ChannelPool;
 
     use super::*;
+    use crate::config::Link;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
 
@@ -270,7 +245,7 @@ mod tests {
 
     /// The text of the header's scan spans, and the color of the last.
     fn scan_shown(snapshot: &Snapshot) -> (String, Option<Color>) {
-        let spans = scan(snapshot);
+        let spans = scan(&view(snapshot).fleet.scan);
         let text = spans.iter().map(|span| span.content.as_ref()).collect();
         (text, spans.last().and_then(|span| span.style.fg))
     }
@@ -475,7 +450,7 @@ mod tests {
     fn header_shows_fan_duty_and_speed_when_bridge_reports_a_reading() {
         let duty = FanDuty::new(40).expect("in range");
         let snapshot = with_fan(Some(FanStats { duty, rpm: Some(1830) }));
-        assert_eq!(fan(&snapshot).as_deref(), Some("fan 40% 1830 rpm"));
+        assert_eq!(fan(view(&snapshot).fan).as_deref(), Some("fan 40% 1830 rpm"));
         assert!(rendered(&snapshot).contains("fan 40% 1830 rpm"));
     }
 
@@ -483,7 +458,7 @@ mod tests {
     fn header_shows_fan_duty_alone_when_bridge_has_no_reading_yet() {
         let duty = FanDuty::new(40).expect("in range");
         let snapshot = with_fan(Some(FanStats { duty, rpm: None }));
-        assert_eq!(fan(&snapshot).as_deref(), Some("fan 40%"));
+        assert_eq!(fan(view(&snapshot).fan).as_deref(), Some("fan 40%"));
     }
 
     #[test]
@@ -491,14 +466,14 @@ mod tests {
         let duty = FanDuty::new(40).expect("in range");
         let mut snapshot = with_fan(Some(FanStats { duty, rpm: Some(1830) }));
         snapshot.link_up = false;
-        assert_eq!(fan(&snapshot), None);
+        assert_eq!(fan(view(&snapshot).fan), None);
         assert!(!rendered(&snapshot).contains("fan "));
     }
 
     #[test]
     fn header_omits_fan_when_bridge_has_no_carrier() {
         let snapshot = with_fan(None);
-        assert_eq!(fan(&snapshot), None);
+        assert_eq!(fan(view(&snapshot).fan), None);
         assert!(!rendered(&snapshot).contains("fan "));
     }
 
@@ -563,8 +538,8 @@ mod tests {
     fn header_names_bluetooth_host_alone_when_bridge_has_not_reported() {
         let mut snapshot = busy();
         snapshot.bridge_status = None;
-        assert_eq!(host(&snapshot, Link::Bluetooth), "host bluetooth");
-        assert_eq!(host(&empty(), Link::Bluetooth), "host bluetooth");
+        assert_eq!(host(View::of(&snapshot, Link::Bluetooth).link.host), "host bluetooth");
+        assert_eq!(host(View::of(&empty(), Link::Bluetooth).link.host), "host bluetooth");
         assert!(rendered(&empty()).contains("waiting for bridge — host usb"));
     }
 
@@ -575,7 +550,7 @@ mod tests {
             central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
-        assert_eq!(host(&snapshot, Link::Usb), "host usb; Bluetooth waits");
+        assert_eq!(host(View::of(&snapshot, Link::Usb).link.host), "host usb; Bluetooth waits");
         assert!(rendered(&snapshot).contains("host usb; Bluetooth waits, link up"));
     }
 
@@ -587,7 +562,7 @@ mod tests {
             central: Some(Central { bonded: false, ..central(ATT_MTU) }),
             ..BluetoothStatus::default()
         });
-        assert_eq!(host(&snapshot, Link::Usb), "host usb");
+        assert_eq!(host(View::of(&snapshot, Link::Usb).link.host), "host usb");
     }
 
     #[test]
@@ -599,8 +574,8 @@ mod tests {
             ..BluetoothStatus::default()
         });
         snapshot.link_up = false;
-        assert_eq!(host(&snapshot, Link::Bluetooth), "host bluetooth");
-        assert_eq!(host(&snapshot, Link::Usb), "host usb");
+        assert_eq!(host(View::of(&snapshot, Link::Bluetooth).link.host), "host bluetooth");
+        assert_eq!(host(View::of(&snapshot, Link::Usb).link.host), "host usb");
     }
 
     #[test]
@@ -609,7 +584,7 @@ mod tests {
         snapshot.nodes.clear();
         snapshot.alive = 0;
         snapshot.assignable = 0;
-        let span = planning(&snapshot);
+        let span = planning(view(&snapshot).fleet.planning);
         assert_eq!(span.content, "waiting for nodes");
         assert_eq!(span.style.fg, Some(Color::Yellow));
     }
@@ -623,7 +598,7 @@ mod tests {
         assert!(!snapshot.nodes.is_empty());
         snapshot.alive = 0;
         snapshot.assignable = 0;
-        let span = planning(&snapshot);
+        let span = planning(view(&snapshot).fleet.planning);
         assert_eq!(span.content, "all nodes silent");
         assert_eq!(span.style.fg, Some(Color::Red));
     }

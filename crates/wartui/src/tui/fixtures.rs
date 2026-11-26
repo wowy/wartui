@@ -8,6 +8,7 @@ use ratatui::backend::TestBackend;
 use tokio::sync::mpsc;
 use wartui_app::session::Controls;
 use wartui_app::settings::{Settings, SettingsStore};
+use wartui_app::view::View;
 use wartui_bridge::BridgeInfo;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{
@@ -29,7 +30,7 @@ use wartui_proto::reset::ResetCause;
 
 use super::draw;
 use super::ui::Ui;
-use crate::config::Config;
+use crate::config::{Config, Link};
 
 /// The `wartui.toml` at `path`, as the view's store.
 pub(super) fn file_store(path: &Path) -> Option<Arc<dyn SettingsStore>> {
@@ -420,6 +421,11 @@ pub(super) fn awaiting_fix() -> Snapshot {
         gps.heard_ms = Some(now_ms - 500);
     }
     snapshot
+}
+
+/// What the view draws of `snapshot` for a run over USB, the link [`idle`]'s view uses.
+pub(super) fn view(snapshot: &Snapshot) -> View {
+    View::of(snapshot, Link::Usb)
 }
 
 /// `snapshot` drawn at 200×40, as text.

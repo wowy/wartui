@@ -1,6 +1,6 @@
 //! The GPS modal (`g`) says why a receiver will not lock, or locks badly, which the header's one
 //! phrase cannot: the fix on the left, the sky on the right. It is read-only and redraws from each
-//! snapshot.
+//! frame's view.
 //!
 //! The accuracy row is HDOP times a nominal ranging error, the same estimate the export writes. It
 //! is not a measurement: that needs `GST`, which common receivers do not send by default.
@@ -14,9 +14,11 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
-use wartui_core::engine::Snapshot;
-use wartui_core::gps::{GpsStatus, GpsView};
-use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky, accuracy_from_hdop};
+use wartui_app::view::{
+    Augmentation, FixShown, ReceiverPort, ReceiverStatus, ReceiverView, SatelliteShown, SkyDate,
+    View,
+};
+use wartui_core::nmea::Constellation;
 
 use super::centered_rect;
 use crate::text::thousands;
@@ -25,7 +27,7 @@ use crate::text::thousands;
 const NONE: &str = "—";
 
 /// Draw the GPS modal over the view.
-pub(super) fn draw_gps_modal(frame: &mut Frame<'_>, snapshot: &Snapshot) {
+pub(super) fn draw_gps_modal(frame: &mut Frame<'_>, view: &View) {
     let area = centered_rect(78, 24, frame.area());
     frame.render_widget(Clear, area);
 
@@ -36,9 +38,9 @@ pub(super) fn draw_gps_modal(frame: &mut Frame<'_>, snapshot: &Snapshot) {
     let [body, help] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     let [left, right] =
         Layout::horizontal([Constraint::Length(36), Constraint::Min(0)]).areas(body);
-    let (status, gps) = status(snapshot);
-    frame.render_widget(Paragraph::new(fix_lines(status, gps)), left);
-    let satellites = gps.map_or(&[][..], |gps| &gps.sky.satellites);
+    let receiver = view.receiver.as_ref();
+    frame.render_widget(Paragraph::new(fix_lines(receiver)), left);
+    let satellites = receiver.and_then(|r| r.sky.as_ref()).map_or(&[][..], |sky| &sky.satellites);
     frame.render_widget(Paragraph::new(sky_lines(satellites, right)), right);
     frame.render_widget(Paragraph::new("esc close"), help);
 }
@@ -47,36 +49,37 @@ pub(super) fn draw_gps_modal(frame: &mut Frame<'_>, snapshot: &Snapshot) {
 const ROWS: [&str; 9] =
     ["sats", "time", "lat", "lon", "altitude", "speed", "accuracy", "port", "sentences"];
 
-/// The left column: what the receiver says about its fix, and how it is being read. `gps` is the
-/// receiver when it is being read; otherwise every row but the status is blank.
-fn fix_lines(status: String, gps: Option<&GpsView>) -> Vec<Line<'static>> {
-    let values: [Option<String>; ROWS.len()] = gps.map_or_else(Default::default, |gps| {
-        let sky = &gps.sky;
-        let used = sky.used_count.map_or_else(|| NONE.to_owned(), |n| n.to_string());
-        let time = match (sky.date, sky.time) {
-            (Some(date), Some(time)) => Some(format!("{date} {} UTC", time.format("%H:%M:%S"))),
-            (None, Some(time)) => Some(format!("{} UTC", time.format("%H:%M:%S"))),
+/// The left column: what the receiver says about its fix, and how it is being read. Every row but
+/// the status is blank while no receiver is being read.
+fn fix_lines(receiver: Option<&ReceiverView>) -> Vec<Line<'static>> {
+    let reading = receiver.and_then(|r| r.sky.as_ref().map(|sky| (r, sky)));
+    let values: [Option<String>; ROWS.len()] = reading.map_or_else(Default::default, |(r, sky)| {
+        let used = sky.used.map_or_else(|| NONE.to_owned(), |n| n.to_string());
+        let time = match (sky.date, sky.time_secs) {
+            (Some(date), Some(secs)) => Some(format!("{} {} UTC", date_text(date), clock(secs))),
+            (None, Some(secs)) => Some(format!("{} UTC", clock(secs))),
             _ => None,
         };
-        let c = gps.counters;
         [
             Some(format!("{used} used · {} in view", sky.satellites.len())),
             time,
             sky.lat.map(|lat| format!("{lat:>11.6}")),
             sky.lon.map(|lon| format!("{lon:>11.6}")),
-            sky.alt.map(|alt| format!("{alt:.1} m")),
+            sky.alt_m.map(|alt| format!("{alt:.1} m")),
             sky.speed_kmh.map(|kmh| format!("{kmh:.1} km/h")),
-            sky.hdop.map(|hdop| format!("±{:.1} m (hdop {hdop})", accuracy_from_hdop(hdop))),
-            if gps.via_bridge {
-                Some("bridge".to_owned())
-            } else {
-                gps.settled.as_ref().map(|(port, baud)| format!("{port} @ {baud}"))
+            sky.hdop
+                .zip(sky.accuracy_m)
+                .map(|(hdop, accuracy)| format!("±{accuracy:.1} m (hdop {hdop})")),
+            match &r.port {
+                ReceiverPort::Bridge => Some("bridge".to_owned()),
+                ReceiverPort::Host { port, baud } => Some(format!("{port} @ {baud}")),
+                ReceiverPort::Unsettled => None,
             },
-            Some(format!("{} · {} rejected", thousands(c.sentences), thousands(c.rejected))),
+            Some(format!("{} · {} rejected", thousands(r.sentences), thousands(r.rejected))),
         ]
     });
     let row = |label: &str, value: String| Line::from(format!("{label:<10}{value}"));
-    let mut lines = vec![row("status", status)];
+    let mut lines = vec![row("status", status(receiver))];
     lines.extend(
         ROWS.iter()
             .zip(values)
@@ -85,64 +88,61 @@ fn fix_lines(status: String, gps: Option<&GpsView>) -> Vec<Line<'static>> {
     lines
 }
 
-/// The status row, and the receiver when it is being read so the other rows have something to
-/// show.
-pub(super) fn status(snapshot: &Snapshot) -> (String, Option<&GpsView>) {
-    let Some(gps) = &snapshot.gps else { return ("off".to_owned(), None) };
-    let text = match &gps.status {
-        GpsStatus::Connecting => "connecting".to_owned(),
-        GpsStatus::Scanning { port, baud } => format!("looking on {port} @{baud}"),
-        GpsStatus::NoReceiver => "no receiver found".to_owned(),
-        GpsStatus::Failed(reason) => format!("failed: {reason}"),
-        GpsStatus::Searching | GpsStatus::Fixed { .. } => {
-            let mut text = sky_status(&gps.sky, gps.heard_ms.is_some());
-            if let Some(heard) = gps.heard_ms
-                && snapshot.now_ms - heard
-                    > i64::try_from(gps.max_age.as_millis()).unwrap_or(i64::MAX)
-            {
-                text.push_str(&format!(" · silent {} s", (snapshot.now_ms - heard) / 1000));
+/// A date as `2026-10-10`.
+fn date_text(date: SkyDate) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+/// Seconds since midnight as `15:40:12`.
+fn clock(secs: u32) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
+}
+
+/// The status row: what the receiver reports, or `off` with no receiver read.
+pub(super) fn status(receiver: Option<&ReceiverView>) -> String {
+    let Some(receiver) = receiver else { return "off".to_owned() };
+    match &receiver.status {
+        ReceiverStatus::Connecting => "connecting".to_owned(),
+        ReceiverStatus::Scanning { port, baud } => format!("looking on {port} @{baud}"),
+        ReceiverStatus::NoReceiver => "no receiver found".to_owned(),
+        ReceiverStatus::Failed { reason } => format!("failed: {reason}"),
+        ReceiverStatus::Reading { fix, silent_secs } => {
+            let mut text = fix_text(*fix);
+            if let Some(secs) = silent_secs {
+                text.push_str(&format!(" · silent {secs} s"));
             }
             text
         }
-    };
-    let reading = matches!(gps.status, GpsStatus::Searching | GpsStatus::Fixed { .. });
-    (text, reading.then_some(gps))
+    }
 }
 
 /// What the receiver's own sentences say about its fix.
-fn sky_status(sky: &Sky, heard: bool) -> String {
-    let suffix = match sky.quality {
-        Some(2) => " (DGPS)",
-        Some(4) => " (RTK fixed)",
-        Some(5) => " (RTK float)",
-        Some(6) => " (dead reckoning)",
-        _ => "",
+fn fix_text(fix: FixShown) -> String {
+    let suffix = |augmented| match augmented {
+        Augmentation::None => "",
+        Augmentation::Dgps => " (DGPS)",
+        Augmentation::RtkFixed => " (RTK fixed)",
+        Augmentation::RtkFloat => " (RTK float)",
+        Augmentation::DeadReckoning => " (dead reckoning)",
     };
-    // `GGA` quality 0 outranks a `GSA` mode: the two arrive separately, and a lost lock reaches
-    // `GGA` while the last `GSA` may still say 3D.
-    match (sky.mode, sky.quality) {
-        (Some(FixMode::NoFix), _) | (_, Some(0)) => "searching".to_owned(),
-        (Some(FixMode::ThreeD), _) => format!("3D fix{suffix}"),
-        (Some(FixMode::TwoD), _) => format!("2D fix{suffix}"),
-        // A receiver that sends no `GSA` still says it has a fix in `GGA`.
-        (None, Some(_)) => format!("fix{suffix}"),
-        (None, None) if heard => "searching".to_owned(),
-        (None, None) => "waiting for sentences".to_owned(),
+    match fix {
+        FixShown::Searching => "searching".to_owned(),
+        FixShown::WaitingForSentences => "waiting for sentences".to_owned(),
+        FixShown::ThreeD { augmented } => format!("3D fix{}", suffix(augmented)),
+        FixShown::TwoD { augmented } => format!("2D fix{}", suffix(augmented)),
+        FixShown::Unspecified { augmented } => format!("fix{}", suffix(augmented)),
     }
 }
 
-/// The right column: every satellite in view, used first, then strongest first.
-fn sky_lines(satellites: &[Satellite], area: Rect) -> Vec<Line<'static>> {
+/// The right column: every satellite in view, in the view's order, as many as `area` holds.
+fn sky_lines(satellites: &[SatelliteShown], area: Rect) -> Vec<Line<'static>> {
     if satellites.is_empty() {
         return vec![Line::from("none in view")];
     }
-    let mut sorted = satellites.to_vec();
-    // System and PRN last, so the list holds still between frames.
-    sorted.sort_by_key(|s| (!s.used, std::cmp::Reverse(s.snr), s.system, s.prn));
     let mut lines = vec![Line::from("sys   PRN  SNR  used")];
     let room = usize::from(area.height).saturating_sub(1);
-    let shown = if sorted.len() > room { room.saturating_sub(1) } else { sorted.len() };
-    lines.extend(sorted[..shown].iter().map(|s| {
+    let shown = if satellites.len() > room { room.saturating_sub(1) } else { satellites.len() };
+    lines.extend(satellites[..shown].iter().map(|s| {
         let snr = s.snr.map_or_else(|| NONE.to_owned(), |snr| snr.to_string());
         let text = format!(
             "{:<4} {:>4} {:>4}  {}",
@@ -154,8 +154,8 @@ fn sky_lines(satellites: &[Satellite], area: Rect) -> Vec<Line<'static>> {
         let style = if s.used { Style::new().fg(Color::Green) } else { Style::new() };
         Line::styled(text, style)
     }));
-    if shown < sorted.len() {
-        lines.push(Line::from(format!("+{} more", sorted.len() - shown)));
+    if shown < satellites.len() {
+        lines.push(Line::from(format!("+{} more", satellites.len() - shown)));
     }
     lines
 }
@@ -178,6 +178,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use std::time::Duration;
+
+    use wartui_core::engine::Snapshot;
+    use wartui_core::gps::GpsStatus;
+    use wartui_core::nmea::{FixMode, Sky};
 
     use super::*;
     use crate::tui::draw;
@@ -238,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn gps_modal_shows_date_and_time_when_receiver_reports_both() {
+        let screen = modal(&with_sky(8));
+        assert!(screen.contains("time      2026-10-10 15:40:12 UTC"), "{screen}");
+    }
+
+    #[test]
+    fn gps_modal_shows_time_alone_when_receiver_reports_no_date() {
+        let mut snapshot = with_sky(8);
+        snapshot.gps.as_mut().expect("a receiver").sky.date = None;
+        let screen = modal(&snapshot);
+        assert!(screen.contains("time      15:40:12 UTC"), "{screen}");
+    }
+
+    #[test]
     fn gps_modal_shows_no_satellites_when_receiver_not_read() {
         let mut snapshot = with_sky(8);
         snapshot.gps.as_mut().expect("a receiver").status =
@@ -250,7 +268,10 @@ mod tests {
 
     #[test]
     fn gps_modal_says_searching_when_gga_reports_no_fix_after_3d_mode() {
-        let sky = Sky { quality: Some(0), mode: Some(FixMode::ThreeD), ..Sky::default() };
-        assert_eq!(sky_status(&sky, true), "searching");
+        // That quality 0 outranks the mode is `wartui_app::view`'s rule; this is its word.
+        let mut snapshot = with_sky(8);
+        let gps = snapshot.gps.as_mut().expect("a receiver");
+        gps.sky = Sky { quality: Some(0), mode: Some(FixMode::ThreeD), ..Sky::default() };
+        assert_eq!(status(view(&snapshot).receiver.as_ref()), "searching");
     }
 }
