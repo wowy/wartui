@@ -10,7 +10,8 @@
 //!
 //! [`Link::bluetooth`] picks the bridge as `wartui run` does over Bluetooth: the bridge named,
 //! else the one the settings remember, else the only one heard. The transport remembers into the
-//! settings' bridge memory, so a capture saves the bridge it connected to.
+//! settings' bridge memory, so a capture saves the bridge it connected to, and the settings read an
+//! idle link's announcement for a save ([`Settings::save`]).
 //!
 //! **A link opened with a bridge named is pinned to it.** Its transport refuses every other
 //! bridge, through each reconnect, so an update over it reaches that bridge's fleet and no other
@@ -36,6 +37,7 @@ use wartui_bridge::ble::BleTransport;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, LinkHandle};
+use wartui_proto::mac::Mac;
 
 use crate::log::SinkError;
 use crate::radio::Radio;
@@ -142,7 +144,8 @@ pub struct Link {
     inner: Arc<Inner>,
 }
 
-/// A [`Link`]'s state, shared with the work its calls run on the runtime.
+/// A [`Link`]'s state, shared with the work its calls run on the runtime, and read by the
+/// [`Settings`] it was opened with.
 #[derive(Debug)]
 pub(crate) struct Inner {
     simulated: bool,
@@ -200,7 +203,9 @@ impl Link {
             .remember_in(settings.app().memory())
             .start()
             .map_err(|error| LinkError::Start { detail: error.to_string() })?;
-        Ok(Self::holding(false, spec, Held::Idle(park(handle, None))))
+        let link = Self::holding(false, spec, Held::Idle(park(handle, None)));
+        settings.attach(&link.inner);
+        Ok(link)
     }
 
     /// Whether the bridge is the simulator's.
@@ -305,6 +310,15 @@ impl Inner {
     /// bridge named when it was opened.
     pub(crate) fn takes_updates(&self) -> bool {
         self.simulated || self.pinned.is_some()
+    }
+
+    /// The address the bridge of an idle link has announced, read without taking the link;
+    /// `None` while in use or closed.
+    pub(crate) fn announced_mac(&self) -> Option<Mac> {
+        match &*self.lock() {
+            Held::Idle(parked) => parked.announced().map(|bridge| bridge.mac),
+            Held::InUse | Held::Closed => None,
+        }
     }
 
     pub(crate) async fn lend(&self) -> Result<(LinkHandle, Option<BridgeInfo>), LinkError> {

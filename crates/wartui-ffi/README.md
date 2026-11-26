@@ -57,10 +57,11 @@ A settings screen builds a `SettingsEdit`: the rows the bridge holds only when m
 host's rows as shown. In a capture it seeds its rows from the view's `settings`, `Session.apply`
 sends the moved rows and saves the host's, and `Session.applyExcluded` sends and saves the
 excluded list alone.
-With none running, `Settings.save` saves the host's rows and ignores the bridge's. `settingsLimits`
-gives the ranges an edit must keep to, and a value outside them, or an excluded list
-`checkExcludedSsid` refuses, is a `SteerError` with nothing sent or saved. What a save came to is
-a `Saved`, its rule typed when the settings break one.
+With none running, `Settings.save` saves the host's rows and ignores the bridge's. Turning
+remember on there remembers the bridge an idle `Link.bluetooth` opened with those settings has
+announced, in the same save. `settingsLimits` gives the ranges an edit must keep to, and a value
+outside them, or an excluded list `checkExcludedSsid` refuses, is a `SteerError` with nothing sent
+or saved. What a save came to is a `Saved`, its rule typed when the settings break one.
 
 ## Uploads
 

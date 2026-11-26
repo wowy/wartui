@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use wartui_core::store::open_readonly;
-use wartui_ffi::{Link, LinkError, ReadyError, Saved, Session, Settings};
+use wartui_ffi::{Link, LinkError, ReadyError, Session, Settings};
 
-use common::{Loopback, Memory, WAIT, capture, host_rows, nowhere, start, three_nodes, until};
+use common::{Loopback, WAIT, capture, nowhere, start, three_nodes, until};
 
 /// How long a test gives the bridge to announce itself, in milliseconds.
 const READY_MS: u32 = 15_000;
@@ -160,42 +160,4 @@ async fn link_ready_gives_the_link_back_idle_when_the_phone_stops_awaiting() {
     })
     .await;
     closed.expect("idle in time").expect("closed");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn link_remembers_announced_bridge_when_remember_is_turned_on_before_a_capture() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let store = Memory::holding("[bridge]\nremember = false\n");
-    let settings = Settings::open(store.clone(), None).expect("the store opens");
-    let link = Link::bluetooth(Loopback::radio(), Arc::clone(&settings), None).expect("opened");
-    link.ready(READY_MS, None).await.expect("announced");
-    // The transport connected with remembering off, so it remembered nothing.
-    assert_eq!(settings.saved().bridge_mac, None);
-    let saved = settings.save(host_rows(true, true)).expect("converted");
-    assert_eq!(saved, Saved::At { place: "memory".to_owned() });
-
-    let session = Session::start(
-        capture(&dir.path().join("capture.db")),
-        Arc::clone(&link),
-        Arc::clone(&settings),
-        nowhere(),
-        None,
-    )
-    .await
-    .expect("the capture starts");
-    let (mac, text) = tokio::time::timeout(WAIT, async {
-        loop {
-            if let Some(mac) = settings.saved().bridge_mac
-                && let Some(text) = store.text().filter(|text| text.contains(&mac))
-            {
-                return (mac, text);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("saved in time");
-    assert!(text.contains("remember = true"), "{mac}: {text}");
-    session.stop().await.expect("stopped");
-    link.close().await.expect("closed");
 }

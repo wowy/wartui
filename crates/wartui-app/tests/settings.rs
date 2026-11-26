@@ -406,7 +406,8 @@ fn settings_save_reports_nowhere_when_there_is_no_store() {
     assert!(matches!(applied.saved, Err(SaveError::Nowhere)), "{applied:?}");
     let excluded = controls(&tx, &settings).apply_excluded(&[]);
     assert!(matches!(excluded, Ok(Err(SaveError::Nowhere))));
-    assert!(matches!(settings.save(&unmoved(&Config::default(), true)), Err(SaveError::Nowhere)));
+    let saved = settings.save(&unmoved(&Config::default(), true), None);
+    assert!(matches!(saved, Err(SaveError::Nowhere)));
     assert!(matches!(rx.try_recv(), Ok(Command::SetExcludedSsids { .. })), "applied anyway");
     assert_eq!(settings.saved(), Config::default(), "nothing saved, nothing changed");
 }
@@ -724,7 +725,7 @@ fn settings_save_writes_each_host_row_when_no_capture_runs() {
         ..SettingsEdit::default()
     };
 
-    assert_eq!(settings.save(&edit).unwrap(), "wartui.toml");
+    assert_eq!(settings.save(&edit, None).unwrap(), "wartui.toml");
 
     let saved = store.config();
     assert_eq!(saved.gps, Gps { bridge_rate_hz: Some(2), wait_for_fix: Some(false) });
@@ -754,7 +755,7 @@ fn settings_save_changes_nothing_when_only_bridge_rows_move() {
         ..unmoved(&full(), true)
     };
 
-    settings.save(&edit).unwrap();
+    settings.save(&edit, None).unwrap();
 
     assert_eq!(store.config(), full(), "the rate unmoved keeps the saved one too");
 }
@@ -765,13 +766,40 @@ fn settings_save_forgets_remembered_bridge_when_remember_bridge_is_off() {
     let memory = full().bridge.memory();
     let settings = kept(&store, full(), &memory);
 
-    settings.save(&unmoved(&full(), false)).unwrap();
+    settings.save(&unmoved(&full(), false), None).unwrap();
 
     assert!(!memory.is_enabled());
     let bridge = store.config().bridge;
     assert_eq!(bridge.remember, Some(false));
     assert_eq!((bridge.mac, bridge.serial, bridge.bluetooth_address), (None, None, None));
     assert_eq!(bridge.link, Some(Link::Bluetooth), "not a row, so kept");
+}
+
+#[test]
+fn settings_save_remembers_connected_bridge_when_remember_turns_on() {
+    let store = Fake::empty();
+    let memory = BridgeMemory::none();
+    memory.set_enabled(false);
+    let settings = kept(&store, Config::default(), &memory).over(Link::Bluetooth);
+
+    settings.save(&unmoved(&Config::default(), true), Some(BRIDGE)).unwrap();
+
+    assert_eq!(memory.recall(), Some(BRIDGE));
+    let bridge = store.config().bridge;
+    assert_eq!(bridge.remember, Some(true));
+    assert_eq!(bridge.mac, Some(BRIDGE));
+}
+
+#[test]
+fn settings_save_keeps_held_bridge_when_remember_is_already_on() {
+    let store = Fake::empty();
+    let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
+    let settings = kept(&store, Config::default(), &memory).over(Link::Bluetooth);
+
+    settings.save(&unmoved(&Config::default(), true), Some(BRIDGE)).unwrap();
+
+    assert_eq!(memory.recall(), Some(OTHER_BRIDGE));
+    assert_eq!(store.config().bridge.mac, Some(OTHER_BRIDGE));
 }
 
 /// A secret store held in memory, which fails its saves while `failing`.
