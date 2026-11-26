@@ -6,6 +6,7 @@
 
 use std::cmp::Reverse;
 
+use chrono::{Datelike, Timelike};
 use wartui_core::engine::Snapshot;
 use wartui_core::gps::{GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Sky, accuracy_from_hdop};
@@ -148,10 +149,10 @@ pub enum ReceiverPort {
 pub struct SkyView {
     /// Satellites in the solution.
     pub used: Option<u8>,
-    /// The last `RMC` date, `YYYY-MM-DD`.
-    pub date: Option<String>,
-    /// UTC time of the last `GGA` or `RMC`, `HH:MM:SS`.
-    pub time: Option<String>,
+    /// The last `RMC` date, UTC.
+    pub date: Option<SkyDate>,
+    /// Seconds since UTC midnight of the last `GGA` or `RMC`, fix or not.
+    pub time_secs: Option<u32>,
     /// Degrees north.
     pub lat: Option<f64>,
     /// Degrees east.
@@ -166,6 +167,17 @@ pub struct SkyView {
     pub accuracy_m: Option<f64>,
     /// Every satellite in view: used first, then strongest first, then by system and PRN.
     pub satellites: Vec<SatelliteShown>,
+}
+
+/// A UTC date, as a receiver's `RMC` gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkyDate {
+    /// The year.
+    pub year: i32,
+    /// The month, 1 to 12.
+    pub month: u8,
+    /// The day of the month, 1 to 31.
+    pub day: u8,
 }
 
 /// One satellite in view.
@@ -275,8 +287,13 @@ fn sky(sky: &Sky) -> SkyView {
     satellites.sort_by_key(|s| (!s.used, Reverse(s.snr), s.system, s.prn));
     SkyView {
         used: sky.used_count,
-        date: sky.date.map(|date| date.to_string()),
-        time: sky.time.map(|time| time.format("%H:%M:%S").to_string()),
+        date: sky.date.map(|date| SkyDate {
+            year: date.year(),
+            // A month is at most 12 and a day at most 31.
+            month: u8::try_from(date.month()).unwrap_or(u8::MAX),
+            day: u8::try_from(date.day()).unwrap_or(u8::MAX),
+        }),
+        time_secs: sky.time.map(|time| time.num_seconds_from_midnight()),
         lat: sky.lat,
         lon: sky.lon,
         alt_m: sky.alt,

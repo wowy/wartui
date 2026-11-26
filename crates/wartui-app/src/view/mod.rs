@@ -36,7 +36,7 @@ pub use faults::{Fault, LinkFault, LinkFaultKind, Note, RejectsFrom};
 pub use nodes::{FirmwareShown, NodeRow, NodeStatus, PowerCycle, Severity, ShareShown, SlotShown};
 pub use receiver::{
     Augmentation, FixShown, ReceiverPort, ReceiverStatus, ReceiverSummary, ReceiverView,
-    SatelliteShown, SkyView,
+    SatelliteShown, SkyDate, SkyView,
 };
 
 use crate::settings::Link;

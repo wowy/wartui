@@ -16,8 +16,11 @@ use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
 use super::NodeRow;
+#[cfg(doc)]
+use super::View;
 
-/// What an operator should know that is no fault. In the order a front end lists them.
+/// Something an operator should know that is no fault. [`View::notes`] lists them in the order a
+/// front end shows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     /// Sightings a full pending buffer turned away. At least one count is non-zero. Most are
@@ -42,7 +45,8 @@ pub enum Note {
     },
 }
 
-/// Every fault so far, most urgent first. Empty on a clean run.
+/// Something wrong with the capture, the bridge, the receiver or a node. [`View::faults`] lists
+/// every one so far, most urgent first, and is empty on a clean run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// The link is down. First, because with the link down nothing else updates.

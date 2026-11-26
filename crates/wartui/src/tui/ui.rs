@@ -208,15 +208,20 @@ impl Ui {
             PowerCycle::NotHeard => {
                 format!("{name} has not heartbeated yet, so nothing says which slot it is in")
             }
-            PowerCycle::LostSlot => format!("{name} {LOST_SLOT}"),
             PowerCycle::Allowed => {
-                // A node is allowed only with a slot.
-                let Some(shown) = &row.slot else { return };
-                let Some(slot) = Slot::from_u8(shown.index) else { return };
-                self.notice = None;
-                self.power_confirm = Some((slot, shown.label.clone()));
-                return;
+                // The slot comes from the view's index, the round trip a phone makes too. A row
+                // with no slot, or an index that names none, is refused as a node with no slot.
+                let slot = row.slot.as_ref().and_then(|shown| {
+                    Slot::from_u8(shown.index).map(|slot| (slot, shown.label.clone()))
+                });
+                if let Some(slot) = slot {
+                    self.notice = None;
+                    self.power_confirm = Some(slot);
+                    return;
+                }
+                format!("{name} {LOST_SLOT}")
             }
+            PowerCycle::LostSlot => format!("{name} {LOST_SLOT}"),
         };
         self.say(why, snapshot);
     }

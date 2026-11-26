@@ -10,7 +10,7 @@ use wartui_app::view::{
     Augmentation, BridgeView, ChannelBar, FanShown, Fault, FirmwareShown, FixShown, HostShown,
     LinkFault, LinkFaultKind, NodeRow, NodeStatus, Note, Planning, PowerCycle, ReceiverPort,
     ReceiverStatus, ReceiverSummary, RejectsFrom, SatelliteShown, ScanShown, Severity, ShareShown,
-    SlotShown, View,
+    SkyDate, SlotShown, View,
 };
 use wartui_bridge::DisconnectCause;
 use wartui_core::engine::{NodeView, Snapshot};
@@ -145,7 +145,7 @@ fn view_shows_no_fan_when_link_is_down_or_bridge_has_no_carrier() {
 }
 
 #[test]
-fn view_reports_scan_as_bridge_last_said() {
+fn view_reports_scan_mode_when_bridge_reports_one() {
     let scan = |mode, slot| {
         let mut snapshot = running(Vec::new());
         snapshot.scan = mode;
@@ -246,7 +246,7 @@ fn view_names_node_stale_when_it_is_unassignable() {
 }
 
 #[test]
-fn view_rates_each_node_status_by_what_it_asks_of_operator() {
+fn view_rates_severity_by_status_when_readings_are_in_range() {
     let mut rebooted = node(0x84);
     rebooted.state.reboots = 1;
     let mut starting = node(0x84);
@@ -296,7 +296,7 @@ fn view_raises_severity_to_warning_only_from_ok_when_node_is_hot_or_supply_drops
 }
 
 #[test]
-fn view_shows_node_share_pending_until_node_adopts_it() {
+fn view_shows_share_pending_when_node_has_not_adopted_it() {
     let share = |channels, adopted| {
         let mut view = node(0x84);
         give(&mut view, channels, adopted);
@@ -355,7 +355,7 @@ fn view_refuses_power_cycle_in_order_when_node_cannot_be_reached() {
 }
 
 #[test]
-fn view_describes_node_by_its_slot_board_and_firmware() {
+fn view_describes_node_when_it_has_heartbeated_from_a_slot() {
     let mut view = node(0x84);
     view.state.die_temp = DieTemp::from_c(41);
     view.state.batches_lost = 3;
@@ -655,13 +655,13 @@ fn view_reports_fix_mode_and_augmentation_when_receiver_has_a_fix() {
 }
 
 #[test]
-fn view_reports_fix_waiting_for_sentences_until_one_parses() {
+fn view_reports_fix_waiting_for_sentences_when_none_has_parsed() {
     assert_eq!(fix(Sky::default(), false), FixShown::WaitingForSentences);
     assert_eq!(fix(Sky::default(), true), FixShown::Searching);
 }
 
 #[test]
-fn view_names_receiver_port_by_where_it_is_read() {
+fn view_names_receiver_port_when_search_has_settled_or_receiver_is_bridges() {
     let port = |via_bridge, settled: Option<(String, u32)>| {
         let mut snapshot = with_gps(GpsStatus::Searching, PositionSource::None);
         let gps = snapshot.gps.as_mut().expect("a receiver");
@@ -699,7 +699,8 @@ fn view_reports_receiver_sky_when_receiver_is_read() {
     assert_eq!((shown.sentences, shown.rejected), (1_234, 2));
     let sky = shown.sky.expect("read");
     assert_eq!(sky.used, Some(8));
-    assert_eq!((sky.date.as_deref(), sky.time.as_deref()), (Some("2026-10-10"), Some("15:40:12")));
+    assert_eq!(sky.date, Some(SkyDate { year: 2026, month: 10, day: 10 }));
+    assert_eq!(sky.time_secs, Some(15 * 3600 + 40 * 60 + 12));
     assert_eq!((sky.lat, sky.lon, sky.alt_m), (Some(48.1173), Some(11.5167), Some(545.4)));
     assert_eq!((sky.speed_kmh, sky.hdop), (Some(42.3), Some(0.9)));
     assert!(sky.accuracy_m.is_some_and(|m| (m - 4.5).abs() < 1e-9), "{:?}", sky.accuracy_m);
@@ -936,7 +937,7 @@ fn view_lists_bridge_drops_only_when_this_capture_lost_frames() {
 }
 
 #[test]
-fn view_names_restarted_node_as_its_row_does() {
+fn view_names_restarted_node_by_address_tail_when_node_has_no_slot() {
     let mut slotless = node(0x86);
     slotless.state.slot = None;
     slotless.state.fault_restart = Some(ResetCause::Brownout);

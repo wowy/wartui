@@ -15,7 +15,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 use wartui_app::view::{
-    Augmentation, FixShown, ReceiverPort, ReceiverStatus, ReceiverView, SatelliteShown, View,
+    Augmentation, FixShown, ReceiverPort, ReceiverStatus, ReceiverView, SatelliteShown, SkyDate,
+    View,
 };
 use wartui_core::nmea::Constellation;
 
@@ -54,9 +55,9 @@ fn fix_lines(receiver: Option<&ReceiverView>) -> Vec<Line<'static>> {
     let reading = receiver.and_then(|r| r.sky.as_ref().map(|sky| (r, sky)));
     let values: [Option<String>; ROWS.len()] = reading.map_or_else(Default::default, |(r, sky)| {
         let used = sky.used.map_or_else(|| NONE.to_owned(), |n| n.to_string());
-        let time = match (&sky.date, &sky.time) {
-            (Some(date), Some(time)) => Some(format!("{date} {time} UTC")),
-            (None, Some(time)) => Some(format!("{time} UTC")),
+        let time = match (sky.date, sky.time_secs) {
+            (Some(date), Some(secs)) => Some(format!("{} {} UTC", date_text(date), clock(secs))),
+            (None, Some(secs)) => Some(format!("{} UTC", clock(secs))),
             _ => None,
         };
         [
@@ -85,6 +86,16 @@ fn fix_lines(receiver: Option<&ReceiverView>) -> Vec<Line<'static>> {
             .map(|(label, value)| row(label, value.unwrap_or_else(|| NONE.to_owned()))),
     );
     lines
+}
+
+/// A date as `2026-10-10`.
+fn date_text(date: SkyDate) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+/// Seconds since midnight as `15:40:12`.
+fn clock(secs: u32) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
 }
 
 /// The status row: what the receiver reports, or `off` with no receiver read.
@@ -228,6 +239,20 @@ mod tests {
         snapshot.gps.as_mut().expect("a receiver").max_age = Duration::from_secs(5);
         let screen = modal(&snapshot);
         assert!(screen.contains("3D fix (DGPS) · silent 12 s"), "{screen}");
+    }
+
+    #[test]
+    fn gps_modal_shows_date_and_time_when_receiver_reports_both() {
+        let screen = modal(&with_sky(8));
+        assert!(screen.contains("time      2026-10-10 15:40:12 UTC"), "{screen}");
+    }
+
+    #[test]
+    fn gps_modal_shows_time_alone_when_receiver_reports_no_date() {
+        let mut snapshot = with_sky(8);
+        snapshot.gps.as_mut().expect("a receiver").sky.date = None;
+        let screen = modal(&snapshot);
+        assert!(screen.contains("time      15:40:12 UTC"), "{screen}");
     }
 
     #[test]
