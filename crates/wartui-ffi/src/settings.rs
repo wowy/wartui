@@ -9,8 +9,8 @@
 //! **One edit, two ways in.** A [`SettingsEdit`] is a settings screen's rows. In a capture
 //! `Session::apply` puts the moved rows in force and saves them; with none running
 //! [`Settings::save`] saves the rows the host holds. Both convert the edit the same way first, and
-//! a value the app's types refuse is a [`SteerError`] with nothing sent or saved. What the save
-//! came to is a [`Saved`], typed as far as the app types it.
+//! a value the app's types or the excluded list's rules refuse is a [`SteerError`] with nothing
+//! sent or saved. What the save came to is a [`Saved`], typed as far as the app types it.
 //!
 //! **The phone's store fails as a value.** A [`StoreFailure`] reaches the app layer as an
 //! `io::Error` carrying its detail, as a file's failure does on a desktop. A store whose `place`
@@ -205,6 +205,7 @@ impl SettingsEdit {
         if let Some(hz) = self.gps_rate_hz.filter(|hz| !GPS_RATE_HZ.contains(hz)) {
             return Err(SteerError::GpsRate { hz });
         }
+        check_excluded(&self.excluded_ssids)?;
         Ok(app::SettingsEdit {
             pool: self.pool,
             planner,
@@ -219,6 +220,15 @@ impl SettingsEdit {
             excluded_ssids: self.excluded_ssids,
         })
     }
+}
+
+/// The first entry of `ssids` the excluded list's rules refuse, as a load would refuse it.
+pub(crate) fn check_excluded(ssids: &[String]) -> Result<(), SteerError> {
+    for (index, ssid) in ssids.iter().enumerate() {
+        app::check_excluded_ssid(ssid, &ssids[..index])
+            .map_err(|refusal| SteerError::ExcludedSsid { ssid: ssid.clone(), refusal })?;
+    }
+    Ok(())
 }
 
 /// What a save came to.
@@ -364,10 +374,12 @@ impl Settings {
     }
 
     /// Save the rows the host holds, with no capture running. Rows a bridge holds are ignored,
-    /// once the edit converts.
+    /// once the edit converts. A bridge a [`Link`](crate::Link) has announced already is
+    /// remembered when the next capture starts over that link.
     ///
     /// # Errors
-    /// A value the app's types refuse, and then nothing is saved.
+    /// A value the app's types refuse, or [`SteerError::ExcludedSsid`] for an excluded list the
+    /// settings' rules refuse; then nothing is saved.
     pub fn save(&self, edit: SettingsEdit) -> Result<Saved, SteerError> {
         let edit = edit.into_app()?;
         Ok(self.inner.save(&edit).into())

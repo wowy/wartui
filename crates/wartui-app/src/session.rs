@@ -117,7 +117,9 @@ impl Session {
     ///
     /// `announced` is the bridge `link` announced before this capture: `None` for a link not yet
     /// read from, which is what `run` and `bench` hold, and `Some` for one a front end waited on
-    /// for its `Ready` (`ops::ready`) or a [`SessionEnd`] gave back.
+    /// for its `Ready` (`ops::ready`) or a [`SessionEnd`] gave back. A transport remembers a
+    /// bridge only as it connects, so an announced bridge is remembered here when remembering
+    /// is on and holds none: the switch turned on after the link connected.
     ///
     /// `health` is read once per host sample for the host's own health; `None` records nothing.
     ///
@@ -164,6 +166,9 @@ impl Session {
             Err(error) => return Err(Refused { error, link: Box::new(link) }),
         };
 
+        if let Some(bridge) = &announced {
+            settings.remember_announced(bridge.mac);
+        }
         let (snapshot_tx, snapshots) =
             watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
         let (stop, stop_rx) = oneshot::channel();

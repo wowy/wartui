@@ -21,7 +21,7 @@ use wartui_core::store::{StoreConfig, StoreError, open_readonly};
 use wartui_core::ubx;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 
-use common::{Fake, OTHER_BRIDGE, snapshot};
+use common::{BRIDGE, Fake, OTHER_BRIDGE, snapshot};
 
 /// The longest any wait below may take before the test fails rather than hangs.
 const WAIT: Duration = Duration::from_secs(30);
@@ -208,6 +208,49 @@ async fn session_saves_bridge_once_when_transport_remembers_it() {
 
     assert_eq!(store.saves(), 1, "saved once, not every snapshot");
     assert_eq!(store.config().bridge.mac, Some(OTHER_BRIDGE));
+    timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_saves_announced_bridge_when_remembering_is_on_and_holds_none() {
+    // The remember switch turned on after the link connected, so the transport remembered nothing.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Fake::empty();
+    let memory = BridgeMemory::none();
+    let announced = snapshot(Some(BRIDGE)).bridge;
+    let session = Session::start(
+        config(&dir.path().join("wartui.db")),
+        fleet(1),
+        announced,
+        None,
+        kept(&store, &memory),
+    )
+    .expect("starting");
+
+    until(|| store.text().is_some()).await;
+    assert_eq!(store.config().bridge.mac, Some(BRIDGE));
+    assert_eq!(memory.recall(), Some(BRIDGE));
+    timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_keeps_remembered_bridge_when_another_is_announced() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Fake::empty();
+    let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
+    let announced = snapshot(Some(BRIDGE)).bridge;
+    let session = Session::start(
+        config(&dir.path().join("wartui.db")),
+        fleet(1),
+        announced,
+        None,
+        kept(&store, &memory),
+    )
+    .expect("starting");
+
+    until(|| store.text().is_some()).await;
+    assert_eq!(store.config().bridge.mac, Some(OTHER_BRIDGE));
+    assert_eq!(memory.recall(), Some(OTHER_BRIDGE));
     timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
 }
 

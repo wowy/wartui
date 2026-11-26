@@ -9,10 +9,12 @@
 //! part way through removes the partial file, so a retry is not refused by it.
 //!
 //! **[`ExportOptions`] are `wartui export`'s flags**, each defaulting as the CLI does. The
-//! summary crosses flattened: every count as the export counted it, and each node by the name a
-//! report gives it (`wartui_app::export::NodeNames`).
+//! excluded list is the settings', as the CLI's is. The summary crosses flattened: every count as
+//! the export counted it, and each node by the name a report gives it
+//! (`wartui_app::export::NodeNames`).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use wartui_app::export::{self as app, ExportError as AppError, OutName};
 use wartui_core::export::{
@@ -23,7 +25,7 @@ use wartui_core::store::StoreError;
 use wartui_proto::mac;
 
 use crate::runtime::runtime;
-use crate::settings::chain;
+use crate::settings::{Settings, chain};
 
 /// Which rows an export writes.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -32,9 +34,6 @@ pub struct ExportOptions {
     /// `wartui export` defaults; `0` writes one row per network.
     #[uniffi(default)]
     pub recapture_secs: Option<u32>,
-    /// Wi-Fi networks left out, matched byte for byte. None by default.
-    #[uniffi(default)]
-    pub excluded_ssids: Vec<String>,
 }
 
 /// One node's share of an export.
@@ -213,22 +212,23 @@ impl From<AppError> for ExportError {
 }
 
 /// Write `db_path`'s capture as a WiGLE CSV at `out_path`, which must not exist, stamped with
-/// `app_version`.
+/// `app_version`. The Wi-Fi networks `settings` exclude are left out.
 ///
 /// # Errors
 /// The step that failed.
 #[uniffi::export]
 pub async fn export_wigle_csv(
+    settings: Arc<Settings>,
     db_path: String,
     out_path: String,
     options: ExportOptions,
     app_version: String,
 ) -> Result<Exported, ExportError> {
+    let excluded = settings.app().saved().excluded_ssids;
     let filter = ExportFilter {
         recapture_secs: options.recapture_secs.map_or(DEFAULT_RECAPTURE_SECS, u64::from),
         after_uploads: None,
-        excluded_ssids: wartui_app::settings::excluded_ssid_bytes(&options.excluded_ssids)
-            .collect(),
+        excluded_ssids: wartui_app::settings::excluded_ssid_bytes(&excluded).collect(),
     };
     let writing = runtime().spawn_blocking(move || {
         let (db, out) = (Path::new(&db_path), Path::new(&out_path));

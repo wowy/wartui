@@ -351,7 +351,7 @@ impl Ui {
 
     /// Show the bridge's answer to a format, once.
     pub(super) fn poll_sd(&mut self, snapshot: &Snapshot) {
-        let Some(answer) = View::of(snapshot, self.link()).answers.sd else { return };
+        let Some(answer) = snapshot.sd_answer else { return };
         if self.sd_shown == Some(answer.id) {
             return;
         }
@@ -359,15 +359,14 @@ impl Ui {
         self.say(sd_formatted_text(answer.outcome), snapshot);
     }
 
-    /// Show the bridge's answer to a power-cycle, once, worded on the board the bridge announced.
+    /// Show the bridge's answer to a power-cycle, once, worded on the board it arrived on.
     pub(super) fn poll_power(&mut self, snapshot: &Snapshot) {
-        let Some(answer) = View::of(snapshot, self.link()).answers.power else { return };
+        let Some(answer) = snapshot.power_answer else { return };
         if self.power_shown == Some(answer.id) {
             return;
         }
         self.power_shown = Some(answer.id);
-        let Some(slot) = Slot::from_u8(answer.slot.index) else { return };
-        self.say(power_cycled_text(snapshot.node_board(), slot, answer.outcome), snapshot);
+        self.say(power_cycled_text(answer.board, answer.slot, answer.outcome), snapshot);
     }
 
     /// Open the settings modal, seeded from what is in force.
@@ -583,6 +582,22 @@ mod tests {
         ui.say("something since".to_owned(), &snapshot);
         ui.poll_power(&snapshot);
         assert_eq!(ui.notice(snapshot.now_ms), Some("something since"));
+    }
+
+    #[test]
+    fn ui_words_power_cycle_answer_on_its_board_when_announced_board_differs() {
+        use wartui_core::engine::PowerAnswer;
+        use wartui_proto::bus::NodeBoard;
+        use wartui_proto::link::PowerOutcome;
+        // B1 is N8 on a carrier-14 and N4 on a carrier-6.
+        let mut snapshot = on_board(NodeBoard::Carrier6);
+        let mut ui = idle();
+        let slot = Slot::new(1, 0).expect("B1");
+        let board = NodeBoard::Carrier14;
+        snapshot.power_answer =
+            Some(PowerAnswer { id: 1, slot, board, outcome: PowerOutcome::Done });
+        ui.poll_power(&snapshot);
+        assert_eq!(ui.notice(snapshot.now_ms), Some("N8 power-cycled"));
     }
 
     #[test]
