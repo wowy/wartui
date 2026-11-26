@@ -48,38 +48,31 @@
 //! a scan (`wartui_bridge::ble`).
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
+use wartui_app::ops::{self, Cleared};
 #[cfg(any(target_os = "linux", test))]
 use wartui_bridge::DisconnectCause;
+#[cfg(any(target_os = "linux", test))]
+use wartui_bridge::LinkEvent;
+use wartui_bridge::LinkHandle;
 #[cfg(any(target_os = "linux", test))]
 use wartui_bridge::ble::Advertiser;
 use wartui_bridge::serial::{self, Probed};
 use wartui_bridge::spec::BridgeSpec;
-use wartui_bridge::{LinkEvent, LinkHandle};
 #[cfg(any(target_os = "linux", test))]
 use wartui_proto::link::HOST_SILENCE_SECS;
-use wartui_proto::link::{
-    BluetoothStatus, BridgeToHost, HostToBridge, PAIR_WINDOW_SECS, PairWindow,
-};
+use wartui_proto::link::{BluetoothStatus, PAIR_WINDOW_SECS, PairWindow};
 use wartui_proto::mac::{self, Mac};
 
 use crate::OnOff;
 use crate::config::Link;
 #[cfg(any(target_os = "linux", test))]
 use crate::status::bonds_text;
-use crate::status::{pairing_text, wait_for_ready, wait_for_status, wardrive_esp_text};
-
-/// How long the bridge has to answer a status request.
-const REPLY_TIMEOUT: Duration = crate::CONNECT_NOTICE_AFTER;
-
-/// How long `forget` listens for a fault once the bonds are cleared.
-const SETTLE: Duration = Duration::from_secs(1);
-
-/// How long `wardrive-esp` listens for a fault once the setting is sent, as `wartui pool` does.
-const SETTING_SETTLE: Duration = Duration::from_millis(500);
+use crate::status::{
+    NO_STATUS, link_error, pairing_text, print_fault, wait_for_ready, wardrive_esp_text,
+};
 
 /// What turning `wardrive-esp` on lets a stranger do.
 const PHONES_NOTICE: &str = "Any phone in range can now link to the bridge with no pairing, hold \
@@ -321,8 +314,8 @@ async fn open_over_usb(path: &str) -> Result<(Mac, BluetoothStatus)> {
         let info = wait_for_ready(&mut link, Link::Usb, crate::CONNECT_NOTICE_AFTER)
             .await?
             .context("the bridge did not announce itself")?;
-        link.send_bulk(HostToBridge::OpenPairing).context("queueing the request")?;
-        Ok((info.mac, bluetooth_status(&mut link).await?))
+        let opened = ops::open_pairing(&mut link, &mut print_fault).await;
+        Ok((info.mac, opened.map_err(|error| link_error(error, NO_STATUS))?.bluetooth))
     }
     .await;
     link.close().await;
@@ -331,14 +324,8 @@ async fn open_over_usb(path: &str) -> Result<(Mac, BluetoothStatus)> {
 
 /// Ask the bridge for its status, and return its Bluetooth host link.
 async fn bluetooth_status(link: &mut LinkHandle) -> Result<BluetoothStatus> {
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let status = tokio::time::timeout(REPLY_TIMEOUT, wait_for_status(link))
-        .await
-        .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { bluetooth, .. } = status else {
-        unreachable!("wait_for_status only returns Status")
-    };
-    Ok(bluetooth)
+    let status = ops::status(link, ops::REPLY_TIMEOUT, &mut print_fault).await;
+    Ok(status.map_err(|error| link_error(error, NO_STATUS))?.bluetooth)
 }
 
 /// What `pair` says once the bridge `found` keeps the bond.
@@ -788,7 +775,6 @@ async fn forget(args: ForgetArgs) -> Result<()> {
         crate::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
             .await?;
     let name = format!("bridge {}", mac::short(&info.mac));
-    link.send_bulk(HostToBridge::ClearBonds).context("queueing the request")?;
     println!("clearing every Bluetooth bond on bridge {}", mac::full(&info.mac));
     let cleared = cleared(&mut link, over).await;
     link.close().await;
@@ -807,15 +793,18 @@ async fn wardrive_esp(args: WardriveEspArgs) -> Result<()> {
         crate::connect_one(args.bridge.as_deref(), args.link_flag.link, args.config.as_deref())
             .await?;
     let wanted = args.state.map(OnOff::is_on);
-    if let Some(on) = wanted {
-        link.send_bulk(HostToBridge::SetWardriveEsp { on }).context("queueing the setting")?;
-        let state = if on { "on" } else { "off" };
-        println!("turning wardrive esp {state} on bridge {}", mac::full(&info.mac));
-        crate::settle(&mut link, SETTING_SETTLE).await?;
-    }
-    let bluetooth = bluetooth_status(&mut link).await?;
+    let (bluetooth, taken) = match wanted {
+        Some(on) => {
+            let state = if on { "on" } else { "off" };
+            println!("turning wardrive esp {state} on bridge {}", mac::full(&info.mac));
+            let set = ops::set_wardrive_esp(&mut link, on, &mut print_fault).await;
+            let set = set.map_err(|error| link_error(error, NO_STATUS))?;
+            (set.status.bluetooth, set.taken)
+        }
+        None => (bluetooth_status(&mut link).await?, true),
+    };
     println!("phones     {}", wardrive_esp_text(&bluetooth));
-    if wanted.is_some_and(|on| on != bluetooth.wardrive_esp) {
+    if !taken {
         bail!("the bridge did not take the setting");
     }
     if wanted == Some(true) {
@@ -824,26 +813,15 @@ async fn wardrive_esp(args: WardriveEspArgs) -> Result<()> {
     Ok(())
 }
 
-/// Wait for the bonds to clear. Over USB a status shows them gone. Over Bluetooth this PC's bond
-/// went with them and the bridge disconnects it, so that disconnect is the expected end, and only
-/// a fault is listened for until it, or for [`SETTLE`].
+/// Clear the bonds and wait for them to go (`wartui_app::ops::clear_bonds`). Over USB the status
+/// after shows them gone; over Bluetooth the bridge disconnecting this PC is the expected end.
 async fn cleared(link: &mut LinkHandle, over: Link) -> Result<()> {
-    if over == Link::Bluetooth {
-        let until = tokio::time::Instant::now() + SETTLE;
-        loop {
-            match tokio::time::timeout_at(until, link.recv()).await {
-                Ok(Some(LinkEvent::Message(BridgeToHost::Error { message }))) => {
-                    println!("fault      {message}");
-                }
-                Ok(Some(LinkEvent::Disconnected { .. }) | None) | Err(_) => return Ok(()),
-                Ok(Some(_)) => {}
-            }
-        }
-    }
-    crate::settle(link, SETTLE).await?;
-    let bluetooth = bluetooth_status(link).await?;
-    println!("pairing    {}", pairing_text(&bluetooth));
-    if bluetooth.bonds > 0 {
+    let cleared = ops::clear_bonds(link, over, &mut print_fault)
+        .await
+        .map_err(|error| link_error(error, NO_STATUS))?;
+    let Cleared::Status(status) = cleared else { return Ok(()) };
+    println!("pairing    {}", pairing_text(&status.bluetooth));
+    if status.bluetooth.bonds > 0 {
         bail!("the bridge did not clear its bonds");
     }
     Ok(())

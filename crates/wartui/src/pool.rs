@@ -9,19 +9,14 @@
 //! fault prints first.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_app::ops;
 use wartui_proto::mac;
 use wartui_proto::plan::ChannelPool;
 
-/// How long the bridge has to answer the status request.
-const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
-
-/// How long to listen for a fault after setting the pool.
-const SETTLE: Duration = Duration::from_millis(500);
+use crate::status::{NO_STATUS, link_error, print_fault};
 
 /// A channel pool, as the command line spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -71,21 +66,20 @@ pub async fn run(args: Args) -> Result<()> {
             .await?;
 
     let wanted = args.pool.map(ChannelPool::from);
-    if let Some(pool) = wanted {
-        link.send_bulk(HostToBridge::SetPool { pool }).context("queueing the pool")?;
-        println!("setting the pool to {pool} on bridge {}", mac::full(&info.mac));
-        super::settle(&mut link, SETTLE).await?;
-    }
-
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let status = tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status(&mut link))
-        .await
-        .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { pool, .. } = status else {
-        unreachable!("wait_for_status only returns Status")
+    let (status, taken) = match wanted {
+        Some(pool) => {
+            println!("setting the pool to {pool} on bridge {}", mac::full(&info.mac));
+            let set = ops::set_pool(&mut link, pool, &mut print_fault).await;
+            let set = set.map_err(|error| link_error(error, NO_STATUS))?;
+            (set.status, set.taken)
+        }
+        None => {
+            let status = ops::status(&mut link, ops::REPLY_TIMEOUT, &mut print_fault).await;
+            (status.map_err(|error| link_error(error, NO_STATUS))?, true)
+        }
     };
-    println!("pool       {pool}");
-    if wanted.is_some_and(|wanted| wanted != pool) {
+    println!("pool       {}", status.pool);
+    if !taken {
         bail!("the bridge did not take the pool");
     }
     Ok(())

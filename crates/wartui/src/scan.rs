@@ -7,7 +7,7 @@
 //! mode across a reboot.
 //!
 //! Each action waits for the bridge to report the change, and fails when it does not within
-//! [`REPLY_TIMEOUT`]. `start` then reads the bridge's reports for [`SETTLE`] before it prints the
+//! [`REPLY_TIMEOUT`]. `start` then reads the bridge's reports for [`ops::PLAN_SETTLE`] before it prints the
 //! plan, since a node joins the plan on its next heartbeat. A fleet still short of two nodes gets
 //! no Bluetooth node, which is said and is not a failure: the bridge gives Bluetooth to a node once
 //! a second joins. Without an action, nothing is sent but a status request.
@@ -16,27 +16,19 @@
 //! port, so this runs only while none is attached; in `run`, settings' `bluetooth` row toggles
 //! it and quitting stops the scan.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
-use wartui_bridge::{LinkEvent, LinkHandle};
+use std::path::PathBuf;
+use wartui_app::ops::{self, REPLY_TIMEOUT};
+use wartui_bridge::LinkHandle;
 use wartui_core::runtime::stop_scan;
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::fleet::{Report, ScanMode};
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::fleet::ScanMode;
 use wartui_proto::mac;
-use wartui_proto::plan::PlanSettings;
 
-use crate::status::{ble_text, plan_lines, planner_text, scan_text};
-
-/// How long the bridge has to report a change, or to answer the status request.
-const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
-
-/// How long `start` reads reports once the bridge shows the mode: an idle node heartbeats every
-/// second, so every node present has joined the plan by then.
-const SETTLE: Duration = Duration::from_secs(3);
+use crate::status::{
+    NO_STATUS, ble_text, link_error, plan_lines, planner_text, print_fault, scan_text,
+};
 
 #[derive(ClapArgs)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -161,14 +153,10 @@ async fn act(link: &mut LinkHandle, board: NodeBoard, wanted: Wanted) -> Result<
 
 /// The mode, the Bluetooth node and every share, from one status request.
 async fn show(link: &mut LinkHandle, board: NodeBoard) -> Result<Vec<String>> {
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
-    let (status, plan) =
-        tokio::time::timeout(REPLY_TIMEOUT, crate::status::wait_for_status_and_plan(link))
-            .await
-            .context("the bridge did not answer a status request")??;
-    let BridgeToHost::Status { scan, ble, pool, planner, .. } = status else {
-        unreachable!("wait_for_status_and_plan only returns Status")
-    };
+    let (status, plan) = ops::status_and_plan(link, REPLY_TIMEOUT, &mut print_fault)
+        .await
+        .map_err(|error| link_error(error, NO_STATUS))?;
+    let ops::Status { scan, ble, pool, planner, .. } = status;
     let mut lines = vec![
         format!("scan       {}", scan_text(scan)),
         format!("bluetooth  {}", pick_text(board, scan, ble)),
@@ -181,14 +169,11 @@ async fn show(link: &mut LinkHandle, board: NodeBoard) -> Result<Vec<String>> {
 
 /// Start the scan, wait for the bridge to report it, then read its plan as nodes join.
 async fn start(link: &mut LinkHandle, board: NodeBoard, bluetooth: bool) -> Result<Vec<String>> {
-    link.send_urgent(HostToBridge::StartScan { bluetooth }).context("queueing the start")?;
-    link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
+    let started = ops::start_scan(link, bluetooth, &mut print_fault)
+        .await
+        .map_err(|error| link_error(error, NO_STATUS))?;
+    let Some(seen) = started else { bail!("the bridge did not report the scan started") };
     let mode = if bluetooth { ScanMode::WifiBluetooth } else { ScanMode::Wifi };
-    let mut seen = Seen::default();
-    if !watch(link, REPLY_TIMEOUT, &mut seen, |seen| seen.mode == Some(mode)).await? {
-        bail!("the bridge did not report the scan started");
-    }
-    watch(link, SETTLE, &mut seen, |_| false).await?;
     let mut lines = vec![format!("scan       {}", scan_text(mode))];
     if bluetooth {
         lines.push(format!("bluetooth  {}", pick_text(board, mode, seen.pick)));
@@ -212,64 +197,6 @@ fn pick_text(board: NodeBoard, mode: ScanMode, pick: Option<Slot>) -> String {
     }
 }
 
-/// What the bridge has reported so far.
-#[derive(Debug, Default)]
-struct Seen {
-    /// Its mode, from a `Status` or a `Fleet` report.
-    mode: Option<ScanMode>,
-    /// The node it gave Bluetooth, from the same.
-    pick: Option<Slot>,
-    /// Its last `Fleet` report.
-    plan: Option<Report>,
-    /// The planner its last `Status` reported.
-    planner: Option<PlanSettings>,
-}
-
-impl Seen {
-    /// Take in one link event.
-    fn note(&mut self, event: &BridgeToHost) {
-        match event {
-            BridgeToHost::Status { scan, ble, planner, .. } => {
-                self.mode = Some(*scan);
-                self.pick = *ble;
-                self.planner = Some(*planner);
-            }
-            BridgeToHost::Fleet(report) => {
-                self.mode = Some(report.mode);
-                self.pick = report.shares.iter().find(|share| share.ble).map(|share| share.slot);
-                self.plan = Some(report.clone());
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Read the link for up to `wait`, noting each report in `seen`, until `done` holds. Prints each
-/// fault the bridge reports meanwhile. `Ok(false)` when the wait ran out first.
-async fn watch(
-    link: &mut LinkHandle,
-    wait: Duration,
-    seen: &mut Seen,
-    done: impl Fn(&Seen) -> bool,
-) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + wait;
-    while !done(seen) {
-        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
-            return Ok(false);
-        };
-        match event {
-            Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
-                println!("fault      {message}");
-            }
-            Some(LinkEvent::Message(message)) => seen.note(&message),
-            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
-        }
-    }
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use wartui_bridge::sim::{SimConfig, SimTransport};
@@ -285,7 +212,7 @@ mod tests {
         let ready = crate::status::wait_for_ready(
             &mut link,
             crate::config::Link::Usb,
-            super::REPLY_TIMEOUT,
+            wartui_app::ops::REPLY_TIMEOUT,
         );
         let info = ready.await.expect("the simulator connects").expect("in time");
         (link, info.node_board)

@@ -1,6 +1,6 @@
 [package]
 name = "wartui-app"
-description = "The headless app layer a wartui front end binds to: its settings, and the captures it runs."
+description = "The headless app layer a wartui front end binds to: its settings, the captures it runs, and what it asks a bridge between them."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "sync"] }
+tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
 toml = "1"
 tracing = "0.1.44"
 wartui-bridge = { path = "../wartui-bridge" }

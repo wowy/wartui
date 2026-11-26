@@ -11,21 +11,16 @@
 //! the carrier's switch.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_app::ops::{self, POWER_CYCLE_TIMEOUT};
 use wartui_core::engine::{NO_CARRIER, power_cycled_text};
 use wartui_proto::bus::{NodeBoard, Slot};
-use wartui_proto::link::{BridgeToHost, HostToBridge, PowerOutcome};
+use wartui_proto::link::PowerOutcome;
 use wartui_proto::mac;
 
-/// How long the bridge has to answer. The worst case, on a carrier whose node supply is out, is
-/// about 5 s: a cycle already running ahead of it (1 s off and its tries at power-on), up to 14
-/// nodes powered 100 ms apart once the request ends the scouting, and its own 1 s off. The rest
-/// is room, though not for a queue of several requests ahead of it.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
+use crate::status::{link_error, print_fault};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -55,13 +50,11 @@ pub async fn run(args: Args) -> Result<()> {
     let board = info.node_board;
     let slot = slot_for(board, &args.slot).map_err(anyhow::Error::msg)?;
 
-    link.send_bulk(HostToBridge::PowerCycle { slot }).context("queueing the power-cycle")?;
     println!("power-cycling {} on bridge {}", board.label(slot), mac::full(&info.mac));
-    let outcome = tokio::time::timeout(ANSWER_TIMEOUT, wait_for_answer(&mut link, slot))
+    let no_answer = format!("the bridge did not answer within {}s", POWER_CYCLE_TIMEOUT.as_secs());
+    let outcome = ops::power_cycle(&mut link, slot, &mut print_fault)
         .await
-        .with_context(|| {
-        format!("the bridge did not answer within {}s", ANSWER_TIMEOUT.as_secs())
-    })??;
+        .map_err(|error| link_error(error, &no_answer))?;
     let text = power_cycled_text(board, slot, outcome);
     if outcome != PowerOutcome::Done {
         bail!("{text}");
@@ -74,25 +67,6 @@ pub async fn run(args: Args) -> Result<()> {
 /// power, and a carrier takes only the names it drives.
 fn slot_for(board: NodeBoard, name: &str) -> Result<Slot, String> {
     crate::text::carrier_slot_named(board, name, NO_CARRIER)
-}
-
-/// Wait for the answer about `slot`, printing each fault the bridge reports meanwhile.
-async fn wait_for_answer(link: &mut LinkHandle, slot: Slot) -> Result<PowerOutcome> {
-    loop {
-        match link.recv().await {
-            Some(LinkEvent::Message(BridgeToHost::PowerCycled { slot: answered, outcome }))
-                if answered == slot =>
-            {
-                return Ok(outcome);
-            }
-            Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
-                println!("fault      {message}");
-            }
-            Some(LinkEvent::Disconnected { reason, .. }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
-        }
-    }
 }
 
 #[cfg(test)]
