@@ -290,7 +290,7 @@ impl Ui {
         if !snapshot.awaiting_fix {
             return None;
         }
-        let tick = if self.controls.settings().saved().gps.waits_for_fix() { ' ' } else { 'x' };
+        let tick = if self.controls.settings().waits_for_fix() { ' ' } else { 'x' };
         Some(vec![
             "Waiting for a GPS fix before the scan starts.".to_owned(),
             format!("gps: {}", gps::status(snapshot).0),
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_shows_sky_while_gps_modal_is_open() {
+    fn ui_shows_sky_when_gps_modal_is_open() {
         let snapshot = with_bridge_sky(4);
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = steering(&tx, Settings::default());

@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn status_cmd_words_no_answer_as_a_timed_out_request() {
+    async fn status_cmd_words_no_answer_as_a_timed_out_request_when_status_never_comes() {
         let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
             .await
             .expect_err("runs out");

@@ -269,11 +269,14 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let health = Box::new(wartui_desktop::health::read);
-    let session = Session::start(session, link, Some(health), settings).map_err(|e| match e {
-        // Already names the path and says what to do.
-        StoreError::Exists(_) => anyhow::Error::new(e),
-        e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
-    })?;
+    let session =
+        Session::start(session, link, None, Some(health), settings).map_err(|refused| {
+            match refused.error {
+                // Already names the path and says what to do.
+                e @ StoreError::Exists(_) => anyhow::Error::new(e),
+                e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
+            }
+        })?;
     let outcome = tui::run(session.snapshots(), session.controls(), upload).await;
     // Always stopped, even when the view failed: this is what commits the last batch and writes
     // the capture's end time. The link it gives back closes as `main` returns.

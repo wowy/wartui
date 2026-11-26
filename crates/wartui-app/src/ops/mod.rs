@@ -286,7 +286,8 @@ pub async fn status(
 }
 
 /// [`status`], then the `Fleet` report the bridge sends behind it, or the last one before it when
-/// none follows within [`PLAN_AFTER`]. `within` bounds both.
+/// none follows within [`PLAN_AFTER`]. `within` bounds the wait for the `Status`; the plan wait
+/// has its own [`PLAN_AFTER`] cap, so a `Status` that comes late is kept.
 ///
 /// # Errors
 /// As [`status`].
@@ -296,27 +297,24 @@ pub async fn status_and_plan(
     fault: &mut dyn FnMut(&str),
 ) -> Result<(Status, Option<Report>), LinkError> {
     send(link, HostToBridge::GetStatus, Request::Status)?;
-    let read = async {
-        let mut plan = None;
-        let status = answer(link, fault, |message| match message {
-            BridgeToHost::Fleet(report) => {
-                plan = Some(report);
-                None
-            }
-            message => Status::from_message(message),
-        })
-        .await?;
-        let deadline = tokio::time::Instant::now() + PLAN_AFTER;
-        loop {
-            let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
-                return Ok((status, plan));
-            };
-            if let Some(BridgeToHost::Fleet(report)) = message(event, fault)? {
-                return Ok((status, Some(report)));
-            }
+    let mut plan = None;
+    let answered = answer(link, fault, |message| match message {
+        BridgeToHost::Fleet(report) => {
+            plan = Some(report);
+            None
         }
-    };
-    tokio::time::timeout(within, read).await.map_err(LinkError::NoAnswer)?
+        message => Status::from_message(message),
+    });
+    let status = tokio::time::timeout(within, answered).await.map_err(LinkError::NoAnswer)??;
+    let deadline = tokio::time::Instant::now() + PLAN_AFTER;
+    loop {
+        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
+            return Ok((status, plan));
+        };
+        if let Some(BridgeToHost::Fleet(report)) = message(event, fault)? {
+            return Ok((status, Some(report)));
+        }
+    }
 }
 
 /// Send `command`, let it land for `settle`, then read the status back and judge whether it took.

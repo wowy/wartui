@@ -117,7 +117,7 @@ fn settings_load_adds_no_bridge_hint_when_unknown_table_is_another() {
 }
 
 #[test]
-fn settings_load_names_store_in_errors() {
+fn settings_load_names_store_when_settings_are_refused() {
     let error = load(Fake::holding("[gps]\nbridge-rate-hz = 9\n").as_ref()).unwrap_err();
     assert_eq!(error.to_string(), "in wartui.toml");
 }

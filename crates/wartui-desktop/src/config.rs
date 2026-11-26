@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn config_file_names_its_path_as_its_place() {
+    fn config_file_names_its_path_as_its_place_when_asked() {
         let path = PathBuf::from("/custom/wartui.toml");
         assert_eq!(named(&path).place(), "/custom/wartui.toml");
         assert_eq!(named(&path).path(), path);

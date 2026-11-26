@@ -20,10 +20,11 @@
 //!
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API keys, so a first-time operator has a place to paste them. It
-//! never rewrites an existing file at startup. Its view does, through one save path
-//! (`wartui_app::settings::Settings`): the settings modal, a change to the bridge the transport
-//! remembers, the link the run connected over, which writes `[bridge] link`, and the box on the
-//! waiting-for-GPS pop-up, which writes `[gps] wait-for-fix`.
+//! never rewrites an existing file at startup. Every later write goes through one save path
+//! (`wartui_app::settings::Settings`). The view saves the settings modal and the box on the
+//! waiting-for-GPS pop-up, which writes `[gps] wait-for-fix`. The run's session
+//! (`wartui_app::session`) saves a change to the bridge the transport remembers, and the link the
+//! run connected over, which writes `[bridge] link`.
 //! `flash-bridge` saves the board it found and flashed as the bridge, unless remembering
 //! is off, so `run` and the next `flash-bridge` open the new bridge first. A board named
 //! with `--bridge` is often some other device, and is not saved.

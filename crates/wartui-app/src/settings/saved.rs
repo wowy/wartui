@@ -154,6 +154,12 @@ impl Settings {
         self.lock().saved.clone()
     }
 
+    /// Whether `run` waits for a GPS fix at launch, as the settings were last loaded or saved.
+    #[must_use]
+    pub fn waits_for_fix(&self) -> bool {
+        self.lock().saved.gps.waits_for_fix()
+    }
+
     /// The link this run reaches its bridge over, or `None` under the simulator.
     #[must_use]
     pub fn link(&self) -> Option<Link> {

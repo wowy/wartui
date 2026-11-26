@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::pace::PacedSender;
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
 use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::{BridgeToHost, HostToBridge, Undelivered};
@@ -80,10 +80,19 @@ pub const COMMAND_QUEUE: usize = 8;
 /// `wartui bench`. Borrows the link, which stays open after a stop, so the caller can go on to
 /// update over it or start another capture.
 ///
+/// `announced` is the bridge the link announced before this capture began, when the caller took
+/// its `Connected` already: a link a previous capture gave back, or one a front end waited on for
+/// the bridge's `Ready`. The transport sends `Connected` again only on a new life, so the capture
+/// takes it as its first event, through the same path as one off the link. `None` is a link not
+/// yet read from.
+///
 /// `health` is called once per host sample ([`HOST_SAMPLE`]) for the host's own health. `None`
 /// records [`Health::default`], every value unread.
+// Each is a separate end the capture is wired to; a struct to hold them would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive(
     link: &mut LinkHandle,
+    announced: Option<BridgeInfo>,
     store: Store,
     mut engine: FleetEngine,
     snapshot: watch::Sender<Arc<Snapshot>>,
@@ -112,41 +121,46 @@ pub async fn drive(
     let mut sky_lists = false;
     // Once `stop` has fired on a capture: when to give up waiting for the P4 to stop.
     let mut quitting: Option<tokio::time::Instant> = None;
+    let mut first = announced.map(|info| Event::Link(LinkEvent::Connected(info)));
 
     loop {
-        let event = tokio::select! {
-            biased;
-            _ = &mut stop, if quitting.is_none() => {
-                if !(engine.drives_capture() && engine.bridge_connected()) {
+        let event = if let Some(event) = first.take() {
+            event
+        } else {
+            tokio::select! {
+                biased;
+                _ = &mut stop, if quitting.is_none() => {
+                    if !(engine.drives_capture() && engine.bridge_connected()) {
+                        break;
+                    }
+                    quitting = Some(tokio::time::Instant::now() + QUIT_WAIT);
+                    Event::Command(Command::StopScan)
+                }
+                () = tokio::time::sleep_until(quitting.unwrap_or_else(tokio::time::Instant::now)),
+                    if quitting.is_some() =>
+                {
+                    tracing::warn!("the bridge did not report its scan stopped; quitting anyway");
                     break;
                 }
-                quitting = Some(tokio::time::Instant::now() + QUIT_WAIT);
-                Event::Command(Command::StopScan)
+                // Ahead of the ticker, so pressing a key does not wait out a tick
+                // and then miss the heartbeat it was meant to catch.
+                command = commands.recv(), if steerable => match command {
+                    Some(command) => Event::Command(command),
+                    // The UI has gone. The capture carries on to the end, unsteered.
+                    None => {
+                        steerable = false;
+                        continue;
+                    }
+                },
+                _ = ticker.tick() => Event::Tick,
+                _ = host_ticker.tick() => Event::HostSample(sample(&store)),
+                event = link.recv() => match event {
+                    Some(event) => Event::Link(event),
+                    // The transport gave up. A cable falling out is different: it surfaces as
+                    // `Disconnected` and reconnects.
+                    None => break,
+                },
             }
-            () = tokio::time::sleep_until(quitting.unwrap_or_else(tokio::time::Instant::now)),
-                if quitting.is_some() =>
-            {
-                tracing::warn!("the bridge did not report its scan stopped; quitting anyway");
-                break;
-            }
-            // Ahead of the ticker, so pressing a key does not wait out a tick
-            // and then miss the heartbeat it was meant to catch.
-            command = commands.recv(), if steerable => match command {
-                Some(command) => Event::Command(command),
-                // The UI has gone. The capture carries on to the end, unsteered.
-                None => {
-                    steerable = false;
-                    continue;
-                }
-            },
-            _ = ticker.tick() => Event::Tick,
-            _ = host_ticker.tick() => Event::HostSample(sample(&store)),
-            event = link.recv() => match event {
-                Some(event) => Event::Link(event),
-                // The transport gave up. A cable falling out is different: it surfaces as
-                // `Disconnected` and reconnects.
-                None => break,
-            },
         };
 
         match &event {

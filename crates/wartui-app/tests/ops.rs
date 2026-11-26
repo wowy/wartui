@@ -197,7 +197,7 @@ async fn ops_set_fan_reads_duty_back_when_bridge_takes_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ops_set_sd_log_and_wardrive_esp_read_back_what_was_sent() {
+async fn ops_set_sd_log_and_wardrive_esp_read_back_what_was_sent_when_each_is_switched() {
     let mut link = sim(1).await;
     for on in [false, true] {
         let log = ops::set_sd_log(&mut link, on, &mut ignore).await.expect("the log");
@@ -252,4 +252,23 @@ async fn ops_clear_bonds_ends_on_disconnect_when_over_bluetooth() {
     let cleared = ops::clear_bonds(&mut link, Link::Bluetooth, &mut ignore).await;
 
     assert!(matches!(cleared, Ok(Cleared::Disconnected)), "{cleared:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ops_status_and_plan_keeps_status_when_it_arrives_late() {
+    let (mut link, plumbing) = link_pair();
+    // The answer comes half a second before the wait would run out, and no plan follows it.
+    let answer = tokio::spawn(async move {
+        tokio::time::sleep(ops::REPLY_TIMEOUT - Duration::from_millis(500)).await;
+        plumbing.events.send(LinkEvent::Message(status_message(ChannelPool::Us))).await.unwrap();
+        plumbing
+    });
+
+    let (status, plan) = ops::status_and_plan(&mut link, ops::REPLY_TIMEOUT, &mut ignore)
+        .await
+        .expect("the late status is kept");
+
+    assert_eq!(status.pool, ChannelPool::Us);
+    assert!(plan.is_none(), "no plan came behind it");
+    drop(answer.await.expect("the scripted bridge"));
 }

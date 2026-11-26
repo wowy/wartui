@@ -73,7 +73,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(async move {
         let mut link = link;
-        drive(&mut link, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
     });
 
     // Every node, because the last one to arrive re-cuts every share: a check
@@ -150,7 +150,7 @@ async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(async move {
         let mut link = link;
-        drive(&mut link, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
     });
 
     let outdated = SimTransport::node_mac(1);

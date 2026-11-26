@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use wartui_app::session::{Controls, Session, SessionConfig};
+use wartui_app::session::{Controls, Refused, Session, SessionConfig};
 use wartui_app::settings::{Config, Link, Settings, SettingsStore};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::sim::{SimConfig, SimTransport};
@@ -80,8 +80,36 @@ async fn session_records_capture_when_simulated_fleet_runs() {
     let dir = tempfile::tempdir().expect("temp dir");
     let db = dir.path().join("wartui.db");
     let session =
-        Session::start(config(&db), fleet(3), None, Settings::default()).expect("starting");
+        Session::start(config(&db), fleet(3), None, None, Settings::default()).expect("starting");
 
+    seen(&session, |snapshot| snapshot.nodes.len() == 3 && snapshot.counters.observations > 0)
+        .await;
+    let end = timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
+
+    assert!(end.report.written > 0, "rows reached the store: {:?}", end.report);
+    let conn = open_readonly(&db).expect("reopening the capture");
+    let stored: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert!(stored > 0, "observations reached the disk");
+    let ended: Option<i64> =
+        conn.query_row("SELECT ended_at FROM capture", [], |r| r.get(0)).expect("capture row");
+    assert!(ended.is_some(), "a stopped capture closes its capture row out");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_records_capture_when_started_on_link_a_session_gave_back() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = dir.path().join("first.db");
+    let session =
+        Session::start(config(&first), fleet(3), None, None, Settings::default()).expect("first");
+    seen(&session, |snapshot| snapshot.bridge.is_some()).await;
+    let end = timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
+    assert!(end.bridge.is_some(), "the link still had its bridge announced");
+
+    // The transport announced this bridge once; the second capture is handed the announcement.
+    let db = dir.path().join("second.db");
+    let session = Session::start(config(&db), end.link, end.bridge, None, Settings::default())
+        .expect("second");
     seen(&session, |snapshot| snapshot.nodes.len() == 3 && snapshot.counters.observations > 0)
         .await;
     let end = timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
@@ -99,9 +127,14 @@ async fn session_records_capture_when_simulated_fleet_runs() {
 #[tokio::test(start_paused = true)]
 async fn session_returns_open_link_when_stopped() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let session =
-        Session::start(config(&dir.path().join("wartui.db")), fleet(2), None, Settings::default())
-            .expect("starting");
+    let session = Session::start(
+        config(&dir.path().join("wartui.db")),
+        fleet(2),
+        None,
+        None,
+        Settings::default(),
+    )
+    .expect("starting");
     seen(&session, |snapshot| snapshot.bridge.is_some()).await;
 
     let end = timeout(WAIT, session.stop()).await.expect("stopped in time").expect("no panic");
@@ -127,10 +160,12 @@ async fn session_refuses_start_when_capture_exists() {
     let db = dir.path().join("wartui.db");
     std::fs::write(&db, "").expect("a file in the way");
 
-    let refused = Session::start(config(&db), fleet(1), None, Settings::default());
+    let refused = Session::start(config(&db), fleet(1), None, None, Settings::default());
 
-    assert!(matches!(refused, Err(StoreError::Exists(_))), "{refused:?}");
+    let Err(Refused { error, link }) = refused else { panic!("started over an existing file") };
+    assert!(matches!(error, StoreError::Exists(_)), "{error:?}");
     assert_eq!(std::fs::read(&db).expect("still there"), b"", "the file is left alone");
+    link.send_bulk(HostToBridge::GetStatus).expect("the link comes back, still open");
 }
 
 #[tokio::test(start_paused = true)]
@@ -138,8 +173,9 @@ async fn session_saves_link_when_bridge_announces_itself() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = Fake::empty();
     let settings = kept(&store, &BridgeMemory::default()).over(Link::Bluetooth);
-    let session = Session::start(config(&dir.path().join("wartui.db")), fleet(1), None, settings)
-        .expect("starting");
+    let session =
+        Session::start(config(&dir.path().join("wartui.db")), fleet(1), None, None, settings)
+            .expect("starting");
 
     // No front end calls anything: the session follows the capture on its own.
     until(|| store.text().is_some()).await;
@@ -157,6 +193,7 @@ async fn session_saves_bridge_once_when_transport_remembers_it() {
     let session = Session::start(
         config(&dir.path().join("wartui.db")),
         fleet(1),
+        None,
         None,
         kept(&store, &memory),
     )

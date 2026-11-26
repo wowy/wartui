@@ -14,15 +14,17 @@
 //!
 //! **[`Session::stop`] is the one way out.** It stops the capture, whose engine stops the scan
 //! first, and waits for the store's last batch to commit and the capture's end time to be written,
-//! so a stopped capture is a complete database. It then gives the link back, open, so a phone can
-//! go on to update or start another capture over the one connection.
+//! so a stopped capture is a complete database. It then gives the link back, open, with the bridge
+//! it still had announced, so a phone can go on to update or start another capture over the one
+//! connection: the transport announces a bridge once per life, so the next capture is handed the
+//! announcement rather than waiting for one. A start that is refused gives the link back too.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
-use wartui_bridge::LinkHandle;
+use wartui_bridge::{BridgeInfo, LinkHandle};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::health::HealthReader;
 use wartui_core::position::PositionChain;
@@ -90,6 +92,18 @@ pub struct SessionEnd {
     pub report: StoreReport,
     /// The link the capture ran over, still open.
     pub link: LinkHandle,
+    /// The bridge the link still had announced when the capture stopped, or `None` when the link
+    /// was down. Hand it to the next [`Session::start`] with the link.
+    pub bridge: Option<BridgeInfo>,
+}
+
+/// A capture that did not start, and the link it would have run over, still open.
+#[derive(Debug)]
+pub struct Refused {
+    /// Why the store could not be created.
+    pub error: StoreError,
+    /// Boxed, since the handle is large and an error travels by value.
+    pub link: Box<LinkHandle>,
 }
 
 /// A session's task panicked, so its capture may not have closed out.
@@ -101,16 +115,22 @@ impl Session {
     /// Create the store, build the engine, and spawn the capture and the task that follows it.
     /// A capture starts the scan, and stops it when it ends. Call it inside a tokio runtime.
     ///
+    /// `announced` is the bridge `link` announced before this capture: `None` for a link not yet
+    /// read from, which is what `run` and `bench` hold, and `Some` for one a front end waited on
+    /// for its `Ready` (`ops::ready`) or a [`SessionEnd`] gave back.
+    ///
     /// `health` is read once per host sample for the host's own health; `None` records nothing.
     ///
     /// # Errors
-    /// The store's, when it cannot be created. A capture that exists already is refused.
+    /// [`Refused`], with the store's error and the link, when the store cannot be created. A
+    /// capture that exists already is refused.
     pub fn start(
         config: SessionConfig,
         link: LinkHandle,
+        announced: Option<BridgeInfo>,
         health: Option<HealthReader>,
         settings: Settings,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<Self, Refused> {
         let started = now();
         let info =
             CaptureInfo { notes: config.notes, simulated: config.test_data, link: config.link };
@@ -138,7 +158,11 @@ impl Session {
                 Store::create_with_provenance(&config.store, &info, started.unix_ms, &provenance)
             }
             None => Store::create(&config.store, &info, started.unix_ms),
-        }?;
+        };
+        let store = match store {
+            Ok(store) => store,
+            Err(error) => return Err(Refused { error, link: Box::new(link) }),
+        };
 
         let (snapshot_tx, snapshots) =
             watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
@@ -147,8 +171,17 @@ impl Session {
         let controls = Controls::new(commands, settings);
         let capture = tokio::spawn(async move {
             let mut link = link;
-            let report =
-                drive(&mut link, store, engine, snapshot_tx, command_rx, stop_rx, health).await;
+            let report = drive(
+                &mut link,
+                announced,
+                store,
+                engine,
+                snapshot_tx,
+                command_rx,
+                stop_rx,
+                health,
+            )
+            .await;
             (report, link)
         });
         let follow = tokio::spawn(follow(controls.clone(), snapshots.clone()));
@@ -169,7 +202,7 @@ impl Session {
     }
 
     /// Stop the capture, whose engine stops the scan first, wait for the last batch to commit,
-    /// and give the link back.
+    /// and give the link back with the bridge it still has announced.
     ///
     /// # Errors
     /// [`Panicked`] when a session task panicked.
@@ -179,7 +212,10 @@ impl Session {
         let (report, link) = self.capture.await.map_err(Panicked)?;
         // The capture dropped its snapshot channel on the way out, which ends this one.
         self.follow.await.map_err(Panicked)?;
-        Ok(SessionEnd { report, link })
+        // The capture's last snapshot, which it publishes on the way out.
+        let last = self.snapshots.borrow().clone();
+        let bridge = last.bridge.clone().filter(|_| last.link_up);
+        Ok(SessionEnd { report, link, bridge })
     }
 }
 

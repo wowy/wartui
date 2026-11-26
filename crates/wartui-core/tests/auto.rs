@@ -81,7 +81,7 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(async move {
         let mut link = link;
-        drive(&mut link, store, engine, snapshot_tx, command_rx, stop_rx, None).await
+        drive(&mut link, None, store, engine, snapshot_tx, command_rx, stop_rx, None).await
     });
 
     // Nobody asks for any of this but the run's own start: the nodes turn up and each

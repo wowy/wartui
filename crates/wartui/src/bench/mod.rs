@@ -284,12 +284,13 @@ pub async fn run(args: Args) -> Result<()> {
         record_raw: args.record_raw,
         excluded_ssids: Vec::new(),
         gps_rate_hz: ubx::DEFAULT_RATE_HZ,
-        // No provenance, so the store is created as it always has been for a benchmark.
+        // A benchmark records no provenance.
         build: None,
     };
     let health = Box::new(wartui_desktop::health::read);
     // Its settings are saved nowhere: a benchmark remembers no bridge.
-    let session = Session::start(session, link, Some(health), Settings::default())
+    let session = Session::start(session, link, None, Some(health), Settings::default())
+        .map_err(|refused| refused.error)
         .with_context(|| format!("creating {}", args.db.display()))?;
     let mut snapshot_rx = session.snapshots();
     let controls = session.controls();
