@@ -134,17 +134,26 @@ impl Settings {
         Self { state: Arc::new(Mutex::new(state)) }
     }
 
-    /// The link this run reaches its bridge over. Unset under the simulator.
+    /// The link this run reaches its bridge over, a real one. Clones share the state, so a front
+    /// end that runs a simulated capture and then a real one says so each time.
     #[must_use]
     pub fn over(self, link: Link) -> Self {
-        self.lock().link = Some(link);
+        {
+            let mut state = self.lock();
+            state.link = Some(link);
+            state.simulated = false;
+        }
         self
     }
 
-    /// The simulator's bridge, which is not a board to remember.
+    /// The simulator's bridge, which is not a board to remember, over no link to save.
     #[must_use]
     pub fn simulated(self) -> Self {
-        self.lock().simulated = true;
+        {
+            let mut state = self.lock();
+            state.simulated = true;
+            state.link = None;
+        }
         self
     }
 

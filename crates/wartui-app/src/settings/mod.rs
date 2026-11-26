@@ -24,6 +24,7 @@ mod saved;
 use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use wartui_bridge::remember::BridgeMemory;
 use wartui_proto::mac::{self, Mac};
 
 pub use saved::{Applied, Busy, SaveError, Settings, SettingsEdit};
@@ -76,6 +77,17 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// A handle holding the bridge this table remembers, remembering as `remember` says: on
+    /// unless it is `false`. A transport remembers into it, and [`Settings`] saves from it.
+    #[must_use]
+    pub fn memory(&self) -> BridgeMemory {
+        let memory = BridgeMemory::holding(self.mac)
+            .on_port(self.serial.clone())
+            .on_bluetooth(self.bluetooth_address.clone());
+        memory.set_enabled(self.remember.unwrap_or(true));
+        memory
+    }
+
     /// Whether no key is set, so [`serialize`] writes no `[bridge]` table at all.
     fn is_empty(&self) -> bool {
         self.link.is_none()

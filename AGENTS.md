@@ -40,8 +40,10 @@ cargo test -p wartui-core --test engine engine_ignores_    # tests by name prefi
 
 cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
 
-cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-apple-ios
-cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-linux-android
+cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-apple-ios
+cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-linux-android
+
+crates/wartui-ffi/smoke/run.sh                             # the Kotlin and Swift bindings, end to end
 ```
 
 The Android check compiles bundled SQLite, so it needs the NDK's clang in
@@ -104,7 +106,7 @@ firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware direct
 
 ## Architecture
 
-Six host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
+Seven host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
@@ -169,8 +171,17 @@ own.
   counts as a receiver), `radio::BleRadio` on btleplug, `bluez` (the Linux pairing
   `wartui bluetooth pair` drives), `health` (the Raspberry Pi reader) and `config` (the
   `wartui.toml` file, the desktop's `SettingsStore`). It is the only host crate that names
-  `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge`, `wartui-core` and `wartui-app`
-  compile for a phone; CI checks all three for `aarch64-linux-android` and `aarch64-apple-ios`.
+  `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge`, `wartui-core`, `wartui-app` and
+  `wartui-ffi` compile for a phone; CI checks all four for `aarch64-linux-android` and
+  `aarch64-apple-ios`.
+- **`crates/wartui-ffi`** — the library a phone app loads: `wartui-app` through UniFFI, for Kotlin
+  and Swift. It is the only crate that names UniFFI: the app's types stay free of it and cross as
+  remote declarations here, which repeat each field list, so a field added on one side only fails
+  to compile. It holds no hand-written `unsafe`. Everything it spawns runs on its one tokio
+  runtime, and no exported function blocks on it. A call into the phone's code returns at once
+  and fails as a value, so the phone's Bluetooth stack answers each request later, by its id
+  (`src/radio.rs`, an adapter under `pipe::Radio`'s contract). `smoke/run.sh` runs a capture
+  through the generated Kotlin and Swift (`crates/wartui-ffi/README.md`).
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and

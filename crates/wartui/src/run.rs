@@ -225,8 +225,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
-    let memory = crate::memory_of(&config.bridge);
-    memory.set_enabled(config.bridge.remember.unwrap_or(true));
+    let memory = config.bridge.memory();
     let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), config.bridge.link)?;
     let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 

@@ -313,6 +313,29 @@ fn settings_refuses_bridge_mac_when_remember_is_off() {
 }
 
 #[test]
+fn settings_bridge_memory_holds_saved_bridge_when_remember_is_unset() {
+    let saved = Bridge {
+        mac: Some(BRIDGE),
+        serial: Some("AAAAAAAAAA".to_owned()),
+        bluetooth_address: Some("02:00:5E:10:9D:25".to_owned()),
+        ..Bridge::default()
+    };
+    let memory = saved.memory();
+    assert!(memory.is_enabled());
+    assert_eq!(memory.recall(), Some(BRIDGE));
+    assert_eq!(memory.recall_serial().as_deref(), Some("AAAAAAAAAA"));
+    assert_eq!(memory.recall_bluetooth().as_deref(), Some("02:00:5E:10:9D:25"));
+}
+
+#[test]
+fn settings_bridge_memory_remembers_nothing_when_remember_is_off() {
+    let memory = Bridge { remember: Some(false), ..Bridge::default() }.memory();
+    assert!(!memory.is_enabled());
+    memory.remember_on(BRIDGE, None);
+    assert_eq!(memory.recall(), None, "nothing is remembered while off");
+}
+
+#[test]
 fn settings_load_rejects_bridge_serial_when_remember_is_off() {
     let chain = load_error("[bridge]\nremember = false\nserial = \"AAAAAAAAAA\"\n");
     assert!(chain.contains("bridge.serial"), "{chain}");
@@ -622,4 +645,16 @@ fn settings_apply_sends_nothing_when_command_queue_is_full() {
     assert!(rx.try_recv().is_err(), "nothing else was sent");
     assert!(memory.is_enabled(), "the remember switch did not move");
     assert_eq!(store.saves(), 0, "nothing was saved");
+}
+
+#[test]
+fn settings_take_the_latest_run_when_one_handle_serves_a_simulated_run_then_a_real_one() {
+    let settings = kept(&Fake::empty(), Config::default(), &BridgeMemory::none());
+
+    let simulated = settings.clone().over(Link::Bluetooth).simulated();
+    assert_eq!(simulated.link(), None, "the simulator has no link to save");
+
+    let real = settings.clone().simulated().over(Link::Bluetooth);
+    assert_eq!(real.link(), Some(Link::Bluetooth));
+    assert_eq!(settings.link(), Some(Link::Bluetooth), "clones share the state");
 }
