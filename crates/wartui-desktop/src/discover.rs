@@ -41,7 +41,6 @@ pub const SENTENCES_TO_BELIEVE: usize = 2;
 /// How many are enough on a port the operator named. See [`SENTENCES_TO_BELIEVE`].
 pub const SENTENCES_ON_A_NAMED_PORT: usize = 1;
 
-/// How long one port at one rate is listened to.
 /// How long one port at one rate is listened to: well over one cycle of a 1 Hz receiver, so a whole
 /// sentence lands even if the window opens mid-sentence.
 pub const PROBE_WINDOW: Duration = Duration::from_millis(1_200);

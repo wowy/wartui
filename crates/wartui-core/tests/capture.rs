@@ -544,7 +544,7 @@ async fn host_health_rows(health: Option<HealthReader>) -> Vec<[Option<i64>; 4]>
 }
 
 #[tokio::test(start_paused = true)]
-async fn capture_records_injected_health_when_a_reader_is_given() {
+async fn drive_records_injected_health_when_a_reader_is_given() {
     let read = Health {
         throttled: Some(0x5_0005),
         soc_temp_mc: Some(61_234),
@@ -566,7 +566,7 @@ async fn capture_records_injected_health_when_a_reader_is_given() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn capture_records_no_health_when_no_reader_is_given() {
+async fn drive_records_no_health_when_no_reader_is_given() {
     let rows = host_health_rows(None).await;
     assert!(rows.len() >= 2, "a row at the start and one at shutdown: {rows:?}");
     for row in rows {

@@ -1,15 +1,14 @@
 //! The puck reader: a thread that finds an NMEA receiver among the host's serial ports, reads it,
 //! and feeds what it says into a [`Gps`], whose state and parser are `wartui-core`'s.
 //!
-//! The reader runs on its own thread and publishes into the [`Gps`] it was given. Nothing above
-//! blocks on a satellite: [`Gps::latest`] is a mutex and a copy, so
-//! [`wartui_core::PositionChain::resolve`] stays cheap and synchronous for the engine.
+//! The reader runs on its own thread and publishes into the [`Gps`] it was given, so nothing
+//! above waits on it ([`wartui_core::gps`] says why that matters).
 //!
 //! **It stands down while the bridge's receiver is sending sentences** ([`Gps::set_suspended`],
 //! which [`wartui_core::PositionChain::stand_down`] calls): it lets go of its port within
 //! `READ_TIMEOUT` and opens nothing, so one capture reads one receiver. A receiver that stops
-//! sending lets the search resume after the staleness limit. A port the operator named with
-//! `--gps` never stands down: reading it is their instruction.
+//! sending lets the search resume after the staleness limit. [`wartui_core::gps`] has the one port
+//! that never stands down.
 //!
 //! **The search, the backoff and the retries are the reader's** (`read_forever`). Each rule is
 //! stated where it is applied: a port must stay readable for `HEALTHY` before the backoff is
@@ -227,7 +226,15 @@ impl Reader<'_> {
                         self.gps.set_status(GpsStatus::Searching);
                     }
                     let opened = Instant::now();
-                    let reason = self.read_port(handle);
+                    let Some(reason) = self.read_port(handle) else {
+                        // Halted, not failed: nothing is retried or backed off. A stand-down is
+                        // handled at the top of the loop, and one already lifted reopens the
+                        // settled port.
+                        if self.gps.is_stopped() {
+                            return;
+                        }
+                        continue;
+                    };
                     if self.gps.is_stopped() {
                         return;
                     }
@@ -327,13 +334,14 @@ impl Reader<'_> {
         sample
     }
 
-    /// Read until the port fails, returning why in terms fit to show a user.
-    fn read_port(&self, mut port: Box<dyn Read + Send>) -> String {
+    /// Read until the port fails, returning why in terms fit to show a user, or `None` when the
+    /// reader was halted (stopped or standing down) rather than the port failing.
+    fn read_port(&self, mut port: Box<dyn Read + Send>) -> Option<String> {
         let mut lines = Lines::default();
         let mut buf = [0u8; 512];
         while !self.halted() {
             match port.read(&mut buf) {
-                Ok(0) => return "the receiver closed the port".to_owned(),
+                Ok(0) => return Some("the receiver closed the port".to_owned()),
                 Ok(n) => {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     lines.push(&buf[..n], |line| self.gps.feed(line, now_ms));
@@ -341,11 +349,11 @@ impl Reader<'_> {
                 // Silence does not break the port, but it still ages the retained fix.
                 Err(e) if e.kind() == ErrorKind::TimedOut => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) => return e.to_string(),
+                Err(e) => return Some(e.to_string()),
             }
             self.gps.tick(chrono::Utc::now().timestamp_millis());
         }
-        "stopped".to_owned()
+        None
     }
 }
 
@@ -628,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn gps_stands_down_without_a_fault_when_suspended() {
+    fn gps_reader_stands_down_without_a_fault_when_suspended() {
         // A receiver read and then lost is a fault. Standing down clears it, holds no port, and
         // resumes as a fresh search, which has nothing to report as lost.
         let ports = FakePorts::default().attach(puck("/dev/ttyACM0"), Script::Quiet(talk()));
@@ -648,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn gps_ignores_suspension_when_port_is_pinned() {
+    fn gps_reader_ignores_suspension_when_port_is_pinned() {
         let gps =
             spawn_on(GpsConfig::pinned(NO_SUCH_PORT).at_baud(9_600), FakePorts::default().shared());
         gps.set_suspended(true);
@@ -657,13 +665,29 @@ mod tests {
     }
 
     #[test]
-    fn gps_reports_pinned_when_operator_names_the_port() {
+    fn gps_reader_reports_pinned_when_operator_names_the_port() {
         let gps =
             spawn_on(GpsConfig::pinned(NO_SUCH_PORT).at_baud(9_600), FakePorts::default().shared());
         assert!(gps.is_pinned());
         gps.stop();
         assert!(!Gps::detached().is_pinned());
         assert!(!Gps::bridged(DEFAULT_MAX_AGE).is_pinned());
+    }
+
+    #[test]
+    fn gps_reader_reports_no_failure_when_read_ends_on_a_halt() {
+        // A port that keeps talking ends its read only on a halt, which is not the port failing.
+        let ports = FakePorts::default();
+        ports.script("/dev/ttyACM0", Script::Quiet(talk()));
+        let suspended = Gps::for_reader(false, false, DEFAULT_MAX_AGE);
+        suspended.set_suspended(true);
+        let stopped = Gps::for_reader(false, false, DEFAULT_MAX_AGE);
+        stopped.stop();
+        for gps in [&suspended, &stopped] {
+            let reader = Reader { gps, ports: &ports };
+            let port = ports.open("/dev/ttyACM0", BAUD_LADDER[0]).expect("a scripted port");
+            assert_eq!(reader.read_port(port), None);
+        }
     }
 
     #[test]

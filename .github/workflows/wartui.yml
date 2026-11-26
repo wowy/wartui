@@ -71,8 +71,13 @@ jobs:
       - name: Portable crates name no desktop I/O
         if: matrix.target == 'aarch64-linux-android'
         run: |
-          tree=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --locked)
+          tree=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --target all --locked)
           if grep -E '^(serialport|btleplug|dbus) ' <<< "$tree"; then
             echo "wartui-bridge or wartui-core depends on a desktop I/O crate" >&2
+            exit 1
+          fi
+          direct=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --depth 1 --target all --locked)
+          if grep -E '^libc ' <<< "$direct"; then
+            echo "wartui-bridge or wartui-core names libc directly" >&2
             exit 1
           fi
