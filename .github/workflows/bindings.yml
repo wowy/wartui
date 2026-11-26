@@ -45,7 +45,8 @@ jobs:
       - name: Build the XCFramework
         run: crates/wartui-ffi/package/build.sh ios
 
-      # The runner's newest iPhone simulator, whichever that is.
+      # The runner's newest iPhone simulator, whichever that is, booted before the test asks for
+      # it: `xcodebuild` gives up on a test runner that is still starting with its simulator.
       - name: Run the test in a simulator
         working-directory: crates/wartui-ffi/swift
         run: |
@@ -53,6 +54,7 @@ jobs:
           device=$(xcrun simctl list devices available | grep -E '^\s+iPhone' |
             grep -oE "$uuid" | tail -n 1)
           [[ -n $device ]] || { echo "no iPhone simulator is available" >&2; exit 1; }
+          xcrun simctl bootstatus "$device" -b
           xcodebuild test -scheme WartuiCore -destination "platform=iOS Simulator,id=$device"
 
       - name: Zip the XCFramework with the Swift
