@@ -1,6 +1,6 @@
 [package]
 name = "wartui-desktop"
-description = "The desktop's serial ports, Bluetooth radio, BlueZ pairing and host health, under wartui's portable crates."
+description = "The desktop's serial ports, Bluetooth radio, BlueZ pairing, host health and settings file, under wartui's portable crates."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,6 +18,7 @@ serialport = "4.10.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["sync", "macros"] }
 tracing = "0.1.44"
+wartui-app = { path = "../wartui-app" }
 wartui-bridge = { path = "../wartui-bridge" }
 wartui-core = { path = "../wartui-core" }
 wartui-proto = { path = "../wartui-proto" }

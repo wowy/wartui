@@ -26,12 +26,14 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
+use wartui_app::settings::{Settings, SettingsStore};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::Gps;
 use wartui_core::position::{PositionChain, StandDown, Tier};
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
+use wartui_desktop::config::ConfigFile;
 use wartui_desktop::gps::GpsConfig;
 
 #[derive(ClapArgs, Debug)]
@@ -147,11 +149,11 @@ pub async fn run(args: Args) -> Result<()> {
     // A broken `wartui.toml` stops the run, naming the file and the problem.
     let config = config::load(args.config.as_deref())?;
     // Where the settings modal saves to: the same file `load` just read.
-    let config_path = config::path(args.config.as_deref());
+    let file = ConfigFile::new(args.config.as_deref());
     // A first run gets a file holding the empty API key, so there is a place to paste
     // one. Not under `--sim`, which leaves no files behind, and a directory that cannot
     // be written is no reason to stop a capture.
-    if let Some(path) = &config_path
+    if let Some(path) = file.as_ref().map(ConfigFile::path)
         && args.sim.is_none()
         && let Err(error) = config::create_if_missing(path)
     {
@@ -252,15 +254,12 @@ pub async fn run(args: Args) -> Result<()> {
         wdgwars_base: upload::wdgwars::BASE.to_owned(),
         wigle_base: upload::wigle::BASE.to_owned(),
     };
-    let settings = tui::Settings {
-        config_path,
-        saved: config,
-        bridge_memory: memory,
-        simulated: args.sim.is_some(),
+    let store = file.map(|file| Arc::new(file) as Arc<dyn SettingsStore>);
+    let settings = Settings::new(store, config, memory);
+    let settings = match args.sim {
         // The simulator's link is no link to save.
-        link: args.sim.is_none().then_some(over),
-        link_proved: false,
-        upload,
+        Some(_) => settings.simulated(),
+        None => settings.over(over),
     };
     let config = EngineConfig {
         // A capture starts the scan, and stops it when it ends.
@@ -295,7 +294,7 @@ pub async fn run(args: Args) -> Result<()> {
     let health = Box::new(wartui_desktop::health::read);
     let capture =
         tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
-    let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
+    let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings, upload).await;
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the capture's end time.
     capture.await.context("the capture task panicked")?;

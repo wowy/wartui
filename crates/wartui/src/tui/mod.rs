@@ -32,6 +32,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
+use wartui_app::settings::Settings;
 use wartui_core::engine::{Command, Snapshot};
 use wartui_proto::plan::ChannelPool;
 
@@ -41,13 +42,13 @@ use footer::{buffer_full_line, draw_footer, fault_lines, faults, takeover_line, 
 use gps::draw_gps_modal;
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
-pub use settings::Settings;
 use settings::draw_settings_modal;
 use ui::Ui;
 pub use upload::UploadTarget;
 use upload::draw_confirm_modal;
 
-/// Run the view until the operator quits or the engine stops.
+/// Run the view until the operator quits or the engine stops, saving through `settings` and
+/// uploading with `u` to `upload`.
 ///
 /// Takes ownership of `stop`, so every way out shuts the capture down the same way and
 /// commits the store's last batch. The ways out are a keypress, ctrl-c, or the engine
@@ -57,6 +58,7 @@ pub async fn run(
     commands: mpsc::Sender<Command>,
     stop: oneshot::Sender<()>,
     settings: Settings,
+    upload: UploadTarget,
 ) -> Result<()> {
     let mut terminal = ratatui::try_init().context("preparing the terminal")?;
     // A paste arrives as one event rather than as keystrokes, so a pasted newline
@@ -69,7 +71,7 @@ pub async fn run(
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         previous(info);
     }));
-    let result = view(&mut terminal, &mut snapshot, &commands, settings).await;
+    let result = view(&mut terminal, &mut snapshot, &commands, settings, upload).await;
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     // Stop the engine only once the terminal is restored, so anything it logs on the
@@ -83,10 +85,11 @@ async fn view(
     snapshot: &mut watch::Receiver<Arc<Snapshot>>,
     commands: &mpsc::Sender<Command>,
     settings: Settings,
+    upload: UploadTarget,
 ) -> Result<()> {
     // Inside `view`, so a failure still restores the terminal and stops the engine.
     let (mut inputs, running) = spawn_input()?;
-    let mut ui = Ui::new(settings);
+    let mut ui = Ui::new(settings.clone()).uploading_to(upload);
     // Built before the loop, not inside the arm below. See `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
     let outcome = loop {
@@ -95,8 +98,7 @@ async fn view(
         ui.poll_upload(&current);
         ui.poll_power(&current);
         ui.poll_sd(&current);
-        ui.poll_bridge();
-        ui.poll_link(&current);
+        settings.follow(&current);
         ui.poll_gps_sky(&current, commands);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");

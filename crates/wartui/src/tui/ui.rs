@@ -1,17 +1,14 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use tui_scrollview::ScrollViewState;
+use wartui_app::settings::Settings;
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
-use wartui_proto::mac::Mac;
 
-use super::Settings;
 use super::blocks::LOST_SLOT;
 use super::gps;
-use super::settings::{
-    ConfigModal, ModalAction, apply, apply_excluded, link_written, save_bridge, save_fix_wait,
-};
-use super::upload::Upload;
+use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, unsaved};
+use super::upload::{Upload, UploadTarget};
 use crate::config;
 use crate::text::{gb, node_name};
 
@@ -49,13 +46,10 @@ pub(super) struct Ui {
     sky_sent: bool,
     /// Where to save, and what was last saved there.
     settings: Settings,
+    /// Where `u` uploads to.
+    upload_target: UploadTarget,
     /// The upload `u` started.
     upload: Upload,
-    /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
-    /// the next change rather than repeating every frame.
-    bridge_tried: Option<(Option<Mac>, Option<String>, Option<String>)>,
-    /// Whether [`Self::poll_link`] has tried to save the link, which it does once.
-    link_tried: bool,
     /// The slot `p` asks to power-cycle, while its confirm is open.
     power_confirm: Option<Slot>,
     /// The last power-cycle answer shown, so each is shown once.
@@ -75,10 +69,15 @@ impl Ui {
         Self { settings, ..Self::default() }
     }
 
+    /// This view, with `u` uploading to `target`.
+    pub(super) fn uploading_to(self, target: UploadTarget) -> Self {
+        Self { upload_target: target, ..self }
+    }
+
     /// The link this run reaches its bridge over. The simulator stands in for a bridge on USB, and
     /// reports USB as the bridge's host.
     pub(super) fn link(&self) -> config::Link {
-        self.settings.link.unwrap_or_default()
+        self.settings.link().unwrap_or_default()
     }
 
     /// The block under the cursor, and the grid's scroll and blocks per row, for
@@ -165,7 +164,12 @@ impl Ui {
             KeyCode::Char('g') => self.open_gps(),
             KeyCode::Char('p') => self.ask_power_cycle(snapshot),
             KeyCode::Char('u') => {
-                if let Some(text) = self.upload.press(&self.settings, &snapshot.excluded_ssids) {
+                let pressed = self.upload.press(
+                    &self.settings,
+                    &self.upload_target,
+                    &snapshot.excluded_ssids,
+                );
+                if let Some(text) = pressed {
                     self.say(text, snapshot);
                 }
             }
@@ -263,9 +267,10 @@ impl Ui {
     ) {
         match key.code {
             KeyCode::Char(' ') => {
-                let wait = !self.settings.saved.gps.waits_for_fix();
+                let wait = !self.settings.saved().gps.waits_for_fix();
                 // A failed save leaves the box as the file has it.
-                if let Err(why) = save_fix_wait(&mut self.settings, wait) {
+                if let Err(why) = self.settings.save_wait_for_fix(wait) {
+                    let why = unsaved(&why);
                     self.say(format!("not saved: {}", why.trim_start_matches("; ")), snapshot);
                 }
             }
@@ -286,7 +291,7 @@ impl Ui {
         if !snapshot.awaiting_fix {
             return None;
         }
-        let tick = if self.settings.saved.gps.waits_for_fix() { ' ' } else { 'x' };
+        let tick = if self.settings.saved().gps.waits_for_fix() { ' ' } else { 'x' };
         Some(vec![
             "Waiting for a GPS fix before the scan starts.".to_owned(),
             format!("gps: {}", gps::status(snapshot).0),
@@ -386,7 +391,7 @@ impl Ui {
             // As in `on_key`, unbound keys leave the notice alone.
             ModalAction::Stay => {}
             ModalAction::Close => self.modal = None,
-            ModalAction::Apply => match apply(modal, snapshot, commands, &mut self.settings) {
+            ModalAction::Apply => match apply(modal, snapshot, commands, &self.settings) {
                 Ok(text) => {
                     self.modal = None;
                     self.say(text, snapshot);
@@ -396,7 +401,7 @@ impl Ui {
             },
             ModalAction::FormatSd => self.ask_format_sd(snapshot),
             ModalAction::SaveExcluded => {
-                match apply_excluded(modal, commands, &mut self.settings) {
+                match apply_excluded(modal, commands, &self.settings) {
                     Ok(text) => {
                         modal.leave_page();
                         self.say(text, snapshot);
@@ -422,53 +427,9 @@ impl Ui {
         }
     }
 
-    /// Save the bridge the transport remembered or forgot since the last save.
-    ///
-    /// Silent, since nothing the operator did changed it: a failure is logged at `debug`
-    /// and tried again only once the bridge changes.
-    pub(super) fn poll_bridge(&mut self) {
-        // Compared in place, since this runs every frame; cloned only once it has changed.
-        let memory = &self.settings.bridge_memory;
-        let saved = &self.settings.saved.bridge;
-        if memory.matches(saved.mac, saved.serial.as_deref(), saved.bluetooth_address.as_deref()) {
-            // In step with the file, so a bridge whose save failed is tried again when it
-            // comes back.
-            self.bridge_tried = None;
-            return;
-        }
-        if let Some((mac, serial, bluetooth)) = &self.bridge_tried
-            && memory.matches(*mac, serial.as_deref(), bluetooth.as_deref())
-        {
-            return;
-        }
-        self.bridge_tried =
-            Some((memory.recall(), memory.recall_serial(), memory.recall_bluetooth()));
-        if let Err(error) = save_bridge(&mut self.settings) {
-            tracing::debug!(error = error.trim_start_matches("; "), "could not save the bridge");
-        }
-    }
-
-    /// Save the link this run reaches its bridge over, once the bridge has announced itself
-    /// over it, so the next run takes the same link. Silent, and tried once.
-    pub(super) fn poll_link(&mut self, snapshot: &Snapshot) {
-        let Some(link) = self.settings.link else { return };
-        if self.link_tried || snapshot.bridge.is_none() {
-            return;
-        }
-        self.settings.link_proved = true;
-        let saved = self.settings.saved.bridge.link;
-        if link_written(link, saved) == saved {
-            return;
-        }
-        self.link_tried = true;
-        if let Err(error) = save_bridge(&mut self.settings) {
-            tracing::debug!(error = error.trim_start_matches("; "), "could not save the link");
-        }
-    }
-
     /// A key while the upload's confirm is open. Only `y` sends.
     pub(super) fn on_confirm_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
-        if let Some(text) = self.upload.on_confirm_key(key, &self.settings.upload) {
+        if let Some(text) = self.upload.on_confirm_key(key, &self.upload_target) {
             self.say(text, snapshot);
         }
     }
@@ -480,8 +441,8 @@ impl Ui {
 
     /// The file as last loaded or saved.
     #[cfg(test)]
-    pub(super) fn saved(&self) -> &config::Config {
-        &self.settings.saved
+    pub(super) fn saved(&self) -> config::Config {
+        self.settings.saved()
     }
 
     /// The block grid's scroll offset, in rows.
@@ -786,7 +747,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
         assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
         assert!(lines.contains(&"gps: searching".to_owned()), "{lines:?}");
@@ -835,7 +796,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
 
         for key in ['b', 'c', 'p', 'u', 'x', 'j'] {
             ui.on_fix_wait_key(press(key), &snapshot, &tx);

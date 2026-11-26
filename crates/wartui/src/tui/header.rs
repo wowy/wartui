@@ -223,6 +223,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use wartui_app::settings::Settings;
     use wartui_core::gps::GpsCounters;
     use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::{NodeBoard, Slot};
@@ -231,7 +232,6 @@ mod tests {
     use wartui_proto::plan::ChannelPool;
 
     use super::*;
-    use crate::tui::Settings;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
     use crate::tui::ui::Ui;
@@ -529,7 +529,7 @@ mod tests {
             central: Some(central(ATT_MTU)),
             ..BluetoothStatus::default()
         });
-        let settings = Settings { link: Some(Link::Bluetooth), ..Settings::default() };
+        let settings = Settings::default().over(Link::Bluetooth);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
         let screen = terminal.backend().to_string();
@@ -550,7 +550,7 @@ mod tests {
                     ..Default::default()
                 };
             }
-            let settings = Settings { link: Some(link), ..Settings::default() };
+            let settings = Settings::default().over(link);
             let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("test backend");
             terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::new(settings))).expect("drawing");
             let screen = terminal.backend().to_string();

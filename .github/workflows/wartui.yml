@@ -66,18 +66,18 @@ jobs:
           echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
 
       - name: Check
-        run: cargo check -p wartui-bridge -p wartui-core --target ${{ matrix.target }} --locked
+        run: cargo check -p wartui-bridge -p wartui-core -p wartui-app --target ${{ matrix.target }} --locked
 
       - name: Portable crates name no desktop I/O
         if: matrix.target == 'aarch64-linux-android'
         run: |
-          tree=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --target all --locked)
+          tree=$(cargo tree -p wartui-bridge -p wartui-core -p wartui-app -e normal --prefix none --target all --locked)
           if grep -E '^(serialport|btleplug|dbus) ' <<< "$tree"; then
-            echo "wartui-bridge or wartui-core depends on a desktop I/O crate" >&2
+            echo "wartui-bridge, wartui-core or wartui-app depends on a desktop I/O crate" >&2
             exit 1
           fi
-          direct=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --depth 1 --target all --locked)
+          direct=$(cargo tree -p wartui-bridge -p wartui-core -p wartui-app -e normal --prefix none --depth 1 --target all --locked)
           if grep -E '^libc ' <<< "$direct"; then
-            echo "wartui-bridge or wartui-core names libc directly" >&2
+            echo "wartui-bridge, wartui-core or wartui-app names libc directly" >&2
             exit 1
           fi

@@ -23,18 +23,18 @@
 //!
 //! The gps section holds two rows. Wait for gps is the file's `[gps] wait-for-fix`, which `run`
 //! reads at launch. A run decides at launch whether it waits, so the row applies from the next
-//! launch. The waiting-for-GPS pop-up's box writes the same key, through [`save_fix_wait`]. Update
-//! rate is the bridge receiver's rate, which the host holds rather than the bridge: it shows the
-//! rate in force, `Enter` sends it to the engine when it moved, which writes it to the receiver at
-//! once, and saves it as `[gps] bridge-rate-hz` for the next launch.
+//! launch. The waiting-for-GPS pop-up's box writes the same key, through
+//! [`Settings::save_wait_for_fix`]. Update rate is the bridge receiver's rate, which the host holds
+//! rather than the bridge: it shows the rate in force, `Enter` sends it to the engine when it
+//! moved, which writes it to the receiver at once, and saves it as `[gps] bridge-rate-hz` for the
+//! next launch.
 //!
-//! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
-//! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
-//! the file's only writer within `run`, so the transport's thread never races it on a
-//! whole-file save. `flash-bridge` is the one other writer, and runs as its own command.
+//! On `Enter` the modal hands its rows to [`wartui_app::settings::apply`] as a [`SettingsEdit`],
+//! and words what it did. Every write to `wartui.toml` goes through [`Settings`]
+//! (`crates/wartui-app/src/settings/saved.rs` `//!` gives the save rules). `flash-bridge` is the
+//! one other writer, and runs as its own command.
 
 use std::fmt::Display;
-use std::path::PathBuf;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -42,7 +42,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use tokio::sync::mpsc;
-use wartui_bridge::remember::BridgeMemory;
+use wartui_app::settings::{ApiKeys, Busy, SaveError, Settings, SettingsEdit};
 use wartui_core::engine::{Command, Snapshot};
 use wartui_core::ubx;
 use wartui_proto::fan::FanDuty;
@@ -50,40 +50,10 @@ use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::SdState;
 use wartui_proto::plan::{ChannelPool, PlanSettings, Planner, SparseNodes};
 
-use super::UploadTarget;
 use super::centered_rect;
 use super::ui::ENGINE_BUSY;
 use crate::config;
 use crate::text::{SdForm, sd_text};
-
-/// What saving settings needs that a [`Snapshot`] lacks.
-///
-/// `run` builds it once at startup. The snapshot cannot supply it: the config path
-/// depends on how the process started, and a failed save leaves the file out of step
-/// with what is running.
-#[derive(Debug, Clone, Default)]
-pub struct Settings {
-    /// Where `wartui.toml` is written. `None` when there is no default location and no
-    /// `--config`.
-    pub config_path: Option<PathBuf>,
-    /// The file as last loaded or saved. A remembered bridge rewrites only the bridge from
-    /// this copy.
-    pub saved: config::Config,
-    /// The bridge `run` remembers, and whether it remembers one. Shared with the
-    /// transport, so the remember-bridge switch takes effect on the next reconnect and
-    /// the bridge the transport connects to reaches the file.
-    pub bridge_memory: BridgeMemory,
-    /// Whether the link is the simulator, whose bridge is not a board to remember.
-    pub simulated: bool,
-    /// The link this run reaches its bridge over, saved as `[bridge] link` once it connects;
-    /// `None` under the simulator, which saves no link.
-    pub link: Option<config::Link>,
-    /// Whether a bridge has announced itself over [`Self::link`]. Until then a save keeps
-    /// `[bridge] link` as the file had it.
-    pub link_proved: bool,
-    /// Where `u` uploads to.
-    pub upload: UploadTarget,
-}
 
 /// One row of the settings modal. A new setting adds a variant here and a row in
 /// [`draw_settings_modal`]. The API key rows take typed text, through
@@ -387,6 +357,7 @@ impl ConfigModal {
             Some(ScanMode::Stopped) => None,
             scan => Some(scan == Some(ScanMode::WifiBluetooth)),
         };
+        let saved = settings.saved();
         Self {
             selected: Field::Pool,
             pool,
@@ -403,16 +374,16 @@ impl ConfigModal {
             sd_log_seed: sd_log,
             bridge_up,
             // The engine does not hold this one, so it comes from the handle.
-            remember_bridge: settings.bridge_memory.is_enabled(),
+            remember_bridge: settings.memory().is_enabled(),
             // The file's, since a run reads it only at launch.
-            wait_for_gps: settings.saved.gps.waits_for_fix(),
+            wait_for_gps: saved.gps.waits_for_fix(),
             // The engine's, which holds it for the receiver.
             gps_rate: snapshot.gps_rate_hz,
             gps_rate_seed: snapshot.gps_rate_hz,
             // Nor these. They are what the file holds, hand edits included.
-            wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
-            wigle_name: settings.saved.api_keys.wigle_name.clone(),
-            wigle_token: settings.saved.api_keys.wigle_token.clone(),
+            wdgwars_key: saved.api_keys.wdgwars,
+            wigle_name: saved.api_keys.wigle_name,
+            wigle_token: saved.api_keys.wigle_token,
             excluded: snapshot.excluded_ssids.clone(),
             page: Page::Main,
         }
@@ -584,6 +555,32 @@ fn refusal_text(refusal: config::SsidRefusal) -> &'static str {
     }
 }
 
+/// The modal's rows as a [`SettingsEdit`], each of the bridge's rows and the rate only when it
+/// moved: the bridge stores every pool, planner, duty, wardrive esp and log setting it is sent, and
+/// an unmoved bluetooth row would restate the scan.
+fn edit(modal: &ConfigModal) -> SettingsEdit {
+    SettingsEdit {
+        pool: modal.pool.filter(|_| modal.pool != modal.pool_seed),
+        // Either row moving sends both, since one command carries the pair.
+        planner: modal.planner.filter(|_| modal.planner != modal.planner_seed),
+        fan: modal.fan.filter(|_| modal.fan != modal.fan_seed),
+        bluetooth: modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed),
+        wardrive_esp: modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed),
+        sd_log: modal.sd_log.filter(|_| modal.sd_log != modal.sd_log_seed),
+        gps_rate: (modal.gps_rate != modal.gps_rate_seed).then_some(modal.gps_rate),
+        remember_bridge: modal.remember_bridge,
+        wait_for_fix: modal.wait_for_gps,
+        api_keys: ApiKeys {
+            wdgwars: modal.wdgwars_key.clone(),
+            wigle_name: modal.wigle_name.clone(),
+            wigle_token: modal.wigle_token.clone(),
+        },
+        // Its page sends it on its own `Enter` and restores it on `Esc`, so on the rows it is
+        // always what is in force.
+        excluded_ssids: modal.excluded.clone(),
+    }
+}
+
 /// Send the modal's values to the engine and save them to `wartui.toml`. Returns the
 /// notice saying what happened.
 ///
@@ -593,124 +590,67 @@ pub(super) fn apply(
     modal: &ConfigModal,
     snapshot: &Snapshot,
     commands: &mpsc::Sender<Command>,
-    settings: &mut Settings,
+    settings: &Settings,
 ) -> Result<String, &'static str> {
-    // Reserve every slot first, so a full queue applies none of the modal rather than
-    // part of it. The excluded list is not among them: its page sends it on its own
-    // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
-    // The bridge's rows go only when they moved: the bridge stores every pool, planner, duty,
-    // wardrive esp and log setting it is sent, and an unmoved bluetooth row would restate the scan.
-    let pool = modal.pool.filter(|_| modal.pool != modal.pool_seed);
-    // Either row moving sends both, since one command carries the pair.
-    let planner = modal.planner.filter(|_| modal.planner != modal.planner_seed);
-    let fan = modal.fan.filter(|_| modal.fan != modal.fan_seed);
-    let bluetooth = modal.bluetooth.filter(|_| modal.bluetooth != modal.bluetooth_seed);
-    let wardrive_esp = modal.wardrive_esp.filter(|_| modal.wardrive_esp != modal.wardrive_esp_seed);
-    let sd_log = modal.sd_log.filter(|_| modal.sd_log != modal.sd_log_seed);
-    let gps_rate = (modal.gps_rate != modal.gps_rate_seed).then_some(modal.gps_rate);
-    let wanted = usize::from(pool.is_some())
-        + usize::from(planner.is_some())
-        + usize::from(fan.is_some())
-        + usize::from(bluetooth.is_some())
-        + usize::from(wardrive_esp.is_some())
-        + usize::from(sd_log.is_some())
-        + usize::from(gps_rate.is_some());
-    let Ok(mut permits) = commands.try_reserve_many(wanted) else {
-        return Err(ENGINE_BUSY);
-    };
-    let pool_command = pool.map(|pool| Command::SetPool { pool });
-    let planner_command = planner.map(Command::SetPlanner);
-    let fan_command = fan.map(|duty| Command::SetFanDuty { duty });
-    let bluetooth_command = bluetooth.map(Command::SetBluetooth);
-    let wardrive_esp_command = wardrive_esp.map(Command::SetWardriveEsp);
-    let sd_log_command = sd_log.map(Command::SetSdLog);
-    let gps_rate_command = gps_rate.map(Command::SetGpsRate);
-    for command in pool_command
-        .into_iter()
-        .chain(planner_command)
-        .chain(fan_command)
-        .chain(bluetooth_command)
-        .chain(wardrive_esp_command)
-        .chain(sd_log_command)
-        .chain(gps_rate_command)
-    {
-        if let Some(permit) = permits.next() {
-            permit.send(command);
-        }
-    }
-    let mut text = match pool {
+    let edit = edit(modal);
+    let applied = wartui_app::settings::apply(&edit, snapshot, commands, settings)
+        .map_err(|Busy| ENGINE_BUSY)?;
+    let mut text = match edit.pool {
         Some(pool) => format!("pool {pool} sent to the bridge"),
         None => "settings applied".to_owned(),
     };
-    if let Some(PlanSettings { planner, sparse_nodes }) = planner {
+    if let Some(PlanSettings { planner, sparse_nodes }) = edit.planner {
         text.push_str(&format!(
             "; planner {planner}, sparse nodes {sparse_nodes} sent to the bridge"
         ));
     }
-    if let Some(duty) = fan {
+    if let Some(duty) = edit.fan {
         text.push_str(&format!("; fan {duty} sent to the bridge"));
     }
-    if let Some(on) = bluetooth {
+    if let Some(on) = edit.bluetooth {
         text.push_str(if on { "; bluetooth on" } else { "; bluetooth off" });
     }
-    if let Some(on) = wardrive_esp {
+    if let Some(on) = edit.wardrive_esp {
         text.push_str(if on {
             "; wardrive esp on sent to the bridge, open to any phone in range"
         } else {
             "; wardrive esp off sent to the bridge"
         });
     }
-    if let Some(on) = sd_log {
+    if let Some(on) = edit.sd_log {
         text.push_str(if on {
             "; sd log on sent to the bridge"
         } else {
             "; sd log off sent to the bridge"
         });
     }
-    if let Some(rate) = gps_rate {
+    if let Some(rate) = edit.gps_rate {
         text.push_str(&format!("; gps {rate} Hz"));
     }
-    let memory = &settings.bridge_memory;
-    if modal.remember_bridge != memory.is_enabled() {
-        memory.set_enabled(modal.remember_bridge);
-        if modal.remember_bridge {
-            // Remember the bridge connected now. A reconnect may never come.
-            if let Some(bridge) = &snapshot.bridge
-                && !settings.simulated
-            {
-                memory.remember_on(bridge.mac, None);
-            }
-            text.push_str("; bridge remembered");
-        } else {
-            text.push_str("; bridge forgotten — each start scans for it");
-        }
+    match applied.remember {
+        Some(true) => text.push_str("; bridge remembered"),
+        Some(false) => text.push_str("; bridge forgotten — each start scans for it"),
+        None => {}
     }
-    // The row lives only in the file, so it changes nothing unless the save lands.
-    let wait_moved = modal.wait_for_gps != settings.saved.gps.waits_for_fix();
-    match save_outcome(modal, settings) {
-        Ok(path) => {
-            if wait_moved {
+    match applied.saved {
+        Ok(place) => {
+            // The row lives only in the file, so it changes nothing unless the save lands.
+            if applied.wait_for_fix_moved {
                 text.push_str("; gps wait from the next launch");
             }
-            text.push_str(&format!("; saved to {}", path.display()));
+            text.push_str(&format!("; saved to {place}"));
         }
-        Err(error) => text.push_str(&error),
+        Err(error) => text.push_str(&unsaved(&error)),
     }
     Ok(text)
 }
 
-/// `[gps] wait-for-fix` as written for `wait`: absent to wait, `false` to skip.
-const fn wait_for_fix_key(wait: bool) -> Option<bool> {
-    if wait { None } else { Some(false) }
-}
-
-/// Save whether `run` waits for a GPS fix at launch, over the file as last saved, for the
-/// waiting-for-GPS pop-up's box. Returns the path, or why nothing was written, as [`save`]
-/// does. Nothing else in the file changes.
-pub(super) fn save_fix_wait(settings: &mut Settings, wait: bool) -> Result<PathBuf, String> {
-    let mut written = settings.saved.clone();
-    written.gps.wait_for_fix = wait_for_fix_key(wait);
-    save(settings, written)
+/// The notice suffix saying why nothing was saved.
+pub(super) fn unsaved(error: &SaveError) -> String {
+    match error {
+        SaveError::Nowhere => "; nowhere to save it — use --config".to_owned(),
+        SaveError::Invalid(_) | SaveError::Store(_) => format!("; could not save: {error}"),
+    }
 }
 
 /// Send the modal's excluded SSIDs to the engine and save them to `wartui.toml`.
@@ -722,99 +662,15 @@ pub(super) fn save_fix_wait(settings: &mut Settings, wait: bool) -> Result<PathB
 pub(super) fn apply_excluded(
     modal: &ConfigModal,
     commands: &mpsc::Sender<Command>,
-    settings: &mut Settings,
+    settings: &Settings,
 ) -> Result<String, &'static str> {
-    let ssids = config::excluded_ssid_bytes(&modal.excluded).collect();
-    if commands.try_send(Command::SetExcludedSsids { ssids }).is_err() {
-        return Err(ENGINE_BUSY);
-    }
-    let mut written = settings.saved.clone();
-    written.excluded_ssids = modal.excluded.clone();
-    let saved = save(settings, written)
-        .map(|path| format!("; saved to {}", path.display()))
-        .unwrap_or_else(|error| error);
+    let saved = wartui_app::settings::apply_excluded(&modal.excluded, commands, settings)
+        .map_err(|Busy| ENGINE_BUSY)?;
+    let saved = match saved {
+        Ok(place) => format!("; saved to {place}"),
+        Err(error) => unsaved(&error),
+    };
     Ok(format!("excluded ssids: {}{saved}", excluded_count(&modal.excluded)))
-}
-
-/// Write every modal row to `wartui.toml`. Returns the path, or the notice suffix saying
-/// why nothing was written, as [`save`] does.
-///
-/// Overwrites the whole file, hand edits included. The rows are already applied, so a
-/// failed save loses only the file. On success the written config becomes
-/// [`Settings::saved`].
-fn save_outcome(modal: &ConfigModal, settings: &mut Settings) -> Result<PathBuf, String> {
-    // A row left where the file put it keeps the file's spelling, a hand-written `true`
-    // included; only a moved row is rewritten.
-    let wait_for_fix = if modal.wait_for_gps == settings.saved.gps.waits_for_fix() {
-        settings.saved.gps.wait_for_fix
-    } else {
-        wait_for_fix_key(modal.wait_for_gps)
-    };
-    let saved_rate = settings.saved.gps.bridge_rate_hz;
-    let bridge_rate_hz = if modal.gps_rate == saved_rate.unwrap_or(ubx::DEFAULT_RATE_HZ) {
-        saved_rate
-    } else {
-        Some(modal.gps_rate)
-    };
-    let written = config::Config {
-        excluded_ssids: modal.excluded.clone(),
-        bridge: config::Bridge {
-            // Not on the modal, so kept as the file last had it, unless the run saves its own.
-            link: settings.saved.bridge.link,
-            remember: Some(modal.remember_bridge),
-            ..config::Bridge::default()
-        },
-        gps: config::Gps { bridge_rate_hz, wait_for_fix },
-        api_keys: config::ApiKeys {
-            wdgwars: modal.wdgwars_key.trim().to_owned(),
-            wigle_name: modal.wigle_name.trim().to_owned(),
-            wigle_token: modal.wigle_token.trim().to_owned(),
-        },
-    };
-    save(settings, written)
-}
-
-/// Save the bridge the transport holds now, over the file as last saved. Returns the
-/// path, or why nothing was written, as [`save`] does.
-pub(super) fn save_bridge(settings: &mut Settings) -> Result<PathBuf, String> {
-    save(settings, settings.saved.clone())
-}
-
-/// Write `written` to the config path, with the bridge [`Settings::bridge_memory`] holds,
-/// and on success make it [`Settings::saved`]. Returns the path, or the notice suffix
-/// saying why nothing was written.
-fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf, String> {
-    let Some(path) = settings.config_path.clone() else {
-        return Err("; nowhere to save it — use --config".to_owned());
-    };
-    // Nothing while remembering is off, so the keys drop out beside `remember = false`.
-    written.bridge.mac = settings.bridge_memory.recall();
-    written.bridge.serial = settings.bridge_memory.recall_serial();
-    written.bridge.bluetooth_address = settings.bridge_memory.recall_bluetooth();
-    if let Some(link) = settings.link.filter(|_| settings.link_proved) {
-        written.bridge.link = link_written(link, written.bridge.link);
-    }
-    // The live switch, whatever an earlier failed save left in `saved`, so `remember` never
-    // contradicts `mac`. An absent key stays absent while on, since absent means on.
-    written.bridge.remember = match (settings.bridge_memory.is_enabled(), written.bridge.remember) {
-        (true, None) => None,
-        (on, _) => Some(on),
-    };
-    config::save(&path, &written).map_err(|error| format!("; could not save: {error}"))?;
-    settings.saved = written;
-    Ok(path)
-}
-
-/// What `[bridge] link` says once `link` is saved over `saved`: absent stays absent for USB,
-/// since absent means USB.
-pub(super) fn link_written(
-    link: config::Link,
-    saved: Option<config::Link>,
-) -> Option<config::Link> {
-    match (link, saved) {
-        (config::Link::Usb, None) => None,
-        (link, _) => Some(link),
-    }
 }
 
 /// The tip on the sd card row when `Enter` asks to format the card.
@@ -1081,6 +937,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use wartui_app::settings::Gps;
+    use wartui_bridge::remember::BridgeMemory;
     use wartui_proto::link::SdStatus;
 
     use super::*;
@@ -1329,7 +1187,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::Planner, &mut ui, &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
 
@@ -1435,7 +1293,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.pool = Some(ChannelPool::All);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1473,7 +1331,7 @@ mod tests {
         snapshot.scan = Some(wartui_proto::fleet::ScanMode::WifiBluetooth);
         snapshot.ble_slot = snapshot.nodes[0].state.slot;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -1493,17 +1351,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("wartui.toml");
             let saved = config::Config {
-                gps: config::Gps { bridge_rate_hz: file, wait_for_fix: Some(false) },
+                gps: Gps { bridge_rate_hz: file, wait_for_fix: Some(false) },
                 ..config::Config::default()
             };
             let mut snapshot = busy();
             snapshot.gps_rate_hz = in_force;
             let (tx, mut rx) = mpsc::channel(4);
-            let mut ui = Ui::new(Settings {
-                config_path: Some(target.clone()),
-                saved,
-                ..Settings::default()
-            });
+            let mut ui = Ui::new(saving(&target, saved));
             ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
             assert_eq!(ui.modal().expect("open").gps_rate, in_force, "the rate in force");
 
@@ -1543,7 +1397,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::GpsRate, &mut ui, &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Char('h')), &snapshot, &tx);
@@ -1566,7 +1420,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(2);
         tx.try_send(Command::StopScan).unwrap();
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
         // The pool and the rate moved: two commands, and room for one.
         ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
@@ -1613,8 +1467,7 @@ mod tests {
         let saved = config::load(Some(&target)).expect("a valid file");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
+        let mut ui = Ui::new(saving(&target, saved));
         ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
         // An unrelated row moves.
         while ui.modal().expect("open").selected != Field::RememberBridge {
@@ -1634,7 +1487,7 @@ mod tests {
     fn ui_says_only_why_not_saved_when_wait_for_gps_moves_with_nowhere_to_save() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: None, ..Settings::default() });
+        let mut ui = Ui::new(Settings::default());
         ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
         while ui.modal().expect("open").selected != Field::WaitForGps {
             ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
@@ -1654,7 +1507,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
         while ui.modal().expect("open").selected != Field::WaitForGps {
             ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
@@ -1693,7 +1546,7 @@ mod tests {
         let snapshot = fan_snapshot(40);
         let (tx, mut rx) = mpsc::channel(4);
         tx.try_send(Command::StopScan).unwrap();
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // The pool, planner, fan and bluetooth rows moved, so the modal sends four commands.
         for row in [Field::Pool, Field::Planner, Field::Fan, Field::Bluetooth] {
@@ -1720,7 +1573,7 @@ mod tests {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(1);
         tx.try_send(Command::StopScan).unwrap();
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1741,7 +1594,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(Command::StopScan).unwrap();
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1763,7 +1616,7 @@ mod tests {
         std::fs::write(&target, "[bridge]\nremember = false\n").unwrap();
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         // Hand-edited while the modal is open: a different list and remember switch.
@@ -1782,7 +1635,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
         let after_first = std::fs::read_to_string(&target).expect("written by the first save");
@@ -1800,7 +1653,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the remember row moves. The pool row is left alone.
         while ui.modal().expect("open").selected != Field::RememberBridge {
@@ -1839,10 +1692,7 @@ mod tests {
         std::fs::write(&blocker, "").unwrap();
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings {
-            config_path: Some(blocker.join("wartui.toml")),
-            ..Settings::default()
-        });
+        let mut ui = Ui::new(saving_to(&blocker.join("wartui.toml")));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1856,11 +1706,8 @@ mod tests {
 
     /// A view saving to `dir/wartui.toml`, holding the bridge in `memory`.
     fn ui_with_bridge_memory(dir: &std::path::Path, memory: &BridgeMemory) -> Ui {
-        Ui::new(Settings {
-            config_path: Some(dir.join("wartui.toml")),
-            bridge_memory: memory.clone(),
-            ..Settings::default()
-        })
+        let store = file_store(&dir.join("wartui.toml"));
+        Ui::new(Settings::new(store, config::Config::default(), memory.clone()))
     }
 
     /// Open the modal and walk down to `field`. `↓` rather than `j`, which the key row
@@ -1963,270 +1810,6 @@ mod tests {
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(!notice.contains("bridge forgotten"), "{notice}");
         assert!(!notice.contains("bridge remembered"), "{notice}");
-    }
-
-    /// A view saving to `dir/wartui.toml` for a run over `link`.
-    fn ui_over(dir: &std::path::Path, link: Option<config::Link>) -> Ui {
-        Ui::new(Settings {
-            config_path: Some(dir.join("wartui.toml")),
-            link,
-            ..Settings::default()
-        })
-    }
-
-    #[test]
-    fn ui_saves_link_when_bridge_announces_itself_over_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ui = ui_over(dir.path(), Some(config::Link::Bluetooth));
-        let mut waiting = busy();
-        waiting.bridge = None;
-        ui.poll_link(&waiting);
-        assert!(!dir.path().join("wartui.toml").exists(), "not before it connects");
-
-        ui.poll_link(&busy());
-
-        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Bluetooth));
-        assert_eq!(ui.saved().bridge.link, Some(config::Link::Bluetooth));
-    }
-
-    #[test]
-    fn ui_keeps_link_as_file_had_it_when_settings_save_before_bridge_announces_itself() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bridge]\nlink = \"usb\"\n").unwrap();
-        let mut settings = Settings {
-            config_path: Some(path.clone()),
-            saved: config::load(Some(&path)).unwrap(),
-            link: Some(config::Link::Bluetooth),
-            ..Settings::default()
-        };
-
-        save_fix_wait(&mut settings, false).unwrap();
-        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Usb));
-
-        std::fs::write(&path, "").unwrap();
-        settings.saved = config::load(Some(&path)).unwrap();
-        save_fix_wait(&mut settings, true).unwrap();
-        assert_eq!(saved_bridge(dir.path()).link, None, "an absent key stays absent");
-    }
-
-    #[test]
-    fn ui_writes_nothing_when_run_is_over_usb_and_file_names_no_link() {
-        // Absent means USB, so there is nothing to change.
-        let dir = tempfile::tempdir().unwrap();
-        let mut ui = ui_over(dir.path(), Some(config::Link::Usb));
-        ui.poll_link(&busy());
-        assert!(!dir.path().join("wartui.toml").exists());
-    }
-
-    #[test]
-    fn ui_saves_usb_when_file_names_bluetooth_and_run_is_over_usb() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        std::fs::write(&path, "[bridge]\nlink = \"bluetooth\"\n").unwrap();
-        let mut ui = Ui::new(Settings {
-            config_path: Some(path),
-            saved: config::load(Some(&dir.path().join("wartui.toml"))).unwrap(),
-            link: Some(config::Link::Usb),
-            ..Settings::default()
-        });
-
-        ui.poll_link(&busy());
-
-        assert_eq!(saved_bridge(dir.path()).link, Some(config::Link::Usb));
-    }
-
-    #[test]
-    fn ui_saves_no_link_when_link_is_the_simulator() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ui = ui_over(dir.path(), None);
-        ui.poll_link(&busy());
-        assert!(!dir.path().join("wartui.toml").exists());
-    }
-
-    #[test]
-    fn ui_saves_bluetooth_address_when_transport_remembers_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
-        memory.remember_bluetooth(OTHER_BRIDGE, "02:00:5E:10:44:C1".to_owned());
-
-        ui.poll_bridge();
-
-        let saved = saved_bridge(dir.path());
-        assert_eq!(saved.mac, Some(OTHER_BRIDGE));
-        assert_eq!(saved.bluetooth_address.as_deref(), Some("02:00:5E:10:44:C1"));
-    }
-
-    #[test]
-    fn ui_saves_bridge_when_transport_remembers_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
-        ui.poll_bridge();
-        assert!(!dir.path().join("wartui.toml").exists(), "nothing changed, nothing written");
-
-        memory.remember_on(OTHER_BRIDGE, None); // As the transport does on connecting.
-        ui.poll_bridge();
-
-        assert_eq!(saved_bridge(dir.path()).mac, Some(OTHER_BRIDGE));
-        assert_eq!(ui.saved().bridge.mac, Some(OTHER_BRIDGE), "the view knows it too");
-        assert_eq!(ui.notice(busy().now_ms), None, "silent");
-    }
-
-    #[test]
-    fn ui_saves_removal_when_transport_forgets_bridge() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-
-        memory.forget(); // As the transport does when the remembered board goes quiet.
-        ui.poll_bridge();
-
-        assert_eq!(saved_bridge(dir.path()).mac, None);
-    }
-
-    #[test]
-    fn ui_saves_remember_on_with_bridge_when_saved_copy_still_says_off() {
-        // As after turning remember on in the modal with a save that failed.
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::none();
-        let saved = config::Config {
-            bridge: config::Bridge { remember: Some(false), ..config::Bridge::default() },
-            ..config::Config::default()
-        };
-        let mut ui = Ui::new(Settings {
-            config_path: Some(dir.path().join("wartui.toml")),
-            saved,
-            bridge_memory: memory.clone(),
-            ..Settings::default()
-        });
-        memory.remember_on(OTHER_BRIDGE, None);
-
-        ui.poll_bridge();
-
-        let file = saved_bridge(dir.path());
-        assert_eq!(file.remember, Some(true));
-        assert_eq!(file.mac, Some(OTHER_BRIDGE));
-    }
-
-    #[test]
-    fn ui_saves_remember_off_without_bridge_when_saved_copy_still_says_on() {
-        // As after turning remember off in the modal with a save that failed.
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
-        let saved = config::Config {
-            bridge: config::Bridge {
-                remember: Some(true),
-                mac: Some(OTHER_BRIDGE),
-                ..config::Bridge::default()
-            },
-            ..config::Config::default()
-        };
-        let mut ui = Ui::new(Settings {
-            config_path: Some(dir.path().join("wartui.toml")),
-            saved,
-            bridge_memory: memory.clone(),
-            ..Settings::default()
-        });
-        memory.set_enabled(false);
-
-        ui.poll_bridge();
-
-        let file = saved_bridge(dir.path());
-        assert_eq!(file.remember, Some(false));
-        assert_eq!(file.mac, None);
-    }
-
-    #[test]
-    fn ui_saves_remember_on_without_bridge_when_link_is_simulated() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = BridgeMemory::none();
-        memory.set_enabled(false);
-        let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings {
-            config_path: Some(dir.path().join("wartui.toml")),
-            bridge_memory: memory.clone(),
-            simulated: true,
-            ..Settings::default()
-        });
-        select_remember_bridge(&mut ui, &snapshot, &tx);
-        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        assert!(memory.is_enabled());
-        assert_eq!(memory.recall(), None, "the simulator's bridge is not a board");
-        let saved = saved_bridge(dir.path());
-        assert_eq!(saved.remember, Some(true));
-        assert_eq!(saved.mac, None);
-    }
-
-    #[test]
-    fn ui_leaves_file_alone_when_remembered_bridge_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui.toml");
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-        // A hand edit after the save. Only a change to the bridge rewrites the file.
-        std::fs::write(&path, "# mine\n").unwrap();
-
-        ui.poll_bridge();
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn ui_waits_for_next_change_when_bridge_save_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        // A file where the config's directory would have to go: every save fails.
-        let blocked = dir.path().join("blocked");
-        std::fs::write(&blocked, "").unwrap();
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(&blocked, &memory);
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-        assert_eq!(ui.saved().bridge.mac, None, "the save failed");
-
-        // Now the save would succeed, but the bridge has not changed since it failed.
-        std::fs::remove_file(&blocked).unwrap();
-        ui.poll_bridge();
-        assert!(!blocked.exists(), "not retried every frame");
-
-        let bridge = busy().bridge.expect("a bridge").mac;
-        memory.remember_on(bridge, None);
-        ui.poll_bridge();
-        assert_eq!(saved_bridge(&blocked).mac, Some(bridge), "a new bridge is tried again");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn ui_saves_bridge_when_it_returns_after_a_failed_save() {
-        let dir = tempfile::tempdir().unwrap();
-        let blocked = dir.path().join("blocked");
-        std::fs::write(&blocked, "").unwrap();
-        let memory = BridgeMemory::none();
-        let mut ui = ui_with_bridge_memory(&blocked, &memory);
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-        assert_eq!(ui.saved().bridge.mac, None, "the save failed");
-
-        // Back to what the file holds, which clears the failed attempt.
-        memory.forget();
-        ui.poll_bridge();
-        std::fs::remove_file(&blocked).unwrap();
-        memory.remember_on(OTHER_BRIDGE, None);
-        ui.poll_bridge();
-
-        assert_eq!(saved_bridge(&blocked).mac, Some(OTHER_BRIDGE));
     }
 
     #[test]
@@ -2387,7 +1970,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select_wdgwars(&mut ui, &snapshot, &tx);
         ui.on_modal_paste("abc123def456");
 
@@ -2405,7 +1988,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::WigleName, &mut ui, &snapshot, &tx);
         for c in "AIDname ".chars() {
             press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
@@ -2439,8 +2022,7 @@ mod tests {
         let saved = config::load(Some(&target)).unwrap();
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
+        let mut ui = Ui::new(saving(&target, saved));
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(ui.modal().expect("open").wdgwars_key, "by-hand-key", "seeded");
 
@@ -2477,13 +2059,10 @@ mod tests {
     fn draw_shows_masked_key_and_never_the_whole_key_when_modal_open() {
         let snapshot = busy();
         let saved = config::Config {
-            api_keys: config::ApiKeys {
-                wdgwars: "abcSECRETxyz".to_owned(),
-                ..config::ApiKeys::default()
-            },
+            api_keys: ApiKeys { wdgwars: "abcSECRETxyz".to_owned(), ..ApiKeys::default() },
             ..config::Config::default()
         };
-        let mut ui = Ui::new(Settings { saved, ..Settings::default() });
+        let mut ui = Ui::new(Settings::new(None, saved, BridgeMemory::default()));
         let (tx, _rx) = mpsc::channel(4);
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -2500,15 +2079,15 @@ mod tests {
 
     /// The modal drawn at 120×30, opened with `key` saved and the cursor on `field`.
     fn modal_rendered(key: &str, field: Field) -> String {
-        let keys = config::ApiKeys { wdgwars: key.to_owned(), ..config::ApiKeys::default() };
+        let keys = ApiKeys { wdgwars: key.to_owned(), ..ApiKeys::default() };
         modal_terminal(keys, field).backend().to_string()
     }
 
     /// The terminal at 120×30 with the modal open, `keys` saved and the cursor on `field`.
-    fn modal_terminal(keys: config::ApiKeys, field: Field) -> Terminal<TestBackend> {
+    fn modal_terminal(keys: ApiKeys, field: Field) -> Terminal<TestBackend> {
         let snapshot = busy();
         let saved = config::Config { api_keys: keys, ..config::Config::default() };
-        let mut ui = Ui::new(Settings { saved, ..Settings::default() });
+        let mut ui = Ui::new(Settings::new(None, saved, BridgeMemory::default()));
         let (tx, _rx) = mpsc::channel(4);
         select(field, &mut ui, &snapshot, &tx);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
@@ -2517,12 +2096,8 @@ mod tests {
     }
 
     /// `keys` holding only WiGLE's name and token.
-    fn wigle_keys(name: &str, token: &str) -> config::ApiKeys {
-        config::ApiKeys {
-            wigle_name: name.to_owned(),
-            wigle_token: token.to_owned(),
-            ..config::ApiKeys::default()
-        }
+    fn wigle_keys(name: &str, token: &str) -> ApiKeys {
+        ApiKeys { wigle_name: name.to_owned(), wigle_token: token.to_owned(), ..ApiKeys::default() }
     }
 
     #[test]
@@ -2759,10 +2334,10 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = excluded_snapshot(&["HomeNet"]);
         let saved = config::Config {
-            gps: config::Gps { bridge_rate_hz: Some(2), wait_for_fix: None },
+            gps: Gps { bridge_rate_hz: Some(2), wait_for_fix: None },
             ..config::Config::default()
         };
-        let settings = Settings { config_path: Some(target.clone()), saved, ..Settings::default() };
+        let settings = saving(&target, saved);
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::new(settings);
         ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
@@ -2812,7 +2387,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let settings = saving_to(&target);
         let mut ui = open_excluded_page(&snapshot, settings);
         add_ssid(&mut ui, "HomeNet", &snapshot);
         let (tx, mut rx) = mpsc::channel(4);
@@ -2858,7 +2433,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let settings = saving_to(&target);
         let mut ui = open_excluded_page(&snapshot, settings);
         add_ssid(&mut ui, "HomeNet", &snapshot);
         let (tx, mut rx) = mpsc::channel(1);
@@ -3026,7 +2601,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = fan_snapshot(40);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::Fan, &mut ui, &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -3075,7 +2650,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::WardriveEsp, &mut ui, &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Right), &snapshot, &tx);
 
@@ -3180,7 +2755,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::SdLog, &mut ui, &snapshot, &tx);
         ui.on_modal_key(key(KeyCode::Right), &snapshot, &tx);
 
@@ -3262,7 +2837,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        let mut ui = Ui::new(saving_to(&target));
         select(Field::Bluetooth, &mut ui, &snapshot, &tx);
         assert!(modal_screen(&snapshot, &mut ui).contains("bluetooth         ◂ off ▸"));
         ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);

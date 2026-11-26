@@ -32,9 +32,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 use serde_json::{Map, Value};
+use wartui_app::settings::Settings;
 use wartui_core::store::UploadSite;
 
-use super::{Settings, centered_rect};
+use super::centered_rect;
 use crate::config;
 use crate::upload::{
     Job, Options, Prepare, Prepared, Sent, Simulated, Site, finish, involved, prepare, send, size,
@@ -96,21 +97,27 @@ impl std::fmt::Debug for Upload {
 impl Upload {
     /// `u`: start preparing, or say why not. Returns the notice to show, if any.
     ///
-    /// `excluded` is the engine's list in force, not `settings.saved`'s, which is stale
+    /// `excluded` is the engine's list in force, not the saved settings', which are stale
     /// when saving `wartui.toml` failed.
-    pub(super) fn press(&mut self, settings: &Settings, excluded: &[String]) -> Option<String> {
+    pub(super) fn press(
+        &mut self,
+        settings: &Settings,
+        target: &UploadTarget,
+        excluded: &[String],
+    ) -> Option<String> {
         if !matches!(self.stage, Stage::Idle) {
             return Some("an upload is already under way".to_owned());
         }
         self.general = None;
         self.wdgwars = None;
         self.wigle = None;
-        if involved(&settings.saved).is_empty() {
+        let config = settings.saved();
+        if involved(&config).is_empty() {
             return Some("no upload credentials; paste a key in settings (c)".to_owned());
         }
-        let config = settings.saved.clone();
-        let config_path = settings.config_path.clone();
-        let db = settings.upload.db.clone();
+        // Only named in a refusal, so the place serves as the path.
+        let config_path = settings.place().map(PathBuf::from);
+        let db = target.db.clone();
         let options = Options {
             excluded_ssids: config::excluded_ssid_bytes(excluded).collect(),
             ..Options::default()
@@ -401,6 +408,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc;
+    use wartui_bridge::remember::BridgeMemory;
     use wartui_core::engine::Snapshot;
 
     use super::*;
@@ -419,7 +427,7 @@ mod tests {
             wdgwars_base: wdgwars_base.to_owned(),
             wigle_base: wigle_base.to_owned(),
         };
-        Ui::new(Settings { saved, upload, ..Settings::default() })
+        Ui::new(Settings::new(None, saved, BridgeMemory::default())).uploading_to(upload)
     }
 
     /// A view whose `u` uploads `db`, with a WDGWars key alone, to a local server at `base`.

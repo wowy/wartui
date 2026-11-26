@@ -1,15 +1,20 @@
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, NaiveTime};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use wartui_app::settings::{Settings, SettingsStore};
 use wartui_bridge::BridgeInfo;
+use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{
     BridgeStatus, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
 };
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
+use wartui_desktop::config::ConfigFile;
 use wartui_proto::bus::{
     Board, Capabilities, MAX_SLOTS, NODE_VERSION, NodeBoard, RecordKind, Slot, Version,
 };
@@ -22,6 +27,22 @@ use wartui_proto::reset::ResetCause;
 
 use super::draw;
 use super::ui::Ui;
+use crate::config::Config;
+
+/// The `wartui.toml` at `path`, as the view's store.
+pub(super) fn file_store(path: &Path) -> Option<Arc<dyn SettingsStore>> {
+    Some(Arc::new(ConfigFile::at(path.to_path_buf())))
+}
+
+/// Settings saved to the `wartui.toml` at `path`, last loaded as `saved`.
+pub(super) fn saving(path: &Path, saved: Config) -> Settings {
+    Settings::new(file_store(path), saved, BridgeMemory::default())
+}
+
+/// Settings saved to the `wartui.toml` at `path`, which held nothing.
+pub(super) fn saving_to(path: &Path) -> Settings {
+    saving(path, Config::default())
+}
 
 /// The fixtures' wall-clock start, in unix milliseconds.
 pub(super) const EPOCH_MS: i64 = 1_777_642_477_000;
