@@ -219,7 +219,8 @@ pub enum Failed {
 
 /// Update the bridge on `link`, reached over `over`, to `image`. `running` is the image the
 /// bridge's `Ready` named (`BridgeInfo::image`). Opening the link and waiting for that `Ready`
-/// are the caller's.
+/// are the caller's. `say` is `Send`, so a phone's binding runs the update as a task of its own
+/// runtime.
 ///
 /// # Errors
 /// How the update failed.
@@ -228,9 +229,9 @@ pub async fn update(
     over: Link,
     running: Option<[u8; DIGEST_LEN]>,
     image: &BridgeImage,
-    mut say: impl FnMut(Progress),
+    mut say: impl FnMut(Progress) + Send,
 ) -> Result<Updated, Failed> {
-    let say: &mut dyn FnMut(Progress) = &mut say;
+    let say: &mut (dyn FnMut(Progress) + Send) = &mut say;
     let digest = image.digest();
     if running == Some(digest) {
         return Ok(Updated::AlreadyCurrent);
@@ -328,7 +329,7 @@ impl<'a> Update<'a> {
     async fn send(
         &mut self,
         link: &mut LinkHandle,
-        say: &mut dyn FnMut(Progress),
+        say: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<(), Failed> {
         let mut tick = tokio::time::interval(TICK);
         let mut written = link.written();
@@ -369,7 +370,7 @@ impl<'a> Update<'a> {
     async fn come_back(
         &mut self,
         link: &mut LinkHandle,
-        say: &mut dyn FnMut(Progress),
+        say: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<BridgeInfo, Failed> {
         let wait = async {
             let mut tick = tokio::time::interval(TICK);
@@ -412,7 +413,7 @@ impl<'a> Update<'a> {
     async fn settle_bluetooth(
         &mut self,
         link: &mut LinkHandle,
-        say: &mut dyn FnMut(Progress),
+        say: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<(), Failed> {
         let mut settling = Settling::new(self.sent, self.before, Instant::now());
         let mut tick = tokio::time::interval(TICK);
@@ -498,7 +499,7 @@ impl<'a> Update<'a> {
     }
 
     /// A message from the P4: a status for the sender, or a line to hand on.
-    fn take(&mut self, message: BridgeToHost, say: &mut dyn FnMut(Progress)) {
+    fn take(&mut self, message: BridgeToHost, say: &mut (dyn FnMut(Progress) + Send)) {
         match message {
             BridgeToHost::Update(bytes) => {
                 if let Some(Op::Status(status)) = Op::decode(&bytes) {
@@ -511,7 +512,7 @@ impl<'a> Update<'a> {
 }
 
 /// Hand on a bridge's log or error line; anything else is not a line.
-fn line(message: &BridgeToHost, say: &mut dyn FnMut(Progress)) {
+fn line(message: &BridgeToHost, say: &mut (dyn FnMut(Progress) + Send)) {
     match message {
         BridgeToHost::Error { message } => say(Progress::Line(Line::Fault(message.to_string()))),
         BridgeToHost::Log { message } => say(Progress::Line(Line::Log(message.to_string()))),
@@ -541,7 +542,7 @@ async fn next_event(
 }
 
 /// Hand on what the C6's update says, until its new life or [`QUIET`] without a line about it.
-async fn follow_radio(link: &mut LinkHandle, say: &mut dyn FnMut(Progress)) {
+async fn follow_radio(link: &mut LinkHandle, say: &mut (dyn FnMut(Progress) + Send)) {
     let deadline = tokio::time::Instant::now() + FOLLOW;
     let mut quiet_until = tokio::time::Instant::now() + QUIET;
     let mut poll = tokio::time::interval(POLL);
@@ -591,7 +592,7 @@ enum Confirm {
 /// other line on the way.
 async fn await_confirm(
     link: &mut LinkHandle,
-    say: &mut dyn FnMut(Progress),
+    say: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<Confirm, Failed> {
     let deadline = tokio::time::Instant::now() + CONFIRM_WAIT;
     let mut poll = tokio::time::interval(POLL);
@@ -789,7 +790,7 @@ impl Settling {
 fn settled_end(
     settled: Settled,
     radio_running: bool,
-    say: &mut dyn FnMut(Progress),
+    say: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<(), Failed> {
     match settled {
         Settled::Installed(proof) => {

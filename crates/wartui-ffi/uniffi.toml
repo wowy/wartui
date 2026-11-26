@@ -3,12 +3,15 @@
 package_name = "racing.deadbear.wartui.core"
 
 # Every Kotlin object is `AutoCloseable`, whose `close()` frees the handle, so `Link::close`
-# would clash with it. Kotlin nests an error's variants in its exception class, where the variant
-# `SettingsError::Invalid` hides the type `Invalid` its `reason` field names, so the type is
-# `BrokenRule`, in Swift too so both languages call it the same.
+# would clash with it. Kotlin nests an error's or an enum's variants in its class, where a variant
+# hides the type of the same name its field holds: `SettingsError::Invalid` hides `Invalid`,
+# `SiteRefusal::Missing` hides `Missing` and `Waited::Unfollowed` hides `Unfollowed`. So those
+# types are renamed, in Swift too so both languages call them the same.
 [bindings.kotlin.rename]
 "Link.close" = "disconnect"
 "Invalid" = "BrokenRule"
+"Missing" = "MissingCredentials"
+"Unfollowed" = "JobUnfollowed"
 
 [bindings.swift]
 module_name = "WartuiCore"
@@ -16,3 +19,5 @@ ffi_module_name = "WartuiCoreFFI"
 
 [bindings.swift.rename]
 "Invalid" = "BrokenRule"
+"Missing" = "MissingCredentials"
+"Unfollowed" = "JobUnfollowed"

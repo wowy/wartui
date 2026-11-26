@@ -1,7 +1,9 @@
-// The binding end to end from Kotlin: a simulated capture steered and exported, then one over a
-// radio written here that loops back to a simulated bridge. Also the first example a phone
-// developer reads: the loopback driver is shaped as an Android `BluetoothGattCallback` adapter is.
+// The binding end to end from Kotlin: a simulated capture steered and exported, its nodes updated
+// between captures, then one over a radio written here that loops back to a simulated bridge, and
+// the first capture refused for upload as test data. Also the first example a phone developer
+// reads: the loopback driver is shaped as an Android `BluetoothGattCallback` adapter is.
 
+import racing.deadbear.wartui.core.Board
 import racing.deadbear.wartui.core.CaptureConfig
 import racing.deadbear.wartui.core.ChannelPool
 import racing.deadbear.wartui.core.Completion
@@ -14,6 +16,10 @@ import racing.deadbear.wartui.core.LocationFeed
 import racing.deadbear.wartui.core.LocationFix
 import racing.deadbear.wartui.core.LogLevel
 import racing.deadbear.wartui.core.LogSink
+import racing.deadbear.wartui.core.NodeImage
+import racing.deadbear.wartui.core.NodeOutcome
+import racing.deadbear.wartui.core.NodeUpdateListener
+import racing.deadbear.wartui.core.NodeUpdateProgress
 import racing.deadbear.wartui.core.PositionSource
 import racing.deadbear.wartui.core.PositionSources
 import racing.deadbear.wartui.core.Pushed
@@ -25,15 +31,20 @@ import racing.deadbear.wartui.core.Session
 import racing.deadbear.wartui.core.Settings
 import racing.deadbear.wartui.core.SettingsEdit
 import racing.deadbear.wartui.core.SettingsStore
+import racing.deadbear.wartui.core.UploadOptions
+import racing.deadbear.wartui.core.UploadRefusal
 import racing.deadbear.wartui.core.View
 import racing.deadbear.wartui.core.WireSim
 import racing.deadbear.wartui.core.bridgesNearby
 import racing.deadbear.wartui.core.exportWigleCsv
 import racing.deadbear.wartui.core.logTo
+import racing.deadbear.wartui.core.prepareUpload
+import racing.deadbear.wartui.core.testingNodeImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.system.exitProcess
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -142,6 +153,15 @@ class LoopbackDriver(private val sim: WireSim, private val pumps: CoroutineScope
     override fun close(peer: String, unsubscribe: Boolean) {}
 }
 
+/** Counts the steps a node update reports. */
+class Counting : NodeUpdateListener {
+    val calls = AtomicInteger()
+
+    override fun progress(progress: NodeUpdateProgress) {
+        calls.incrementAndGet()
+    }
+}
+
 /** Follow [session]'s views until [done] holds for one, within the deadline. */
 suspend fun until(session: Session, what: String, done: (View) -> Boolean): View =
     withTimeout(DEADLINE_MS) {
@@ -170,14 +190,18 @@ fun capture(db: Path) = CaptureConfig(
     build = HostBuild(hostVersion = "smoke", hostCommit = null, releaseTag = null),
 )
 
-/** A simulated capture, placed by a fix the platform pushes, steered, then exported. */
-suspend fun simulated(dir: Path) {
+/**
+ * A simulated capture, placed by a fix the platform pushes, steered, then exported, and its nodes
+ * updated over the link once it has stopped. Returns the capture's path.
+ */
+suspend fun simulated(dir: Path): Path {
     val db = dir.resolve("simulated.db")
     val location = LocationFeed()
     val settings = Settings.unsaved()
+    val link = Link.simulated(3u)
     val session = Session.start(
         capture(db),
-        Link.simulated(3u),
+        link,
         settings,
         PositionSources(bridgeReceiver = false, location = location, fixed = null),
         HealthFeed(),
@@ -216,13 +240,42 @@ suspend fun simulated(dir: Path) {
     }
     check(Files.exists(csv)) { "no export at $csv" }
     check(exported.nodes.size == 3) { "the export names ${exported.nodes.map { it.name }}" }
+
+    updateNodes(link)
+    return db
+}
+
+/** Every node [link] hears updated, forced, to an image of the version they run. */
+suspend fun updateNodes(link: Link) {
+    val heard = withTimeout(DEADLINE_MS) { link.hearNodes(3_000u) }
+    // No slot named: every node heard.
+    val version = heard.targets(listOf()).first().capabilities.version
+    val image = NodeImage.parse(testingNodeImage(Board.Esp32c5, version))
+    val plan = heard.plan(listOf(), listOf(image), true)
+    check(plan.chosen() == 3u) { "the plan chooses ${plan.rows()}" }
+    val counting = Counting()
+    val updated = withTimeout(DEADLINE_MS) { link.updateNodes(plan, null, counting) }
+    check(updated.failed == null && updated.outcomes.size == 3) { "updated: $updated" }
+    check(updated.outcomes.all { it.outcome is NodeOutcome.Done }) { "updated: $updated" }
+    check(counting.calls.get() > 0) { "the listener heard nothing" }
+}
+
+/** A simulated capture is test data, which is never uploaded. This contacts nothing. */
+suspend fun refusedAsTestData(settings: Settings, db: Path) {
+    try {
+        prepareUpload(settings, db.toString(), UploadOptions(appVersion = "smoke"))
+        error("a simulated capture was prepared for upload")
+    } catch (refused: UploadRefusal.TestData) {
+        // As it should be.
+    }
 }
 
 /**
  * A capture over the loopback radio: the bridge picked from those nearby and announced before the
  * capture, remembered in the settings, and an API key typed in afterwards kept in the secret store.
+ * Returns the settings, which hold the key.
  */
-suspend fun loopback(dir: Path) {
+suspend fun loopback(dir: Path): Settings {
     val pumps = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val driver = LoopbackDriver(WireSim.start(3u, 185u), pumps)
     val radio = Radio(driver)
@@ -260,6 +313,7 @@ suspend fun loopback(dir: Path) {
     check(keyed is Saved.At) { "the key was not saved: $keyed" }
     check(secrets.text?.contains(key) == true) { "the secret store holds ${secrets.text}" }
     check(store.text?.contains(key) == false) { "the key is in the settings: ${store.text}" }
+    return settings
 }
 
 fun main() {
@@ -268,8 +322,9 @@ fun main() {
             val sink = Lines()
             check(logTo(sink, LogLevel.INFO)) { "a log sink was already set" }
             val dir = Files.createTempDirectory("wartui-smoke")
-            simulated(dir)
-            loopback(dir)
+            val simulatedDb = simulated(dir)
+            val keyed = loopback(dir)
+            refusedAsTestData(keyed, simulatedDb)
             check(sink.lines.isNotEmpty()) { "the log sink saw nothing" }
         }
     } catch (failure: Throwable) {

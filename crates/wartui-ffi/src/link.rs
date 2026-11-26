@@ -12,6 +12,11 @@
 //! else the one the settings remember, else the only one heard. The transport remembers into the
 //! settings' bridge memory, so a capture saves the bridge it connected to.
 //!
+//! **A link opened with a bridge named is pinned to it.** Its transport refuses every other
+//! bridge, through each reconnect, so an update over it reaches that bridge's fleet and no other
+//! (`update.rs`). One opened unnamed prefers the remembered bridge and may take another, which a
+//! capture is free to do and an update is not.
+//!
 //! **[`Link::ready`] waits for the announcement before a capture**, so a phone can show the
 //! bridge, or why none answered, before it starts one. It is `wartui_app::ops::ready`, run whole
 //! on the library's runtime: the link is taken, waited on and given back, parked with the
@@ -135,10 +140,13 @@ pub struct Link {
     inner: Arc<Inner>,
 }
 
-/// A [`Link`]'s state, shared with the work [`Link::ready`] runs on the runtime.
+/// A [`Link`]'s state, shared with the work its calls run on the runtime.
 #[derive(Debug)]
-struct Inner {
+pub(crate) struct Inner {
     simulated: bool,
+    /// The bridge the transport was opened for, which it refuses every other for. `None` for the
+    /// simulator, and for a Bluetooth link opened with no bridge named.
+    pinned: Option<BridgeSpec>,
     held: Mutex<Held>,
 }
 
@@ -159,12 +167,12 @@ impl Link {
                 Held::Closed
             }
         };
-        Self::holding(true, held)
+        Self::holding(true, None, held)
     }
 
     /// The Bluetooth link to the bridge `bridge` names (a whole address, or its last octets as
     /// `44:C0`), else the one `settings` remember, else the only one heard. The settings remember
-    /// the bridge it connects to.
+    /// the bridge it connects to. Only a link opened with `bridge` given takes an update.
     ///
     /// # Errors
     /// [`LinkError::NotABridgeName`] when `bridge` names no bridge, and [`LinkError::Start`]
@@ -181,7 +189,7 @@ impl Link {
             Some(Err(never)) => match never {},
             None => None,
         };
-        let transport = match spec {
+        let transport = match spec.clone() {
             Some(spec) => BleTransport::with_spec(radio, spec),
             None => BleTransport::new(radio),
         };
@@ -190,7 +198,7 @@ impl Link {
             .remember_in(settings.app().memory())
             .start()
             .map_err(|error| LinkError::Start { detail: error.to_string() })?;
-        Ok(Self::holding(false, Held::Idle(park(handle, None))))
+        Ok(Self::holding(false, spec, Held::Idle(park(handle, None))))
     }
 
     /// Whether the bridge is the simulator's.
@@ -255,8 +263,14 @@ impl Link {
 }
 
 impl Link {
-    fn holding(simulated: bool, held: Held) -> Arc<Self> {
-        Arc::new(Self { inner: Arc::new(Inner { simulated, held: Mutex::new(held) }) })
+    fn holding(simulated: bool, pinned: Option<BridgeSpec>, held: Held) -> Arc<Self> {
+        let inner = Inner { simulated, pinned, held: Mutex::new(held) };
+        Arc::new(Self { inner: Arc::new(inner) })
+    }
+
+    /// The link's state, for work run on the runtime.
+    pub(crate) fn shared(&self) -> Arc<Inner> {
+        Arc::clone(&self.inner)
     }
 
     /// Take the link for a session: idle to in use, with the bridge it has announced now. A link
@@ -277,7 +291,18 @@ impl Link {
 }
 
 impl Inner {
-    async fn lend(&self) -> Result<(LinkHandle, Option<BridgeInfo>), LinkError> {
+    /// Whether the bridge is the simulator's.
+    pub(crate) fn is_simulated(&self) -> bool {
+        self.simulated
+    }
+
+    /// Whether an update may go over the link: the simulator's, or a Bluetooth link pinned to the
+    /// bridge named when it was opened.
+    pub(crate) fn takes_updates(&self) -> bool {
+        self.simulated || self.pinned.is_some()
+    }
+
+    pub(crate) async fn lend(&self) -> Result<(LinkHandle, Option<BridgeInfo>), LinkError> {
         let parked = {
             let mut held = self.lock();
             match std::mem::replace(&mut *held, Held::InUse) {
@@ -296,12 +321,12 @@ impl Inner {
         })
     }
 
-    fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
+    pub(crate) fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
         let _inside = runtime().enter();
         *self.lock() = Held::Idle(park(handle, announced));
     }
 
-    fn lose(&self) {
+    pub(crate) fn lose(&self) {
         *self.lock() = Held::Closed;
     }
 

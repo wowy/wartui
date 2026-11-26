@@ -20,9 +20,16 @@
 //! | | [`Session`]'s steering: `apply`, `apply_excluded`, `start_without_fix` |
 //! | | [`Session`]'s bridge commands: `power_cycle`, `format_sd` |
 //! | | [`export_wigle_csv`] |
+//! | [`UploadListener`] | [`prepare_upload`], then [`PreparedUpload`]: `shown`, `send` |
+//! | | [`NodeImage`], [`BridgeImage`]: `parse`; [`fetch_node_image`], [`fetch_bridge_image`] |
+//! | [`NodeUpdateListener`] | [`Link`]'s node update: `hear_nodes`, then `update_nodes` |
+//! | | [`NodesHeard`]: `targets`, `boards`, `plan`; [`NodePlan`]: `rows`, `chosen` |
+//! | [`BridgeUpdateListener`] | [`Link`]'s bridge update: `update_bridge` |
+//! | | [`Stopper`]: `new`, `stop`, for either update |
 //!
-//! Kotlin calls `Link::close` `disconnect`, and both languages call the rule enum `Invalid`
-//! `BrokenRule` (`uniffi.toml`).
+//! Kotlin calls `Link::close` `disconnect`. Both languages call the rule enum `Invalid`
+//! `BrokenRule`, the upload's `Missing` `MissingCredentials` and its `Unfollowed`
+//! `JobUnfollowed` (`uniffi.toml`).
 //!
 //! **Threads.** Calls arrive on any thread, a new one each time on Kotlin. Every task runs on the
 //! library's one runtime (`runtime`), and no exported function blocks on it: an exported
@@ -50,6 +57,8 @@ mod session;
 mod settings;
 #[cfg(feature = "testing")]
 mod testing;
+mod update;
+mod upload;
 mod view;
 
 pub use export::{ExportError, ExportOptions, Exported, ExportedNode, export_wigle_csv};
@@ -69,6 +78,23 @@ pub use settings::{
     SettingsStore, StoreFailure, UNNAMED_PLACE, check_excluded_ssid, settings_limits,
 };
 #[cfg(feature = "testing")]
-pub use testing::WireSim;
+pub use testing::{WireSim, testing_node_image};
+pub use update::{
+    BridgeImage, BridgeUpdateFailed, BridgeUpdateListener, BridgeUpdateProgress, BridgeUpdated,
+    CutShort, FetchError, ImageError, LinkKind, NodeAction, NodeCapabilities, NodeEnded,
+    NodeFailure, NodeImage, NodeOutcome, NodePlan, NodeTarget, NodeUpdateListener,
+    NodeUpdateProgress, NodesFailed, NodesHeard, NodesUpdated, PlanRow, QueueFailure,
+    ReleaseFailure, SelectFailed, SenderFailure, SessionProgress, Stopper, UpdateError,
+    fetch_bridge_image, fetch_node_image,
+};
+#[cfg(feature = "testing")]
+pub use update::{fetch_bridge_image_from, fetch_node_image_from};
+pub use upload::{
+    PreparedUpload, PreviousUpload, SiteOutcome, SitePrepared, UploadError, UploadListener,
+    UploadOptions, UploadOutcome, UploadProgress, UploadRefusal, UploadSendFailure, UploadShown,
+    prepare_upload,
+};
+#[cfg(feature = "testing")]
+pub use upload::{UploadEndpoints, prepare_upload_at};
 
 uniffi::setup_scaffolding!();
