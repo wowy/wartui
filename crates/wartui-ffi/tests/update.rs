@@ -180,16 +180,26 @@ fn remembering(driver: &Loopback) -> Arc<Settings> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn update_refuses_bluetooth_link_when_no_bridge_was_named() {
-    let (radio, driver) = Loopback::steered();
-    // Remembered is not named: a transport opened unnamed may take another bridge.
-    let link = Link::bluetooth(radio, remembering(&driver), None).expect("opened");
+async fn update_refuses_bluetooth_link_when_no_bridge_is_named_or_remembered() {
+    let radio = Loopback::radio();
+    // A transport pinned to nothing takes whichever bridge a scan hears.
+    let link = Link::bluetooth(radio, Settings::unsaved(), None).expect("opened");
     let refused = link.hear_nodes(LISTEN_MS).await;
-    assert!(matches!(refused, Err(UpdateError::BridgeNotNamed)), "{refused:?}");
+    assert!(matches!(refused, Err(UpdateError::NotPinned)), "{refused:?}");
     let image = BridgeImage::parse(fixture_with(P4_APP_HEADER, BRIDGE_PROJECT, "0.1.0", 0x1000))
         .expect("a bridge image");
     let refused = link.update_bridge(image, None, None).await;
-    assert!(matches!(refused, Err(BridgeUpdateFailed::BridgeNotNamed)), "{refused:?}");
+    assert!(matches!(refused, Err(BridgeUpdateFailed::NotPinned)), "{refused:?}");
+    link.close().await.expect("closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_takes_bluetooth_link_when_bridge_is_remembered() {
+    let (radio, driver) = Loopback::steered();
+    let link = Link::bluetooth(radio, remembering(&driver), None).expect("opened");
+    link.ready(READY_MS, None).await.expect("announced");
+    let heard = link.hear_nodes(LISTEN_MS).await.expect("heard over the remembered bridge");
+    assert_eq!(heard.targets(Vec::new()).expect("targets").len(), 3);
     link.close().await.expect("closed");
 }
 

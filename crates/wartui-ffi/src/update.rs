@@ -11,10 +11,10 @@
 //! `//!`). What stands for the operator's yes is that [`NodePlan`] is opaque: the plan a confirm
 //! screen shows is the plan [`Link::update_nodes`] runs.
 //!
-//! **Only a pinned link takes an update.** Over Bluetooth an update goes to the bridge named when
-//! the link was opened, whose transport refuses every other through each reconnect, never to one
-//! a scan happens to hear, whose fleet would take the image (`link.rs`). A simulated link is
-//! exempt.
+//! **Only a pinned link takes an update.** Over Bluetooth an update goes to the bridge named or
+//! remembered when the link was opened, whose transport refuses every other through each
+//! reconnect, never to one a scan happens to hear, whose fleet would take the image (`link.rs`).
+//! A simulated link is exempt.
 //!
 //! **Each call works over the link as [`Link::ready`] does.** The link must be idle; it is lent
 //! for the call, the work runs whole on the library's runtime, and it is given back parked on
@@ -475,11 +475,11 @@ pub enum UpdateError {
     /// The link is closed, or its transport ended.
     #[error("the link is closed")]
     Closed,
-    /// The Bluetooth link was opened with no bridge named, so the bridge it reaches may be one a
-    /// scan heard. An app updates over a link it opened with `bridge` given; for the remembered
-    /// bridge it passes `Settings.saved().bridge_mac`.
-    #[error("no bridge was named when the link was opened")]
-    BridgeNotNamed,
+    /// The Bluetooth link was opened with no bridge named and none remembered, so the bridge it
+    /// reaches is one a scan heard. An app names the bridge, or opens the link once the settings
+    /// remember one.
+    #[error("the link is pinned to no bridge")]
+    NotPinned,
 }
 
 /// The link, lent for an update: refused unless it takes updates and is idle.
@@ -487,7 +487,7 @@ async fn lend(
     inner: &Inner,
 ) -> Result<(wartui_bridge::LinkHandle, Option<wartui_bridge::BridgeInfo>), UpdateError> {
     if !inner.takes_updates() {
-        return Err(UpdateError::BridgeNotNamed);
+        return Err(UpdateError::NotPinned);
     }
     inner.lend().await.map_err(|error| match error {
         LinkError::InUse => UpdateError::InUse,
@@ -1045,9 +1045,9 @@ pub enum BridgeUpdateFailed {
     /// one with `ready` first.
     #[error("no bridge has announced itself")]
     NotAnnounced,
-    /// As [`UpdateError::BridgeNotNamed`].
-    #[error("no bridge was named when the link was opened")]
-    BridgeNotNamed,
+    /// As [`UpdateError::NotPinned`].
+    #[error("the link is pinned to no bridge")]
+    NotPinned,
     /// The stopper stopped it. The bridge keeps the image it runs.
     #[error("stopped")]
     Stopped,
@@ -1136,7 +1136,7 @@ impl Link {
     /// waits up to `period_ms` for one first, since the slots are labeled on the board it names.
     ///
     /// # Errors
-    /// [`UpdateError::BridgeNotNamed`] for a Bluetooth link opened unnamed,
+    /// [`UpdateError::NotPinned`] for a Bluetooth link pinned to no bridge,
     /// [`UpdateError::InUse`] or [`UpdateError::Closed`] for a link not idle, and
     /// [`UpdateError::Closed`] when the transport ends while listening.
     pub async fn hear_nodes(&self, period_ms: u32) -> Result<Arc<NodesHeard>, UpdateError> {
@@ -1185,7 +1185,7 @@ impl Link {
     /// task that is not suspended.
     ///
     /// # Errors
-    /// How the update failed, or why it did not start: [`BridgeUpdateFailed::BridgeNotNamed`],
+    /// How the update failed, or why it did not start: [`BridgeUpdateFailed::NotPinned`],
     /// [`BridgeUpdateFailed::InUse`], [`BridgeUpdateFailed::Closed`] or
     /// [`BridgeUpdateFailed::NotAnnounced`].
     pub async fn update_bridge(
@@ -1256,7 +1256,7 @@ async fn update_bridge(
     let (mut handle, announced) = lend(&inner).await.map_err(|error| match error {
         UpdateError::InUse => BridgeUpdateFailed::InUse,
         UpdateError::Closed => BridgeUpdateFailed::Closed,
-        UpdateError::BridgeNotNamed => BridgeUpdateFailed::BridgeNotNamed,
+        UpdateError::NotPinned => BridgeUpdateFailed::NotPinned,
     })?;
     let Some(running) = announced.map(|bridge| bridge.image) else {
         inner.give_back(handle, None);

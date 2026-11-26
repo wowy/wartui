@@ -8,7 +8,7 @@ use std::time::Duration;
 use wartui_core::store::open_readonly;
 use wartui_ffi::{Link, LinkError, ReadyError, Session, Settings};
 
-use common::{Loopback, WAIT, capture, nowhere, start, three_nodes, until};
+use common::{Loopback, Memory, WAIT, capture, nowhere, start, three_nodes, until};
 
 /// How long a test gives the bridge to announce itself, in milliseconds.
 const READY_MS: u32 = 15_000;
@@ -96,6 +96,24 @@ async fn link_drops_the_announcement_when_bridge_goes_while_idle() {
     .await;
     assert!(!shown.unwrap_or(false), "a bridge gone while idle is not handed on");
     second.stop().await.expect("stopped");
+    link.close().await.expect("closed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_refuses_another_bridge_when_settings_remember_one() {
+    let (radio, driver) = Loopback::steered();
+    let other = if driver.tail() == "00:01" { "00:02" } else { "00:01" };
+    let remembered = format!("02:00:00:00:{other}");
+    let text = format!("[bridge]\nmac = \"{remembered}\"\n");
+    let settings = Settings::open(Memory::holding(&text), None).expect("the settings load");
+    let link = Link::bluetooth(radio, Arc::clone(&settings), None).expect("opened");
+
+    // The loopback's bridge is the only one heard, and not the one remembered. An unpinned link
+    // takes it once a scan has listened its 2 s, so the wait outlasts that.
+    let waited = tokio::time::timeout(WAIT, link.ready(4_000, None)).await.expect("in time");
+    assert!(waited.is_err(), "another bridge announced: {waited:?}");
+    let saved = settings.saved().bridge_mac.expect("still remembered");
+    assert!(saved.eq_ignore_ascii_case(&remembered), "{saved}");
     link.close().await.expect("closed");
 }
 

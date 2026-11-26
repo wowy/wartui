@@ -86,10 +86,10 @@ is what a confirm screen shows and what `updateNodes` runs. `updateBridge` sends
 `fetchBridgeImage` take a release's images, checked against its `SHA256SUMS`, for the release tag
 the app is built against.
 
-- **Name the bridge.** An update goes only over a link opened with `bridge` given, whose
-  transport refuses every other bridge; one opened without may reach a bridge a scan heard, whose
-  fleet would take the image, and is refused with `BridgeNotNamed`. For the remembered bridge,
-  pass `Settings.saved().bridgeMac`.
+- **Name the bridge, or remember it.** `Link.bluetooth` pins the link to the bridge named, else
+  to the one the settings remember when it opens, and its transport refuses every other, so the
+  app moves to another bridge by naming it. With neither it takes the only bridge heard, whose
+  fleet would take the image, and an update over it is refused with `NotPinned`.
 - **There is no USB fallback from a phone.** A bridge update that fails over Bluetooth is
   recovered from a computer, so the app says so before it starts.
 - **Run either in a background task the OS does not suspend.** A bridge update can run several
