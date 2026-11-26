@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use wartui_core::feed::{FeedLoss, FeedView, FixFeed, LocationFix, Pushed};
+use wartui_core::feed::{FeedLoss, FeedView, FixFeed, LocationFix, MAX_ACCURACY_M, Pushed};
 use wartui_core::health::{Health, HealthReader};
 use wartui_core::position::DEFAULT_MAX_AGE;
 use wartui_core::runtime::now;
@@ -25,7 +25,8 @@ pub struct LocationFix {
     pub lon: f64,
     /// Meters above mean sea level, if known.
     pub alt_msl: Option<f64>,
-    /// Horizontal accuracy in meters. A fix without one, or worse than 50 m, is refused.
+    /// Horizontal accuracy in meters. A fix without one, or worse than
+    /// [`max_fix_accuracy_m`], is refused.
     pub accuracy_m: Option<f64>,
     /// When the fix was taken, in Unix milliseconds on this device's clock. Where the platform
     /// stamps satellite time (Android does for GPS fixes), give the wall clock less the fix's age
@@ -46,7 +47,7 @@ pub enum Pushed {
     Mock,
     /// Its coordinates name no place on Earth.
     Invalid,
-    /// Its accuracy is missing or worse than 50 m.
+    /// Its accuracy is missing or worse than [`max_fix_accuracy_m`].
     Coarse,
 }
 
@@ -74,6 +75,14 @@ pub struct FeedView {
     pub refused: u64,
     /// Whether the capture wants fixes now.
     pub wanted: bool,
+}
+
+/// The worst horizontal accuracy a fix may report and still be taken, in meters
+/// (`wartui_core::feed::MAX_ACCURACY_M`).
+#[uniffi::export]
+#[must_use]
+pub fn max_fix_accuracy_m() -> f64 {
+    MAX_ACCURACY_M
 }
 
 /// The platform's location services, as a capture's position tier.

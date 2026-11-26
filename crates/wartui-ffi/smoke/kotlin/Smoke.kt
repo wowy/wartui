@@ -2,27 +2,27 @@
 // loops back to a simulated bridge. Also the first example a phone developer reads: the loopback
 // driver is shaped as an Android `BluetoothGattCallback` adapter is.
 
-import io.github.wowy.wartui.CaptureConfig
-import io.github.wowy.wartui.Completion
-import io.github.wowy.wartui.HealthFeed
-import io.github.wowy.wartui.Heard
-import io.github.wowy.wartui.HostBuild
-import io.github.wowy.wartui.Link
-import io.github.wowy.wartui.LocationFeed
-import io.github.wowy.wartui.LocationFix
-import io.github.wowy.wartui.LogLevel
-import io.github.wowy.wartui.LogSink
-import io.github.wowy.wartui.PositionSource
-import io.github.wowy.wartui.PositionSources
-import io.github.wowy.wartui.Pushed
-import io.github.wowy.wartui.Radio
-import io.github.wowy.wartui.RadioDriver
-import io.github.wowy.wartui.Session
-import io.github.wowy.wartui.Settings
-import io.github.wowy.wartui.SettingsStore
-import io.github.wowy.wartui.View
-import io.github.wowy.wartui.WireSim
-import io.github.wowy.wartui.logTo
+import racing.deadbear.wartui.core.CaptureConfig
+import racing.deadbear.wartui.core.Completion
+import racing.deadbear.wartui.core.HealthFeed
+import racing.deadbear.wartui.core.Heard
+import racing.deadbear.wartui.core.HostBuild
+import racing.deadbear.wartui.core.Link
+import racing.deadbear.wartui.core.LocationFeed
+import racing.deadbear.wartui.core.LocationFix
+import racing.deadbear.wartui.core.LogLevel
+import racing.deadbear.wartui.core.LogSink
+import racing.deadbear.wartui.core.PositionSource
+import racing.deadbear.wartui.core.PositionSources
+import racing.deadbear.wartui.core.Pushed
+import racing.deadbear.wartui.core.Radio
+import racing.deadbear.wartui.core.RadioDriver
+import racing.deadbear.wartui.core.Session
+import racing.deadbear.wartui.core.Settings
+import racing.deadbear.wartui.core.SettingsStore
+import racing.deadbear.wartui.core.View
+import racing.deadbear.wartui.core.WireSim
+import racing.deadbear.wartui.core.logTo
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -70,7 +70,8 @@ class MemoryStore : SettingsStore {
  */
 class LoopbackDriver(private val sim: WireSim, private val pumps: CoroutineScope) : RadioDriver {
     lateinit var radio: Radio
-    private val gatt = Executors.newSingleThreadExecutor { Thread(it, "gatt").apply { isDaemon = true } }
+    private val gatt =
+        Executors.newSingleThreadExecutor { Thread(it, "gatt").apply { isDaemon = true } }
     private var pumping = false
 
     private fun answer(request: ULong, outcome: Completion) =
@@ -78,7 +79,8 @@ class LoopbackDriver(private val sim: WireSim, private val pumps: CoroutineScope
 
     override fun pairsOnConnect() = true
 
-    override fun recall(request: ULong, key: String) = answer(request, Completion.Recalled(known = false))
+    override fun recall(request: ULong, key: String) =
+        answer(request, Completion.Recalled(known = false))
 
     override fun known(request: ULong) = answer(request, Completion.Known(bridges = emptyList()))
 
@@ -89,7 +91,8 @@ class LoopbackDriver(private val sim: WireSim, private val pumps: CoroutineScope
 
     override fun stopScan() {}
 
-    override fun connect(request: ULong, peer: String) = answer(request, Completion.Connected(made = true))
+    override fun connect(request: ULong, peer: String) =
+        answer(request, Completion.Connected(made = true))
 
     override fun abandon(peer: String) {}
 

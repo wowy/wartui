@@ -9,10 +9,15 @@
 //! It answers as a real bridge does on this link, and as `ble/fake.rs`'s bridge does:
 //!
 //! - **It says nothing until asked.** The first `Identify` attaches the central. Until then it
-//!   sends no notification, and the messages the simulator emits are dropped, as a P4 with its
-//!   host gate closed sends none. Each `Identify` is answered with a `Ready` built from the
-//!   simulator's announcement, its uptime counted on from it, so two answers read as one life
-//!   (`crate::gate`). One that comes before the announcement is answered when it arrives.
+//!   sends no notification, as a P4 with its host gate closed sends none. Each `Identify` is
+//!   answered with a `Ready` built from the simulator's announcement, its uptime counted on from
+//!   it, so two answers read as one life (`crate::gate`). One that comes before the announcement
+//!   is answered when it arrives.
+//! - **What came with the announcement follows the first `Ready`.** A real P4 queues `Ready` first
+//!   when a host attaches, and its announcement repeats the receiver's fault and carries the plan.
+//!   The simulator sends those once, right after it announces itself, so until the central
+//!   attaches they are kept, in order, up to [`HELD_MAX`], dropping the oldest. Node records are
+//!   stale by then and are dropped.
 //! - **Every other command goes on the bulk queue** ([`LinkHandle::send_bulk`]). The central
 //!   already ordered them on Down, and the P4 takes host frames in the order they arrive: the
 //!   urgent queue's bias would reorder them. The bulk queue is also the deeper.
@@ -20,6 +25,8 @@
 //!   one frame. Up is a byte stream, and the driver reassembles frames however values cut them.
 //!
 //! Dropping both halves drops the simulator's [`LinkHandle`], which stops it.
+
+use std::collections::VecDeque;
 
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -33,6 +40,10 @@ use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
 
 /// The ATT header a notification carries ahead of its value.
 const ATT_HEADER: u16 = 3;
+
+/// The most messages kept for the central before it attaches. The simulator sends two with its
+/// announcement, the receiver's fault and the plan, and a few plan changes may follow.
+const HELD_MAX: usize = 64;
 
 /// A simulated bridge and fleet, reached as a central reaches a real one: by bytes.
 #[derive(Debug)]
@@ -58,6 +69,7 @@ impl WireSim {
             announced: None,
             asked: false,
             attached: false,
+            held: VecDeque::new(),
         };
         tokio::spawn(run(link, down_rx, side));
         Ok(Self { down: WireDown(down_tx), up: WireUp(up_rx) })
@@ -110,6 +122,9 @@ struct Side {
     asked: bool,
     /// An `Identify` has been answered, so the simulator's messages reach the central.
     attached: bool,
+    /// What the simulator said before the central attached, node records aside, sent after the
+    /// first `Ready`.
+    held: VecDeque<BridgeToHost>,
 }
 
 impl Side {
@@ -122,6 +137,22 @@ impl Side {
         let ready = ready(info, *at);
         self.attached = true;
         self.notify(&ready);
+        for msg in std::mem::take(&mut self.held) {
+            self.notify(&msg);
+        }
+    }
+
+    /// Take `msg` from the simulator: send it to an attached central, else keep it unless it is a
+    /// node record.
+    fn message(&mut self, msg: BridgeToHost) {
+        if self.attached {
+            self.notify(&msg);
+        } else if !matches!(msg, BridgeToHost::FromNode { .. }) {
+            if self.held.len() == HELD_MAX {
+                self.held.pop_front();
+            }
+            self.held.push_back(msg);
+        }
     }
 
     /// The simulator announced itself as `info`.
@@ -189,7 +220,7 @@ async fn run(mut link: LinkHandle, mut down: mpsc::UnboundedReceiver<Vec<u8>>, m
             }
             event = link.recv() => match event {
                 Some(LinkEvent::Connected(info)) => side.announce(info),
-                Some(LinkEvent::Message(msg)) if side.attached => side.notify(&msg),
+                Some(LinkEvent::Message(msg)) => side.message(msg),
                 Some(_) => {}
                 None => return,
             },
@@ -320,6 +351,25 @@ mod tests {
                 assert!(reader.lens.contains(&max), "{:?}", reader.lens);
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wire_sim_sends_what_came_with_the_announcement_when_identified() {
+        let (down, mut reader, _) = started(ATT_MTU);
+        // Long enough for the simulator to announce itself, say what comes with it, and heartbeat.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        down.write(&identify());
+        assert!(matches!(reader.next().await, BridgeToHost::Ready { .. }));
+        let mut fleet = false;
+        loop {
+            match reader.next().await {
+                BridgeToHost::Fleet(_) => fleet = true,
+                // The first node record is live, so everything kept has been sent.
+                msg if is_heartbeat(&msg) => break,
+                _ => {}
+            }
+        }
+        assert!(fleet, "the plan came with the announcement");
     }
 
     #[tokio::test(start_paused = true)]

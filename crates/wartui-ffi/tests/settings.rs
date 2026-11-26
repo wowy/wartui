@@ -32,6 +32,7 @@ async fn settings_save_remembered_bridge_when_bluetooth_link_announces() {
         nowhere(),
         None,
     )
+    .await
     .expect("the capture starts");
     until(&session, |view| three_nodes(view) && view.bridge.is_some()).await;
     // The follow task saves the bridge the transport remembered, without the operator.

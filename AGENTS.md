@@ -43,7 +43,7 @@ cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-d
 cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-apple-ios
 cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-linux-android
 
-crates/wartui-ffi/smoke/run.sh                             # the Kotlin and Swift bindings, end to end
+crates/wartui-ffi/smoke/run.sh                             # both bindings, end to end
 ```
 
 The Android check compiles bundled SQLite, so it needs the NDK's clang in
@@ -157,11 +157,12 @@ own.
   whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
   front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
-  started; typed, and handing each fault the bridge reports to the caller) and `view` (what a
-  fleet view shows of a snapshot, decided once as plain data: the faults and their order, the
-  notes, each node's state, the planner and the receiver, the settings in force and the bridge's
-  answers to a power-cycle and a format) and `export` (a capture written as a WiGLE CSV, and
-  what a report calls its nodes) and `upload` (a capture sent to WDGWars
+  started, and the link parked between captures, read so nothing backs up; typed, and handing
+  each fault the bridge reports to the caller) and `view` (what a fleet view shows of a
+  snapshot, decided once as plain data: the faults and their order, the notes, each node's
+  state, the planner and the receiver, the settings in force and the bridge's answers to a
+  power-cycle and a format) and `export` (a capture written as a WiGLE CSV, and what a report
+  calls its nodes) and `upload` (a capture sent to WDGWars
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and

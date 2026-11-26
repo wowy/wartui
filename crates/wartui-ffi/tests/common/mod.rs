@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::time::timeout;
 use wartui_app::view::View;
+use wartui_bridge::pipe::{RadioError, RadioErrorKind};
 use wartui_ffi::{
     CaptureConfig, Completion, DriverError, Heard, Link, PositionSources, Radio, RadioDriver,
     Session, Settings, SettingsStore, StoreFailure, Viewed, WireSim,
@@ -30,20 +31,37 @@ pub struct Loopback {
     radio: Mutex<Weak<Radio>>,
     tasks: Handle,
     pumping: AtomicBool,
+    /// Every connect fails, as to a bridge that has gone.
+    gone: AtomicBool,
 }
 
 impl Loopback {
     /// A radio over a fresh simulated bridge with three nodes. Call it inside a tokio runtime.
     pub fn radio() -> Arc<Radio> {
+        Self::steered().0
+    }
+
+    /// [`Self::radio`], and the driver, to steer. Call it inside a tokio runtime.
+    pub fn steered() -> (Arc<Radio>, Arc<Self>) {
         let driver = Arc::new(Self {
             sim: WireSim::start(3, 185),
             radio: Mutex::new(Weak::new()),
             tasks: Handle::current(),
             pumping: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
         });
         let radio = Radio::new(driver.clone());
         *driver.radio.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&radio);
-        radio
+        (radio, driver)
+    }
+
+    /// The bridge goes: its link drops, and every connect from now on fails.
+    pub fn go(&self) {
+        self.gone.store(true, Ordering::Relaxed);
+        if let Some(radio) = self.radio_later().upgrade() {
+            let error = RadioError::new(RadioErrorKind::Disconnected, "the peer went away");
+            radio.dropped(PEER.to_owned(), error);
+        }
     }
 
     fn radio_later(&self) -> Weak<Radio> {
@@ -92,7 +110,13 @@ impl RadioDriver for Loopback {
     }
 
     fn connect(&self, request: u64, _peer: String) -> Result<(), DriverError> {
-        self.answer(request, Completion::Connected { made: true });
+        let outcome = if self.gone.load(Ordering::Relaxed) {
+            let error = RadioError::new(RadioErrorKind::Other, "no such peripheral");
+            Completion::Failed { error }
+        } else {
+            Completion::Connected { made: true }
+        };
+        self.answer(request, outcome);
         Ok(())
     }
 
@@ -193,8 +217,9 @@ pub fn nowhere() -> PositionSources {
 }
 
 /// A capture into `db` over `link`, with defaults saved nowhere and no position.
-pub fn start(db: &Path, link: &Arc<Link>) -> Arc<Session> {
+pub async fn start(db: &Path, link: &Arc<Link>) -> Arc<Session> {
     Session::start(capture(db), Arc::clone(link), Settings::unsaved(), nowhere(), None)
+        .await
         .expect("the capture starts")
 }
 

@@ -5,7 +5,7 @@
 #   crates/wartui-ffi/smoke/run.sh [kotlin|swift|all]    # default all
 #
 # Prints `OK <language>` for each that passes, and exits non-zero on any failure. Needs `kotlinc`
-# and `java` for Kotlin, and `swiftc` for Swift. Everything it makes stays under
+# and `java` for Kotlin, and `swiftc` 6.4 or later for Swift. Everything it makes stays under
 # `target/ffi-smoke/`.
 set -euo pipefail
 
@@ -95,19 +95,37 @@ kotlin() {
     d1d75aa01dffbb4d1c520e67e4c4e7f5f6174718e7cb4632412503f2f0e604fa)
   local classpath=$jna:$coroutines
   kotlinc -nowarn -classpath "$classpath" -include-runtime -d "$out/kotlin/smoke.jar" \
-    "$out/kotlin/io/github/wowy/wartui/wartui_ffi.kt" "$here/kotlin/Smoke.kt"
+    "$out/kotlin/racing/deadbear/wartui/core/wartui_ffi.kt" "$here/kotlin/Smoke.kt"
   java -Djna.library.path="$(dirname "$library")" -classpath "$out/kotlin/smoke.jar:$classpath" \
     SmokeKt
   echo "OK kotlin"
 }
 
+# The Swift written here needs Swift 6.4 and compiles in the Swift 6 language mode. The generated
+# binding compiles in that mode too, and keeps UniFFI's own checks for older compilers.
+swift_is_new_enough() {
+  local numbers='s/.*Swift version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p'
+  local major minor
+  read -r major minor <<< "$(swiftc --version 2> /dev/null | sed -n "$numbers" | head -n 1)"
+  if [[ -z ${major:-} || -z ${minor:-} ]]; then
+    echo "could not read swiftc's version; the Swift smoke test needs Swift 6.4 or later" >&2
+    exit 1
+  fi
+  if ((major < 6 || (major == 6 && minor < 4))); then
+    echo "the Swift smoke test needs Swift 6.4 or later; swiftc is $major.$minor" >&2
+    exit 1
+  fi
+}
+
 swift() {
+  swift_is_new_enough
   generate swift
   local dir
   dir=$(dirname "$library")
-  swiftc -I "$out/swift" -Xcc -fmodule-map-file="$out/swift/WartuiFFI.modulemap" \
+  swiftc -swift-version 6 -I "$out/swift" \
+    -Xcc -fmodule-map-file="$out/swift/WartuiCoreFFI.modulemap" \
     -L "$dir" -lwartui_ffi -Xlinker -rpath -Xlinker "$dir" \
-    -o "$out/swift/smoke" "$out/swift/Wartui.swift" "$here/swift/main.swift"
+    -o "$out/swift/smoke" "$out/swift/WartuiCore.swift" "$here/swift/main.swift"
   "$out/swift/smoke"
   echo "OK swift"
 }

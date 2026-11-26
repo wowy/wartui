@@ -1,13 +1,21 @@
 //! The saved settings, and the one path that writes them.
 //!
-//! **Every write goes through one function** (`State::save`). It overlays the bridge the
-//! transport holds in the shared [`BridgeMemory`], so a save never writes back a bridge the
-//! transport has since replaced or forgotten. It writes `[bridge] link` only once a bridge has
-//! announced itself over the run's link, since a link that never connected is no link to
-//! remember. It makes `remember` follow the live switch, whatever an earlier failed save left in
-//! the copy, so `remember` never contradicts `mac`. On success the written copy becomes the saved
-//! one. [`Settings`] is the store's only writer within a run, so the transport's thread never
-//! races it on a whole-store save; the store is tiny, so the write happens under the lock.
+//! **Every write goes through one path** (`State::prepare`, then `Settings::write`). It overlays
+//! the bridge the transport holds in the shared [`BridgeMemory`], so a save never writes back a
+//! bridge the transport has since replaced or forgotten. It writes `[bridge] link` only once a
+//! bridge has announced itself over the run's link, since a link that never connected is no link
+//! to remember. It makes `remember` follow the live switch, whatever an earlier failed save left
+//! in the copy, so `remember` never contradicts `mac`. On success the written copy becomes the
+//! saved one. [`Settings`] is the store's only writer within a run, so the transport's thread
+//! never races it on a whole-store save.
+//!
+//! **The store is called with no lock on the settings held.** On a phone the store is the app's
+//! code, which may call back into [`Settings`]: one that read them under a held lock would
+//! deadlock. So a save works out what to write under the state's lock, releases it, calls the
+//! store, and locks again to record what landed. Saves still never interleave, or two racing could
+//! leave the saved copy describing text the store does not hold: a second lock guards only "a
+//! save is in progress", taken before the state's. A store's `save` deadlocks on it only by saving
+//! from inside a save.
 //!
 //! **[`apply`], behind `Controls::apply`, puts a front end's rows in force, then saves them.** It reserves a command slot
 //! for every row that moved before it sends any, so a full queue sends nothing and saves nothing:
@@ -102,6 +110,8 @@ pub struct Applied {
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     state: Arc<Mutex<State>>,
+    /// Held for the whole of a save, and taken before [`Self::state`] (the module's `//!`).
+    saving: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -135,7 +145,7 @@ impl Settings {
     #[must_use]
     pub fn new(store: Option<Arc<dyn SettingsStore>>, saved: Config, memory: BridgeMemory) -> Self {
         let state = State { store, saved, memory, ..State::default() };
-        Self { state: Arc::new(Mutex::new(state)) }
+        Self { state: Arc::new(Mutex::new(state)), saving: Arc::default() }
     }
 
     /// The link this run reaches its bridge over, a real one. Clones share the state, so a front
@@ -188,7 +198,8 @@ impl Settings {
     /// The store's place, or `None` with no store.
     #[must_use]
     pub fn place(&self) -> Option<String> {
-        self.lock().store.as_ref().map(|store| store.place())
+        let store = self.lock().store.clone();
+        store.map(|store| store.place())
     }
 
     /// Save whether `run` waits for a GPS fix at launch, over the settings as last saved. Nothing
@@ -197,10 +208,14 @@ impl Settings {
     /// # Errors
     /// Why nothing was saved.
     pub fn save_wait_for_fix(&self, wait: bool) -> Result<String, SaveError> {
-        let mut state = self.lock();
-        let mut written = state.saved.clone();
-        written.gps.wait_for_fix = wait_for_fix_key(wait);
-        state.save(written)
+        let _saving = self.saving();
+        let pending = {
+            let state = self.lock();
+            let mut written = state.saved.clone();
+            written.gps.wait_for_fix = wait_for_fix_key(wait);
+            state.prepare(written)
+        };
+        self.write(pending?)
     }
 
     /// Save the rows the host holds (`remember`, the fix wait, the receiver's rate, the API keys,
@@ -212,30 +227,68 @@ impl Settings {
     /// # Errors
     /// Why nothing was saved.
     pub fn save(&self, edit: &SettingsEdit) -> Result<String, SaveError> {
-        let mut state = self.lock();
-        let saved = state.saved.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
-        state.keep(edit, None, edit.gps_rate.unwrap_or(saved)).saved
+        self.keep(edit, None, None).saved
+    }
+
+    /// Put the host's rows of `edit` in force and save them all ([`State::keep`]), the write made
+    /// with no lock on the state held.
+    fn keep(&self, edit: &SettingsEdit, connected: Option<Mac>, shown: Option<u8>) -> Applied {
+        let _saving = self.saving();
+        let (remember, wait_for_fix_moved, pending) = self.lock().keep(edit, connected, shown);
+        let saved = pending.and_then(|pending| self.write(pending));
+        Applied { remember, wait_for_fix_moved, saved }
     }
 
     /// Save the bridge the transport remembered or forgot, and the link once a bridge has
     /// announced itself over it. Silent, since nothing the operator did changed either: a failure
     /// is logged at `debug`.
     pub(crate) fn follow(&self, snapshot: &Snapshot) {
-        let mut state = self.lock();
-        state.follow_bridge();
-        state.follow_link(snapshot);
+        let _saving = self.saving();
+        let bridge = self.lock().follow_bridge();
+        if let Some(Err(error)) = bridge.map(|pending| self.write(pending?)) {
+            tracing::debug!(%error, "could not save the bridge");
+        }
+        let link = self.lock().follow_link(snapshot);
+        if let Some(Err(error)) = link.map(|pending| self.write(pending?)) {
+            tracing::debug!(%error, "could not save the link");
+        }
+    }
+
+    /// Make `pending`'s write, with no lock on the state held, and record it as saved once it
+    /// lands. Returns the store's place. The caller holds [`Self::saving`].
+    fn write(&self, pending: Pending) -> Result<String, SaveError> {
+        let Pending { store, written, text, secret } = pending;
+        store.save(&text, secret).map_err(SaveError::Store)?;
+        self.lock().saved = written;
+        Ok(store.place())
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         // Every write leaves the state whole, so a panic elsewhere leaves nothing half-done.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// The right to save, held until the save is recorded.
+    fn saving(&self) -> MutexGuard<'_, ()> {
+        // It guards no data.
+        self.saving.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A save worked out under the state's lock, to make once it is released.
+struct Pending {
+    store: Arc<dyn SettingsStore>,
+    /// What becomes the saved copy once the store takes it.
+    written: Config,
+    text: String,
+    /// Whether the text holds an API key.
+    secret: bool,
 }
 
 impl State {
-    /// Write `written` to the store, with the bridge [`Self::memory`] holds, and on success make
-    /// it [`Self::saved`]. Returns the store's place.
-    fn save(&mut self, mut written: Config) -> Result<String, SaveError> {
+    /// What writing `written` to the store takes, with the bridge [`Self::memory`] holds.
+    /// [`Settings::write`] makes it [`Self::saved`] once the store has it.
+    fn prepare(&self, mut written: Config) -> Result<Pending, SaveError> {
         let Some(store) = self.store.clone() else { return Err(SaveError::Nowhere) };
         // Nothing while remembering is off, so the keys drop out beside `remember = false`.
         written.bridge.mac = self.memory.recall();
@@ -251,15 +304,21 @@ impl State {
             (on, _) => Some(on),
         };
         let text = serialize(&written).map_err(SaveError::Invalid)?;
-        store.save(&text, written.api_keys.any_set()).map_err(SaveError::Store)?;
-        self.saved = written;
-        Ok(store.place())
+        let secret = written.api_keys.any_set();
+        Ok(Pending { store, written, text, secret })
     }
 
     /// Set the remember switch as `edit` says, remembering `connected`, the bridge connected now,
-    /// when it turns on, then write every row of `edit` to the store, `rate` being the receiver's
-    /// rate the row shows.
-    fn keep(&mut self, edit: &SettingsEdit, connected: Option<Mac>, rate: u8) -> Applied {
+    /// when it turns on, then work out the save of every row of `edit`. `shown` is the rate a
+    /// running receiver shows, which the row holds when `edit` names none; with no capture it is
+    /// the rate already saved. Returns the switch if it moved, whether the fix wait moved, and
+    /// the save to make.
+    fn keep(
+        &self,
+        edit: &SettingsEdit,
+        connected: Option<Mac>,
+        shown: Option<u8>,
+    ) -> (Option<bool>, bool, Result<Pending, SaveError>) {
         let remember = (edit.remember_bridge != self.memory.is_enabled()).then(|| {
             self.memory.set_enabled(edit.remember_bridge);
             // Remember the bridge connected now. A reconnect may never come.
@@ -272,15 +331,19 @@ impl State {
             edit.remember_bridge
         });
         let wait_for_fix_moved = edit.wait_for_fix != self.saved.gps.waits_for_fix();
-        let saved = self.save_edit(edit, rate);
-        Applied { remember, wait_for_fix_moved, saved }
+        let rate = edit
+            .gps_rate
+            .or(shown)
+            .unwrap_or_else(|| self.saved.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ));
+        (remember, wait_for_fix_moved, self.prepare_edit(edit, rate))
     }
 
-    /// Write every row of `edit` to the store, `rate` being the receiver's rate the row shows.
+    /// What writing every row of `edit` to the store takes, `rate` being the receiver's rate the
+    /// row shows.
     ///
     /// Replaces the whole copy, hand edits included. The rows are already applied, so a failed
     /// save loses only the stored copy.
-    fn save_edit(&mut self, edit: &SettingsEdit, rate: u8) -> Result<String, SaveError> {
+    fn prepare_edit(&self, edit: &SettingsEdit, rate: u8) -> Result<Pending, SaveError> {
         // A row left where the store put it keeps the store's spelling, a hand-written `true`
         // included; only a moved row is rewritten.
         let wait_for_fix = if edit.wait_for_fix == self.saved.gps.waits_for_fix() {
@@ -309,12 +372,12 @@ impl State {
                 wigle_token: edit.api_keys.wigle_token.trim().to_owned(),
             },
         };
-        self.save(written)
+        self.prepare(written)
     }
 
-    /// Save the bridge the transport remembered or forgot since the last save. A failure is tried
-    /// again only once the bridge changes.
-    fn follow_bridge(&mut self) {
+    /// The save of the bridge the transport remembered or forgot since the last save, if one is
+    /// due. A failure is tried again only once the bridge changes.
+    fn follow_bridge(&mut self) -> Option<Result<Pending, SaveError>> {
         // Compared in place, since this runs every frame; cloned only once it has changed.
         let memory = &self.memory;
         let saved = &self.saved.bridge;
@@ -322,36 +385,32 @@ impl State {
             // In step with the store, so a bridge whose save failed is tried again when it comes
             // back.
             self.bridge_tried = None;
-            return;
+            return None;
         }
         if let Some((mac, serial, bluetooth)) = &self.bridge_tried
             && memory.matches(*mac, serial.as_deref(), bluetooth.as_deref())
         {
-            return;
+            return None;
         }
         self.bridge_tried =
             Some((memory.recall(), memory.recall_serial(), memory.recall_bluetooth()));
-        if let Err(error) = self.save(self.saved.clone()) {
-            tracing::debug!(%error, "could not save the bridge");
-        }
+        Some(self.prepare(self.saved.clone()))
     }
 
-    /// Save the link this run reaches its bridge over, once the bridge has announced itself over
-    /// it, so the next run takes the same link. Tried once.
-    fn follow_link(&mut self, snapshot: &Snapshot) {
-        let Some(link) = self.link else { return };
+    /// The save of the link this run reaches its bridge over, once the bridge has announced
+    /// itself over it, so the next run takes the same link. Tried once.
+    fn follow_link(&mut self, snapshot: &Snapshot) -> Option<Result<Pending, SaveError>> {
+        let link = self.link?;
         if self.link_tried || snapshot.bridge.is_none() {
-            return;
+            return None;
         }
         self.link_proved = true;
         let saved = self.saved.bridge.link;
         if link_written(link, saved) == saved {
-            return;
+            return None;
         }
         self.link_tried = true;
-        if let Err(error) = self.save(self.saved.clone()) {
-            tracing::debug!(%error, "could not save the link");
-        }
+        Some(self.prepare(self.saved.clone()))
     }
 }
 
@@ -399,8 +458,7 @@ pub(crate) fn apply(
     }
 
     let connected = snapshot.bridge.as_ref().map(|bridge| bridge.mac);
-    let rate = edit.gps_rate.unwrap_or(snapshot.gps_rate_hz);
-    Ok(settings.lock().keep(edit, connected, rate))
+    Ok(settings.keep(edit, connected, Some(snapshot.gps_rate_hz)))
 }
 
 /// Send `ssids` to the engine as the excluded list, and save them. Nothing else in the store
@@ -417,8 +475,12 @@ pub(crate) fn apply_excluded(
     if commands.try_send(Command::SetExcludedSsids { ssids: bytes }).is_err() {
         return Err(Busy);
     }
-    let mut state = settings.lock();
-    let mut written = state.saved.clone();
-    written.excluded_ssids = ssids.to_vec();
-    Ok(state.save(written))
+    let _saving = settings.saving();
+    let pending = {
+        let state = settings.lock();
+        let mut written = state.saved.clone();
+        written.excluded_ssids = ssids.to_vec();
+        state.prepare(written)
+    };
+    Ok(pending.and_then(|pending| settings.write(pending)))
 }

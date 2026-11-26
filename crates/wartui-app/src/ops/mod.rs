@@ -11,7 +11,10 @@
 //! **A setting is sent, given time to land, then read back.** The bridge applies a setting and
 //! keeps it on its own flash; a fresh `Status` is what says it took. Each operation's settle time
 //! is defined once here, with its reason. Choosing and opening the link stays the front end's.
+//!
+//! **A link held between captures is parked** ([`park`]), read so nothing piles up in it.
 
+mod park;
 mod ready;
 
 use std::time::Duration;
@@ -28,6 +31,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::plan::{ChannelPool, PlanSettings};
 
+pub use park::{ParkEnded, Parked, park};
 pub use ready::{NotReady, ReadyNotice, ReadyWaited, ready};
 
 use crate::settings::Link;

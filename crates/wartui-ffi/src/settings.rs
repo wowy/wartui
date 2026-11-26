@@ -31,7 +31,8 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for StoreFailure {
     }
 }
 
-/// Where the settings text is kept: app storage on a phone. Called on any thread.
+/// Where the settings text is kept: app storage on a phone. Called on any thread, and free to
+/// read [`Settings`] from inside a call. A `save` must not cause another save.
 #[uniffi::export(with_foreign)]
 pub trait SettingsStore: Send + Sync {
     /// The stored text, or `None` when nothing is stored yet.
