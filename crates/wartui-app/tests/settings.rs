@@ -313,6 +313,29 @@ fn settings_refuses_bridge_mac_when_remember_is_off() {
 }
 
 #[test]
+fn settings_bridge_memory_holds_saved_bridge_when_remember_is_unset() {
+    let saved = Bridge {
+        mac: Some(BRIDGE),
+        serial: Some("AAAAAAAAAA".to_owned()),
+        bluetooth_address: Some("02:00:5E:10:9D:25".to_owned()),
+        ..Bridge::default()
+    };
+    let memory = saved.memory();
+    assert!(memory.is_enabled());
+    assert_eq!(memory.recall(), Some(BRIDGE));
+    assert_eq!(memory.recall_serial().as_deref(), Some("AAAAAAAAAA"));
+    assert_eq!(memory.recall_bluetooth().as_deref(), Some("02:00:5E:10:9D:25"));
+}
+
+#[test]
+fn settings_bridge_memory_remembers_nothing_when_remember_is_off() {
+    let memory = Bridge { remember: Some(false), ..Bridge::default() }.memory();
+    assert!(!memory.is_enabled());
+    memory.remember_on(BRIDGE, None);
+    assert_eq!(memory.recall(), None, "nothing is remembered while off");
+}
+
+#[test]
 fn settings_load_rejects_bridge_serial_when_remember_is_off() {
     let chain = load_error("[bridge]\nremember = false\nserial = \"AAAAAAAAAA\"\n");
     assert!(chain.contains("bridge.serial"), "{chain}");
@@ -384,6 +407,52 @@ fn settings_save_reports_nowhere_when_there_is_no_store() {
     assert!(matches!(excluded, Ok(Err(SaveError::Nowhere))));
     assert!(matches!(rx.try_recv(), Ok(Command::SetExcludedSsids { .. })), "applied anyway");
     assert_eq!(settings.saved(), Config::default(), "nothing saved, nothing changed");
+}
+
+/// A store that reads the settings it saves for from inside its `save`, as a phone's code may.
+#[derive(Debug, Default)]
+struct CallsBack {
+    settings: std::sync::OnceLock<Settings>,
+    /// What each `save` read back: the saved copy's wait for a fix, and the place.
+    read: std::sync::Mutex<Vec<(bool, Option<String>)>>,
+}
+
+impl SettingsStore for CallsBack {
+    fn load(&self) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn save(&self, _text: &str, _secret: bool) -> std::io::Result<()> {
+        let settings = self.settings.get().expect("given before the save");
+        let read = (settings.saved().gps.waits_for_fix(), settings.place());
+        self.read.lock().unwrap().push(read);
+        Ok(())
+    }
+
+    fn place(&self) -> String {
+        "calls back".to_owned()
+    }
+}
+
+#[test]
+fn settings_save_lets_the_store_read_settings_when_it_calls_back() {
+    let store = Arc::new(CallsBack::default());
+    let settings = Settings::new(
+        Some(store.clone() as Arc<dyn SettingsStore>),
+        Config::default(),
+        BridgeMemory::default(),
+    );
+    store.settings.set(settings.clone()).expect("set once");
+    // On a thread of its own, so a deadlock fails the test rather than hanging it.
+    let (done, saved) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(settings.save_wait_for_fix(false).map_err(|error| error.to_string()));
+    });
+    let saved = saved.recv_timeout(std::time::Duration::from_secs(5)).expect("the save completes");
+    assert_eq!(saved.as_deref(), Ok("calls back"));
+    // Read before the save landed, so the copy is the one before it.
+    let read = store.read.lock().unwrap().clone();
+    assert_eq!(read, [(true, Some("calls back".to_owned()))]);
 }
 
 #[test]
@@ -622,4 +691,16 @@ fn settings_apply_sends_nothing_when_command_queue_is_full() {
     assert!(rx.try_recv().is_err(), "nothing else was sent");
     assert!(memory.is_enabled(), "the remember switch did not move");
     assert_eq!(store.saves(), 0, "nothing was saved");
+}
+
+#[test]
+fn settings_take_the_latest_run_when_one_handle_serves_a_simulated_run_then_a_real_one() {
+    let settings = kept(&Fake::empty(), Config::default(), &BridgeMemory::none());
+
+    let simulated = settings.clone().over(Link::Bluetooth).simulated();
+    assert_eq!(simulated.link(), None, "the simulator has no link to save");
+
+    let real = settings.clone().simulated().over(Link::Bluetooth);
+    assert_eq!(real.link(), Some(Link::Bluetooth));
+    assert_eq!(settings.link(), Some(Link::Bluetooth), "clones share the state");
 }

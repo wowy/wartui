@@ -111,7 +111,7 @@ fn link(args: &Args, remembered: &config::Bridge) -> Result<Link> {
 async fn over_bluetooth(args: &Args, remembered: &config::Bridge) -> Result<()> {
     let bridge = crate::reset::bluetooth_target(args.bridge.as_deref(), remembered, "flash-bridge")
         .map_err(anyhow::Error::msg)?;
-    let memory = crate::memory_of(remembered);
+    let memory = crate::unsaved_memory(remembered);
     p4::run(args, p4::Target::Bluetooth { bridge, memory }).await
 }
 

@@ -17,10 +17,9 @@
 //! stores `none`. Every receiver answers as [`PositionSource::Gps`]: a row records that a receiver
 //! placed it, not which one.
 //!
-//! `wartui run` builds a host receiver pinned with `--gps`, then the bridge's receiver, then a host
-//! receiver the search found, then `--lat`/`--lon`. A named port goes first because `--gps PATH`
-//! is the operator's instruction. The bridge's receiver goes above a searched one because the
-//! searched one stands down while the bridge's is sending sentences, and is then not read at all.
+//! A front end builds its chain through `wartui_app::position`, which says the order and why: a
+//! receiver the operator named, the bridge's receiver, the platform's location services, a
+//! receiver a search found, then a typed-in position. `wartui run` has no platform tier.
 //!
 //! **A tier may stand down for the tiers above it** ([`StandDown`]), so a device reads one source
 //! at a time: [`PositionChain::stand_down`] suspends a receiver's search ([`Gps::set_suspended`])

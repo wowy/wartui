@@ -4,6 +4,7 @@
 //! they are stored and the one path that writes them ([`settings`]), and the capture it runs,
 //! assembled, followed and stopped the same way whatever starts it ([`session`]), what it asks
 //! a bridge outside a capture: its status, a setting, the pairing window, a power-cycle ([`ops`]),
+//! where its rows are placed, the position chain's order and the wait for a fix ([`position`]),
 //! what a fleet view shows of a capture's snapshot, as plain data ([`view`]), a capture sent
 //! to WDGWars and WiGLE once the operator has said yes ([`upload`]), and the nodes and the
 //! bridge updated over the link, from images checked before they are sent ([`update`]).
@@ -13,6 +14,7 @@
 //! `wartui.toml` file is a [`settings::SettingsStore`] in `wartui-desktop`.
 
 pub mod ops;
+pub mod position;
 pub mod session;
 pub mod settings;
 pub mod update;

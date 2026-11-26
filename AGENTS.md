@@ -40,8 +40,10 @@ cargo test -p wartui-core --test engine engine_ignores_    # tests by name prefi
 
 cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
 
-cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-apple-ios
-cargo check -p wartui-bridge -p wartui-core -p wartui-app --target aarch64-linux-android
+cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-apple-ios
+cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-linux-android
+
+crates/wartui-ffi/smoke/run.sh                             # both bindings, end to end
 ```
 
 The Android check compiles bundled SQLite, so it needs the NDK's clang in
@@ -104,7 +106,7 @@ firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware direct
 
 ## Architecture
 
-Six host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
+Seven host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
@@ -154,22 +156,33 @@ own.
   whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
   front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
-  started; typed, and handing each fault the bridge reports to the caller) and `view` (what a
-  fleet view shows of a snapshot, decided once as plain data: the faults and their order, the
-  notes, each node's state, the planner and the receiver) and `upload` (a capture sent to WDGWars
+  started, and the link parked between captures, read so nothing backs up; typed, and handing
+  each fault the bridge reports to the caller) and `view` (what a fleet view shows of a
+  snapshot, decided once as plain data: the faults and their order, the notes, each node's
+  state, the planner and the receiver) and `upload` (a capture sent to WDGWars
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and
-  the bridge's update read across its reboot). It words nothing for the operator, and names no
-  desktop I/O and no terminal.
+  the bridge's update read across its reboot) and `position` (the position chain's tiers in
+  their order, and whether the scan waits for a fix, for a desktop and a phone alike). It words
+  nothing for the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what
   counts as a receiver), `radio::BleRadio` on btleplug, `bluez` (the Linux pairing
   `wartui bluetooth pair` drives), `health` (the Raspberry Pi reader) and `config` (the
   `wartui.toml` file, the desktop's `SettingsStore`). It is the only host crate that names
-  `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge`, `wartui-core` and `wartui-app`
-  compile for a phone; CI checks all three for `aarch64-linux-android` and `aarch64-apple-ios`.
+  `serialport`, `btleplug`, `dbus` or `libc`, so `wartui-bridge`, `wartui-core`, `wartui-app` and
+  `wartui-ffi` compile for a phone; CI checks all four for `aarch64-linux-android` and
+  `aarch64-apple-ios`.
+- **`crates/wartui-ffi`** — the library a phone app loads: `wartui-app` through UniFFI, for Kotlin
+  and Swift. It is the only crate that names UniFFI: the app's types stay free of it and cross as
+  remote declarations here, which repeat each field list, so a field added on one side only fails
+  to compile. It holds no hand-written `unsafe`. Everything it spawns runs on its one tokio
+  runtime, and no exported function blocks on it. A call into the phone's code returns at once
+  and fails as a value, so the phone's Bluetooth stack answers each request later, by its id
+  (`src/radio.rs`, an adapter under `pipe::Radio`'s contract). `smoke/run.sh` runs a capture
+  through the generated Kotlin and Swift (`crates/wartui-ffi/README.md`).
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and
@@ -256,10 +269,12 @@ Each change bumps `store::SCHEMA_VERSION`, and a capture stamped anything else i
 than migrated.
 
 Positions resolve fresh per record through `PositionChain`, trying its tiers in the order the
-caller builds them. `wartui run` builds a host GPS pinned with `--gps` → the bridge's GPS (its
-bytes fed in by `runtime::drive`, never the engine) → a host GPS found by `discover` (NMEA on its
-own thread, standing down while the bridge's receiver is sending sentences) → static
-`--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) → nothing.
+caller builds them, which `wartui_app::position::Sources` decides for every front end: a host GPS
+pinned with `--gps` → the bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) →
+a phone's location services (standing down while a tier above holds a fix run) → a host GPS found
+by `discover` (NMEA on its own thread, standing down while the bridge's receiver is sending
+sentences) → static `--lat`/`--lon` (test only: it marks the capture as test data, which is never
+uploaded) → nothing. `wartui run` has no phone tier.
 A `FixFeed` tier takes typed fixes from a phone's location services and stores `platform`,
 and refuses a fix whose reported accuracy is missing or worse than 50 m.
 `runtime::drive` calls `PositionChain::stand_down`, which applies each tier's stand-down rule.

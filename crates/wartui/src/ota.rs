@@ -272,7 +272,7 @@ fn open(args: &Args) -> Result<(LinkHandle, Link, Option<String>)> {
     }
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
     let (over, bridge) = reach(args, &remembered)?;
-    let link = super::open(bridge.as_deref(), None, over, super::memory_of(&remembered))?;
+    let link = super::open(bridge.as_deref(), None, over, super::unsaved_memory(&remembered))?;
     Ok((link, over, bridge))
 }
 

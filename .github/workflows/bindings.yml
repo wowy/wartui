@@ -1,0 +1,33 @@
+name: Bindings
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Kotlin and Swift smoke tests
+    # Xcode 27 carries Swift 6.4, which the Swift written against the binding needs.
+    runs-on: xcode-27
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The runner image carries Java and Swift; kotlinc comes from Homebrew when it is missing.
+      - name: Install kotlinc
+        run: command -v kotlinc || brew install kotlin
+
+      - name: Run the smoke tests
+        run: crates/wartui-ffi/smoke/run.sh all

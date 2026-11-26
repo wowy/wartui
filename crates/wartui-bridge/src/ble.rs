@@ -131,6 +131,20 @@
 //! 2026-11-20). A run that has settled heard a `Ready` from this bridge, so this host is bonded,
 //! and its subscription keeps [`CONNECT_WITHIN`] and sends no notice ([`awaits_pairing`]).
 //!
+//! **Causes a front end acts on.** A phone asks the operator to turn Bluetooth on, to grant the
+//! app's permission, to forget a stale bond or to name a bridge, so a try that ends on what an OS
+//! names ([`RadioErrorKind::PoweredOff`], [`RadioErrorKind::Unauthorized`],
+//! [`RadioErrorKind::PeerForgotBond`]), or on a search that heard no bridge or several, reports
+//! its own cause (`cause_of`). Its reason is worded as for any failure at that call.
+//! Each is retried as [`DisconnectCause::Other`] is, since the operator's remedy needs no
+//! restart, and the unbonded-drop timing reclassifies only an `Other`.
+//!
+//! **The search's calls are timed too.** A phone's stack answers when it does, which with
+//! Bluetooth off or a callback lost may be never, so the recall of the remembered address, a
+//! scan's start and the OS's listing each get a few seconds ([`RECALL_WITHIN`],
+//! [`SCAN_START_WITHIN`], [`LIST_WITHIN`]). One that does not answer ends the try as a failure,
+//! cause [`DisconnectCause::Other`], and the next try asks again.
+//!
 //! **Reconnecting.** Like `serial::supervise`: a failure that repeats is one warning, and a
 //! connection that announced a bridge settles the run on that bridge. A P4 reboot resets its C6
 //! and drops the link, which is an ordinary reconnect.
@@ -203,6 +217,19 @@ const PAIRING_NOTICE_AFTER: Duration = Duration::from_secs(3);
 
 /// How long the disconnect that cancels a timed-out connect may take.
 const CANCEL_WITHIN: Duration = Duration::from_secs(2);
+
+/// How long the OS may take to say whether it knows the remembered address. It looks the address
+/// up in its own tables, which a desktop answers at once; a phone's stack that never answers, with
+/// Bluetooth off or a callback lost, would hang the link without a `Disconnected`.
+const RECALL_WITHIN: Duration = Duration::from_secs(5);
+
+/// How long the OS may take to start a scan. Starting one is local to the OS, so seconds are
+/// plenty, as for [`RECALL_WITHIN`].
+const SCAN_START_WITHIN: Duration = Duration::from_secs(5);
+
+/// How long the OS may take to list the devices it holds ([`Radio::known`]), local to the OS as
+/// [`RECALL_WITHIN`] is.
+const LIST_WITHIN: Duration = Duration::from_secs(5);
 
 /// How long one write to Down may take. A write request is answered within a few connection
 /// intervals. The C6 holds its answer only while its queue to the P4 is full, and refuses each
@@ -438,7 +465,8 @@ pub async fn find_advertiser(
     spec: Option<&BridgeSpec>,
     preferred: Option<&BridgeSpec>,
 ) -> Result<Advertiser, TransportError> {
-    let Sighting { peer, octets, name, .. } = scan(radio, spec, preferred).await?;
+    let scanned = scan(radio, spec, preferred).await;
+    let Sighting { peer, octets, name, .. } = scanned.map_err(|missed| missed.error)?;
     Ok(Advertiser { octets, name, address: peer })
 }
 
@@ -682,6 +710,59 @@ impl End {
     }
 }
 
+/// What a try ended on, for the cause it reports ([`cause_of`]).
+#[derive(Debug, Clone, Copy)]
+enum EndedOn<'a> {
+    /// A radio call's failure, of this kind.
+    Radio(RadioErrorKind),
+    /// The search's failure.
+    Search(&'a TransportError),
+}
+
+/// The cause a try that ended on `ended` reports: the one place a cause is named for a failure
+/// (§ "Causes a front end acts on"). [`RadioErrorKind::NotBonded`] is [`refusal`]'s only where the
+/// C6 answers, and [`DisconnectCause::MaybeNotBonded`] is the drop's timing in `connect`.
+const fn cause_of(ended: EndedOn<'_>) -> DisconnectCause {
+    match ended {
+        EndedOn::Radio(RadioErrorKind::PoweredOff) => DisconnectCause::RadioOff,
+        EndedOn::Radio(RadioErrorKind::Unauthorized) => DisconnectCause::NotAuthorized,
+        EndedOn::Radio(RadioErrorKind::PeerForgotBond) => DisconnectCause::StaleBond,
+        EndedOn::Radio(
+            RadioErrorKind::NoAdapter
+            | RadioErrorKind::NotBonded
+            | RadioErrorKind::Disconnected
+            | RadioErrorKind::NoService
+            | RadioErrorKind::Other,
+        ) => DisconnectCause::Other,
+        EndedOn::Search(TransportError::NotFound { .. }) => DisconnectCause::NotAdvertising,
+        EndedOn::Search(TransportError::SeveralAdvertising { .. }) => {
+            DisconnectCause::SeveralAdvertising
+        }
+        EndedOn::Search(_) => DisconnectCause::Other,
+    }
+}
+
+/// Why a search gave no bridge: what a caller of [`find_advertiser`] is told, and the cause a try
+/// reports.
+#[derive(Debug)]
+struct Missed {
+    error: TransportError,
+    cause: DisconnectCause,
+}
+
+impl Missed {
+    /// A radio call's failure during the search.
+    fn radio(error: RadioError) -> Self {
+        Self { cause: cause_of(EndedOn::Radio(error.kind)), error: transport_error(error) }
+    }
+}
+
+impl From<TransportError> for Missed {
+    fn from(error: TransportError) -> Self {
+        Self { cause: cause_of(EndedOn::Search(&error)), error }
+    }
+}
+
 /// Why a connection's write or subscription failed.
 struct Failure {
     reason: String,
@@ -691,6 +772,11 @@ struct Failure {
 impl Failure {
     fn other(reason: String) -> Self {
         Self { reason, cause: DisconnectCause::Other }
+    }
+
+    /// A radio call's failure of `kind`, for `reason`.
+    const fn radio(reason: String, kind: RadioErrorKind) -> Self {
+        Self { reason, cause: cause_of(EndedOn::Radio(kind)) }
     }
 }
 
@@ -790,7 +876,9 @@ async fn attempt(
                     *direct_failed |= found.direct;
                     found
                 }
-                Err(e) => return End::failed(e.to_string()),
+                Err(Missed { error, cause }) => {
+                    return End::Over { reason: error.to_string(), cause, announced: false };
+                }
             }
         }
     };
@@ -810,14 +898,18 @@ struct Found {
 
 /// The peer to connect to, by [`look`]: the remembered one when the OS lists it and no
 /// connection straight to it has failed, else the one a scan hears advertising the id.
-async fn find(transport: &BleTransport, direct_failed: bool) -> Result<Found, TransportError> {
+async fn find(transport: &BleTransport, direct_failed: bool) -> Result<Found, Missed> {
     let radio = &*transport.radio;
     let spec = transport.spec.as_ref();
     let Look { direct, preferred } =
         look(spec, transport.memory.recall(), transport.memory.recall_bluetooth(), direct_failed);
     if let Some(remembered) = direct
-        && let Some(Recalled { peer, octets }) =
-            radio.recall(&remembered).await.map_err(transport_error)?
+        && let Some(Recalled { peer, octets }) = within(
+            RECALL_WITHIN,
+            radio.recall(&remembered),
+            "did not look up the remembered bridge",
+        )
+        .await?
     {
         return Ok(Found { peer, octets, direct: true, heard: false });
     }
@@ -873,11 +965,19 @@ async fn scan(
     radio: &dyn Radio,
     spec: Option<&BridgeSpec>,
     preferred: Option<&BridgeSpec>,
-) -> Result<Sighting, TransportError> {
-    let mut sightings = radio.scan().await.map_err(transport_error)?;
+) -> Result<Sighting, Missed> {
+    let started = within(SCAN_START_WITHIN, radio.scan(), "did not start a scan").await;
+    let mut sightings = match started {
+        Ok(sightings) => sightings,
+        Err(missed) => {
+            // A scan the OS starts late runs on, unread.
+            radio.stop_scan().await;
+            return Err(missed);
+        }
+    };
     let heard = listen(radio, &mut sightings, spec).await;
     radio.stop_scan().await;
-    choose(heard?, preferred)
+    choose(heard?, preferred).map_err(Missed::from)
 }
 
 /// The bridge `spec` names, for the message when none is found: its octets when the spec gives
@@ -894,7 +994,7 @@ async fn listen(
     radio: &dyn Radio,
     sightings: &mut BoxStream<'static, Sighting>,
     spec: Option<&BridgeSpec>,
-) -> Result<Vec<Bridge>, TransportError> {
+) -> Result<Vec<Bridge>, Missed> {
     let started = tokio::time::Instant::now();
     let (listened, give_up) = (started + LISTEN_FOR, started + SCAN_FOR);
     let mut hearing = Hearing::new(spec);
@@ -905,7 +1005,7 @@ async fn listen(
         }
         if !listed && tokio::time::Instant::now() >= listened {
             listed = true;
-            for sighting in radio.known().await.map_err(transport_error)? {
+            for sighting in within(LIST_WITHIN, radio.known(), "did not list its devices").await? {
                 hearing.note(sighting);
             }
         }
@@ -913,25 +1013,36 @@ async fn listen(
             break;
         }
         if tokio::time::Instant::now() >= give_up {
-            return Err(TransportError::NotFound {
-                bridge: spec.map(sought),
-                secs: SCAN_FOR.as_secs(),
-            });
+            let not_found =
+                TransportError::NotFound { bridge: spec.map(sought), secs: SCAN_FOR.as_secs() };
+            return Err(not_found.into());
         }
         let wake = if listed { give_up } else { listened };
         tokio::select! {
             sighting = sightings.next() => match sighting {
                 Some(sighting) => hearing.note(sighting),
                 None => {
-                    return Err(TransportError::Bluetooth(
-                        "the Bluetooth adapter stopped reporting".to_owned(),
-                    ));
+                    let stopped = "the Bluetooth adapter stopped reporting".to_owned();
+                    return Err(TransportError::Bluetooth(stopped).into());
                 }
             },
             () = tokio::time::sleep_until(wake) => {}
         }
     }
     Ok(hearing.into_bridges())
+}
+
+/// `call`, a radio call of the search, for up to `limit`. One that does not answer in time ends
+/// the try as the adapter that `did_not` answer, retried as any failed try is.
+async fn within<T>(
+    limit: Duration,
+    call: impl Future<Output = Result<T, RadioError>>,
+    did_not: &str,
+) -> Result<T, Missed> {
+    match tokio::time::timeout(limit, call).await {
+        Ok(answered) => answered.map_err(Missed::radio),
+        Err(_) => Err(TransportError::Bluetooth(format!("the Bluetooth adapter {did_not}")).into()),
+    }
 }
 
 /// The bridge as the operator names it, for the messages: its advertised `octets` when known.
@@ -975,7 +1086,11 @@ async fn connect(
     };
     let Connected { mut connection, made } = match connecting {
         Ok(Ok(connected)) => connected,
-        Ok(Err(e)) => return End::failed(format!("could not connect to {label}: {e}")),
+        Ok(Err(e)) => {
+            let Failure { reason, cause } =
+                Failure::radio(format!("could not connect to {label}: {e}"), e.kind);
+            return End::Over { reason, cause, announced: false };
+        }
         Err(_) => {
             // The connect is still pending in the OS, and could complete after this process has
             // gone.
@@ -1049,7 +1164,9 @@ async fn discover(
         Ok(Err(e)) if e.kind == RadioErrorKind::NoService => {
             Err(Failure::other(format!("{label} offers no wartui link service")))
         }
-        Ok(Err(e)) => Err(Failure::other(format!("could not read {label}'s services: {e}"))),
+        Ok(Err(e)) => {
+            Err(Failure::radio(format!("could not read {label}'s services: {e}"), e.kind))
+        }
         Err(_) => Err(Failure::other(format!("{label} did not list its services"))),
     }
 }
@@ -1110,7 +1227,7 @@ async fn subscribe<T>(
             Ok(subscribed)
         }
         Ok(Err(e)) if e.kind == RadioErrorKind::NotBonded => Err(refusal(label)),
-        Ok(Err(e)) => Err(Failure::other(format!("could not subscribe to {label}: {e}"))),
+        Ok(Err(e)) => Err(Failure::radio(format!("could not subscribe to {label}: {e}"), e.kind)),
         Err(_) => Err(Failure::other(format!("{label} did not answer the subscription"))),
     }
 }
@@ -1160,7 +1277,9 @@ async fn pump(
                     Some(Incoming::Dropped(e)) if e.kind == RadioErrorKind::Disconnected => {
                         return over("the bridge disconnected", ever_announced);
                     }
-                    Some(Incoming::Dropped(e)) => return over(&e.text, ever_announced),
+                    Some(Incoming::Dropped(e)) => {
+                        return failed(Failure::radio(e.text, e.kind), ever_announced);
+                    }
                     None => return over("notifications ended", ever_announced),
                 };
                 for heard in inbound.feed(&value, Instant::now()) {
@@ -1303,7 +1422,7 @@ async fn send(
                 return Err(if refused {
                     refusal(label)
                 } else {
-                    Failure::other(format!("write failed: {e}"))
+                    Failure::radio(format!("write failed: {e}"), e.kind)
                 });
             }
             Err(_) => {

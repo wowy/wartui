@@ -133,6 +133,16 @@ pub enum LinkFaultKind {
     NotBonded,
     /// The bridge dropped this host before serving it, as it drops a host it holds no bond for.
     MaybeNotBonded,
+    /// The OS's Bluetooth is turned off.
+    RadioOff,
+    /// The OS does not let this app use Bluetooth.
+    NotAuthorized,
+    /// The OS holds a bond the bridge no longer does.
+    StaleBond,
+    /// The search heard no bridge it could use.
+    NotAdvertising,
+    /// The search heard several bridges and none was named.
+    SeveralAdvertising,
     /// Nothing the transport names.
     Other,
 }
@@ -246,6 +256,15 @@ fn link(snapshot: &Snapshot, notes: &mut Vec<Note>, faults: &mut Vec<Fault>) {
         Some(DisconnectCause::NotBonded) => faults.extend(fault(LinkFaultKind::NotBonded)),
         Some(DisconnectCause::MaybeNotBonded) => {
             faults.extend(fault(LinkFaultKind::MaybeNotBonded));
+        }
+        Some(DisconnectCause::RadioOff) => faults.extend(fault(LinkFaultKind::RadioOff)),
+        Some(DisconnectCause::NotAuthorized) => faults.extend(fault(LinkFaultKind::NotAuthorized)),
+        Some(DisconnectCause::StaleBond) => faults.extend(fault(LinkFaultKind::StaleBond)),
+        Some(DisconnectCause::NotAdvertising) => {
+            faults.extend(fault(LinkFaultKind::NotAdvertising));
+        }
+        Some(DisconnectCause::SeveralAdvertising) => {
+            faults.extend(fault(LinkFaultKind::SeveralAdvertising));
         }
         Some(DisconnectCause::Other) | None => faults.extend(fault(LinkFaultKind::Other)),
     }

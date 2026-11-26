@@ -2,9 +2,10 @@
 //!
 //! Over USB the first disconnect ends it. Over Bluetooth the transport reports every failed try
 //! as a disconnect and tries again a second later, so a [`DisconnectCause::Other`] is kept and
-//! the wait goes on. The bridge's refusal of this host and a USB takeover still end it at once.
-//! The first [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches
-//! to the transport's pairing window; a later one returns no notice. A
+//! the wait goes on, as is each cause the transport names and retries alike ([`retried`]). The
+//! bridge's refusal of this host and a USB takeover still end it at once. The first
+//! [`DisconnectCause::AwaitingPairing`] is the operator's notice, and the wait stretches to the
+//! transport's pairing window; a later one returns no notice. A
 //! [`DisconnectCause::AwaitingReady`] says the subscription is through and the wait goes on, for
 //! the bridge's `Ready`; the first is the operator's notice that the click landed, and a later one
 //! returns no notice. A wait that runs out names a failure that is retried, else the bridge's
@@ -95,6 +96,24 @@ fn pairing_deadline(
     until.max(now + wartui_bridge::ble::PAIR_WITHIN + usual)
 }
 
+/// Whether the Bluetooth transport retries a try that ended on `cause` as it retries
+/// [`DisconnectCause::Other`], so the wait keeps it and goes on.
+const fn retried(cause: DisconnectCause) -> bool {
+    match cause {
+        DisconnectCause::Other
+        | DisconnectCause::RadioOff
+        | DisconnectCause::NotAuthorized
+        | DisconnectCause::StaleBond
+        | DisconnectCause::NotAdvertising
+        | DisconnectCause::SeveralAdvertising => true,
+        DisconnectCause::UsbTookBridge
+        | DisconnectCause::AwaitingPairing
+        | DisconnectCause::AwaitingReady
+        | DisconnectCause::NotBonded
+        | DisconnectCause::MaybeNotBonded => false,
+    }
+}
+
 /// A wait for the bridge's announcement, fed one link event at a time (the module's `//!`).
 #[derive(Debug)]
 struct ReadyWait {
@@ -138,8 +157,8 @@ impl ReadyWait {
                     Taken::Notice(ReadyNotice::Pairing(reason))
                 }
             }
-            Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::Other })
-                if self.over == Link::Bluetooth =>
+            Some(LinkEvent::Disconnected { reason, cause })
+                if retried(cause) && self.over == Link::Bluetooth =>
             {
                 self.retried = Some(reason);
                 Taken::Waiting
@@ -205,6 +224,22 @@ mod tests {
         assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
         assert_eq!(wait.take(down("not found", DisconnectCause::Other)), Taken::Waiting);
         assert_eq!(wait.timed_out(), Some(NotReady::Retried("not found".to_owned())));
+    }
+
+    #[test]
+    fn ready_wait_keeps_waiting_and_names_last_failure_when_bluetooth_retries_a_named_cause() {
+        for cause in [
+            DisconnectCause::RadioOff,
+            DisconnectCause::NotAuthorized,
+            DisconnectCause::StaleBond,
+            DisconnectCause::NotAdvertising,
+            DisconnectCause::SeveralAdvertising,
+        ] {
+            let mut wait = ReadyWait::new(Link::Bluetooth);
+            assert_eq!(wait.take(down("timed out", DisconnectCause::Other)), Taken::Waiting);
+            assert_eq!(wait.take(down("named", cause)), Taken::Waiting, "{cause:?}");
+            assert_eq!(wait.timed_out(), Some(NotReady::Retried("named".to_owned())), "{cause:?}");
+        }
     }
 
     #[test]

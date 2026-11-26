@@ -778,13 +778,18 @@ fn view_lists_link_fault_of_kind_other_when_transport_names_no_cause() {
 }
 
 #[test]
-fn view_lists_link_fault_as_not_bonded_when_bridge_refuses_this_host() {
+fn view_lists_link_fault_of_its_kind_when_transport_names_a_cause() {
     let kind = |cause| match &down(Some("why"), Some(cause)).faults[..] {
         [Fault::LinkDown(link)] => link.kind,
         other => panic!("{other:?}"),
     };
     assert_eq!(kind(DisconnectCause::NotBonded), LinkFaultKind::NotBonded);
     assert_eq!(kind(DisconnectCause::MaybeNotBonded), LinkFaultKind::MaybeNotBonded);
+    assert_eq!(kind(DisconnectCause::RadioOff), LinkFaultKind::RadioOff);
+    assert_eq!(kind(DisconnectCause::NotAuthorized), LinkFaultKind::NotAuthorized);
+    assert_eq!(kind(DisconnectCause::StaleBond), LinkFaultKind::StaleBond);
+    assert_eq!(kind(DisconnectCause::NotAdvertising), LinkFaultKind::NotAdvertising);
+    assert_eq!(kind(DisconnectCause::SeveralAdvertising), LinkFaultKind::SeveralAdvertising);
 }
 
 #[test]

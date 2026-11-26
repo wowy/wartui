@@ -363,14 +363,17 @@ fn no_boards_notice() -> String {
 /// What the transport remembers into it is dropped at exit. Only `run` and `flash-bridge` save
 /// the bridge, so a one-off `wartui status --bridge X` never decides what every later run opens.
 fn memory(explicit: Option<&Path>) -> BridgeMemory {
-    memory_of(&config::remembered_bridge(explicit))
+    unsaved_memory(&config::remembered_bridge(explicit))
 }
 
-/// A handle holding the bridge `saved` remembers.
-fn memory_of(saved: &config::Bridge) -> BridgeMemory {
-    BridgeMemory::holding(saved.mac)
-        .on_port(saved.serial.clone())
-        .on_bluetooth(saved.bluetooth_address.clone())
+/// A handle holding the bridge `saved` remembers, for a command that does not save it.
+///
+/// Remembering stays on whatever `remember` says: the handle is let go at exit, and within the
+/// command the transport finds the board it connected to again by what it remembered.
+fn unsaved_memory(saved: &config::Bridge) -> BridgeMemory {
+    let memory = saved.memory();
+    memory.set_enabled(true);
+    memory
 }
 
 /// The link a command reaches the bridge over: `--link`, else what a `--bridge` path says, since
@@ -447,7 +450,7 @@ fn open_remembered(
 ) -> Result<(LinkHandle, Link)> {
     let saved = config::remembered_bridge(config);
     let over = link_for(flag, bridge, saved.link)?;
-    Ok((open(bridge, sim, over, memory_of(&saved))?, over))
+    Ok((open(bridge, sim, over, unsaved_memory(&saved))?, over))
 }
 
 /// Open the one bridge `named` resolves to, with the remembered bridge read from `config`, and
@@ -463,7 +466,7 @@ async fn connect_one(
 ) -> Result<(LinkHandle, BridgeInfo)> {
     let remembered = crate::config::remembered_bridge(config);
     let link = link_for(flag, named, remembered.link)?;
-    let memory = memory_of(&remembered);
+    let memory = unsaved_memory(&remembered);
     let mut handle = match link {
         Link::Usb => {
             let ports = serial_ports();

@@ -150,7 +150,7 @@ pub(crate) fn bluetooth_target(
 async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge) -> Result<()> {
     let target = bluetooth_target(named, remembered, "reset").map_err(anyhow::Error::msg)?;
     let board = target.to_string();
-    let memory = super::memory_of(remembered);
+    let memory = super::unsaved_memory(remembered);
     let mut link = super::open(Some(&board), None, Link::Bluetooth, memory)?;
     let wait = super::connect_wait(Link::Bluetooth);
     let before = match crate::status::wait_for_ready(&mut link, Link::Bluetooth, wait).await? {

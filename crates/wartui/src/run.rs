@@ -25,11 +25,11 @@ use crate::{capture, config, tui};
 use anyhow::{Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
+use wartui_app::position::{Fixed, Sources};
 use wartui_app::session::{HostBuild, Session, SessionConfig};
 use wartui_app::settings::{Settings, SettingsStore};
 use wartui_app::upload::Endpoints;
 use wartui_core::gps::Gps;
-use wartui_core::position::{PositionChain, StandDown, Tier};
 use wartui_core::store::{StoreConfig, StoreError};
 use wartui_core::ubx;
 use wartui_desktop::config::ConfigFile;
@@ -171,7 +171,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     let fixed = match (args.lat, args.lon) {
-        (Some(lat), Some(lon)) => Some(Tier::fixed(lat, lon, args.alt)),
+        (Some(lat), Some(lon)) => Some(Fixed { lat, lon, alt: args.alt }),
         (None, None) => None,
         // `requires` should have caught this, but a position half-given is
         // worse than none: it would silently record a wrong place.
@@ -212,33 +212,25 @@ pub async fn run(args: Args) -> Result<()> {
     // Built whatever the bridge turns out to be, simulated included: a bridge without a
     // receiver sends no bytes, and this one then says nothing.
     let bridge_gps = (choice != GpsChoice::Off).then(|| Gps::bridged(max_age));
-    // `--gps PATH` is the operator's instruction, so it goes above the bridge's receiver. A
-    // searched one goes below it, and stands down while the bridge's is sending sentences.
-    let pinned = gps.as_ref().filter(|gps| gps.is_pinned());
-    let searched = gps.as_ref().filter(|gps| !gps.is_pinned());
-    let tiers = pinned
-        .map(|gps| Tier::receiver(gps.clone()))
-        .into_iter()
-        .chain(bridge_gps.as_ref().map(|gps| Tier::receiver(gps.clone())))
-        .chain(
-            searched
-                .map(|gps| Tier::receiver(gps.clone()).standing_down(StandDown::WhileAboveTalks)),
-        )
-        .chain(fixed)
-        .collect();
-    let position = PositionChain::new(tiers, max_age);
+    // `--gps PATH` is the operator's instruction, so it goes above the bridge's receiver, and a
+    // searched one below it (`wartui_app::position`).
+    let sources = Sources {
+        named: gps.clone().filter(Gps::is_pinned),
+        bridge: bridge_gps.clone(),
+        platform: None,
+        searched: gps.clone().filter(|gps| !gps.is_pinned()),
+        fixed,
+    };
+    let position = sources.chain(max_age);
 
     // Seeded from the file, and saved back by the view when the transport changes it. The
     // simulator never changes it, so a simulated run leaves `[bridge]` as it found it.
-    let memory = crate::memory_of(&config.bridge);
-    memory.set_enabled(config.bridge.remember.unwrap_or(true));
+    let memory = config.bridge.memory();
     let over = crate::link_for(args.link_flag.link, args.bridge.as_deref(), config.bridge.link)?;
     let link = crate::open(args.bridge.as_deref(), args.sim, over, memory.clone())?;
 
     let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
-    let wait_for_fix = config.gps.waits_for_fix()
-        && args.lat.is_none()
-        && (gps.is_some() || (bridge_gps.is_some() && args.sim.is_none()));
+    let wait_for_fix = sources.waits_for_fix(config.gps.waits_for_fix(), args.sim.is_some());
     let holds_test_data = test_data(args.sim, args.lat);
     let session = SessionConfig {
         store: StoreConfig::new(&db),
