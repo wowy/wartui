@@ -221,13 +221,26 @@ impl Settings {
     /// Save the rows the host holds (`remember`, the fix wait, the receiver's rate, the API keys,
     /// the excluded list), with no engine to tell. The rows a bridge holds are not saved anywhere
     /// on the host and are ignored. `remember` switches the bridge memory as a running capture's
-    /// [`Controls::apply`](crate::session::Controls::apply) does, with no bridge connected to
-    /// remember. `edit.gps_rate` is the rate saved when given, else the one already saved.
+    /// [`Controls::apply`](crate::session::Controls::apply) does, whether or not the save lands:
+    /// a failed save loses only the stored copy. A bridge already connected is remembered when
+    /// the next capture starts over its link. `edit.gps_rate` is the rate saved when given, else
+    /// the one already saved.
     ///
     /// # Errors
-    /// Why nothing was saved.
+    /// Why nothing was saved. The remember switch has moved all the same.
     pub fn save(&self, edit: &SettingsEdit) -> Result<String, SaveError> {
         self.keep(edit, None, None).saved
+    }
+
+    /// Remember `mac`, the bridge a capture's link announced before it, when remembering is on
+    /// and holds no bridge: the switch turned on after the link connected, which a connection
+    /// made with it on has remembered already. Nothing under the simulator. [`Self::follow`]
+    /// saves it.
+    pub(crate) fn remember_announced(&self, mac: Mac) {
+        let state = self.lock();
+        if !state.simulated && state.memory.is_enabled() && state.memory.recall().is_none() {
+            state.memory.remember_on(mac, None);
+        }
     }
 
     /// Put the host's rows of `edit` in force and save them all ([`State::keep`]), the write made

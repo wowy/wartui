@@ -242,7 +242,8 @@ func simulated(_ dir: URL) async throws {
     let csv = dir.appendingPathComponent("simulated.csv")
     let exported = try await within("export") {
         try await exportWigleCsv(
-            dbPath: db.path, outPath: csv.path, options: ExportOptions(), appVersion: "smoke"
+            settings: settings, dbPath: db.path, outPath: csv.path, options: ExportOptions(),
+            appVersion: "smoke"
         )
     }
     guard FileManager.default.fileExists(atPath: csv.path) else { fail("no export at \(csv.path)") }

@@ -1,5 +1,6 @@
-//! What the binding's tests share: a loopback radio over a `WireSim`, settings and secret stores
-//! held in memory, an edit that moves nothing, and waits with deadlines.
+//! What the binding's tests share: a loopback radio over a `WireSim`, or one that hears no
+//! bridge, settings and secret stores held in memory, edits that move nothing or only the host's
+//! rows, and waits with deadlines.
 
 #![allow(dead_code)] // Each test binary uses its own part of this.
 
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::time::timeout;
+use wartui_app::settings::ApiKeys;
 use wartui_app::view::View;
 use wartui_bridge::pipe::{RadioError, RadioErrorKind};
 use wartui_ffi::{
@@ -34,6 +36,8 @@ pub struct Loopback {
     pumping: AtomicBool,
     /// Every connect fails, as to a bridge that has gone.
     gone: AtomicBool,
+    /// A scan hears nothing, as where no bridge is in range.
+    deaf: bool,
 }
 
 impl Loopback {
@@ -44,12 +48,22 @@ impl Loopback {
 
     /// [`Self::radio`], and the driver, to steer. Call it inside a tokio runtime.
     pub fn steered() -> (Arc<Radio>, Arc<Self>) {
+        Self::built(false)
+    }
+
+    /// A radio whose scans hear no bridge. Call it inside a tokio runtime.
+    pub fn deaf() -> Arc<Radio> {
+        Self::built(true).0
+    }
+
+    fn built(deaf: bool) -> (Arc<Radio>, Arc<Self>) {
         let driver = Arc::new(Self {
             sim: WireSim::start(3, 185),
             radio: Mutex::new(Weak::new()),
             tasks: Handle::current(),
             pumping: AtomicBool::new(false),
             gone: AtomicBool::new(false),
+            deaf,
         });
         let radio = Radio::new(driver.clone());
         *driver.radio.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&radio);
@@ -102,6 +116,9 @@ impl RadioDriver for Loopback {
 
     fn start_scan(&self, request: u64) -> Result<(), DriverError> {
         self.answer(request, Completion::Done);
+        if self.deaf {
+            return Ok(());
+        }
         let (radio, id) = (self.radio_later(), self.sim.id());
         self.tasks.spawn(async move {
             if let Some(radio) = radio.upgrade() {
@@ -228,6 +245,23 @@ impl SecretStore for Secrets {
     fn save(&self, text: String) -> Result<(), StoreFailure> {
         *self.text.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
         Ok(())
+    }
+}
+
+/// An edit of the rows the host holds, the bridge's left unmoved and the list empty.
+pub fn host_rows(remember_bridge: bool, wait_for_fix: bool) -> SettingsEdit {
+    SettingsEdit {
+        pool: None,
+        planner: None,
+        fan_duty_pct: None,
+        bluetooth: None,
+        wardrive_esp: None,
+        sd_log: None,
+        gps_rate_hz: None,
+        remember_bridge,
+        wait_for_fix,
+        api_keys: ApiKeys::default(),
+        excluded_ssids: Vec::new(),
     }
 }
 

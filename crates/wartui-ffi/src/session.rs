@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use wartui_app::position::{Fixed, Sources};
 use wartui_app::session::{Controls, HostBuild, Refused, Session as Capture, SessionConfig};
-use wartui_app::settings::{self as app, Busy, Link as Over};
+use wartui_app::settings::{self as app, Busy, Link as Over, SsidRefusal};
 use wartui_app::view::View;
 use wartui_core::engine::{Command, Snapshot};
 use wartui_core::gps::Gps;
@@ -45,7 +45,7 @@ use wartui_proto::bus::Slot;
 use crate::feeds::{HealthFeed, LocationFeed};
 use crate::link::{Link, LinkError};
 use crate::runtime::spawn;
-use crate::settings::{Saved, Settings, SettingsEdit, chain};
+use crate::settings::{Saved, Settings, SettingsEdit, chain, check_excluded};
 
 /// The build a capture records as its provenance.
 #[uniffi::remote(Record)]
@@ -155,6 +155,9 @@ pub enum SteerError {
     /// The receiver rate is outside [`settings_limits`](crate::settings_limits)' range.
     #[error("{hz} Hz is out of range")]
     GpsRate { hz: u8 },
+    /// The first entry of the excluded list that cannot join it, and why.
+    #[error("SSID {ssid:?} cannot be excluded: {refusal:?}")]
+    ExcludedSsid { ssid: String, refusal: SsidRefusal },
     /// `slot` names no node-bus slot.
     #[error("slot {slot} names no slot")]
     NoSuchSlot { slot: u8 },
@@ -267,8 +270,9 @@ impl Session {
     /// latest snapshot.
     ///
     /// # Errors
-    /// A value the app's types refuse, or [`SteerError::Busy`] when the engine takes no command;
-    /// then nothing is sent, switched or saved.
+    /// A value the app's types refuse, [`SteerError::ExcludedSsid`] for an excluded list the
+    /// settings' rules refuse, or [`SteerError::Busy`] when the engine takes no command; then
+    /// nothing is sent, switched or saved.
     pub fn apply(&self, edit: SettingsEdit) -> Result<Applied, SteerError> {
         let edit = edit.into_app()?;
         self.running()?;
@@ -279,8 +283,10 @@ impl Session {
     /// Put `ssids` in force as the excluded list, and save only them.
     ///
     /// # Errors
-    /// [`SteerError::Busy`] when the engine takes no command, and then nothing is saved.
+    /// [`SteerError::ExcludedSsid`] for a list the settings' rules refuse, and
+    /// [`SteerError::Busy`] when the engine takes no command; then nothing is sent or saved.
     pub fn apply_excluded(&self, ssids: Vec<String>) -> Result<Saved, SteerError> {
+        check_excluded(&ssids)?;
         self.running()?;
         Ok(self.controls.apply_excluded(&ssids)?.into())
     }

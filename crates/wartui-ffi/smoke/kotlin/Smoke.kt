@@ -212,7 +212,7 @@ suspend fun simulated(dir: Path) {
 
     val csv = dir.resolve("simulated.csv")
     val exported = withTimeout(DEADLINE_MS) {
-        exportWigleCsv(db.toString(), csv.toString(), ExportOptions(), "smoke")
+        exportWigleCsv(settings, db.toString(), csv.toString(), ExportOptions(), "smoke")
     }
     check(Files.exists(csv)) { "no export at $csv" }
     check(exported.nodes.size == 3) { "the export names ${exported.nodes.map { it.name }}" }
