@@ -1,89 +1,22 @@
 //! The settings' schema, their rules, and the one path that saves them, against a store held in
 //! memory.
 
+mod common;
+
 use std::error::Error;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use wartui_app::session::Controls;
 use wartui_app::settings::{
-    ApiKeys, Bridge, Config, Gps, Link, SaveError, Settings, SettingsEdit, SettingsStore, apply,
-    apply_excluded, excluded_ssid_bytes, load, parse, serialize,
+    ApiKeys, Bridge, Config, Gps, Link, SaveError, Settings, SettingsEdit, SettingsStore,
+    excluded_ssid_bytes, load, parse, serialize,
 };
-use wartui_bridge::BridgeInfo;
 use wartui_bridge::remember::BridgeMemory;
-use wartui_core::engine::{Command, EngineConfig, FleetEngine, Now, Snapshot, StoreStats};
-use wartui_proto::bus::NodeBoard;
-use wartui_proto::link::LoopPhase;
-use wartui_proto::mac::Mac;
+use wartui_core::engine::{Command, Snapshot};
 use wartui_proto::plan::ChannelPool;
-use wartui_proto::reset::ResetCause;
 
-/// The bridge a snapshot has announced.
-const BRIDGE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24];
-
-/// A bridge other than the one connected.
-const OTHER_BRIDGE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
-
-/// A store held in memory, which counts its saves and fails them while `failing`.
-#[derive(Debug, Default)]
-struct Fake {
-    text: Mutex<Option<String>>,
-    saves: Mutex<usize>,
-    failing: Mutex<bool>,
-}
-
-impl Fake {
-    /// A store holding `text`.
-    fn holding(text: &str) -> Arc<Self> {
-        Arc::new(Self { text: Mutex::new(Some(text.to_owned())), ..Self::default() })
-    }
-
-    /// An empty store.
-    fn empty() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    /// The settings it holds, which must parse.
-    fn config(&self) -> Config {
-        let text = self.text.lock().unwrap().clone().expect("something saved");
-        parse(&text).expect("valid settings")
-    }
-
-    /// The text it holds.
-    fn text(&self) -> Option<String> {
-        self.text.lock().unwrap().clone()
-    }
-
-    /// How many saves it has taken.
-    fn saves(&self) -> usize {
-        *self.saves.lock().unwrap()
-    }
-
-    /// Fail every save from now on, or stop failing.
-    fn fail(&self, failing: bool) {
-        *self.failing.lock().unwrap() = failing;
-    }
-}
-
-impl SettingsStore for Fake {
-    fn load(&self) -> std::io::Result<Option<String>> {
-        Ok(self.text())
-    }
-
-    fn save(&self, text: &str, _secret: bool) -> std::io::Result<()> {
-        if *self.failing.lock().unwrap() {
-            return Err(std::io::Error::other("the store is full"));
-        }
-        *self.text.lock().unwrap() = Some(text.to_owned());
-        *self.saves.lock().unwrap() += 1;
-        Ok(())
-    }
-
-    fn place(&self) -> String {
-        "wartui.toml".to_owned()
-    }
-}
+use common::{BRIDGE, Fake, OTHER_BRIDGE, snapshot};
 
 /// Settings kept in `store`, last loaded as `saved`, with the bridge `memory` holds.
 fn kept(store: &Arc<Fake>, saved: Config, memory: &BridgeMemory) -> Settings {
@@ -103,22 +36,15 @@ fn load_error(text: &str) -> String {
     chain
 }
 
-/// A snapshot whose bridge, `bridge`, has announced itself, or none has.
-fn snapshot(bridge: Option<Mac>) -> Snapshot {
-    let now = Now { mono: Instant::now(), unix_ms: 1_777_642_477_000 };
-    let engine = FleetEngine::new(EngineConfig::default(), now);
-    let mut snapshot = engine.snapshot(now, StoreStats::default());
-    snapshot.bridge = bridge.map(|mac| BridgeInfo {
-        mac,
-        fw_version: "0.1.0".to_owned(),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::Unknown,
-        uptime_ms: 1_000,
-        node_board: NodeBoard::Carrier14,
-        radio: None,
-        image: None,
-    });
-    snapshot
+/// Controls sending on `tx` and saving through `settings`.
+fn controls(tx: &mpsc::Sender<Command>, settings: &Settings) -> Controls {
+    Controls::new(tx.clone(), settings.clone())
+}
+
+/// [`Controls::follow`] over `settings`, as a session's follow task calls it.
+fn follow(settings: &Settings, snapshot: &Snapshot) {
+    let (tx, _rx) = mpsc::channel(4);
+    controls(&tx, settings).follow(snapshot);
 }
 
 /// The settings modal's rows, unmoved, over `saved` with remembering `on`.
@@ -450,10 +376,12 @@ fn settings_save_reports_nowhere_when_there_is_no_store() {
 
     assert!(matches!(settings.save_wait_for_fix(false), Err(SaveError::Nowhere)));
     let (tx, mut rx) = mpsc::channel(4);
-    let applied =
-        apply(&unmoved(&Config::default(), true), &snapshot(None), &tx, &settings).unwrap();
+    let applied = controls(&tx, &settings)
+        .apply(&unmoved(&Config::default(), true), &snapshot(None))
+        .unwrap();
     assert!(matches!(applied.saved, Err(SaveError::Nowhere)), "{applied:?}");
-    assert!(matches!(apply_excluded(&[], &tx, &settings), Ok(Err(SaveError::Nowhere))));
+    let excluded = controls(&tx, &settings).apply_excluded(&[]);
+    assert!(matches!(excluded, Ok(Err(SaveError::Nowhere))));
     assert!(matches!(rx.try_recv(), Ok(Command::SetExcludedSsids { .. })), "applied anyway");
     assert_eq!(settings.saved(), Config::default(), "nothing saved, nothing changed");
 }
@@ -477,10 +405,10 @@ fn settings_save_keeps_link_as_store_had_it_when_bridge_has_not_announced_itself
 fn settings_follow_saves_link_when_bridge_announces_itself() {
     let store = Fake::empty();
     let settings = kept(&store, Config::default(), &BridgeMemory::default()).over(Link::Bluetooth);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(store.saves(), 0, "not before it connects");
 
-    settings.follow(&snapshot(Some(BRIDGE)));
+    follow(&settings, &snapshot(Some(BRIDGE)));
 
     assert_eq!(store.config().bridge.link, Some(Link::Bluetooth));
     assert_eq!(settings.saved().bridge.link, Some(Link::Bluetooth));
@@ -491,7 +419,7 @@ fn settings_follow_writes_nothing_when_run_is_over_usb_and_store_names_no_link()
     // Absent means USB, so there is nothing to change.
     let store = Fake::empty();
     let settings = kept(&store, Config::default(), &BridgeMemory::default()).over(Link::Usb);
-    settings.follow(&snapshot(Some(BRIDGE)));
+    follow(&settings, &snapshot(Some(BRIDGE)));
     assert_eq!(store.saves(), 0);
 }
 
@@ -501,7 +429,7 @@ fn settings_follow_saves_usb_when_store_names_bluetooth_and_run_is_over_usb() {
     let saved = load(store.as_ref()).unwrap();
     let settings = kept(&store, saved, &BridgeMemory::default()).over(Link::Usb);
 
-    settings.follow(&snapshot(Some(BRIDGE)));
+    follow(&settings, &snapshot(Some(BRIDGE)));
 
     assert_eq!(store.config().bridge.link, Some(Link::Usb));
 }
@@ -510,7 +438,7 @@ fn settings_follow_saves_usb_when_store_names_bluetooth_and_run_is_over_usb() {
 fn settings_follow_saves_no_link_when_link_is_the_simulator() {
     let store = Fake::empty();
     let settings = kept(&store, Config::default(), &BridgeMemory::default()).simulated();
-    settings.follow(&snapshot(Some(BRIDGE)));
+    follow(&settings, &snapshot(Some(BRIDGE)));
     assert_eq!(store.saves(), 0);
 }
 
@@ -521,7 +449,7 @@ fn settings_follow_saves_bluetooth_address_when_transport_remembers_one() {
     let settings = kept(&store, Config::default(), &memory);
     memory.remember_bluetooth(OTHER_BRIDGE, "02:00:5E:10:44:C1".to_owned());
 
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     let saved = store.config().bridge;
     assert_eq!(saved.mac, Some(OTHER_BRIDGE));
@@ -533,12 +461,12 @@ fn settings_follow_saves_bridge_once_when_transport_remembers_it() {
     let store = Fake::empty();
     let memory = BridgeMemory::none();
     let settings = kept(&store, Config::default(), &memory);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(store.saves(), 0, "nothing changed, nothing written");
 
     memory.remember_on(OTHER_BRIDGE, None); // As the transport does on connecting.
-    settings.follow(&snapshot(None));
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
+    follow(&settings, &snapshot(None));
 
     assert_eq!(store.saves(), 1, "saved once, not every frame");
     assert_eq!(store.config().bridge.mac, Some(OTHER_BRIDGE));
@@ -551,10 +479,10 @@ fn settings_follow_saves_removal_when_transport_forgets_bridge() {
     let memory = BridgeMemory::none();
     let settings = kept(&store, Config::default(), &memory);
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     memory.forget(); // As the transport does when the remembered board goes quiet.
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     assert_eq!(store.config().bridge.mac, None);
 }
@@ -571,7 +499,7 @@ fn settings_follow_saves_remember_on_with_bridge_when_saved_copy_still_says_off(
     let settings = kept(&store, saved, &memory);
     memory.remember_on(OTHER_BRIDGE, None);
 
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     let bridge = store.config().bridge;
     assert_eq!(bridge.remember, Some(true));
@@ -590,7 +518,7 @@ fn settings_follow_saves_remember_off_without_bridge_when_saved_copy_still_says_
     let settings = kept(&store, saved, &memory);
     memory.set_enabled(false);
 
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     let bridge = store.config().bridge;
     assert_eq!(bridge.remember, Some(false));
@@ -603,13 +531,13 @@ fn settings_follow_leaves_store_alone_when_remembered_bridge_unchanged() {
     let memory = BridgeMemory::none();
     let settings = kept(&store, Config::default(), &memory);
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     // A hand edit after the save. Only a change to the bridge rewrites the store.
     *store.text.lock().unwrap() = Some("# mine\n".to_owned());
 
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     assert_eq!(store.text().as_deref(), Some("# mine\n"));
 }
@@ -621,16 +549,16 @@ fn settings_follow_tries_failed_bridge_save_again_when_bridge_changes() {
     let memory = BridgeMemory::none();
     let settings = kept(&store, Config::default(), &memory);
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(settings.saved().bridge.mac, None, "the save failed");
 
     // Now the save would succeed, but the bridge has not changed since it failed.
     store.fail(false);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(store.saves(), 0, "not retried every frame");
 
     memory.remember_on(BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(store.config().bridge.mac, Some(BRIDGE), "a new bridge is tried again");
 }
 
@@ -641,15 +569,15 @@ fn settings_follow_saves_bridge_when_it_returns_after_a_failed_save() {
     let memory = BridgeMemory::none();
     let settings = kept(&store, Config::default(), &memory);
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     assert_eq!(settings.saved().bridge.mac, None, "the save failed");
 
     // Back to what the store holds, which clears the failed attempt.
     memory.forget();
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
     store.fail(false);
     memory.remember_on(OTHER_BRIDGE, None);
-    settings.follow(&snapshot(None));
+    follow(&settings, &snapshot(None));
 
     assert_eq!(store.config().bridge.mac, Some(OTHER_BRIDGE));
 }
@@ -662,8 +590,9 @@ fn settings_apply_saves_remember_on_without_bridge_when_link_is_simulated() {
     let settings = kept(&store, Config::default(), &memory).simulated();
     let (tx, _rx) = mpsc::channel(4);
 
-    let applied =
-        apply(&unmoved(&Config::default(), true), &snapshot(Some(BRIDGE)), &tx, &settings).unwrap();
+    let applied = controls(&tx, &settings)
+        .apply(&unmoved(&Config::default(), true), &snapshot(Some(BRIDGE)))
+        .unwrap();
 
     assert_eq!(applied.remember, Some(true));
     assert!(memory.is_enabled());
@@ -687,7 +616,7 @@ fn settings_apply_sends_nothing_when_command_queue_is_full() {
         ..unmoved(&Config::default(), false)
     };
 
-    assert!(apply(&edit, &snapshot(Some(BRIDGE)), &tx, &settings).is_err());
+    assert!(controls(&tx, &settings).apply(&edit, &snapshot(Some(BRIDGE))).is_err());
 
     assert_eq!(rx.try_recv().unwrap(), Command::StopScan);
     assert!(rx.try_recv().is_err(), "nothing else was sent");

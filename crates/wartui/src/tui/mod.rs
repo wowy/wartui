@@ -31,9 +31,9 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
-use tokio::sync::{mpsc, oneshot, watch};
-use wartui_app::settings::Settings;
-use wartui_core::engine::{Command, Snapshot};
+use tokio::sync::watch;
+use wartui_app::session::Controls;
+use wartui_core::engine::Snapshot;
 use wartui_proto::plan::ChannelPool;
 
 use blocks::draw_blocks;
@@ -47,17 +47,15 @@ use ui::Ui;
 pub use upload::UploadTarget;
 use upload::draw_confirm_modal;
 
-/// Run the view until the operator quits or the engine stops, saving through `settings` and
-/// uploading with `u` to `upload`.
+/// Run the view until the operator quits or the engine stops, steering the capture through
+/// `controls` and uploading with `u` to `upload`.
 ///
-/// Takes ownership of `stop`, so every way out shuts the capture down the same way and
-/// commits the store's last batch. The ways out are a keypress, ctrl-c, or the engine
-/// ending on its own.
+/// The ways out are a keypress, ctrl-c, or the engine ending on its own. Each returns with the
+/// terminal restored, and the caller then stops the session, so anything the capture logs on the
+/// way out lands on a readable screen.
 pub async fn run(
     mut snapshot: watch::Receiver<Arc<Snapshot>>,
-    commands: mpsc::Sender<Command>,
-    stop: oneshot::Sender<()>,
-    settings: Settings,
+    controls: Controls,
     upload: UploadTarget,
 ) -> Result<()> {
     let mut terminal = ratatui::try_init().context("preparing the terminal")?;
@@ -71,25 +69,21 @@ pub async fn run(
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         previous(info);
     }));
-    let result = view(&mut terminal, &mut snapshot, &commands, settings, upload).await;
+    let result = view(&mut terminal, &mut snapshot, controls, upload).await;
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
-    // Stop the engine only once the terminal is restored, so anything it logs on the
-    // way out lands on a readable screen.
-    let _ = stop.send(());
     result
 }
 
 async fn view(
     terminal: &mut DefaultTerminal,
     snapshot: &mut watch::Receiver<Arc<Snapshot>>,
-    commands: &mpsc::Sender<Command>,
-    settings: Settings,
+    controls: Controls,
     upload: UploadTarget,
 ) -> Result<()> {
-    // Inside `view`, so a failure still restores the terminal and stops the engine.
+    // Inside `view`, so a failure still restores the terminal.
     let (mut inputs, running) = spawn_input()?;
-    let mut ui = Ui::new(settings.clone()).uploading_to(upload);
+    let mut ui = Ui::new(controls).uploading_to(upload);
     // Built before the loop, not inside the arm below. See `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
     let outcome = loop {
@@ -98,8 +92,6 @@ async fn view(
         ui.poll_upload(&current);
         ui.poll_power(&current);
         ui.poll_sd(&current);
-        settings.follow(&current);
-        ui.poll_gps_sky(&current, commands);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }
@@ -113,10 +105,10 @@ async fn view(
                 Some(Input::Key(key)) if ui.upload().confirming() => ui.on_confirm_key(key, &current),
                 // Opened only from the fleet view, so nothing else is open under it.
                 Some(Input::Key(key)) if ui.power_confirming() => {
-                    ui.on_power_key(key, &current, commands);
+                    ui.on_power_key(key, &current);
                 }
                 // Opened over the settings modal, which keys reach again once it closes.
-                Some(Input::Key(key)) if ui.sd_confirming() => ui.on_sd_key(key, &current, commands),
+                Some(Input::Key(key)) if ui.sd_confirming() => ui.on_sd_key(key, &current),
                 // Ahead of `quits()`, so `q` closes the modal rather than the view. Also ahead of
                 // the waiting-for-GPS pop-up it may be opened over, which keys reach again once
                 // it closes.
@@ -124,15 +116,15 @@ async fn view(
                 // An open modal gets the key ahead of `quits()`, so `esc` and `q`
                 // close the modal, not the view.
                 Some(Input::Key(key)) if ui.modal().is_some() => {
-                    ui.on_modal_key(key, &current, commands);
+                    ui.on_modal_key(key, &current);
                 }
                 // The waiting-for-GPS pop-up has nothing to back out to, so `q` and `esc` fall
                 // through to `quits()` and quit, as in the fleet view.
                 Some(Input::Key(key)) if current.awaiting_fix && !quits(key) => {
-                    ui.on_fix_wait_key(key, &current, commands);
+                    ui.on_fix_wait_key(key, &current);
                 }
                 Some(Input::Key(key)) if quits(key) => break Ok(()),
-                Some(Input::Key(key)) => ui.on_key(key, &current, commands),
+                Some(Input::Key(key)) => ui.on_key(key, &current),
                 Some(Input::Paste(text)) => ui.on_modal_paste(&text),
                 // The input thread died. Carrying on would leave a view nobody can
                 // quit.
@@ -143,9 +135,8 @@ async fn view(
                     break Ok(());   // The engine stopped.
                 }
             }
-            // The same exit as `q`. The terminal is restored, the engine stops, the
-            // last batch is committed and the port is released. See
-            // `crate::Terminate`.
+            // The same exit as `q`. The terminal is restored, and the caller stops the
+            // session, which commits the last batch. See `crate::Terminate`.
             () = terminate.recv() => break Ok(()),
         }
     };
@@ -284,7 +275,7 @@ mod tests {
     /// unreadable.
     #[test]
     fn view_renders_without_panicking_when_given_various_terminal_sizes() {
-        let mut gps = Ui::default();
+        let mut gps = idle();
         gps.open_gps();
         let mut lossy = fleet_of(14);
         lossy.nodes[3].state.batches_lost = 2;
@@ -302,7 +293,7 @@ mod tests {
                 (6, 3),
                 (1, 1),
             ] {
-                for ui in [&mut Ui::default(), &mut gps] {
+                for ui in [&mut idle(), &mut gps] {
                     let mut terminal =
                         Terminal::new(TestBackend::new(width, height)).expect("test backend");
                     terminal.draw(|frame| draw(frame, &snapshot, ui)).expect("drawing");
@@ -314,7 +305,7 @@ mod tests {
     #[test]
     fn view_draws_fix_wait_pop_up_over_live_view_when_awaiting_fix() {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &awaiting_fix(), &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &awaiting_fix(), &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains(" waiting for GPS "), "{rendered}");
@@ -327,13 +318,13 @@ mod tests {
         );
         assert!(rendered.contains("unique APs"), "the live view behind it: {rendered}");
 
-        terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &busy(), &mut idle())).expect("drawing");
         assert!(!terminal.backend().to_string().contains("waiting for GPS"), "gone with the wait");
     }
 
     #[test]
     fn view_draws_gps_modal_over_fix_wait_pop_up_when_both_are_open() {
-        let mut ui = Ui::default();
+        let mut ui = idle();
         ui.open_gps();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
         terminal.draw(|frame| draw(frame, &awaiting_fix(), &mut ui)).expect("drawing");
@@ -348,7 +339,7 @@ mod tests {
     #[test]
     fn view_shows_counts_chart_and_blocks_when_terminal_is_wide() {
         let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &busy(), &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("unique APs"), "{rendered}");
@@ -363,7 +354,7 @@ mod tests {
     fn view_charts_pool_channels_when_pool_is_us() {
         let snapshot = Snapshot { pool: Some(ChannelPool::Us), ..busy() };
         let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("pool US"), "{rendered}");
@@ -377,7 +368,7 @@ mod tests {
         snapshot.unique_wifi_aps = 95;
         snapshot.unique_ble_aps = 20;
         let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut idle())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         let counts = rendered.lines().find(|l| l.contains("unique APs")).expect("the counts");

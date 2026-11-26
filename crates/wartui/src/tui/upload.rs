@@ -407,7 +407,6 @@ mod tests {
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use tokio::sync::mpsc;
     use wartui_bridge::remember::BridgeMemory;
     use wartui_core::engine::Snapshot;
 
@@ -427,7 +426,7 @@ mod tests {
             wdgwars_base: wdgwars_base.to_owned(),
             wigle_base: wigle_base.to_owned(),
         };
-        Ui::new(Settings::new(None, saved, BridgeMemory::default())).uploading_to(upload)
+        idle_with(Settings::new(None, saved, BridgeMemory::default())).uploading_to(upload)
     }
 
     /// A view whose `u` uploads `db`, with a WDGWars key alone, to a local server at `base`.
@@ -472,8 +471,7 @@ mod tests {
     }
 
     fn press_u(ui: &mut Ui, snapshot: &Snapshot) {
-        let (tx, _rx) = mpsc::channel(4);
-        ui.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), snapshot, &tx);
+        ui.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), snapshot);
     }
 
     fn press_y(ui: &mut Ui, snapshot: &Snapshot) {
@@ -495,7 +493,7 @@ mod tests {
     #[test]
     fn upload_key_shows_notice_when_no_credentials() {
         let snapshot = busy();
-        let mut ui = Ui::default();
+        let mut ui = idle();
         press_u(&mut ui, &snapshot);
         assert_eq!(
             ui.notice(snapshot.now_ms),
@@ -692,7 +690,7 @@ mod tests {
     #[test]
     fn upload_footer_counts_a_line_per_site_when_both_have_status() {
         let snapshot = busy();
-        let mut ui = Ui::default();
+        let mut ui = idle();
         let upload = ui.upload_mut();
         upload.wdgwars = Some("upload: WDGWars job 42 queued".to_owned());
         upload.wigle =

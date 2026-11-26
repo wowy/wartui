@@ -522,6 +522,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
+    use wartui_app::settings::Settings;
     use wartui_proto::bus::{Capabilities, DieTemp, NodeBoard, Slot, Vdd};
     use wartui_proto::plan::ChannelPool;
 
@@ -567,14 +568,14 @@ mod tests {
 
     /// The text of the block titled `title`, drawn from `snapshot` at 200×40.
     fn block_lines(snapshot: &Snapshot, title: &str) -> Vec<String> {
-        let terminal = terminal(snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(snapshot, &mut idle(), 200, 40);
         block(terminal.backend().buffer(), title).map(|(_, lines)| lines).unwrap_or_default()
     }
 
     /// The border color of the only node's block, N7.
     fn border_fg(node: NodeView) -> Option<Color> {
         let snapshot = Snapshot { nodes: vec![node], tail: Vec::new(), ..busy() };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(&snapshot, &mut idle(), 200, 40);
         let buffer = terminal.backend().buffer();
         let ((x, y), _) = block(buffer, " N7 ")?;
         Some(buffer[(x, y)].fg)
@@ -583,7 +584,7 @@ mod tests {
     /// The foreground of `label` in the only node's block, N7.
     fn state_fg(node: NodeView, label: &str) -> Option<Color> {
         let snapshot = Snapshot { nodes: vec![node], tail: Vec::new(), ..busy() };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(&snapshot, &mut idle(), 200, 40);
         let buffer = terminal.backend().buffer();
         let ((left, top), lines) = block(buffer, " N7 ")?;
         let (dy, line) = lines.iter().enumerate().rfind(|(_, line)| line.contains(label))?;
@@ -631,7 +632,7 @@ mod tests {
             tail: Vec::new(),
             ..busy()
         };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(&snapshot, &mut idle(), 200, 40);
         let buffer = terminal.backend().buffer();
         for title in [" N7 ", " N9 ", " — "] {
             let (_, lines) = block(buffer, title).unwrap_or_else(|| panic!("{title}"));
@@ -681,7 +682,7 @@ mod tests {
     #[test]
     fn blocks_show_lost_line_on_every_wide_block_when_any_node_lost_batches() {
         let snapshot = lossy();
-        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(&snapshot, &mut idle(), 200, 40);
         let buffer = terminal.backend().buffer();
         // The count's cell: the left border, then ` lost       `.
         let count_fg = |((x, y), _): ((u16, u16), Vec<String>)| buffer[(x + 13, y + 2)].fg;
@@ -700,7 +701,7 @@ mod tests {
     fn blocks_omit_lost_line_when_no_node_lost_batches() {
         let snapshot = fleet_of(14);
         assert_eq!(grid(14, 200, true, false).block_h, 7);
-        let terminal = terminal(&snapshot, &mut Ui::default(), 200, 40);
+        let terminal = terminal(&snapshot, &mut idle(), 200, 40);
         let buffer = terminal.backend().buffer();
         for i in 1..=14 {
             let title = format!(" N{i} ");
@@ -725,7 +726,7 @@ mod tests {
     #[test]
     fn blocks_show_bare_channel_list_when_layout_is_narrow() {
         let snapshot = Snapshot { nodes: vec![pending(0x84), assigned(0x85)], ..busy() };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 58, 26);
+        let terminal = terminal(&snapshot, &mut idle(), 58, 26);
         let buffer = terminal.backend().buffer();
         let (_, lines) = block(buffer, " N7 ").expect("the pending node's block");
         assert_eq!(lines.len(), 3, "{lines:?}");
@@ -758,7 +759,7 @@ mod tests {
     fn blocks_fit_sparse_share_in_narrow_block_when_terminal_is_58_by_26() {
         // The handheld's narrow block has no count line; the list is cut at a comma to fit.
         let snapshot = Snapshot { nodes: vec![sparse_node(0x84), assigned(0x85)], ..busy() };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 58, 26);
+        let terminal = terminal(&snapshot, &mut idle(), 58, 26);
         let (_, lines) = block(terminal.backend().buffer(), " N7 ").expect("the sparse node");
         let list = lines[1].trim();
         assert!(list.starts_with("52,60,104,") && list.ends_with('…'), "{lines:?}");
@@ -798,7 +799,7 @@ mod tests {
     #[test]
     fn blocks_draw_double_border_when_block_is_selected() {
         let snapshot = Snapshot { nodes: vec![node(0x84, 0, true), node(0x85, 0, true)], ..busy() };
-        let mut ui = Ui::default();
+        let mut ui = idle();
         let terminal = terminal(&snapshot, &mut ui, 200, 40);
         let buffer = terminal.backend().buffer();
         let ((x, y), _) = block(buffer, " N7 ").expect("the selected block");
@@ -813,9 +814,9 @@ mod tests {
         let snapshot = fleet_of(14);
         let (tx, _rx) = mpsc::channel(4);
         let press = |ui: &mut Ui, code| {
-            ui.on_key(KeyEvent::new(code, KeyModifiers::NONE), &snapshot, &tx);
+            ui.on_key(KeyEvent::new(code, KeyModifiers::NONE), &snapshot);
         };
-        let mut ui = Ui::default();
+        let mut ui = steering(&tx, Settings::default());
         // The first frame tells the keys how many blocks a row holds. At 32 rows the grid
         // shows two of its three rows, so a move between those two is inside the window.
         let mut terminal = terminal(&snapshot, &mut ui, 120, 32);
@@ -844,13 +845,12 @@ mod tests {
         let silent = node(0x85, 0, true);
         let snapshot = Snapshot { nodes: vec![reading, silent], tail: Vec::new(), ..busy() };
 
-        let mut ui = Ui::default();
+        let mut ui = idle();
         let mut terminal = terminal(&snapshot, &mut ui, 200, 40);
         let screen = terminal.backend().to_string();
         assert!(screen.contains(&format!("N7 C5 57:84  v{NODE_VERSION}  41 °C")), "{screen}");
 
-        let (tx, _rx) = mpsc::channel(4);
-        ui.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &snapshot);
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(
@@ -903,7 +903,7 @@ mod tests {
             nodes: vec![node(0x84, 0, true), node(0x85, 0, true)],
             ..busy()
         };
-        let terminal = terminal(&snapshot, &mut Ui::default(), 58, 26);
+        let terminal = terminal(&snapshot, &mut idle(), 58, 26);
         let (_, lines) = block(terminal.backend().buffer(), " N7 ").expect("N7's block");
         assert_eq!(lines[1].trim(), "idle", "{lines:?}");
     }

@@ -77,12 +77,13 @@ pub const COMMAND_QUEUE: usize = 8;
 ///
 /// Consumes the store so the last batch commits and `ended_at` is written before returning: an
 /// interrupted capture is still a complete database. Returns what the store's writer did, for
-/// `wartui bench`.
+/// `wartui bench`. Borrows the link, which stays open after a stop, so the caller can go on to
+/// update over it or start another capture.
 ///
 /// `health` is called once per host sample ([`HOST_SAMPLE`]) for the host's own health. `None`
 /// records [`Health::default`], every value unread.
 pub async fn drive(
-    mut link: LinkHandle,
+    link: &mut LinkHandle,
     store: Store,
     mut engine: FleetEngine,
     snapshot: watch::Sender<Arc<Snapshot>>,

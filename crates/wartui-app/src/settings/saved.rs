@@ -9,7 +9,7 @@
 //! one. [`Settings`] is the store's only writer within a run, so the transport's thread never
 //! races it on a whole-store save; the store is tiny, so the write happens under the lock.
 //!
-//! **[`apply`] puts a front end's rows in force, then saves them.** It reserves a command slot
+//! **[`apply`], behind `Controls::apply`, puts a front end's rows in force, then saves them.** It reserves a command slot
 //! for every row that moved before it sends any, so a full queue sends nothing and saves nothing:
 //! the saved copy would claim settings the engine is not running. The bridge's rows go only when
 //! they moved, and never reach the store: the bridge stores every pool, planner, duty,
@@ -18,7 +18,7 @@
 //! only a moved row is rewritten. [`apply_excluded`] applies and saves only the excluded list, and
 //! [`Settings::save_wait_for_fix`] saves only `[gps] wait-for-fix`.
 //!
-//! **[`Settings::follow`] saves what changed without the operator.** The transport remembers a
+//! **[`Settings::follow`], behind `Controls::follow`, saves what changed without the operator.** The transport remembers a
 //! bridge it connects to and forgets one that goes quiet, so a snapshot whose bridge no longer
 //! matches the saved copy is saved, silently. A failed save is tried again only once the bridge
 //! changes, rather than every frame. The run's link is saved once, when the first bridge announces
@@ -75,13 +75,14 @@ pub struct SettingsEdit {
     pub remember_bridge: bool,
     /// Whether `run` holds the scan for a GPS fix, from the next launch.
     pub wait_for_fix: bool,
-    /// The keys as typed. [`apply`] trims them.
+    /// The keys as typed, which are trimmed before they are saved.
     pub api_keys: ApiKeys,
-    /// The list in force, which [`apply`] saves and does not send.
+    /// The list in force, which is saved and not sent.
     pub excluded_ssids: Vec<String>,
 }
 
-/// What [`apply`] did beyond sending the edit's moved rows.
+/// What [`Controls::apply`](crate::session::Controls::apply) did beyond sending the edit's moved
+/// rows.
 #[derive(Debug)]
 pub struct Applied {
     /// The remember switch, `Some` when it changed.
@@ -186,7 +187,7 @@ impl Settings {
     /// Save the bridge the transport remembered or forgot, and the link once a bridge has
     /// announced itself over it. Silent, since nothing the operator did changed either: a failure
     /// is logged at `debug`.
-    pub fn follow(&self, snapshot: &Snapshot) {
+    pub(crate) fn follow(&self, snapshot: &Snapshot) {
         let mut state = self.lock();
         state.follow_bridge();
         state.follow_link(snapshot);
@@ -319,7 +320,7 @@ fn link_written(link: Link, saved: Option<Link>) -> Option<Link> {
 ///
 /// # Errors
 /// [`Busy`] when the engine takes no command, and then nothing is sent, switched or saved.
-pub fn apply(
+pub(crate) fn apply(
     edit: &SettingsEdit,
     snapshot: &Snapshot,
     commands: &mpsc::Sender<Command>,
@@ -366,7 +367,7 @@ pub fn apply(
 ///
 /// # Errors
 /// [`Busy`] when the engine takes no command, and then nothing is saved.
-pub fn apply_excluded(
+pub(crate) fn apply_excluded(
     ssids: &[String],
     commands: &mpsc::Sender<Command>,
     settings: &Settings,

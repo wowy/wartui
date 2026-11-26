@@ -1,6 +1,6 @@
 [package]
 name = "wartui-app"
-description = "The headless app layer a wartui front end binds to: the settings, and the one path that saves them."
+description = "The headless app layer a wartui front end binds to: its settings, and the captures it runs."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,9 +12,13 @@ workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["sync"] }
+tokio = { version = "1.53.1", features = ["rt", "sync"] }
 toml = "1"
 tracing = "0.1.44"
 wartui-bridge = { path = "../wartui-bridge" }
 wartui-core = { path = "../wartui-core" }
 wartui-proto = { path = "../wartui-proto" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "rt", "test-util", "time"] }

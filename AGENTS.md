@@ -149,8 +149,10 @@ own.
   GPS receiver's reader drives its `gps::Gps` from outside the crate.
 - **`crates/wartui-app`** — the headless app layer a phone binds to, and the TUI too: `settings`
   (the schema of `wartui.toml` and its rules, the `SettingsStore` seam, and `Settings`, the one
-  path that saves them). It words nothing for the operator, and names no desktop I/O and no
-  terminal.
+  path that saves them) and `session` (assembles and runs a capture for `run`, `bench` and a phone
+  alike, follows it, saving the bridge and the link and asking for the bridge receiver's sky lists
+  whether or not a view draws, and gives the link back, open, when it stops). It words nothing for
+  the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what
@@ -226,8 +228,8 @@ running every node's session at once (`crates/wartui-core/tests/ota.rs`). So is 
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
 ordered against each other. Only `c`, `p` and the waiting-for-GPS pop-up's `Enter` get that
-far, beside the `StopScan` a quit sends and the `SetGpsSky` opening or closing the GPS modal
-sends; channels are the P4's.
+far, beside the `StopScan` a quit sends and the `SetGpsSky` the session sends as the GPS modal
+opens or closes (`wartui_app::session::Controls`); channels are the P4's.
 
 ### Store is the system of record
 

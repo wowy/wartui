@@ -26,7 +26,8 @@ use std::ops::RangeInclusive;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wartui_proto::mac::{self, Mac};
 
-pub use saved::{Applied, Busy, SaveError, Settings, SettingsEdit, apply, apply_excluded};
+pub use saved::{Applied, Busy, SaveError, Settings, SettingsEdit};
+pub(crate) use saved::{apply, apply_excluded};
 
 /// Everything the settings hold. Add a field and a table to grow it; every struct denies unknown
 /// fields, so a typo is caught rather than silently ignored. [`serialize`] omits a table with
@@ -108,8 +109,8 @@ impl From<Link> for wartui_core::record::HostLink {
 /// The `[gps]` table: how often a bridge's GPS receiver reports a fix, in whole hertz
 /// within [`GPS_RATE_HZ`], and whether `run` holds the scan until a receiver holds a fix.
 /// `bridge-rate-hz` absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`], and
-/// `wait-for-fix` absent means wait. [`apply`] writes both, and leaves each as the stored copy
-/// had it while its row is unmoved.
+/// `wait-for-fix` absent means wait. [`crate::session::Controls::apply`] writes both, and leaves
+/// each as the stored copy had it while its row is unmoved.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Gps {
