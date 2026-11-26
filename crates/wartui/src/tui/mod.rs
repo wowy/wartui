@@ -2,9 +2,11 @@
 //!
 //! See the operator's manual (`crates/wartui/README.md`) for a usage guide.
 //!
-//! Each frame is drawn from the latest [`Snapshot`], published four times a second.
-//! Drawing per observation would back-pressure the link, since a busy fleet sends tens
-//! of rows a second.
+//! Each frame is drawn from a [`View`] of the latest [`Snapshot`], published four times a
+//! second. Drawing per observation would back-pressure the link, since a busy fleet sends tens
+//! of rows a second. The view holds every decision the fleet view draws, so a phone shows a
+//! capture by the same rules; what is left here is the terminal's own: words, colors, widths and
+//! layout. The settings modal reads the snapshot, for the settings in force.
 
 mod blocks;
 mod chart;
@@ -33,12 +35,12 @@ use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::watch;
 use wartui_app::session::Controls;
+use wartui_app::view::View;
 use wartui_core::engine::Snapshot;
-use wartui_proto::plan::ChannelPool;
 
 use blocks::draw_blocks;
 use chart::draw_chart;
-use footer::{buffer_full_line, draw_footer, fault_lines, faults, takeover_line, waiting_line};
+use footer::{draw_footer, fault_lines, fault_texts};
 use gps::draw_gps_modal;
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
@@ -145,26 +147,20 @@ async fn view(
 }
 
 fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
+    let view = View::of(snapshot, ui.link());
     // Faults get their own lines, and only when there are any, so the counters
     // cannot push them off screen.
-    let faults = fault_lines(&faults(snapshot), frame.area().width);
-    let buffer_full = u16::from(buffer_full_line(&snapshot.counters).is_some());
+    let faults = fault_lines(&fault_texts(&view), frame.area().width);
+    let notes = u16::try_from(view.notes.len()).unwrap_or(u16::MAX);
     let upload = u16::try_from(ui.upload().status_lines().len()).unwrap_or(u16::MAX);
-    let takeover = u16::from(takeover_line(snapshot).is_some());
-    let waiting = u16::from(waiting_line(snapshot).is_some());
-    let footer_height = 1
-        + buffer_full
-        + takeover
-        + waiting
-        + upload
-        + u16::try_from(faults.len()).unwrap_or(u16::MAX);
+    let footer_height = 1 + notes + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let area = frame.area();
     let body = Rect { height: area.height.saturating_sub(HEADER_H + footer_height), ..area };
     let wide = body.width >= WIDE_AT;
-    let counts = counts::Counts::new(snapshot);
+    let counts = counts::Counts::new(&view.totals);
     let strip_min = strip_min(&counts, body.width, wide);
-    let grid_height = blocks::wanted_height(snapshot, body.width, wide)
-        .min(body.height.saturating_sub(strip_min));
+    let grid_height =
+        blocks::wanted_height(&view, body.width, wide).min(body.height.saturating_sub(strip_min));
     let [header, strip, grid, footer] = Layout::vertical([
         Constraint::Length(HEADER_H),
         Constraint::Min(strip_min),
@@ -173,22 +169,22 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     ])
     .areas(area);
 
-    draw_header(frame, header, snapshot, ui.link());
-    draw_strip(frame, strip, snapshot, &counts, wide);
+    draw_header(frame, header, &view);
+    draw_strip(frame, strip, &view, &counts, wide);
     let (selected, scroll, cols) = ui.grid_mut();
-    draw_blocks(frame, grid, snapshot, selected, scroll, cols, wide);
-    draw_footer(frame, footer, snapshot, ui, &faults);
+    draw_blocks(frame, grid, &view, selected, scroll, cols, wide);
+    draw_footer(frame, footer, &view, ui, &faults);
 
-    if let Some(lines) = ui.fix_wait_lines(snapshot) {
+    if let Some(lines) = ui.fix_wait_lines(&view) {
         draw_confirm_modal(frame, " waiting for GPS ", &lines);
     }
     if let Some(modal) = ui.modal() {
         draw_settings_modal(frame, modal, snapshot);
     }
     if ui.gps_open() {
-        draw_gps_modal(frame, snapshot);
+        draw_gps_modal(frame, &view);
     }
-    if let Some(lines) = ui.power_confirm_lines(snapshot) {
+    if let Some(lines) = ui.power_confirm_lines() {
         draw_confirm_modal(frame, " power-cycle ", &lines);
     }
     if let Some(lines) = ui.sd_confirm_lines() {
@@ -214,14 +210,8 @@ fn strip_min(counts: &counts::Counts, width: u16, wide: bool) -> u16 {
 
 /// The strip under the header: the big unique counts, and the chart of Wi-Fi sightings per
 /// channel of the bridge's pool, under a title of every sighting this capture holds.
-fn draw_strip(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    snapshot: &Snapshot,
-    counts: &counts::Counts,
-    wide: bool,
-) {
-    let title = format!(" {} sightings ", crate::text::thousands(snapshot.counters.observations));
+fn draw_strip(frame: &mut Frame<'_>, area: Rect, view: &View, counts: &counts::Counts, wide: bool) {
+    let title = format!(" {} sightings ", crate::text::thousands(view.totals.sightings));
     let right = " wifi sightings per channel ";
     let title_w = title.chars().count();
     let mut block = Block::bordered().title(title);
@@ -230,21 +220,18 @@ fn draw_strip(
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    // No pool arrives before the bridge's first `Status`; the chart then shows all of `All`, the
-    // pool a bridge with nothing stored holds.
-    let pool = snapshot.pool.unwrap_or(ChannelPool::All);
     if wide {
         let [left, chart] =
             Layout::horizontal([Constraint::Length(counts.wide_width()), Constraint::Min(0)])
                 .areas(inner);
         counts.draw(frame, left, true);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
+        draw_chart(frame, chart, &view.chart);
     } else {
         let band = counts.band_height(inner.width);
         let [top, chart] =
             Layout::vertical([Constraint::Length(band), Constraint::Min(0)]).areas(inner);
         counts.draw(frame, top, false);
-        draw_chart(frame, chart, &snapshot.wifi_by_channel, pool);
+        draw_chart(frame, chart, &view.chart);
     }
 }
 
@@ -264,6 +251,8 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use wartui_proto::plan::ChannelPool;
 
     use super::*;
     use crate::tui::fixtures::*;

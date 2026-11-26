@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tui_big_text::{BigText, PixelSize};
-use wartui_core::engine::Snapshot;
+use wartui_app::view::Totals;
 
 use crate::text::thousands;
 
@@ -56,21 +56,23 @@ struct Group {
 
 impl Group {
     /// The Wi-Fi and Bluetooth groups.
-    fn both(snapshot: &Snapshot) -> [Self; 2] {
-        let c = &snapshot.counters;
+    fn both(totals: &Totals) -> [Self; 2] {
         [
             Self {
-                digits: approx(snapshot.unique_wifi_aps),
+                digits: approx(totals.unique_wifi),
                 style: Style::new().fg(Color::Green),
                 labels: [
                     "unique APs".to_owned(),
-                    format!("{} wifi", thousands(c.wifi_observations)),
+                    format!("{} wifi", thousands(totals.wifi_sightings)),
                 ],
             },
             Self {
-                digits: approx(snapshot.unique_ble_aps),
+                digits: approx(totals.unique_bluetooth),
                 style: Style::new().fg(Color::Blue),
-                labels: ["unique BLE".to_owned(), format!("{} bt", thousands(c.ble_observations))],
+                labels: [
+                    "unique BLE".to_owned(),
+                    format!("{} bt", thousands(totals.bluetooth_sightings)),
+                ],
             },
         ]
     }
@@ -111,8 +113,8 @@ pub(super) struct Counts {
 }
 
 impl Counts {
-    pub(super) fn new(snapshot: &Snapshot) -> Self {
-        Self { groups: Group::both(snapshot) }
+    pub(super) fn new(totals: &Totals) -> Self {
+        Self { groups: Group::both(totals) }
     }
 
     /// The width the wide layout's counts column takes: [`WIDE_W`], or more when a group needs it.
@@ -171,6 +173,8 @@ impl Counts {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use wartui_core::engine::Snapshot;
 
     use super::*;
     use crate::tui::draw;
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn counts_fall_back_to_text_when_strip_is_under_four_rows() {
         let mut terminal = Terminal::new(TestBackend::new(60, 3)).expect("test backend");
-        let counts = Counts::new(&busy());
+        let counts = Counts::new(&view(&busy()).totals);
         terminal.draw(|frame| counts.draw(frame, frame.area(), false)).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("~32 APs  ~8 BLE"), "{rendered}");

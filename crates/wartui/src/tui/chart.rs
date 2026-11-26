@@ -15,33 +15,9 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use tui_bar_graph::{BarGraph, BarStyle, ColorMode};
-use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_app::view::ChannelBar;
 
 use super::counts::approx;
-
-/// The channels each band starts at: 2.4 GHz, then the three 5 GHz runs the table holds.
-const BAND_STARTS: [u8; 4] = [1, 36, 100, 149];
-
-/// One charted channel: its number, its sightings and whether a band starts at it.
-struct Bar {
-    channel: u8,
-    count: u64,
-    starts_band: bool,
-}
-
-/// One bar per channel of `pool`, in table order. A channel outside it has no bar, whatever it
-/// counts, and channel 14 is in no pool.
-fn bars(counts: &[u64; NUM_SCAN_CHANNELS as usize], pool: ChannelPool) -> Vec<Bar> {
-    (0u8..)
-        .zip(SCAN_CHANNELS.iter().zip(counts))
-        .filter(|&(i, _)| pool.contains(i))
-        .map(|(_, (&channel, &count))| Bar {
-            channel,
-            count,
-            starts_band: BAND_STARTS.contains(&channel),
-        })
-        .collect()
-}
 
 /// The columns the bars are laid out in: what each column holds, from 0 to 1, and the first
 /// column of each bar.
@@ -55,7 +31,7 @@ struct Columns {
 /// Lay `bars` out in `width` columns: `cell` columns per channel, a bar `cell - 1` wide and a
 /// blank column after it, and one more blank column between bands. Below the width all that
 /// takes, each channel gets one column and the bands touch.
-fn columns(bars: &[Bar], width: u16, highest: u64) -> Columns {
+fn columns(bars: &[ChannelBar], width: u16, highest: u64) -> Columns {
     let n = bars.len();
     let gaps = bars.iter().skip(1).filter(|b| b.starts_band).count();
     let width = usize::from(width);
@@ -70,33 +46,27 @@ fn columns(bars: &[Bar], width: u16, highest: u64) -> Columns {
             values.push(0.0);
         }
         first.push(values.len());
-        values.extend(std::iter::repeat_n(b.count as f64 / scale, bar));
+        values.extend(std::iter::repeat_n(b.sightings as f64 / scale, bar));
         values.extend(std::iter::repeat_n(0.0, gap));
     }
     Columns { values, first, cell, bar }
 }
 
-/// Draw the chart of `pool`'s channels into `area`: the axis at the left, the bars, and the
-/// channel labels under them. The axis tops at the loudest charted channel.
+/// Draw the chart of `bars` into `area`: the axis at the left, the bars, and the channel labels
+/// under them. The axis tops at the loudest charted channel.
 ///
 /// It sheds by height, keeping three bar rows: the three label rows drop to one, then that one
 /// goes, then below two rows the axis.
-pub(super) fn draw_chart(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    counts: &[u64; NUM_SCAN_CHANNELS as usize],
-    pool: ChannelPool,
-) {
+pub(super) fn draw_chart(frame: &mut Frame<'_>, area: Rect, bars: &[ChannelBar]) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let bars = bars(counts, pool);
-    let highest = bars.iter().map(|b| b.count).max().unwrap_or(0);
+    let highest = bars.iter().map(|b| b.sightings).max().unwrap_or(0);
     let top = approx(highest.max(1));
     let label_w = u16::try_from(top.len()).unwrap_or(u16::MAX).max(3);
     let gutter = if area.height >= 2 { label_w + 1 } else { 0 };
     let plot_w = area.width.saturating_sub(gutter);
-    let Columns { values, first, cell, bar } = columns(&bars, plot_w, highest);
+    let Columns { values, first, cell, bar } = columns(bars, plot_w, highest);
     // Three stacked digits under each channel when it has a column to spare and the rows allow;
     // one row naming each band otherwise.
     let label_rows = match area.height {
@@ -129,7 +99,7 @@ pub(super) fn draw_chart(
         frame.render_widget(graph, plot);
     }
     if label_rows > 0 && plot.width > 0 {
-        let lines = labels(&bars, &first, bar, label_rows, usize::from(plot.width));
+        let lines = labels(bars, &first, bar, label_rows, usize::from(plot.width));
         let under = Rect { y: area.y + bar_rows, height: label_rows, ..plot };
         frame.render_widget(Paragraph::new(lines), under);
     }
@@ -142,7 +112,7 @@ pub(super) fn draw_chart(
 /// column. One row names the first channel of each band under its first bar, and the last
 /// channel ending under the last bar where it has room beside the band's.
 fn labels(
-    bars: &[Bar],
+    bars: &[ChannelBar],
     first: &[usize],
     bar: usize,
     rows: u16,
@@ -189,8 +159,16 @@ fn labels(
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use wartui_core::engine::Snapshot;
+    use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
     use super::*;
+    use crate::tui::fixtures::{busy, view};
+
+    /// The bars the view charts for `counts` under `pool`.
+    fn bars(counts: &[u64; NUM_SCAN_CHANNELS as usize], pool: ChannelPool) -> Vec<ChannelBar> {
+        view(&Snapshot { wifi_by_channel: *counts, pool: Some(pool), ..busy() }).chart
+    }
 
     /// The chart for `counts` drawn alone at `width`×`height`, as rows of text.
     fn chart(
@@ -199,8 +177,9 @@ mod tests {
         width: u16,
         height: u16,
     ) -> Vec<String> {
+        let bars = bars(counts, pool);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
-        terminal.draw(|frame| draw_chart(frame, frame.area(), counts, pool)).expect("drawing");
+        terminal.draw(|frame| draw_chart(frame, frame.area(), &bars)).expect("drawing");
         terminal.backend().to_string().lines().map(|l| l.trim_matches('"').to_owned()).collect()
     }
 
@@ -250,37 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn chart_omits_channel_14() {
-        let charted: Vec<u8> =
-            bars(&sample(), ChannelPool::All).iter().map(|b| b.channel).collect();
-        assert_eq!(charted.len(), 41);
-        assert!(!charted.contains(&14));
-        // Every bar after 13 is a 5 GHz channel, in table order.
-        assert_eq!(&charted[12..14], &[13, 36]);
-        assert_eq!(charted.last(), Some(&177));
-    }
-
-    #[test]
-    fn chart_charts_only_pool_channels_when_pool_is_us() {
-        let charted: Vec<u8> = bars(&sample(), ChannelPool::Us).iter().map(|b| b.channel).collect();
-        assert_eq!(charted.len(), 36);
-        for hidden in [12, 13, 14, 169, 173, 177] {
-            assert!(!charted.contains(&hidden), "{hidden}: {charted:?}");
-        }
-        assert_eq!(charted.last(), Some(&165));
-    }
-
-    #[test]
-    fn chart_charts_only_pool_channels_when_pool_is_eu() {
-        let charted: Vec<u8> = bars(&sample(), ChannelPool::Eu).iter().map(|b| b.channel).collect();
-        assert_eq!(charted.len(), 32);
-        for hidden in [14, 144, 149, 153, 157, 161, 165, 169, 173, 177] {
-            assert!(!charted.contains(&hidden), "{hidden}: {charted:?}");
-        }
-        assert_eq!(charted.last(), Some(&140));
-    }
-
-    #[test]
     fn chart_names_last_pool_channel_when_pool_is_eu() {
         // Two band gaps, not three: EU has no run at 149.
         let rows = chart(&sample(), ChannelPool::Eu, 56, 4);
@@ -311,12 +259,11 @@ mod tests {
         assert!(!rows[0].contains('┤'), "no axis: {rows:?}");
         assert!(rows[0].contains('█'), "but bars: {rows:?}");
         for pool in [ChannelPool::All, ChannelPool::Eu, ChannelPool::Us] {
+            let bars = bars(&sample(), pool);
             for (width, height) in [(0, 0), (1, 1), (3, 2), (10, 3), (44, 5)] {
                 let mut terminal =
                     Terminal::new(TestBackend::new(width, height)).expect("test backend");
-                terminal
-                    .draw(|frame| draw_chart(frame, frame.area(), &sample(), pool))
-                    .expect("drawing");
+                terminal.draw(|frame| draw_chart(frame, frame.area(), &bars)).expect("drawing");
             }
         }
     }

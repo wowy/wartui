@@ -252,19 +252,6 @@ impl Snapshot {
     pub fn node_board(&self) -> NodeBoard {
         announced_board(self.bridge.as_ref())
     }
-
-    /// The nodes heard on another major or minor, as the header names them:
-    /// `2 need update`, `1 host behind`, or `3 undrivable` for both. `None` when there are none.
-    #[must_use]
-    pub fn undrivable_text(&self) -> Option<String> {
-        match (self.needs_update, self.host_behind) {
-            (0, 0) => None,
-            (1, 0) => Some("1 needs update".to_owned()),
-            (n, 0) => Some(format!("{n} need update")),
-            (0, n) => Some(format!("{n} host behind")),
-            (older, newer) => Some(format!("{} undrivable", older + newer)),
-        }
-    }
 }
 
 /// The bridge's self-report.

@@ -1,6 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_scrollview::ScrollViewState;
 use wartui_app::session::Controls;
+use wartui_app::view::{PowerCycle, View};
 use wartui_core::engine::{Command, NO_CARRIER, Snapshot};
 use wartui_proto::bus::Slot;
 
@@ -9,7 +10,7 @@ use super::gps;
 use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, unsaved};
 use super::upload::{Upload, UploadTarget};
 use crate::config;
-use crate::text::{gb, node_name};
+use crate::text::gb;
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -47,8 +48,8 @@ pub(super) struct Ui {
     upload_target: UploadTarget,
     /// The upload `u` started.
     upload: Upload,
-    /// The slot `p` asks to power-cycle, while its confirm is open.
-    power_confirm: Option<Slot>,
+    /// The slot `p` asks to power-cycle and its label, while its confirm is open.
+    power_confirm: Option<(Slot, String)>,
     /// The last power-cycle answer shown, so each is shown once.
     power_shown: Option<u64>,
     /// The card's size in MiB, while the confirm to format it is open over the settings modal.
@@ -196,29 +197,28 @@ impl Ui {
     /// Open the confirm to power-cycle the selected node, or say why not. A node needs only a
     /// slot: one that has stopped heartbeating is what a power-cycle is for.
     fn ask_power_cycle(&mut self, snapshot: &Snapshot) {
-        let Some(node) = snapshot.nodes.get(self.selected) else { return };
-        let target = node.state.mac;
-        let name = node_name(snapshot.node_board(), node.state.slot, &target);
-        if !snapshot.link_up {
-            self.say(NOT_CONNECTED.to_owned(), snapshot);
-            return;
-        }
-        // Refused here, so a bridge with no carrier is never sent a request it can only refuse.
-        if !snapshot.node_board().is_carrier() {
-            self.say(NO_CARRIER.to_owned(), snapshot);
-            return;
-        }
-        let Some(slot) = node.state.slot else {
-            let why = if node.state.capabilities.is_none() {
-                "has not heartbeated yet, so nothing says which slot it is in"
-            } else {
-                LOST_SLOT
-            };
-            self.say(format!("{name} {why}"), snapshot);
-            return;
+        let view = View::of(snapshot, self.link());
+        let Some(row) = view.nodes.get(self.selected) else { return };
+        let name = row.name();
+        // A bridge with no carrier is refused here, so it is never sent a request it can only
+        // refuse.
+        let why = match row.power_cycle {
+            PowerCycle::NotConnected => NOT_CONNECTED.to_owned(),
+            PowerCycle::NoCarrier => NO_CARRIER.to_owned(),
+            PowerCycle::NotHeard => {
+                format!("{name} has not heartbeated yet, so nothing says which slot it is in")
+            }
+            PowerCycle::LostSlot => format!("{name} {LOST_SLOT}"),
+            PowerCycle::Allowed => {
+                // A node is allowed only with a slot.
+                let Some(shown) = &row.slot else { return };
+                let Some(slot) = Slot::from_u8(shown.index) else { return };
+                self.notice = None;
+                self.power_confirm = Some((slot, shown.label.clone()));
+                return;
+            }
         };
-        self.notice = None;
-        self.power_confirm = Some(slot);
+        self.say(why, snapshot);
     }
 
     /// Whether the power-cycle confirm is open, and so takes every key.
@@ -228,8 +228,7 @@ impl Ui {
 
     /// A key while the power-cycle confirm is open: `y` sends, anything else cancels.
     pub(super) fn on_power_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
-        let Some(slot) = self.power_confirm.take() else { return };
-        let name = snapshot.node_board().label(slot);
+        let Some((slot, name)) = self.power_confirm.take() else { return };
         if key.code != KeyCode::Char('y') || key.modifiers != KeyModifiers::NONE {
             self.say(format!("{name} not power-cycled"), snapshot);
             return;
@@ -247,9 +246,8 @@ impl Ui {
     }
 
     /// The power-cycle confirm's lines, while it is open.
-    pub(super) fn power_confirm_lines(&self, snapshot: &Snapshot) -> Option<Vec<String>> {
-        let slot = self.power_confirm?;
-        let name = snapshot.node_board().label(slot);
+    pub(super) fn power_confirm_lines(&self) -> Option<Vec<String>> {
+        let (_, name) = self.power_confirm.as_ref()?;
         Some(vec![
             format!("power-cycle {name}?"),
             "Its node goes off for a second, then boots again.".to_owned(),
@@ -286,14 +284,14 @@ impl Ui {
 
     /// The waiting-for-GPS pop-up's lines, while the run holds its scan for a fix. The box
     /// is what the file holds.
-    pub(super) fn fix_wait_lines(&self, snapshot: &Snapshot) -> Option<Vec<String>> {
-        if !snapshot.awaiting_fix {
+    pub(super) fn fix_wait_lines(&self, view: &View) -> Option<Vec<String>> {
+        if !view.awaiting_fix {
             return None;
         }
         let tick = if self.controls.settings().waits_for_fix() { ' ' } else { 'x' };
         Some(vec![
             "Waiting for a GPS fix before the scan starts.".to_owned(),
-            format!("gps: {}", gps::status(snapshot).0),
+            format!("gps: {}", gps::status(view.receiver.as_ref())),
             String::new(),
             format!("[{tick}] skip this wait at every launch"),
             String::new(),
@@ -474,7 +472,7 @@ mod tests {
         ui.on_key(press('p'), &snapshot);
         assert!(ui.power_confirming());
         assert!(rx.try_recv().is_err(), "nothing before the answer");
-        let lines = ui.power_confirm_lines(&snapshot).expect("the confirm");
+        let lines = ui.power_confirm_lines().expect("the confirm");
         assert_eq!(lines[0], "power-cycle N7?", "{lines:?}");
 
         ui.on_power_key(press('y'), &snapshot);
@@ -705,7 +703,7 @@ mod tests {
         let snapshot = awaiting_fix();
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = steering(&tx, saving_to(&target));
-        let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
+        let lines = ui.fix_wait_lines(&view(&snapshot)).expect("the pop-up");
         assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
         assert!(lines.contains(&"gps: searching".to_owned()), "{lines:?}");
 
@@ -714,7 +712,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "the box sends nothing");
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.gps.wait_for_fix, Some(false));
-        let lines = ui.fix_wait_lines(&snapshot).expect("still up");
+        let lines = ui.fix_wait_lines(&view(&snapshot)).expect("still up");
         assert!(lines.contains(&"[x] skip this wait at every launch".to_owned()), "{lines:?}");
 
         ui.on_fix_wait_key(press(' '), &snapshot);
@@ -730,7 +728,7 @@ mod tests {
 
         ui.on_fix_wait_key(press(' '), &snapshot);
 
-        let lines = ui.fix_wait_lines(&snapshot).expect("the pop-up");
+        let lines = ui.fix_wait_lines(&view(&snapshot)).expect("the pop-up");
         assert!(lines.contains(&"[ ] skip this wait at every launch".to_owned()), "{lines:?}");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("--config"), "{notice}");
@@ -778,7 +776,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing goes to the engine");
         ui.on_gps_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!ui.gps_open());
-        assert!(ui.fix_wait_lines(&snapshot).is_some(), "the pop-up is there again");
+        assert!(ui.fix_wait_lines(&view(&snapshot)).is_some(), "the pop-up is there again");
     }
 
     #[test]
@@ -796,7 +794,7 @@ mod tests {
 
     #[test]
     fn ui_shows_no_fix_wait_lines_when_not_waiting() {
-        assert_eq!(idle().fix_wait_lines(&busy()), None);
+        assert_eq!(idle().fix_wait_lines(&view(&busy())), None);
     }
 
     #[test]
