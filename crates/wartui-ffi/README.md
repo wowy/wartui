@@ -114,6 +114,8 @@ the app is built against.
   milliseconds; where the platform stamps satellite time, give the wall clock less the fix's age.
   Mock fixes, and fixes without an accuracy or worse than `maxFixAccuracyM()`, are refused
   (`crates/wartui-core/src/feed.rs`).
+- **On Android, `altMsl` is `Location.getMslAltitudeMeters()`, API 34 and later.** Below it,
+  leave `altMsl` out: `getAltitude()` is a height above the ellipsoid, not above sea level.
 - **Errors are typed.** Every error and state is an enum for the app to word; a `detail` string
   is the failure's own account from below, for a log.
 
@@ -131,6 +133,62 @@ target/debug/uniffi-bindgen generate --library target/debug/libwartui_ffi.dylib 
 
 Kotlin lands in package `racing.deadbear.wartui.core` and needs JNA and kotlinx-coroutines; Swift
 is module `WartuiCore` over the C module `WartuiCoreFFI` (`uniffi.toml`).
+
+## Packaging
+
+```sh
+crates/wartui-ffi/package/build.sh [android|ios|all]    # default all
+```
+
+| It makes | Where, under `crates/wartui-ffi/` unless `target/` |
+|---|---|
+| `libwartui_ffi.so` for `arm64-v8a` and `x86_64` | `android/wartui-core/generated/jniLibs/` |
+| The Kotlin binding, with `android = true` | `android/wartui-core/generated/kotlin/` |
+| The release AAR | `target/phone/android/wartui-core.aar` |
+| `libwartui_ffi.a` for the device and the arm64 simulator | `target/<triple>/release/` |
+| `WartuiCoreFFI.xcframework`: both libraries, the C header and module map | `swift/` |
+| `WartuiCore.swift` | `swift/Sources/WartuiCore/` |
+
+All are release builds, and git ignores them. Neither ships the `testing` feature, and the script
+fails a binding that exports it. Android needs an SDK (`ANDROID_HOME`, else
+`~/Library/Android/sdk`) and an NDK (`ANDROID_NDK_HOME`, else `ANDROID_NDK_LATEST_HOME`, else
+the newest in the SDK); iOS needs Xcode.
+
+| Minimum | |
+|---|---|
+| Android | API 31 (`minSdk`, and the NDK clang the library links with) |
+| iOS | 17.0 (the package's platform, and `IPHONEOS_DEPLOYMENT_TARGET`) |
+| Swift | 6.4, in the Swift 6 language mode |
+
+**An Android app** depends on the AAR. A file carries no dependency list, so the app also names
+JNA and kotlinx-coroutines, which the binding calls through:
+
+```kotlin
+dependencies {
+    implementation(files("libs/wartui-core.aar"))
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+}
+```
+
+The AAR carries the R8 rules JNA and the binding need, and asks for no permission: the app
+declares Bluetooth and location. Google Play requires native libraries aligned to 16 KB pages:
+the script links with `-z max-page-size=16384` and fails a library with a `LOAD` segment
+aligned to less. JNA 5.19.1's `libjnidispatch.so` is aligned too.
+
+`android/` is the Gradle project that builds the AAR, with its wrapper and dependency
+verification (`gradle/verification-metadata.xml`); `gradle/libs.versions.toml` pins every version
+it builds with. Its `./gradlew connectedAndroidTest` runs the shipped binding on ART in a running
+emulator.
+
+**An iOS app** adds `swift/` as a local package (Xcode's "Add Package Dependencies", "Add
+Local", or `.package(path: "…/crates/wartui-ffi/swift")`) and imports `WartuiCore`. Its test runs
+on a simulator: `xcodebuild test -scheme WartuiCore -destination 'platform=iOS Simulator,…'`.
+
+**SQLite's temporary storage.** On Android SQLite keeps it in memory, so an app sets nothing up
+and an export's or an upload's memory grows with the capture, to the order of 170 MiB for a full
+drive of two million sightings; the script fails a library built otherwise. On iOS it uses the
+app's `TMPDIR` (`crates/wartui-core/src/export.rs`).
 
 ## Smoke tests
 

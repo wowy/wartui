@@ -44,10 +44,17 @@ cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target
 cargo check -p wartui-bridge -p wartui-core -p wartui-app -p wartui-ffi --target aarch64-linux-android
 
 crates/wartui-ffi/smoke/run.sh                             # both bindings, end to end
+crates/wartui-ffi/package/build.sh [android|ios|all]       # the AAR and the Swift package
+
+cd crates/wartui-ffi/android && ./gradlew connectedAndroidTest   # on a running emulator
+cd crates/wartui-ffi/swift && xcodebuild test -scheme WartuiCore \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'        # any simulator listed
 ```
 
-The Android check compiles bundled SQLite, so it needs the NDK's clang in
-`CC_aarch64_linux_android` (and its `llvm-ar` in `AR_aarch64_linux_android`).
+The Android check compiles bundled SQLite, so it needs the NDK's API 31 clang,
+`aarch64-linux-android31-clang`, in `CC_aarch64_linux_android` (and its `llvm-ar` in
+`AR_aarch64_linux_android`). Both on-device tests run what `build.sh` placed
+(`crates/wartui-ffi/README.md` § "Packaging").
 
 Run it without hardware — the simulator runs a fake fleet on a fake clock:
 
@@ -186,7 +193,10 @@ own.
   runtime, and no exported function blocks on it. A call into the phone's code returns at once
   and fails as a value, so the phone's Bluetooth stack answers each request later, by its id
   (`src/radio.rs`, an adapter under `pipe::Radio`'s contract). `smoke/run.sh` runs a capture
-  through the generated Kotlin and Swift (`crates/wartui-ffi/README.md`).
+  through the generated Kotlin and Swift (`crates/wartui-ffi/README.md`). `package/build.sh`
+  makes what an app depends on, an Android AAR (the Gradle project in `android/`) and the Swift
+  package in `swift/` over an XCFramework, each with a test that runs on an emulator or a
+  simulator. Nothing generated is committed.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and

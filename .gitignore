@@ -49,3 +49,15 @@ wartui-*.csv
 # AI tools
 .claude/worktrees/
 .junie/plans/
+
+# What `crates/wartui-ffi/package/build.sh` and the Gradle and Swift builds place in the tree.
+/crates/wartui-ffi/android/.gradle/
+/crates/wartui-ffi/android/.kotlin/
+/crates/wartui-ffi/android/build/
+/crates/wartui-ffi/android/local.properties
+/crates/wartui-ffi/android/wartui-core/build/
+/crates/wartui-ffi/android/wartui-core/generated/
+/crates/wartui-ffi/swift/.build/
+/crates/wartui-ffi/swift/.swiftpm/
+/crates/wartui-ffi/swift/Sources/WartuiCore/WartuiCore.swift
+/crates/wartui-ffi/swift/WartuiCoreFFI.xcframework/

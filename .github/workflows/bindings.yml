@@ -31,3 +31,98 @@ jobs:
 
       - name: Run the smoke tests
         run: crates/wartui-ffi/smoke/run.sh all
+
+  package-ios:
+    name: Swift package and its test in an iOS simulator
+    runs-on: xcode-27
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Build the XCFramework
+        run: crates/wartui-ffi/package/build.sh ios
+
+      # The runner's newest iPhone simulator, whichever that is.
+      - name: Run the test in a simulator
+        working-directory: crates/wartui-ffi/swift
+        run: |
+          uuid='[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}'
+          device=$(xcrun simctl list devices available | grep -E '^\s+iPhone' |
+            grep -oE "$uuid" | tail -n 1)
+          [[ -n $device ]] || { echo "no iPhone simulator is available" >&2; exit 1; }
+          xcodebuild test -scheme WartuiCore -destination "platform=iOS Simulator,id=$device"
+
+      - name: Zip the XCFramework with the Swift
+        run: |
+          kept=target/phone/ios/artifact
+          mkdir -p "$kept"
+          (cd crates/wartui-ffi/swift && zip -qr "$OLDPWD/$kept/WartuiCoreFFI.xcframework.zip" \
+            WartuiCoreFFI.xcframework)
+          cp crates/wartui-ffi/swift/Sources/WartuiCore/WartuiCore.swift "$kept/"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wartui-core-ios
+          path: target/phone/ios/artifact/
+          if-no-files-found: error
+
+  package-android:
+    name: Android AAR and its test on an API 31 emulator
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      # The runner carries an Android SDK, its command-line tools and NDKs.
+      - name: Build the AAR
+        run: crates/wartui-ffi/package/build.sh android
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wartui-core-android
+          path: target/phone/android/wartui-core.aar
+          if-no-files-found: error
+
+      # API 31 is the minimum the library claims, and x86_64 is what this runner emulates.
+      - name: Let the runner user open KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install the emulator and the API 31 image
+        run: |
+          tools=$ANDROID_HOME/cmdline-tools/latest/bin
+          yes | "$tools/sdkmanager" --licenses > /dev/null
+          "$tools/sdkmanager" emulator platform-tools "system-images;android-31;default;x86_64"
+          echo no | "$tools/avdmanager" create avd --name api31 \
+            --package "system-images;android-31;default;x86_64"
+
+      - name: Start the emulator
+        run: |
+          nohup "$ANDROID_HOME/emulator/emulator" -avd api31 -no-window -no-audio \
+            -no-boot-anim -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          adb=$ANDROID_HOME/platform-tools/adb
+          timeout 300 "$adb" wait-for-device
+          for _ in $(seq 120); do
+            booted=$("$adb" shell getprop sys.boot_completed 2> /dev/null | tr -d '\r')
+            [[ $booted == 1 ]] && exit 0
+            sleep 5
+          done
+          echo "the emulator did not boot within 10 minutes" >&2
+          exit 1
+
+      - name: Run the test on the emulator
+        working-directory: crates/wartui-ffi/android
+        run: ./gradlew :wartui-core:connectedAndroidTest
+
+      - name: Show the emulator's log
+        if: failure()
+        run: cat "$RUNNER_TEMP/emulator.log"
