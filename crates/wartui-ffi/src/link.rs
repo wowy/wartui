@@ -20,13 +20,15 @@
 //! **[`Link::ready`] waits for the announcement before a capture**, so a phone can show the
 //! bridge, or why none answered, before it starts one. It is `wartui_app::ops::ready`, run whole
 //! on the library's runtime: the link is taken, waited on and given back, parked with the
-//! announcement, on every way out, a phone that stops awaiting included. The wait a `Ready` gets
-//! once a link is up is `wartui_app::ops::REPLY_TIMEOUT`, as the terminal's commands give it. A
-//! link that holds an announcement already answers with it at once.
+//! announcement, on every way out. A phone that stops awaiting ends the wait and has the link back
+//! idle, rather than in use until the wait runs out, which a pairing notice stretches. The wait a
+//! `Ready` gets once a link is up is `wartui_app::ops::REPLY_TIMEOUT`, as the terminal's commands
+//! give it. A link that holds an announcement already answers with it at once.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use wartui_app::ops::{self, NotReady, Parked, ReadyNotice, park};
 use wartui_app::settings::Link as Over;
 use wartui_app::view::BridgeView;
@@ -208,7 +210,8 @@ impl Link {
     }
 
     /// Wait up to `within_ms` for the bridge to announce itself, and keep the announcement for
-    /// the next capture. The link is in use while this runs. Each notice goes to `listener`.
+    /// the next capture. The link is in use while this runs. Each notice goes to `listener`. A
+    /// phone that stops awaiting ends the wait and has the link back idle.
     ///
     /// # Errors
     /// [`ReadyError::InUse`] or [`ReadyError::Closed`] for a link not idle, and otherwise why
@@ -220,8 +223,10 @@ impl Link {
     ) -> Result<Announced, ReadyError> {
         let inner = Arc::clone(&self.inner);
         let within = Duration::from_millis(u64::from(within_ms));
+        // Dropped with this future, which ends the wait.
+        let (_awaited, dropped) = oneshot::channel::<()>();
         // On the runtime, so a phone that stops awaiting still has the link given back.
-        match spawn(Arc::clone(&inner).ready(within, listener)).await {
+        match spawn(Arc::clone(&inner).ready(within, listener, dropped)).await {
             Ok(waited) => waited,
             // The link was in the work that panicked, and went with it.
             Err(_) => {
@@ -330,11 +335,13 @@ impl Inner {
         *self.lock() = Held::Closed;
     }
 
-    /// [`Link::ready`]'s work, on the library's runtime.
+    /// [`Link::ready`]'s work, on the library's runtime. `dropped` resolves once the phone stops
+    /// awaiting, which ends the wait with the link given back idle.
     async fn ready(
         self: Arc<Self>,
         within: Duration,
         listener: Option<Arc<dyn ReadyListener>>,
+        dropped: oneshot::Receiver<()>,
     ) -> Result<Announced, ReadyError> {
         let (mut handle, announced) = self.lend().await.map_err(|error| match error {
             LinkError::InUse => ReadyError::InUse,
@@ -353,7 +360,20 @@ impl Inner {
                 let _ = listener.notice(notice);
             }
         };
-        let waited = ops::ready(&mut handle, over, within, ops::REPLY_TIMEOUT, &mut notice).await;
+        // `ops::ready` is safe to drop mid-wait: it returns on the `Connected` it reads, so none
+        // is lost, and the parked link keeps one that arrives after.
+        let waited = tokio::select! {
+            biased;
+            _ = dropped => None,
+            waited = ops::ready(&mut handle, over, within, ops::REPLY_TIMEOUT, &mut notice) => {
+                Some(waited)
+            }
+        };
+        let Some(waited) = waited else {
+            // Nobody reads this result.
+            self.give_back(handle, None);
+            return Err(ReadyError::Closed);
+        };
         let bridge = waited.ready.as_ref().ok().and_then(Option::clone);
         self.give_back(handle, bridge);
         match waited.ready {

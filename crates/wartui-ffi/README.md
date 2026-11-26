@@ -39,9 +39,10 @@ bridge from `bridgesNearby`, open `Link.bluetooth` to it, wait for `link.ready` 
 `Session.start` over it (a `suspend` function in Kotlin, `async` in Swift), follow `nextView`,
 and `stop`. The link stays open for the next capture, read meanwhile so the bridge's stream never
 backs up into it, with the bridge it announced. `exportWigleCsv` writes the capture out
-afterwards. `smoke/kotlin/Smoke.kt` and `smoke/swift/main.swift` do exactly that. Under
-`Link.simulated` the view's `link.host` shows the simulator as a bridge on USB, as the terminal
-does: it describes no real link.
+afterwards, leaving out the networks the settings exclude, as `wartui export` does.
+`smoke/kotlin/Smoke.kt` and `smoke/swift/main.swift` do exactly that. Under `Link.simulated` the
+view's `link.host` shows the simulator as a bridge on USB, as the terminal does: it describes no
+real link.
 
 `powerCycle` and `formatSd` are answered by the bridge in the view's `answers`, each answer
 numbered so a new one is told from the last.
@@ -57,15 +58,16 @@ host's rows as shown. In a capture it seeds its rows from the view's `settings`,
 sends the moved rows and saves the host's, and `Session.applyExcluded` sends and saves the
 excluded list alone.
 With none running, `Settings.save` saves the host's rows and ignores the bridge's. `settingsLimits`
-gives the ranges an edit must keep to, and a value outside them is a `SteerError` with nothing
-sent or saved. What a save came to is a `Saved`, its rule typed when the settings break one.
+gives the ranges an edit must keep to, and a value outside them, or an excluded list
+`checkExcludedSsid` refuses, is a `SteerError` with nothing sent or saved. What a save came to is
+a `Saved`, its rule typed when the settings break one.
 
 ## Uploads
 
 `prepareUpload` reads a capture and builds each site's upload, with the API keys the settings
-hold, and contacts nothing. A site ready to send is a `PreparedUpload`, whose `shown` is what a
-confirm screen shows. A capture of test data, simulated or placed by a typed-in position, is
-refused for every site.
+hold and without the networks they exclude, and contacts nothing. A site ready to send is a
+`PreparedUpload`, whose `shown` is what a confirm screen shows. A capture of test data, simulated
+or placed by a typed-in position, is refused for every site.
 
 - **`send` is the operator's yes.** An upload publishes to the operator's profile and cannot be
   taken back, so call it only from the operator's confirmation of what `shown` showed. It sends

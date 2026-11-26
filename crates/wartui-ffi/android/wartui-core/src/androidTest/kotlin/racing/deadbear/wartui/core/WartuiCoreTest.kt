@@ -123,7 +123,13 @@ class WartuiCoreTest {
 
         val csv = File(context.cacheDir, "simulated.csv").also { it.delete() }
         val exported = withTimeout(DEADLINE_MS) {
-            exportWigleCsv(db.absolutePath, csv.absolutePath, ExportOptions(), "android-test")
+            exportWigleCsv(
+                Settings.unsaved(),
+                db.absolutePath,
+                csv.absolutePath,
+                ExportOptions(),
+                "android-test",
+            )
         }
         assertTrue("no export at $csv", csv.isFile)
         assertTrue("the export wrote no rows", exported.rows > 0UL)

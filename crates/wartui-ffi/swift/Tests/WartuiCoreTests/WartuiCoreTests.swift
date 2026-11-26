@@ -153,7 +153,8 @@ func freshDirectory() throws -> URL {
     let csv = dir.appendingPathComponent("simulated.csv")
     let exported = try await within("export") {
         try await exportWigleCsv(
-            dbPath: db.path, outPath: csv.path, options: ExportOptions(), appVersion: "ios-test"
+            settings: Settings.unsaved(), dbPath: db.path, outPath: csv.path,
+            options: ExportOptions(), appVersion: "ios-test"
         )
     }
     #expect(FileManager.default.fileExists(atPath: csv.path))

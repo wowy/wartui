@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
+use wartui_app::settings::SsidRefusal;
 use wartui_app::view::ReceiverSummary;
 use wartui_core::feed::{LocationFix, Pushed};
 use wartui_core::position::PositionSource;
@@ -322,7 +323,7 @@ async fn session_apply_is_busy_when_capture_has_stopped() {
 }
 
 #[tokio::test]
-async fn session_apply_excluded_saves_only_the_list() {
+async fn session_apply_excluded_saves_only_the_list_when_capture_runs() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = Memory::holding("[gps]\nwait-for-fix = false\n");
     let settings = Settings::open(store.clone(), None).expect("the store opens");
@@ -336,6 +337,41 @@ async fn session_apply_excluded_saves_only_the_list() {
     assert_eq!(config.excluded_ssids, ["HomeNet"]);
     assert_eq!(config.gps.wait_for_fix, Some(false), "the rest kept: {text}");
     until(&session, |view| view.settings.excluded_ssids == ["HomeNet"]).await;
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_apply_excluded_refuses_list_when_an_ssid_is_empty() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Memory::holding("excluded-ssids = [\"HomeNet\"]\n");
+    let settings = Settings::open(store.clone(), None).expect("the store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    until(&session, |view| view.link.up && view.settings.excluded_ssids == ["HomeNet"]).await;
+
+    let refused = session.apply_excluded(vec!["CafeNet".to_owned(), String::new()]);
+    let Err(SteerError::ExcludedSsid { ssid, refusal }) = refused else { panic!("{refused:?}") };
+    assert_eq!((ssid.as_str(), refusal), ("", SsidRefusal::Empty));
+    assert_eq!(store.text().as_deref(), Some("excluded-ssids = [\"HomeNet\"]\n"), "nothing saved");
+    // Room for a list sent to land, as it does when one is applied.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(session.view().view.settings.excluded_ssids, ["HomeNet"], "nothing sent");
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test]
+async fn session_apply_refuses_edit_when_an_ssid_is_listed_twice() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(Memory::default());
+    let settings = Settings::open(store.clone(), None).expect("an empty store opens");
+    let session = saving(&dir.path().join("capture.db"), &Link::simulated(3), &settings).await;
+    let shown = until(&session, |view| view.link.up).await.view;
+
+    let excluded_ssids = vec!["HomeNet".to_owned(), "HomeNet".to_owned()];
+    let edit = wartui_ffi::SettingsEdit { excluded_ssids, ..unmoved(&shown, &settings) };
+    let refused = session.apply(edit);
+    let Err(SteerError::ExcludedSsid { ssid, refusal }) = refused else { panic!("{refused:?}") };
+    assert_eq!((ssid.as_str(), refusal), ("HomeNet", SsidRefusal::Listed));
+    assert_eq!(store.text(), None, "nothing saved");
     session.stop().await.expect("stopped");
 }
 

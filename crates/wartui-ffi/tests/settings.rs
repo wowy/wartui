@@ -10,24 +10,9 @@ use wartui_ffi::{
     settings_limits,
 };
 
-use common::{Loopback, Memory, PEER, Secrets, WAIT, capture, nowhere, three_nodes, until};
-
-/// An edit of the rows the host holds, the bridge's left unmoved.
-fn host_rows(remember_bridge: bool, wait_for_fix: bool) -> SettingsEdit {
-    SettingsEdit {
-        pool: None,
-        planner: None,
-        fan_duty_pct: None,
-        bluetooth: None,
-        wardrive_esp: None,
-        sd_log: None,
-        gps_rate_hz: None,
-        remember_bridge,
-        wait_for_fix,
-        api_keys: ApiKeys::default(),
-        excluded_ssids: Vec::new(),
-    }
-}
+use common::{
+    Loopback, Memory, PEER, Secrets, WAIT, capture, host_rows, nowhere, three_nodes, until,
+};
 
 #[test]
 fn settings_open_fails_when_stored_text_is_malformed() {
@@ -128,6 +113,19 @@ fn settings_save_refuses_edit_when_rate_is_out_of_range() {
 
     let refused = settings.save(edit);
     assert!(matches!(refused, Err(SteerError::GpsRate { hz: got }) if got == hz), "{refused:?}");
+    assert_eq!(store.text(), None, "nothing saved");
+}
+
+#[test]
+fn settings_save_refuses_edit_when_an_ssid_is_too_long() {
+    let store = Arc::new(Memory::default());
+    let settings = Settings::open(store.clone(), None).expect("opens empty");
+    let long = "x".repeat(usize::try_from(settings_limits().ssid_max_bytes).unwrap() + 1);
+    let edit = SettingsEdit { excluded_ssids: vec![long.clone()], ..host_rows(true, true) };
+
+    let refused = settings.save(edit);
+    let Err(SteerError::ExcludedSsid { ssid, refusal }) = refused else { panic!("{refused:?}") };
+    assert_eq!((ssid, refusal), (long, SsidRefusal::TooLong));
     assert_eq!(store.text(), None, "nothing saved");
 }
 

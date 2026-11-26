@@ -735,7 +735,8 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, vi
     let value_width = usize::from(WIDTH.min(frame.area().width)).saturating_sub(22);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
     let (sd_value, sd_action) = sd_row(&view.settings.sd);
-    // A bridge that reported no card slot has no log to set.
+    // A bridge that reported no card slot has no log to set. The card state is live, so once the
+    // link drops the row reads `no bridge`, as the card's row below it does.
     let no_slot = modal.bridge_up && view.settings.sd == SdShown::NoSlot;
     let mut lines = vec![
         match modal.pool {
