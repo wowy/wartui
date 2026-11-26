@@ -128,7 +128,7 @@ wartui sd-log LOG/ # print the bridge's log as text, from the card's files
 |----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
-| `crates/wartui-app`                                      | The headless app layer a phone binds to: settings and their one save path, the capture `Session`, bridge ops  |
+| `crates/wartui-app`                                      | The headless app layer a phone binds to: settings and their save path, the `Session`, bridge ops, the `View`  |
 | `crates/wartui-desktop`                                  | The desktop's adapters: serial ports, Bluetooth radio, BlueZ pairing, host health, the `wartui.toml` file     |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport over USB and Bluetooth, what a serial port is, simulator              |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with every firmware                                                 |

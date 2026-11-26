@@ -1,4 +1,4 @@
-//! What the integration tests share: a store held in memory, and snapshots.
+//! What the integration tests share: a store held in memory, and snapshots and the nodes in them.
 
 #![allow(dead_code)]
 
@@ -7,9 +7,14 @@ use std::time::Instant;
 
 use wartui_app::settings::{Config, SettingsStore, parse};
 use wartui_bridge::BridgeInfo;
-use wartui_core::engine::{EngineConfig, FleetEngine, Now, Snapshot, StoreStats};
-use wartui_proto::bus::NodeBoard;
-use wartui_proto::link::LoopPhase;
+use wartui_core::engine::{
+    BridgeStatus, EngineConfig, FleetEngine, NodeState, NodeView, Now, Snapshot, StoreStats,
+};
+use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
+use wartui_core::nmea::Sky;
+use wartui_core::position::DEFAULT_MAX_AGE;
+use wartui_proto::bus::{Board, Capabilities, MAX_SLOTS, NodeBoard};
+use wartui_proto::link::{BluetoothStatus, LoopPhase};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
 
@@ -95,4 +100,64 @@ pub fn snapshot(bridge: Option<Mac>) -> Snapshot {
         image: None,
     });
     snapshot
+}
+
+/// A snapshot of a running capture: the bridge announced, the link up, and `nodes`.
+pub fn running(nodes: Vec<NodeView>) -> Snapshot {
+    let mut snapshot = snapshot(Some(BRIDGE));
+    snapshot.link_up = true;
+    snapshot.bridge_status = Some(status());
+    snapshot.alive = nodes.iter().filter(|node| node.alive).count();
+    snapshot.assignable = nodes.iter().filter(|node| node.assignable).count();
+    snapshot.nodes = nodes;
+    snapshot
+}
+
+/// A bridge's report with nothing dropped, no fan and no Bluetooth host.
+pub fn status() -> BridgeStatus {
+    BridgeStatus {
+        rx_count: 0,
+        dropped_tx: 0,
+        dropped_since_attach: 0,
+        uptime_ms: 60_000,
+        fan: None,
+        sd: None,
+        bluetooth: BluetoothStatus::default(),
+        health: Default::default(),
+    }
+}
+
+/// A heartbeating, assignable node ending in `last`, in the slot that byte names: `0x84` is A7,
+/// `N7` on a 14-node carrier.
+pub fn node(last: u8) -> NodeView {
+    let now = Now { mono: Instant::now(), unix_ms: 1_777_642_477_000 };
+    let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
+    state.last_heartbeat = Some(now.mono);
+    state.observations = 340;
+    state.slot = wartui_proto::bus::Slot::from_u8(last % MAX_SLOTS as u8);
+    state.capabilities = Some(Capabilities::here(Board::Esp32c5));
+    NodeView {
+        state,
+        alive: true,
+        on_bus: true,
+        assignable: true,
+        share: None,
+        adopted: false,
+        starting: false,
+    }
+}
+
+/// A host receiver in `status`, settled on a port, heard as the snapshot was taken.
+pub fn receiver(status: GpsStatus, snapshot: &Snapshot) -> GpsView {
+    GpsView {
+        status,
+        counters: GpsCounters::default(),
+        last_fix_ms: None,
+        settled: Some(("/dev/ttyACM1".to_owned(), 9_600)),
+        pinned_baud: false,
+        sky: Sky::default(),
+        heard_ms: Some(snapshot.now_ms),
+        max_age: DEFAULT_MAX_AGE,
+        via_bridge: false,
+    }
 }

@@ -20,5 +20,6 @@ wartui-core = { path = "../wartui-core" }
 wartui-proto = { path = "../wartui-proto" }
 
 [dev-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "rt", "test-util", "time"] }
