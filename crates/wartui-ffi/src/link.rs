@@ -8,10 +8,15 @@
 //! life and the next capture is handed the announcement (`wartui_app::session` `//!`). Taking a
 //! parked link back waits on that task, so lending and closing are async.
 //!
-//! [`Link::bluetooth`] picks the bridge as `wartui run` does over Bluetooth: the bridge named,
-//! else the one the settings remember, else the only one heard. The transport remembers into the
-//! settings' bridge memory, so a capture saves the bridge it connected to, and the settings read an
-//! idle link's announcement for a save ([`Settings::save`]).
+//! **[`Link::bluetooth`] pins the link to the bridge named, else to the one the settings remember
+//! when it opens.** Its transport refuses every other bridge through each reconnect, so a capture
+//! or an update over it reaches that bridge and no other (`update.rs`). Only with neither does it
+//! take the only bridge heard, which a capture may and an update may not. This differs from
+//! `wartui run`, which takes another bridge in the remembered one's absence: a phone moves to
+//! another bridge by naming it.
+//!
+//! The transport remembers into the settings' bridge memory, so a capture saves the bridge it
+//! connected to. The settings read an idle link's announcement for a save ([`Settings::save`]).
 //!
 //! **[`Link::ready`] waits for the announcement before a capture**, so a phone can show the
 //! bridge, or why none answered, before it starts one. It is `wartui_app::ops::ready`, run whole
@@ -139,11 +144,14 @@ pub struct Link {
     inner: Arc<Inner>,
 }
 
-/// A [`Link`]'s state, shared with the work [`Link::ready`] runs on the runtime, and read by the
+/// A [`Link`]'s state, shared with the work its calls run on the runtime, and read by the
 /// [`Settings`] it was opened with.
 #[derive(Debug)]
 pub(crate) struct Inner {
     simulated: bool,
+    /// The bridge the transport was opened for, which it refuses every other for. `None` for the
+    /// simulator, and for a Bluetooth link opened with no bridge named or remembered.
+    pinned: Option<BridgeSpec>,
     held: Mutex<Held>,
 }
 
@@ -158,18 +166,19 @@ impl Link {
         let _inside = runtime().enter();
         let config = SimConfig { node_count: nodes, ..SimConfig::default() };
         let held = match SimTransport::new(config).start() {
-            Ok(handle) => Held::Idle(park(handle, None)),
+            Ok(handle) => Held::Idle(park(handle)),
             Err(error) => {
                 tracing::warn!(%error, "the simulator did not start");
                 Held::Closed
             }
         };
-        Self::holding(true, held)
+        Self::holding(true, None, held)
     }
 
     /// The Bluetooth link to the bridge `bridge` names (a whole address, or its last octets as
-    /// `44:C0`), else the one `settings` remember, else the only one heard. The settings remember
-    /// the bridge it connects to.
+    /// `44:C0`), else the one `settings` remember now, pinned to it whatever the settings do
+    /// afterwards. With neither it takes the only bridge heard and takes no update. The settings
+    /// remember the bridge it connects to.
     ///
     /// # Errors
     /// [`LinkError::NotABridgeName`] when `bridge` names no bridge, and [`LinkError::Start`]
@@ -184,9 +193,11 @@ impl Link {
             Some(Ok(BridgeSpec::Path(given))) => return Err(LinkError::NotABridgeName { given }),
             Some(Ok(spec)) => Some(spec),
             Some(Err(never)) => match never {},
-            None => None,
+            // The address alone: a save that turns remembering on holds it before a connection
+            // has stored the Bluetooth one.
+            None => settings.app().memory().recall().map(BridgeSpec::Mac),
         };
-        let transport = match spec {
+        let transport = match spec.clone() {
             Some(spec) => BleTransport::with_spec(radio, spec),
             None => BleTransport::new(radio),
         };
@@ -195,7 +206,7 @@ impl Link {
             .remember_in(settings.app().memory())
             .start()
             .map_err(|error| LinkError::Start { detail: error.to_string() })?;
-        let link = Self::holding(false, Held::Idle(park(handle, None)));
+        let link = Self::holding(false, spec, Held::Idle(park(handle)));
         settings.attach(&link.inner);
         Ok(link)
     }
@@ -265,8 +276,14 @@ impl Link {
 }
 
 impl Link {
-    fn holding(simulated: bool, held: Held) -> Arc<Self> {
-        Arc::new(Self { inner: Arc::new(Inner { simulated, held: Mutex::new(held) }) })
+    fn holding(simulated: bool, pinned: Option<BridgeSpec>, held: Held) -> Arc<Self> {
+        let inner = Inner { simulated, pinned, held: Mutex::new(held) };
+        Arc::new(Self { inner: Arc::new(inner) })
+    }
+
+    /// The link's state, for work run on the runtime.
+    pub(crate) fn shared(&self) -> Arc<Inner> {
+        Arc::clone(&self.inner)
     }
 
     /// Take the link for a session: idle to in use, with the bridge it has announced now. A link
@@ -275,9 +292,9 @@ impl Link {
         self.inner.lend().await
     }
 
-    /// Give the link back, parked: in use to idle, with the bridge it still has announced.
-    pub(crate) fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
-        self.inner.give_back(handle, announced);
+    /// Give the link back, parked: in use to idle, with the bridge the handle holds announced.
+    pub(crate) fn give_back(&self, handle: LinkHandle) {
+        self.inner.give_back(handle);
     }
 
     /// The session holding the link lost it.
@@ -287,6 +304,17 @@ impl Link {
 }
 
 impl Inner {
+    /// Whether the bridge is the simulator's.
+    pub(crate) fn is_simulated(&self) -> bool {
+        self.simulated
+    }
+
+    /// Whether an update may go over the link: the simulator's, or a Bluetooth link pinned to the
+    /// bridge named or remembered when it was opened.
+    pub(crate) fn takes_updates(&self) -> bool {
+        self.simulated || self.pinned.is_some()
+    }
+
     /// The address the bridge of an idle link has announced, read without taking the link;
     /// `None` while in use or closed.
     pub(crate) fn announced_mac(&self) -> Option<Mac> {
@@ -296,7 +324,7 @@ impl Inner {
         }
     }
 
-    async fn lend(&self) -> Result<(LinkHandle, Option<BridgeInfo>), LinkError> {
+    pub(crate) async fn lend(&self) -> Result<(LinkHandle, Option<BridgeInfo>), LinkError> {
         let parked = {
             let mut held = self.lock();
             match std::mem::replace(&mut *held, Held::InUse) {
@@ -315,12 +343,12 @@ impl Inner {
         })
     }
 
-    fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
+    pub(crate) fn give_back(&self, handle: LinkHandle) {
         let _inside = runtime().enter();
-        *self.lock() = Held::Idle(park(handle, announced));
+        *self.lock() = Held::Idle(park(handle));
     }
 
-    fn lose(&self) {
+    pub(crate) fn lose(&self) {
         *self.lock() = Held::Closed;
     }
 
@@ -337,9 +365,8 @@ impl Inner {
             _ => ReadyError::Closed,
         })?;
         if let Some(bridge) = announced {
-            let shown = Announced { bridge: BridgeView::of(&bridge), garbled: false };
-            self.give_back(handle, Some(bridge));
-            return Ok(shown);
+            self.give_back(handle);
+            return Ok(Announced { bridge: BridgeView::of(&bridge), garbled: false });
         }
         // The simulator stands in for a bridge on USB, as a capture over it does.
         let over = if self.simulated { Over::Usb } else { Over::Bluetooth };
@@ -349,8 +376,8 @@ impl Inner {
                 let _ = listener.notice(notice);
             }
         };
-        // `ops::ready` is safe to drop mid-wait: it returns on the `Connected` it reads, so none
-        // is lost, and the parked link keeps one that arrives after.
+        // `ops::ready` is safe to drop mid-wait: the handle keeps the `Connected` it reads, and the
+        // parked link one that arrives after.
         let waited = tokio::select! {
             biased;
             _ = dropped => None,
@@ -358,13 +385,9 @@ impl Inner {
                 Some(waited)
             }
         };
-        let Some(waited) = waited else {
-            // Nobody reads this result.
-            self.give_back(handle, None);
-            return Err(ReadyError::Closed);
-        };
-        let bridge = waited.ready.as_ref().ok().and_then(Option::clone);
-        self.give_back(handle, bridge);
+        self.give_back(handle);
+        // Nobody reads the result of a wait the phone stopped awaiting.
+        let Some(waited) = waited else { return Err(ReadyError::Closed) };
         match waited.ready {
             Ok(Some(bridge)) => {
                 Ok(Announced { bridge: BridgeView::of(&bridge), garbled: waited.garbled })

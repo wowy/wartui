@@ -1,8 +1,9 @@
 # wartui-ffi
 
-The library an Android or iOS app loads: `wartui-app`'s captures, settings and Bluetooth link,
-through [UniFFI](https://mozilla.github.io/uniffi-rs/)-generated Kotlin and Swift. The app's own
-types cross unchanged, so a phone shows a capture by the same rules as the terminal
+The library an Android or iOS app loads: `wartui-app`'s captures, settings, Bluetooth link,
+uploads and firmware updates, through
+[UniFFI](https://mozilla.github.io/uniffi-rs/)-generated Kotlin and Swift. The app's own types
+cross unchanged, so a phone shows a capture by the same rules as the terminal
 (`crates/wartui-app/src/view/mod.rs`).
 
 ## The object model
@@ -20,11 +21,18 @@ types cross unchanged, so a phone shows a capture by the same rules as the termi
 | | `Session`: `start`, `view`, `nextView`, `showSky`, `stop` |
 | | `Session`'s steering: `apply`, `applyExcluded`, `startWithoutFix`, `powerCycle`, `formatSd` |
 | | `exportWigleCsv` |
+| `UploadListener` | `prepareUpload`, then `PreparedUpload`: `shown`, `send` |
+| | `NodeImage`, `BridgeImage`: `parse`; `fetchNodeImage`, `fetchBridgeImage` |
+| `NodeUpdateListener` | `Link`'s node update: `hearNodes`, then `updateNodes` |
+| | `NodesHeard`: `targets`, `boards`, `plan`; `NodePlan`: `rows`, `chosen` |
+| `BridgeUpdateListener` | `Link`'s bridge update: `updateBridge` |
+| | `Stopper`: `stop`, for either update |
 
 `linkUuids()` gives the link service's UUIDs. Kotlin calls `Link.close` `disconnect`, since every
 Kotlin object's `close()` frees its handle. Both languages call the rule enum `Invalid`
-`BrokenRule`, since inside `SettingsException.Invalid` Kotlin would read `Invalid` as that variant
-(`uniffi.toml`).
+`BrokenRule`, since inside `SettingsException.Invalid` Kotlin would read `Invalid` as that variant,
+and for the same reason the upload's `Missing` `MissingCredentials` and its `Unfollowed`
+`JobUnfollowed` (`uniffi.toml`).
 
 A capture: open `Settings` over the app's stores, make a `Radio` over the app's driver, pick a
 bridge from `bridgesNearby`, open `Link.bluetooth` to it, wait for `link.ready` to show it,
@@ -54,6 +62,43 @@ remember on there remembers the bridge an idle `Link.bluetooth` opened with thos
 announced, in the same save. `settingsLimits` gives the ranges an edit must keep to, and a value
 outside them, or an excluded list `checkExcludedSsid` refuses, is a `SteerError` with nothing sent
 or saved. What a save came to is a `Saved`, its rule typed when the settings break one.
+
+## Uploads
+
+`prepareUpload` reads a capture and builds each site's upload, with the API keys the settings
+hold and without the networks they exclude, and contacts nothing. A site ready to send is a
+`PreparedUpload`, whose `shown` is what a confirm screen shows. A capture of test data, simulated
+or placed by a typed-in position, is refused for every site.
+
+- **`send` is the operator's yes.** An upload publishes to the operator's profile and cannot be
+  taken back, so call it only from the operator's confirmation of what `shown` showed. It sends
+  once; a second call is refused.
+- **Run it in a background task.** It can take minutes: the uplink, then WDGWars' job followed to
+  its end.
+- **A lost answer reads as a failed send.** The site may have taken the file all the same, so a
+  retry may send the rows again. `UploadOutcome.failed` says when a retry is called for.
+
+## Firmware updates
+
+`hearNodes` listens for the fleet's heartbeats, and its `plan`, made from checked `NodeImage`s,
+is what a confirm screen shows and what `updateNodes` runs. `updateBridge` sends a checked
+`BridgeImage` and reads the outcome across the bridge's reboot. `fetchNodeImage` and
+`fetchBridgeImage` take a release's images, checked against its `SHA256SUMS`, for the release tag
+the app is built against.
+
+- **Name the bridge, or remember it.** `Link.bluetooth` pins the link to the bridge named, else
+  to the one the settings remember when it opens, and its transport refuses every other, so the
+  app moves to another bridge by naming it. With neither it takes the only bridge heard, whose
+  fleet would take the image, and an update over it is refused with `NotPinned`.
+- **There is no USB fallback from a phone.** A bridge update that fails over Bluetooth is
+  recovered from a computer, so the app says so before it starts.
+- **Run either in a background task the OS does not suspend.** A bridge update can run several
+  minutes and reads its outcome across reconnects. A `Stopper`, or an await the app cancels,
+  cancels a node update, telling each node under way. It abandons a bridge update only while the
+  image is sent, and the bridge keeps the image it runs; from `Installing` on, the update runs to
+  its outcome.
+- **A bridge update needs the bridge's announcement**, from `link.ready`. The link keeps the
+  latest one it reads, so after an install it names the new image.
 
 ## What a phone's adapter keeps to
 
@@ -99,13 +144,16 @@ crates/wartui-ffi/smoke/run.sh [kotlin|swift|all]    # default all; prints OK <l
 ```
 
 It builds the library with the `testing` feature, which adds `WireSim`, a simulated bridge at the
-byte level, generates both bindings under `target/ffi-smoke/`, and runs a program in each
-language: a simulated capture placed by a pushed fix, its pool moved and its rows exported, then
-a capture over a loopback `RadioDriver` to a `WireSim` found by `bridgesNearby` and announced by
-`link.ready`, which remembers its bridge through an in-memory `SettingsStore` and keeps a typed-in
-API key in an in-memory `SecretStore`. It
-needs `kotlinc` and `java`, or `swiftc`, on `PATH`, and fetches JNA and kotlinx-coroutines from
-Maven Central against pinned digests. CI runs it on macOS (`.github/workflows/bindings.yml`).
+byte level, `testingNodeImage`, and uploads and release fetches sent to a local listener. It
+generates both bindings under `target/ffi-smoke/`, and runs a program in each language: a
+simulated capture placed by a pushed fix, its pool moved and its rows exported, and its nodes
+updated over the link once it stops, to an image the `testing` feature builds; then a capture over
+a loopback `RadioDriver` to a `WireSim` found by `bridgesNearby` and announced by `link.ready`,
+which remembers its bridge through an in-memory `SettingsStore` and keeps a typed-in API key in an
+in-memory `SecretStore`; then, with that key, the simulated capture refused for upload as test
+data, which contacts nothing. It needs `kotlinc` and `java`, or `swiftc`, on `PATH`, and fetches
+JNA and kotlinx-coroutines from Maven Central against pinned digests. CI runs it on macOS
+(`.github/workflows/bindings.yml`).
 
 Swift written against the binding needs Swift 6.4 or later, and the smoke program compiles in the
 Swift 6 language mode. The generated file itself keeps UniFFI's checks for older compilers.

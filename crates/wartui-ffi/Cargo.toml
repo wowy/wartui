@@ -21,9 +21,10 @@ required-features = ["cli"]
 [features]
 # The bindings generator, which reads `uniffi.toml` through `cargo metadata`.
 cli = ["uniffi/cli", "uniffi/cargo-metadata"]
-# `WireSim`, a simulated bridge at the byte level, for tests and the smoke programs. No shipped
-# build enables it.
-testing = []
+# `WireSim`, a simulated bridge at the byte level, the uploads and release fetches sent to a local
+# listener, and a node image that passes every check, for tests and the smoke programs. It turns
+# on `wartui-app`'s fixtures too. No shipped build enables it.
+testing = ["wartui-app/testing"]
 
 [dependencies]
 futures-util = "0.3.34"

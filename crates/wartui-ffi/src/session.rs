@@ -394,10 +394,10 @@ async fn start(
     };
     let settings = if simulated { settings.simulated() } else { settings.over(Over::Bluetooth) };
     let health = health.map(|feed| feed.reader());
-    let capture = match Capture::start(capture, handle, announced.clone(), health, settings) {
+    let capture = match Capture::start(capture, handle, announced, health, settings) {
         Ok(capture) => capture,
         Err(Refused { error, link: handle }) => {
-            link.give_back(*handle, announced);
+            link.give_back(*handle);
             return Err(match error {
                 StoreError::Exists(path) => StartError::Exists { path: path.display().to_string() },
                 error => StartError::Store { detail: chain(&error) },
@@ -425,7 +425,7 @@ struct Running {
 async fn stop(running: Running, link: Arc<Link>) -> Result<CaptureEnd, StopError> {
     match running.capture.stop().await {
         Ok(end) => {
-            link.give_back(end.link, end.bridge);
+            link.give_back(end.link);
             // The capture's snapshots have ended, so this task ends on the last of them.
             if let Err(error) = running.viewing.await {
                 tracing::warn!(%error, "the view task panicked");

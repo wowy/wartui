@@ -1,6 +1,7 @@
-// The binding end to end from Swift: a simulated capture steered and exported, then one over a
-// radio written here that loops back to a simulated bridge. Also the first example a phone
-// developer reads: the loopback driver is shaped as a `CBPeripheralDelegate` adapter is.
+// The binding end to end from Swift: a simulated capture steered and exported, its nodes updated
+// between captures, then one over a radio written here that loops back to a simulated bridge, and
+// the first capture refused for upload as test data. Also the first example a phone developer
+// reads: the loopback driver is shaped as a `CBPeripheralDelegate` adapter is.
 
 import Foundation
 
@@ -165,6 +166,24 @@ final class LoopbackDriver: RadioDriver, @unchecked Sendable {
     func close(peer: String, unsubscribe: Bool) {}
 }
 
+/// Counts the steps a node update reports.
+final class Counting: NodeUpdateListener, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    func progress(progress: NodeUpdateProgress) {
+        lock.lock()
+        calls += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+}
+
 /// Follow `session`'s views until `done` holds for one, within the deadline.
 func until(_ session: Session, _ what: String, _ done: (View) -> Bool) async -> View {
     await within(what) {
@@ -197,14 +216,16 @@ func capture(_ db: URL) -> CaptureConfig {
     )
 }
 
-/// A simulated capture, placed by a fix the platform pushes, steered, then exported.
-func simulated(_ dir: URL) async throws {
+/// A simulated capture, placed by a fix the platform pushes, steered, then exported, and its nodes
+/// updated over the link once it has stopped. Returns the capture's location.
+func simulated(_ dir: URL) async throws -> URL {
     let db = dir.appendingPathComponent("simulated.db")
     let location = LocationFeed()
     let settings = Settings.unsaved()
+    let link = Link.simulated(nodes: 3)
     let session = try await Session.start(
         config: capture(db),
-        link: Link.simulated(nodes: 3),
+        link: link,
         settings: settings,
         position: PositionSources(bridgeReceiver: false, location: location, fixed: nil),
         health: HealthFeed()
@@ -248,12 +269,48 @@ func simulated(_ dir: URL) async throws {
     }
     guard FileManager.default.fileExists(atPath: csv.path) else { fail("no export at \(csv.path)") }
     guard exported.nodes.count == 3 else { fail("the export names \(exported.nodes.map(\.name))") }
+
+    try await updateNodes(link)
+    return db
+}
+
+/// Every node `link` hears updated, forced, to an image of the version they run.
+func updateNodes(_ link: Link) async throws {
+    let heard = try await within("a listen") { try await link.hearNodes(periodMs: 3_000) }
+    // No slot named: every node heard.
+    guard let version = try heard.targets(slots: []).first?.capabilities.version else {
+        fail("no node heard")
+    }
+    let image = try NodeImage.parse(bytes: testingNodeImage(board: .esp32c5, version: version))
+    let plan = try heard.plan(slots: [], images: [image], force: true)
+    guard plan.chosen() == 3 else { fail("the plan chooses \(plan.rows())") }
+    let counting = Counting()
+    let updated = try await within("the update") {
+        try await link.updateNodes(plan: plan, stopper: nil, listener: counting)
+    }
+    guard updated.failed == nil, updated.outcomes.count == 3 else { fail("updated: \(updated)") }
+    for ended in updated.outcomes {
+        guard case .done = ended.outcome else { fail("updated: \(updated)") }
+    }
+    guard counting.count > 0 else { fail("the listener heard nothing") }
+}
+
+/// A simulated capture is test data, which is never uploaded. This contacts nothing.
+func refusedAsTestData(_ settings: Settings, _ db: URL) async throws {
+    do {
+        _ = try await prepareUpload(
+            settings: settings, dbPath: db.path, options: UploadOptions(appVersion: "smoke")
+        )
+        fail("a simulated capture was prepared for upload")
+    } catch UploadRefusal.TestData {
+        // As it should be.
+    }
 }
 
 /// A capture over the loopback radio: the bridge picked from those nearby and announced before the
 /// capture, remembered in the settings, and an API key typed in afterwards kept in the secret
-/// store.
-func loopback(_ dir: URL) async throws {
+/// store. Returns the settings, which hold the key.
+func loopback(_ dir: URL) async throws -> Settings {
     let driver = LoopbackDriver(sim: WireSim.start(nodes: 3, mtu: 185))
     let radio = Radio(driver: driver)
     driver.attach(radio)
@@ -299,6 +356,7 @@ func loopback(_ dir: URL) async throws {
         fail("the secret store holds \(secrets.text ?? "nothing")")
     }
     guard store.text?.contains(key) == false else { fail("the key is in the settings") }
+    return settings
 }
 
 let lines = Lines()
@@ -307,8 +365,9 @@ let dir = FileManager.default.temporaryDirectory
     .appendingPathComponent("wartui-smoke-\(ProcessInfo.processInfo.globallyUniqueString)")
 do {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    try await simulated(dir)
-    try await loopback(dir)
+    let simulatedDb = try await simulated(dir)
+    let keyed = try await loopback(dir)
+    try await refusedAsTestData(keyed, simulatedDb)
 } catch {
     fail("\(error)")
 }

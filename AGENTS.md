@@ -68,7 +68,8 @@ attached board by its address, and `crates/wartui/README.md` § "Telling the boa
 that works.
 
 **Never upload to WDGWars or WiGLE without asking the user directly first, every time.** That
-covers `wartui upload`, with or without `--yes` or `--to`, and any request to either site's upload
+covers `wartui upload`, with or without `--yes` or `--to`, the phone binding's
+`PreparedUpload::send` run against the real sites, and any request to either site's upload
 endpoints (`wdgwars.pl`, `api.wigle.net`), such as curl. An upload publishes to the user's profile
 and cannot be taken back. Approval for one upload, or for one site, is not approval for the next.
 Tests use a local listener, never the real sites.
