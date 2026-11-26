@@ -42,6 +42,8 @@ pub(super) enum Connects {
     Completes,
     /// It fails, in these words.
     Fails(String),
+    /// It fails as this kind, in these words, as an OS that names the failure.
+    FailsAs(RadioErrorKind, String),
     /// It never completes, as CoreBluetooth's to a bridge that dropped this host's bond.
     Never,
     /// The OS already holds the link, so the call makes none.
@@ -264,12 +266,16 @@ impl FakeRadio {
 
     /// Drop `peer`'s link, as the peer does.
     pub(super) fn drop_link(&self, peer: &str) {
+        self.drop_link_as(peer, RadioError::new(RadioErrorKind::Disconnected, "disconnected"));
+    }
+
+    /// Drop `peer`'s link with `error`, as an OS that names why.
+    pub(super) fn drop_link_as(&self, peer: &str, error: RadioError) {
         let mut shared = self.lock();
         if let Some(link) = shared.link_of_mut(peer) {
             link.up = false;
             if let Some(notify) = link.notify.take() {
-                let dropped = RadioError::new(RadioErrorKind::Disconnected, "disconnected");
-                let _ = notify.send(Incoming::Dropped(dropped));
+                let _ = notify.send(Incoming::Dropped(error));
             }
         }
     }
@@ -440,6 +446,7 @@ impl Radio for FakeRadio {
                 Connects::Completes => true,
                 Connects::AlreadyHeld => false,
                 Connects::Fails(text) => return Err(RadioError::new(RadioErrorKind::Other, text)),
+                Connects::FailsAs(kind, text) => return Err(RadioError::new(kind, text)),
                 Connects::Never => std::future::pending().await,
             };
             let mut shared = self.lock();

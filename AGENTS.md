@@ -160,8 +160,9 @@ own.
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and
-  the bridge's update read across its reboot). It words nothing for the operator, and names no
-  desktop I/O and no terminal.
+  the bridge's update read across its reboot) and `position` (the position chain's tiers in
+  their order, and whether the scan waits for a fix, for a desktop and a phone alike). It words
+  nothing for the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
   `serial::SerialPorts` (`pipe::Ports`) on `serialport`, `gps` (the puck reader thread and its
   search, which feed a core `Gps`) and `discover` (which ports the search listens to and what
@@ -256,10 +257,12 @@ Each change bumps `store::SCHEMA_VERSION`, and a capture stamped anything else i
 than migrated.
 
 Positions resolve fresh per record through `PositionChain`, trying its tiers in the order the
-caller builds them. `wartui run` builds a host GPS pinned with `--gps` → the bridge's GPS (its
-bytes fed in by `runtime::drive`, never the engine) → a host GPS found by `discover` (NMEA on its
-own thread, standing down while the bridge's receiver is sending sentences) → static
-`--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) → nothing.
+caller builds them, which `wartui_app::position::Sources` decides for every front end: a host GPS
+pinned with `--gps` → the bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) →
+a phone's location services (standing down while a tier above holds a fix run) → a host GPS found
+by `discover` (NMEA on its own thread, standing down while the bridge's receiver is sending
+sentences) → static `--lat`/`--lon` (test only: it marks the capture as test data, which is never
+uploaded) → nothing. `wartui run` has no phone tier.
 A `FixFeed` tier takes typed fixes from a phone's location services and stores `platform`,
 and refuses a fix whose reported accuracy is missing or worse than 50 m.
 `runtime::drive` calls `PositionChain::stand_down`, which applies each tier's stand-down rule.

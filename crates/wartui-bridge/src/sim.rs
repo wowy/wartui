@@ -56,6 +56,9 @@
 //! [`format::plan`] gives and an `SdFormatted { Done }`. A `FormatSd` while one runs is `Busy`.
 //! Its log is on at the start, and a `SetSdLog` sets it: `Status` reports it writing file 1 while
 //! the card is ready and waiting otherwise. No block is written: the card is its state alone.
+//!
+//! [`WireSim`] is the same bridge reached by bytes, as a central reaches a real one over
+//! Bluetooth (`sim/wire.rs`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -87,6 +90,12 @@ use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::format;
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
+
+mod wire;
+pub use wire::{WireDown, WireSim, WireUp};
+
+/// The address the simulated bridge announces, its C6's: locally administered, as a node's is.
+const BRIDGE_MAC: Mac = [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01];
 
 /// How the simulated fleet should behave.
 #[derive(Debug, Clone)]
@@ -590,7 +599,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
     let Bridge { fleet, attached, no_image, mut drop_cache_after, command_latency } = bridge;
     let (routes, present, started) = (&fleet.routes, &*fleet.present, fleet.started);
     let info = BridgeInfo {
-        mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
+        mac: BRIDGE_MAC,
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
         // A simulated bridge has only ever just been switched on, so anything else
         // here is a fault on screen that no amount of looking could explain.
@@ -602,7 +611,7 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
         node_board: NodeBoard::Carrier14,
         // The C6 behind the P4, as the real bridge reports it.
         radio: Some(RadioInfo {
-            mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
+            mac: BRIDGE_MAC,
             fw_version: wartui_proto::link::ShortStr::try_from(concat!(
                 env!("CARGO_PKG_VERSION"),
                 "-sim"

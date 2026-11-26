@@ -16,6 +16,7 @@ use super::{
     MAX_RETRY_DELAY, PAIRING_NOTICE_AFTER, SCAN_FOR, WRITE_WITHIN, WriteKind, connect_timeout_text,
     find_advertiser, pairing_notice, ready_notice,
 };
+use crate::pipe::{RadioError, RadioErrorKind};
 use crate::remember::BridgeMemory;
 use crate::spec::BridgeSpec;
 use crate::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle, TransportError};
@@ -178,7 +179,8 @@ async fn ble_scan_reports_several_advertising_when_two_bridges_answer_unnamed() 
     let mut handle = start(BleTransport::new(fake.radio()));
 
     let several = TransportError::SeveralAdvertising { bridges: "44:C0, 44:C1".to_owned() };
-    assert_eq!(reason(&mut handle).await, several.to_string());
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!((reason, cause), (several.to_string(), DisconnectCause::SeveralAdvertising));
     assert_eq!(count(&fake, |did| matches!(did, Did::Connect(_))), 0);
 }
 
@@ -219,7 +221,8 @@ async fn ble_scan_reports_not_found_when_nothing_advertises_in_time() {
     let mut handle = start(named(&fake));
 
     let not_found = TransportError::NotFound { bridge: Some("44:C0".to_owned()), secs: 12 };
-    assert_eq!(reason(&mut handle).await, not_found.to_string());
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!((reason, cause), (not_found.to_string(), DisconnectCause::NotAdvertising));
     assert_eq!(start_at.elapsed(), SCAN_FOR);
     assert_eq!(fake.did(), [Did::ScanStarted, Did::Known, Did::ScanStopped]);
 }
@@ -376,6 +379,43 @@ async fn ble_link_reports_connect_failure_when_os_refuses() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn ble_link_reports_radio_off_and_retries_when_connect_fails_powered_off() {
+    let off = Connects::FailsAs(RadioErrorKind::PoweredOff, "Bluetooth is off".to_owned());
+    let fake = radio([FakeBridge { connects: off, ..bridge_a() }]);
+    let mut handle = start(named(&fake));
+
+    for _ in 0..2 {
+        let (reason, cause) = disconnected(&mut handle).await;
+        assert_eq!(reason, "could not connect to 44:C0: Bluetooth is off");
+        assert_eq!(cause, DisconnectCause::RadioOff);
+    }
+    assert_eq!(count(&fake, |did| matches!(did, Did::Connect(_))), 2, "tried again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_reports_not_authorized_when_connect_fails_unauthorized() {
+    let denied = Connects::FailsAs(RadioErrorKind::Unauthorized, "not allowed".to_owned());
+    let fake = radio([FakeBridge { connects: denied, ..bridge_a() }]);
+    let mut handle = start(named(&fake));
+
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!(reason, "could not connect to 44:C0: not allowed");
+    assert_eq!(cause, DisconnectCause::NotAuthorized);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_reports_stale_bond_when_connect_fails_peer_forgot_bond() {
+    let text = "Peer removed pairing information";
+    let forgot = Connects::FailsAs(RadioErrorKind::PeerForgotBond, text.to_owned());
+    let fake = radio([FakeBridge { connects: forgot, ..bridge_a() }]);
+    let mut handle = start(named(&fake));
+
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!(reason, format!("could not connect to 44:C0: {text}"));
+    assert_eq!(cause, DisconnectCause::StaleBond);
+}
+
+#[tokio::test(start_paused = true)]
 async fn ble_link_reports_no_link_service_when_bridge_offers_none() {
     let fake = radio([FakeBridge { discovers: Discovers::NoService, ..bridge_a() }]);
     let mut handle = start(named(&fake));
@@ -406,6 +446,18 @@ async fn ble_link_reports_maybe_not_bonded_when_link_drops_ten_seconds_after_con
     let (reason, cause) = disconnected(&mut handle).await;
     assert_eq!(reason, TransportError::MaybeNotBonded { bridge: "44:C0".to_owned() }.to_string());
     assert_eq!(cause, DisconnectCause::MaybeNotBonded);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ble_link_keeps_radio_off_when_link_drops_powered_off_before_ready() {
+    // Inside the unbonded drop's timing, but the OS named why.
+    let fake = radio([FakeBridge { answers: None, ..bridge_a() }]);
+    let mut handle = start(named(&fake));
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    fake.drop_link_as(PEER_A, RadioError::new(RadioErrorKind::PoweredOff, "Bluetooth is off"));
+    let (reason, cause) = disconnected(&mut handle).await;
+    assert_eq!((reason.as_str(), cause), ("Bluetooth is off", DisconnectCause::RadioOff));
 }
 
 #[tokio::test(start_paused = true)]

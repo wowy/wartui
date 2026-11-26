@@ -41,6 +41,12 @@
 //!   peer's own drop.
 //! - [`RadioErrorKind::NotBonded`] is the peer's ATT Insufficient Authentication or Encryption
 //!   answer to a subscription or a write request.
+//! - [`RadioErrorKind::PoweredOff`], [`RadioErrorKind::Unauthorized`] and
+//!   [`RadioErrorKind::PeerForgotBond`] are for an adapter whose OS names them, from any call. The
+//!   driver reports each as its own cause, so a front end asks the operator for the remedy
+//!   (Bluetooth on, the app's permission, the bond forgotten in the OS's settings). Any other
+//!   failure is [`RadioErrorKind::Other`]: btleplug names none of the three, so the desktop's
+//!   adapter never reports them.
 //! - [`Connection::close`] does not disconnect a link that already dropped.
 //! - [`Connection::mtu`] is the ATT MTU, so an OS that reports a maximum write length adds the
 //!   3-byte ATT header.
@@ -148,6 +154,13 @@ pub enum RadioErrorKind {
     Disconnected,
     /// The peer offers no wartui link service.
     NoService,
+    /// The OS's Bluetooth is turned off.
+    PoweredOff,
+    /// The OS does not let this app use Bluetooth.
+    Unauthorized,
+    /// The OS holds a bond for the peer, and the peer answers that it holds none (CoreBluetooth's
+    /// "peer removed pairing information"). The remedy is the operator's, in the OS's settings.
+    PeerForgotBond,
     /// Anything else, in the stack's words.
     Other,
 }

@@ -170,6 +170,17 @@ pub enum DisconnectCause {
     /// bond for. A P4 reset or range lost at that moment looks the same, so it proves nothing.
     /// [`TransportError::MaybeNotBonded`] words it.
     MaybeNotBonded,
+    /// The OS's Bluetooth is turned off ([`pipe::RadioErrorKind::PoweredOff`]).
+    RadioOff,
+    /// The OS does not let this app use Bluetooth ([`pipe::RadioErrorKind::Unauthorized`]).
+    NotAuthorized,
+    /// The OS holds a bond the bridge no longer does ([`pipe::RadioErrorKind::PeerForgotBond`]).
+    StaleBond,
+    /// The search heard no bridge it could use. [`TransportError::NotFound`] words it.
+    NotAdvertising,
+    /// The search heard several bridges and none was named.
+    /// [`TransportError::SeveralAdvertising`] words it.
+    SeveralAdvertising,
 }
 
 /// What the host sees of a P4 with no firmware, and where its first flash is described.
