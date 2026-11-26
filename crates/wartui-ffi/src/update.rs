@@ -18,9 +18,9 @@
 //!
 //! **Each call works over the link as [`Link::ready`] does.** The link must be idle; it is lent
 //! for the call, the work runs whole on the library's runtime, and it is given back parked on
-//! every way out, a phone that stops awaiting included. A node update keeps the announcement it
-//! was lent with. A bridge update clears it, whatever the outcome: the bridge may have restarted
-//! into another image, and the next `ready` or capture reads it afresh.
+//! every way out. A phone that stops awaiting stops the call as its [`Stopper`] would, and has the
+//! link back once the work ends. The link goes back with the latest announcement it read, so
+//! after a bridge install it names the new image, and after the bridge went it names none.
 //!
 //! **A plan holds its images by board.** `wartui_app::update::image::NodeImage` shares its bytes
 //! behind an `Arc`, so a [`NodeImage`] gives each plan made from it a clone of that handle, never
@@ -29,9 +29,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use wartui_app::ops;
 use wartui_app::settings::Link as Over;
 use wartui_app::update::bridge::{self, Failed, Line, Proof, Updated};
@@ -44,7 +45,7 @@ use wartui_app::update::nodes::{
 };
 use wartui_app::update::release::{self, BRIDGE_APP_ASSET, ReleaseError, Releases};
 use wartui_app::view::SlotShown;
-use wartui_bridge::SendError;
+use wartui_bridge::{LinkHandle, SendError};
 use wartui_core::ota::{self, Failure, Outcome, Phase};
 use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState};
 use wartui_proto::mac::{self, Mac};
@@ -466,6 +467,16 @@ async fn stopped(stopper: Option<Arc<Stopper>>) {
     }
 }
 
+/// Resolves once `stopper` is stopped or the phone stops awaiting the call, which drops the
+/// sender of `dropped`: the one stop every update call takes.
+async fn halted(stopper: Option<Arc<Stopper>>, dropped: oneshot::Receiver<()>) {
+    tokio::select! {
+        () = stopped(stopper) => {}
+        // Sent or dropped, either is the phone gone.
+        _ = dropped => {}
+    }
+}
+
 /// Why a node update, or the listen before it, could not run.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum UpdateError {
@@ -482,17 +493,17 @@ pub enum UpdateError {
     NotPinned,
 }
 
-/// The link, lent for an update: refused unless it takes updates and is idle.
-async fn lend(
-    inner: &Inner,
-) -> Result<(wartui_bridge::LinkHandle, Option<wartui_bridge::BridgeInfo>), UpdateError> {
+/// The link, lent for an update, with the announcement it holds: refused unless it takes
+/// updates and is idle.
+async fn lend(inner: &Inner) -> Result<LinkHandle, UpdateError> {
     if !inner.takes_updates() {
         return Err(UpdateError::NotPinned);
     }
-    inner.lend().await.map_err(|error| match error {
+    let (handle, _) = inner.lend().await.map_err(|error| match error {
         LinkError::InUse => UpdateError::InUse,
         _ => UpdateError::Closed,
-    })
+    })?;
+    Ok(handle)
 }
 
 /// What a node's heartbeat said it is.
@@ -953,7 +964,8 @@ impl From<Ended> for NodesUpdated {
     }
 }
 
-/// What a node update says as it goes.
+/// What a node update says as it goes. It is called from the update's own loop, so it returns at
+/// once and hands any work elsewhere: a listener that waits stalls the update.
 #[uniffi::export(with_foreign)]
 pub trait NodeUpdateListener: Send + Sync {
     /// One step, on any thread. A listener that fails is ignored.
@@ -1048,7 +1060,9 @@ pub enum BridgeUpdateFailed {
     /// As [`UpdateError::NotPinned`].
     #[error("the link is pinned to no bridge")]
     NotPinned,
-    /// The stopper stopped it. The bridge keeps the image it runs.
+    /// The stopper, or a phone that stopped awaiting, stopped it before
+    /// [`BridgeUpdateProgress::Installing`] was reported; from then a stop is not taken, and the
+    /// call runs to its outcome. The bridge keeps the image it runs.
     #[error("stopped")]
     Stopped,
 }
@@ -1091,7 +1105,7 @@ impl From<Failed> for BridgeUpdateFailed {
 pub enum BridgeUpdateProgress {
     /// Over Bluetooth, the bridge did not report its scan stopped; the update goes on.
     ScanNotStopped,
-    /// The share of the image the bridge has reported holding, said on every turn of the send.
+    /// The share of the image the bridge has reported holding, said each time it changes.
     Sending { percent: u8 },
     /// `Install` is sent; the bridge reboots.
     Installing,
@@ -1122,7 +1136,8 @@ impl From<bridge::Progress> for BridgeUpdateProgress {
     }
 }
 
-/// What a bridge update says as it goes.
+/// What a bridge update says as it goes. It is called from the update's own loop, so it returns
+/// at once and hands any work elsewhere: a listener that waits stalls the update.
 #[uniffi::export(with_foreign)]
 pub trait BridgeUpdateListener: Send + Sync {
     /// One step, on any thread. A listener that fails is ignored.
@@ -1134,6 +1149,7 @@ impl Link {
     /// Listen `period_ms` for the fleet's heartbeats. The link is in use while this runs. Six
     /// seconds hears an assigned node, which beats every five. A link that holds no announcement
     /// waits up to `period_ms` for one first, since the slots are labeled on the board it names.
+    /// A phone that stops awaiting ends the listen and has the link back idle.
     ///
     /// # Errors
     /// [`UpdateError::NotPinned`] for a Bluetooth link pinned to no bridge,
@@ -1142,8 +1158,10 @@ impl Link {
     pub async fn hear_nodes(&self, period_ms: u32) -> Result<Arc<NodesHeard>, UpdateError> {
         let inner = self.shared();
         let period = Duration::from_millis(u64::from(period_ms));
+        // Dropped with this future, which ends the listen.
+        let (_awaited, dropped) = oneshot::channel::<()>();
         // On the runtime, so a phone that stops awaiting still has the link given back.
-        match spawn(hear(Arc::clone(&inner), period)).await {
+        match spawn(hear(Arc::clone(&inner), period, dropped)).await {
             Ok(heard) => heard,
             // The link was in the work that panicked, and went with it.
             Err(_) => {
@@ -1154,8 +1172,9 @@ impl Link {
     }
 
     /// Run `plan`: stop the scan, then update each node it chooses, every one at once, reporting
-    /// through `listener`. `stopper` cancels it, and each node under way is told. A plan that
-    /// chooses no node sends nothing.
+    /// through `listener`. `stopper` cancels it, and each node under way is told. A phone that
+    /// stops awaiting cancels it the same way, and has the link back idle once each node is told.
+    /// A plan that chooses no node sends nothing.
     ///
     /// # Errors
     /// As [`Self::hear_nodes`], except a transport that ends, which fails each node instead.
@@ -1166,7 +1185,10 @@ impl Link {
         listener: Option<Arc<dyn NodeUpdateListener>>,
     ) -> Result<NodesUpdated, UpdateError> {
         let inner = self.shared();
-        match spawn(update_nodes(Arc::clone(&inner), plan, stopper, listener)).await {
+        // Dropped with this future, which stops the update.
+        let (_awaited, dropped) = oneshot::channel::<()>();
+        let working = update_nodes(Arc::clone(&inner), plan, stopper, listener, dropped);
+        match spawn(working).await {
             Ok(updated) => updated,
             Err(_) => {
                 inner.lose();
@@ -1176,8 +1198,15 @@ impl Link {
     }
 
     /// Send `image` to the bridge over this link, wait out its reboot, and read the outcome.
-    /// Needs the bridge's announcement (`ready`), which names the image it runs, and clears it
-    /// once done, whatever the outcome. `stopper` abandons it; the bridge keeps the image it runs.
+    /// Needs the bridge's announcement (`ready`), which names the image it runs. The link keeps
+    /// the latest announcement it reads, so after an install it names the new image.
+    ///
+    /// `stopper`, or a phone that stops awaiting, abandons the update while the image is sent:
+    /// the bridge keeps the image it runs, and holds the partial image's session until the next
+    /// update or until the link goes, since no op ends one. From
+    /// [`BridgeUpdateProgress::Installing`] on, the bridge boots the new image and only the
+    /// update's polls confirm it, so a stop is not taken and the call runs to its outcome; a phone
+    /// that stopped awaiting has the link back once it ends.
     ///
     /// A phone has no USB to fall back on, so a bridge update that fails over Bluetooth is
     /// recovered from a computer; the app says so before it starts. It can run several minutes
@@ -1195,9 +1224,11 @@ impl Link {
         listener: Option<Arc<dyn BridgeUpdateListener>>,
     ) -> Result<BridgeUpdated, BridgeUpdateFailed> {
         let inner = self.shared();
-        let working = Arc::clone(&inner);
+        // Dropped with this future, which stops the update as `stopper` would.
+        let (_awaited, dropped) = oneshot::channel::<()>();
+        let working = update_bridge(Arc::clone(&inner), image, stopper, listener, dropped);
         // On the runtime, so a phone that stops awaiting still has the link given back.
-        match spawn(update_bridge(working, image, stopper, listener)).await {
+        match spawn(working).await {
             Ok(updated) => updated,
             Err(_) => {
                 inner.lose();
@@ -1207,77 +1238,194 @@ impl Link {
     }
 }
 
-/// [`Link::hear_nodes`]'s work, on the library's runtime.
-async fn hear(inner: Arc<Inner>, period: Duration) -> Result<Arc<NodesHeard>, UpdateError> {
-    let (mut handle, mut announced) = lend(&inner).await?;
-    if announced.is_none() {
-        // A listen reads past an announcement, which the link would then never hold, so one not
-        // yet held is waited for first, up to the listen's own length.
-        let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
-        let waited = ops::ready(&mut handle, over, period, ops::REPLY_TIMEOUT, &mut |_| {}).await;
-        announced = waited.ready.ok().flatten();
-    }
-    let heard = nodes::listen(&mut handle, period).await;
-    // Labeled as a capture's view labels them: no carrier before an announcement.
-    let board = announced.as_ref().map_or(NodeBoard::NoCarrier, |bridge| bridge.node_board);
-    inner.give_back(handle, announced);
+/// [`Link::hear_nodes`]'s work, on the library's runtime. `dropped` resolves once the phone stops
+/// awaiting, which ends the listen with the link given back idle.
+async fn hear(
+    inner: Arc<Inner>,
+    period: Duration,
+    dropped: oneshot::Receiver<()>,
+) -> Result<Arc<NodesHeard>, UpdateError> {
+    let mut handle = lend(&inner).await?;
+    let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
+    // Both are safe to drop mid-read: the handle keeps the announcement it reads.
+    let heard = tokio::select! {
+        biased;
+        () = halted(None, dropped) => None,
+        heard = listened(&mut handle, over, period) => Some(heard),
+    };
+    inner.give_back(handle);
+    // Nobody reads the result of a listen the phone stopped awaiting.
+    let Some((heard, board)) = heard else { return Err(UpdateError::Closed) };
     match heard {
         Ok(heard) => Ok(Arc::new(NodesHeard { heard, board })),
         Err(LinkClosed) => Err(UpdateError::Closed),
     }
 }
 
-/// [`Link::update_nodes`]'s work, on the library's runtime.
+/// The nodes `link` hears for `period`, and the board announced when the listen starts, which
+/// labels their slots.
+async fn listened(
+    link: &mut LinkHandle,
+    over: Over,
+    period: Duration,
+) -> (Result<Heard, LinkClosed>, NodeBoard) {
+    if link.announced().is_none() {
+        // The slots are labeled on the board an announcement names, so one not yet held is
+        // waited for first, up to the listen's own length.
+        ops::ready(link, over, period, ops::REPLY_TIMEOUT, &mut |_| {}).await;
+    }
+    // Labeled as a capture's view labels them: no carrier before an announcement.
+    let board = link.announced().map_or(NodeBoard::NoCarrier, |bridge| bridge.node_board);
+    (nodes::listen(link, period).await, board)
+}
+
+/// [`Link::update_nodes`]'s work, on the library's runtime. `dropped` resolves once the phone
+/// stops awaiting, which stops the update as `stopper` would.
 async fn update_nodes(
     inner: Arc<Inner>,
     plan: Arc<NodePlan>,
     stopper: Option<Arc<Stopper>>,
     listener: Option<Arc<dyn NodeUpdateListener>>,
+    dropped: oneshot::Receiver<()>,
 ) -> Result<NodesUpdated, UpdateError> {
-    let (mut handle, announced) = lend(&inner).await?;
+    let mut handle = lend(&inner).await?;
     let say = |progress: nodes::Progress| {
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    let ended = nodes::run(&mut handle, &plan.plan, stopped(stopper), say).await;
-    inner.give_back(handle, announced);
+    let ended = nodes::run(&mut handle, &plan.plan, halted(stopper, dropped), say).await;
+    inner.give_back(handle);
     Ok(ended.into())
 }
 
-/// [`Link::update_bridge`]'s work, on the library's runtime.
+/// [`Link::update_bridge`]'s work, on the library's runtime. `dropped` resolves once the phone
+/// stops awaiting, which stops the update as `stopper` would.
 async fn update_bridge(
     inner: Arc<Inner>,
     image: Arc<BridgeImage>,
     stopper: Option<Arc<Stopper>>,
     listener: Option<Arc<dyn BridgeUpdateListener>>,
+    dropped: oneshot::Receiver<()>,
 ) -> Result<BridgeUpdated, BridgeUpdateFailed> {
-    let (mut handle, announced) = lend(&inner).await.map_err(|error| match error {
+    let mut handle = lend(&inner).await.map_err(|error| match error {
         UpdateError::InUse => BridgeUpdateFailed::InUse,
         UpdateError::Closed => BridgeUpdateFailed::Closed,
         UpdateError::NotPinned => BridgeUpdateFailed::NotPinned,
     })?;
-    let Some(running) = announced.map(|bridge| bridge.image) else {
-        inner.give_back(handle, None);
+    let Some(running) = handle.announced().map(|bridge| bridge.image) else {
+        inner.give_back(handle);
         return Err(BridgeUpdateFailed::NotAnnounced);
     };
     // The simulator stands in for a bridge on USB, as a capture over it does.
     let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
-    let say = |progress: bridge::Progress| {
+    let installing = AtomicBool::new(false);
+    let flag = &installing;
+    let mut last = None;
+    let say = move |progress: bridge::Progress| {
+        if !passed_on(&mut last, &progress) {
+            return;
+        }
+        if progress == bridge::Progress::Installing {
+            flag.store(true, Ordering::Relaxed);
+        }
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    // Dropping the update's future is how it stops; the bridge drops its session with it.
-    let updated = tokio::select! {
-        updated = bridge::update(&mut handle, over, running, &image.image, say) => {
-            updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from)
-        }
-        () = stopped(stopper) => Err(BridgeUpdateFailed::Stopped),
-    };
-    // The bridge may run another image now, so the next `ready` or capture reads it afresh.
-    inner.give_back(handle, None);
-    updated
+    let updating = bridge::update(&mut handle, over, running, &image.image, say);
+    let updated = unless_stopped(updating, halted(stopper, dropped), &installing).await;
+    inner.give_back(handle);
+    match updated {
+        Some(updated) => updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from),
+        None => Err(BridgeUpdateFailed::Stopped),
+    }
+}
+
+/// `update`'s outcome, or `None` when `stop` resolves while `installing` is clear, which drops
+/// the update. `bridge::update` says `Installing` in the poll that queues `Install`, so the flag
+/// is exact: once it is set the bridge boots the new image, which only the update's polls
+/// confirm, and the update runs to its outcome whatever `stop` does.
+async fn unless_stopped<T>(
+    update: impl Future<Output = T>,
+    stop: impl Future<Output = ()>,
+    installing: &AtomicBool,
+) -> Option<T> {
+    tokio::pin!(update);
+    tokio::select! {
+        updated = &mut update => return Some(updated),
+        () = stop => {}
+    }
+    if installing.load(Ordering::Relaxed) { Some(update.await) } else { None }
+}
+
+/// Whether `progress` goes on to the phone's listener: a `Sending` only when its percent differs
+/// from the last passed on, held in `last`, and anything else always. The send says its percent
+/// on every turn of its loop, many times a second.
+fn passed_on(last: &mut Option<u8>, progress: &bridge::Progress) -> bool {
+    match progress {
+        bridge::Progress::Sending { percent } => last.replace(*percent) != Some(*percent),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+    use wartui_app::update::bridge::Progress;
+
+    use super::{passed_on, unless_stopped};
+
+    #[tokio::test]
+    async fn unless_stopped_runs_to_the_outcome_when_stopped_after_installing() {
+        let installing = AtomicBool::new(false);
+        let (said, heard) = oneshot::channel();
+        let update = async {
+            // As `say(Installing)` does, in the poll that queues `Install`.
+            installing.store(true, Ordering::Relaxed);
+            let _ = said.send(());
+            // The reboot and the polls that confirm it.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            "installed"
+        };
+        let stop = async {
+            let _ = heard.await;
+        };
+        assert_eq!(unless_stopped(update, stop, &installing).await, Some("installed"));
+    }
+
+    #[tokio::test]
+    async fn unless_stopped_drops_the_update_when_stopped_while_sending() {
+        let installing = AtomicBool::new(false);
+        let (said, heard) = oneshot::channel();
+        let update = async {
+            let _ = said.send(());
+            std::future::pending::<&str>().await
+        };
+        let stop = async {
+            let _ = heard.await;
+        };
+        assert_eq!(unless_stopped(update, stop, &installing).await, None);
+    }
+
+    #[test]
+    fn passed_on_drops_a_sending_when_its_percent_is_the_last_passed_on() {
+        let mut last = None;
+        let said = [0, 0, 1, 1, 1, 2, 2]
+            .map(|percent| Progress::Sending { percent })
+            .into_iter()
+            .chain([Progress::Installing])
+            .filter(|progress| passed_on(&mut last, progress))
+            .collect::<Vec<_>>();
+        let expected = [0, 1, 2]
+            .map(|percent| Progress::Sending { percent })
+            .into_iter()
+            .chain([Progress::Installing]);
+        assert_eq!(said, expected.collect::<Vec<_>>());
+    }
 }

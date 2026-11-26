@@ -166,7 +166,7 @@ impl Link {
         let _inside = runtime().enter();
         let config = SimConfig { node_count: nodes, ..SimConfig::default() };
         let held = match SimTransport::new(config).start() {
-            Ok(handle) => Held::Idle(park(handle, None)),
+            Ok(handle) => Held::Idle(park(handle)),
             Err(error) => {
                 tracing::warn!(%error, "the simulator did not start");
                 Held::Closed
@@ -206,7 +206,7 @@ impl Link {
             .remember_in(settings.app().memory())
             .start()
             .map_err(|error| LinkError::Start { detail: error.to_string() })?;
-        let link = Self::holding(false, spec, Held::Idle(park(handle, None)));
+        let link = Self::holding(false, spec, Held::Idle(park(handle)));
         settings.attach(&link.inner);
         Ok(link)
     }
@@ -292,9 +292,9 @@ impl Link {
         self.inner.lend().await
     }
 
-    /// Give the link back, parked: in use to idle, with the bridge it still has announced.
-    pub(crate) fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
-        self.inner.give_back(handle, announced);
+    /// Give the link back, parked: in use to idle, with the bridge the handle holds announced.
+    pub(crate) fn give_back(&self, handle: LinkHandle) {
+        self.inner.give_back(handle);
     }
 
     /// The session holding the link lost it.
@@ -343,9 +343,9 @@ impl Inner {
         })
     }
 
-    pub(crate) fn give_back(&self, handle: LinkHandle, announced: Option<BridgeInfo>) {
+    pub(crate) fn give_back(&self, handle: LinkHandle) {
         let _inside = runtime().enter();
-        *self.lock() = Held::Idle(park(handle, announced));
+        *self.lock() = Held::Idle(park(handle));
     }
 
     pub(crate) fn lose(&self) {
@@ -365,9 +365,8 @@ impl Inner {
             _ => ReadyError::Closed,
         })?;
         if let Some(bridge) = announced {
-            let shown = Announced { bridge: BridgeView::of(&bridge), garbled: false };
-            self.give_back(handle, Some(bridge));
-            return Ok(shown);
+            self.give_back(handle);
+            return Ok(Announced { bridge: BridgeView::of(&bridge), garbled: false });
         }
         // The simulator stands in for a bridge on USB, as a capture over it does.
         let over = if self.simulated { Over::Usb } else { Over::Bluetooth };
@@ -377,8 +376,8 @@ impl Inner {
                 let _ = listener.notice(notice);
             }
         };
-        // `ops::ready` is safe to drop mid-wait: it returns on the `Connected` it reads, so none
-        // is lost, and the parked link keeps one that arrives after.
+        // `ops::ready` is safe to drop mid-wait: the handle keeps the `Connected` it reads, and the
+        // parked link one that arrives after.
         let waited = tokio::select! {
             biased;
             _ = dropped => None,
@@ -386,13 +385,9 @@ impl Inner {
                 Some(waited)
             }
         };
-        let Some(waited) = waited else {
-            // Nobody reads this result.
-            self.give_back(handle, None);
-            return Err(ReadyError::Closed);
-        };
-        let bridge = waited.ready.as_ref().ok().and_then(Option::clone);
-        self.give_back(handle, bridge);
+        self.give_back(handle);
+        // Nobody reads the result of a wait the phone stopped awaiting.
+        let Some(waited) = waited else { return Err(ReadyError::Closed) };
         match waited.ready {
             Ok(Some(bridge)) => {
                 Ok(Announced { bridge: BridgeView::of(&bridge), garbled: waited.garbled })

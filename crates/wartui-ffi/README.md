@@ -93,10 +93,12 @@ the app is built against.
 - **There is no USB fallback from a phone.** A bridge update that fails over Bluetooth is
   recovered from a computer, so the app says so before it starts.
 - **Run either in a background task the OS does not suspend.** A bridge update can run several
-  minutes and reads its outcome across reconnects. A `Stopper` cancels a node update, telling each
-  node under way, and abandons a bridge update, which keeps the image it runs.
-- **A bridge update needs the bridge's announcement**, from `link.ready`, and clears it once done:
-  the bridge may run another image now.
+  minutes and reads its outcome across reconnects. A `Stopper`, or an await the app cancels,
+  cancels a node update, telling each node under way. It abandons a bridge update only while the
+  image is sent, and the bridge keeps the image it runs; from `Installing` on, the update runs to
+  its outcome.
+- **A bridge update needs the bridge's announcement**, from `link.ready`. The link keeps the
+  latest one it reads, so after an install it names the new image.
 
 ## What a phone's adapter keeps to
 
