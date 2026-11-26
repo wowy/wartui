@@ -6,6 +6,7 @@
 //! having to plug anything in.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rusqlite::OptionalExtension;
@@ -15,6 +16,7 @@ use wartui_core::engine::{Command, EngineConfig, FleetEngine, StoreStats};
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::feed::{FixFeed, LocationFix, Pushed};
 use wartui_core::gps::Gps;
+use wartui_core::health::{Health, HealthReader};
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
@@ -49,7 +51,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     let (stop_tx, stop_rx) = oneshot::channel();
 
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
     tokio::time::sleep(Duration::from_secs(2)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
@@ -165,7 +167,7 @@ async fn drive_records_settings_history_when_operator_changes_pool_bluetooth_and
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
     // The bridge's first `Status`, so the change below is told apart from it, and both nodes,
     // so the bridge has two to give Bluetooth to one of.
     snapshot_rx
@@ -277,7 +279,7 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
     // One node scans Bluetooth, which is what keeps observations arriving for the
     // whole drive: advertisers rotate their addresses and never fall into the dedup
     // ring, while the access points are all reported in the first sweep. Without a
@@ -361,7 +363,7 @@ async fn drive_stores_platform_positions_when_chain_has_a_feed() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
     tokio::time::sleep(Duration::from_secs(2)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
@@ -401,7 +403,7 @@ async fn drive_keeps_no_bridge_satellites_when_sky_command_turns_them_off() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
 
     // As the GPS modal leaves it: the sky lists on, and a list in view.
     command_tx.send(Command::SetGpsSky(true)).await.expect("the engine is listening");
@@ -446,7 +448,7 @@ async fn drive_builds_bridge_satellites_when_run_waits_for_fix() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
 
     // No GPS modal: the wait alone turns the lists on.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -476,7 +478,7 @@ async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
     // One sample at the start, two more on the timer, then the one at shutdown.
     tokio::time::sleep(Duration::from_secs(12)).await;
     stop_tx.send(()).expect("the capture is still running");
@@ -503,4 +505,71 @@ async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
         .query_row("SELECT MAX(host_frames) FROM bridge_status", [], |r| r.get(0))
         .expect("a bridge status row");
     assert!(host_frames > 0, "status replies carry the frames read so far");
+}
+
+/// The host's health as each `host_status` row of a short simulated capture recorded it, read
+/// through `health`.
+async fn host_health_rows(health: Option<HealthReader>) -> Vec<[Option<i64>; 4]> {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+    let engine = FleetEngine::new(EngineConfig::default(), started);
+    let (snapshot_tx, _snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+
+    let capture =
+        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, health));
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+
+    let conn = open_readonly(&path).expect("reopening the capture");
+    let mut rows = conn
+        .prepare(
+            "SELECT throttled, soc_temp_mc, battery_mv, battery_ma FROM host_status ORDER BY id",
+        )
+        .expect("preparing");
+    rows.query_map([], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))
+        .expect("reading host rows")
+        .collect::<Result<_, _>>()
+        .expect("each host row")
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_records_injected_health_when_a_reader_is_given() {
+    let read = Health {
+        throttled: Some(0x5_0005),
+        soc_temp_mc: Some(61_234),
+        battery_mv: Some(4_185),
+        battery_ma: Some(-21),
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let reader: HealthReader = Box::new(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        read
+    });
+    let rows = host_health_rows(Some(reader)).await;
+    assert!(rows.len() >= 2, "a row at the start and one at shutdown: {rows:?}");
+    assert_eq!(calls.load(Ordering::Relaxed), rows.len(), "read once per host sample");
+    for row in rows {
+        assert_eq!(row, [Some(0x5_0005), Some(61_234), Some(4_185), Some(-21)]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_records_no_health_when_no_reader_is_given() {
+    let rows = host_health_rows(None).await;
+    assert!(rows.len() >= 2, "a row at the start and one at shutdown: {rows:?}");
+    for row in rows {
+        assert_eq!(row, [None; 4]);
+    }
 }

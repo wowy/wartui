@@ -8,7 +8,7 @@
 //! Everything here is protocol: which ports a sweep opens, what goes into them and how long
 //! each is worth. The ports themselves are a [`Ports`] adapter's, opened as a
 //! [`SerialPipe`](crate::pipe::SerialPipe) whose contract (`pipe`) the threads below rely on;
-//! [`desktop::SerialPorts`](crate::desktop::SerialPorts) is the one built on `serialport`.
+//! `wartui-desktop`'s `SerialPorts` is the one built on `serialport`.
 //!
 //! [`HOST_BAUD`]: wartui_proto::link::HOST_BAUD
 

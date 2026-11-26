@@ -80,8 +80,7 @@ pub fn run(args: Args) -> Result<()> {
         Some(obtain(&NODE, &source)?)
     };
 
-    let found =
-        discover_ports(&wartui_bridge::desktop::SerialPorts).context("listing serial ports")?;
+    let found = discover_ports(&wartui_desktop::SerialPorts).context("listing serial ports")?;
     let mut probe = Vec::new();
     let mut report = Vec::new();
     for verdict in select(&found, &args.skip) {

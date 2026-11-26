@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use wartui_bridge::ports::{self, PortCandidate};
 
-use crate::nmea::Nmea;
+use wartui_core::gps::Lines;
+use wartui_core::nmea::Nmea;
 
 /// Line rates to try, in the order they are worth trying.
 ///
@@ -40,7 +41,6 @@ pub const SENTENCES_TO_BELIEVE: usize = 2;
 /// How many are enough on a port the operator named. See [`SENTENCES_TO_BELIEVE`].
 pub const SENTENCES_ON_A_NAMED_PORT: usize = 1;
 
-/// How long one port at one rate is listened to.
 /// How long one port at one rate is listened to: well over one cycle of a 1 Hz receiver, so a whole
 /// sentence lands even if the window opens mid-sentence.
 pub const PROBE_WINDOW: Duration = Duration::from_millis(1_200);
@@ -60,7 +60,7 @@ const RECEIVER_VIDS: [u16; 3] = [
 /// as the live stream would treat it: the leading fragment fails.
 #[must_use]
 pub fn sentences_in(sample: &[u8]) -> usize {
-    let mut lines = crate::gps::Lines::default();
+    let mut lines = Lines::default();
     let mut nmea = Nmea::new();
     let mut believed = 0;
     lines.push(sample, |line| {

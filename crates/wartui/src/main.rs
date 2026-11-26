@@ -29,13 +29,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use wartui_bridge::ble::{BleTransport, SCAN_FOR, pairing_notice_allowance};
-use wartui_bridge::desktop::{ble_radio, radio_traits, serial_ports};
 use wartui_bridge::ports::{PortCandidate, is_ch343};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle, NO_FIRMWARE_P4};
+use wartui_desktop::{ble_radio, radio_traits, serial_ports};
 use wartui_proto::link::{BridgeToHost, LoopPhase};
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
@@ -671,7 +671,7 @@ pub async fn no_bridge_notice(bridge: Option<&str>, link: Link) -> String {
     match link {
         Link::Usb => silence_notice(
             bridge,
-            &serial::discover_bridges(&wartui_bridge::desktop::SerialPorts).unwrap_or_default(),
+            &serial::discover_bridges(&wartui_desktop::SerialPorts).unwrap_or_default(),
         ),
         Link::Bluetooth => bluetooth_silence_text(bridge, listing_here(bridge).await),
     }
@@ -737,7 +737,7 @@ fn bluetooth_silence_text(bridge: Option<&str>, listing: Listing) -> String {
 async fn listing_here(bridge: Option<&str>) -> Listing {
     let bridge = bridge.map(str::to_owned);
     tokio::task::spawn_blocking(move || {
-        wartui_bridge::bluez::devices()
+        wartui_desktop::bluez::devices()
             .map_or(Listing::Absent, |devices| listing_among(&devices, bridge.as_deref()))
     })
     .await
@@ -747,7 +747,7 @@ async fn listing_here(bridge: Option<&str>) -> Listing {
 /// [`listing_here`], over the `devices` BlueZ lists. A path names no Bluetooth bridge, so it is
 /// read as none named.
 #[cfg(target_os = "linux")]
-fn listing_among(devices: &[wartui_bridge::bluez::Device], bridge: Option<&str>) -> Listing {
+fn listing_among(devices: &[wartui_desktop::bluez::Device], bridge: Option<&str>) -> Listing {
     let named = bridge.map(spec).filter(|named| !matches!(named, BridgeSpec::Path(_)));
     let mut bridges = devices
         .iter()
@@ -1354,8 +1354,8 @@ mod tests {
 
     /// A device BlueZ lists, advertising `octets`.
     #[cfg(target_os = "linux")]
-    fn listed(octets: Option<[u8; 2]>, paired: bool) -> wartui_bridge::bluez::Device {
-        wartui_bridge::bluez::Device {
+    fn listed(octets: Option<[u8; 2]>, paired: bool) -> wartui_desktop::bluez::Device {
+        wartui_desktop::bluez::Device {
             path: "/org/bluez/hci0/dev_02_00_5E_10_44_C0".to_owned(),
             adapter: "/org/bluez/hci0".to_owned(),
             address: "02:00:5E:10:44:C0".to_owned(),

@@ -38,3 +38,46 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-targets --all-features --locked --verbose
+
+  phones:
+    name: Phone targets
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: aarch64-apple-ios
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Bundled SQLite is compiled with the NDK's C compiler.
+      - name: Use the NDK's C compiler
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+
+      - name: Check
+        run: cargo check -p wartui-bridge -p wartui-core --target ${{ matrix.target }} --locked
+
+      - name: Portable crates name no desktop I/O
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          tree=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --target all --locked)
+          if grep -E '^(serialport|btleplug|dbus) ' <<< "$tree"; then
+            echo "wartui-bridge or wartui-core depends on a desktop I/O crate" >&2
+            exit 1
+          fi
+          direct=$(cargo tree -p wartui-bridge -p wartui-core -e normal --prefix none --depth 1 --target all --locked)
+          if grep -E '^libc ' <<< "$direct"; then
+            echo "wartui-bridge or wartui-core names libc directly" >&2
+            exit 1
+          fi

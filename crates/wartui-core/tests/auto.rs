@@ -79,7 +79,7 @@ async fn drive_partitions_us_pool_when_fleet_joins() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
     let (_command_tx, command_rx) = mpsc::channel(4);
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, None));
 
     // Nobody asks for any of this but the run's own start: the nodes turn up and each
     // takes its share.

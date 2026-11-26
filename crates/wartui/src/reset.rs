@@ -27,12 +27,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::desktop::serial_ports;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, Probed, discover_bridges, probe_all};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, LinkEvent, TransportError};
+use wartui_desktop::serial_ports;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 

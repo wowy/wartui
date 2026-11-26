@@ -84,7 +84,7 @@ pub async fn run(args: Args) -> Result<()> {
         return over_bluetooth(&args, &remembered).await;
     }
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
-    let ports = wartui_bridge::desktop::serial_ports();
+    let ports = wartui_desktop::serial_ports();
     let found = discover_ports(ports.as_ref()).context("listing serial ports")?;
     let ch343s: Vec<PortCandidate> =
         found.iter().filter(|c| could_be_a_bridge(c)).cloned().collect();

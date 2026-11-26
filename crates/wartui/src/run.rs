@@ -27,11 +27,12 @@ use chrono::Local;
 use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
-use wartui_core::gps::{Gps, GpsConfig};
+use wartui_core::gps::Gps;
 use wartui_core::position::{PositionChain, StandDown, Tier};
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_core::ubx;
+use wartui_desktop::gps::GpsConfig;
 
 #[derive(ClapArgs, Debug)]
 // `run` adds a sentence to the shared `--link` help, which clap holds without its final period.
@@ -205,7 +206,7 @@ pub async fn run(args: Args) -> Result<()> {
             Some(baud) => config.at_baud(baud),
             None => config,
         };
-        Gps::spawn(GpsConfig { max_age, ..config })
+        wartui_desktop::gps::spawn(GpsConfig { max_age, ..config })
     });
     // Built whatever the bridge turns out to be, simulated included: a bridge without a
     // receiver sends no bytes, and this one then says nothing.
@@ -291,7 +292,9 @@ pub async fn run(args: Args) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let health = Box::new(wartui_desktop::health::read);
+    let capture =
+        tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx, Some(health)));
     let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the capture's end time.

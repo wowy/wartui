@@ -36,6 +36,7 @@ use wartui_proto::mac;
 use wartui_proto::radio_link::update::{self, Op, Sender, Stage};
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
+use crate::health::{Health, HealthReader};
 use crate::ota::{Failure, OtaEvent, OtaImage, OtaSession, Outcome, Progress};
 use crate::record::{CaptureSettings, Record};
 use crate::store::{Store, StoreReport};
@@ -77,6 +78,9 @@ pub const COMMAND_QUEUE: usize = 8;
 /// Consumes the store so the last batch commits and `ended_at` is written before returning: an
 /// interrupted capture is still a complete database. Returns what the store's writer did, for
 /// `wartui bench`.
+///
+/// `health` is called once per host sample ([`HOST_SAMPLE`]) for the host's own health. `None`
+/// records [`Health::default`], every value unread.
 pub async fn drive(
     mut link: LinkHandle,
     store: Store,
@@ -84,6 +88,7 @@ pub async fn drive(
     snapshot: watch::Sender<Arc<Snapshot>>,
     mut commands: mpsc::Receiver<Command>,
     mut stop: oneshot::Receiver<()>,
+    mut health: Option<HealthReader>,
 ) -> StoreReport {
     let mut settings = SettingsLog::default();
     settings.record(&store, engine.capture_settings(), now());
@@ -93,10 +98,10 @@ pub async fn drive(
     host_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick is immediate, so a capture opens on a host row that `analyze` reads
     // the rest against, and its figures cover the capture from the start.
-    let sample = |store: &Store| HostSample {
+    let mut sample = |store: &Store| HostSample {
         store: store.stats(),
         peaks: store.take_peaks(),
-        health: crate::health::read(),
+        health: health.as_mut().map_or_else(Health::default, |read| read()),
     };
     // Once the UI is gone this branch is disabled. A closed receiver is always ready, and would
     // spin the loop for the rest of the capture.

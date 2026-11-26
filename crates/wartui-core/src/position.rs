@@ -706,7 +706,7 @@ mod tests {
         bridge.feed_bytes(GSV, 1_000);
         bridge.feed(GGA, 1_000);
         chain.stand_down(1_000, true);
-        assert!(!host.suspended());
+        assert!(!host.is_suspended());
         assert!(*feed.wanted().borrow());
     }
 
@@ -726,13 +726,13 @@ mod tests {
         // No sky: sentences every epoch, and the operator watches the bridge's receiver acquire.
         let (host, bridge, chain) = searched_under_bridge();
         chain.stand_down(1_000, true);
-        assert!(!host.suspended(), "a bridge whose receiver says nothing");
+        assert!(!host.is_suspended(), "a bridge whose receiver says nothing");
         bridge.feed_bytes(GGA_NO_FIX, 1_000);
         bridge.feed_bytes(GSV, 1_000);
         chain.stand_down(1_000, false);
-        assert!(!host.suspended(), "sentences with no bridge connected");
+        assert!(!host.is_suspended(), "sentences with no bridge connected");
         chain.stand_down(1_000, true);
-        assert!(host.suspended());
+        assert!(host.is_suspended());
     }
 
     #[test]
@@ -740,9 +740,9 @@ mod tests {
         let (host, bridge, chain) = searched_under_bridge();
         bridge.feed_bytes(GSV, 1_000);
         chain.stand_down(6_000, true);
-        assert!(host.suspended());
+        assert!(host.is_suspended());
         chain.stand_down(6_001, true);
-        assert!(!host.suspended());
+        assert!(!host.is_suspended());
     }
 
     #[test]
@@ -753,9 +753,9 @@ mod tests {
         // from before.
         bridge.reset_stream();
         chain.stand_down(2_000, true);
-        assert!(!host.suspended());
+        assert!(!host.is_suspended());
         bridge.feed_bytes(GSV, 3_000);
         chain.stand_down(3_000, true);
-        assert!(host.suspended());
+        assert!(host.is_suspended());
     }
 }

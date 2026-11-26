@@ -13,7 +13,6 @@
 //! until it ends.
 
 pub mod analyze;
-pub mod discover;
 pub mod distinct;
 pub mod engine;
 pub mod export;
@@ -30,7 +29,7 @@ pub mod ubx;
 
 pub use engine::{ActionBatch, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot};
 pub use feed::{FixFeed, LocationFix};
-pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
+pub use gps::{Gps, GpsStatus, GpsView};
 pub use position::{Fix, PositionChain, PositionSource, Provider, StandDown, Tier};
 pub use record::Record;
 pub use store::{

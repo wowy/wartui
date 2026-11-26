@@ -1,7 +1,7 @@
 //! Talking to a real bridge over Bluetooth, through its C6's GATT service (`wartui_proto::ble`).
 //! The driver here is the link's protocol, and runs on a [`Radio`]: the OS's scanning,
-//! connecting and subscribing are the adapter's, and
-//! [`desktop::BleRadio`](crate::desktop::BleRadio) is the one built on btleplug.
+//! connecting and subscribing are the adapter's, and `wartui-desktop`'s `BleRadio` is the one
+//! built on btleplug.
 //!
 //! **Finding the bridge.** The C6 advertises the bridge's id: service data under
 //! `wartui_proto::ble::ID_UUID` that carries its last two octets
@@ -24,15 +24,14 @@
 //!   checked against the settled address, which already matched the spec ([`settled_spec`]).
 //!
 //! **A scan listens before it chooses.** The radio reports each bridge it hears or lists
-//! ([`Sighting`]), and reads the OS as sparingly as the OS needs (`desktop::BleRadio`). A scan
-//! ends at once only on a bridge heard advertising whose two octets the spec gives. Any other
-//! listens [`LISTEN_FOR`] and lets [`choose`] decide, so a second bridge advertising nearby is
-//! seen rather than passed over, and a bonded bridge that is off is not taken while one that
-//! answers advertises. At the end of that listen it reads the OS's listing once
-//! ([`Radio::known`]), for a bridge that raised no event: one BlueZ lists as bonded and has not
-//! heard, or one that was advertising before the scan began. A bridge listed and never heard is
-//! still tried when it is the only one, since one BlueZ still holds a connection to does not
-//! advertise.
+//! ([`Sighting`]), and reads the OS as sparingly as the OS needs (`wartui-desktop`'s `BleRadio`). A
+//! scan ends at once only on a bridge heard advertising whose two octets the spec gives. Any other
+//! listens [`LISTEN_FOR`] and lets [`choose`] decide, so a second bridge advertising nearby is seen
+//! rather than passed over, and a bonded bridge that is off is not taken while one that answers
+//! advertises. At the end of that listen it reads the OS's listing once ([`Radio::known`]), for a
+//! bridge that raised no event: one BlueZ lists as bonded and has not heard, or one that was
+//! advertising before the scan began. A bridge listed and never heard is still tried when it is the
+//! only one, since one BlueZ still holds a connection to does not advertise.
 //!
 //! **The P4 serves a central only once it owns the host queue**, which it takes on a subscription
 //! to Up from a bonded, encrypted link (`wartui_proto::host_owner`). The stream starts with a
@@ -96,8 +95,7 @@
 //!
 //! - **[`DisconnectCause::NotBonded`]** is the C6's own answer: an ATT authentication or encryption
 //!   error on the subscription to Up or on a write request to Down ([`RadioErrorKind::NotBonded`],
-//!   which the desktop adapter reads with
-//!   [`refused_for_bonding`](crate::desktop::refused_for_bonding)).
+//!   which the desktop adapter reads with `wartui-desktop`'s `refused_for_bonding`).
 //! - **[`DisconnectCause::MaybeNotBonded`]** is timing: a link that drops before any `Ready`, 8 to
 //!   35 s after connecting, which is when the C6 disconnects a central that has not bonded
 //!   ([`dropped_as_unbonded`]). A bonded host waiting behind a USB host and then losing the link
@@ -146,7 +144,7 @@
 //! (§ "Waiting on the OS's pairing").
 //!
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
-//! `wartui bluetooth pair`, which pairs through the OS (`crate::bluez` on Linux).
+//! `wartui bluetooth pair`, which pairs through the OS (`wartui-desktop`'s `bluez` on Linux).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

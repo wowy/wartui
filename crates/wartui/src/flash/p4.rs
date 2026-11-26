@@ -293,7 +293,7 @@ async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeInfo)> {
     // By path: the probe that chose it has already asked, and the reboot leaves the CH343 where
     // it is.
     let mut link = SerialTransport::with_spec(
-        wartui_bridge::desktop::serial_ports(),
+        wartui_desktop::serial_ports(),
         BridgeSpec::Path(path.to_owned()),
     )
     .remember_in(BridgeMemory::none())

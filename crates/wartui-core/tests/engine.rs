@@ -17,7 +17,7 @@ use wartui_core::engine::{
     StoreStats,
 };
 use wartui_core::feed::{FixFeed, LocationFix, Pushed};
-use wartui_core::gps::{Gps, GpsConfig, GpsStatus};
+use wartui_core::gps::{Gps, GpsStatus};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource, StandDown, Tier};
 use wartui_core::record::{
@@ -1993,12 +1993,11 @@ fn engine_snapshot_shows_pinned_host_receiver_when_bridge_receiver_is_talking() 
     // `--gps PATH` positions the rows ahead of the bridge, so the view reports on it.
     let clock = Clock::new();
     let bridge = Gps::bridged(DEFAULT_MAX_AGE);
-    let host = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+    let host = Gps::for_reader(true, true, DEFAULT_MAX_AGE);
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
     engine.handle(connected(), clock.at(1));
     bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
     assert!(!shows_bridge_gps(&engine, clock.at(2)));
-    host.stop();
 }
 
 #[test]

@@ -1,11 +1,12 @@
 //! The host's serial ports, as the operating system describes them.
 //!
-//! Nothing here knows the link protocol. It describes "what is attached, and what
-//! does the OS say it is", which [`pipe::Ports::list`](crate::pipe::Ports::list) answers and
-//! [`serial`](crate::serial) reads. It is kept separate from the judgment made on that answer
-//! so that a second thing looking for a device shares one enumeration rather than writing
-//! another: `wartui-proto` is `no_std` and cannot list ports, and `wartui-core` already depends
-//! on this crate, so this module is reachable from either without inverting a layer.
+//! Nothing here knows the link protocol. It describes "what does the OS say a port is"
+//! ([`PortCandidate`]) and the judgments made on that, which
+//! [`pipe::Ports::list`](crate::pipe::Ports::list) answers and [`serial`](crate::serial) reads.
+//! Listing the ports is an adapter's: `wartui-desktop`'s `serial::SerialPorts` is the desktop's.
+//! The description is kept apart from the link so that a second thing looking for a device shares
+//! it rather than writing another: `wartui-proto` is `no_std`, and `wartui-core` already depends on
+//! this crate, so this module is reachable from either without inverting a layer.
 //!
 //! **A node's USB serial number is its MAC.** A node's native USB Serial/JTAG reports the
 //! address its radio transmits from, so the OS has already paired a device node with the
@@ -25,7 +26,7 @@
 //! moves one line and not the other. `esptool` reaches that state deliberately,
 //! routing through (1,1) to avoid the other. Leave both alone, and set
 //! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
-//! [`desktop::SerialPorts::open`](crate::desktop::SerialPorts) is where the rule is applied, and
+//! `wartui-desktop`'s `serial` applies the rule in its one function that opens a port, and
 //! [`pipe::Ports::open`](crate::pipe::Ports::open) requires it of any adapter.
 //!
 //! **What a device is for is decided by its USB IDs.** The CH343's pair
@@ -44,9 +45,6 @@
 //!   what it opens, never opens one of the fleet's boards. A GPS receiver behind a CH343
 //!   is therefore not searched; name it with `--gps`.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
 use wartui_proto::mac::{self, Mac};
 
 /// Espressif's USB vendor ID, which a node's native USB Serial/JTAG reports.
@@ -64,10 +62,6 @@ pub const CH343_VID: u16 = 0x1A86;
 
 /// The CH343's product ID.
 pub const CH343_PID: u16 = 0x55D3;
-
-/// Where udev keeps the names that survive a replug.
-const BY_ID: &str = "/dev/serial/by-id";
-const BY_PATH: &str = "/dev/serial/by-path";
 
 /// A serial port the host can see, as the OS described it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +99,7 @@ impl PortCandidate {
 /// Build a candidate by hand.
 ///
 /// The normalization from `serialport`'s own types is deliberately private to
-/// [`desktop`](crate::desktop), so that nothing else names `UsbPortInfo` — its shape depends
+/// `wartui-desktop`'s `serial`, so that nothing else names `UsbPortInfo` — its shape depends
 /// on Cargo features any dependent crate can turn on, and a test written against it would
 /// break for a reason that has nothing to do with wartui.
 #[must_use]
@@ -158,118 +152,6 @@ pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
 #[must_use]
 pub fn is_usable_path(path: &str) -> bool {
     !path.starts_with("/dev/tty.")
-}
-
-/// The stable names udev keeps for a device node.
-///
-/// Two directories rather than one because they fail differently. `by-id` is built
-/// from what the device says about itself, so it is the name worth showing — but a
-/// device that reports no serial number shares its name with every other of its
-/// model, and udev can only give it to one of them. `by-path` names the socket
-/// instead, which is unique whatever the device claims, and stable for as long as
-/// the cable stays where it is.
-#[derive(Debug, Default)]
-pub struct StableNames {
-    by_id: HashMap<String, String>,
-    by_path: HashMap<String, String>,
-}
-
-impl StableNames {
-    /// What udev has recorded. Empty where the directories do not exist, which is
-    /// every non-Linux host and a Linux one with no serial device attached.
-    #[must_use]
-    pub fn read() -> Self {
-        Self { by_id: links_in(BY_ID), by_path: links_in(BY_PATH) }
-    }
-
-    /// The same thing from `(device, link)` pairs, so the choosing can be tested
-    /// without a `/dev` to read.
-    #[must_use]
-    pub fn from_pairs(
-        by_id: impl IntoIterator<Item = (String, String)>,
-        by_path: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
-        Self { by_id: by_id.into_iter().collect(), by_path: by_path.into_iter().collect() }
-    }
-
-    /// The best name for `device`, given whether its `by-id` name can be trusted to
-    /// mean this device and no other.
-    #[must_use]
-    pub fn best<'a>(&'a self, device: &'a str, by_id_is_its_own: bool) -> &'a str {
-        if by_id_is_its_own && let Some(link) = self.by_id.get(device) {
-            return link;
-        }
-        self.by_path.get(device).map_or(device, String::as_str)
-    }
-}
-
-/// Name each candidate by the most stable path that means it alone.
-///
-/// A `by-id` name is built from the vendor, product and serial number, so two
-/// devices reporting the same three are one name between them — udev gives it to
-/// whichever enumerated last, and a run that opened it would be opening whichever
-/// was plugged in most recently rather than the one it meant. Those are named by
-/// socket instead.
-#[must_use]
-pub fn with_stable_paths(
-    candidates: Vec<PortCandidate>,
-    names: &StableNames,
-) -> Vec<PortCandidate> {
-    let ambiguous = indistinct_identities(&candidates);
-    candidates
-        .into_iter()
-        .map(|candidate| {
-            let own = !ambiguous.contains(&identity(&candidate));
-            let path = names.best(&candidate.device, own).to_owned();
-            PortCandidate { path, ..candidate }
-        })
-        .collect()
-}
-
-/// What udev builds a `by-id` name out of.
-fn identity(candidate: &PortCandidate) -> (Option<u16>, Option<u16>, Option<String>) {
-    (candidate.vid, candidate.pid, candidate.serial.clone())
-}
-
-/// The identities more than one attached device answers to.
-fn indistinct_identities(
-    candidates: &[PortCandidate],
-) -> HashSet<(Option<u16>, Option<u16>, Option<String>)> {
-    let mut seen = HashSet::new();
-    let mut twice = HashSet::new();
-    for candidate in candidates {
-        let id = identity(candidate);
-        if !seen.insert(id.clone()) {
-            twice.insert(id);
-        }
-    }
-    twice
-}
-
-/// Every symlink in `dir`, keyed by the device node it resolves to.
-fn links_in(dir: &str) -> HashMap<String, String> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return HashMap::new() };
-    let mut links = HashMap::new();
-    for entry in entries.flatten() {
-        let link = entry.path();
-        let Ok(device) = std::fs::canonicalize(&link) else { continue };
-        let (Some(device), Some(link)) = (to_str(&device), to_str(&link)) else { continue };
-        // Sorted rather than last-wins so that two names for one device — `-if00`
-        // and a `by-path` alias — resolve the same way on every run.
-        links
-            .entry(device)
-            .and_modify(|held: &mut String| {
-                if link < *held {
-                    *held = link.clone();
-                }
-            })
-            .or_insert(link);
-    }
-    links
-}
-
-fn to_str(path: &Path) -> Option<String> {
-    path.to_str().map(str::to_owned)
 }
 
 #[cfg(test)]

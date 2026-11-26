@@ -7,7 +7,7 @@
 //! asking each CH343. One that does not is paired inside whatever window it has.
 //!
 //! **Then the OS pairs, because BlueZ never would.** On Linux `pair` scans for the id the bridge
-//! advertises and pairs through BlueZ's D-Bus API (`wartui_bridge::bluez` has why). Other
+//! advertises and pairs through BlueZ's D-Bus API (`wartui_desktop::bluez` has why). Other
 //! OSes pair on their own on the first `--link bluetooth` connection inside the window, so `pair`
 //! says so there and stops after the window. macOS raises a dialog for it, and that connection's
 //! subscription waits on the click, mostly past the transport's 10 s; the pairing completes
@@ -295,7 +295,7 @@ fn fresh_hint(octets: [u8; 2]) -> String {
 
 /// Open the pairing window of the bridge on USB, if one answers there.
 async fn open_window(named: Option<&BridgeSpec>, remembered: Option<Mac>) -> Window {
-    let ports = wartui_bridge::desktop::serial_ports();
+    let ports = wartui_desktop::serial_ports();
     let attached = serial::discover_bridges(ports.as_ref()).unwrap_or_default();
     if attached.is_empty() {
         return Window::NotOnUsb;
@@ -438,9 +438,9 @@ mod linux {
     use anyhow::{Context, Result, anyhow, bail};
     use wartui_bridge::LinkHandle;
     use wartui_bridge::ble::{Advertiser, BleTransport, find_advertiser};
-    use wartui_bridge::bluez::{self, BluezError, Device};
-    use wartui_bridge::desktop::ble_radio;
     use wartui_bridge::spec::BridgeSpec;
+    use wartui_desktop::ble_radio;
+    use wartui_desktop::bluez::{self, BluezError, Device};
     use wartui_proto::link::{BluetoothStatus, HOST_SILENCE_SECS};
     use wartui_proto::mac::{self, Mac};
 
@@ -688,7 +688,7 @@ mod linux {
     mod tests {
         use std::time::Duration;
 
-        use wartui_bridge::bluez::BluezError;
+        use wartui_desktop::bluez::BluezError;
 
         use super::try_pairing;
 
