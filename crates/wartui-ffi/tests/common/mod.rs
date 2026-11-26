@@ -1,5 +1,6 @@
-//! What the binding's tests share: a loopback radio over a `WireSim`, a settings store held in
-//! memory, and waits with deadlines.
+//! What the binding's tests share: a loopback radio over a `WireSim`, or one that hears no
+//! bridge, settings and secret stores held in memory, edits that move nothing or only the host's
+//! rows, and waits with deadlines.
 
 #![allow(dead_code)] // Each test binary uses its own part of this.
 
@@ -10,12 +11,14 @@ use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tokio::time::timeout;
+use wartui_app::settings::ApiKeys;
 use wartui_app::view::View;
 use wartui_bridge::pipe::{RadioError, RadioErrorKind};
 use wartui_ffi::{
     CaptureConfig, Completion, DriverError, Heard, Link, PositionSources, Radio, RadioDriver,
-    Session, Settings, SettingsStore, StoreFailure, Viewed, WireSim,
+    SecretStore, Session, Settings, SettingsEdit, SettingsStore, StoreFailure, Viewed, WireSim,
 };
+use wartui_proto::mac;
 
 /// The longest any wait takes before the test fails rather than hangs. The simulator announces
 /// within a second, and its nodes heartbeat within a few.
@@ -33,6 +36,8 @@ pub struct Loopback {
     pumping: AtomicBool,
     /// Every connect fails, as to a bridge that has gone.
     gone: AtomicBool,
+    /// A scan hears nothing, as where no bridge is in range.
+    deaf: bool,
 }
 
 impl Loopback {
@@ -43,12 +48,22 @@ impl Loopback {
 
     /// [`Self::radio`], and the driver, to steer. Call it inside a tokio runtime.
     pub fn steered() -> (Arc<Radio>, Arc<Self>) {
+        Self::built(false)
+    }
+
+    /// A radio whose scans hear no bridge. Call it inside a tokio runtime.
+    pub fn deaf() -> Arc<Radio> {
+        Self::built(true).0
+    }
+
+    fn built(deaf: bool) -> (Arc<Radio>, Arc<Self>) {
         let driver = Arc::new(Self {
             sim: WireSim::start(3, 185),
             radio: Mutex::new(Weak::new()),
             tasks: Handle::current(),
             pumping: AtomicBool::new(false),
             gone: AtomicBool::new(false),
+            deaf,
         });
         let radio = Radio::new(driver.clone());
         *driver.radio.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&radio);
@@ -62,6 +77,11 @@ impl Loopback {
             let error = RadioError::new(RadioErrorKind::Disconnected, "the peer went away");
             radio.dropped(PEER.to_owned(), error);
         }
+    }
+
+    /// The last two octets the bridge advertises, as `44:C0`.
+    pub fn tail(&self) -> String {
+        mac::octets(&self.sim.id()).to_string()
     }
 
     fn radio_later(&self) -> Weak<Radio> {
@@ -96,6 +116,9 @@ impl RadioDriver for Loopback {
 
     fn start_scan(&self, request: u64) -> Result<(), DriverError> {
         self.answer(request, Completion::Done);
+        if self.deaf {
+            return Ok(());
+        }
         let (radio, id) = (self.radio_later(), self.sim.id());
         self.tasks.spawn(async move {
             if let Some(radio) = radio.upgrade() {
@@ -201,6 +224,65 @@ impl SettingsStore for Memory {
     }
 }
 
+/// API keys held in memory, where a phone would use its Keychain or Keystore.
+#[derive(Default)]
+pub struct Secrets {
+    text: Mutex<Option<String>>,
+}
+
+impl Secrets {
+    /// What it holds now.
+    pub fn text(&self) -> Option<String> {
+        self.text.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl SecretStore for Secrets {
+    fn load(&self) -> Result<Option<String>, StoreFailure> {
+        Ok(self.text())
+    }
+
+    fn save(&self, text: String) -> Result<(), StoreFailure> {
+        *self.text.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
+        Ok(())
+    }
+}
+
+/// An edit of the rows the host holds, the bridge's left unmoved and the list empty.
+pub fn host_rows(remember_bridge: bool, wait_for_fix: bool) -> SettingsEdit {
+    SettingsEdit {
+        pool: None,
+        planner: None,
+        fan_duty_pct: None,
+        bluetooth: None,
+        wardrive_esp: None,
+        sd_log: None,
+        gps_rate_hz: None,
+        remember_bridge,
+        wait_for_fix,
+        api_keys: ApiKeys::default(),
+        excluded_ssids: Vec::new(),
+    }
+}
+
+/// An edit that moves no row of `settings`, the list in force as `view` shows it.
+pub fn unmoved(view: &View, settings: &Settings) -> SettingsEdit {
+    let saved = settings.saved();
+    SettingsEdit {
+        pool: None,
+        planner: None,
+        fan_duty_pct: None,
+        bluetooth: None,
+        wardrive_esp: None,
+        sd_log: None,
+        gps_rate_hz: None,
+        remember_bridge: saved.remember_bridge,
+        wait_for_fix: saved.wait_for_fix,
+        api_keys: saved.api_keys,
+        excluded_ssids: view.settings.excluded_ssids.clone(),
+    }
+}
+
 /// A capture into `db`, with nothing else asked for.
 pub fn capture(db: &Path) -> CaptureConfig {
     CaptureConfig {
@@ -218,7 +300,12 @@ pub fn nowhere() -> PositionSources {
 
 /// A capture into `db` over `link`, with defaults saved nowhere and no position.
 pub async fn start(db: &Path, link: &Arc<Link>) -> Arc<Session> {
-    Session::start(capture(db), Arc::clone(link), Settings::unsaved(), nowhere(), None)
+    saving(db, link, &Settings::unsaved()).await
+}
+
+/// A capture into `db` over `link`, saving through `settings`, with no position.
+pub async fn saving(db: &Path, link: &Arc<Link>, settings: &Arc<Settings>) -> Arc<Session> {
+    Session::start(capture(db), Arc::clone(link), Arc::clone(settings), nowhere(), None)
         .await
         .expect("the capture starts")
 }

@@ -6,13 +6,15 @@
 //! a bridge outside a capture: its status, a setting, the pairing window, a power-cycle ([`ops`]),
 //! where its rows are placed, the position chain's order and the wait for a fix ([`position`]),
 //! what a fleet view shows of a capture's snapshot, as plain data ([`view`]), a capture sent
-//! to WDGWars and WiGLE once the operator has said yes ([`upload`]), and the nodes and the
-//! bridge updated over the link, from images checked before they are sent ([`update`]).
+//! to WDGWars and WiGLE once the operator has said yes ([`upload`]), a capture written out as a
+//! WiGLE CSV and what its reports call its nodes ([`export`]), and the nodes and the bridge
+//! updated over the link, from images checked before they are sent ([`update`]).
 //! It words nothing for the operator, so each front end says what happened in its own way.
 //!
 //! It compiles for a phone, so it names no desktop I/O library and no terminal. The desktop's
 //! `wartui.toml` file is a [`settings::SettingsStore`] in `wartui-desktop`.
 
+pub mod export;
 pub mod ops;
 pub mod position;
 pub mod session;

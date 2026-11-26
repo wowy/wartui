@@ -54,13 +54,14 @@ pub struct ReadyWaited {
 
 /// The bridge's announcement over `over` within `within`, handing each [`ReadyNotice`] to `notice`
 /// as it comes. `usual` is the wait the caller gives a `Ready` once a link is up, which the
-/// deadline keeps behind the transport's pairing window.
+/// deadline keeps behind the transport's pairing window. `notice` is `Send`, so a phone's binding
+/// runs the wait as a task of its own runtime.
 pub async fn ready(
     link: &mut LinkHandle,
     over: Link,
     within: Duration,
     usual: Duration,
-    notice: &mut dyn FnMut(ReadyNotice),
+    notice: &mut (dyn FnMut(ReadyNotice) + Send),
 ) -> ReadyWaited {
     let mut until = tokio::time::Instant::now() + within;
     let mut wait = ReadyWait::new(over);

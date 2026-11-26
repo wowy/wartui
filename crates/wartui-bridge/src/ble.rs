@@ -159,6 +159,9 @@
 //!
 //! **Pairing is not the transport's.** [`find_advertiser`] is its scan alone, for
 //! `wartui bluetooth pair`, which pairs through the OS (`wartui-desktop`'s `bluez` on Linux).
+//! [`survey`] is a listen alone, for a phone's picker: every bridge heard or listed, none chosen.
+//! It fails with the radio's own error rather than a [`TransportError`], whose text would flatten
+//! the kind a phone names the remedy by.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1039,10 +1042,69 @@ async fn within<T>(
     call: impl Future<Output = Result<T, RadioError>>,
     did_not: &str,
 ) -> Result<T, Missed> {
-    match tokio::time::timeout(limit, call).await {
-        Ok(answered) => answered.map_err(Missed::radio),
-        Err(_) => Err(TransportError::Bluetooth(format!("the Bluetooth adapter {did_not}")).into()),
+    timed(limit, call, did_not).await.map_err(Missed::radio)
+}
+
+/// `call` for up to `limit`, failing as [`RadioErrorKind::Other`], the adapter that `did_not`
+/// answer, when it does not answer in time.
+async fn timed<T>(
+    limit: Duration,
+    call: impl Future<Output = Result<T, RadioError>>,
+    did_not: &str,
+) -> Result<T, RadioError> {
+    tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
+        Err(RadioError::new(RadioErrorKind::Other, format!("the Bluetooth adapter {did_not}")))
+    })
+}
+
+/// Listen through `radio` for `listen_for` and list every bridge heard or listed, for a picker:
+/// the latest sighting of each peer the scan heard, then each the OS lists that it did not,
+/// sorted by octets. It takes no spec and chooses nothing.
+///
+/// # Errors
+/// The radio's own failure, its kind kept, so a phone names the remedy: the scan's start or the
+/// OS's listing, or either not answering within [`SCAN_START_WITHIN`] or [`LIST_WITHIN`], or an
+/// adapter that stops reporting. The scan is stopped on every way out.
+pub async fn survey(radio: &dyn Radio, listen_for: Duration) -> Result<Vec<Sighting>, RadioError> {
+    let surveyed = match timed(SCAN_START_WITHIN, radio.scan(), "did not start a scan").await {
+        Ok(sightings) => gather(radio, sightings, listen_for).await,
+        Err(error) => Err(error),
+    };
+    // On every way out, a timed-out start included: a scan the OS starts late runs on, unread.
+    radio.stop_scan().await;
+    surveyed
+}
+
+/// [`survey`]'s listen over `sightings`, and the OS's listing after it.
+async fn gather(
+    radio: &dyn Radio,
+    mut sightings: BoxStream<'static, Sighting>,
+    listen_for: Duration,
+) -> Result<Vec<Sighting>, RadioError> {
+    let until = tokio::time::Instant::now() + listen_for;
+    let mut heard: Vec<Sighting> = Vec::new();
+    loop {
+        tokio::select! {
+            sighting = sightings.next() => match sighting {
+                Some(sighting) => match heard.iter_mut().find(|kept| kept.peer == sighting.peer) {
+                    Some(kept) => *kept = sighting,
+                    None => heard.push(sighting),
+                },
+                None => {
+                    let stopped = "the Bluetooth adapter stopped reporting";
+                    return Err(RadioError::new(RadioErrorKind::Other, stopped));
+                }
+            },
+            () = tokio::time::sleep_until(until) => break,
+        }
     }
+    for listed in timed(LIST_WITHIN, radio.known(), "did not list its devices").await? {
+        if !heard.iter().any(|kept| kept.peer == listed.peer) {
+            heard.push(listed);
+        }
+    }
+    heard.sort_by(|a, b| a.octets.cmp(&b.octets).then_with(|| a.peer.cmp(&b.peer)));
+    Ok(heard)
 }
 
 /// The bridge as the operator names it, for the messages: its advertised `octets` when known.

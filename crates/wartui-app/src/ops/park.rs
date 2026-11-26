@@ -11,9 +11,11 @@
 //! **The announcement stays current.** The transport announces a bridge once per life, and the
 //! next capture is handed the last one. A `Connected` while parked is the announcement, and a
 //! `Disconnected`, whatever its cause, clears it: the transport announces again once the bridge is
-//! back. A transport that ended is read no more, and comes back with no announcement.
+//! back. A transport that ended is read no more, and comes back with no announcement. The
+//! announcement is readable while parked ([`Parked::announced`]), so a save between captures
+//! remembers the bridge connected now.
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 
@@ -24,6 +26,8 @@ pub struct Parked {
     stop: oneshot::Sender<()>,
     /// Owns the link, and hands it back once stopped.
     task: JoinHandle<(LinkHandle, Option<BridgeInfo>)>,
+    /// The announcement the task holds now.
+    announced: watch::Receiver<Option<BridgeInfo>>,
 }
 
 /// The parking task panicked, and the link went with it.
@@ -38,10 +42,17 @@ pub struct ParkEnded;
 #[must_use]
 pub fn park(link: LinkHandle, announced: Option<BridgeInfo>) -> Parked {
     let (stop, stopped) = oneshot::channel();
-    Parked { stop, task: tokio::spawn(keep_read(link, announced, stopped)) }
+    let (publish, announced) = watch::channel(announced);
+    Parked { stop, task: tokio::spawn(keep_read(link, publish, stopped)), announced }
 }
 
 impl Parked {
+    /// The bridge the link has announced now, read without taking the link back.
+    #[must_use]
+    pub fn announced(&self) -> Option<BridgeInfo> {
+        self.announced.borrow().clone()
+    }
+
     /// Take the link back, with the bridge it has announced now.
     ///
     /// # Errors
@@ -55,23 +66,28 @@ impl Parked {
 /// Read `link` until `stopped` resolves, keeping the announcement current, and hand it back.
 async fn keep_read(
     mut link: LinkHandle,
-    mut announced: Option<BridgeInfo>,
+    announced: watch::Sender<Option<BridgeInfo>>,
     mut stopped: oneshot::Receiver<()>,
 ) -> (LinkHandle, Option<BridgeInfo>) {
     loop {
         tokio::select! {
             biased;
             // Sent or dropped, either is the stop.
-            _ = &mut stopped => return (link, announced),
+            _ = &mut stopped => return (link, announced.borrow().clone()),
             event = link.recv() => match event {
-                Some(LinkEvent::Connected(info)) => announced = Some(info),
-                Some(LinkEvent::Disconnected { .. }) => announced = None,
+                Some(LinkEvent::Connected(info)) => {
+                    announced.send_replace(Some(info));
+                }
+                Some(LinkEvent::Disconnected { .. }) => {
+                    announced.send_replace(None);
+                }
                 Some(LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
                 None => break,
             },
         }
     }
     // The transport ended: nothing more comes, so wait for the stop alone.
+    announced.send_replace(None);
     let _ = stopped.await;
     (link, None)
 }
@@ -156,6 +172,32 @@ mod tests {
         settle().await;
         let (_link, announced) = parked.resume().await.expect("resumed");
         assert_eq!(announced, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn park_shows_the_announcement_while_parked_when_bridge_connects() {
+        let (link, plumbing) = link_pair();
+        let parked = park(link, None);
+        assert_eq!(parked.announced(), None);
+        plumbing.events.send(LinkEvent::Connected(bridge(800))).await.expect("the link reads");
+        settle().await;
+        assert_eq!(parked.announced(), Some(bridge(800)));
+        let (_link, announced) = parked.resume().await.expect("resumed");
+        assert_eq!(announced, Some(bridge(800)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn park_shows_no_announcement_while_parked_when_link_goes_down() {
+        let (link, plumbing) = link_pair();
+        let parked = park(link, Some(bridge(60_000)));
+        assert_eq!(parked.announced(), Some(bridge(60_000)));
+        let gone = LinkEvent::Disconnected {
+            reason: "the bridge disconnected".to_owned(),
+            cause: DisconnectCause::Other,
+        };
+        plumbing.events.send(gone).await.expect("the link reads");
+        settle().await;
+        assert_eq!(parked.announced(), None);
     }
 
     #[tokio::test(start_paused = true)]

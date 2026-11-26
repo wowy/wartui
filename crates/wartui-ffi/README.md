@@ -10,22 +10,50 @@ types cross unchanged, so a phone shows a capture by the same rules as the termi
 | The phone implements | The phone calls |
 |---|---|
 | `RadioDriver` | `Radio`: `heard`, `completed`, `notified`, `dropped` |
-| `SettingsStore` | `Settings`: `open`, `unsaved`, `place` |
+| | `bridgesNearby`: every bridge the radio hears or the OS lists, for a picker |
+| `SettingsStore` | `Settings`: `open`, `unsaved`, `place`, `saved`, `save` |
+| `SecretStore` | `settingsLimits`, `checkExcludedSsid` |
 | `LogSink` | `logTo` |
-| | `Link`: `simulated`, `bluetooth`, `isSimulated`, `close` (`disconnect` in Kotlin) |
+| `ReadyListener` | `Link`: `simulated`, `bluetooth`, `isSimulated`, `ready`, `close` |
 | | `LocationFeed`: `push`, `lost`, `wanted`, `nextWanted`, `state` |
 | | `HealthFeed`: `set` |
-| | `Session`: `start`, `view`, `nextView`, `showSky`, `startWithoutFix`, `stop` |
+| | `Session`: `start`, `view`, `nextView`, `showSky`, `stop` |
+| | `Session`'s steering: `apply`, `applyExcluded`, `startWithoutFix`, `powerCycle`, `formatSd` |
+| | `exportWigleCsv` |
 
 `linkUuids()` gives the link service's UUIDs. Kotlin calls `Link.close` `disconnect`, since every
-Kotlin object's `close()` frees its handle (`uniffi.toml`).
+Kotlin object's `close()` frees its handle. Both languages call the rule enum `Invalid`
+`BrokenRule`, since inside `SettingsException.Invalid` Kotlin would read `Invalid` as that variant
+(`uniffi.toml`).
 
-A capture: open `Settings` over the app's store, make a `Radio` over the app's driver, open
-`Link.bluetooth`, `Session.start` over it (a `suspend` function in Kotlin, `async` in Swift),
-follow `nextView`, and `stop`. The link stays open for the next capture, read meanwhile so the
-bridge's stream never backs up into it. `smoke/kotlin/Smoke.kt` and `smoke/swift/main.swift` do
-exactly that. Under `Link.simulated` the view's `link.host` shows the simulator as a bridge on
-USB, as the terminal does: it describes no real link.
+A capture: open `Settings` over the app's stores, make a `Radio` over the app's driver, pick a
+bridge from `bridgesNearby`, open `Link.bluetooth` to it, wait for `link.ready` to show it,
+`Session.start` over it (a `suspend` function in Kotlin, `async` in Swift), follow `nextView`,
+and `stop`. The link stays open for the next capture, read meanwhile so the bridge's stream never
+backs up into it, with the bridge it announced. `exportWigleCsv` writes the capture out
+afterwards, leaving out the networks the settings exclude, as `wartui export` does.
+`smoke/kotlin/Smoke.kt` and `smoke/swift/main.swift` do exactly that. Under `Link.simulated` the
+view's `link.host` shows the simulator as a bridge on USB, as the terminal does: it describes no
+real link.
+
+`powerCycle` and `formatSd` are answered by the bridge in the view's `answers`, each answer
+numbered so a new one is told from the last.
+
+## Settings
+
+The settings text is the TOML a desktop keeps in `wartui.toml`, in the app's `SettingsStore`.
+Given a `SecretStore` too, `Settings.open` keeps the `[api-keys]` table there, in the Keychain or
+the Keystore, and the rest in the settings store. A save writes both, the keys first.
+
+A settings screen builds a `SettingsEdit`: the rows the bridge holds only when moved, and the
+host's rows as shown. In a capture it seeds its rows from the view's `settings`, `Session.apply`
+sends the moved rows and saves the host's, and `Session.applyExcluded` sends and saves the
+excluded list alone.
+With none running, `Settings.save` saves the host's rows and ignores the bridge's. Turning
+remember on there remembers the bridge an idle `Link.bluetooth` opened with those settings has
+announced, in the same save. `settingsLimits` gives the ranges an edit must keep to, and a value
+outside them, or an excluded list `checkExcludedSsid` refuses, is a `SteerError` with nothing sent
+or saved. What a save came to is a `Saved`, its rule typed when the settings break one.
 
 ## What a phone's adapter keeps to
 
@@ -72,8 +100,10 @@ crates/wartui-ffi/smoke/run.sh [kotlin|swift|all]    # default all; prints OK <l
 
 It builds the library with the `testing` feature, which adds `WireSim`, a simulated bridge at the
 byte level, generates both bindings under `target/ffi-smoke/`, and runs a program in each
-language: a simulated capture placed by a pushed fix, then a capture over a loopback
-`RadioDriver` to a `WireSim` that remembers its bridge through an in-memory `SettingsStore`. It
+language: a simulated capture placed by a pushed fix, its pool moved and its rows exported, then
+a capture over a loopback `RadioDriver` to a `WireSim` found by `bridgesNearby` and announced by
+`link.ready`, which remembers its bridge through an in-memory `SettingsStore` and keeps a typed-in
+API key in an in-memory `SecretStore`. It
 needs `kotlinc` and `java`, or `swiftc`, on `PATH`, and fetches JNA and kotlinx-coroutines from
 Maven Central against pinned digests. CI runs it on macOS (`.github/workflows/bindings.yml`).
 

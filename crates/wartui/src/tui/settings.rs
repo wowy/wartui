@@ -17,7 +17,7 @@
 //! mode again after the bridge reboots. The bridge picks which node scans Bluetooth.
 //!
 //! The sd card's format row is an action, not a setting: nothing in it is applied or saved. Its
-//! value is drawn from the live snapshot on every frame, so a format's progress shows while the
+//! value is drawn from the live view on every frame, so a format's progress shows while the
 //! modal is open. `Enter` on it asks [`super::ui::Ui`] to confirm a format, which erases the card,
 //! and the modal stays open behind the confirm with its edits.
 //!
@@ -43,17 +43,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use wartui_app::session::Controls;
 use wartui_app::settings::{ApiKeys, Busy, SaveError, Settings, SettingsEdit};
+use wartui_app::view::{SdShown, View};
 use wartui_core::engine::Snapshot;
 use wartui_core::ubx;
 use wartui_proto::fan::FanDuty;
-use wartui_proto::fleet::ScanMode;
 use wartui_proto::link::SdState;
 use wartui_proto::plan::{ChannelPool, PlanSettings, Planner, SparseNodes};
 
 use super::centered_rect;
 use super::ui::ENGINE_BUSY;
 use crate::config;
-use crate::text::{SdForm, sd_text};
+use crate::text::{SdForm, sd_card_text, sd_text};
 
 /// One row of the settings modal. A new setting adds a variant here and a row in
 /// [`draw_settings_modal`]. The API key rows take typed text, through
@@ -110,8 +110,8 @@ impl Field {
     }
 }
 
-/// The settings modal's state while open. Seeded from the snapshot at opening, then
-/// edited independently of it. The format row holds nothing: it reads the live snapshot.
+/// The settings modal's state while open. Seeded from the view at opening, then
+/// edited independently of it. The format row holds nothing: it reads the live view.
 #[derive(Debug, Clone)]
 pub(super) struct ConfigModal {
     selected: Field,
@@ -336,27 +336,16 @@ pub(super) enum ModalAction {
 }
 
 impl ConfigModal {
-    /// Open the modal, seeded from what is in force.
-    pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
-        // The bridge holds these five, so they are what its last `Status` said, and nothing
-        // while the link is down.
-        let bridge_up = snapshot.link_up;
-        let pool = snapshot.pool.filter(|_| bridge_up);
-        let planner = snapshot.planner.filter(|_| bridge_up);
-        let wardrive_esp = snapshot.wardrive_esp.filter(|_| bridge_up);
-        let sd_log = snapshot.sd_log.filter(|_| bridge_up);
-        let fan = snapshot
-            .bridge_status
-            .and_then(|status| status.fan)
-            .map(|fan| fan.duty)
-            .filter(|_| bridge_up);
-        // Nothing to toggle while stopped: the run starts the scan once the bridge reports it
-        // stopped. Before the first report it is off, and the engine starts the scan in the mode
-        // asked for meanwhile.
-        let bluetooth = match snapshot.scan {
-            Some(ScanMode::Stopped) => None,
-            scan => Some(scan == Some(ScanMode::WifiBluetooth)),
-        };
+    /// Open the modal, seeded from what is in force (`wartui_app::view::SettingsShown`).
+    pub(super) fn open(view: &View, settings: &Settings) -> Self {
+        let shown = &view.settings;
+        let bridge_up = view.link.up;
+        let pool = shown.pool;
+        let planner = shown.planner.map(PlanSettings::from);
+        let wardrive_esp = shown.wardrive_esp;
+        let sd_log = shown.sd_log;
+        let fan = shown.fan_duty_pct.and_then(FanDuty::new);
+        let bluetooth = shown.bluetooth;
         let saved = settings.saved();
         Self {
             selected: Field::Pool,
@@ -378,13 +367,13 @@ impl ConfigModal {
             // The file's, since a run reads it only at launch.
             wait_for_gps: saved.gps.waits_for_fix(),
             // The engine's, which holds it for the receiver.
-            gps_rate: snapshot.gps_rate_hz,
-            gps_rate_seed: snapshot.gps_rate_hz,
+            gps_rate: shown.gps_rate_hz,
+            gps_rate_seed: shown.gps_rate_hz,
             // Nor these. They are what the file holds, hand edits included.
             wdgwars_key: saved.api_keys.wdgwars,
             wigle_name: saved.api_keys.wigle_name,
             wigle_token: saved.api_keys.wigle_token,
-            excluded: snapshot.excluded_ssids.clone(),
+            excluded: shown.excluded_ssids.clone(),
             page: Page::Main,
         }
     }
@@ -410,8 +399,8 @@ impl ConfigModal {
         }
     }
 
-    /// A key while the modal is open. `snapshot` is what the sd card row reads.
-    pub(super) fn on_key(&mut self, key: KeyEvent, snapshot: &Snapshot) -> ModalAction {
+    /// A key while the modal is open. `sd` is what the sd card row reads.
+    pub(super) fn on_key(&mut self, key: KeyEvent, sd: &SdShown) -> ModalAction {
         if matches!(self.page, Page::Excluded { .. }) {
             return self.on_page_key(key);
         }
@@ -454,7 +443,7 @@ impl ConfigModal {
             KeyCode::Esc | KeyCode::Char('q') => return ModalAction::Close,
             // An action, not a setting: `Enter` asks, or does nothing where the tip says why.
             KeyCode::Enter if self.selected == Field::SdCard => {
-                return match sd_row(snapshot).1 {
+                return match sd_row(sd).1 {
                     Ok(()) => ModalAction::FormatSd,
                     Err(_) => ModalAction::Stay,
                 };
@@ -672,8 +661,8 @@ pub(super) fn apply_excluded(
 /// The tip on the sd card row when `Enter` asks to format the card.
 const FORMAT_TIP: &str = "enter formats the card and erases it";
 
-/// The sd card row as `snapshot` has it: its value, and `Ok` when `Enter` asks to format the
-/// card, or the tip saying why it does nothing.
+/// The sd card row as `sd` has it: its value, and `Ok` when `Enter` asks to format the card, or
+/// the tip saying why it does nothing.
 ///
 /// | Card | Value | `Enter` |
 /// |---|---|---|
@@ -683,27 +672,32 @@ const FORMAT_TIP: &str = "enter formats the card and erases it";
 /// | no card | `no card` | nothing |
 /// | not FAT32, ready, or failed | its size and state | asks |
 /// | formatting | `formatting…` | nothing |
-fn sd_row(snapshot: &Snapshot) -> (String, Result<(), &'static str>) {
-    if !snapshot.link_up {
-        return ("no bridge".to_owned(), Err("no bridge to format a card on · esc cancel"));
+fn sd_row(sd: &SdShown) -> (String, Result<(), &'static str>) {
+    match *sd {
+        SdShown::NoBridge => {
+            ("no bridge".to_owned(), Err("no bridge to format a card on · esc cancel"))
+        }
+        SdShown::Waiting => {
+            ("waiting".to_owned(), Err("waiting for the bridge's status · esc cancel"))
+        }
+        SdShown::NoSlot => {
+            (sd_text(None, SdForm::Row), Err("this bridge has no card slot · esc cancel"))
+        }
+        SdShown::Card { state, card_mb, free_mb, can_format, .. } => {
+            let action = match state {
+                _ if can_format => Ok(()),
+                SdState::Formatting => Err("a format is running · esc cancel"),
+                _ => Err("no card in the slot · esc cancel"),
+            };
+            (sd_card_text(state, card_mb, free_mb, SdForm::Row), action)
+        }
     }
-    let Some(status) = snapshot.bridge_status else {
-        return ("waiting".to_owned(), Err("waiting for the bridge's status · esc cancel"));
-    };
-    let sd = status.sd;
-    let action = match sd.map(|sd| sd.state) {
-        None => Err("this bridge has no card slot · esc cancel"),
-        Some(SdState::NoCard) => Err("no card in the slot · esc cancel"),
-        Some(SdState::Formatting) => Err("a format is running · esc cancel"),
-        Some(SdState::NoFat32 | SdState::Ready | SdState::Failed) => Ok(()),
-    };
-    (sd_text(sd, SdForm::Row), action)
 }
 
-/// The settings modal, centered over the live view behind it. `snapshot` is the live one, which
-/// the sd card row reads on every frame. The box is as tall as its lines. On a terminal too short
+/// The settings modal, centered over the live view behind it. `view` is the live one, which the
+/// sd card row reads on every frame. The box is as tall as its lines. On a terminal too short
 /// for them it drops the blank separators, the last first, so the tip line stays on screen.
-pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, snapshot: &Snapshot) {
+pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, view: &View) {
     const WIDTH: u16 = 48;
 
     if let Page::Excluded { cursor, input, error, .. } = &modal.page {
@@ -740,10 +734,10 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal, sn
     // What fits right of the border, the 18-wide label column and its two spaces.
     let value_width = usize::from(WIDTH.min(frame.area().width)).saturating_sub(22);
     const CLEAR_TIP: &str = "ctrl-u clear · enter save · esc cancel";
-    let (sd_value, sd_action) = sd_row(snapshot);
-    // A bridge that reported no card slot has no log to set.
-    let no_slot =
-        modal.bridge_up && snapshot.bridge_status.is_some_and(|status| status.sd.is_none());
+    let (sd_value, sd_action) = sd_row(&view.settings.sd);
+    // A bridge that reported no card slot has no log to set. The card state is live, so once the
+    // link drops the row reads `no bridge`, as the card's row below it does.
+    let no_slot = modal.bridge_up && view.settings.sd == SdShown::NoSlot;
     let mut lines = vec![
         match modal.pool {
             Some(pool) => row("pool", &pool, Field::Pool),
@@ -936,6 +930,7 @@ mod tests {
     use wartui_app::settings::Gps;
     use wartui_bridge::remember::BridgeMemory;
     use wartui_core::engine::Command;
+    use wartui_proto::fleet::ScanMode;
     use wartui_proto::link::SdStatus;
 
     use super::*;

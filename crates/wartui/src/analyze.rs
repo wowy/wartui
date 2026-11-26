@@ -12,9 +12,10 @@
 use crate::export::{
     Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
 };
-use crate::text::{NodeNames, buffer_full, thousands};
+use crate::text::{buffer_full, thousands};
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use wartui_app::export::NodeNames;
 use wartui_core::analyze::{
     BridgeLoss, HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, RadioLinkLoss, losses, peaks,
 };
@@ -325,7 +326,7 @@ mod tests {
     use wartui_proto::mac::Mac;
 
     use super::{losses_text, peaks_text};
-    use crate::text::NodeNames;
+    use wartui_app::export::NodeNames;
 
     const NODE_1C: Mac = [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A];
     const NODE_57: Mac = [0x02, 0, 0x5E, 0x10, 0x57, 0x84];

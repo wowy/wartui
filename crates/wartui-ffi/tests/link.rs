@@ -6,9 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use wartui_core::store::open_readonly;
-use wartui_ffi::{Link, LinkError, Session, Settings};
+use wartui_ffi::{Link, LinkError, ReadyError, Session, Settings};
 
-use common::{Loopback, capture, nowhere, start, three_nodes, until};
+use common::{Loopback, WAIT, capture, nowhere, start, three_nodes, until};
+
+/// How long a test gives the bridge to announce itself, in milliseconds.
+const READY_MS: u32 = 15_000;
 
 #[tokio::test]
 async fn link_refuses_a_path_when_asked_for_a_bluetooth_bridge() {
@@ -94,4 +97,67 @@ async fn link_drops_the_announcement_when_bridge_goes_while_idle() {
     assert!(!shown.unwrap_or(false), "a bridge gone while idle is not handed on");
     second.stop().await.expect("stopped");
     link.close().await.expect("closed");
+}
+
+#[tokio::test]
+async fn link_ready_announces_the_bridge_when_link_is_simulated() {
+    let link = Link::simulated(3);
+    let announced = link.ready(READY_MS, None).await.expect("announced");
+    assert_eq!(announced.bridge.mac_tail.len(), "44:C0".len(), "{announced:?}");
+    assert!(!announced.garbled);
+    // Given back idle, with the announcement, which a second wait answers with at once.
+    let again = tokio::time::timeout(Duration::from_millis(100), link.ready(READY_MS, None)).await;
+    assert_eq!(again.expect("at once").expect("announced"), announced);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_ready_keeps_the_announcement_when_a_capture_follows() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let settings = Settings::unsaved();
+    let link = Link::bluetooth(Loopback::radio(), Arc::clone(&settings), None).expect("opened");
+    let announced = link.ready(READY_MS, None).await.expect("announced");
+
+    // The transport announces a bridge once per life, so a capture shows it only when handed on.
+    let session = Session::start(
+        capture(&dir.path().join("capture.db")),
+        Arc::clone(&link),
+        settings,
+        nowhere(),
+        None,
+    )
+    .await
+    .expect("the capture starts");
+    let shown = until(&session, |view| view.bridge.is_some()).await;
+    assert_eq!(shown.view.bridge, Some(announced.bridge));
+    session.stop().await.expect("stopped");
+    link.close().await.expect("closed");
+}
+
+#[tokio::test]
+async fn link_ready_refuses_when_link_is_in_use() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let link = Link::simulated(3);
+    let session = start(&dir.path().join("capture.db"), &link).await;
+    let refused = tokio::time::timeout(WAIT, link.ready(READY_MS, None)).await.expect("at once");
+    assert!(matches!(refused, Err(ReadyError::InUse)), "{refused:?}");
+    session.stop().await.expect("stopped");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_ready_gives_the_link_back_idle_when_the_phone_stops_awaiting() {
+    let link = Link::bluetooth(Loopback::deaf(), Settings::unsaved(), None).expect("opened");
+    let waited = tokio::time::timeout(Duration::from_millis(200), link.ready(60_000, None)).await;
+    assert!(waited.is_err(), "no bridge answers: {waited:?}");
+
+    // Idle again well before the minute the wait was given.
+    let closed = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match link.close().await {
+                Err(LinkError::InUse) => tokio::time::sleep(Duration::from_millis(20)).await,
+                closed => return closed,
+            }
+        }
+    })
+    .await;
+    closed.expect("idle in time").expect("closed");
 }

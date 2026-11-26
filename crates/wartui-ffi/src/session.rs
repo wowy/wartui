@@ -15,6 +15,12 @@
 //! drew and hands it the latest, skipping any it was too slow for. The stream ends with the
 //! capture, and [`Session::stop`] returns once its last view is numbered.
 //!
+//! **Steering.** [`Session::apply`] and [`Session::apply_excluded`] are a settings screen's,
+//! through `Controls::apply`, which compares the edit against the capture's latest snapshot and
+//! saves what it puts in force (`settings.rs`). The other commands are those the terminal sends
+//! outside its settings modal: [`Session::start_without_fix`], [`Session::power_cycle`] and
+//! [`Session::format_sd`]. The bridge's answer to the last two arrives in `View::answers`.
+//!
 //! **The link goes back on every way out.** [`Session::stop`] commits the last batch and gives
 //! the `Link` back, parked, with the bridge it still had announced, so the next capture starts on
 //! the one connection. A start the store refuses gives it back too. A session the phone lets go
@@ -27,18 +33,19 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use wartui_app::position::{Fixed, Sources};
 use wartui_app::session::{Controls, HostBuild, Refused, Session as Capture, SessionConfig};
-use wartui_app::settings::{Busy, Link as Over};
+use wartui_app::settings::{self as app, Busy, Link as Over, SsidRefusal};
 use wartui_app::view::View;
-use wartui_core::engine::Command;
+use wartui_core::engine::{Command, Snapshot};
 use wartui_core::gps::Gps;
 use wartui_core::position::DEFAULT_MAX_AGE;
 use wartui_core::store::{StoreConfig, StoreError};
 use wartui_core::ubx;
+use wartui_proto::bus::Slot;
 
 use crate::feeds::{HealthFeed, LocationFeed};
 use crate::link::{Link, LinkError};
 use crate::runtime::spawn;
-use crate::settings::{Settings, chain};
+use crate::settings::{Saved, Settings, SettingsEdit, chain, check_excluded};
 
 /// The build a capture records as its provenance.
 #[uniffi::remote(Record)]
@@ -131,12 +138,54 @@ pub enum StopError {
     Panicked,
 }
 
-/// Why the capture did not take a command.
+/// Why the capture did not take a command, or a settings edit was refused. Nothing is sent or
+/// saved.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SteerError {
     /// The engine takes no command: its queue is full, or the capture has stopped.
     #[error("the capture takes no command")]
     Busy,
+    /// The fan duty is past [`settings_limits`](crate::settings_limits)' `fan_duty_pct_max`.
+    #[error("fan duty {pct} is out of range")]
+    FanDuty { pct: u8 },
+    /// The sparse node count is outside 1 to
+    /// [`settings_limits`](crate::settings_limits)' `sparse_nodes_max`.
+    #[error("{count} sparse nodes is out of range")]
+    SparseNodes { count: u8 },
+    /// The receiver rate is outside [`settings_limits`](crate::settings_limits)' range.
+    #[error("{hz} Hz is out of range")]
+    GpsRate { hz: u8 },
+    /// The first entry of the excluded list that cannot join it, and why.
+    #[error("SSID {ssid:?} cannot be excluded: {refusal:?}")]
+    ExcludedSsid { ssid: String, refusal: SsidRefusal },
+    /// `slot` names no node-bus slot.
+    #[error("slot {slot} names no slot")]
+    NoSuchSlot { slot: u8 },
+}
+
+impl From<Busy> for SteerError {
+    fn from(Busy: Busy) -> Self {
+        Self::Busy
+    }
+}
+
+/// What [`Session::apply`] did beyond sending the edit's moved rows.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Applied {
+    /// The remember switch, `Some` when it changed.
+    pub remember: Option<bool>,
+    /// Whether the wait-for-fix row moved. It lives only in the store, so it changes nothing
+    /// unless the save lands.
+    pub wait_for_fix_moved: bool,
+    /// What the save came to. The rows are in force either way.
+    pub saved: Saved,
+}
+
+impl From<app::Applied> for Applied {
+    fn from(applied: app::Applied) -> Self {
+        let app::Applied { remember, wait_for_fix_moved, saved } = applied;
+        Self { remember, wait_for_fix_moved, saved: saved.into() }
+    }
 }
 
 /// A running capture.
@@ -146,6 +195,8 @@ pub struct Session {
     /// The capture, until it is stopped.
     running: Mutex<Option<Running>>,
     controls: Controls,
+    /// The capture's latest snapshot, which an edit is compared against.
+    snapshots: watch::Receiver<Arc<Snapshot>>,
     views: watch::Receiver<Viewed>,
 }
 
@@ -212,7 +263,51 @@ impl Session {
     /// [`SteerError::Busy`] when the engine takes no command: its queue is full, or the capture
     /// has stopped.
     pub fn start_without_fix(&self) -> Result<(), SteerError> {
-        self.controls.command(Command::StartWithoutFix).map_err(|Busy| SteerError::Busy)
+        Ok(self.controls.command(Command::StartWithoutFix)?)
+    }
+
+    /// Put the edit's moved rows in force and save them. The comparison is against the capture's
+    /// latest snapshot.
+    ///
+    /// # Errors
+    /// A value the app's types refuse, [`SteerError::ExcludedSsid`] for an excluded list the
+    /// settings' rules refuse, or [`SteerError::Busy`] when the engine takes no command; then
+    /// nothing is sent, switched or saved.
+    pub fn apply(&self, edit: SettingsEdit) -> Result<Applied, SteerError> {
+        let edit = edit.into_app()?;
+        self.running()?;
+        let snapshot = Arc::clone(&self.snapshots.borrow());
+        Ok(self.controls.apply(&edit, &snapshot)?.into())
+    }
+
+    /// Put `ssids` in force as the excluded list, and save only them.
+    ///
+    /// # Errors
+    /// [`SteerError::ExcludedSsid`] for a list the settings' rules refuse, and
+    /// [`SteerError::Busy`] when the engine takes no command; then nothing is sent or saved.
+    pub fn apply_excluded(&self, ssids: Vec<String>) -> Result<Saved, SteerError> {
+        check_excluded(&ssids)?;
+        self.running()?;
+        Ok(self.controls.apply_excluded(&ssids)?.into())
+    }
+
+    /// Switch the node in `slot` (the view's `SlotShown::index`) off and on. The bridge's answer
+    /// arrives in `View::answers`.
+    ///
+    /// # Errors
+    /// [`SteerError::NoSuchSlot`] when `slot` names none, and [`SteerError::Busy`] when the
+    /// engine takes no command.
+    pub fn power_cycle(&self, slot: u8) -> Result<(), SteerError> {
+        let slot = Slot::from_u8(slot).ok_or(SteerError::NoSuchSlot { slot })?;
+        Ok(self.controls.command(Command::PowerCycle { slot })?)
+    }
+
+    /// Format the bridge's SD card. The bridge's answer arrives in `View::answers`.
+    ///
+    /// # Errors
+    /// [`SteerError::Busy`] when the engine takes no command.
+    pub fn format_sd(&self) -> Result<(), SteerError> {
+        Ok(self.controls.command(Command::FormatSd)?)
     }
 
     /// Stop the capture, wait for its last rows to commit and its last view, and give the link
@@ -236,6 +331,12 @@ impl Session {
 }
 
 impl Session {
+    /// [`SteerError::Busy`] once the capture has stopped, so nothing is saved for a capture
+    /// that has ended.
+    fn running(&self) -> Result<(), SteerError> {
+        if self.lock().is_some() { Ok(()) } else { Err(SteerError::Busy) }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Option<Running>> {
         // `take` is the only write, so a panic elsewhere leaves nothing torn.
         self.running.lock().unwrap_or_else(PoisonError::into_inner)
@@ -307,8 +408,9 @@ async fn start(
     let over = if simulated { Over::Usb } else { Over::Bluetooth };
     let (views, viewing) = follow(&capture, over);
     let controls = capture.controls();
+    let snapshots = capture.snapshots();
     let running = Mutex::new(Some(Running { capture, viewing }));
-    Ok(Arc::new(Session { link, running, controls, views }))
+    Ok(Arc::new(Session { link, running, controls, snapshots, views }))
 }
 
 /// A capture under way, and the task numbering its views.

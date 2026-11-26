@@ -194,22 +194,26 @@ pub struct Snapshot {
     pub awaiting_fix: bool,
 }
 
-/// The bridge's answer to a power-cycle, as the operator reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The bridge's answer to a power-cycle. [`power_cycled_text`] words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerAnswer {
     /// Counts the answers this engine has had, from 1, so the view tells a new one from the last.
     pub id: u64,
-    /// What happened, in [`power_cycled_text`]'s words.
-    pub text: String,
+    /// The slot the bridge answered for.
+    pub slot: Slot,
+    /// What carried the nodes as the answer arrived, which labels the slot.
+    pub board: NodeBoard,
+    /// What happened.
+    pub outcome: PowerOutcome,
 }
 
-/// The bridge's answer to a format of its microSD card, as the operator reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The bridge's answer to a format of its microSD card. [`sd_formatted_text`] words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdAnswer {
     /// Counts the answers this engine has had, from 1, so the view tells a new one from the last.
     pub id: u64,
-    /// What happened, in [`sd_formatted_text`]'s words.
-    pub text: String,
+    /// What happened.
+    pub outcome: SdFormatOutcome,
 }
 
 /// What the operator reads of a format's `outcome`.
@@ -385,8 +389,8 @@ impl FleetEngine {
                 .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
                 .collect(),
             gps_rate_hz: self.config.gps_rate_hz,
-            power_answer: self.power_answer.clone(),
-            sd_answer: self.sd_answer.clone(),
+            power_answer: self.power_answer,
+            sd_answer: self.sd_answer,
             awaiting_fix: self.fix_wait,
         }
     }

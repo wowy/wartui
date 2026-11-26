@@ -26,6 +26,10 @@
 //! only a moved row is rewritten. [`apply_excluded`] applies and saves only the excluded list, and
 //! [`Settings::save_wait_for_fix`] saves only `[gps] wait-for-fix`.
 //!
+//! **[`Settings::save`] saves the rows the host holds with no capture running**, by the code
+//! `apply` saves them with: a phone's settings screen is open between captures too, to type the
+//! API keys or forget the bridge.
+//!
 //! **[`Settings::follow`], behind `Controls::follow`, saves what changed without the operator.** The transport remembers a
 //! bridge it connects to and forgets one that goes quiet, so a snapshot whose bridge no longer
 //! matches the saved copy is saved, silently. A failed save is tried again only once the bridge
@@ -214,6 +218,42 @@ impl Settings {
         self.write(pending?)
     }
 
+    /// Save the rows the host holds (`remember`, the fix wait, the receiver's rate, the API keys,
+    /// the excluded list), with no engine to tell. The rows a bridge holds are not saved anywhere
+    /// on the host and are ignored. `remember` switches the bridge memory as a running capture's
+    /// [`Controls::apply`](crate::session::Controls::apply) does, whether or not the save lands:
+    /// a failed save loses only the stored copy. `connected` is the bridge an open link has
+    /// announced, remembered when the switch turns on, since a reconnect may never come; a front
+    /// end with no link open passes `None`. `edit.gps_rate` is the rate saved when given, else
+    /// the one already saved.
+    ///
+    /// # Errors
+    /// Why nothing was saved. The remember switch has moved all the same.
+    pub fn save(&self, edit: &SettingsEdit, connected: Option<Mac>) -> Result<String, SaveError> {
+        self.keep(edit, connected, None).saved
+    }
+
+    /// Remember `mac`, the bridge a capture's link announced before it, when remembering is on
+    /// and holds no bridge: the switch turned on after the link connected, which a connection
+    /// made with it on has remembered already. This covers a save made while the link was in
+    /// use, which [`Self::save`] is handed no bridge for. Nothing under the simulator.
+    /// [`Self::follow`] saves it.
+    pub(crate) fn remember_announced(&self, mac: Mac) {
+        let state = self.lock();
+        if !state.simulated && state.memory.is_enabled() && state.memory.recall().is_none() {
+            state.memory.remember_on(mac, None);
+        }
+    }
+
+    /// Put the host's rows of `edit` in force and save them all ([`State::keep`]), the write made
+    /// with no lock on the state held.
+    fn keep(&self, edit: &SettingsEdit, connected: Option<Mac>, shown: Option<u8>) -> Applied {
+        let _saving = self.saving();
+        let (remember, wait_for_fix_moved, pending) = self.lock().keep(edit, connected, shown);
+        let saved = pending.and_then(|pending| self.write(pending));
+        Applied { remember, wait_for_fix_moved, saved }
+    }
+
     /// Save the bridge the transport remembered or forgot, and the link once a bridge has
     /// announced itself over it. Silent, since nothing the operator did changed either: a failure
     /// is logged at `debug`.
@@ -281,6 +321,36 @@ impl State {
         let text = serialize(&written).map_err(SaveError::Invalid)?;
         let secret = written.api_keys.any_set();
         Ok(Pending { store, written, text, secret })
+    }
+
+    /// Set the remember switch as `edit` says, remembering `connected`, the bridge connected now,
+    /// when it turns on, then work out the save of every row of `edit`. `shown` is the rate a
+    /// running receiver shows, which the row holds when `edit` names none; with no capture it is
+    /// the rate already saved. Returns the switch if it moved, whether the fix wait moved, and
+    /// the save to make.
+    fn keep(
+        &self,
+        edit: &SettingsEdit,
+        connected: Option<Mac>,
+        shown: Option<u8>,
+    ) -> (Option<bool>, bool, Result<Pending, SaveError>) {
+        let remember = (edit.remember_bridge != self.memory.is_enabled()).then(|| {
+            self.memory.set_enabled(edit.remember_bridge);
+            // Remember the bridge connected now. A reconnect may never come.
+            if edit.remember_bridge
+                && let Some(mac) = connected
+                && !self.simulated
+            {
+                self.memory.remember_on(mac, None);
+            }
+            edit.remember_bridge
+        });
+        let wait_for_fix_moved = edit.wait_for_fix != self.saved.gps.waits_for_fix();
+        let rate = edit
+            .gps_rate
+            .or(shown)
+            .unwrap_or_else(|| self.saved.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ));
+        (remember, wait_for_fix_moved, self.prepare_edit(edit, rate))
     }
 
     /// What writing every row of `edit` to the store takes, `rate` being the receiver's rate the
@@ -402,26 +472,8 @@ pub(crate) fn apply(
         permit.send(command);
     }
 
-    let _saving = settings.saving();
-    let (remember, wait_for_fix_moved, pending) = {
-        let state = settings.lock();
-        let remember = (edit.remember_bridge != state.memory.is_enabled()).then(|| {
-            state.memory.set_enabled(edit.remember_bridge);
-            // Remember the bridge connected now. A reconnect may never come.
-            if edit.remember_bridge
-                && let Some(bridge) = &snapshot.bridge
-                && !state.simulated
-            {
-                state.memory.remember_on(bridge.mac, None);
-            }
-            edit.remember_bridge
-        });
-        let wait_for_fix_moved = edit.wait_for_fix != state.saved.gps.waits_for_fix();
-        let rate = edit.gps_rate.unwrap_or(snapshot.gps_rate_hz);
-        (remember, wait_for_fix_moved, state.prepare_edit(edit, rate))
-    };
-    let saved = pending.and_then(|pending| settings.write(pending));
-    Ok(Applied { remember, wait_for_fix_moved, saved })
+    let connected = snapshot.bridge.as_ref().map(|bridge| bridge.mac);
+    Ok(settings.keep(edit, connected, Some(snapshot.gps_rate_hz)))
 }
 
 /// Send `ssids` to the engine as the excluded list, and save them. Nothing else in the store

@@ -13,6 +13,9 @@
 //!
 //! A capture of test data — made with `--sim` or `--lat`/`--lon` — still exports, since
 //! testing is what it is for, but with a warning not to submit the CSV anywhere.
+//!
+//! Writing the file is `wartui_app::export`'s, and so is the rule a chosen name follows; the
+//! flags, standard output and every word are here.
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -20,12 +23,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
+use wartui_app::export::{ExportError, Exported, NodeNames, OutName};
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{Connection, is_simulated, open_readonly};
 
 use crate::capture;
 use crate::config::{self, Config};
-use crate::text::{NodeNames, thousands};
+use crate::text::thousands;
 
 /// Which capture to read and which of its rows to send, shared by `export`, `analyze` and
 /// `upload` so all three read a capture the same way.
@@ -118,9 +122,9 @@ pub fn run(args: Args) -> Result<()> {
     let warning = test_data_note(&conn, &db)?;
     let filter = args.selection.filter(&config);
     let version = env!("CARGO_PKG_VERSION");
-    let names = NodeNames::of(&conn);
 
     let summary = if out.as_os_str() == "-" {
+        let names = NodeNames::of(&conn);
         let stdout = std::io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
         let summary = wigle_csv(&conn, &filter, &mut writer, version)?;
@@ -128,8 +132,8 @@ pub fn run(args: Args) -> Result<()> {
         eprint!("{}", report(&summary, None, &names));
         summary
     } else {
-        let summary =
-            into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, &filter, writer, version)?))?;
+        let name = if derived { OutName::Chosen } else { OutName::Named };
+        let Exported { summary, names } = into_csv(&db, &out, name, &filter, version)?;
         eprint!("{}", report(&summary, Some(&out), &names));
         summary
     };
@@ -352,71 +356,53 @@ fn is_the_capture(out: &Path, db: &Path) -> bool {
     }
 }
 
-/// Write the CSV at `path` through `write`, taking a name we chose back if it fails.
+/// Write the capture at `db` to the CSV at `path` (`wartui_app::export::wigle_csv`), each
+/// failure in this command's words.
 ///
-/// The file has to exist before a row can go into it, so a failure part way through —
-/// a query that gives up, a full disk — would otherwise leave an empty export under the
-/// derived name, and the next run would refuse it. The retry would be blocked by what
-/// the fault left behind, which is the one moment the guard must not be in the way.
-/// A path the reader typed is left where it failed: they named the file, and what is in
-/// it is theirs to look at.
-fn into_csv<T>(
+/// A name this command chose is never written over, and a failure part way through takes it
+/// back: an empty export left under the derived name would have the next run refuse it, blocking
+/// the retry. A path the reader typed is truncated as any other tool would, and left where it
+/// failed: they named the file, and what is in it is theirs to look at.
+fn into_csv(
+    db: &Path,
     path: &Path,
-    derived: bool,
-    write: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<T>,
-) -> Result<T> {
-    let file = create_csv(path, derived)?;
-    let mut writer = BufWriter::new(file);
-    let written = write(&mut writer).and_then(|value| {
-        writer.flush().context("flushing the export")?;
-        Ok(value)
-    });
-    if written.is_err() && derived {
-        let _ = std::fs::remove_file(path);
-    }
-    written
-}
-
-/// Open the CSV, refusing to write over a name this command chose rather than the reader.
-///
-/// `create_new` rather than asking whether the path is there and then creating it, so
-/// nothing can appear in the gap between the two questions. A path the reader typed is
-/// truncated as any other tool would: they named the file they meant.
-fn create_csv(path: &Path, derived: bool) -> Result<std::fs::File> {
-    if !derived {
-        return std::fs::File::create(path).with_context(|| format!("creating {}", path.display()));
-    }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => Ok(file),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+    name: OutName,
+    filter: &ExportFilter,
+    version: &str,
+) -> Result<Exported> {
+    wartui_app::export::wigle_csv(db, path, name, filter, version).map_err(|error| match error {
+        ExportError::Open(source) => {
+            anyhow::Error::new(source).context(format!("opening {}", db.display()))
+        }
+        ExportError::Exists => anyhow::anyhow!(
             "{} already exists, and export will not write over a name it chose itself; \
              name another with --out PATH, or --out {} to replace that one",
             path.display(),
             path.display()
         ),
-        Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
-    }
+        ExportError::Create(source) => {
+            anyhow::Error::new(source).context(format!("creating {}", path.display()))
+        }
+        ExportError::Export(source) => anyhow::Error::new(source),
+        ExportError::Flush(source) => anyhow::Error::new(source).context("flushing the export"),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use std::path::Path;
-
-    use anyhow::bail;
 
     use std::collections::BTreeMap;
 
+    use wartui_app::export::{NodeNames, OutName};
     use wartui_core::export::{Bands, ExportSummary, KindStats, NodeStats, Positions};
     use wartui_proto::bus::{NodeBoard, Slot};
     use wartui_proto::mac::Mac;
 
     use super::{
-        Args, Selection, create_csv, into_csv, is_the_capture, quality_warnings, report,
-        test_data_note, test_data_warning,
+        Args, Selection, into_csv, is_the_capture, quality_warnings, report, test_data_note,
+        test_data_warning,
     };
-    use crate::text::NodeNames;
     use wartui_app::upload::testing::{EPOCH_MS, capture, capture_simulated, sighting};
 
     /// Names for a capture with no node on a slot, so every node goes by its tail.
@@ -577,66 +563,19 @@ mod tests {
     }
 
     #[test]
-    fn export_writer_creates_destination_file_when_derived_path_does_not_exist() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
-        create_csv(&path, true).unwrap().write_all(b"rows").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
-    }
-
-    #[test]
     fn export_mgr_refuses_overwrite_when_auto_generated_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
+        let db = capture(dir.path(), Vec::new());
         let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
         std::fs::write(&path, "the export that was uploaded").unwrap();
-        let error = create_csv(&path, true).unwrap_err().to_string();
+        let filter = Selection { db: None, recapture: Some(0), config: None }
+            .filter(&crate::config::Config::default());
+        let error = into_csv(&db, &path, OutName::Chosen, &filter, "0.1.0").unwrap_err();
+        let error = error.to_string();
         assert!(error.contains("--out"), "{error}");
         assert!(error.contains("wartui-2026-09-18-14-30-07.csv"), "{error}");
         // And the file it refused to open is the one still there.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "the export that was uploaded");
-    }
-
-    #[test]
-    fn export_writer_allows_overwrite_when_destination_path_is_explicitly_specified() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tonight.csv");
-        std::fs::write(&path, "an export of the capture before").unwrap();
-        create_csv(&path, false).unwrap().write_all(b"rows").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
-    }
-
-    #[test]
-    fn export_writer_deletes_partial_file_when_auto_generated_export_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
-        let failed: Result<(), _> = into_csv(&path, true, |_| bail!("the query went wrong"));
-        assert!(failed.is_err());
-        // Nothing left under the name, so the retry that fixes the fault is not
-        // refused by what the fault left behind.
-        assert!(!path.exists(), "an empty export was left at {}", path.display());
-    }
-
-    #[test]
-    fn export_writer_preserves_partial_file_when_explicitly_named_export_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tonight.csv");
-        let failed: Result<(), _> = into_csv(&path, false, |_| bail!("the query went wrong"));
-        assert!(failed.is_err());
-        // They named the file, so what happened to it is theirs to look at.
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn export_writer_persists_full_payload_when_export_succeeds() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
-        let rows = into_csv(&path, true, |writer| {
-            writer.write_all(b"rows")?;
-            Ok(973)
-        })
-        .unwrap();
-        assert_eq!(rows, 973);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
     }
 
     #[test]

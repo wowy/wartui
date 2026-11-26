@@ -1,9 +1,11 @@
-// The binding end to end from Kotlin: a simulated capture, then one over a radio written here that
-// loops back to a simulated bridge. Also the first example a phone developer reads: the loopback
-// driver is shaped as an Android `BluetoothGattCallback` adapter is.
+// The binding end to end from Kotlin: a simulated capture steered and exported, then one over a
+// radio written here that loops back to a simulated bridge. Also the first example a phone
+// developer reads: the loopback driver is shaped as an Android `BluetoothGattCallback` adapter is.
 
 import racing.deadbear.wartui.core.CaptureConfig
+import racing.deadbear.wartui.core.ChannelPool
 import racing.deadbear.wartui.core.Completion
+import racing.deadbear.wartui.core.ExportOptions
 import racing.deadbear.wartui.core.HealthFeed
 import racing.deadbear.wartui.core.Heard
 import racing.deadbear.wartui.core.HostBuild
@@ -17,11 +19,16 @@ import racing.deadbear.wartui.core.PositionSources
 import racing.deadbear.wartui.core.Pushed
 import racing.deadbear.wartui.core.Radio
 import racing.deadbear.wartui.core.RadioDriver
+import racing.deadbear.wartui.core.Saved
+import racing.deadbear.wartui.core.SecretStore
 import racing.deadbear.wartui.core.Session
 import racing.deadbear.wartui.core.Settings
+import racing.deadbear.wartui.core.SettingsEdit
 import racing.deadbear.wartui.core.SettingsStore
 import racing.deadbear.wartui.core.View
 import racing.deadbear.wartui.core.WireSim
+import racing.deadbear.wartui.core.bridgesNearby
+import racing.deadbear.wartui.core.exportWigleCsv
 import racing.deadbear.wartui.core.logTo
 import java.nio.file.Files
 import java.nio.file.Path
@@ -62,6 +69,17 @@ class MemoryStore : SettingsStore {
     }
 
     override fun place(): String = "memory"
+}
+
+/** API keys kept in memory, where an app would use the Keystore. */
+class MemorySecrets : SecretStore {
+    @Volatile var text: String? = null
+
+    override fun load(): String? = text
+
+    override fun save(text: String) {
+        this.text = text
+    }
 }
 
 /**
@@ -134,6 +152,17 @@ suspend fun until(session: Session, what: String, done: (View) -> Boolean): View
         viewed.view
     }
 
+/** What a settings screen holds before the operator moves a row: nothing to send. */
+fun unmoved(settings: Settings, view: View?): SettingsEdit {
+    val saved = settings.saved()
+    return SettingsEdit(
+        rememberBridge = saved.rememberBridge,
+        waitForFix = saved.waitForFix,
+        apiKeys = saved.apiKeys,
+        excludedSsids = view?.settings?.excludedSsids ?: saved.excludedSsids,
+    )
+}
+
 fun capture(db: Path) = CaptureConfig(
     dbPath = db.toString(),
     notes = null,
@@ -141,18 +170,21 @@ fun capture(db: Path) = CaptureConfig(
     build = HostBuild(hostVersion = "smoke", hostCommit = null, releaseTag = null),
 )
 
-/** A simulated capture, placed by a fix the platform pushes. */
+/** A simulated capture, placed by a fix the platform pushes, steered, then exported. */
 suspend fun simulated(dir: Path) {
     val db = dir.resolve("simulated.db")
     val location = LocationFeed()
+    val settings = Settings.unsaved()
     val session = Session.start(
         capture(db),
         Link.simulated(3u),
-        Settings.unsaved(),
+        settings,
         PositionSources(bridgeReceiver = false, location = location, fixed = null),
         HealthFeed(),
     )
-    until(session, "three nodes and the link up") { it.nodes.size == 3 && it.link.up }
+    val shown = until(session, "three nodes, the link up and the pool") {
+        it.nodes.size == 3 && it.link.up && it.settings.pool != null
+    }
     // Synthetic and mid-ocean, taken now on this device's clock.
     val fix = LocationFix(
         lat = 10.0,
@@ -166,20 +198,45 @@ suspend fun simulated(dir: Path) {
     until(session, "rows placed by the platform") {
         it.position.located && it.position.source == PositionSource.PLATFORM
     }
+    // The operator moves the pool; the view shows it once the bridge holds it.
+    val pool = if (shown.settings.pool == ChannelPool.EU) ChannelPool.US else ChannelPool.EU
+    val applied = session.apply(unmoved(settings, shown).copy(pool = pool))
+    check(applied.saved == Saved.Nowhere) { "unsaved settings were saved: ${applied.saved}" }
+    until(session, "the pool moved") { it.settings.pool == pool }
+    until(session, "every node heartbeating and heard") { view ->
+        view.nodes.size == 3 && view.nodes.all { it.firmware != null && it.sightings > 0UL }
+    }
     val end = withTimeout(DEADLINE_MS) { session.stop() }
     check(end.written > 0UL) { "no rows were written" }
     check(Files.exists(db)) { "no capture at $db" }
+
+    val csv = dir.resolve("simulated.csv")
+    val exported = withTimeout(DEADLINE_MS) {
+        exportWigleCsv(settings, db.toString(), csv.toString(), ExportOptions(), "smoke")
+    }
+    check(Files.exists(csv)) { "no export at $csv" }
+    check(exported.nodes.size == 3) { "the export names ${exported.nodes.map { it.name }}" }
 }
 
-/** A capture over the loopback radio, which remembers its bridge in the settings. */
+/**
+ * A capture over the loopback radio: the bridge picked from those nearby and announced before the
+ * capture, remembered in the settings, and an API key typed in afterwards kept in the secret store.
+ */
 suspend fun loopback(dir: Path) {
     val pumps = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val driver = LoopbackDriver(WireSim.start(3u, 185u), pumps)
     val radio = Radio(driver)
     driver.radio = radio
+    val nearby = withTimeout(DEADLINE_MS) { bridgesNearby(radio, 500u) }
+    check(nearby.size == 1 && nearby[0].peer == PEER && nearby[0].live) { "nearby: $nearby" }
+    val bridge = nearby[0].tail
+
     val store = MemoryStore()
-    val settings = Settings.open(store)
-    val link = Link.bluetooth(radio, settings, null)
+    val secrets = MemorySecrets()
+    val settings = Settings.open(store, secrets)
+    val link = Link.bluetooth(radio, settings, bridge)
+    val announced = withTimeout(DEADLINE_MS) { link.ready(15_000u, null) }
+    check(announced.bridge.macTail == bridge) { "announced ${announced.bridge}, not $bridge" }
     val session = Session.start(
         capture(dir.resolve("loopback.db")),
         link,
@@ -195,6 +252,14 @@ suspend fun loopback(dir: Path) {
     pumps.cancel()
     val saved = store.text
     check(saved != null && saved.contains("\"$PEER\"")) { "the bridge was not remembered: $saved" }
+
+    // Obviously fake.
+    val key = "AAAAAAAAAA"
+    val typed = unmoved(settings, null).let { it.copy(apiKeys = it.apiKeys.copy(wdgwars = key)) }
+    val keyed = settings.save(typed)
+    check(keyed is Saved.At) { "the key was not saved: $keyed" }
+    check(secrets.text?.contains(key) == true) { "the secret store holds ${secrets.text}" }
+    check(store.text?.contains(key) == false) { "the key is in the settings: ${store.text}" }
 }
 
 fun main() {
