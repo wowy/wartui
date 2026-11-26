@@ -35,7 +35,8 @@
 //! either way. [`Outcome::failed`] says whether a retry is called for: a site refused before it
 //! queued the upload, or WDGWars reports its import failed. A WiGLE upload whose `queued` result
 //! cannot be written is none: its row is written, and is a cutoff. The retry is safe: a site
-//! that queued reads "nothing new".
+//! that queued reads "nothing new". The exception is [`SendError::Unrecorded`]: the site holds
+//! the rows and the capture holds no cutoff, so a retry sends them again.
 //!
 //! **A capture of test data is refused for every site**, whatever the options say: invented
 //! networks or a fixed position would be published as real, WDGWars and WiGLE ban both, and an
@@ -158,18 +159,15 @@ impl Credentials {
     }
 }
 
-/// What is ready to send to one site. Holds the credentials, so `Debug` is written by hand and
-/// prints neither them nor the body.
+/// What is ready to send to one site. It cannot be changed once built, which is what lets a
+/// [`Consent`] name it. Holds the credentials, so `Debug` is written by hand and prints neither
+/// them nor the body.
 pub struct Prepared {
     credentials: Credentials,
-    /// The capture's WiGLE CSV, gzipped.
-    pub body: Vec<u8>,
-    /// The CSV's length before compression, the size WDGWars' limit counts.
-    pub csv_bytes: u64,
-    pub summary: ExportSummary,
-    /// The upload to this site this one follows on from. `None` with [`Options::resend`], which
-    /// follows on from nothing.
-    pub previous: Option<UploadRecord>,
+    body: Vec<u8>,
+    csv_bytes: u64,
+    summary: ExportSummary,
+    previous: Option<UploadRecord>,
 }
 
 impl Prepared {
@@ -177,6 +175,31 @@ impl Prepared {
     #[must_use]
     pub fn site(&self) -> UploadSite {
         self.credentials.site()
+    }
+
+    /// The capture's WiGLE CSV, gzipped: the file as sent.
+    #[must_use]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The CSV's length before compression, the size WDGWars' limit counts.
+    #[must_use]
+    pub fn csv_bytes(&self) -> u64 {
+        self.csv_bytes
+    }
+
+    /// What went into the CSV.
+    #[must_use]
+    pub fn summary(&self) -> &ExportSummary {
+        &self.summary
+    }
+
+    /// The upload to this site this one follows on from. `None` with [`Options::resend`], which
+    /// follows on from nothing.
+    #[must_use]
+    pub fn previous(&self) -> Option<&UploadRecord> {
+        self.previous.as_ref()
     }
 
     /// The size of the file as sent.
@@ -579,30 +602,23 @@ pub enum Progress {
 /// What a prepared upload came to.
 #[derive(Debug)]
 pub enum Outcome {
-    NotSent(SendError),
+    /// [`send`] did not end with the upload recorded.
+    SendFailed(SendError),
     /// WiGLE queued it. `unrecorded`: its `queued` result could not be written; the row is, so
     /// it is still a cutoff.
-    Wigle {
-        queued: wigle::Queued,
-        unrecorded: Option<StoreError>,
-    },
+    Wigle { queued: wigle::Queued, unrecorded: Option<StoreError> },
     /// WDGWars queued it as `job`, whose status is at `url`. `unrecorded`: how the wait ended
     /// could not be written.
-    Wdgwars {
-        job: u64,
-        url: String,
-        waited: wdgwars::Waited,
-        unrecorded: Option<StoreError>,
-    },
+    Wdgwars { job: u64, url: String, waited: wdgwars::Waited, unrecorded: Option<StoreError> },
 }
 
 impl Outcome {
-    /// Whether a retry is called for: never queued, the import failed, or its end is unrecorded.
-    /// A WiGLE upload whose `queued` result is unwritten is none.
+    /// Whether a retry is called for: not sent, sent and left unrecorded, the import failed, or its
+    /// end is unrecorded. A WiGLE upload whose `queued` result is unwritten is none.
     #[must_use]
     pub fn failed(&self) -> bool {
         match self {
-            Self::NotSent(_) => true,
+            Self::SendFailed(_) => true,
             Self::Wigle { .. } => false,
             Self::Wdgwars { waited, unrecorded, .. } => {
                 matches!(waited, wdgwars::Waited::Failed(_)) || unrecorded.is_some()
@@ -621,7 +637,7 @@ pub fn upload(
     mut say: impl FnMut(Progress),
 ) -> Outcome {
     let (client, job) = match send(prepared, consent, db, endpoints) {
-        Err(error) => return Outcome::NotSent(error),
+        Err(error) => return Outcome::SendFailed(error),
         Ok(Sent::Wigle { queued, unrecorded }) => return Outcome::Wigle { queued, unrecorded },
         Ok(Sent::Wdgwars { client, job }) => (client, job),
     };
@@ -735,8 +751,8 @@ mod tests {
         let db = capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
         let conn = open_readonly(&db).unwrap();
@@ -756,8 +772,8 @@ mod tests {
         let db = capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
         let built = body(&open_readonly(&db).unwrap(), &ExportFilter::default(), "test").unwrap();
@@ -769,7 +785,7 @@ mod tests {
     #[test]
     fn upload_body_names_app_version_when_options_give_one() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let built = body(&open_readonly(&db).unwrap(), &ExportFilter::default(), "9.8.7").unwrap();
         let mut csv = String::new();
         GzDecoder::new(built.gz.as_slice()).read_to_string(&mut csv).unwrap();
@@ -837,7 +853,7 @@ mod tests {
     #[test]
     fn upload_refuses_every_site_when_capture_simulated() {
         let dir = tempfile::tempdir().unwrap();
-        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let records = vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
         let db = capture_simulated(dir.path(), records, true);
         for resend in [false, true] {
             let options = Options { resend, ..options() };
@@ -855,7 +871,7 @@ mod tests {
     #[test]
     fn upload_sends_nothing_when_capture_has_no_positioned_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
         assert!(matches!(prepare_one(&keyed(), &db, false), Prepare::NoRows(_)));
     }
 
@@ -865,8 +881,8 @@ mod tests {
         let db = capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
         // `sighting` stores every network as `example`.
@@ -882,7 +898,7 @@ mod tests {
     #[test]
     fn upload_prepare_covers_every_configured_site_when_none_named() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let outcomes = outcomes_of(&both(), &db, &options());
         let sites: Vec<UploadSite> = outcomes.iter().map(|(site, _)| *site).collect();
         assert_eq!(sites, [UploadSite::Wdgwars, UploadSite::Wigle]);
@@ -892,7 +908,7 @@ mod tests {
     #[test]
     fn upload_prepare_covers_only_named_site_when_to_given() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let options = Options { to: Some(UploadSite::Wigle), ..options() };
         let outcomes = outcomes_of(&both(), &db, &options);
         let [(UploadSite::Wigle, Prepare::Ready(prepared))] = outcomes.as_slice() else {
@@ -904,7 +920,7 @@ mod tests {
     #[test]
     fn upload_prepare_refuses_wigle_when_token_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let keys = ApiKeys { wigle_token: "  ".to_owned(), ..both() };
         let outcomes = outcomes_of(&keys, &db, &options());
         assert!(
@@ -950,8 +966,8 @@ mod tests {
         let db = capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
             ],
         );
         let mut outcomes = outcomes_of(&both(), &db, &options());
@@ -959,7 +975,7 @@ mod tests {
         let Prepare::Ready(wdgwars) = outcomes.pop().unwrap().1 else {
             panic!("WDGWars not ready")
         };
-        assert_eq!((wdgwars.summary.rows, wigle.summary.rows), (1, 2));
+        assert_eq!((wdgwars.summary().rows, wigle.summary().rows), (1, 2));
     }
 
     #[test]
@@ -968,15 +984,15 @@ mod tests {
         let db = capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS + 10_000, Some(37.1)),
             ],
         );
         for (recapture, rows) in [(3_600, 1), (1, 2)] {
             let options = Options { recapture: Some(recapture), ..options() };
             for (site, outcome) in outcomes_of(&both(), &db, &options) {
                 let Prepare::Ready(prepared) = outcome else { panic!("{site:?} not ready") };
-                assert_eq!(prepared.summary.rows, rows, "{site:?} at {recapture} s");
+                assert_eq!(prepared.summary().rows, rows, "{site:?} at {recapture} s");
             }
         }
     }
@@ -987,9 +1003,9 @@ mod tests {
         let db = capture(
             dir,
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 60_000, Some(37.1)),
-                sighting([0x10, 0, 0, 0, 0, 3], EPOCH_MS + 120_000, Some(37.2)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS + 60_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 3], EPOCH_MS + 120_000, Some(37.2)),
             ],
         );
         let conn = open_readwrite(&db).unwrap();
@@ -1013,16 +1029,16 @@ mod tests {
         let Prepare::Ready(wigle) = outcome(outcomes, UploadSite::Wigle) else {
             panic!("WiGLE not ready")
         };
-        assert_eq!(wigle.summary.rows, 3);
-        assert_eq!(wigle.previous, None);
+        assert_eq!(wigle.summary().rows, 3);
+        assert_eq!(wigle.previous(), None);
     }
 
     #[test]
     fn upload_records_job_and_cutoff_when_submit_accepted() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let prepared = prepare_one(&keyed(), &db, false).ready();
-        assert_eq!(prepared.previous, None);
+        assert_eq!(prepared.previous(), None);
 
         let (base, server) = serve_once("202 Accepted", r#"{"ok":true,"job_id":42}"#);
         let sent = send_consented(&prepared, &db, &endpoints(&base, NOWHERE)).unwrap();
@@ -1041,7 +1057,7 @@ mod tests {
     #[test]
     fn upload_records_wigle_transaction_as_queued_when_wigle_accepts() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let options = Options { to: Some(UploadSite::Wigle), ..options() };
         let prepared = outcome(outcomes_of(&both(), &db, &options), UploadSite::Wigle).ready();
 
@@ -1089,7 +1105,7 @@ mod tests {
     #[test]
     fn upload_returns_wigle_success_with_error_when_queued_write_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let options = Options { to: Some(UploadSite::Wigle), ..options() };
         let prepared = outcome(outcomes_of(&both(), &db, &options), UploadSite::Wigle).ready();
         refuse_result_writes(&db);
@@ -1119,7 +1135,7 @@ mod tests {
     #[test]
     fn upload_sends_nothing_when_capture_not_writable() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let prepared = prepare_one(&keyed(), &db, false).ready();
         let mut permissions = std::fs::metadata(&db).unwrap().permissions();
         permissions.set_readonly(true);
@@ -1141,7 +1157,7 @@ mod tests {
     #[test]
     fn upload_send_refuses_and_sends_nothing_when_consent_is_for_another_upload() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let mut outcomes = outcomes_of(&both(), &db, &options());
         let wigle = outcomes.pop().unwrap().1.ready();
         let wdgwars = outcomes.pop().unwrap().1.ready();
@@ -1151,8 +1167,8 @@ mod tests {
         // Consent to WiGLE's upload sends neither WDGWars' nor, rebuilt, a larger one.
         let error = send(&wdgwars, Consent::to(&wigle), &db, &endpoints(&base, &base)).err();
         assert!(matches!(error, Some(SendError::NoConsent)), "{error:?}");
-        let mut grown = prepared(UploadSite::Wigle, Vec::new(), 0, wigle.summary.clone(), None);
-        grown.summary.rows += 1;
+        let larger = ExportSummary { rows: wigle.summary().rows + 1, ..wigle.summary().clone() };
+        let grown = prepared(UploadSite::Wigle, Vec::new(), 0, larger, None);
         let error = send(&grown, Consent::to(&wigle), &db, &endpoints(&base, &base)).err();
         assert!(matches!(error, Some(SendError::NoConsent)), "{error:?}");
 
@@ -1166,8 +1182,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(dir.path());
         let prepared = prepare_one(&keyed(), &db, false).ready();
-        assert_eq!(macs(&prepared.body), ["10:00:00:00:00:03"]);
-        assert_eq!(prepared.previous.map(|p| p.job).as_deref(), Some("7"));
+        assert_eq!(macs(prepared.body()), ["02:00:00:00:00:03"]);
+        assert_eq!(prepared.previous().map(|p| p.job.as_str()), Some("7"));
     }
 
     #[test]
@@ -1175,8 +1191,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(dir.path());
         let prepared = prepare_one(&keyed(), &db, true).ready();
-        assert_eq!(prepared.summary.rows, 3);
-        assert_eq!(prepared.previous, None);
+        assert_eq!(prepared.summary().rows, 3);
+        assert_eq!(prepared.previous(), None);
     }
 
     #[test]
@@ -1200,7 +1216,7 @@ mod tests {
     #[test]
     fn upload_reports_queued_then_outcome_when_job_is_followed() {
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
         let prepared = prepare_one(&keyed(), &db, false).ready();
         let (base, server) = serve_sequence(&[
             ("202 Accepted", r#"{"ok":true,"job_id":42}"#),
@@ -1254,9 +1270,9 @@ mod tests {
 
     #[test]
     fn upload_outcome_fails_when_not_sent() {
-        assert!(Outcome::NotSent(SendError::NoConsent).failed());
+        assert!(Outcome::SendFailed(SendError::NoConsent).failed());
         let site = SendError::Site(SiteError::TooLarge);
-        assert!(Outcome::NotSent(site).failed());
+        assert!(Outcome::SendFailed(site).failed());
     }
 
     #[test]

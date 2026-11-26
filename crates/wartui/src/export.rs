@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn export_writes_rows_when_capture_holds_test_data() {
         let dir = tempfile::tempdir().unwrap();
-        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let records = vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
         let db = capture_simulated(dir.path(), records, true);
         let out = dir.path().join("tonight.csv");
         // An empty file of its own, so the operator's `wartui.toml` plays no part.
@@ -663,7 +663,7 @@ mod tests {
         let args = Args { selection, out: Some(out.clone()) };
         super::run(args).unwrap();
         let csv = std::fs::read_to_string(&out).unwrap();
-        assert!(csv.contains("10:00:00:00:00:01"), "{csv}");
+        assert!(csv.contains("02:00:00:00:00:01"), "{csv}");
     }
 
     #[test]

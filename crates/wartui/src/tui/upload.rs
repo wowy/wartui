@@ -372,7 +372,7 @@ fn progress_line(progress: &Progress) -> String {
 /// `site`'s footer line once its upload of `db` has ended.
 fn outcome_line(site: UploadSite, outcome: &Outcome, db: &Path) -> String {
     match outcome {
-        Outcome::NotSent(error) => {
+        Outcome::SendFailed(error) => {
             format!("upload: {} failed: {}", site.label(), send_error_text(site, error, db))
         }
         Outcome::Wigle { queued, unrecorded } => {
@@ -485,8 +485,8 @@ mod tests {
         capture(
             dir.path(),
             vec![
-                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
-                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+                sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x02, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         )
     }
@@ -610,7 +610,7 @@ mod tests {
     fn upload_key_shows_notice_when_neither_site_has_rows() {
         use wartui_app::upload::testing::{capture, sighting};
         let dir = tempfile::tempdir().unwrap();
-        let db = capture(dir.path(), vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
+        let db = capture(dir.path(), vec![sighting([0x02, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
         let snapshot = busy();
         let mut ui = view(db, both(true), NOWHERE, NOWHERE);
         press_u(&mut ui, &snapshot);

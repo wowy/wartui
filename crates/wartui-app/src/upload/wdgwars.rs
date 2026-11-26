@@ -157,7 +157,7 @@ pub fn wait(
             Err(error) => {
                 // Once per distinct error.
                 if last_error.as_ref() != Some(&error) {
-                    tracing::warn!(job, error = %error, "WDGWars poll failed");
+                    tracing::warn!(job, error = ?error, "WDGWars poll failed");
                 }
                 say(Progress::PollFailed { job, error: error.clone() });
                 last_error = Some(error);
@@ -272,8 +272,8 @@ fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String, Site
     let status = response.status();
     if status.is_redirection() {
         let location = location(&response);
-        if location.contains("/login") {
-            return Err(SiteError::LoginRequired { location });
+        if let Some(login) = location.as_ref().filter(|at| at.contains("/login")) {
+            return Err(SiteError::LoginRequired { location: login.clone() });
         }
         return Err(SiteError::Redirected { location });
     }
@@ -284,7 +284,10 @@ fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String, Site
     Err(match status.as_u16() {
         401 | 403 => SiteError::CredentialsRejected { reason: site_reason(&text) },
         413 => SiteError::TooLarge,
-        code => SiteError::Status { code, said: Some(quote(&text)) },
+        // The body as it came, when there is one.
+        code => {
+            SiteError::Status { code, said: Some(quote(&text)).filter(|said| !said.is_empty()) }
+        }
     })
 }
 
@@ -487,7 +490,25 @@ mod tests {
         let (base, server) = serve_once_with("302 Found", "Location: /elsewhere\r\n", b"");
         let client = Client::new(&base, "secret".to_owned());
         let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
-        assert_eq!(error, SiteError::Redirected { location: "/elsewhere".to_owned() });
+        assert_eq!(error, SiteError::Redirected { location: Some("/elsewhere".to_owned()) });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn upload_client_reports_redirect_to_nowhere_when_location_missing() {
+        let (base, server) = serve_once_with("302 Found", "", b"");
+        let client = Client::new(&base, "secret".to_owned());
+        let error = client.submit(b"bytes", "x.csv.gz").unwrap_err();
+        assert_eq!(error, SiteError::Redirected { location: None });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn upload_client_reports_bare_status_when_error_body_is_empty() {
+        let (base, server) = serve_once("502 Bad Gateway", "  ");
+        let client = Client::new(&base, "secret".to_owned());
+        let error = client.poll(42).unwrap_err();
+        assert_eq!(error, SiteError::Status { code: 502, said: None });
         server.join().unwrap();
     }
 

@@ -96,7 +96,7 @@ pub fn run(args: Args) -> Result<()> {
         match outcome {
             Prepare::Ready(prepared) => {
                 eprint!("{label}: {}", describe(&prepared, &names));
-                notes(&prepared.summary);
+                notes(prepared.summary());
                 ready.push(prepared);
             }
             Prepare::NothingNew { previous, summary } => {
@@ -148,7 +148,7 @@ pub fn run(args: Args) -> Result<()> {
 /// everything else on standard error.
 fn report(site: UploadSite, outcome: &Outcome, db: &Path) {
     match outcome {
-        Outcome::NotSent(error) => {
+        Outcome::SendFailed(error) => {
             eprintln!("{} upload failed: {}", site.label(), send_error_text(site, error, db));
         }
         Outcome::Wigle { queued, unrecorded } => {

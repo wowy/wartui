@@ -64,7 +64,7 @@ pub(crate) fn names(db: &Path, outcomes: &[(UploadSite, Prepare)]) -> NodeNames 
 /// compressed size and the upload this one follows on from, a line each.
 pub(crate) fn describe(prepared: &Prepared, names: &NodeNames) -> String {
     let mut text = rows_line(prepared);
-    text.push_str(&details(&prepared.summary, names));
+    text.push_str(&details(prepared.summary(), names));
     text.push_str(&sizes(prepared));
     text
 }
@@ -77,13 +77,13 @@ pub(crate) fn brief(prepared: &Prepared) -> String {
 }
 
 fn rows_line(prepared: &Prepared) -> String {
-    format!("{} rows to upload\n", thousands(prepared.summary.rows))
+    format!("{} rows to upload\n", thousands(prepared.summary().rows))
 }
 
 fn sizes(prepared: &Prepared) -> String {
-    let mut text = format!("  {:<11}{}\n", "csv", size(prepared.csv_bytes));
+    let mut text = format!("  {:<11}{}\n", "csv", size(prepared.csv_bytes()));
     text.push_str(&format!("  {:<11}{}\n", "compressed", size(prepared.file_bytes())));
-    if let Some(previous) = &prepared.previous {
+    if let Some(previous) = prepared.previous() {
         text.push_str(&format!(
             "  {:<11}{} {}, {}; sending what came after\n",
             "previously",
@@ -195,7 +195,9 @@ pub(crate) fn site_error_text(site: UploadSite, error: &SiteError) -> String {
             "{label} redirected to its login page ({location}): the endpoint wants a logged-in \
              session rather than the API key"
         ),
-        SiteError::Redirected { location } => format!("{label} redirected to {location}"),
+        SiteError::Redirected { location } => {
+            format!("{label} redirected to {}", location.as_deref().unwrap_or("nowhere"))
+        }
         SiteError::CredentialsRejected { reason } => {
             let head = match site {
                 UploadSite::Wdgwars => "WDGWars rejected the API key",
@@ -464,9 +466,11 @@ mod tests {
             "WDGWars redirected to its login page (/login/): the endpoint wants a logged-in \
              session rather than the API key"
         );
-        let elsewhere = SiteError::Redirected { location: "/elsewhere".to_owned() };
+        let elsewhere = SiteError::Redirected { location: Some("/elsewhere".to_owned()) };
         assert_eq!(site_error_text(W, &elsewhere), "WDGWars redirected to /elsewhere");
         assert_eq!(site_error_text(G, &elsewhere), "WiGLE redirected to /elsewhere");
+        let nowhere = SiteError::Redirected { location: None };
+        assert_eq!(site_error_text(W, &nowhere), "WDGWars redirected to nowhere");
     }
 
     #[test]
@@ -500,6 +504,9 @@ mod tests {
         assert_eq!(site_error_text(G, &status), "WiGLE answered 500: it broke");
         let bare = SiteError::Status { code: 400, said: None };
         assert_eq!(site_error_text(G, &bare), "WiGLE answered 400");
+        // WDGWars' error status with an empty body.
+        let empty = SiteError::Status { code: 502, said: None };
+        assert_eq!(site_error_text(W, &empty), "WDGWars answered 502");
     }
 
     #[test]

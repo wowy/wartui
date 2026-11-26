@@ -18,7 +18,8 @@ pub(super) const GZIP: &str = "application/gzip";
 /// end knows which site it asked.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SiteError {
-    /// The upload's request failed in transport, with the transport's reason.
+    /// The upload's request failed in transport, with the transport's reason. When it was the
+    /// answer that was lost, the site may still have taken the file.
     #[error("sending to {url}: {error}")]
     Unsent { url: String, error: String },
     /// A poll's request failed in transport, with the transport's reason.
@@ -27,9 +28,9 @@ pub enum SiteError {
     /// WDGWars redirected to its login page: the endpoint wants a logged-in session.
     #[error("redirected to the login page at {location}")]
     LoginRequired { location: String },
-    /// The site redirected elsewhere.
-    #[error("redirected to {location}")]
-    Redirected { location: String },
+    /// The site redirected elsewhere, to the `Location` it named, if it named one.
+    #[error("redirected to {location:?}")]
+    Redirected { location: Option<String> },
     /// The site refused the credentials (WDGWars' 401 or 403, WiGLE's 401), with its reason.
     #[error("credentials rejected")]
     CredentialsRejected { reason: Option<String> },
@@ -77,12 +78,10 @@ pub(super) fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Where a redirect points.
-pub(super) fn location(response: &ureq::http::Response<ureq::Body>) -> String {
-    response
-        .headers()
-        .get(ureq::http::header::LOCATION)
-        .map_or_else(|| "nowhere".to_owned(), |l| String::from_utf8_lossy(l.as_bytes()).into())
+/// Where a redirect points, if it names a place.
+pub(super) fn location(response: &ureq::http::Response<ureq::Body>) -> Option<String> {
+    let location = response.headers().get(ureq::http::header::LOCATION)?;
+    Some(String::from_utf8_lossy(location.as_bytes()).into_owned())
 }
 
 /// A response's body, read up to a limit, as the status asked for it: a 2xx body whole, or a

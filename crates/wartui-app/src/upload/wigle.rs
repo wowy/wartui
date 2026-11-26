@@ -236,7 +236,7 @@ mod tests {
     fn wigle_client_reports_redirect_when_submit_redirects() {
         let (base, server) = serve_once_with("302 Found", "Location: /elsewhere\r\n", b"");
         let error = client(&base).submit(b"bytes", "x.csv.gz").unwrap_err();
-        assert_eq!(error, SiteError::Redirected { location: "/elsewhere".to_owned() });
+        assert_eq!(error, SiteError::Redirected { location: Some("/elsewhere".to_owned()) });
         // `serve_once` panics, failing the join, if the redirect was followed.
         server.join().unwrap();
     }
