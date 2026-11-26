@@ -27,8 +27,7 @@
 //! routing through (1,1) to avoid the other. Leave both alone, and set
 //! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
 //! `wartui-desktop`'s `serial` applies the rule in its one function that opens a port, and
-//! [`pipe::Ports::open`](crate::pipe::Ports::open) and `wartui_core::gps::ReceiverPorts` require it
-//! of any adapter.
+//! [`pipe::Ports::open`](crate::pipe::Ports::open) requires it of any adapter.
 //!
 //! **What a device is for is decided by its USB IDs.** The CH343's pair
 //! [`CH343_VID`]:[`CH343_PID`] could be the P4 bridge, and Espressif's vendor ID is a node.

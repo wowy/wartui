@@ -1,6 +1,6 @@
 //! The host's serial ports through the `serialport` crate: [`SerialPorts`], the adapter under the
-//! host link ([`Ports`]) and the GPS search ([`ReceiverPorts`]), and [`open_reader`] for a caller
-//! that only listens.
+//! host link ([`Ports`]) and the puck reader ([`gps`]), and [`open_reader`] for a
+//! caller that only listens.
 //!
 //! **Every port is opened by one function, `open_port`, which sets `FlowControl::None` and never
 //! sets DTR or RTS.** Moving one modem line without the other is the reset sequence on a P4 board
@@ -19,8 +19,9 @@ use std::time::Duration;
 use wartui_bridge::TransportError;
 use wartui_bridge::pipe::{Abort, Ports, READ_TIMEOUT, SerialParts, SerialPipe};
 use wartui_bridge::ports::{self, PortCandidate};
-use wartui_core::gps::ReceiverPorts;
 use wartui_proto::link::HOST_BAUD;
+
+use crate::gps::{self, ReceiverPorts};
 
 /// Where udev keeps the names that survive a replug.
 const BY_ID: &str = "/dev/serial/by-id";
@@ -33,12 +34,6 @@ pub struct SerialPorts;
 /// [`SerialPorts`], shared the way the transports take it.
 #[must_use]
 pub fn serial_ports() -> Arc<dyn Ports> {
-    Arc::new(SerialPorts)
-}
-
-/// [`SerialPorts`], shared the way the GPS reader takes it.
-#[must_use]
-pub fn receiver_ports() -> Arc<dyn ReceiverPorts> {
     Arc::new(SerialPorts)
 }
 
@@ -60,7 +55,7 @@ impl ReceiverPorts for SerialPorts {
     }
 
     fn open(&self, path: &str, baud: u32) -> io::Result<Box<dyn Read + Send>> {
-        open_reader(path, baud, wartui_core::gps::READ_TIMEOUT)
+        open_reader(path, baud, gps::READ_TIMEOUT)
     }
 }
 

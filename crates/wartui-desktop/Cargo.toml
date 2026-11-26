@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 # BlueZ over D-Bus on Linux, which links libdbus; CoreBluetooth on macOS.
 btleplug = "0.13.5"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 futures-util = "0.3.34"
 serialport = "4.10.1"
 thiserror = "2.0.20"

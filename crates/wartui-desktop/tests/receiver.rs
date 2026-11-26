@@ -1,7 +1,7 @@
 //! Finding an NMEA receiver, against recorded streams rather than a serial port.
 
 use wartui_bridge::ports::{self, ESPRESSIF_VID, PortCandidate, candidate};
-use wartui_core::discover::{
+use wartui_desktop::discover::{
     BAUD_LADDER, SENTENCES_ON_A_NAMED_PORT, SENTENCES_TO_BELIEVE, candidates, looks_like_nmea,
     sentences_in, settle,
 };

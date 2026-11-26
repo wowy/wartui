@@ -3029,6 +3029,7 @@ name = "wartui-desktop"
 version = "0.1.0"
 dependencies = [
  "btleplug",
+ "chrono",
  "dbus",
  "futures-util",
  "libc",

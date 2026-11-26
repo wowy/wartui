@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use wartui_bridge::ports::{self, PortCandidate};
 
-use crate::nmea::Nmea;
+use wartui_core::gps::Lines;
+use wartui_core::nmea::Nmea;
 
 /// Line rates to try, in the order they are worth trying.
 ///
@@ -60,7 +61,7 @@ const RECEIVER_VIDS: [u16; 3] = [
 /// as the live stream would treat it: the leading fragment fails.
 #[must_use]
 pub fn sentences_in(sample: &[u8]) -> usize {
-    let mut lines = crate::gps::Lines::default();
+    let mut lines = Lines::default();
     let mut nmea = Nmea::new();
     let mut believed = 0;
     lines.push(sample, |line| {
