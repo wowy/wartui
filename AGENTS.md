@@ -110,7 +110,9 @@ check in `firmware/node/README.md` § "Bench check", which no CI job can run.
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
 when something it compiles changes, and `firmware/common` when it, `wartui-proto` or a
 firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware directory, so a
-`wartui-proto` change that reaches the firmware is checked there too.
+`wartui-proto` change that reaches the firmware is checked there too. The Swift package and its
+simulator test run on `main` and when asked for by hand, never for a PR
+(`crates/wartui-ffi/README.md`).
 
 ## Architecture
 

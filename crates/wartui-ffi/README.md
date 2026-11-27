@@ -189,7 +189,9 @@ emulator.
 
 **An iOS app** adds `swift/` as a local package (Xcode's "Add Package Dependencies", "Add
 Local", or `.package(path: "…/crates/wartui-ffi/swift")`) and imports `WartuiCore`. Its test runs
-on a simulator: `xcodebuild test -scheme WartuiCore -destination 'platform=iOS Simulator,…'`.
+on a simulator: `xcodebuild test -scheme WartuiCore -destination 'platform=iOS Simulator,…'`. CI
+builds the package and runs that test on `main` only; a branch asks for it with
+`gh workflow run bindings.yml --ref <branch>`.
 
 **SQLite's temporary storage.** An export and an upload sort through temporary files. An Android
 app names their directory once, before its first export or upload:
