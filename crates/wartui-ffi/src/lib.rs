@@ -55,6 +55,7 @@ mod radio;
 mod runtime;
 mod session;
 mod settings;
+mod temp;
 #[cfg(feature = "testing")]
 mod testing;
 mod update;

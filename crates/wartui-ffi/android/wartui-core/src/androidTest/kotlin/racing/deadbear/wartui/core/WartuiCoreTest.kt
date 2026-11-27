@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -91,8 +93,8 @@ class WartuiCoreTest {
 
     @Test
     fun capture_runs_over_the_simulator_and_exports() = runBlocking {
-        // SQLite keeps an export's temporary storage in memory on Android, so no temporary
-        // directory is needed.
+        // An export sorts through temporary files, so it refuses until the app names their
+        // directory.
         Os.unsetenv("SQLITE_TMPDIR")
         Os.unsetenv("TMPDIR")
         val db = freshDb("simulated.db")
@@ -122,7 +124,7 @@ class WartuiCoreTest {
         assertTrue("no rows were written", end.written > 0UL)
 
         val csv = File(context.cacheDir, "simulated.csv").also { it.delete() }
-        val exported = withTimeout(DEADLINE_MS) {
+        suspend fun export() = withTimeout(DEADLINE_MS) {
             exportWigleCsv(
                 Settings.unsaved(),
                 db.absolutePath,
@@ -131,6 +133,17 @@ class WartuiCoreTest {
                 "android-test",
             )
         }
+        val refused = try {
+            export()
+            null
+        } catch (error: ExportException.NoTemporaryDirectory) {
+            error
+        }
+        assertNotNull("the export ran with no temporary directory", refused)
+        assertFalse("the refused export wrote $csv", csv.exists())
+
+        Os.setenv("SQLITE_TMPDIR", context.cacheDir.absolutePath, true)
+        val exported = export()
         assertTrue("no export at $csv", csv.isFile)
         assertTrue("the export wrote no rows", exported.rows > 0UL)
         assertEquals(3, exported.nodes.size)

@@ -113,15 +113,15 @@ check_pages() {
   ((aligned)) || fail "llvm-readelf found no LOAD segment in $library"
 }
 
-# libsqlite3-sys builds SQLite for Android with `SQLITE_TEMP_STORE=3`, temporary storage in
-# memory, because an app has no temporary directory SQLite finds. An export rests on it
-# (`crates/wartui-core/src/export.rs`), and SQLite keeps its compile options as strings.
+# Fail a library whose SQLite is not built with `SQLITE_TEMP_STORE=1`, temporary storage in files
+# unless a connection asks otherwise: an export would hold its whole sort in memory
+# (`crates/wartui-core/src/export.rs`). SQLite keeps its compile options as strings.
 check_temp_store() {
   local library=$1
   # Not `grep -q`, which stops reading early and fails the pipe.
-  "$ndk_bin/llvm-strings" "$library" | grep -x 'TEMP_STORE=3' > /dev/null ||
-    fail "$library's SQLite is not built with SQLITE_TEMP_STORE=3, so an export would need" \
-      "a temporary directory nobody set"
+  "$ndk_bin/llvm-strings" "$library" | grep -x 'TEMP_STORE=1' > /dev/null ||
+    fail "$library's SQLite is not built with SQLITE_TEMP_STORE=1, so an export would hold" \
+      "its whole sort in memory"
 }
 
 # Build `libwartui_ffi.so` for `triple`, linked by the minimum API's clang.
@@ -133,11 +133,15 @@ build_android() {
   clang=$ndk_bin/$triple$min_sdk-clang
   [[ -x $clang ]] || fail "the NDK at $ndk has no $triple$min_sdk-clang"
   rust_target "$triple"
+  # libsqlite3-sys builds SQLite for Android with `SQLITE_TEMP_STORE=3`, temporary storage always
+  # in memory, and appends these flags after its own, so SQLite's default holds: files. The app
+  # names their directory (`crates/wartui-ffi/src/temp.rs`).
   (cd "$root" && env \
     "CARGO_TARGET_${upper}_LINKER=$clang" \
     "CARGO_TARGET_${upper}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" \
     "CC_$lower=$clang" \
     "AR_$lower=$ndk_bin/llvm-ar" \
+    "LIBSQLITE3_FLAGS=-USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1" \
     cargo build -p wartui-ffi --release --target "$triple" --locked)
   # Stripped here, with the NDK it was linked by, so the AAR ships it small; the Gradle build
   # leaves it as it is.

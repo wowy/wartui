@@ -190,10 +190,17 @@ emulator.
 Local", or `.package(path: "…/crates/wartui-ffi/swift")`) and imports `WartuiCore`. Its test runs
 on a simulator: `xcodebuild test -scheme WartuiCore -destination 'platform=iOS Simulator,…'`.
 
-**SQLite's temporary storage.** On Android SQLite keeps it in memory, so an app sets nothing up
-and an export's or an upload's memory grows with the capture, to the order of 170 MiB for a full
-drive of two million sightings; the script fails a library built otherwise. On iOS it uses the
-app's `TMPDIR` (`crates/wartui-core/src/export.rs`).
+**SQLite's temporary storage.** An export and an upload sort through temporary files. An Android
+app names their directory once, before its first export or upload:
+
+```kotlin
+Os.setenv("SQLITE_TMPDIR", context.cacheDir.absolutePath, true)
+```
+
+Without it, `exportWigleCsv` throws `ExportException.NoTemporaryDirectory` and `prepareUpload`
+throws `UploadRefusal.NoTemporaryDirectory`, before any work. The script fails a library whose
+SQLite is not built to keep temporary storage in files. On iOS SQLite uses the app's `TMPDIR`
+(`src/temp.rs`, `crates/wartui-core/src/export.rs`).
 
 ## Smoke tests
 

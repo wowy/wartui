@@ -36,6 +36,7 @@ use crate::export::Exported;
 use crate::log::SinkError;
 use crate::runtime::runtime;
 use crate::settings::{Settings, chain};
+use crate::temp;
 
 /// A site a capture is uploaded to.
 #[uniffi::remote(Enum)]
@@ -257,6 +258,11 @@ pub enum UploadRefusal {
     /// The gzip could not be finished.
     #[error("compressing the upload: {detail}")]
     Compress { detail: String },
+    /// On Android, neither `SQLITE_TMPDIR` nor `TMPDIR` names a directory SQLite can sort in.
+    /// An Android app sets `SQLITE_TMPDIR` to a directory of its own, such as its cache
+    /// directory, before its first export or upload.
+    #[error("no temporary directory: set SQLITE_TMPDIR")]
+    NoTemporaryDirectory,
     /// The work preparing it panicked.
     #[error("preparing the upload panicked")]
     Panicked,
@@ -445,8 +451,8 @@ impl PreparedUpload {
 /// Contacts nothing.
 ///
 /// # Errors
-/// [`UploadRefusal`] refuses the whole upload: no site has credentials, or the capture holds
-/// test data or cannot be read.
+/// [`UploadRefusal`] refuses the whole upload: no site has credentials, the capture holds test
+/// data or cannot be read, or on Android no temporary directory is set.
 #[uniffi::export]
 pub async fn prepare_upload(
     settings: Arc<Settings>,
@@ -490,6 +496,9 @@ async fn prepare(
     let saved = settings.app().saved();
     let (keys, excluded) = (saved.api_keys, saved.excluded_ssids);
     let preparing = runtime().spawn_blocking(move || {
+        if cfg!(target_os = "android") && !temp::found() {
+            return Err(UploadRefusal::NoTemporaryDirectory);
+        }
         let db = PathBuf::from(db_path);
         let outcomes = app::prepare(&keys, &db, &options.into_app(&excluded))?;
         let names = names(&db, &outcomes);
@@ -523,7 +532,7 @@ async fn prepare(
         Ok(prepared.collect())
     });
     match preparing.await {
-        Ok(prepared) => prepared.map_err(|refusal: Refusal| refusal.into()),
+        Ok(prepared) => prepared,
         Err(_) => Err(UploadRefusal::Panicked),
     }
 }

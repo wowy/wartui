@@ -25,18 +25,17 @@
 //! into a temporary table on the export's connection and come back in order. The store is not
 //! written: a temporary table belongs to the connection.
 //!
-//! Where that table lives depends on the platform:
+//! SQLite spills that table and its sorter past the page cache to temporary files, so a longer
+//! capture costs temporary disk, not memory: about 170 MiB for a full drive of two million
+//! sightings, where a `Vec` of its rows took 183 MiB (`docs/store-io-findings.md`). Where the
+//! files go depends on the platform:
 //!
-//! - **Desktop and iOS:** SQLite spills past its page cache to a temporary file, so a longer
-//!   capture costs temporary disk, not memory. In a `Vec`, a full drive's rows took 183 MiB
-//!   (`docs/store-io-findings.md`). The file goes to `SQLITE_TMPDIR`, then `TMPDIR`, then
-//!   `/var/tmp`, which on a Pi booting from its card is the card. iOS gives every app a `TMPDIR`.
-//! - **Android:** libsqlite3-sys compiles the bundled SQLite with `SQLITE_TEMP_STORE=3`, which
-//!   keeps temporary storage in memory whatever the pragma says, because an app has no temporary
-//!   directory SQLite finds. Both sorts, the sightings' and the rows', stay in memory, so an
-//!   export's memory grows with the capture: what a laptop wrote as temporary files, about
-//!   170 MiB for a full drive of two million sightings (`docs/store-io-findings.md`), is memory
-//!   there. `crates/wartui-ffi/package/build.sh` fails a library built without it.
+//! - **Desktop and iOS:** `SQLITE_TMPDIR`, then `TMPDIR`, then `/var/tmp`, which on a Pi booting
+//!   from its card is the card. iOS gives every app a `TMPDIR`.
+//! - **Android:** libsqlite3-sys compiles the bundled SQLite to keep temporary storage in memory
+//!   whatever the pragma says. The phone package builds it with files
+//!   (`crates/wartui-ffi/package/build.sh`), and the app names their directory in
+//!   `SQLITE_TMPDIR` (`crates/wartui-ffi/src/temp.rs`).
 //!
 //! The [`ExportSummary`] counts are exact, because the fold walks networks in order and knows where
 //! each begins. Their cost is the node and position-source columns riding through the sort
@@ -244,9 +243,8 @@ pub fn wigle_csv<W: Write>(
     let recapture_ms =
         i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
 
-    // Set before the table exists, since changing it discards temporary tables. Off Android it
-    // makes the table a file, and the memory bound rests on it; on Android the bundled build keeps
-    // it in memory whatever this says (the module's `//!`).
+    // Set before the table exists, since changing it discards temporary tables. It makes the
+    // table a file, and the memory bound rests on it (the module's `//!`).
     conn.pragma_update(None, "temp_store", "FILE")?;
     // One transaction, so the inserts are one commit and a failed export rolls back the table too.
     let tx = conn.unchecked_transaction()?;
