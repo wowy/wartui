@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 // `generated/` by `package/build.sh`, which git ignores. No hand-written source ships in it.
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.android.junit)
 }
 
 val jvm = libs.versions.jvm.get()
@@ -49,7 +50,8 @@ dependencies {
     // The binding marks its API 34 cleaner with `@RequiresApi`.
     implementation(libs.annotation)
 
-    androidTestImplementation(libs.junit)
+    // The test is JUnit 5. The `android-junit` plugin adds its runner, which `AndroidJUnitRunner`
+    // starts; that runner is built on JUnit 4 and still brings `junit:junit` with it.
+    androidTestImplementation(libs.jupiter.api)
     androidTestImplementation(libs.androidx.test.runner)
-    androidTestImplementation(libs.androidx.test.junit)
 }

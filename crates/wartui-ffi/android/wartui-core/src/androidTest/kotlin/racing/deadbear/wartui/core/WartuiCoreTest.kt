@@ -1,24 +1,21 @@
 package racing.deadbear.wartui.core
 
 import android.system.Os
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
-import org.junit.runner.RunWith
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
 
 /** The longest any wait takes. */
 const val DEADLINE_MS = 30_000L
 
 /** The shipped binding on ART, through JNA, with no `testing` feature. */
-@RunWith(AndroidJUnit4::class)
 class WartuiCoreTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
@@ -85,8 +82,8 @@ class WartuiCoreTest {
             excludedSsids = listOf("example-network"),
         )
         val outcome = settings.save(edit)
-        assertTrue("the save came to $outcome", outcome is Saved.At)
-        assertTrue("the store holds ${store.text}", store.text?.contains("example-network") == true)
+        assertTrue(outcome is Saved.At, "the save came to $outcome")
+        assertTrue(store.text?.contains("example-network") == true, "the store holds ${store.text}")
         // Read back through the store's `load`.
         assertEquals(listOf("example-network"), Settings.open(store, null).saved().excludedSsids)
     }
@@ -121,7 +118,7 @@ class WartuiCoreTest {
             view.position.located && view.nodes.size == 3 && view.nodes.all { it.sightings > 0UL }
         }
         val end = withTimeout(DEADLINE_MS) { session.stop() }
-        assertTrue("no rows were written", end.written > 0UL)
+        assertTrue(end.written > 0UL, "no rows were written")
 
         val csv = File(context.cacheDir, "simulated.csv").also { it.delete() }
         suspend fun export() = withTimeout(DEADLINE_MS) {
@@ -139,20 +136,20 @@ class WartuiCoreTest {
         } catch (error: ExportException.NoTemporaryDirectory) {
             error
         }
-        assertNotNull("the export ran with no temporary directory", refused)
-        assertFalse("the refused export wrote $csv", csv.exists())
+        assertNotNull(refused, "the export ran with no temporary directory")
+        assertFalse(csv.exists(), "the refused export wrote $csv")
 
         Os.setenv("SQLITE_TMPDIR", context.cacheDir.absolutePath, true)
         val exported = export()
-        assertTrue("no export at $csv", csv.isFile)
-        assertTrue("the export wrote no rows", exported.rows > 0UL)
+        assertTrue(csv.isFile, "no export at $csv")
+        assertTrue(exported.rows > 0UL, "the export wrote no rows")
         assertEquals(3, exported.nodes.size)
     }
 
     @Test
     fun log_sink_hears_the_library_when_a_capture_runs() = runBlocking {
         val sink = Lines()
-        assertTrue("a log sink was already set", logTo(sink, LogLevel.DEBUG))
+        assertTrue(logTo(sink, LogLevel.DEBUG), "a log sink was already set")
         val session = Session.start(
             capture(freshDb("logged.db")),
             Link.simulated(1u),

@@ -185,7 +185,7 @@ aligned to less. JNA 5.19.1's `libjnidispatch.so` is aligned too.
 `android/` is the Gradle project that builds the AAR, with its wrapper and dependency
 verification (`gradle/verification-metadata.xml`); `gradle/libs.versions.toml` pins every version
 it builds with. Its `./gradlew connectedAndroidTest` runs the shipped binding on ART in a running
-emulator.
+emulator; the test is JUnit 5, which the `de.mannodermaus.android-junit` plugin runs on a device.
 
 **An iOS app** adds `swift/` as a local package (Xcode's "Add Package Dependencies", "Add
 Local", or `.package(path: "…/crates/wartui-ffi/swift")`) and imports `WartuiCore`. Its test runs
