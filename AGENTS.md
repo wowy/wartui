@@ -114,8 +114,8 @@ firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware direct
 
 ## Architecture
 
-Seven host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
-own.
+Seven host crates, strictly layered, the binding's generator beside them, and firmware that shares
+the bottom one and a crate of its own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `bus` (the SPI transfers between a P4 bridge and its nodes, their acknowledgment, the
@@ -187,16 +187,19 @@ own.
   `wartui-ffi` compile for a phone; CI checks all four for `aarch64-linux-android` and
   `aarch64-apple-ios`.
 - **`crates/wartui-ffi`** — the library a phone app loads: `wartui-app` through UniFFI, for Kotlin
-  and Swift. It is the only crate that names UniFFI: the app's types stay free of it and cross as
-  remote declarations here, which repeat each field list, so a field added on one side only fails
-  to compile. It holds no hand-written `unsafe`. Everything it spawns runs on its one tokio
-  runtime, and no exported function blocks on it. A call into the phone's code returns at once
-  and fails as a value, so the phone's Bluetooth stack answers each request later, by its id
-  (`src/radio.rs`, an adapter under `pipe::Radio`'s contract). `smoke/run.sh` runs a capture
-  through the generated Kotlin and Swift (`crates/wartui-ffi/README.md`). `package/build.sh`
-  makes what an app depends on, an Android AAR (the Gradle project in `android/`) and the Swift
-  package in `swift/` over an XCFramework, each with a test that runs on an emulator or a
-  simulator. Nothing generated is committed.
+  and Swift. It and its generator are the only crates that name UniFFI: the app's types stay free of
+  it and cross as remote declarations here, which repeat each field list, so a field added on one
+  side only fails to compile. It holds no hand-written `unsafe`. Everything it spawns runs on its
+  one tokio runtime, and no exported function blocks on it. A call into the phone's code returns at
+  once and fails as a value, so the phone's Bluetooth stack answers each request later, by its id
+  (`src/radio.rs`, an adapter under `pipe::Radio`'s contract). `smoke/run.sh` runs a capture through
+  the generated Kotlin and Swift (`crates/wartui-ffi/README.md`). `package/build.sh` makes what an
+  app depends on, an Android AAR (the Gradle project in `android/`) and the Swift package in
+  `swift/` over an XCFramework, each with a test that runs on an emulator or a simulator. Nothing
+  generated is committed.
+- **`crates/wartui-bindgen`** — `uniffi-bindgen`, the generator that makes the binding's Kotlin and
+  Swift, on `wartui-ffi`'s `uniffi`. It reads the built library and `uniffi.toml`, so it depends on
+  nothing of the binding's, and building it for the host compiles none of that stack.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `power-cycle`/`fan`/`pool`/`sd`/`sd-log`/`scan`/`ports`/`flash-fleet`/`flash-bridge`/`ota`/
   `bluetooth`) and the ratatui view. `sd log [on|off]` reads or sets the SD log, and

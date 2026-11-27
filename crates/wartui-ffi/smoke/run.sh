@@ -50,7 +50,8 @@ case "$which" in
   all) need cargo kotlinc java swiftc ;;
 esac
 
-(cd "$root" && cargo build -p wartui-ffi --features testing,cli --locked)
+(cd "$root" && cargo build -p wartui-ffi --features testing --locked)
+(cd "$root" && cargo build -p wartui-bindgen --locked)
 bindgen=$target/debug/uniffi-bindgen
 
 # Generate `language`'s binding from the built library into `target/ffi-smoke/<language>/`.

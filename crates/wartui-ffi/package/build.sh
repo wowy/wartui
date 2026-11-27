@@ -52,8 +52,9 @@ case "$which" in
   all) need cargo rustup java xcodebuild ;;
 esac
 
-# The bindings generator, built for the host from this crate's own `uniffi`.
-(cd "$root" && cargo build -p wartui-ffi --features cli --locked)
+# The bindings generator, built for the host on the binding's `uniffi`. It is all the host
+# needs: the generator reads the phone library.
+(cd "$root" && cargo build -p wartui-bindgen --locked)
 bindgen=$target/debug/uniffi-bindgen
 
 # Add a Rust target when rustup lacks it.

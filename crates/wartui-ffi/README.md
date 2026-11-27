@@ -128,10 +128,11 @@ the app is built against.
 
 ## Generating the bindings
 
-Build the library, then run the crate's own `uniffi-bindgen` on it in library mode:
+Build the library and `uniffi-bindgen` (`crates/wartui-bindgen`, on the same `uniffi`), then run
+the generator on the library in library mode:
 
 ```sh
-cargo build -p wartui-ffi --features cli
+cargo build -p wartui-ffi -p wartui-bindgen
 target/debug/uniffi-bindgen generate --library target/debug/libwartui_ffi.dylib \
   --language kotlin --out-dir out/kotlin       # or --language swift; .so on Linux
 ```

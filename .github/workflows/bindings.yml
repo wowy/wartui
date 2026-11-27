@@ -39,8 +39,9 @@ jobs:
         run: crates/wartui-ffi/smoke/run.sh all
 
   # The package's test is always built and linked for a simulator, which costs a minute. It runs
-  # in one only where the binding itself changed, on `main` and when asked for by hand: a
-  # simulator's first boot on a fresh runner costs five to eight minutes for four seconds of test.
+  # in one only where the binding, its generator or a dependency changed, on `main` and when asked
+  # for by hand: a simulator's first boot on a fresh runner costs five to eight minutes for four
+  # seconds of test.
   package-ios:
     name: Swift package and its test for an iOS simulator
     runs-on: xcode-27
@@ -87,7 +88,8 @@ jobs:
         run: |
           if [[ $EVENT != pull_request ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif ! git diff --quiet HEAD^1 HEAD -- crates/wartui-ffi .github/workflows/bindings.yml; then
+          elif ! git diff --quiet HEAD^1 HEAD -- \
+              crates/wartui-ffi crates/wartui-bindgen Cargo.lock .github/workflows/bindings.yml; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "the pull request leaves the binding as it is: the test is built, not run"
