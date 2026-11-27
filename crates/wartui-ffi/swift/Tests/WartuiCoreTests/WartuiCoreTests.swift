@@ -98,11 +98,11 @@ func freshDirectory() throws -> URL {
     return dir
 }
 
-@Test func libraryLoads() {
+@Test func libraryLoadsWhenRunInASimulator() {
     #expect(linkUuids().service == "f2410001-d870-4eb6-a5a0-ed645732a877")
 }
 
-@Test func settingsOpenThroughASwiftStore() throws {
+@Test func settingsKeepAnEditWhenStoreIsSwift() throws {
     let store = MemoryStore()
     let settings = try Settings.open(store: store, secrets: nil)
     let saved = settings.saved()
@@ -122,7 +122,7 @@ func freshDirectory() throws -> URL {
     #expect(reopened.saved().excludedSsids == ["example-network"])
 }
 
-@Test func captureRunsOverTheSimulatorAndExports() async throws {
+@Test func captureExportsWhenRunOverTheSimulator() async throws {
     let dir = try freshDirectory()
     let db = dir.appendingPathComponent("simulated.db")
     let location = LocationFeed()
@@ -162,7 +162,7 @@ func freshDirectory() throws -> URL {
     #expect(exported.nodes.count == 3)
 }
 
-@Test func logSinkHearsTheLibrary() async throws {
+@Test func logSinkHearsTheLibraryWhenACaptureRuns() async throws {
     let lines = Lines()
     #expect(logTo(sink: lines, level: .debug), "a log sink was already set")
     let dir = try freshDirectory()

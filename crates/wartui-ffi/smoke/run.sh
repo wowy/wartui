@@ -20,7 +20,9 @@ esac
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-target=${CARGO_TARGET_DIR:-$root/target}
+# Cargo reads a relative `CARGO_TARGET_DIR` against the directory it runs in, the root.
+target=${CARGO_TARGET_DIR:-target}
+[[ $target == /* ]] || target=$root/$target
 out=$target/ffi-smoke
 
 case "$(uname -s)" in

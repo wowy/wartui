@@ -14,6 +14,6 @@ name = "uniffi-bindgen"
 path = "src/main.rs"
 
 [dependencies]
-# The version `wartui-ffi` names, so the generator reads the metadata that library embeds. It
-# reads `uniffi.toml` through `cargo metadata`.
-uniffi = { version = "0.32.2", default-features = false, features = ["cli", "cargo-metadata"] }
+# The workspace's `uniffi`, which `wartui-ffi` builds on too. The generator reads `uniffi.toml`
+# through `cargo metadata`.
+uniffi = { workspace = true, features = ["cli", "cargo-metadata"] }

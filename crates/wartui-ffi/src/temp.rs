@@ -88,6 +88,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let read_only = tempfile::tempdir().unwrap();
         std::fs::set_permissions(read_only.path(), PermissionsExt::from_mode(0o555)).unwrap();
+        // Root writes whatever the mode says, which leaves nothing to tell apart.
+        if std::fs::File::create(read_only.path().join("root")).is_ok() {
+            return;
+        }
         let only = found_in(env(&[("SQLITE_TMPDIR", read_only.path())]));
         let both = found_in(env(&[("SQLITE_TMPDIR", read_only.path()), ("TMPDIR", dir.path())]));
         // Writable again, so the directory can be removed.

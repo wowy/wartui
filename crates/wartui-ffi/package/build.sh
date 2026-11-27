@@ -23,7 +23,9 @@ esac
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ffi=$(cd "$here/.." && pwd)
 root=$(cd "$ffi/../.." && pwd)
-target=${CARGO_TARGET_DIR:-$root/target}
+# Cargo reads a relative `CARGO_TARGET_DIR` against the directory it runs in, the root.
+target=${CARGO_TARGET_DIR:-target}
+[[ $target == /* ]] || target=$root/$target
 out=$target/phone
 
 # The iOS release the static libraries and the Swift package both name as their minimum. Keep it
@@ -65,6 +67,7 @@ rust_target() {
 # Fail when the generated `binding` carries anything from the `testing` feature.
 check_shipped_api() {
   local binding=$1
+  [[ -f $binding ]] || fail "the generator wrote no $binding"
   if grep -q 'WireSim\|testingNodeImage\|testing_node_image' "$binding"; then
     fail "$binding exports the testing feature's API, which no shipped build enables"
   fi
@@ -177,11 +180,13 @@ android() {
   # `android.os.Build`, so it is set in a config derived here rather than in `uniffi.toml`, which
   # the desktop smoke test reads too.
   mkdir -p "$out/android"
-  local config=$out/android/uniffi.toml
+  local config=$out/android/uniffi.toml kotlin
+  # Read here, not inside the heredoc, where a missing pin would not stop the build.
+  kotlin=$(catalog_version kotlin)
   cat > "$config" << EOF
 [crates.wartui_ffi.bindings.kotlin]
 android = true
-kotlin_target_version = "$(catalog_version kotlin)"
+kotlin_target_version = "$kotlin"
 EOF
   (cd "$root" && "$bindgen" generate \
     --library "$target/aarch64-linux-android/release/libwartui_ffi.so" \

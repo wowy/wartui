@@ -69,12 +69,12 @@ class WartuiCoreTest {
         }
 
     @Test
-    fun library_loads_on_art() {
+    fun library_loads_when_run_on_art() {
         assertEquals("f2410001-d870-4eb6-a5a0-ed645732a877", linkUuids().service)
     }
 
     @Test
-    fun settings_open_through_a_kotlin_store() {
+    fun settings_keep_an_edit_when_store_is_kotlin() {
         val store = MemoryStore()
         val settings = Settings.open(store, null)
         val saved = settings.saved()
@@ -92,7 +92,7 @@ class WartuiCoreTest {
     }
 
     @Test
-    fun capture_runs_over_the_simulator_and_exports() = runBlocking {
+    fun capture_exports_when_app_names_a_temporary_directory() = runBlocking {
         // An export sorts through temporary files, so it refuses until the app names their
         // directory.
         Os.unsetenv("SQLITE_TMPDIR")
@@ -150,7 +150,7 @@ class WartuiCoreTest {
     }
 
     @Test
-    fun log_sink_hears_the_library() = runBlocking {
+    fun log_sink_hears_the_library_when_a_capture_runs() = runBlocking {
         val sink = Lines()
         assertTrue("a log sink was already set", logTo(sink, LogLevel.DEBUG))
         val session = Session.start(
