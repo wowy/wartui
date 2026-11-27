@@ -12,12 +12,21 @@
 //! | 3 `Commit` | P4 to C6 | session (1) |
 //! | 4 `Install` | P4 to C6 | session (1) |
 //! | 5 `Status` | C6 to P4 | session (1), state (1, [`UpdateState`]'s code), next offset (4) |
+//! | 6 `Abort` | P4 to C6 | session (1) |
 //!
 //! The C6 drives [`crate::ota::Receiver`] with these, as a node does with the bus's update
 //! messages, so the receiver's flow control applies: a status on each sector flush, and on each
 //! duplicate or gap. [`receive`] is that step, shared by the C6 and the P4, which takes the same
-//! ops for its own image; each switches slots on `Install` itself. A fixed op reads its body and
-//! ignores anything after it, so a body can grow at its end.
+//! ops for its own image from the host; each switches slots on `Install` itself. A fixed op reads
+//! its body and ignores anything after it, so a body can grow at its end. An op a receiver does
+//! not know decodes as nothing and is skipped, with no answer: it names no session to answer for.
+//!
+//! - **Session 0 names no session**, and a sender's session byte is never 0.
+//! - **Every refusal is a `Status`.** A `Begin` while the booted image is on trial, or with no
+//!   slot to write, is `FlashError`; a `Chunk` or `Commit` with no session is `Idle`.
+//! - **`Abort` drops the session it names and answers `Idle`**, with next offset 0, whatever the
+//!   slot and the trial. One naming another session, or none, answers the same and changes
+//!   nothing.
 //!
 //! [`Sender`] is the P4's half, a pure state machine so the host tests it. The host drives one
 //! too, to update the P4 itself over the host link: each op travels in a
@@ -52,7 +61,8 @@
 //!   toward its C6 writes each op to the UART at once, so it never calls it.
 
 use crate::bus::{
-    UPDATE_CHUNK, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState, UpdateStatus, Version,
+    UPDATE_CHUNK, UpdateAbort, UpdateBegin, UpdateChunk, UpdateCommit, UpdateState, UpdateStatus,
+    Version,
 };
 use crate::ota::image::DIGEST_LEN;
 use crate::ota::{Receiver, SECTOR, SectorSink};
@@ -109,6 +119,11 @@ pub enum Op<'a> {
     },
     /// Where the C6's session stands.
     Status(UpdateStatus),
+    /// Drop the session, if it is the one in hand.
+    Abort {
+        /// The session.
+        session: u8,
+    },
 }
 
 impl Op<'_> {
@@ -136,7 +151,7 @@ impl Op<'_> {
                 out[CHUNK_HEADER..].copy_from_slice(data);
                 end
             }
-            Op::Commit { session } | Op::Install { session } => {
+            Op::Commit { session } | Op::Install { session } | Op::Abort { session } => {
                 let out = &mut out[..SESSION_LEN];
                 out[0] = op_code(self);
                 out[1] = session;
@@ -181,6 +196,7 @@ impl<'a> Op<'a> {
             }
             3 => Some(Op::Commit { session: *body.first()? }),
             4 => Some(Op::Install { session: *body.first()? }),
+            6 => Some(Op::Abort { session: *body.first()? }),
             5 => {
                 let b = body.get(..STATUS_LEN - 1)?;
                 Some(Op::Status(UpdateStatus {
@@ -208,7 +224,8 @@ pub enum Received {
 ///
 /// `slot` is `None` on a table without a second app slot or a `trial` sector. A `Begin` is then
 /// refused with [`UpdateState::FlashError`], as it is while the booted image is on `trial`, and a
-/// `Chunk` or `Commit` is answered [`UpdateState::Idle`].
+/// `Chunk` or `Commit` is answered [`UpdateState::Idle`]. An `Abort` is answered
+/// [`UpdateState::Idle`] whatever `slot` and `trial` are.
 pub fn receive<S: SectorSink>(
     receiver: &mut Receiver,
     op: Op<'_>,
@@ -218,6 +235,7 @@ pub fn receive<S: SectorSink>(
     let status = match (op, slot) {
         (Op::Install { session }, _) => return Received::Install(session),
         (Op::Status(_), _) => None,
+        (Op::Abort { session }, _) => Some(receiver.abort(&UpdateAbort { session })),
         (Op::Begin { session, len, sha256 }, Some(slot)) if !trial => {
             // The op names no version, and the receiver checks none.
             let version = Version::new(0, 0, 0);
@@ -262,6 +280,7 @@ const fn op_code(op: &Op<'_>) -> u8 {
         Op::Commit { .. } => 3,
         Op::Install { .. } => 4,
         Op::Status(_) => 5,
+        Op::Abort { .. } => 6,
     }
 }
 

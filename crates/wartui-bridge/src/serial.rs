@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, decode_frame,
+    BridgeToHost, FrameAccumulator, HostToBridge, LinkError, MAX_FRAME, MAX_HOST_FRAME, Reads,
+    decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -258,9 +259,10 @@ fn identify<P: Read + Write + ?Sized>(
         };
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
-            // Whatever decodes ahead of the `Ready` was sent before this question.
-            if let Ok(BridgeToHost::Ready { mac, .. }) = decode_frame::<BridgeToHost>(frame) {
-                return Some(mac);
+            // Whatever decodes ahead of the `Ready` was sent before this question. The address
+            // is in the frozen core, so a bridge on any build names itself.
+            if let Ok(Some(BridgeToHost::Ready(ready))) = decode_frame(frame, Reads::Core) {
+                return Some(ready.core.mac);
             }
         }
     }
@@ -1154,10 +1156,10 @@ fn read_frames<R: Read>(
                 raw.clear();
                 raw.extend_from_slice(frame);
             }
-            let decoded = decode_frame::<BridgeToHost>(frame);
+            let decoded = decode_frame(frame, gate.reads());
             let prev = prev_ok.replace(decoded.is_ok());
             let event = match decoded {
-                Ok(msg) => match gate.admit(msg, Instant::now()) {
+                Ok(Some(msg)) => match gate.admit(msg, Instant::now()) {
                     Admitted::Ready { info, fresh, .. } => {
                         state.announced.store(true, Ordering::Relaxed);
                         // Read by the sweep, which stops here and holds this board for
@@ -1184,10 +1186,22 @@ fn read_frames<R: Read>(
                         }
                         LinkEvent::Connected(info)
                     }
+                    // A bridge whose messages this host cannot read: reported as a frame it
+                    // cannot read.
+                    Admitted::Unread { .. } => {
+                        state.garbled.fetch_add(1, Ordering::Relaxed);
+                        LinkEvent::Garbled(LinkError::Malformed)
+                    }
                     Admitted::Message(msg) => LinkEvent::Message(msg),
                     // Written before the connection, out of the CH343's or the tty's buffer.
                     Admitted::Stale => continue,
                 },
+                // A sound frame of a code this host does not read: a later build's message, or
+                // any but the core's from a bridge not yet known to be readable.
+                Ok(None) => {
+                    tracing::debug!("skipped a frame this host does not read");
+                    continue;
+                }
                 // The bootloader's log after a reset and half-frames land here; the
                 // framing has already resynchronized, so this is a counter rather than a
                 // fault. At `debug`, or a bad cable writes the log as fast as the bridge
@@ -1336,10 +1350,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
-    use wartui_proto::bus::{NodeBoard, Slot};
+    use wartui_proto::bus::{NodeBoard, Slot, Version};
     use wartui_proto::link::{
-        BridgeToHost, FromNodeBody, HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, ShortStr,
-        encode_frame,
+        BRIDGE_TO_HOST_CODES, BRIDGE_VERSION, BridgeToHost, FRAME_VERSION, FromNodeBody,
+        HostToBridge, LinkError, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest,
+        ShortStr, Trial, crc16, encode_frame,
     };
     use wartui_proto::reset::ResetCause;
 
@@ -1532,17 +1547,25 @@ mod tests {
     }
 
     fn ready() -> BridgeToHost {
-        BridgeToHost::Ready {
-            mac: [1, 2, 3, 4, 5, 6],
-            fw_version: ShortStr::new(),
-            reset_cause: ResetCause::PowerOn,
-            last_phase: LoopPhase::Unknown,
-            uptime_ms: 0,
-            node_board: NodeBoard::NoCarrier,
-            radio: None,
-            image: None,
-        }
+        up(BRIDGE_VERSION, [1, 2, 3, 4, 5, 6], 0)
     }
+
+    /// A `Ready` from a bridge on `version` at `mac`, `uptime_ms` into its life.
+    fn up(version: Version, mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
+        BridgeToHost::Ready(Ready {
+            core: ReadyCore { mac, image: [0; 32], version, trial: Trial::Settled, uptime_ms },
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::new(),
+                reset_cause: ResetCause::PowerOn,
+                last_phase: LoopPhase::Unknown,
+                node_board: NodeBoard::NoCarrier,
+                radio: None,
+            }),
+        })
+    }
+
+    /// A bridge one major past this host's.
+    const NEXT_MAJOR: Version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
 
     #[test]
     fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
@@ -1561,6 +1584,55 @@ mod tests {
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_reader_skips_frame_when_bridge_is_another_major() {
+        // Its `Ready` reads as a frame this host cannot read, and its other messages are skipped
+        // unread: no garble each, so they never pass a probe's limit.
+        let mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+        let mut bytes = frame(&up(NEXT_MAJOR, mac, 500));
+        bytes.extend(frame(&rx(20)));
+        bytes.extend(frame(&rx(30)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Garbled(LinkError::Malformed))));
+        assert!(received.try_recv().is_err(), "nothing else passed on");
+        assert!(!state.announced.load(Ordering::Relaxed));
+        assert_eq!(state.garbled.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn serial_reader_skips_frame_when_code_is_past_last_known() {
+        // A later minor's message, once the bridge has announced itself readable.
+        let mut bytes = frame(&ready());
+        let mut body = vec![FRAME_VERSION, BRIDGE_TO_HOST_CODES, 1, 2];
+        let crc = crc16(&body);
+        body.extend(crc.to_le_bytes());
+        // COBS by hand, for a body this short: each run of non-zero bytes behind its length.
+        let mut later = Vec::new();
+        for run in body.split(|&b| b == 0) {
+            later.push(u8::try_from(run.len() + 1).unwrap());
+            later.extend_from_slice(run);
+        }
+        later.push(0);
+        bytes.extend(later);
+        bytes.extend(frame(&rx(20)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. }))
+        ));
+        assert!(received.try_recv().is_err());
+        assert_eq!(state.garbled.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1642,19 +1714,7 @@ mod tests {
     fn serial_link_reports_new_life_when_p4_reboots_under_held_connection() {
         // The CH343 stays on the bus, so the reboot arrives on the same connection: the
         // bootloader's log at the wrong rate, then a `Ready` whose uptime fell.
-        let up = |uptime_ms| match ready() {
-            BridgeToHost::Ready { mac, fw_version, reset_cause, .. } => BridgeToHost::Ready {
-                mac,
-                fw_version,
-                reset_cause,
-                last_phase: LoopPhase::Unknown,
-                uptime_ms,
-                node_board: NodeBoard::NoCarrier,
-                radio: None,
-                image: None,
-            },
-            _ => unreachable!(),
-        };
+        let up = |uptime_ms| up(BRIDGE_VERSION, [1, 2, 3, 4, 5, 6], uptime_ms);
         let mut bytes = frame(&up(50_000));
         bytes.extend([0x00, 0xF0, 0x80, 0xFE, 0x00, 0x13, 0x77, 0x00]);
         bytes.extend(frame(&up(120)));
@@ -1714,6 +1774,14 @@ mod tests {
         let mut asked = [0u8; MAX_HOST_FRAME + 1];
         let n = encode_for_wire(&HostToBridge::Identify, true, &mut asked).unwrap();
         assert_eq!(port.written, &asked[..n]);
+    }
+
+    #[test]
+    fn serial_probe_names_bridge_when_ready_is_from_another_major() {
+        // The address is in the frozen core, so a bridge on any build names itself.
+        let mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+        let mut port = FakePort::answering(frame(&up(NEXT_MAJOR, mac, 0)));
+        assert_eq!(identify(&mut port, WAIT, WAIT), Some(mac));
     }
 
     #[test]

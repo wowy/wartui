@@ -448,6 +448,8 @@ mod tests {
             node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
+            version: wartui_proto::link::BRIDGE_VERSION,
+            trial: wartui_proto::link::Trial::Settled,
         };
         engine.handle(Event::Link(LinkEvent::Connected(info)), now);
         let message = LogStr::try_from(NO_GPS_RECEIVER).expect("the text fits a LogStr");

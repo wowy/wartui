@@ -18,8 +18,8 @@ use tokio::time::Instant;
 use wartui_proto::ble::ATT_MTU;
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, LogStr, LoopPhase, MAX_FRAME, ShortStr,
-    USB_TOOK_BRIDGE, decode_frame, encode_frame,
+    BRIDGE_VERSION, BridgeToHost, FrameAccumulator, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
+    Ready, ReadyCore, ReadyRest, ShortStr, Trial, USB_TOOK_BRIDGE, decode_host_frame, encode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
@@ -601,7 +601,9 @@ impl Connection for FakeConnection {
 fn take(shared: &mut Shared, link: usize, bytes: &[u8]) {
     let bridge = shared.links[link].bridge;
     for &byte in bytes {
-        let Some(cmd) = shared.links[link].acc.push(byte).and_then(|f| decode_frame(f).ok()) else {
+        let Some(cmd) =
+            shared.links[link].acc.push(byte).and_then(|f| decode_host_frame(f).ok().flatten())
+        else {
             continue;
         };
         if cmd == HostToBridge::Identify
@@ -630,15 +632,21 @@ pub(super) fn frame(msg: &BridgeToHost) -> Vec<u8> {
 /// A `Ready` from a bridge at `mac` that booted at `booted`. Its uptime advances with the clock,
 /// so the answers to two `Identify`s read as one life.
 fn ready(mac: Mac, booted: Instant) -> Vec<u8> {
-    let msg = BridgeToHost::Ready {
-        mac,
-        fw_version: ShortStr::new(),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::Unknown,
-        uptime_ms: u32::try_from(booted.elapsed().as_millis()).unwrap_or(u32::MAX),
-        node_board: NodeBoard::NoCarrier,
-        radio: None,
-        image: None,
-    };
+    let msg = BridgeToHost::Ready(Ready {
+        core: ReadyCore {
+            mac,
+            image: [0; 32],
+            version: BRIDGE_VERSION,
+            trial: Trial::Settled,
+            uptime_ms: u32::try_from(booted.elapsed().as_millis()).unwrap_or(u32::MAX),
+        },
+        rest: Some(ReadyRest {
+            fw_version: ShortStr::new(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            node_board: NodeBoard::NoCarrier,
+            radio: None,
+        }),
+    });
     frame(&msg)
 }

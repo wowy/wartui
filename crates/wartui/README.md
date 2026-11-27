@@ -600,7 +600,7 @@ The image comes from the same three sources as `flash-fleet`'s, with `firmware/p
 `firmware/node`; a release publishes one under the same
 `images/<tag>/`. Nothing is sent unless the image is an app-only image whose header names the
 `esp32p4` and whose descriptor names `wartui-p4-bridge-fw`, its checksum and appended SHA-256 hold,
-and it fits the P4's 1920 KiB app slot.
+and it fits the P4's app slot of 0x7F0000 bytes, about 7.9 MiB.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
 The P4 checks it, switches slots and reboots into it on trial. The connection holds through the
@@ -954,7 +954,7 @@ wartui sd-log LOG/00000007.BIN --verbose   # one file, each frame in full under 
 $ wartui sd-log LOG/00000007.BIN
 LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerOn, last phase Unknown
 00:00:05.000  open        format 1 · card 29.7 GB, 29.3 GB free · image abababab
-00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v1
+00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v2
 00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s · P4 —
 00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s · P4 48 °C · C6 45 °C 3.30 V heap 40K free
 00:00:06.100  log         sd: hello
@@ -976,7 +976,8 @@ when the boot before ended in a panic, and `--verbose` prints the panic's text u
 file of that boot repeats it, so count panics by boot (part 0), not by file. The bridge also logs
 the text at boot as `last boot panicked: …` lines, and says them to the first host that attaches.
 A line per record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and
-what it says. A frame reads as `wartui sniff` prints it.
+what it says. A frame reads as `wartui sniff` prints it. A `ready` from a bridge on another major
+names only its address and version, since the rest of its `Ready` is not read.
 
 | Kind                              | Record                                                                   |
 |-----------------------------------|--------------------------------------------------------------------------|

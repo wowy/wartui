@@ -7,7 +7,7 @@
 use wartui_core::engine::power_cycled_text;
 use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg};
 use wartui_proto::link::{
-    BridgeHealth, BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus,
+    BridgeHealth, BridgeToHost, FRAME_VERSION, Ready, SdLogState, SdState, SdStatus,
 };
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
@@ -246,10 +246,14 @@ pub(crate) struct MessageText {
 /// `msg` as one line, naming slots as `board` labels them.
 pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText {
     let (kind, text) = match msg {
-        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => (
+        BridgeToHost::Ready(Ready { core, rest: Some(rest) }) => (
             "ready",
-            format!("{} firmware {fw_version} link v{LINK_PROTO_VERSION}", mac::full(bridge_mac)),
+            format!("{} firmware {} link v{FRAME_VERSION}", mac::full(&core.mac), rest.fw_version),
         ),
+        // A build whose rest this host cannot read names only its address and version.
+        BridgeToHost::Ready(Ready { core, rest: None }) => {
+            ("ready", format!("{} version {}", mac::full(&core.mac), core.version))
+        }
         BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, health, .. } => (
             "status",
             format!(
@@ -467,6 +471,20 @@ mod tests {
         };
         let said = message_text(&from_node(UpType::Heartbeat.as_u8(), &ahead.encode()), board);
         assert_eq!((said.kind, said.text.as_str()), ("node", "N8 type 1, 63 bytes"));
+    }
+
+    #[test]
+    fn message_text_names_address_and_version_when_ready_rest_is_unread() {
+        let core = wartui_proto::link::ReadyCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: [0; 32],
+            version: wartui_proto::bus::Version::new(3, 1, 0),
+            trial: wartui_proto::link::Trial::Settled,
+            uptime_ms: 10,
+        };
+        let ready = BridgeToHost::Ready(wartui_proto::link::Ready { core, rest: None });
+        let said = message_text(&ready, NodeBoard::Carrier14);
+        assert_eq!((said.kind, said.text.as_str()), ("ready", "02:00:5E:10:44:C0 version 3.1.0"));
     }
 
     #[test]

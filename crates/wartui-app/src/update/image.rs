@@ -48,7 +48,7 @@ pub const SLOT_LEN: usize = 0x1E_0000;
 
 /// The largest image the P4's app slot holds: `ota_0` and `ota_1` in
 /// `firmware/p4-bridge/partitions.csv`.
-pub const BRIDGE_SLOT_LEN: usize = 0x1E_0000;
+pub const BRIDGE_SLOT_LEN: usize = 0x7F_0000;
 
 /// The project name the P4 bridge's app descriptor carries: its crate's name.
 pub const BRIDGE_PROJECT: &str = "wartui-p4-bridge-fw";

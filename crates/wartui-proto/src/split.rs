@@ -47,8 +47,8 @@ use core::fmt::Write;
 use crate::bus::{DieTemp, MAX_SLOTS, NodeBoard};
 use crate::fan::FanStats;
 use crate::link::{
-    BridgeHealth, BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats, RADIO_UPDATING,
-    RadioInfo, RadioLinkStats, ShortStr,
+    BRIDGE_VERSION, BridgeHealth, BridgeToHost, LogStr, LoopPhase, QueueStat, QueueStats,
+    RADIO_UPDATING, RadioInfo, RadioLinkStats, Ready, ReadyCore, ReadyRest, ShortStr, Trial,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
@@ -456,20 +456,26 @@ impl Pair {
         }
     }
 
-    /// The `Ready` to announce, or `None` while the P4 is still waiting for the C6.
-    pub fn ready(&self, now_ms: u64) -> Option<BridgeToHost> {
+    /// The `Ready` to announce, with the booted image's `trial`, or `None` while the P4 is still
+    /// waiting for the C6.
+    pub fn ready(&self, now_ms: u64, trial: Trial) -> Option<Ready> {
         let mac = self.bridge_mac()?;
         let hello = self.radio_hello();
         let (reset_cause, last_phase) = match hello {
             Some(hello) if self.life_from_radio => (hello.reset_cause, hello.last_phase),
             _ => (self.own_cause, self.own_phase),
         };
-        Some(BridgeToHost::Ready {
+        let core = ReadyCore {
             mac,
+            image: self.own_image.unwrap_or([0; DIGEST_LEN]),
+            version: BRIDGE_VERSION,
+            trial,
+            uptime_ms: self.uptime_ms(now_ms),
+        };
+        let rest = ReadyRest {
             fw_version: self.own_fw.clone(),
             reset_cause,
             last_phase,
-            uptime_ms: self.uptime_ms(now_ms),
             node_board: self.node_board,
             radio: hello.map(|hello| RadioInfo {
                 mac: hello.mac,
@@ -478,8 +484,8 @@ impl Pair {
                 last_phase: hello.last_phase,
                 uptime_ms: hello.uptime_ms,
             }),
-            image: self.own_image,
-        })
+        };
+        Some(Ready { core, rest: Some(rest) })
     }
 
     /// The fault to tell the host about, if the radio is not usable.

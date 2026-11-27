@@ -661,8 +661,8 @@ impl Inbound {
         let mut heard = Vec::new();
         for &byte in bytes {
             let Some(frame) = self.acc.push(byte) else { continue };
-            match decode_frame::<BridgeToHost>(frame) {
-                Ok(msg) if is_takeover(&msg) && self.gate.announced() => {
+            match decode_frame(frame, self.gate.reads()) {
+                Ok(Some(msg)) if is_takeover(&msg) && self.gate.announced() => {
                     // The stream starts afresh at the handback, with a `Ready` of the same life.
                     self.gate.restart();
                     heard.push(Heard::Event(LinkEvent::Disconnected {
@@ -670,7 +670,7 @@ impl Inbound {
                         cause: DisconnectCause::UsbTookBridge,
                     }));
                 }
-                Ok(msg) => match self.gate.admit(msg, now) {
+                Ok(Some(msg)) => match self.gate.admit(msg, now) {
                     Admitted::Ready { info, fresh, .. } => {
                         if let Some(spec) = &self.spec
                             && !spec.matches_address(&info.mac)
@@ -686,9 +686,17 @@ impl Inbound {
                             heard.push(Heard::Event(LinkEvent::Connected(info)));
                         }
                     }
+                    // A bridge whose messages this host cannot read: reported as a frame it
+                    // cannot read.
+                    Admitted::Unread { .. } => {
+                        heard.push(Heard::Event(LinkEvent::Garbled(LinkError::Malformed)));
+                    }
                     Admitted::Message(msg) => heard.push(Heard::Event(LinkEvent::Message(msg))),
                     Admitted::Stale => {}
                 },
+                // A sound frame of a code this host does not read: a later build's message, or
+                // any but the core's from a bridge not yet known to be readable.
+                Ok(None) => tracing::debug!("skipped a frame this host does not read"),
                 Err(e) => {
                     tracing::debug!(error = %e, "undecodable frame over Bluetooth");
                     heard.push(Heard::Event(LinkEvent::Garbled(e)));

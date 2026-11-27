@@ -1,17 +1,17 @@
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 
 use super::{
-    BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION, MAX_FRAME,
-    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, UPDATE_STATUS_MAX,
+    BridgeToHost, FRAME_VERSION, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, MAX_FRAME, MAX_HOST_FRAME,
+    MAX_NODE_DOWN, MAX_NODE_PAYLOAD, READY_CORE_LEN, Ready, UPDATE_STATUS_MAX, UpdateOp,
+    UpdateStatusBytes,
 };
-use crate::ota::image::DIGEST_LEN;
 use crate::radio_link::update::OP_MAX;
 
 // A frame is a body (the version byte, the payload and the CRC) plus COBS overhead (one
 // byte per 254 and a leading marker, five for a body this size) and the terminator, so 8
 // bytes cover the framing. Checked here so a payload that outgrew the buffer is a build
 // error, not a silent truncation. Each `+ 32` below is room for the message's other
-// fields, its variant index, and the body's version byte and CRC.
+// fields, its code, and the body's version byte and CRC.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // The same for the host-to-bridge direction, whose longest frames are a full record for a
@@ -43,15 +43,41 @@ const _: () = assert!(
     "a Status with every queue and link stats must fit one frame"
 );
 const _: () = assert!(
-    // Two `ShortStr`s behind their lengths, two MACs, the bridge's and the radio's, and the
-    // image digest. `8 * 5` bounds eight varint `u32`s, against two today: `uptime_ms` and
-    // the radio's `uptime_ms`. `24` bounds the one-byte fields, against 8 today: the variant
-    // index, `reset_cause`, `last_phase`, `node_board`, the radio's tag, `reset_cause` and
-    // `last_phase`, and the image's tag. The slack lets either grow a little without moving
-    // the sum.
-    2 * (32 + 1) + 2 * 6 + DIGEST_LEN + 8 * 5 + 24 < MAX_BODY,
+    // The code, `core_len` and the core, then the rest: two `ShortStr`s behind their lengths
+    // and the radio's MAC. `8 * 5` bounds eight varint `u32`s, against one today: the radio's
+    // `uptime_ms`. `24` bounds the one-byte fields, against 6 today: `reset_cause`,
+    // `last_phase`, `node_board`, the radio's tag, `reset_cause` and `last_phase`. The slack
+    // lets the rest grow a little without moving the sum.
+    1 + 1 + READY_CORE_LEN + 2 * (32 + 1) + 6 + 8 * 5 + 24 < MAX_BODY,
     "a Ready with radio info must fit one frame"
 );
+
+/// The frozen codes, host to bridge: `Identify`, `Reset` and `Update`. Spelled out rather than
+/// read off the enum, so neither an enum reorder nor a postcard change moves them.
+const IDENTIFY: u8 = 0;
+const RESET: u8 = 2;
+const HOST_UPDATE: u8 = 4;
+
+/// The frozen codes, bridge to host: `Ready` and `Update`.
+const READY: u8 = 0;
+const BRIDGE_UPDATE: u8 = 5;
+
+/// The codes this build knows host to bridge: [`HostToBridge`]'s variants. A code at or past it
+/// is a later build's message, skipped.
+pub const HOST_TO_BRIDGE_CODES: u8 = 19;
+
+/// The codes this build knows bridge to host: [`BridgeToHost`]'s variants.
+pub const BRIDGE_TO_HOST_CODES: u8 = 13;
+
+/// What a decoder reads of a bridge's frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reads {
+    /// The frozen messages alone, `Ready` and `Update`: a bridge whose other messages this host
+    /// cannot read, or has not yet learned it can.
+    Core,
+    /// Every message this build knows.
+    All,
+}
 
 /// Why a frame could not be encoded or decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,9 +160,10 @@ static CRC16_TABLE: [u16; 256] = {
     table
 };
 
-/// Serialize a bridge-to-host `msg` into `out` as a complete frame, terminator included,
-/// of up to [`MAX_FRAME`].
+/// Encode a bridge-to-host `msg` into `out` as a complete frame, terminator included, of up to
+/// [`MAX_FRAME`].
 ///
+/// `Ready` and `Update` are laid out by hand; every other message is postcard behind its code.
 /// Each encoder takes one direction's enum, so a frame is always checked against its own
 /// direction's buffer.
 ///
@@ -145,50 +172,123 @@ static CRC16_TABLE: [u16; 256] = {
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
 pub fn encode_frame(msg: &BridgeToHost, out: &mut [u8]) -> Result<usize, LinkError> {
-    encode_frame_in::<_, MAX_BODY>(msg, out)
+    let mut body = [0u8; MAX_BODY];
+    let len = encode_body(&mut body, |payload| match msg {
+        BridgeToHost::Ready(ready) => {
+            let (code, rest) = payload.split_first_mut()?;
+            *code = READY;
+            Some(1 + ready.encode(rest)?)
+        }
+        BridgeToHost::Update(status) => encode_bytes(BRIDGE_UPDATE, status, payload),
+        msg => encode_postcard(msg, payload),
+    })?;
+    frame_out(&body[..len], out)
 }
 
-/// Serialize a host-to-bridge `msg` into `out` as a complete frame of up to
-/// [`MAX_HOST_FRAME`].
+/// Encode a host-to-bridge `msg` into `out` as a complete frame of up to [`MAX_HOST_FRAME`].
+///
+/// `Identify`, `Reset` and `Update` are laid out by hand; every other message is postcard behind
+/// its code.
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
 pub fn encode_host_frame(msg: &HostToBridge, out: &mut [u8]) -> Result<usize, LinkError> {
-    encode_frame_in::<_, MAX_HOST_BODY>(msg, out)
+    let mut body = [0u8; MAX_HOST_BODY];
+    let len = encode_body(&mut body, |payload| match msg {
+        HostToBridge::Identify => encode_code(IDENTIFY, payload),
+        HostToBridge::Reset => encode_code(RESET, payload),
+        HostToBridge::Update(op) => encode_bytes(HOST_UPDATE, op, payload),
+        msg => encode_postcard(msg, payload),
+    })?;
+    frame_out(&body[..len], out)
 }
 
-fn encode_frame_in<T: Serialize, const B: usize>(
-    msg: &T,
-    out: &mut [u8],
-) -> Result<usize, LinkError> {
-    let mut body = [0u8; B];
-    let len = encode_body(msg, &mut body)?;
+/// COBS-encode `body` into `out`, terminator included.
+fn frame_out(body: &[u8], out: &mut [u8]) -> Result<usize, LinkError> {
     if out.is_empty() {
         return Err(LinkError::BufferTooSmall);
     }
     let mut stream = CobsStream::new();
-    let written = stream.fill(&body[..len], out);
+    let written = stream.fill(body, out);
     if !stream.is_done() {
         return Err(LinkError::BufferTooSmall);
     }
     Ok(written)
 }
 
-/// Write a frame's body into `out`: the version byte, the serialized `msg` and its CRC,
-/// little-endian. COBS and the terminator are the caller's.
+/// Write a frame's body into `out`: the version byte, the message `write` puts in the bytes after
+/// it, returning their length, and the CRC, little-endian. COBS and the terminator are the
+/// caller's.
 ///
 /// Returns how many bytes of `out` were used.
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the body.
-fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
+fn encode_body(
+    out: &mut [u8],
+    write: impl FnOnce(&mut [u8]) -> Option<usize>,
+) -> Result<usize, LinkError> {
     let (version, payload) = out.split_first_mut().ok_or(LinkError::BufferTooSmall)?;
-    *version = LINK_PROTO_VERSION;
-    let used = postcard::to_slice(msg, payload).map_err(|_| LinkError::BufferTooSmall)?.len();
+    *version = FRAME_VERSION;
+    let used = write(payload).ok_or(LinkError::BufferTooSmall)?;
     let end = 1 + used;
     let crc = crc16(&out[..end]);
     out.get_mut(end..end + 2).ok_or(LinkError::BufferTooSmall)?.copy_from_slice(&crc.to_le_bytes());
     Ok(end + 2)
+}
+
+/// A message that is its code alone.
+fn encode_code(code: u8, out: &mut [u8]) -> Option<usize> {
+    *out.first_mut()? = code;
+    Some(1)
+}
+
+/// A message that is its code, then `bytes` behind their LEB128 length: the bytes postcard writes
+/// for a newtype variant over a byte string.
+fn encode_bytes(code: u8, bytes: &[u8], out: &mut [u8]) -> Option<usize> {
+    let (first, rest) = out.split_first_mut()?;
+    *first = code;
+    let len = write_varint(bytes.len(), rest)?;
+    rest.get_mut(len..len + bytes.len())?.copy_from_slice(bytes);
+    Some(1 + len + bytes.len())
+}
+
+fn encode_postcard<T: Serialize>(msg: &T, out: &mut [u8]) -> Option<usize> {
+    postcard::to_slice(msg, out).ok().map(|used| used.len())
+}
+
+/// Write `n` as a LEB128 varint, returning its length.
+fn write_varint(mut n: usize, out: &mut [u8]) -> Option<usize> {
+    let mut i = 0;
+    loop {
+        // The low seven bits.
+        let low = (n & 0x7F) as u8;
+        n >>= 7;
+        *out.get_mut(i)? = if n == 0 { low } else { low | 0x80 };
+        i += 1;
+        if n == 0 {
+            return Some(i);
+        }
+    }
+}
+
+/// Read a LEB128 varint of at most five bytes from the start of `bytes`, returning it and its
+/// length.
+fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut n = 0usize;
+    for (i, &byte) in bytes.iter().take(5).enumerate() {
+        n |= usize::from(byte & 0x7F) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some((n, i + 1));
+        }
+    }
+    None
+}
+
+/// The bytes behind a LEB128 length at the start of `body`. Bytes past them are ignored.
+fn read_bytes(body: &[u8]) -> Result<&[u8], LinkError> {
+    let (len, at) = read_varint(body).ok_or(LinkError::Malformed)?;
+    body.get(at..at.checked_add(len).ok_or(LinkError::Malformed)?).ok_or(LinkError::Malformed)
 }
 
 /// COBS-encodes a frame body a piece at a time, terminator included, producing exactly
@@ -283,26 +383,75 @@ impl CobsStream {
     }
 }
 
-/// Decode a COBS-encoded frame body, with the terminating zero already removed.
-///
-/// # Errors
-/// See [`LinkError`].
-pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkError> {
+/// Check a COBS-encoded frame, with the terminating zero already removed, and return its
+/// message: the bytes after the version byte and ahead of the CRC.
+fn message(frame: &mut [u8]) -> Result<&[u8], LinkError> {
     let len = cobs::decode_in_place(frame).map_err(|_| LinkError::Corrupt)?;
     if len < 3 {
         return Err(LinkError::TooShort);
     }
-    let body = &frame[..len];
-    let (payload, checksum) = body.split_at(len - 2);
+    let (payload, checksum) = frame[..len].split_at(len - 2);
     let expected = u16::from_le_bytes([checksum[0], checksum[1]]);
     let actual = crc16(payload);
     if expected != actual {
         return Err(LinkError::BadChecksum { expected, actual });
     }
-    if payload[0] != LINK_PROTO_VERSION {
-        return Err(LinkError::VersionMismatch { ours: LINK_PROTO_VERSION, theirs: payload[0] });
+    if payload[0] != FRAME_VERSION {
+        return Err(LinkError::VersionMismatch { ours: FRAME_VERSION, theirs: payload[0] });
     }
-    postcard::from_bytes(&payload[1..]).map_err(|_| LinkError::Malformed)
+    Ok(&payload[1..])
+}
+
+/// Decode a bridge-to-host frame, with the terminating zero already removed, reading what
+/// `reads` says.
+///
+/// `Ok(None)` is a sound frame this host does not read: a code past the last this build knows,
+/// or under [`Reads::Core`] any code but `Ready`'s and `Update`'s. The frozen messages are read
+/// by hand before any postcard, and ignore bytes after the body they know; an `Update` whose
+/// status is longer than [`UPDATE_STATUS_MAX`] is cut to it.
+///
+/// # Errors
+/// See [`LinkError`]. A code this build knows whose body does not decode is
+/// [`LinkError::Malformed`].
+pub fn decode_frame(frame: &mut [u8], reads: Reads) -> Result<Option<BridgeToHost>, LinkError> {
+    let body = message(frame)?;
+    let (&code, rest) = body.split_first().ok_or(LinkError::Malformed)?;
+    match code {
+        READY => Ready::decode(rest)
+            .map(|ready| Some(BridgeToHost::Ready(ready)))
+            .ok_or(LinkError::Malformed),
+        BRIDGE_UPDATE => {
+            let status = read_bytes(rest)?;
+            let cut = &status[..status.len().min(UPDATE_STATUS_MAX)];
+            Ok(Some(BridgeToHost::Update(UpdateStatusBytes::from_slice(cut).unwrap_or_default())))
+        }
+        code if code >= BRIDGE_TO_HOST_CODES => Ok(None),
+        _ if reads == Reads::Core => Ok(None),
+        _ => postcard::from_bytes(body).map(Some).map_err(|_| LinkError::Malformed),
+    }
+}
+
+/// Decode a host-to-bridge frame, with the terminating zero already removed.
+///
+/// `Ok(None)` is a sound frame with a code past the last this build knows. The frozen messages
+/// are read by hand before any postcard, and ignore bytes after the body they know.
+///
+/// # Errors
+/// See [`LinkError`]. A code this build knows whose body does not decode, or an `Update` longer
+/// than [`OP_MAX`], is [`LinkError::Malformed`].
+pub fn decode_host_frame(frame: &mut [u8]) -> Result<Option<HostToBridge>, LinkError> {
+    let body = message(frame)?;
+    let (&code, rest) = body.split_first().ok_or(LinkError::Malformed)?;
+    match code {
+        IDENTIFY => Ok(Some(HostToBridge::Identify)),
+        RESET => Ok(Some(HostToBridge::Reset)),
+        HOST_UPDATE => {
+            let op = UpdateOp::from_slice(read_bytes(rest)?).map_err(|_| LinkError::Malformed)?;
+            Ok(Some(HostToBridge::Update(op)))
+        }
+        code if code >= HOST_TO_BRIDGE_CODES => Ok(None),
+        _ => postcard::from_bytes(body).map(Some).map_err(|_| LinkError::Malformed),
+    }
 }
 
 /// Reassembles frames from a byte stream.
@@ -348,8 +497,8 @@ impl<const N: usize> FrameAccumulator<N> {
     /// Feed one byte.
     ///
     /// Returns the raw COBS-encoded frame when a terminator completes one; pass it to
-    /// [`decode_frame`]. Empty frames and frames that overran the buffer yield `None`,
-    /// having resynchronized.
+    /// [`decode_frame`] or [`decode_host_frame`]. Empty frames and frames that overran the buffer
+    /// yield `None`, having resynchronized.
     pub fn push(&mut self, byte: u8) -> Option<&mut [u8]> {
         if byte != 0x00 {
             if self.len < N {

@@ -130,3 +130,24 @@ fn node_image_cache_reports_receiving_only_when_upload_is_part_way() {
     upload(&mut cache, 2, &bytes, sha256);
     assert!(!cache.is_receiving());
 }
+
+#[test]
+fn node_image_cache_drops_image_when_abort_names_its_session() {
+    let mut cache = cache(2 * 1024 * 1024);
+    let (bytes, sha256) = image(0);
+    upload(&mut cache, 1, &bytes, sha256);
+    let idle = cache.take(Op::Abort { session: 1 }).expect("a status");
+    assert_eq!((idle.session, idle.state, idle.next_offset), (1, UpdateState::Idle, 0));
+    assert_eq!(cache.image(image_tag(&sha256)), None);
+    assert!(!cache.is_receiving());
+}
+
+#[test]
+fn node_image_cache_keeps_image_when_abort_names_another_session() {
+    let mut cache = cache(2 * 1024 * 1024);
+    let (bytes, sha256) = image(0);
+    upload(&mut cache, 1, &bytes, sha256);
+    let idle = cache.take(Op::Abort { session: 2 }).expect("a status");
+    assert_eq!(idle.state, UpdateState::Idle);
+    assert_eq!(cache.image(image_tag(&sha256)), Some(&bytes[..]));
+}

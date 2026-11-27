@@ -122,9 +122,15 @@ temperature, rail and heap, or none before the C6 has sent one. esp-hal has no P
 
 The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is
 the port the bridge's link then runs on, so quit any `wartui` holding it first. The runner
-writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
-`otadata`, so the P4 boots the image just written. It leaves `nvs`, where the P4 keeps its
-settings, as it was.
+writes `partitions.csv` and erases `otadata`, so the P4 boots the image just written. It leaves
+`nvs`, where the P4 keeps its settings and bonds, as it was.
+
+`partitions.csv` is the P4's own table: two app slots of 0x7F0000 bytes, about 7.9 MiB each,
+`ota_0` and `ota_1`, and a `trial` sector at 0xFF0000. An update writes only the spare slot,
+`otadata` and `trial`, so every later image runs on the table of the board's last wired flash
+(`crates/wartui-proto/src/link/mod.rs` `//!`). The table ends at 0xFF1000 and needs a 16 MB flash;
+Waveshare lists the board's as 32 MB, and the top half stays unassigned. espflash writes the size
+it detects into the bootloader's header, and refuses this table on a board it reads as smaller.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
 `cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
@@ -144,10 +150,11 @@ After the first flash, `wartui flash-bridge` sends the P4 its app image over its
 same Type-C cable, or a bonded central through the C6 (§ "Bluetooth hosts"), more slowly
 (`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the update receiver
 the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on trial. The new
-image's bundled C6 image then reaches the C6 as below. The P4 drops an update session when its
-host lets go, so a Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets
-the C6, which drops a Bluetooth link too, and `flash-bridge` reads the outcome across the
-reconnects.
+image's bundled C6 image then reaches the C6 as below. A `Begin` the P4 takes stops the scan, as
+`StopScan` does, and an `Abort` drops the session it names. Every refusal is a status, and an op
+the P4 cannot read is skipped. The P4 drops an update session when its host lets go, so a
+Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets the C6, which drops a
+Bluetooth link too, and `flash-bridge` reads the outcome across the reconnects.
 
 **The first host frame after the C6's hello confirms the image.** `flash-bridge` polls every
 second while the P4 reboots, so a P4 that comes back and hears `wartui` keeps its image.

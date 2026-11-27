@@ -1,15 +1,16 @@
 use core::fmt;
 
-/// A node firmware version, as `firmware/node/Cargo.toml` states it and every heartbeat
-/// carries it.
+/// A firmware version: a node's, as `firmware/node/Cargo.toml` states it and every heartbeat
+/// carries it, or the P4 bridge's, as its `Ready` carries it ([`crate::link::BRIDGE_VERSION`]).
 ///
-/// Before 1.0 a minor bump may change the wire and a patch bump may not, so two versions
-/// agreeing on major and minor speak the same layouts ([`Version::compat`]).
+/// For a node before 1.0 a minor bump may change the wire and a patch bump may not, so two
+/// versions agreeing on major and minor speak the same layouts ([`Version::compat`]). The
+/// bridge's follows semantic versioning instead ([`crate::link::Standing`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version {
     /// Major version.
     pub major: u8,
-    /// Minor version. Before 1.0, a change here is a wire change.
+    /// Minor version. For a node before 1.0, a change here is a wire change.
     pub minor: u8,
     /// Patch version. Never a wire change.
     pub patch: u8,

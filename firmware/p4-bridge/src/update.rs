@@ -37,7 +37,7 @@ use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, UPDATE_STATUS_MAX,
+    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, Trial, UPDATE_STATUS_MAX,
     UpdateStatusBytes,
 };
 use wartui_proto::ota::Receiver;
@@ -230,11 +230,16 @@ pub fn note_host_frame(shared: &Shared) -> bool {
 /// Out of line: a decoded op borrows the 1 KB frame, and the flash work below is deep.
 #[inline(never)]
 pub fn take(bytes: &[u8], shared: &Shared) {
-    let Some(op) = Op::decode(bytes) else {
-        shared.push_error("an update op did not decode");
-        return;
-    };
+    // An op this P4 does not know is skipped, with no answer: it names no session to answer for.
+    let Some(op) = Op::decode(bytes) else { return };
+    let begin = matches!(op, Op::Begin { .. });
     let status = shared.updates.borrow_mut().take(op);
+    // A taken `Begin` for this P4's own image stops the scan, as a `StopScan` does: a Bluetooth
+    // update needs the scan stopped, and a host on another major sends no `StopScan`. The reboot
+    // at `Install` stops it anyway.
+    if begin && status.is_some_and(|status| status.state == UpdateState::Receiving) {
+        crate::fleet::stop(shared);
+    }
     if let Some(status) = status {
         answer(status, shared);
     }
@@ -288,6 +293,17 @@ pub fn receiving(shared: &Shared) -> bool {
 /// Whether the booted image is on trial.
 pub fn on_trial(shared: &Shared) -> bool {
     shared.updates.borrow().trial
+}
+
+/// Where the booted image's trial stands, for `Ready`. A host frame that confirms the image runs
+/// before the `Ready` answering it is built (`src/host.rs`), so that `Ready` says how it went.
+pub fn trial(shared: &Shared) -> Trial {
+    let updates = shared.updates.borrow();
+    match (updates.trial, updates.confirm_failed) {
+        (false, _) => Trial::Settled,
+        (true, false) => Trial::OnTrial,
+        (true, true) => Trial::ConfirmFailed,
+    }
 }
 
 /// The running slot's label, `ota_0` or `ota_1`, or `?` when the table names neither.

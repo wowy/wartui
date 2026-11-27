@@ -200,6 +200,7 @@ mod tests {
         Chunk(u32),
         Commit,
         Install,
+        Abort,
     }
 
     fn sent(op: &Op<'_>) -> Sent {
@@ -208,6 +209,7 @@ mod tests {
             Op::Chunk { offset, .. } => Sent::Chunk(*offset),
             Op::Commit { .. } => Sent::Commit,
             Op::Install { .. } => Sent::Install,
+            Op::Abort { .. } => Sent::Abort,
             Op::Status(_) => panic!("a status sent down"),
         }
     }

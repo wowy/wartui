@@ -14,11 +14,11 @@ use wartui_bridge::ble::{
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
-use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::bus::{NodeBoard, Slot, Version};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
-    MAX_HOST_FRAME, ShortStr, ToNodeBody, USB_TOOK_BRIDGE, decode_frame, encode_frame,
-    encode_host_frame,
+    BRIDGE_VERSION, BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LinkError, LogStr,
+    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest, ShortStr, ToNodeBody, Trial,
+    USB_TOOK_BRIDGE, decode_host_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -34,17 +34,21 @@ fn frame(msg: &BridgeToHost) -> Vec<u8> {
     buf[..len].to_vec()
 }
 
+fn ready_on(version: Version, mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
+    BridgeToHost::Ready(Ready {
+        core: ReadyCore { mac, image: [0; 32], version, trial: Trial::Settled, uptime_ms },
+        rest: Some(ReadyRest {
+            fw_version: ShortStr::new(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            node_board: NodeBoard::NoCarrier,
+            radio: None,
+        }),
+    })
+}
+
 fn ready(mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
-    BridgeToHost::Ready {
-        mac,
-        fw_version: ShortStr::new(),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::Unknown,
-        uptime_ms,
-        node_board: NodeBoard::NoCarrier,
-        radio: None,
-        image: None,
-    }
+    ready_on(BRIDGE_VERSION, mac, uptime_ms)
 }
 
 fn rx(rx_us: u32) -> BridgeToHost {
@@ -135,7 +139,7 @@ fn frames(writes: &[DownWrite]) -> Vec<HostToBridge> {
     let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
     bytes(writes)
         .into_iter()
-        .filter_map(|byte| acc.push(byte).map(|f| decode_frame(f).unwrap()))
+        .filter_map(|byte| acc.push(byte).map(|f| decode_host_frame(f).unwrap().unwrap()))
         .collect()
 }
 
@@ -205,10 +209,10 @@ fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
     let mut decoded = None;
     for byte in bytes(&writes) {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<HostToBridge>(frame));
+            decoded = Some(decode_host_frame(frame));
         }
     }
-    assert_eq!(decoded, Some(Ok(cmd)));
+    assert_eq!(decoded, Some(Ok(Some(cmd))));
 }
 
 #[test]
@@ -343,6 +347,19 @@ fn ble_inbound_drops_frames_when_they_arrive_before_first_ready() {
     assert!(matches!(events[0], LinkEvent::Connected(_)));
     assert!(matches!(events[1], LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. })));
     assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn ble_inbound_skips_frame_when_bridge_is_another_major() {
+    // Its `Ready` reads as a frame this host cannot read, and its other messages are not read.
+    let other = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let mut bytes = frame(&ready_on(other, BRIDGE, 500));
+    bytes.extend(frame(&rx(20)));
+    bytes.extend(frame(&takeover()));
+    let mut inbound = Inbound::new(None);
+    let heard = inbound.feed(&bytes, Instant::now());
+    assert_eq!(heard, [Heard::Event(LinkEvent::Garbled(LinkError::Malformed))]);
+    assert!(!inbound.announced(), "still asking");
 }
 
 #[test]

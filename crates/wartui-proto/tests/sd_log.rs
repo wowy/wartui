@@ -8,8 +8,9 @@ use wartui_proto::crc::crc32;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::host_owner::{Holder, Input};
 use wartui_proto::link::{
-    BridgeToHost, GpsBytes, LinkError, LogStr, LoopPhase, MAX_FRAME, PowerOutcome, SdFormatOutcome,
-    Undelivered, UpdateStatusBytes, decode_frame, encode_frame,
+    BRIDGE_VERSION, BridgeToHost, GpsBytes, LinkError, LogStr, LoopPhase, MAX_FRAME, PowerOutcome,
+    Reads, Ready, ReadyCore, ReadyRest, SdFormatOutcome, Trial, Undelivered, UpdateStatusBytes,
+    decode_frame, encode_frame,
 };
 use wartui_proto::plan::ChannelSet;
 use wartui_proto::reset::ResetCause;
@@ -202,7 +203,7 @@ fn sd_log_frame_payload_decodes_with_decode_frame_when_recorded() {
     let len = cobs::decode_in_place(&mut body).expect("COBS");
     let payload = &mut body[5..len - 4];
     assert_eq!(payload, &frame[..n - 1]);
-    assert_eq!(decode_frame::<BridgeToHost>(payload), Ok(msg));
+    assert_eq!(decode_frame(payload, Reads::All), Ok(Some(msg)));
 }
 
 #[test]
@@ -312,16 +313,22 @@ fn sd_log_logged_pins_each_variant_when_bridge_sends_it() {
     let status = UpdateStatusBytes::from_slice(&[1, 2]).expect("fits");
     let cases = [
         (
-            BridgeToHost::Ready {
-                mac: [0x02, 0, 0, 0, 0, 1],
-                fw_version: String::new(),
-                reset_cause: ResetCause::PowerOn,
-                last_phase: LoopPhase::Unknown,
-                uptime_ms: 0,
-                node_board: NodeBoard::NoCarrier,
-                radio: None,
-                image: None,
-            },
+            BridgeToHost::Ready(Ready {
+                core: ReadyCore {
+                    mac: [0x02, 0, 0, 0, 0, 1],
+                    image: [0; 32],
+                    version: BRIDGE_VERSION,
+                    trial: Trial::Settled,
+                    uptime_ms: 0,
+                },
+                rest: Some(ReadyRest {
+                    fw_version: String::new(),
+                    reset_cause: ResetCause::PowerOn,
+                    last_phase: LoopPhase::Unknown,
+                    node_board: NodeBoard::NoCarrier,
+                    radio: None,
+                }),
+            }),
             true,
         ),
         (largest_status(), true),

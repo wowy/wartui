@@ -12,10 +12,18 @@
 //! reconnect that never happened. The other is a new life under a held connection — a C6 that
 //! restarted, or a P4 that rebooted while the CH343 stayed on the bus — and that has to be
 //! reported, or the engine keeps the dead life's `BridgeInfo`.
+//!
+//! **A connection reads the frozen core until a `Ready` says it can read more.** Each transport
+//! decodes in [`Gate::reads`]'s mode. Before the first `Ready`, and after one whose rest this host
+//! could not read, that is [`Reads::Core`]: `Ready` and `Update` alone, so a bridge on another
+//! major cannot pass its messages off as this build's. A `Ready` whose rest is unread is
+//! [`Admitted::Unread`], which starts no connection; a `Ready` with its rest starts one, and opens
+//! [`Reads::All`]. The life is followed through both kinds, so a new life reads as one whichever
+//! announced it.
 
 use std::time::{Duration, Instant};
 
-use wartui_proto::link::BridgeToHost;
+use wartui_proto::link::{BridgeToHost, Reads, Ready, ReadyCore};
 use wartui_proto::mac;
 
 use crate::BridgeInfo;
@@ -35,19 +43,31 @@ pub(crate) enum Admitted {
         /// A life this connection has not reported yet.
         fresh: bool,
     },
+    /// A `Ready` whose rest this host did not read: another major, or a rest that did not
+    /// decode. It starts no connection. `fresh` is a new life, as for `Ready`.
+    Unread {
+        /// What every bridge says of itself.
+        core: ReadyCore,
+        /// A life this connection has not seen yet.
+        fresh: bool,
+    },
     /// A frame to pass on.
     Message(BridgeToHost),
     /// A frame from before this connection's first `Ready`, dropped.
     Stale,
 }
 
-/// One connection's view of the stream: the last `Ready`, and the frames dropped before the
-/// first.
+/// One connection's view of the stream: the last `Ready`, what it lets this host read, and the
+/// frames dropped before the first.
 #[derive(Debug, Default)]
 pub(crate) struct Gate {
-    /// The last `Ready`'s uptime and the host's time it arrived. A property of one connection,
-    /// not of the link.
+    /// The last `Ready`'s uptime and the host's time it arrived, its rest read or not. A property
+    /// of one connection, not of the link.
     last_ready: Option<(u32, Instant)>,
+    /// A `Ready` with its rest has arrived on this connection.
+    announced: bool,
+    /// The last `Ready` carried a rest this host read.
+    reads_all: bool,
     /// Frames that decoded before this connection's first `Ready`, and were not passed on.
     skipped: u32,
 }
@@ -58,9 +78,15 @@ impl Gate {
         Self::default()
     }
 
-    /// Whether this connection has had its first `Ready`.
+    /// Whether this connection has had its first `Ready` with a rest this host read.
     pub(crate) fn announced(&self) -> bool {
-        self.last_ready.is_some()
+        self.announced
+    }
+
+    /// What to decode the bridge's next frame for: [`Reads::All`] once a `Ready` with its rest
+    /// has arrived, and [`Reads::Core`] before one and after one whose rest went unread.
+    pub(crate) fn reads(&self) -> Reads {
+        if self.reads_all { Reads::All } else { Reads::Core }
     }
 
     /// Frames dropped before the first `Ready`.
@@ -77,51 +103,47 @@ impl Gate {
     /// Take one frame that decoded, arriving at `now`.
     pub(crate) fn admit(&mut self, msg: BridgeToHost, now: Instant) -> Admitted {
         match msg {
-            BridgeToHost::Ready {
-                mac,
-                fw_version,
-                reset_cause,
-                last_phase,
-                uptime_ms,
-                node_board,
-                radio,
-                image,
-            } => {
-                let fresh = is_a_new_life(uptime_ms, now, self.last_ready);
-                if self.last_ready.is_none() && self.skipped > 0 {
+            BridgeToHost::Ready(Ready { core, rest }) => {
+                let new_life = is_a_new_life(core.uptime_ms, now, self.last_ready);
+                self.last_ready = Some((core.uptime_ms, now));
+                self.reads_all = rest.is_some();
+                let Some(rest) = rest else {
+                    tracing::debug!(
+                        mac = %mac::full(&core.mac),
+                        version = %core.version,
+                        "the bridge announced itself in a build this host cannot read"
+                    );
+                    return Admitted::Unread { core, fresh: new_life };
+                };
+                // The first readable `Ready` starts the connection, whatever came before it.
+                let fresh = new_life || !self.announced;
+                if !self.announced && self.skipped > 0 {
                     tracing::debug!("skipped {} frames from before this connection", self.skipped);
                 }
-                self.last_ready = Some((uptime_ms, now));
+                self.announced = true;
+                let info = BridgeInfo::from_ready(&core, rest);
                 if fresh {
                     // Without it, a log of a link that dropped and came back ends at "opening
                     // the bridge" — as does one that never did.
                     tracing::info!(
-                        mac = %mac::full(&mac),
-                        fw = %fw_version.as_str(),
-                        reset = ?reset_cause,
-                        phase = ?last_phase,
-                        uptime_ms,
-                        board = %node_board,
-                        radio = ?radio,
+                        mac = %mac::full(&info.mac),
+                        fw = %info.fw_version,
+                        version = %info.version,
+                        trial = ?info.trial,
+                        reset = ?info.reset_cause,
+                        phase = ?info.last_phase,
+                        uptime_ms = info.uptime_ms,
+                        board = %info.node_board,
+                        radio = ?info.radio,
                         "the bridge announced itself"
                     );
                 }
-                let info = BridgeInfo {
-                    mac,
-                    fw_version: fw_version.as_str().to_owned(),
-                    reset_cause,
-                    last_phase,
-                    uptime_ms,
-                    node_board,
-                    radio,
-                    image,
-                };
                 Admitted::Ready { info, fresh }
             }
             msg => {
                 // A rebooted bridge's `Ready` on a connection already announced changes nothing
                 // here.
-                if self.last_ready.is_none() {
+                if !self.announced {
                     self.skipped += 1;
                     return Admitted::Stale;
                 }
@@ -181,23 +203,42 @@ pub(crate) fn is_a_new_life(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use wartui_proto::bus::{NodeBoard, Slot};
-    use wartui_proto::link::{BridgeToHost, FromNodeBody, LoopPhase, ShortStr};
+    use wartui_proto::bus::{NodeBoard, Slot, Version};
+    use wartui_proto::link::{
+        BRIDGE_VERSION, BridgeToHost, FromNodeBody, LoopPhase, Reads, Ready, ReadyCore, ReadyRest,
+        ShortStr, Trial,
+    };
     use wartui_proto::reset::ResetCause;
 
     use super::{Admitted, Gate};
 
-    fn ready(uptime_ms: u32) -> BridgeToHost {
-        BridgeToHost::Ready {
+    fn core(uptime_ms: u32, version: Version) -> ReadyCore {
+        ReadyCore {
             mac: [0x02, 0, 0x5E, 0x10, 0x44, 0xC0],
-            fw_version: ShortStr::new(),
-            reset_cause: ResetCause::PowerOn,
-            last_phase: LoopPhase::Unknown,
+            image: [0; 32],
+            version,
+            trial: Trial::Settled,
             uptime_ms,
-            node_board: NodeBoard::NoCarrier,
-            radio: None,
-            image: None,
         }
+    }
+
+    fn ready(uptime_ms: u32) -> BridgeToHost {
+        BridgeToHost::Ready(Ready {
+            core: core(uptime_ms, BRIDGE_VERSION),
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::new(),
+                reset_cause: ResetCause::PowerOn,
+                last_phase: LoopPhase::Unknown,
+                node_board: NodeBoard::NoCarrier,
+                radio: None,
+            }),
+        })
+    }
+
+    /// A `Ready` from a bridge on another major, whose rest this host left unread.
+    fn unread(uptime_ms: u32) -> BridgeToHost {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        BridgeToHost::Ready(Ready { core: core(uptime_ms, version), rest: None })
     }
 
     fn rx() -> BridgeToHost {
@@ -246,5 +287,44 @@ mod tests {
         assert_eq!(gate.admit(rx(), t0), Admitted::Stale);
         let back = gate.admit(ready(30_000), t0 + Duration::from_secs(20));
         assert!(matches!(back, Admitted::Ready { fresh: true, .. }));
+    }
+
+    #[test]
+    fn gate_reads_core_only_when_no_ready_has_arrived() {
+        let mut gate = Gate::new();
+        assert_eq!(gate.reads(), Reads::Core);
+        assert!(matches!(gate.admit(ready(500), Instant::now()), Admitted::Ready { .. }));
+        assert_eq!(gate.reads(), Reads::All);
+        gate.restart();
+        assert_eq!(gate.reads(), Reads::Core, "a new start of the stream reads the core again");
+    }
+
+    #[test]
+    fn gate_reads_core_only_when_ready_is_from_another_major() {
+        let mut gate = Gate::new();
+        let t0 = Instant::now();
+        let first = gate.admit(unread(500), t0);
+        assert!(matches!(first, Admitted::Unread { fresh: true, .. }));
+        assert_eq!(gate.reads(), Reads::Core);
+        assert!(!gate.announced(), "no connection starts");
+        // Whatever still decodes ahead of a readable `Ready` was not admitted.
+        assert_eq!(gate.admit(rx(), t0), Admitted::Stale);
+        // A bridge updated under the connection reads in full again, and starts it.
+        let full = gate.admit(ready(100), t0 + Duration::from_secs(1));
+        assert!(matches!(full, Admitted::Ready { fresh: true, .. }));
+        assert_eq!(gate.reads(), Reads::All);
+        // And back to another major.
+        let again = gate.admit(unread(50), t0 + Duration::from_secs(2));
+        assert!(matches!(again, Admitted::Unread { fresh: true, .. }));
+        assert_eq!(gate.reads(), Reads::Core);
+    }
+
+    #[test]
+    fn gate_reports_ready_fresh_when_first_readable_ready_follows_unread_one_of_same_life() {
+        let mut gate = Gate::new();
+        let t0 = Instant::now();
+        gate.admit(unread(1_200), t0);
+        let full = gate.admit(ready(1_202), t0 + Duration::from_millis(2));
+        assert!(matches!(full, Admitted::Ready { fresh: true, .. }));
     }
 }

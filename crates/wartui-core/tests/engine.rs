@@ -346,6 +346,8 @@ fn connected_board(mac: Mac, node_board: NodeBoard) -> Event {
         node_board,
         radio: None,
         image: None,
+        version: wartui_proto::link::BRIDGE_VERSION,
+        trial: wartui_proto::link::Trial::Settled,
     }))
 }
 

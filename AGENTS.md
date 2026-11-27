@@ -127,8 +127,9 @@ the bottom one and a crate of its own.
   setting, planner and sparse node count in), `bonds` (the Bluetooth bonds the P4 keeps for its
   C6, and their records),
   `host_owner` (who holds the P4's host queue: USB, a Bluetooth central, a phone or no one), `crc`,
-  `beacon`, `hci`, `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and
-  their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
+  `beacon`, `hci`, `dedup`, `link` (the host link's frames and messages, their frozen core, the
+  hand-laid `Ready`, and what the bridge firmware's version means), `radio_link` (the UART packets
+  between the P4 and its C6, and their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
   finds a bridge by, the address its set advertises from, and the rest of the phones' set after a
   silent central),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
@@ -333,10 +334,6 @@ is here rather than only in a `//!`.
   `Stop`, so a change to those four layouts costs a P4 reflash too (`wartui flash-bridge`, from
   the same tree); any other node message passes through it unread and does not.
   `wartui ota` updates the nodes over the bus.
-- **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
-  protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
-  trees may meet as an undecodable frame rather than a named mismatch, which is stated where the
-  constant is.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is a flags
   byte (random address, connectable), then two bytes of company identifier when the advertiser
@@ -354,6 +351,11 @@ is here rather than only in a `//!`.
   firmware's `version` in `firmware/node/Cargo.toml` is bumped on every change: before 1.0 a minor
   bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
+  `firmware/p4-bridge`'s version follows semantic versioning instead, for the host link's
+  unfrozen messages: a changed message's bytes is a major, a new message a minor, and a patch
+  changes none. `link::BRIDGE_VERSION` mirrors it, `tests/version.rs` fails when they differ, and
+  `crates/wartui-proto/tests/link_messages.txt` holds every message's bytes, so a change without
+  its bump fails a test.
   The node's `trial` sector layout, which one image writes and the next reads, is frozen with the
   bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker but
   `store::SCHEMA_VERSION` moves until 1.0**, whatever a layout does. `bus::BUS_VERSION` names the
@@ -488,7 +490,7 @@ edit stops; follow the pointer before changing the rule.
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-desktop/src/discover.rs` `//!`
 - **A connection starts at its first `Ready`, on both links, and asks with `Identify` until one
   answers.** What decodes ahead of it was written before the connection and is dropped
-  (`gate`). Over USB a connection asks a CH343 every 500 ms, and any other port once. A CH343
+  (`gate`), and until a `Ready` whose rest the host reads, it decodes only the frozen messages. Over USB a connection asks a CH343 every 500 ms, and any other port once. A CH343
   drains its UART, and a P4 booting behind it loses the first `Identify`. A path named with
   `--bridge` that is not a listed CH343 may be a node, and a node that is not reading its USB
   endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output queue
@@ -550,6 +552,9 @@ edit stops; follow the pointer before changing the rule.
 - **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
   any node build, and a node never needs a wired flash.
   → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **The host link's core is frozen, even before 1.0**, so any later host can reach, identify,
+  update and restart any bridge that carries it. `link::FRAME_VERSION` is 2 and never moves.
+  → `crates/wartui-proto/src/link/mod.rs` `//!`
 - **The P4's core 1 stays off.** Every future, the microSD card's included, is joined on core 0,
   and nothing calls `start_second_core`. esp-storage stalls the other core for every flash write,
   wherever it is, so a core 1 frozen holding a lock leaves core 0 spinning on it: on the bench,
@@ -571,8 +576,8 @@ edit stops; follow the pointer before changing the rule.
   Lock it per transaction, never across an await on anything but the bus, or one stalls the
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
 - **Over USB, a restart of either chip is invisible unless the host compares uptimes**, because
-  the CH343 stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the
-  C6's, which the P4 resets at its own boot. Both transports read each `Ready` through the same
+  the CH343 stays on the bus through it, so the connection holds, and the uptime in `Ready`'s
+  frozen core is the C6's, which the P4 resets at its own boot. Both transports read each `Ready` through the same
   gate, so a new life under a held connection is reported on either; over Bluetooth a restart of
   either chip also drops the link. → `crates/wartui-bridge/src/gate.rs` `//!`, `is_a_new_life`
 - **The P4 writes nothing to a host until one attaches, and queues nothing until then.** A USB

@@ -506,6 +506,8 @@ mod tests {
             node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
+            version: wartui_proto::link::BRIDGE_VERSION,
+            trial: wartui_proto::link::Trial::Settled,
         };
         handle(LinkEvent::Connected(info), &args(), &mut counts);
         assert_eq!(head(7, b1, &counts), "         7us  N8");

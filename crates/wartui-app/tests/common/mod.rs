@@ -98,6 +98,8 @@ pub fn snapshot(bridge: Option<Mac>) -> Snapshot {
         node_board: NodeBoard::Carrier14,
         radio: None,
         image: None,
+        version: wartui_proto::link::BRIDGE_VERSION,
+        trial: wartui_proto::link::Trial::Settled,
     });
     snapshot
 }

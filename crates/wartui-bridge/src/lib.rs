@@ -62,8 +62,11 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
-use wartui_proto::bus::NodeBoard;
-use wartui_proto::link::{BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo};
+use wartui_proto::bus::{NodeBoard, Version};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo, Ready, ReadyCore, ReadyRest,
+    ShortStr, Trial,
+};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -118,6 +121,51 @@ pub struct BridgeInfo {
     /// installed image from a rollback. `None` when the P4 cannot read one: its partition
     /// table did not read, or the image carries no appended digest.
     pub image: Option<[u8; DIGEST_LEN]>,
+    /// The P4 firmware's version (`wartui_proto::link::BRIDGE_VERSION`'s, on a bridge from this
+    /// tree).
+    pub version: Version,
+    /// Where the booted image's trial stands.
+    pub trial: Trial,
+}
+
+impl BridgeInfo {
+    /// The bridge a `Ready` with this `core` and `rest` announces.
+    #[must_use]
+    pub fn from_ready(core: &ReadyCore, rest: ReadyRest) -> Self {
+        Self {
+            mac: core.mac,
+            fw_version: rest.fw_version.as_str().to_owned(),
+            reset_cause: rest.reset_cause,
+            last_phase: rest.last_phase,
+            uptime_ms: core.uptime_ms,
+            node_board: rest.node_board,
+            radio: rest.radio,
+            image: core.image(),
+            version: core.version,
+            trial: core.trial,
+        }
+    }
+
+    /// The `Ready` this bridge announces itself with, `uptime_ms` into its life.
+    #[must_use]
+    pub fn ready(&self, uptime_ms: u32) -> Ready {
+        Ready {
+            core: ReadyCore {
+                mac: self.mac,
+                image: self.image.unwrap_or([0; DIGEST_LEN]),
+                version: self.version,
+                trial: self.trial,
+                uptime_ms,
+            },
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::try_from(self.fw_version.as_str()).unwrap_or_default(),
+                reset_cause: self.reset_cause,
+                last_phase: self.last_phase,
+                node_board: self.node_board,
+                radio: self.radio.clone(),
+            }),
+        }
+    }
 }
 
 /// Something that happened on the link.
@@ -590,6 +638,7 @@ impl CommandRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wartui_proto::link::BRIDGE_VERSION;
 
     #[tokio::test]
     async fn link_handle_prioritizes_urgent_commands_when_bulk_commands_are_backlogged() {
@@ -759,6 +808,8 @@ mod tests {
             node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
+            version: BRIDGE_VERSION,
+            trial: Trial::Settled,
         }
     }
 

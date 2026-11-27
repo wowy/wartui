@@ -43,8 +43,8 @@ use crate::wardrive_esp::beacon::Beacon;
 /// The revision of the [`Up`] and [`Down`] encoding, which [`Hello`](super::Hello)
 /// carries.
 ///
-/// Not frozen. Held at 1 until 1.0, as [`crate::link::LINK_PROTO_VERSION`] is: both firmwares
-/// are flashed from one tree. `radio_link_revision_golden_bytes` in `tests/radio_link.rs` pins
+/// Not frozen. Held at 1 until 1.0: both firmwares are flashed from one tree, since the P4's image
+/// carries the C6's. `radio_link_revision_golden_bytes` in `tests/radio_link.rs` pins
 /// the encoding, and is re-pinned when these types change shape.
 pub const LINK_REVISION: u16 = 1;
 

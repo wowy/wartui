@@ -503,9 +503,9 @@ impl Shared {
     /// Out of line, as each message is, so the two never share a frame.
     #[inline(never)]
     fn push_ready(&self) -> bool {
-        let ready = self.pair.borrow().ready(now_ms());
+        let ready = self.pair.borrow().ready(now_ms(), update::trial(self));
         let Some(ready) = ready else { return false };
-        self.push_host(&ready);
+        self.push_host(&BridgeToHost::Ready(ready));
         true
     }
 

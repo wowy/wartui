@@ -66,8 +66,8 @@ use wartui_firmware::reboot;
 use wartui_proto::host_owner::{Effect, Input};
 use wartui_proto::host_queue::HOST_CHUNK;
 use wartui_proto::link::{
-    FrameAccumulator, HOST_BAUD, HOST_SILENCE_SECS, HostOwner, HostToBridge, LoopPhase,
-    MAX_HOST_FRAME, decode_frame, encode_frame,
+    BridgeToHost, FrameAccumulator, HOST_BAUD, HOST_SILENCE_SECS, HostOwner, HostToBridge,
+    LoopPhase, MAX_HOST_FRAME, decode_host_frame, encode_frame,
 };
 use wartui_proto::radio_link::Down;
 
@@ -248,9 +248,12 @@ pub fn owe_ready(shared: &Shared) {
     shared.pushed.signal(());
 }
 
+/// The command `frame` carries, or `None` for one this P4 cannot read: a frame that does not
+/// decode, or a code a later host sends. Either is skipped as though it never came, with no
+/// attach, no presence and no confirm.
 #[inline(never)]
 fn decode(frame: &mut [u8]) -> Option<HostToBridge> {
-    decode_frame::<HostToBridge>(frame).ok()
+    decode_host_frame(frame).ok().flatten()
 }
 
 /// Write queued frames to the host forever, a chunk at a time.
@@ -290,10 +293,10 @@ async fn write_host(mut tx: UhciTx<'static, Async>, mut buf: DmaTxBuf, shared: &
 /// Out of line, for the encode buffer.
 #[inline(never)]
 fn ready_frame(shared: &Shared, out: &mut [u8; HOST_CHUNK]) -> usize {
-    let ready = shared.pair.borrow().ready(now_ms());
+    let ready = shared.pair.borrow().ready(now_ms(), crate::update::trial(shared));
     let Some(ready) = ready else { return 0 };
     out[0] = 0x00;
-    encode_frame(&ready, &mut out[1..]).map_or(0, |len| 1 + len)
+    encode_frame(&BridgeToHost::Ready(ready), &mut out[1..]).map_or(0, |len| 1 + len)
 }
 
 /// Tell the queue's owner once [`HOST_SILENCE`] passes without a UART0 frame while USB owns

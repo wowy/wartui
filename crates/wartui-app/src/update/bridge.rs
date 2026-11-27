@@ -1125,6 +1125,8 @@ mod tests {
             node_board: NodeBoard::Carrier14,
             radio: None,
             image,
+            version: wartui_proto::link::BRIDGE_VERSION,
+            trial: wartui_proto::link::Trial::Settled,
         }
     }
 

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use wartui_proto::bus::NodeBoard;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, LoopPhase, MAX_FRAME, ShortStr, decode_frame,
-    encode_frame,
+    BRIDGE_VERSION, BridgeToHost, FrameAccumulator, HostToBridge, LoopPhase, MAX_FRAME, Ready,
+    ReadyCore, ReadyRest, ShortStr, Trial, decode_host_frame, encode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
@@ -230,7 +230,9 @@ impl Write for Pipe {
             return Err(unplugged());
         }
         for &byte in buf {
-            let Some(cmd) = line.acc.push(byte).and_then(|frame| decode_frame(frame).ok()) else {
+            let Some(cmd) =
+                line.acc.push(byte).and_then(|frame| decode_host_frame(frame).ok().flatten())
+            else {
                 continue;
             };
             if let (HostToBridge::Identify, Behavior::Bridge { mac, ignore }) =
@@ -269,16 +271,22 @@ impl Abort for Pipe {
 /// A `Ready` from a bridge at `mac` that booted at `booted`. Its uptime advances with real time,
 /// so the answers to two `Identify`s read as one life.
 fn ready(mac: Mac, booted: Instant) -> Vec<u8> {
-    let msg = BridgeToHost::Ready {
-        mac,
-        fw_version: ShortStr::new(),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::Unknown,
-        uptime_ms: u32::try_from(booted.elapsed().as_millis()).unwrap_or(u32::MAX),
-        node_board: NodeBoard::NoCarrier,
-        radio: None,
-        image: None,
-    };
+    let msg = BridgeToHost::Ready(Ready {
+        core: ReadyCore {
+            mac,
+            image: [0; 32],
+            version: BRIDGE_VERSION,
+            trial: Trial::Settled,
+            uptime_ms: u32::try_from(booted.elapsed().as_millis()).unwrap_or(u32::MAX),
+        },
+        rest: Some(ReadyRest {
+            fw_version: ShortStr::new(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            node_board: NodeBoard::NoCarrier,
+            radio: None,
+        }),
+    });
     let mut buf = [0; MAX_FRAME];
     let len = encode_frame(&msg, &mut buf).expect("a Ready fits a frame");
     buf[..len].to_vec()

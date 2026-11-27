@@ -176,6 +176,8 @@ pub(super) fn busy() -> Snapshot {
             node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
+            version: wartui_proto::link::BRIDGE_VERSION,
+            trial: wartui_proto::link::Trial::Settled,
         }),
         link_up: true,
         link_error: None,

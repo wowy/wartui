@@ -1452,6 +1452,8 @@ mod tests {
                 node_board: wartui_proto::bus::NodeBoard::NoCarrier,
                 radio: None,
                 image: None,
+                version: wartui_proto::link::BRIDGE_VERSION,
+                trial: wartui_proto::link::Trial::Settled,
             })
         };
         for (phase, said) in [

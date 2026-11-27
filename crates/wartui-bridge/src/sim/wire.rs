@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, ShortStr, decode_frame, encode_frame,
+    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, decode_host_frame, encode_frame,
 };
 use wartui_proto::mac::Mac;
 
@@ -181,16 +181,7 @@ impl Side {
 /// The `Ready` a bridge that announced itself as `info` at `at` answers an `Identify` with.
 fn ready(info: &BridgeInfo, at: Instant) -> BridgeToHost {
     let since = u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX);
-    BridgeToHost::Ready {
-        mac: info.mac,
-        fw_version: ShortStr::try_from(info.fw_version.as_str()).unwrap_or_default(),
-        reset_cause: info.reset_cause,
-        last_phase: info.last_phase,
-        uptime_ms: info.uptime_ms.saturating_add(since),
-        node_board: info.node_board,
-        radio: info.radio.clone(),
-        image: info.image,
-    }
+    BridgeToHost::Ready(info.ready(info.uptime_ms.saturating_add(since)))
 }
 
 /// Carry Down's bytes to the simulator and its messages to Up, until both halves are gone or the
@@ -207,13 +198,14 @@ async fn run(mut link: LinkHandle, mut down: mpsc::UnboundedReceiver<Vec<u8>>, m
                 };
                 for &byte in &bytes {
                     let Some(frame) = acc.push(byte) else { continue };
-                    match decode_frame::<HostToBridge>(frame) {
-                        Ok(HostToBridge::Identify) => side.identify(),
-                        Ok(cmd) => {
+                    match decode_host_frame(frame) {
+                        Ok(Some(HostToBridge::Identify)) => side.identify(),
+                        Ok(Some(cmd)) => {
                             if let Err(e) = link.send_bulk(cmd) {
                                 tracing::debug!(error = %e, "the simulator did not take a command");
                             }
                         }
+                        Ok(None) => tracing::debug!("a host frame this bridge does not read"),
                         Err(e) => tracing::debug!(error = %e, "undecodable host frame on Down"),
                     }
                 }
@@ -241,7 +233,8 @@ mod tests {
     use wartui_proto::ble::ATT_MTU;
     use wartui_proto::bus::UpType;
     use wartui_proto::link::{
-        BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, decode_frame,
+        BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, Reads,
+        decode_frame,
     };
 
     use super::{WireDown, WireSim, WireUp};
@@ -291,7 +284,8 @@ mod tests {
                 let mut decoded = None;
                 for byte in value {
                     if let Some(frame) = self.acc.push(byte) {
-                        decoded = Some(decode_frame(frame).expect("a bridge frame"));
+                        let msg = decode_frame(frame, Reads::All).expect("a bridge frame");
+                        decoded = Some(msg.expect("a code this build knows"));
                     }
                 }
                 // Each value is within one frame, so it ends at most one.
@@ -330,10 +324,10 @@ mod tests {
     async fn wire_sim_answers_ready_when_identify_is_written() {
         let (down, mut reader, mac) = started(ATT_MTU);
         down.write(&identify());
-        let BridgeToHost::Ready { mac: announced, .. } = reader.next().await else {
+        let BridgeToHost::Ready(ready) = reader.next().await else {
             panic!("not a Ready first");
         };
-        assert_eq!(announced, mac);
+        assert_eq!(ready.core.mac, mac);
     }
 
     #[tokio::test(start_paused = true)]
