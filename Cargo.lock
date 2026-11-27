@@ -3310,6 +3310,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wartui-bindgen"
+version = "0.1.0"
+dependencies = [
+ "uniffi",
+]
+
+[[package]]
 name = "wartui-bridge"
 version = "0.1.0"
 dependencies = [

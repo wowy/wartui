@@ -1,0 +1,29 @@
+# Every version the Android library builds with, each named once. `package/build.sh` reads
+# `minSdk`, for the clang it links with, and `kotlin`, for the binding it generates.
+[versions]
+agp = "9.5.3"
+kotlin = "2.4.21"
+compileSdk = "37"
+minSdk = "31"
+jvm = "17"
+jna = "5.19.1"
+coroutines = "1.11.0"
+annotation = "1.11.0"
+jupiter = "5.14.4"
+android-junit = "2.0.2"
+androidx-test-runner = "1.7.0"
+
+[libraries]
+kgp = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
+jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "jupiter" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidx-test-runner" }
+
+[libraries.coroutines]
+module = "org.jetbrains.kotlinx:kotlinx-coroutines-core"
+version.ref = "coroutines"
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-junit = { id = "de.mannodermaus.android-junit", version.ref = "android-junit" }

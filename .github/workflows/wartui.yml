@@ -57,12 +57,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Bundled SQLite is compiled with the NDK's C compiler.
+      # Bundled SQLite is compiled with the NDK's C compiler, for API 31, the library's minimum.
       - name: Use the NDK's C compiler
         if: matrix.target == 'aarch64-linux-android'
         run: |
           bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$bin/aarch64-linux-android31-clang" >> "$GITHUB_ENV"
           echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
 
       - name: Check

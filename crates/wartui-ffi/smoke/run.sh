@@ -20,7 +20,9 @@ esac
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-target=${CARGO_TARGET_DIR:-$root/target}
+# Cargo reads a relative `CARGO_TARGET_DIR` against the directory it runs in, the root.
+target=${CARGO_TARGET_DIR:-target}
+[[ $target == /* ]] || target=$root/$target
 out=$target/ffi-smoke
 
 case "$(uname -s)" in
@@ -50,7 +52,8 @@ case "$which" in
   all) need cargo kotlinc java swiftc ;;
 esac
 
-(cd "$root" && cargo build -p wartui-ffi --features testing,cli --locked)
+(cd "$root" && cargo build -p wartui-ffi --features testing --locked)
+(cd "$root" && cargo build -p wartui-bindgen --locked)
 bindgen=$target/debug/uniffi-bindgen
 
 # Generate `language`'s binding from the built library into `target/ffi-smoke/<language>/`.

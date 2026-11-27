@@ -13,14 +13,7 @@ workspace = true
 name = "wartui_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
-[[bin]]
-name = "uniffi-bindgen"
-path = "src/bin/uniffi-bindgen.rs"
-required-features = ["cli"]
-
 [features]
-# The bindings generator, which reads `uniffi.toml` through `cargo metadata`.
-cli = ["uniffi/cli", "uniffi/cargo-metadata"]
 # `WireSim`, a simulated bridge at the byte level, the uploads and release fetches sent to a local
 # listener, and a node image that passes every check, for tests and the smoke programs. It turns
 # on `wartui-app`'s fixtures too. No shipped build enables it.
@@ -32,7 +25,7 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
-uniffi = { version = "0.32.2", default-features = false }
+uniffi = { workspace = true }
 wartui-app = { path = "../wartui-app" }
 wartui-bridge = { path = "../wartui-bridge" }
 wartui-core = { path = "../wartui-core" }

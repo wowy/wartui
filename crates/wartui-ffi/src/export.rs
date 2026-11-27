@@ -26,6 +26,7 @@ use wartui_proto::mac;
 
 use crate::runtime::runtime;
 use crate::settings::{Settings, chain};
+use crate::temp;
 
 /// Which rows an export writes.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -189,6 +190,11 @@ pub enum ExportError {
     /// The last rows could not be written out.
     #[error("flushing the export: {detail}")]
     Flush { detail: String },
+    /// On Android, neither `SQLITE_TMPDIR` nor `TMPDIR` names a directory SQLite can sort in.
+    /// An Android app sets `SQLITE_TMPDIR` to a directory of its own, such as its cache
+    /// directory, before its first export or upload. Nothing was written.
+    #[error("no temporary directory: set SQLITE_TMPDIR")]
+    NoTemporaryDirectory,
     /// The export's task panicked.
     #[error("the export panicked")]
     Panicked,
@@ -231,11 +237,14 @@ pub async fn export_wigle_csv(
         excluded_ssids: wartui_app::settings::excluded_ssid_bytes(&excluded).collect(),
     };
     let writing = runtime().spawn_blocking(move || {
+        if cfg!(target_os = "android") && !temp::found() {
+            return Err(ExportError::NoTemporaryDirectory);
+        }
         let (db, out) = (Path::new(&db_path), Path::new(&out_path));
-        app::wigle_csv(db, out, OutName::Chosen, &filter, &app_version)
+        Ok(app::wigle_csv(db, out, OutName::Chosen, &filter, &app_version)?.into())
     });
     match writing.await {
-        Ok(written) => Ok(written?.into()),
+        Ok(written) => written,
         Err(_) => Err(ExportError::Panicked),
     }
 }
