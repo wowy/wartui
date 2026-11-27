@@ -28,7 +28,7 @@ out=$target/phone
 
 # The iOS release the static libraries and the Swift package both name as their minimum. Keep it
 # equal to `platforms` in `swift/Package.swift`.
-ios_minimum=17.0
+ios_minimum=26.0
 
 fail() {
   echo "$*" >&2

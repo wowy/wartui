@@ -162,7 +162,7 @@ the newest in the SDK); iOS needs Xcode.
 | Minimum | |
 |---|---|
 | Android | API 31 (`minSdk`, and the NDK clang the library links with) |
-| iOS | 17.0 (the package's platform, and `IPHONEOS_DEPLOYMENT_TARGET`) |
+| iOS | 26.0 (the package's platform, and `IPHONEOS_DEPLOYMENT_TARGET`) |
 | Swift | 6.4, in the Swift 6 language mode |
 
 **An Android app** depends on the AAR. A file carries no dependency list, so the app also names

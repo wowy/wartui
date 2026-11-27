@@ -8,7 +8,7 @@ import PackageDescription
 let package = Package(
     name: "WartuiCore",
     // Keep it equal to `ios_minimum` in `../package/build.sh`, which builds the libraries for it.
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v26)],
     products: [
         .library(name: "WartuiCore", targets: ["WartuiCore"])
     ],
