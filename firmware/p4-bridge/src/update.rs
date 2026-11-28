@@ -36,9 +36,7 @@ use wartui_firmware::ota::{Fault, Note, Ota, SettingsSector};
 use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
-use wartui_proto::link::{
-    BridgeToHost, HostOwner, LogStr, Trial, UPDATE_STATUS_MAX, UpdateStatusBytes,
-};
+use wartui_proto::link::{BridgeToHost, LogStr, Trial, UPDATE_STATUS_MAX, UpdateStatusBytes};
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
@@ -241,12 +239,11 @@ pub fn take(bytes: &[u8], shared: &Shared) {
     let Some(op) = Op::decode(bytes) else { return };
     let begin = matches!(op, Op::Begin { .. });
     let status = shared.updates.borrow_mut().take(op);
-    // A `Begin` taken from a Bluetooth central stops the scan, as a `StopScan` does: a Bluetooth
-    // update needs the scan stopped, and a host on another major sends no `StopScan`. Over USB
-    // the scan runs on. A session that ends without `Install` leaves the scan stopped, as a host's
-    // own `StopScan` before a Bluetooth update does; the reboot at `Install` stops it anyway.
-    let bluetooth = shared.owner.get().owner() == HostOwner::Bluetooth;
-    if bluetooth && begin && status.is_some_and(|status| status.state == UpdateState::Receiving) {
+    // A taken `Begin` stops the scan, as a `StopScan` does, whichever host sent it: an update
+    // needs the bridge's attention and ends in a reboot that stops the scan anyway, and a host on
+    // another major cannot send `StopScan`. A session that ends without `Install` leaves the scan
+    // stopped, since resuming a scan unasked after a failed update is not the bridge's call.
+    if begin && status.is_some_and(|status| status.state == UpdateState::Receiving) {
         crate::fleet::stop(shared);
     }
     if let Some(status) = status {

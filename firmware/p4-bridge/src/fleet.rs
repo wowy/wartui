@@ -171,7 +171,7 @@ pub fn start(shared: &Shared, bluetooth: bool) {
     after_input(shared);
 }
 
-/// A `StopScan`: idle every node, then pump.
+/// A `StopScan`, or a `Begin` taken for the P4's own image: idle every node, then pump.
 pub fn stop(shared: &Shared) {
     shared.fleet.borrow_mut().stop(now_ms());
     after_input(shared);

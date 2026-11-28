@@ -388,10 +388,11 @@ is here rather than only in a `//!`.
   there. It has four inputs, all the bridge's: the pool, kept in NVS and set by `SetPool`; the
   planner and its sparse node count, kept in NVS and set by `SetPlanner`; the scan mode, set by
   `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session, in Wi-Fi or Bluetooth
-  mode, and kept nowhere; and a linked phone's channel list, which outranks the pool while the
-  phone holds it and is kept nowhere. Which node scans Bluetooth is its pick, not an input. The
-  host's `Command::SetPool`, `SetPlanner`, `SetBluetooth` and `StopScan` only ask, and the engine
-  believes what the next `Status` or `Fleet` report says.
+  mode, stopped too by a `Begin` the P4 takes for its own image, and kept nowhere; and a linked
+  phone's channel list, which outranks the pool while the phone holds it and is kept nowhere.
+  Which node scans Bluetooth is its pick, not an input. The host's `Command::SetPool`,
+  `SetPlanner`, `SetBluetooth` and `StopScan` only ask, and the engine believes what the next
+  `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
 - **Only heartbeating nodes are assignable or in the plan.** The P4 plans by slot: a member is a
   present slot that has heartbeated within `fleet::HEARTBEAT_TIMEOUT_MS` (20 s), and its

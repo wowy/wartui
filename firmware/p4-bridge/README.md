@@ -41,8 +41,8 @@ host; this firmware feeds it and sends what it owes.
 
 - **It boots stopped.** Every node idles until a host's `StartScan`, and a node still scanning
   from the P4's last life is sent a `Stop`.
-- **It scans until a `StopScan`**, whether or not a host is listening. The host gate closing
-  changes nothing.
+- **It scans until a `StopScan`, or a `Begin` it takes for its own image**, whether or not a host
+  is listening. The host gate closing changes nothing.
 - **A member** is a present slot that has heartbeated within 20 s, on a node firmware of this
   build's major and minor. The pool is cut across the members in slot order, and cut again when
   membership, the mode or the pool changes.
@@ -152,11 +152,12 @@ After the first flash, `wartui flash-bridge` sends the P4 its app image over its
 same Type-C cable, or a bonded central through the C6 (§ "Bluetooth hosts"), more slowly
 (`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the update receiver
 the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on trial. The new
-image's bundled C6 image then reaches the C6 as below. A `Begin` the P4 takes from a Bluetooth
-central stops the scan, as `StopScan` does; over USB the scan runs on. A session that ends without
-`Install` leaves the scan stopped, as a host's own `StopScan` before a Bluetooth update does. An
-`Abort` drops the session it names. Every refusal is a status, and an op
-the P4 cannot read is skipped. The P4 drops an update session when its host lets go, so a
+image's bundled C6 image then reaches the C6 as below. A `Begin` the P4 takes stops the scan, as
+`StopScan` does, whichever host sent it: an update needs the bridge's attention and ends in a
+reboot that stops the scan anyway, and a host on another major cannot send `StopScan`. A session
+that ends without `Install` leaves the scan stopped: resuming a scan unasked after a failed update
+is not the bridge's call. An `Abort` drops the session it names. Every refusal is a status, and
+an op the P4 cannot read is skipped. The P4 drops an update session when its host lets go, so a
 Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets the C6, which drops a
 Bluetooth link too, and `flash-bridge` reads the outcome across the reconnects.
 
