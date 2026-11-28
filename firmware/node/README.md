@@ -126,7 +126,8 @@ band and gets `BandMode::Auto`. It is RISC-V and builds on stable.
 Diagnostics go out over USB serial-JTAG. The cargo runner is
 `espflash flash --monitor --partition-table partitions.csv --erase-parts otadata` with no `--chip`,
 so espflash detects the part. Run it from this directory, since the table's path is relative. Unlike
-the bridge's, this monitor is worth watching, because nothing but diagnostics goes down that pipe.
+the bridge's runner, which has no monitor, this one keeps it, because nothing but diagnostics goes
+down that pipe.
 
 Every node can scan Bluetooth. It does so only if the bridge sets the flag, and a node that does
 scans nothing else.

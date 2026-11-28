@@ -11,5 +11,6 @@ rustflags = [
 # written. `--flash-size 16mb` is the size the table needs and the one `flash-bridge` and the
 # release name in their images: espflash writes it into the image's header, which the image's
 # digest covers, so a board flashed here reports the digest `flash-bridge` builds from the same
-# source. Left to detect it, espflash writes the board's 32 MB.
-runner = "espflash flash --monitor --chip esp32p4 --flash-size 16mb --partition-table partitions.csv --erase-parts otadata"
+# source. Left to detect it, espflash writes the board's 32 MB. No `--monitor`: the port carries
+# the host link, not diagnostics, so the run ends once the image is written and frees the port.
+runner = "espflash flash --chip esp32p4 --flash-size 16mb --partition-table partitions.csv --erase-parts otadata"

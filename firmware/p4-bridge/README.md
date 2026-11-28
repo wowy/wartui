@@ -143,7 +143,9 @@ leaves it alone. Left to itself, `espflash flash` writes the 32 MB it detects, a
 `espflash save-image` reads no board and assumes 4 MB, which this table does not fit.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
-`cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
+`cargo run --release -- --port <that port>` with no button held. It runs no monitor, since the
+port carries the host link rather than diagnostics, so it exits once the image is written and leaves
+the port free for `wartui`. The CH343P's DTR and RTS drive
 EN and GPIO35 through a transistor pair. If a P4 shows `303a:0012` on USB and espflash cannot reach
 it, replug the board: one bench P4 in that state ignored CH343 resets until it was replugged.
 
