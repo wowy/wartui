@@ -101,7 +101,7 @@ pub fn partitions(table: &[u8]) -> impl Iterator<Item = Partition> + '_ {
 /// The `otadata` sector (0 or 1) holding the newest entry the bootloader accepts: seq not
 /// `u32::MAX`, state neither `INVALID` (3) nor `ABORTED` (4), and the CRC at bytes 28..32 equal to
 /// `esp_rom_crc32_le(u32::MAX, seq)`. Seq 0 is accepted, as the bootloader does. On equal seqs
-/// sector 1 wins.
+/// sector 0 wins.
 #[must_use]
 pub fn newest(otadata: &[[u8; 32]; 2]) -> Option<usize> {
     let seq = |entry: &[u8; 32]| {
@@ -114,7 +114,7 @@ pub fn newest(otadata: &[[u8; 32]; 2]) -> Option<usize> {
         valid.then_some(seq)
     };
     match (seq(&otadata[0]), seq(&otadata[1])) {
-        (Some(a), Some(b)) => Some(usize::from(b >= a)),
+        (Some(a), Some(b)) => Some(usize::from(b > a)),
         (Some(_), None) => Some(0),
         (None, Some(_)) => Some(1),
         (None, None) => None,
@@ -404,5 +404,11 @@ mod tests {
         };
         let err = plan(&ours(), running, 1).unwrap_err();
         assert!(matches!(err, Refusal::Overlaps { what: "trial", .. }));
+    }
+
+    #[test]
+    fn first_flash_picks_sector_0_when_both_entries_share_a_seq() {
+        let otadata = [good(2, 0xFFFF_FFFF), good(2, 0xFFFF_FFFF)];
+        assert_eq!(newest(&otadata), Some(0));
     }
 }
