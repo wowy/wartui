@@ -1,0 +1,21 @@
+# Its own workspace, like the firmware that depends on it: the root workspace excludes
+# `firmware`, and each image's lockfile resolves this crate on its own.
+[workspace]
+
+[package]
+name = "wartui-radio-image"
+description = "Builds firmware/p4-radio and saves its images, for the build scripts of every image that carries it."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/wowy/wartui"
+
+[dependencies]
+sha2 = { version = "0.11.1", default-features = false }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
