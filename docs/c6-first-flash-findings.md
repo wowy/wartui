@@ -226,7 +226,31 @@ This answers #395's open question: `esp_hosted_connect_to_slave` neither waits l
 the P4 against a C6 without ESP-Hosted. It returns, the transport event never comes, and card init
 fails within about 3.5 s.
 
+## A second factory board, 2026-11-28
+
+A second factory-fresh P4-WIFI6, P4 `1C:F2` (rev v3.2, 32 MB), was set up through the path a
+checkout user takes: `flash-bridge` with no `--loader`, so it builds both loaders with `idf.py`.
+
+### The rehearsal
+
+The rehearsal loader gave the same spans as on `A9:76`. Its write test started at 0x310000, so the
+factory `ota_1` ends where it does on `A9:76`. The OTA's switch landed in `otadata` sector 1
+(0xe000), and the C6 named no ESP-Hosted version. Run through `flash-bridge --first-flash --loader
+<rehearsal image>`, the setup stopped after `done rehearsal`, wrote no bridge firmware and
+remembered nothing. The P4 stayed on the loader and silent.
+
+### The setup
+
+`flash-bridge --config <scratch>`, answered `y`, built the P4 loader with the plain C6 loader
+inside. The C6 printed `start` rather than `start rehearsal`, ran the six steps and sent `done`.
+The bridge came up with its C6's address, `9E:A8`, and was remembered.
+
+`wartui status` showed the radio `…:9E:A8` on firmware 0.1.0, with a clean radio link (23
+packets, no errors) and no radio update. The loader built from the checkout carried the same radio
+image as the P4's bundle. A second `flash-bridge` said `9E:A8 already runs this image`.
+
 ### Open
 
-Other boards may ship another ESP-Hosted version. Only `release/ng-v1.0.2-330-g83efce6` has been
-met.
+Other boards may ship another ESP-Hosted version. Neither factory C6 answers the version request.
+The first board's ESP-Hosted read `release/ng-v1.0.2-330-g83efce6` from its app header, and the
+second's partition table and `otadata` behaved the same.
