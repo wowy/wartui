@@ -228,28 +228,13 @@ fn target(
 
 #[cfg(test)]
 mod tests {
-    use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate, is_ch343};
+    use wartui_bridge::ports::is_ch343;
 
-    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
+    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, bridge, silent};
     use super::*;
 
     fn named(given: &str) -> (&str, BridgeSpec) {
         (given, spec(given))
-    }
-
-    /// A CH343 as the OS lists it, with a serial number of its own.
-    fn ch343(device: &str) -> PortCandidate {
-        candidate(device, Some(CH343_VID), Some(CH343_PID), Some(device))
-    }
-
-    /// A CH343 whose probe answered as the bridge `address`.
-    fn bridge(device: &str, address: &Mac) -> Probed {
-        Probed { candidate: ch343(device), opened: true, mac: Some(*address) }
-    }
-
-    /// A CH343 whose probe heard nothing: a blank P4, or another device.
-    fn silent(device: &str) -> Probed {
-        Probed { candidate: ch343(device), opened: true, mac: None }
     }
 
     /// Every fleet board as `discover_ports` lists it: the nodes, then each probed CH343.
