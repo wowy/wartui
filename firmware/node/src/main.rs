@@ -18,8 +18,8 @@
 //! do. Its messages are wartui's own in both directions — [`wartui_proto::bus`]. It takes
 //! a new image over the bus, and boots it on trial until it hears the bridge — [`ota`].
 //!
-//! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
-//! worth watching: a node's USB endpoint carries nothing but diagnostics.
+//! The runner is `espflash flash --monitor`, unlike the bridge's, which has none: a
+//! node's USB endpoint carries nothing but diagnostics, so the monitor is worth watching.
 #![no_std]
 #![no_main]
 #![deny(
