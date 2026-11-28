@@ -20,8 +20,9 @@ frequency and size.
 
 The loader reads the factory table and `otadata`, finds the slot it booted from, and plans every
 write from p4-radio's table (`wartui_proto::first_flash`). A write that would land on the loader
-is refused before anything is written. A refusal, or an embedded image whose SHA-256 is wrong,
-erases the newest `otadata` entry, so the next reset boots ESP-Hosted again.
+is refused before anything is written. A refusal, an embedded image whose SHA-256 is wrong, or an
+embedded bootloader or table without its magic erases the newest `otadata` entry, so the next
+reset boots ESP-Hosted again. The build refuses a bootloader or table without its magic too.
 
 | Step | Writes | A power cut here |
 | --- | --- | --- |
@@ -42,7 +43,7 @@ them.
 
 | Line | When |
 | --- | --- |
-| `c6-loader: start` | first |
+| `c6-loader: start` | first; `start rehearsal` from a rehearsal |
 | `c6-loader: step <text>` | before each step, as `write the bootloader at 0x0..0x8000` |
 | `c6-loader: done` | all six steps done; then it resets |
 | `c6-loader: done rehearsal` | a rehearsal checked and ESP-Hosted selected again; then it resets |
@@ -50,9 +51,15 @@ them.
 
 ## Rehearsal
 
-Built with `--features rehearse`, the loader makes every check, sends `step would <text>` for each
-of the six steps, then erases the newest `otadata` entry and resets into ESP-Hosted. It writes
-nothing else, so it benches the plan on a factory board and leaves the board as it shipped.
+Built with `--features rehearse`, the loader makes every check and sends `step would <text>` for
+each of the six steps. It then tests the write path in flash no table uses: from the running
+slot's end, below our `trial` and clear of every factory partition, 0x310000..0x3BA000 on a
+factory C6. It writes the app, the bootloader and the table there as the real run does, each
+after a `step test-write the <what> at <span>` line, and erases the span. When no such span fits,
+it sends `step skip the write test: <why>` and goes on. Last, it erases the newest `otadata`
+entry and resets into ESP-Hosted. It changes nothing a factory C6 reads, so it benches the plan
+and the writes on a factory board and leaves the board as it shipped. A failed test write is
+`failed`, with ESP-Hosted selected again.
 
 ## Building
 

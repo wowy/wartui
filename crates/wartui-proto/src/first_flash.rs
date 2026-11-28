@@ -16,6 +16,9 @@
 //!   trailing `0xFF` writes are no-ops, so the bootloader's length stays out of the plan.
 //! - **Every span is checked against the running slot.** A table that places `ota_0`, `otadata`
 //!   or `trial` on the loader is refused, never written.
+//! - **A rehearsal's write test lands in flash no table uses.** [`scratch`] starts it at the
+//!   running slot's end, below our `trial` and clear of every factory partition, so the test
+//!   writes nothing a factory C6 or our first boot reads.
 
 use core::fmt;
 
@@ -30,7 +33,10 @@ pub const SECTOR: u32 = 0x1000;
 /// Our bootloader's span: everything below the table.
 pub const BOOTLOADER: Span = Span { start: 0, end: TABLE_AT };
 
-const ENTRY_MAGIC: [u8; 2] = [0xAA, 0x50];
+/// The first byte of an app or bootloader image.
+pub const IMAGE_MAGIC: u8 = 0xE9;
+/// The first two bytes of a partition table entry.
+pub const ENTRY_MAGIC: [u8; 2] = [0xAA, 0x50];
 const ENTRY_LEN: usize = 32;
 const APP: u8 = 0;
 const OTA_0: u8 = 0x10;
@@ -188,7 +194,7 @@ pub fn plan(ours: &[u8], running: Partition, app_len: u32) -> Result<Plan, Refus
     if app_len > ota_0.size {
         return Err(Refusal::TooLarge { len: app_len, slot: ota_0.size });
     }
-    let rounded = app_len.div_ceil(SECTOR).saturating_mul(SECTOR);
+    let rounded = sectors(app_len);
     let plan = Plan {
         app: Span { start: ota_0.offset, end: ota_0.offset.saturating_add(rounded) },
         otadata: otadata.span(),
@@ -210,6 +216,63 @@ pub fn plan(ours: &[u8], running: Partition, app_len: u32) -> Result<Plan, Refus
         }
     }
     Ok(plan)
+}
+
+/// Why a rehearsal skips its write test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoScratch {
+    /// `len` bytes from the running slot's end, at `from`, pass the end of flash's address space.
+    Overflows { from: u32, len: u32 },
+    /// The span reaches our `trial`.
+    ReachesTrial { span: Span, trial: Span },
+    /// The span overlaps this factory partition.
+    Overlaps { span: Span, partition: Partition },
+}
+
+/// The text after `step skip the write test: `.
+impl fmt::Display for NoScratch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NoScratch::Overflows { from, len } => {
+                write!(f, "{len} bytes from {from:#x} pass the end of flash")
+            }
+            NoScratch::ReachesTrial { span, trial } => {
+                write!(f, "{span} reaches our trial at {trial}")
+            }
+            NoScratch::Overlaps { span, partition } => write!(
+                f,
+                "{span} overlaps the factory partition {} at {}",
+                partition.label(),
+                partition.span()
+            ),
+        }
+    }
+}
+
+/// `len` rounded up to [`SECTOR`].
+#[must_use]
+pub fn sectors(len: u32) -> u32 {
+    len.div_ceil(SECTOR).saturating_mul(SECTOR)
+}
+
+/// Where a rehearsal may test-write `len` bytes: from the running slot's end, wholly below our
+/// `trial`, and overlapping no partition in the factory table.
+pub fn scratch(
+    factory: &[u8],
+    running: Partition,
+    ours: &Plan,
+    len: u32,
+) -> Result<Span, NoScratch> {
+    let from = running.span().end;
+    let end = from.checked_add(len).ok_or(NoScratch::Overflows { from, len })?;
+    let span = Span { start: from, end };
+    if end > ours.trial.start {
+        return Err(NoScratch::ReachesTrial { span, trial: ours.trial });
+    }
+    match partitions(factory).find(|p| p.span().overlaps(span)) {
+        Some(partition) => Err(NoScratch::Overlaps { span, partition }),
+        None => Ok(span),
+    }
 }
 
 #[cfg(test)]
@@ -410,5 +473,60 @@ mod tests {
     fn first_flash_picks_sector_0_when_both_entries_share_a_seq() {
         let otadata = [good(2, 0xFFFF_FFFF), good(2, 0xFFFF_FFFF)];
         assert_eq!(newest(&otadata), Some(0));
+    }
+
+    /// The rehearsal's test length: the app, bootloader and table, each rounded up to a sector.
+    fn test_len(app_len: u32) -> u32 {
+        sectors(app_len) + sectors(BOOTLOADER.end) + sectors(SECTOR)
+    }
+
+    #[test]
+    fn first_flash_finds_scratch_when_loader_runs_from_factory_ota_1() {
+        let ours = plan(&ours(), factory_slot(1), 658_208).unwrap();
+        let span = scratch(&factory(), factory_slot(1), &ours, test_len(658_208)).unwrap();
+        // 0xA1000 + 0x8000 + 0x1000 from ota_1's end.
+        assert_eq!(span, Span { start: 0x31_0000, end: 0x3B_A000 });
+    }
+
+    #[test]
+    fn first_flash_refuses_scratch_when_it_would_reach_trial() {
+        let ours = plan(&ours(), factory_slot(1), 658_208).unwrap();
+        let err = scratch(&factory(), factory_slot(1), &ours, 0xC_1000).unwrap_err();
+        assert_eq!(
+            err,
+            NoScratch::ReachesTrial {
+                span: Span { start: 0x31_0000, end: 0x3D_1000 },
+                trial: Span { start: 0x3D_0000, end: 0x3D_1000 },
+            }
+        );
+    }
+
+    #[test]
+    fn first_flash_refuses_scratch_when_it_would_overlap_a_factory_partition() {
+        use std::string::ToString;
+        let with_storage = table(&[
+            entry("otadata", 1, 0, 0xD000, 0x2000),
+            entry("ota_0", 0, 0x10, 0x1_0000, 0x18_0000),
+            entry("ota_1", 0, 0x11, 0x19_0000, 0x18_0000),
+            entry("storage", 1, 0x82, 0x38_0000, 0x1_0000),
+        ]);
+        let running = factory_slot(1);
+        let ours = plan(&ours(), running, 658_208).unwrap();
+        let err = scratch(&with_storage, running, &ours, test_len(658_208)).unwrap_err();
+        assert!(
+            matches!(err, NoScratch::Overlaps { partition, .. } if partition.offset == 0x38_0000)
+        );
+        assert_eq!(
+            err.to_string(),
+            "0x310000..0x3ba000 overlaps the factory partition storage at 0x380000..0x390000"
+        );
+    }
+
+    #[test]
+    fn first_flash_refuses_scratch_when_it_would_pass_the_end_of_flash() {
+        let running = Partition { size: 0x1000, offset: u32::MAX - 0xFFF, ..factory_slot(1) };
+        let ours = plan(&ours(), factory_slot(1), 1).unwrap();
+        let err = scratch(&factory(), running, &ours, 0x1000).unwrap_err();
+        assert_eq!(err, NoScratch::Overflows { from: u32::MAX, len: 0x1000 });
     }
 }

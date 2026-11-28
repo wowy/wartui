@@ -4,13 +4,19 @@
 //!   holds the loader, and `wartui_proto::first_flash::plan` refuses any write of ours that lands
 //!   on it. All reads and checks come before the first write.
 //! - **A refusal undoes the switch.** Erasing the newest `otadata` entry boots ESP-Hosted again,
-//!   so a C6 this loader cannot set up is left as it shipped. A damaged embedded image is undone
-//!   the same way.
+//!   so a C6 this loader cannot set up is left as it shipped. A damaged embedded image, or a
+//!   bootloader or table without its magic, is undone the same way: a write of either at 0x0 or
+//!   0x8000 would leave a C6 that boots nothing.
 //! - **The writes follow #395's order.** Until the last step erases `otadata`, the factory table
 //!   and `otadata` still boot the loader, so a power cut restarts it. Only a cut while the
 //!   bootloader or the table is written needs the header.
 //! - **Every write copies through RAM.** The embedded images live in flash, and the ROM's write
 //!   routine must not read flash while it programs it.
+//! - **A rehearsal runs the write path into free flash.** It erases, writes and reads back each
+//!   image as the real run does, at [`first_flash::scratch`]'s span, which no table uses, then
+//!   erases it. So a rehearsal on silicon proves the writes, not only the plan.
+//! - **`start` says which build runs.** A rehearsal sends `start rehearsal`, so the host can tell
+//!   it from the build that writes.
 //! - **`failed` repeats and never resets.** The P4 opens its UART only after resetting the C6, and
 //!   a reset would rerun a flow that has already refused.
 
@@ -25,7 +31,9 @@ use esp_hal::main;
 use esp_hal::uart::{Config, Uart};
 use esp_storage::{FlashStorage, FlashStorageError};
 use sha2::{Digest, Sha256};
-use wartui_proto::first_flash::{self, Plan, Refusal, SECTOR, Span, TABLE_AT, TABLE_LEN};
+use wartui_proto::first_flash::{
+    self, ENTRY_MAGIC, IMAGE_MAGIC, Partition, Plan, Refusal, SECTOR, Span, TABLE_AT, TABLE_LEN,
+};
 
 mod bundle {
     include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
@@ -61,7 +69,10 @@ fn main() -> ! {
     let mut flash = FlashStorage::new(p.FLASH);
     let delay = Delay::new();
 
-    link.line(format_args!("start"));
+    link.line(format_args!(
+        "{}",
+        if cfg!(feature = "rehearse") { "start rehearsal" } else { "start" }
+    ));
     let failure = match run(&mut flash, &mut link) {
         Ok(done) => {
             link.line(format_args!("{done}"));
@@ -89,28 +100,81 @@ fn run(flash: &mut FlashStorage<'_>, link: &mut Link) -> Result<Done, Failure> {
     if sha256 != APP_SHA256 {
         return Err(Failure::Damaged(factory.undo(flash)));
     }
+    if BOOTLOADER[0] != IMAGE_MAGIC {
+        return Err(Failure::NoMagic("bootloader", factory.undo(flash)));
+    }
+    if TABLE[..2] != ENTRY_MAGIC {
+        return Err(Failure::NoMagic("partition table", factory.undo(flash)));
+    }
     if cfg!(feature = "rehearse") {
-        rehearse(flash, link, &plan, &factory)
+        rehearse(flash, link, &plan, &factory, running)
     } else {
         land(flash, link, &plan)
     }
 }
 
-/// Report each write, then boot ESP-Hosted again.
+/// Report each write, test the write path in free flash, then boot ESP-Hosted again.
 fn rehearse(
     flash: &mut FlashStorage<'_>,
     link: &mut Link,
     plan: &Plan,
     factory: &Factory,
+    running: Partition,
 ) -> Result<Done, Failure> {
     for step in steps(plan) {
         link.line(format_args!("step would {step}"));
+    }
+    match first_flash::scratch(&factory.table, running, plan, test_len()) {
+        Ok(span) => test_write(flash, link, span)
+            .map_err(|(step, fault)| Failure::Tested(step, fault, factory.undo(flash)))?,
+        Err(why) => link.line(format_args!("step skip the write test: {why}")),
     }
     let at = factory.newest().ok_or(Failure::NoEntry)?;
     let step = Step { text: "erase the otadata entry", at };
     link.line(format_args!("step {step}"));
     erase(flash, at).map_err(|fault| Failure::Step(step, fault))?;
     Ok(Done::Rehearsed)
+}
+
+/// `bytes`' length rounded up to a sector.
+fn sectors(bytes: &[u8]) -> u32 {
+    first_flash::sectors(u32::try_from(bytes.len()).unwrap_or(u32::MAX))
+}
+
+/// The write test's length: the app, the bootloader and the table, each rounded up to a sector.
+fn test_len() -> u32 {
+    sectors(APP).saturating_add(sectors(BOOTLOADER)).saturating_add(sectors(TABLE))
+}
+
+/// Write each image into `span` as [`land`] writes it, then erase `span`.
+fn test_write(
+    flash: &mut FlashStorage<'_>,
+    link: &mut Link,
+    span: Span,
+) -> Result<(), (Step, Fault)> {
+    let mut start = span.start;
+    let mut next = |bytes: &[u8]| {
+        let at = Span { start, end: start.saturating_add(sectors(bytes)) };
+        start = at.end;
+        at
+    };
+    let app = Step { text: "test-write the radio image", at: next(APP) };
+    let bootloader = Step { text: "test-write the bootloader", at: next(BOOTLOADER) };
+    let table = Step { text: "test-write the partition table", at: next(TABLE) };
+    let clear = Step { text: "erase the write test", at: span };
+    let mut step =
+        |step: Step, work: &mut dyn FnMut(&mut FlashStorage<'_>) -> Result<(), Fault>| {
+            link.line(format_args!("step {step}"));
+            work(flash).map_err(|fault| (step, fault))
+        };
+    step(app, &mut |flash| {
+        erase(flash, app.at)?;
+        write(flash, app.at.start, APP)?;
+        if hash(flash, app.at.start, APP.len())? == APP_SHA256 { Ok(()) } else { Err(Fault::Hash) }
+    })?;
+    step(bootloader, &mut |flash| rewrite(flash, bootloader.at, BOOTLOADER))?;
+    step(table, &mut |flash| rewrite(flash, table.at, TABLE))?;
+    step(clear, &mut |flash| erase(flash, clear.at))
 }
 
 /// #395 § "Order of writes", steps 1 to 6.
@@ -346,7 +410,11 @@ enum Failure {
     NoEntry,
     Refused(Refusal, Undo),
     Damaged(Undo),
+    /// The embedded image named here lacks its magic.
+    NoMagic(&'static str, Undo),
     Step(Step, Fault),
+    /// A rehearsal's write test failed at this step.
+    Tested(Step, Fault, Undo),
 }
 
 impl fmt::Display for Failure {
@@ -357,7 +425,9 @@ impl fmt::Display for Failure {
             Failure::NoEntry => f.write_str("otadata holds no entry to erase"),
             Failure::Refused(refusal, undo) => write!(f, "{refusal}{undo}"),
             Failure::Damaged(undo) => write!(f, "the embedded image is damaged{undo}"),
+            Failure::NoMagic(what, undo) => write!(f, "the embedded {what} lacks its magic{undo}"),
             Failure::Step(step, fault) => write!(f, "{step}, {fault}"),
+            Failure::Tested(step, fault, undo) => write!(f, "{step}, {fault}{undo}"),
         }
     }
 }

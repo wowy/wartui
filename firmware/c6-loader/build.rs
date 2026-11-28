@@ -34,6 +34,18 @@ fn bundle() {
         "the merged radio image is {} bytes, short of the app at {APP_AT:#x}",
         merged.len()
     );
+    // The loader writes these at 0x0 and 0x8000, where a C6 boots from.
+    assert!(
+        merged[0] == 0xE9,
+        "the merged radio image starts with {:#04x}, not the bootloader's magic 0xE9",
+        merged[0]
+    );
+    assert!(
+        merged[TABLE_AT..TABLE_AT + 2] == [0xAA, 0x50],
+        "the merged radio image's table at {TABLE_AT:#x} starts with {:02x?}, not the entry \
+         magic [aa, 50]",
+        &merged[TABLE_AT..TABLE_AT + 2]
+    );
     let bootloader = out.join("bootloader.bin");
     let table = out.join("table.bin");
     fs::write(&bootloader, &merged[..TABLE_AT]).expect("write bootloader.bin");
