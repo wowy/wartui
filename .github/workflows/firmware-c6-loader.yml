@@ -1,0 +1,83 @@
+name: Firmware - C6 loader
+
+# Path-filtered: this builds only when something the C6 loader compiles changes — its own
+# sources, `firmware/p4-radio` (the C6 image its build script builds and embeds),
+# `firmware/radio-image` (the crate that builds that image), `firmware/common` and
+# `crates/wartui-proto` (the path dependencies), `rustfmt.toml` (fmt resolves it from the repo
+# root), or this file. One workflow per firmware because GitHub's path filter is workflow-wide,
+# never per-job.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - firmware/c6-loader/**
+      - '!firmware/c6-loader/README.md'
+      - firmware/radio-image/**
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-c6-loader.yml
+      - rustfmt.toml
+  pull_request:
+    paths:
+      - firmware/c6-loader/**
+      - '!firmware/c6-loader/README.md'
+      - firmware/radio-image/**
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-c6-loader.yml
+      - rustfmt.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  c6-loader:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      # `build.rs` builds `firmware/p4-radio` and saves its images with espflash, for every build
+      # and clippy run below.
+      - name: Install espflash
+        run: cargo install espflash --locked
+
+      - name: Lint
+        run: |
+          pushd firmware/c6-loader
+          cargo fmt --all -- --check
+          popd
+          pushd firmware/radio-image
+          cargo fmt --check
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/c6-loader
+          cargo build --release --locked --verbose
+          popd
+
+      - name: Clippy
+        run: |
+          pushd firmware/c6-loader
+          cargo clippy --release --locked -- -D warnings
+          cargo clippy --release --locked --features rehearse -- -D warnings
+          popd
+          pushd firmware/radio-image
+          cargo clippy --locked -- -D warnings
+          popd

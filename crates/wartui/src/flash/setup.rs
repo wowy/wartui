@@ -761,6 +761,14 @@ mod tests {
     }
 
     #[test]
+    fn setup_names_assets_release_yml_publishes() {
+        let workflow = include_str!("../../../../.github/workflows/release.yml");
+        for asset in [P4_C6_LOADER.asset, p4::P4_BRIDGE.asset] {
+            assert!(workflow.contains(asset), "{asset}");
+        }
+    }
+
+    #[test]
     fn setup_refuses_image_when_setting_up_a_board() {
         // An app-only image cannot be written at 0x0, and dropping it silently would set the
         // board up from another source than the one named.

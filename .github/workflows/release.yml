@@ -1,17 +1,19 @@
 name: Release
 
-# A pushed `v*` tag publishes the node and P4 bridge images and the host binaries built from that
-# one tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch their images
-# from the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and
-# the bridge it flashes always share a tree. The asset names below must match the app-only images'
+# A pushed `v*` tag publishes the node, P4 bridge and P4 loader images and the host binaries built
+# from that one tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch
+# their images from the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host,
+# the fleet and the bridge it flashes always share a tree. The asset names below must match the app-only images'
 # in `crates/wartui-app/src/update/release.rs` (`NODE_APP_ASSET`, `BRIDGE_APP_ASSET`) and the
-# merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`), except the P4 bridge's merged
-# image, which only a first flash by hand uses.
+# merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`). The P4 bridge's merged image
+# and the P4 loader's (`wartui-p4-c6-loader-esp32p4.bin`) serve `flash-bridge`'s setup of a new
+# board (`crates/wartui/src/flash/setup.rs`).
 # `SHA256SUMS` is what the host checks a download against. A node's image is merged (bootloader,
 # partition table and app, flashed at 0x0) with `firmware/node/partitions.csv`, and is also
 # published app-only (`wartui-node-app-esp32c5.bin`): the image one app slot holds. The P4 bridge
 # publishes both too, made with `firmware/p4-bridge/partitions.csv`: the merged image for its first
-# flash, and the app image `flash-bridge` sends it over USB.
+# flash, and the app image `flash-bridge` sends it over USB. The P4 loader's merged image is built
+# by `firmware/p4-c6-loader/build.sh`, with the C6 loader inside it.
 
 on:
   push:
@@ -139,6 +141,36 @@ jobs:
           path: wartui-p4-bridge-app-esp32p4.bin
           archive: false
 
+  p4-c6-loader:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Install espflash
+        run: cargo install espflash --locked
+
+      # The ESP-IDF container has no Rust, so the C6 loader is built here first and `build.sh p4`
+      # embeds its saved image.
+      - name: Build the C6 loader
+        run: firmware/p4-c6-loader/build.sh c6
+
+      - name: Build the P4 loader
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32p4
+          path: firmware/p4-c6-loader
+          command: ./build.sh p4
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: firmware/p4-c6-loader/build/wartui-p4-c6-loader-esp32p4.bin
+          archive: false
+
   host:
     strategy:
       matrix:
@@ -173,7 +205,7 @@ jobs:
           archive: false
 
   release:
-    needs: [firmware, p4-bridge, host]
+    needs: [firmware, p4-bridge, p4-c6-loader, host]
     runs-on: ubuntu-latest
     permissions:
       contents: write
