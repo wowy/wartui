@@ -49,6 +49,22 @@ extern const uint8_t image_end[] asm("_binary_c6_loader_bin_end");
 #define ATTEMPT_MASK 0xFFFFFF00u
 static RTC_NOINIT_ATTR uint32_t attempts;
 
+// How far the last attempt got, under the same magic, so a restart after the transport came up
+// is told from one where the C6 never answered.
+#define PHASE_ATTEMPTED 1u
+#define PHASE_TRANSPORT_UP 2u
+#define PHASE_SENT 3u
+static RTC_NOINIT_ATTR uint32_t phase;
+
+static void set_phase(uint32_t p) {
+    phase = ATTEMPT_MAGIC | p;
+}
+
+// The phase recorded, or PHASE_ATTEMPTED when the word holds no magic.
+static uint32_t recorded_phase(void) {
+    return (phase & ATTEMPT_MASK) == ATTEMPT_MAGIC ? phase & 0xFF : PHASE_ATTEMPTED;
+}
+
 // Sends one whole line to the host. A single printf per line keeps another task's log from
 // landing inside it.
 static void say(const char *fmt, ...) {
@@ -162,6 +178,7 @@ static EventGroupHandle_t hosted_events;
 
 static void on_hosted_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (id == ESP_HOSTED_EVENT_TRANSPORT_UP) {
+        set_phase(PHASE_TRANSPORT_UP);
         xEventGroupSetBits(hosted_events, HOSTED_UP);
     } else if (id == ESP_HOSTED_EVENT_TRANSPORT_FAILURE) {
         xEventGroupSetBits(hosted_events, HOSTED_FAILED);
@@ -212,6 +229,7 @@ static bool push_image(bool activate) {
             return false;
         }
     }
+    set_phase(PHASE_SENT);
     say("sent");
     return true;
 }
@@ -222,17 +240,33 @@ void app_main(void) {
 
     // ESP-Hosted restarts the P4 when the C6 does not answer it. Without this guard that
     // restart would rerun the attempt forever; a reset the operator makes is a power-on or the
-    // reset pin, and it starts the count over.
+    // reset pin, and it starts the count over. A restart after the transport came up, such as
+    // ESP-Hosted giving up mid-OTA, a watchdog or a panic, fails instead: the C6 may run the C6
+    // loader or a part-written OTA, so the setup must not write the bridge over it.
     esp_reset_reason_t reason = esp_reset_reason();
     bool host_reset = reason != ESP_RST_POWERON && reason != ESP_RST_EXT;
-    if (!host_reset) attempts = 0;
+    if (!host_reset) {
+        attempts = 0;
+        phase = 0;
+    }
     bool recorded = (attempts & ATTEMPT_MASK) == ATTEMPT_MAGIC && (attempts & 0xFF) > 0;
     if (host_reset && recorded) {
-        say("skipped no ESP-Hosted on the C6 (the host restarted the P4)");
+        switch (recorded_phase()) {
+        case PHASE_TRANSPORT_UP:
+            say("failed the P4 restarted during the OTA; run flash-bridge again");
+            break;
+        case PHASE_SENT:
+            say("failed the P4 restarted after the OTA; run flash-bridge again");
+            break;
+        default:
+            say("skipped no ESP-Hosted on the C6 (the host restarted the P4)");
+            break;
+        }
         idle();
     }
     uint32_t count = recorded ? (attempts & 0xFF) : 0;
     attempts = ATTEMPT_MAGIC | (count < 0xFF ? count + 1 : 0xFF);
+    set_phase(PHASE_ATTEMPTED);
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {

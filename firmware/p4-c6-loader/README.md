@@ -10,15 +10,15 @@ It is C, not esp-hal, because ESP-Hosted's host side exists only as an ESP-IDF c
 ## Flow
 
 1. Wait 2 s for a listener, then send `start`.
-2. Check the RTC guard (below).
-3. Connect to the C6, which resets it. ESP-Hosted's transport event says whether it answered.
-   With no `TRANSPORT_UP` within 5 s, or a `TRANSPORT_FAILURE`, stop ESP-Hosted and listen on the
-   link UART for 25 s. A `c6-loader: ` line there is a C6 loader from an earlier run, running or
-   failed, and its lines are relayed to its verdict as in step 6. With none, send `skipped` and
-   idle.
+2. Check the RTC guard (below), then record the phase `attempted`.
+3. Connect to the C6, which resets it. ESP-Hosted's transport event says whether it answered;
+   `TRANSPORT_UP` records the phase `transport up`. With no `TRANSPORT_UP` within 5 s, or a
+   `TRANSPORT_FAILURE`, stop ESP-Hosted and listen on the link UART for 25 s. A `c6-loader: `
+   line there is a C6 loader from an earlier run, running or failed, and its lines are relayed
+   to its verdict as in step 6. With none, send `skipped` and idle.
 4. Ask for the C6's version, then push the embedded image with `ota_begin`, `ota_write` in
    1500-byte chunks and `ota_end`. `ota_activate` follows only on ESP-Hosted 2.6 or later; the
-   factory C6 answers no version, so it goes without.
+   factory C6 answers no version, so it goes without. Success records the phase `sent`.
 5. Stop ESP-Hosted and reset the C6 through GPIO54: low for 100 ms, then high.
 6. Relay the C6 loader's lines from the link UART (UART1, RX GPIO14, TX GPIO19, 115200 8N1)
    for up to 120 s, until its verdict. Then idle.
@@ -42,8 +42,8 @@ whole line. `wartui flash-bridge` parses them.
 | `wartui-loader: sent` | `ota_end` (and `ota_activate` on 2.6 or later) succeeded |
 | `wartui-loader: c6 <text>` | each `c6-loader: <text>` line, relayed |
 | `wartui-loader: done` | the C6 loader sent `done` or `done rehearsal` |
-| `wartui-loader: failed <why>` | `ota_write at 123000: ESP_FAIL`, `c6 loader: <why>`, `no verdict from the C6 loader in 120 s` |
-| `wartui-loader: skipped <why>` | `no ESP-Hosted on the C6` |
+| `wartui-loader: failed <why>` | `ota_write at 123000: ESP_FAIL`, `c6 loader: <why>`, `no verdict from the C6 loader in 120 s`, `the P4 restarted during the OTA; run flash-bridge again`, `the P4 restarted after the OTA; run flash-bridge again` |
+| `wartui-loader: skipped <why>` | `no ESP-Hosted on the C6`, `no ESP-Hosted on the C6 (the host restarted the P4)` |
 
 Every failed call reads `failed <call>: <error>`, as `ota_begin: ESP_ERR_TIMEOUT`. ESP-IDF's own
 log is at warning level, so its lines are few and never start with `wartui-loader: `.
@@ -69,10 +69,20 @@ before ESP-Hosted stops are lost, and the rest are relayed. The
 table writes need the header, and those take under a second.
 
 **The RTC guard.** ESP-Hosted restarts the P4 when the C6 does not answer it. An `RTC_NOINIT`
-word counts the attempts that reached ESP-Hosted, and a power-on or the reset pin clears it.
-When the P4 boots from anything else and an attempt is recorded, the loader sends
-`skipped no ESP-Hosted on the C6 (the host restarted the P4)` and idles, so that restart cannot
-loop.
+word counts the attempts that reached ESP-Hosted, a second records how far the last one got,
+and a power-on or the reset pin clears both. When the P4 boots from anything else and an
+attempt is recorded, the loader sends one line by the phase and idles, so that restart cannot
+loop:
+
+| Phase | Line |
+| --- | --- |
+| `attempted`: the transport never came up | `skipped no ESP-Hosted on the C6 (the host restarted the P4)` |
+| `transport up`: ESP-Hosted answered, and nothing was sent yet | `failed the P4 restarted during the OTA; run flash-bridge again` |
+| `sent`: the C6 loader was sent | `failed the P4 restarted after the OTA; run flash-bridge again` |
+
+A restart after the transport came up is ESP-Hosted giving up mid-OTA, a watchdog or a panic.
+The C6 may then hold a part-written OTA or run the C6 loader, so the loader fails rather than
+skips, and the setup does not write the bridge over it.
 
 ## Building
 

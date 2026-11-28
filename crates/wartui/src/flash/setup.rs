@@ -868,6 +868,26 @@ mod tests {
     }
 
     #[test]
+    fn setup_says_rerun_without_wait_when_p4_restarted_during_or_after_the_ota() {
+        // No `c6` line was heard, so the C6 loader cannot be writing yet.
+        for when in ["during", "after"] {
+            let transcript = format!(
+                "wartui-loader: start\r\nwartui-loader: failed the P4 restarted {when} the OTA; \
+                 run flash-bridge again\r\n"
+            );
+            let mut port = transcript.as_bytes();
+            let stopped = watch(&mut port, QUIET, WATCH_FOR, |_| {}).unwrap_err();
+            assert_eq!(
+                stopped,
+                Stopped::Failed(format!("the P4 restarted {when} the OTA; run flash-bridge again"))
+            );
+            let text = loader_failed_text("/dev/ttyACM0", &stopped);
+            assert!(text.contains("running flash-bridge again retries"), "{text}");
+            assert!(!text.contains("wait a minute"), "{text}");
+        }
+    }
+
+    #[test]
     fn setup_fetches_release_assets_when_built_for_a_release() {
         assert_eq!(
             source(&P4_C6_LOADER, None, None, Some("v1")),
