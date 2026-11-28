@@ -1,0 +1,58 @@
+# Its own workspace, for the reasons `firmware/p4-radio` is one: a different target, a
+# different toolchain pin and a lockfile that must not be resolved together with the
+# host crates.
+[workspace]
+
+[package]
+name = "wartui-c6-loader-fw"
+description = "Lands firmware/p4-radio on a factory P4-WIFI6's ESP32-C6, from ESP-Hosted's OTA."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/wowy/wartui"
+
+[[bin]]
+name = "wartui-c6-loader-fw"
+path = "src/main.rs"
+
+[features]
+# Check the plan, report each write it would make, then select ESP-Hosted again and reset.
+rehearse = []
+
+[dependencies]
+# p4-radio's pins, so this image builds against the crates the radio itself runs
+# (`firmware/p4-radio/README.md` § "Dependency versions").
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
+esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
+esp-storage = { version = "0.10.0", features = ["esp32c6", "embedded-storage"] }
+embedded-storage = "0.3.2"
+sha2 = { version = "0.11.1", default-features = false }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[build-dependencies]
+wartui-radio-image = { path = "../radio-image" }
+
+[lints.rust]
+# AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
+# stated here too.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.dev]
+# The debug profile is too big.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+# The crates that encode and check every record and packet, built for speed.
+[profile.release.package.wartui-proto]
+opt-level = 3
+
+[profile.release.package.postcard]
+opt-level = 3
