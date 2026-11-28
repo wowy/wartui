@@ -40,7 +40,7 @@
   - Every listener gets a `timeout`.
   - Open the CH343 first, then `stty -f <port> 115200 raw -echo clocal` while holding it (`<scratchpad>/listen.pl` does this).
   - ESP-IDF lives in the scratchpad: `IDF_TOOLS_PATH=<scratchpad>/idf-tools . <scratchpad>/esp-idf/export.sh`.
-- **`<scratchpad>`** is `/private/tmp/claude-501/-Users-wowy-code-wartui/f649a77f-66b2-4a85-ad01-3f00473f1026/scratchpad`. It holds `esp-idf/`, `idf-tools/`, `p4-probe/`, `c6-probe/` and `listen.pl`, and a reboot clears it. If it is gone, reinstall per memory `bench-testing-from-the-bash-tool` (about 10 minutes).
+- **`<scratchpad>`** is the session's scratchpad directory. It holds `esp-idf/`, `idf-tools/`, `p4-probe/`, `c6-probe/` and `listen.pl`, and a reboot clears it. If it is gone, reinstall per memory `bench-testing-from-the-bash-tool` (about 10 minutes).
 
 ## The bench board is a one-shot
 
@@ -612,7 +612,7 @@ The `(None, [])` text in `target` becomes: `"no P4 bridge answered, and no silen
 
 **Only with the user's go-ahead.** This overwrites `A9:76`'s ESP-Hosted for good.
 
-- [ ] **Step 1:** Write the P4 loader built without `rehearse` (`firmware/p4-c6-loader/build.sh`) by hand, so the P4 is silent, as a factory board running a demo would be. Or leave the P4 on the bridge from Task 6, and write the loader first.
+- [ ] **Step 1:** Make the P4 silent by blanking it: `espflash erase-region --chip esp32p4 --port <P4> --non-interactive 0x0 0x10000`. That erases the bootloader and table, so the P4 sits in its ROM and stays silent. Then `flash-bridge` writes the loader and watches it. Never write the plain loader by hand here: espflash's reset runs it at once against the factory C6, with nobody listening.
 - [ ] **Step 2:** Run `cargo run --release -p wartui -- flash-bridge --config <scratchpad>/bench.toml`, driven from a `pty.fork()` script that answers `y`. Expected:
   - `c6 step` lines for all six writes, then `done`.
   - The bridge write, then `set up; the bridge is known by its C6's address`.
@@ -620,9 +620,9 @@ The `(None, [])` text in `target` becomes: `"no P4 bridge answered, and no silen
 - [ ] **Step 3:** Run `wartui ports --config <scratchpad>/bench.toml` and `wartui status --config <scratchpad>/bench.toml`. Expected: the bridge with its C6 answering, and no "updating the radio", which shows the loader's app digest equals the P4's bundle.
 - [ ] **Step 4:** Run `flash-bridge` again. Expected: the ordinary update over the link, ending `already runs this image`.
 - [ ] **Step 5: The `skipped` path.**
-  - Write the real P4 loader by hand: `espflash write-bin 0x0`.
+  - Write the real P4 loader by hand: `espflash write-bin 0x0`. This is safe here, unlike Step 1: the C6 runs p4-radio by now, so the loader finds no ESP-Hosted, hears no C6 loader and writes nothing to the C6.
   - Run `flash-bridge --config <scratchpad>/bench.toml --bridge <path> --first-flash`.
 
-  Expected: `skipped no ESP-Hosted on the C6`, then the bridge comes up with the C6 answering. Record how `esp_hosted_connect_to_slave` behaved against a non-ESP-Hosted C6: did it fail fast, wait, or restart the P4? That answers #395's first open question.
+  Expected: `skipped no ESP-Hosted on the C6` after the loader's 25 s listen, then the bridge comes up with the C6 answering. Record how `esp_hosted_connect_to_slave` behaved against a non-ESP-Hosted C6: did it fail fast, wait, or restart the P4? That answers #395's first open question.
 - [ ] **Step 6:** Fill in Task 9's section of `docs/c6-first-flash-findings.md`. Commit with the message "Record the C6 first flash's end-to-end bench", then push.
 - [ ] **Step 7:** Comment the outcome on #395 (`gh issue comment 395`). Then mark the PR ready.
