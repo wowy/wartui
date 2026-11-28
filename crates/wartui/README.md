@@ -679,7 +679,8 @@ confirms the new image; a second ctrl-c exits at once. The board prints, by its 
 | `n%  sending`                                      | The image is on its way                                  |
 | `installing; waiting for the bridge to come back`  | The P4 holds the whole image and is rebooting into it    |
 | `installed and confirmed`                          | The P4 came back on the new image and confirmed it       |
-| `fault  …`, `Info  …`                              | A line the bridge sent, such as its C6's update progress |
+| `fault  …`                                         | A fault the bridge sent                                  |
+| `Info  …`                                          | A line the bridge sent, such as its C6's update progress |
 | `already runs this image`                          | Nothing was sent                                         |
 | `stopping; ending the bridge's update session`     | A ctrl-c while sending; the run ends                     |
 | `installing, so the update runs to its outcome; …` | A ctrl-c after the install; a second one exits           |
