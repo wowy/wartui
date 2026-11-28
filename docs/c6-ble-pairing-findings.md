@@ -243,10 +243,13 @@ on the last build, against 184 s on 1M from this PC. The first sent a P4 image b
 default back. The C6's image was the same in both, so neither updated the C6. A status read after
 them showed 2M.
 
+**Wardrive Go, a WardriveESP app, worked on an Android phone** on the last build, the operator
+reports. Its model and PHY were not recorded.
+
 It does not settle:
 
 - **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's. A
   PHY update the C6 asks for during a central's encryption start lost the link; one the pairing
   connection ran during its own did not. The `0489:e10d` USB adapter above resumed 4 of 4 with the
   old order, and macOS resumes on 2M.
-- **A WardriveESP phone and macOS on this build.** Neither was run.
+- **macOS on this build.** It was not run.
