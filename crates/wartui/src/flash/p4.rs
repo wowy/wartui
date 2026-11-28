@@ -49,7 +49,8 @@ const P4_BRIDGE_APP: Firmware = Firmware {
     chip: Chip::Esp32p4,
     partition_table: "partitions.csv",
     // The table ends at 0xFF1000, past espflash's default 4 MB. The board's flash is 32 MB, so a
-    // 16 MB header is safe on it.
+    // 16 MB header is safe on it. The wired flash's runner names the same size
+    // (`firmware/p4-bridge/.cargo/config.toml`), so its image carries this one's digest.
     flash_size: Some("16mb"),
     merged: false,
     asset: release::BRIDGE_APP_ASSET,
