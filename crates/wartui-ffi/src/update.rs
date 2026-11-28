@@ -122,9 +122,9 @@ pub enum Phase {
 /// A line the bridge sent while it updated.
 #[uniffi::remote(Enum)]
 pub enum Line {
-    /// An `Error` message.
+    /// An `Error` message, other than the radio update's progress.
     Fault(String),
-    /// A `Log` message.
+    /// A `Log` message, or the radio update's progress, which the P4 sends as an `Error`.
     Log(String),
 }
 

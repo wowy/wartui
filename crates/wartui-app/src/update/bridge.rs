@@ -165,9 +165,9 @@ pub enum Progress {
 /// A line the bridge sent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Line {
-    /// An `Error` message.
+    /// An `Error` message, other than the radio update's progress.
     Fault(String),
-    /// A `Log` message.
+    /// A `Log` message, or the radio update's progress, which the P4 sends as an `Error`.
     Log(String),
 }
 
@@ -709,6 +709,11 @@ impl Said {
     /// [`Self::once_per_life`]; anything else is not a line.
     fn line(&mut self, message: &BridgeToHost, say: &mut (dyn FnMut(Progress) + Send)) {
         let line = match message {
+            // The P4 sends its C6's update progress as an error so the TUI shows it in its fault
+            // footer; here it is always shown as progress, never as a fault.
+            BridgeToHost::Error { message } if message.starts_with(RADIO_UPDATING) => {
+                Line::Log(message.to_string())
+            }
             BridgeToHost::Error { message } => Line::Fault(message.to_string()),
             BridgeToHost::Log { message } => Line::Log(message.to_string()),
             _ => return,
@@ -1055,6 +1060,23 @@ mod tests {
         let fault = Progress::Line(Line::Fault("no GPS receiver".to_owned()));
         let info = Progress::Line(Line::Log("no GPS receiver".to_owned()));
         assert_eq!(lines, [fault.clone(), info, fault]);
+    }
+
+    #[test]
+    fn update_bridge_says_radio_update_as_log_when_bridge_sends_it_as_error() {
+        let mut said = Said::default();
+        let mut lines = Vec::new();
+        let mut say = |progress| lines.push(progress);
+        let progress = format!("{RADIO_UPDATING} to the bundled image (40%)");
+        let installing = format!("{RADIO_UPDATING}: installing the bundled image");
+        said.line(&error(&progress), &mut say);
+        said.line(&error(&installing), &mut say);
+        said.line(&error("no GPS receiver"), &mut say);
+        let fault = Progress::Line(Line::Fault("no GPS receiver".to_owned()));
+        assert_eq!(
+            lines,
+            [Progress::Line(Line::Log(progress)), Progress::Line(Line::Log(installing)), fault]
+        );
     }
 
     /// An update to `NEW` over Bluetooth from `OLD`, installed at `at`.
