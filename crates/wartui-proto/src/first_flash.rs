@@ -6,9 +6,10 @@
 //! live here, where the host tests them, as [`split`](crate::split) does for the P4.
 //!
 //! - **The loader trusts the bootloader's rule, not `OtaUpdater`.** The slot it runs from is the
-//!   slot the bootloader chose, so [`newest`] and [`booted`] repeat that rule: an `otadata` entry
-//!   counts when its seq is neither 0 nor `u32::MAX` and its CRC matches, and erased `otadata`
-//!   boots `ota_0`. `firmware/common/src/ota.rs` reads erased `otadata` its own way, which would
+//!   slot the bootloader chose, so [`newest`] and [`booted`] repeat ESP-IDF's rule: an `otadata`
+//!   entry counts unless its seq is `u32::MAX`, its state is invalid or aborted, or its CRC
+//!   differs. The slot is `ota_((seq - 1) % n)`, found by subtype, and erased `otadata` boots
+//!   `ota_0`. `firmware/common/src/ota.rs` reads erased `otadata` its own way, which would
 //!   misplace the loader on a factory board.
 //! - **`trial` is found by label**, because `data, undefined` is not unique.
 //! - **The whole region below the table is the bootloader.** The loader rewrites it all, and the
@@ -34,6 +35,8 @@ const ENTRY_LEN: usize = 32;
 const APP: u8 = 0;
 const OTA_0: u8 = 0x10;
 const OTA_LAST: u8 = 0x1F;
+const STATE_INVALID: u32 = 3;
+const STATE_ABORTED: u32 = 4;
 
 /// A half-open flash range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,19 +98,23 @@ pub fn partitions(table: &[u8]) -> impl Iterator<Item = Partition> + '_ {
     )
 }
 
-/// The `otadata` sector (0 or 1) holding the newest entry the bootloader accepts: seq neither 0
-/// nor `u32::MAX`, and the CRC at bytes 28..32 equal to `esp_rom_crc32_le(u32::MAX, seq)`.
+/// The `otadata` sector (0 or 1) holding the newest entry the bootloader accepts: seq not
+/// `u32::MAX`, state neither `INVALID` (3) nor `ABORTED` (4), and the CRC at bytes 28..32 equal to
+/// `esp_rom_crc32_le(u32::MAX, seq)`. Seq 0 is accepted, as the bootloader does. On equal seqs
+/// sector 1 wins.
 #[must_use]
 pub fn newest(otadata: &[[u8; 32]; 2]) -> Option<usize> {
     let seq = |entry: &[u8; 32]| {
         let seq = le32(&entry[..4]);
-        let valid = seq != 0
-            && seq != u32::MAX
+        let state = le32(&entry[24..28]);
+        let valid = seq != u32::MAX
+            && state != STATE_INVALID
+            && state != STATE_ABORTED
             && le32(&entry[28..32]) == esp_rom_crc32_le(u32::MAX, &entry[..4]);
         valid.then_some(seq)
     };
     match (seq(&otadata[0]), seq(&otadata[1])) {
-        (Some(a), Some(b)) => Some(usize::from(b > a)),
+        (Some(a), Some(b)) => Some(usize::from(b >= a)),
         (Some(_), None) => Some(0),
         (None, Some(_)) => Some(1),
         (None, None) => None,
@@ -118,20 +125,19 @@ fn is_ota_app(p: &Partition) -> bool {
     p.kind == APP && (OTA_0..=OTA_LAST).contains(&p.subtype)
 }
 
-/// The app slot the bootloader boots: the newest entry's `(seq - 1) % n` over the `n` `ota_N` app
-/// partitions in table order, else `ota_0` when no entry is valid.
+/// The app slot the bootloader boots: the `ota_N` app partition whose `N` is the newest entry's
+/// `(seq - 1) % n`, with `n` the number of `ota_N` app partitions. The bootloader indexes slots by
+/// subtype, not table order. With no valid entry it boots `ota_0`.
 #[must_use]
 pub fn booted(table: &[u8], otadata: &[[u8; 32]; 2]) -> Option<Partition> {
-    let slots = || partitions(table).filter(is_ota_app);
     let index = match newest(otadata) {
         Some(sector) => {
-            let seq = le32(&otadata[sector][..4]);
-            let count = u32::try_from(slots().count()).ok().filter(|&n| n > 0)?;
-            usize::try_from((seq - 1) % count).ok()?
+            let count = u32::try_from(partitions(table).filter(is_ota_app).count()).ok()?;
+            le32(&otadata[sector][..4]).wrapping_sub(1).checked_rem(count)?
         }
         None => 0,
     };
-    slots().nth(index)
+    partitions(table).filter(is_ota_app).find(|p| u32::from(p.subtype & 0x0F) == index)
 }
 
 /// What the loader writes.
@@ -351,5 +357,52 @@ mod tests {
             "the radio image at 0x10000..0x191000 would overwrite this loader at \
              0x190000..0x310000"
         );
+    }
+
+    fn good(seq: u32, state: u32) -> [u8; 32] {
+        ota_entry(seq, state, crc::esp_rom_crc32_le(u32::MAX, &seq.to_le_bytes()))
+    }
+
+    #[test]
+    fn first_flash_skips_entry_when_state_is_aborted() {
+        let otadata = [good(1, 0xFFFF_FFFF), good(2, 4)];
+        assert_eq!(newest(&otadata), Some(0));
+        assert_eq!(booted(&factory(), &otadata).unwrap().offset, 0x1_0000);
+    }
+
+    #[test]
+    fn first_flash_skips_entry_when_seq_is_erased_value_with_matching_crc() {
+        let otadata = [good(u32::MAX, 0xFFFF_FFFF), good(2, 0xFFFF_FFFF)];
+        assert_eq!(newest(&otadata), Some(1));
+    }
+
+    #[test]
+    fn first_flash_prefers_sector_0_when_it_holds_the_newer_entry() {
+        let otadata = [good(3, 0xFFFF_FFFF), good(2, 0xFFFF_FFFF)];
+        assert_eq!(newest(&otadata), Some(0));
+        assert_eq!(booted(&factory(), &otadata).unwrap().offset, 0x1_0000);
+    }
+
+    #[test]
+    fn first_flash_indexes_slot_by_subtype_when_table_lists_ota_1_first() {
+        let swapped = table(&[
+            entry("ota_1", 0, 0x11, 0x19_0000, 0x18_0000),
+            entry("ota_0", 0, 0x10, 0x1_0000, 0x18_0000),
+        ]);
+        let otadata = [good(2, 0xFFFF_FFFF), [0xFF; 32]];
+        assert_eq!(booted(&swapped, &otadata).unwrap().offset, 0x19_0000);
+    }
+
+    #[test]
+    fn first_flash_refuses_plan_when_running_slot_covers_trial() {
+        let running = Partition {
+            kind: APP,
+            subtype: 0x11,
+            offset: 0x3C_0000,
+            size: 0x2_0000,
+            label: [0; 16],
+        };
+        let err = plan(&ours(), running, 1).unwrap_err();
+        assert!(matches!(err, Refusal::Overlaps { what: "trial", .. }));
     }
 }
