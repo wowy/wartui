@@ -34,7 +34,8 @@ advertises the WardriveESP status beacon.
   TrouBLE loads them, and a connected central whose bond the P4 dropped is disconnected. So is a
   bonded central that stays unsubscribed for 30 s, so none holds the one connection idle.
   `src/ble.rs` has the rules.
-- **The C6 asks for the 2M PHY and data length 251** once a central connects.
+- **The C6 asks for the 2M PHY and data length 251** once the link is encrypted, or once a phone
+  reads its stream.
 - **The stream is credited by position.** The C6 holds up to `HOST_WINDOW_BYTES` of it, and its
   credit is the stream offset it is done up to, in the P4's offsets. A lost P4 packet costs its
   frames and not the window, and a restart of either chip cannot skew it

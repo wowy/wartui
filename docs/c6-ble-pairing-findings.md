@@ -178,3 +178,48 @@ It does not settle:
   ([`ble-host-link-findings.md`](ble-host-link-findings.md#bluez-and-a-first-pairing)).
 - **The iPad's first reset,** above.
 - **A fifth bond on hardware.** Eviction ran only in the bond store's tests.
+
+## Reconnecting on a BE200 (E6:A0)
+
+Measured on 2026-11-28 on E6:A0, the carrier-10 P4 with its ten C5 nodes, from a desktop whose
+Bluetooth is an onboard Intel BE200 (`8087:0036`): BlueZ 5.88, kernel 7.3.3, Fedora 44 (#394).
+
+**Every reconnect on a stored bond failed while the C6 asked for 2M on connecting.** The pairing
+connection was served; each connection after it ended with `le-connection-abort-by-local` about
+1 s after it completed, for `wartui` and `bluetoothctl connect` alike. btmon, four of four tries:
+
+- Both ends ran at BlueZ's 45 ms interval and 420 ms supervision timeout.
+- BlueZ sent LE Start Encryption 58 ms after the connection completed.
+- The C6 asked for the 2M PHY and data length 251 as it connected. The PHY update completed
+  314 ms into the encryption procedure, which was still open.
+- Neither side was heard after the PHY instant. Encryption Change reported Connection Timeout
+  (0x08), and the C6 recorded `last_disconnect` 0x08 without restarting.
+- On the pairing connection the same switch completed during SMP, 92 ms before BlueZ started
+  encryption, and the link held on 2M.
+
+With `LE2MTX LE2MRX` deselected on the PC (`btmgmt phy`), the next reconnect was served on 1M.
+Reloading `btusb`, which selects every PHY again, brought the failure back.
+
+**The C6 now asks for 2M, the data length and any build interval only once the link is
+encrypted, or once a phone reads its stream** (`firmware/p4-radio/src/ble.rs`, `tune`). On that
+build, with every PHY selected on the PC:
+
+| Run | Result |
+| --- | --- |
+| Before the flash, `status --link bluetooth` | `le-connection-abort-by-local`, as before |
+| `status --link bluetooth`, four reconnects on the old bond | 4 of 4 served, 4–10 s each; three report 2M, one 1M |
+| `bluetooth pair --fresh` | paired and bonded |
+| `status --link bluetooth`, four reconnects after it | 4 of 4 served, 4–5 s each, all on 2M |
+| `run --link bluetooth`, 3 min, ten nodes scanning | link up throughout; 36 of 36 status rows on 2M, `resynced_bytes` 0, `dropped_writes` 0 |
+
+The one 1M report is most likely a status read before the deferred PHY update completed; no
+capture was taken to show it. No btmon was taken on this build either, so the order of Encryption
+Change and the PHY update is read from the code, not the air.
+
+It does not settle:
+
+- **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's.
+  The `0489:e10d` USB adapter above resumed 4 of 4 with the old order, and macOS resumes on 2M.
+- **A WardriveESP phone and macOS on this build.** Neither was run.
+- **The throughput 2M buys on this PC.** `flash-bridge --link bluetooth` found the image already
+  running and sent nothing.
