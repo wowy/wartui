@@ -216,13 +216,33 @@ out during key distribution. The last ran this one. Every PHY was selected on th
 | `bluetooth pair --fresh`, then six reconnects | paired and bonded; 6 of 6 served, 4–5 s each, all on 2M |
 
 The one 1M report is most likely a status read before the deferred PHY update completed; no
-capture was taken to show it. No btmon was taken on this build either, so the order of Encryption
-Change and the PHY update is read from the code, not the air.
+capture was taken of it.
+
+**btmon on the last build, a fresh pairing and three reconnects:**
+
+| Connection | Start Encryption | Data Length Change | Encryption Change | PHY Update Complete |
+| --- | --- | --- | --- | --- |
+| Pairing | +487 ms | +171 ms | +980 ms | +711 ms |
+| Reconnect 1 | +77 ms | +167 ms | +436 ms | +886 ms |
+| Reconnect 2 | +56 ms | +146 ms | +415 ms | +865 ms |
+| Reconnect 3 | +71 ms | +161 ms | +430 ms | +880 ms |
+
+- On each reconnect the PHY update completes 450 ms after Encryption Change, ten 45 ms events:
+  the C6's request on `Encrypted`, and its instant.
+- **On the pairing connection a PHY update overlapped encryption, and the link held.** The C6
+  cannot have asked for it: it asks after `PairingComplete`, which follows Encryption Change. The
+  PC's host sent no LE Set PHY, so one of the two controllers started it on its own, most likely
+  the BE200 as central. HCI does not show which.
+- A data length change lands inside every connection's encryption, or before it, and none lost
+  the link. Neither host asked for it at that moment, so a controller started it. The PHY update
+  is the procedure whose overlap was lost.
 
 It does not settle:
 
-- **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's.
-  The `0489:e10d` USB adapter above resumed 4 of 4 with the old order, and macOS resumes on 2M.
+- **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's. A
+  PHY update the C6 asks for during a central's encryption start lost the link; one the pairing
+  connection ran during its own did not. The `0489:e10d` USB adapter above resumed 4 of 4 with the
+  old order, and macOS resumes on 2M.
 - **A WardriveESP phone and macOS on this build.** Neither was run.
 - **The throughput 2M buys on this PC.** `flash-bridge --link bluetooth` found the image already
   running and sent nothing.
