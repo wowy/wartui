@@ -55,8 +55,10 @@ jobs:
         with:
           targets: riscv32imac-unknown-none-elf
 
-      - name: Install espflash
-        run: cargo install espflash --locked
+      # `build.sh` saves the C6 loader's image with espflash.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espflash@4.6.0
 
       # The ESP-IDF container has no Rust, so the C6 loader is built here first and `build.sh p4`
       # embeds its saved image.

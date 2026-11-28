@@ -3,9 +3,9 @@ name: Release
 # A pushed `v*` tag publishes the node, P4 bridge and P4 loader images and the host binaries built
 # from that one tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch
 # their images from the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host,
-# the fleet and the bridge it flashes always share a tree. The asset names below must match the app-only images'
-# in `crates/wartui-app/src/update/release.rs` (`NODE_APP_ASSET`, `BRIDGE_APP_ASSET`) and the
-# merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`). The P4 bridge's merged image
+# the fleet and the bridge it flashes always share a tree. The asset names below must match the
+# app-only images' in `crates/wartui-app/src/update/release.rs` (`NODE_APP_ASSET`,
+# `BRIDGE_APP_ASSET`) and the merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`). The P4 bridge's merged image
 # and the P4 loader's (`wartui-p4-c6-loader-esp32p4.bin`) serve `flash-bridge`'s setup of a new
 # board (`crates/wartui/src/flash/setup.rs`).
 # `SHA256SUMS` is what the host checks a download against. A node's image is merged (bootloader,
@@ -149,6 +149,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: riscv32imac-unknown-none-elf
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: Install espflash
         run: cargo install espflash --locked
