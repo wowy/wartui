@@ -573,7 +573,7 @@ wartui flash-bridge --link bluetooth --bridge 44:C0
 | `--firmware-dir DIR`    | the checkout's  | Build the image from the P4 bridge firmware here                             |
 | `--dry-run`             | off             | Report the board, a setup and the sources; write nothing. Resets a silent P4 |
 | `--first-flash`         | off             | Set up a blank P4 without asking; see "Setting up a new board"               |
-| `--loader BIN`          | —               | The P4 C6 loader's merged image to set up a blank P4 with                    |
+| `--loader BIN`          | —               | The merged P4 C6 loader for a blank P4; a rehearsal one stops after the C6   |
 
 **Over USB, the board is chosen before any image is sent.** Each attached CH343 is asked which
 bridge it is, as `wartui ports` asks, and the choice is made among those that answered, from the
@@ -614,7 +614,8 @@ Bluetooth bonds, and leaves the bridge known by its C6's address. A terminal is 
    prefixed `C6` are the C6 loader's.
 2. It waits for the loader's verdict: up to 60 s for each line, and 300 s in all. On a C6 with no
    ESP-Hosted, the loader listens 25 s for a C6 loader from an earlier run and relays it to its
-   verdict. A C6 with neither is passed over, since it may run the bridge's radio already.
+   verdict. A C6 with neither is passed over, since it may run the bridge's radio already. A
+   rehearsal stops here: its C6 runs ESP-Hosted again, and nothing more is written.
 3. It writes the bridge firmware's merged image whole.
 4. It waits up to 90 s for the bridge to answer with its C6's address. That address names the
    bridge from then on, and is saved as a found board is.

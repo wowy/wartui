@@ -27,6 +27,9 @@
 //! no loader line, or 300 s in all. On the bench a rehearsal's push to the C6 ends 13 s in and
 //! its verdict follows at 15 s; a real run adds the C6's own writes, about 650 KB, before it.
 //!
+//! **A rehearsal stops after the C6.** Its C6 loader selects ESP-Hosted again, which never
+//! answers the bridge's link, so writing the bridge firmware would only wait out the come-up.
+//!
 //! **The bridge is known by its C6's address afterwards.** The running bridge reports its C6's
 //! address, and its P4's own only while the C6 does not answer. So the setup succeeds only on a
 //! `Ready` carrying another address than `board-info` read, and the `[bridge]` memory is written
@@ -259,13 +262,37 @@ impl LoaderWatch {
     }
 }
 
-/// How the loader ended, when the setup goes on.
+/// How the loader ended, short of a failure.
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     /// The C6 runs the bridge's radio firmware.
     Done,
+    /// A rehearsal C6 loader checked its plan and selected ESP-Hosted again.
+    Rehearsed,
     /// The C6 runs no ESP-Hosted, for this reason; it may already run the bridge's radio.
     Skipped(String),
+}
+
+/// What the setup does after the loader's verdict.
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    /// Print the line, if any, then write the bridge firmware and wait for it.
+    Bridge(Option<String>),
+    /// Print the line and stop, writing nothing more.
+    Finish(String),
+}
+
+/// What the setup of `path` does after `verdict`: a rehearsal stops after the C6.
+fn next(path: &str, verdict: &Verdict) -> Next {
+    match verdict {
+        Verdict::Done => Next::Bridge(None),
+        Verdict::Rehearsed => Next::Finish(format!(
+            "{path}  rehearsal done; the C6 runs ESP-Hosted again, and nothing more is written"
+        )),
+        Verdict::Skipped(why) => Next::Bridge(Some(format!(
+            "{path}  the C6 loader was skipped: {why}; writing the bridge firmware"
+        ))),
+    }
 }
 
 /// Why the watch of the loader stopped short of a verdict the setup goes on from.
@@ -310,6 +337,7 @@ fn watch(
     let mut heard = started;
     let mut lines = LoaderWatch::new();
     let mut c6_heard = false;
+    let mut rehearsed = false;
     let mut buffer = [0u8; 512];
     loop {
         let now = Instant::now();
@@ -332,28 +360,32 @@ fn watch(
             heard = Instant::now();
             say(&said);
             match said {
+                Said::Done if rehearsed => return Ok(Verdict::Rehearsed),
                 Said::Done => return Ok(Verdict::Done),
                 Said::Skipped(why) => return Ok(Verdict::Skipped(why)),
                 Said::Failed(why) if c6_heard && !why.starts_with(C6_FAILED) => {
                     return Err(Stopped::FailedAfterC6(why));
                 }
                 Said::Failed(why) => return Err(Stopped::Failed(why)),
-                Said::C6(_) => c6_heard = true,
+                Said::C6(text) => {
+                    c6_heard = true;
+                    rehearsed |= text == REHEARSED;
+                }
                 _ => {}
             }
         }
     }
 }
 
-/// What the C6 loader's first line is when it was built with `rehearse`.
-const REHEARSAL: &str = "start rehearsal";
+/// What the C6 loader's verdict is when it was built with `rehearse`.
+const REHEARSED: &str = "done rehearsal";
 
 /// The line printed for each thing the loader says, by the P4's `label`.
 struct Lines {
     label: String,
     /// The tenth of the push last printed.
     tenth: Option<u8>,
-    /// The C6 loader said it is a rehearsal, so its `done` set nothing up.
+    /// The C6 loader's verdict was a rehearsal's, so its `done` set nothing up.
     rehearsal: bool,
 }
 
@@ -362,8 +394,8 @@ impl Lines {
         Self { label, tenth: None, rehearsal: false }
     }
 
-    /// The line to print for `said`, if any: none for `Skipped` and `Failed`, which the setup
-    /// words, and the push's progress once per tenth.
+    /// The line to print for `said`, if any: none for `Skipped`, `Failed` and a rehearsal's
+    /// `Done`, which the setup words, and the push's progress once per tenth.
     fn of(&mut self, said: &Said) -> Option<String> {
         let text = match said {
             Said::Start => "the loader is running".to_owned(),
@@ -379,12 +411,10 @@ impl Lines {
             }
             Said::Sent => "the C6 loader is sent; the C6 runs it".to_owned(),
             Said::C6(text) => {
-                self.rehearsal |= text == REHEARSAL;
+                self.rehearsal |= text == REHEARSED;
                 return Some(format!("{:<6} {text}", "C6"));
             }
-            Said::Done if self.rehearsal => {
-                "the C6 loader's rehearsal is done; writing the bridge firmware".to_owned()
-            }
+            Said::Done if self.rehearsal => return None,
             Said::Done => "the C6 is set up; writing the bridge firmware".to_owned(),
             Said::Failed(_) | Said::Skipped(_) => return None,
         };
@@ -465,12 +495,20 @@ pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) ->
         .await
         .context("watching the loader")?
     };
-    match verdict {
-        Ok(Verdict::Done) => {}
-        Ok(Verdict::Skipped(why)) => {
-            println!("{path}  the C6 loader was skipped: {why}; writing the bridge firmware");
-        }
+    let verdict = match verdict {
+        Ok(verdict) => verdict,
         Err(stopped) => bail!("{}", loader_failed_text(&path, &stopped)),
+    };
+    match next(&path, &verdict) {
+        Next::Bridge(line) => {
+            if let Some(line) = line {
+                println!("{line}");
+            }
+        }
+        Next::Finish(line) => {
+            println!("{line}");
+            return Ok(());
+        }
     }
     write(&path, &image)
         .map_err(|why| anyhow::anyhow!("writing the bridge firmware to {path} failed: {why}"))?;
@@ -887,6 +925,47 @@ mod tests {
         }
     }
 
+    /// The lines the benched rehearsal on `A9:76` sent, abridged.
+    const REHEARSAL_TRANSCRIPT: &[u8] = b"wartui-loader: start\r\n\
+        wartui-loader: hosted unknown\r\n\
+        wartui-loader: sending 0\r\n\
+        wartui-loader: sending 100\r\n\
+        wartui-loader: sent\r\n\
+        wartui-loader: c6 start rehearsal\r\n\
+        wartui-loader: c6 step would write the radio image at 0x10000..0xb1000\r\n\
+        wartui-loader: c6 step would erase otadata at 0xd000..0xf000\r\n\
+        wartui-loader: c6 done rehearsal\r\n\
+        wartui-loader: done\r\n";
+
+    #[test]
+    fn setup_reads_rehearsed_when_c6_loader_says_done_rehearsal() {
+        let mut port = REHEARSAL_TRANSCRIPT;
+        let mut lines = Lines::new("A9:76".into());
+        let mut printed = Vec::new();
+        let verdict = watch(&mut port, QUIET, WATCH_FOR, |said| printed.extend(lines.of(said)));
+        assert_eq!(verdict, Ok(Verdict::Rehearsed));
+        assert_eq!(printed.last().map(String::as_str), Some("C6     done rehearsal"));
+    }
+
+    #[test]
+    fn setup_skips_bridge_write_when_verdict_is_rehearsed() {
+        assert_eq!(
+            next("/dev/ttyACM0", &Verdict::Rehearsed),
+            Next::Finish(
+                "/dev/ttyACM0  rehearsal done; the C6 runs ESP-Hosted again, and nothing more \
+                 is written"
+                    .into()
+            )
+        );
+        assert_eq!(next("/dev/ttyACM0", &Verdict::Done), Next::Bridge(None));
+        let Next::Bridge(Some(line)) =
+            next("/dev/ttyACM0", &Verdict::Skipped("no ESP-Hosted on the C6".into()))
+        else {
+            panic!("a skipped C6 loader goes on to the bridge firmware");
+        };
+        assert!(line.ends_with("writing the bridge firmware"), "{line}");
+    }
+
     #[test]
     fn setup_fetches_release_assets_when_built_for_a_release() {
         assert_eq!(
@@ -990,16 +1069,13 @@ mod tests {
     }
 
     #[test]
-    fn setup_says_rehearsal_is_done_when_c6_loader_started_a_rehearsal() {
+    fn setup_leaves_done_to_the_setup_when_c6_loader_rehearsed() {
         let mut lines = Lines::new("44:C1".into());
         let done = lines.of(&Said::Done).unwrap();
         assert!(done.contains("the C6 is set up"), "{done}");
+        // A rehearsal's `done` writes no bridge firmware, so `run` words it from the verdict.
         let mut lines = Lines::new("44:C1".into());
-        assert_eq!(
-            lines.of(&Said::C6("start rehearsal".into())).unwrap(),
-            "C6     start rehearsal"
-        );
-        let done = lines.of(&Said::Done).unwrap();
-        assert!(done.contains("rehearsal is done") && !done.contains("set up"), "{done}");
+        assert_eq!(lines.of(&Said::C6("done rehearsal".into())).unwrap(), "C6     done rehearsal");
+        assert_eq!(lines.of(&Said::Done), None);
     }
 }
