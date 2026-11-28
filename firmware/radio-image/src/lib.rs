@@ -7,6 +7,11 @@
 //! The C6 is built by its own cargo, from its own directory, so its toolchain pin, target and
 //! `.cargo/config.toml` apply rather than the caller's: every variable the outer cargo sets
 //! for a build script is cleared first.
+//!
+//! The C6's app descriptor embeds a build time unless `SOURCE_DATE_EPOCH` is set, so two builds
+//! of one tree would differ, and a P4 bridge built beside the C6 loader would reflash the C6 it
+//! set up. When the caller sets no `SOURCE_DATE_EPOCH`, the build gets the repository's last
+//! commit time, so the release's two jobs build one image.
 
 use std::env;
 use std::fs;
@@ -52,6 +57,9 @@ const RADIO_INPUTS: &[&str] = &[
 /// The C6's build-time settings (`firmware/p4-radio/src/config.rs`), passed through.
 const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES", "WARTUI_RADIO_CONN_INTERVAL_MS"];
 
+/// The build time when git cannot say: 2026-11-28T00:00:00Z.
+const FALLBACK_EPOCH: &str = "1795824000";
+
 /// Variables the outer cargo sets for a build script that would steer the C6's build, beside
 /// every `CARGO_*` but `CARGO_HOME`.
 const OUTER: &[&str] = &[
@@ -85,7 +93,7 @@ pub fn build(out_dir: &Path, merged: bool) -> Radio {
     for path in RADIO_INPUTS {
         println!("cargo:rerun-if-changed={}", here.join(path).display());
     }
-    for var in RADIO_ENV {
+    for var in RADIO_ENV.iter().chain(&["SOURCE_DATE_EPOCH"]) {
         println!("cargo:rerun-if-env-changed={var}");
     }
     let radio = here.join("../p4-radio");
@@ -99,6 +107,9 @@ pub fn build(out_dir: &Path, merged: bool) -> Radio {
         if (key.starts_with("CARGO_") && key != "CARGO_HOME") || OUTER.contains(&key) {
             build.env_remove(key);
         }
+    }
+    if env::var_os("SOURCE_DATE_EPOCH").is_none() {
+        build.env("SOURCE_DATE_EPOCH", commit_time(&here));
     }
     run(
         build,
@@ -162,6 +173,17 @@ pub fn build(out_dir: &Path, merged: bool) -> Radio {
     });
 
     Radio { app, app_path, merged, sha256, digest }
+}
+
+/// The last commit's time in seconds, from git run in `dir`, else [`FALLBACK_EPOCH`].
+fn commit_time(dir: &Path) -> String {
+    let output = Command::new("git").current_dir(dir).args(["log", "-1", "--format=%ct"]).output();
+    let time = output.ok().filter(|o| o.status.success()).and_then(|o| {
+        let text = String::from_utf8(o.stdout).ok()?;
+        let text = text.trim();
+        text.parse::<u64>().is_ok().then(|| text.to_owned())
+    });
+    time.unwrap_or_else(|| FALLBACK_EPOCH.to_owned())
 }
 
 /// Run `command`, failing the build with `why` and its output if it fails, and with `missing`
