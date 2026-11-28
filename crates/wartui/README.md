@@ -636,8 +636,10 @@ A failed setup leaves what it reached, and saves nothing:
   running `flash-bridge` again takes the ordinary update and does not retry the setup. To retry
   it, blank the P4 with
   `espflash erase-region --chip esp32p4 --port <P4 port> --non-interactive 0x0 0x10000`, then run
-  `flash-bridge --first-flash`, which offers the one silent P4 and remembers it. With several P4s
-  attached, add `--bridge PATH`; a board named that way is not remembered.
+  `flash-bridge --first-flash` when the setup found the board on its own: it offers the one silent
+  P4 and remembers it. When you named the board, run `flash-bridge --bridge PATH --first-flash`;
+  a board named that way is not remembered. To remember it, run `wartui flash-bridge` or
+  `wartui run` once without `--bridge` while it is the only bridge attached, or keep naming it.
 
 The C6's header is the fallback, per `firmware/p4-bridge/README.md` § "First flash". The bench
 record is [`docs/c6-first-flash-findings.md`](../../docs/c6-first-flash-findings.md).

@@ -515,7 +515,7 @@ pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) ->
 
     println!("{path}  waiting for the bridge to answer with its C6's address");
     let Some(c6) = crate::interruptible(come_up(&label, &path, info.mac)).await? else {
-        bail!("{}", c6_silent_text(&path));
+        bail!("{}", c6_silent_text(&path, named));
     };
     println!("{:<6} set up; the bridge is known by its C6's address", mac::short(&c6));
     bridge::remember(args, named, &board, c6);
@@ -614,15 +614,23 @@ fn loader_failed_text(path: &str, stopped: &Stopped) -> String {
 }
 
 /// Why the setup of `path` ended without its C6 answering. The P4 then answers with its own
-/// address, so a plain rerun takes the ordinary update rather than the setup.
-fn c6_silent_text(path: &str) -> String {
+/// address, so a plain rerun takes the ordinary update rather than the setup. An unnamed setup
+/// found the board on its own, so a plain retry finds it again; a named one needs `--bridge`.
+fn c6_silent_text(path: &str, named: bool) -> String {
+    let retry = if named {
+        format!(
+            "flash-bridge --bridge {path} --first-flash. A board named with --bridge is not \
+             remembered. To remember it, run `wartui flash-bridge` or `wartui run` once without \
+             --bridge while it is the only bridge attached, or keep naming it"
+        )
+    } else {
+        "flash-bridge --first-flash".to_owned()
+    };
     format!(
         "{path} runs the bridge firmware, but its C6 is not answering, so the bridge is not \
          remembered. Running flash-bridge again updates the P4 and does not retry the setup. To \
          retry it, blank the P4 with `espflash erase-region --chip esp32p4 --port {path} \
-         --non-interactive 0x0 0x10000`, then run flash-bridge --first-flash. With several P4s \
-         attached, add --bridge {path}; a board named that way is not remembered. The C6's \
-         header is the fallback, per {}",
+         --non-interactive 0x0 0x10000`, then run {retry}. The C6's header is the fallback, per {}",
         p4::FIRST_FLASH
     )
 }
@@ -894,27 +902,36 @@ mod tests {
         assert!(text.contains("again retries") && !text.contains("wait a minute"), "{text}");
     }
 
+    const BLANK: &str = "espflash erase-region --chip esp32p4 --port /dev/ttyACM0 \
+                         --non-interactive 0x0 0x10000";
+
     #[test]
-    fn setup_says_how_to_retry_when_c6_stays_silent() {
-        let text = c6_silent_text("/dev/ttyACM0");
+    fn setup_says_how_to_retry_when_c6_stays_silent_and_board_was_found() {
+        let text = c6_silent_text("/dev/ttyACM0", false);
         assert!(text.contains("not remembered") && text.contains(p4::FIRST_FLASH), "{text}");
         assert!(text.contains("does not retry the setup"), "{text}");
+        assert!(text.contains(BLANK), "{text}");
+        assert!(text.contains("then run flash-bridge --first-flash. The C6's header"), "{text}");
+        assert!(!text.contains("--bridge") && !text.contains("several P4s"), "{text}");
+    }
+
+    #[test]
+    fn setup_says_how_to_retry_when_c6_stays_silent_and_board_was_named() {
+        let text = c6_silent_text("/dev/ttyACM0", true);
+        assert!(text.contains(BLANK), "{text}");
+        assert!(
+            text.contains("then run flash-bridge --bridge /dev/ttyACM0 --first-flash. "),
+            "{text}"
+        );
         assert!(
             text.contains(
-                "espflash erase-region --chip esp32p4 --port /dev/ttyACM0 \
-                 --non-interactive 0x0 0x10000"
+                "A board named with --bridge is not remembered. To remember it, run `wartui \
+                 flash-bridge` or `wartui run` once without --bridge while it is the only bridge \
+                 attached, or keep naming it"
             ),
             "{text}"
         );
-        // Without --bridge, the one silent P4 is offered and remembered once it comes up.
-        assert!(text.contains("then run flash-bridge --first-flash."), "{text}");
-        assert!(
-            text.contains(
-                "With several P4s attached, add --bridge /dev/ttyACM0; a board named that way is \
-                 not remembered"
-            ),
-            "{text}"
-        );
+        assert!(text.contains(p4::FIRST_FLASH), "{text}");
     }
 
     #[test]
