@@ -47,10 +47,9 @@ wartui-firmware = { path = "../common", features = ["esp32p4", "gps"] }
 esp32p4 = "0.3.0"
 wartui-proto = { path = "../../crates/wartui-proto" }
 
-# `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.
+# `build.rs` embeds the C6's image, which `radio-image` builds and hashes.
 [build-dependencies]
-sha2 = { version = "0.11.1", default-features = false }
-wartui-proto = { path = "../../crates/wartui-proto" }
+wartui-radio-image = { path = "../radio-image" }
 
 [lints.rust]
 # AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is

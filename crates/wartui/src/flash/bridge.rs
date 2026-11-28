@@ -10,8 +10,11 @@
 //! which is why the listing holds every fleet board: the refusal has to say which of the two it
 //! is. Several and none known is a refusal that lists them, never a guess.
 //!
-//! **No P4 bridge answering points at the first flash.** A blank P4 is a CH343 that does not
-//! answer, so that flash is by hand ([`p4::FIRST_FLASH`]).
+//! **No P4 bridge answering offers a setup** (`super::setup`). A blank P4 is a CH343 that does
+//! not answer. When the choice is refused and a silent CH343 is left that the setup may take,
+//! the run hands it over: with the operator's consent it writes the P4 C6 loader, then the bridge
+//! firmware. With none left, the refusal stands and points at the first flash by hand
+//! ([`p4::FIRST_FLASH`]).
 //!
 //! **A board found here is remembered once flashed.** `flash-bridge` saves its address and its
 //! CH343's serial number to `wartui.toml` as `[bridge] mac` and `serial`, the way `run` does once
@@ -39,14 +42,15 @@ use wartui_bridge::serial::{Probed, discover_ports, probe_all};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_proto::mac::{self, Mac};
 
-use super::{canonical, matches, p4};
+use super::{canonical, matches, p4, setup};
 use crate::config::Link;
 use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Which P4 bridge to flash, by path, by address or by the end of it (`71:F4`), which must
-    /// match one P4 bridge that answers. It is not remembered. Without it, the bridge remembered
+    /// match one P4 bridge that answers; a path whose CH343 is silent is offered for setup
+    /// instead. It is not remembered. Without it, the bridge remembered
     /// in `wartui.toml`, which must answer; else, with none remembered, the only P4 bridge that
     /// answers. A board found without it is remembered as the bridge once flashed.
     #[arg(long, value_name = "PATH|MAC")]
@@ -76,6 +80,16 @@ pub struct Args {
     /// downloads and sends no image; over USB, each CH343 is still asked which bridge it is.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Set up a P4 that does not answer without asking: the answer to flash-bridge's
+    /// y/N. A P4 that answers is updated as always, flag or not.
+    #[arg(long)]
+    pub first_flash: bool,
+
+    /// The P4 C6 loader's merged image to set up a new board with, rather than building or
+    /// downloading one.
+    #[arg(long, value_name = "BIN")]
+    pub loader: Option<PathBuf>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -89,12 +103,22 @@ pub async fn run(args: Args) -> Result<()> {
     let ch343s: Vec<PortCandidate> =
         found.iter().filter(|c| could_be_a_bridge(c)).cloned().collect();
     let probed = probe_all(&ports, &ch343s).await;
-    let (board, expected) = target(
+    let (board, expected) = match target(
         &found,
         &probed,
         named.as_ref().map(|(given, spec)| (*given, spec)),
         remembered.mac,
-    )?;
+    ) {
+        Ok(chosen) => chosen,
+        Err(refusal) => {
+            let named_spec = named.as_ref().map(|(_, spec)| spec);
+            let silent = setup::blank_candidates(&probed, named_spec, remembered.mac);
+            if silent.is_empty() {
+                return Err(refusal);
+            }
+            return setup::run(&args, named.is_some(), silent).await;
+        }
+    };
     p4::run(&args, p4::Target::Usb { board: board.clone(), expected }).await?;
     if !args.dry_run {
         remember(&args, named.is_some(), &board, expected);
@@ -117,7 +141,7 @@ async fn over_bluetooth(args: &Args, remembered: &config::Bridge) -> Result<()> 
 
 /// Remember the flashed board as the bridge, unless `--bridge` named it, saying so when that
 /// fails.
-fn remember(args: &Args, named: bool, board: &PortCandidate, mac: Mac) {
+pub(super) fn remember(args: &Args, named: bool, board: &PortCandidate, mac: Mac) {
     if named {
         return;
     }
@@ -210,8 +234,8 @@ fn target(
             }
             (None, [only]) => *only,
             (None, []) => bail!(
-                "no P4 bridge answered. A blank P4 is a CH343 that does not answer, and takes its \
-                 first flash by hand, per {}",
+                "no P4 bridge answered, and no silent CH343 is attached for flash-bridge to set \
+                 up. See {}",
                 p4::FIRST_FLASH
             ),
             (None, several) => bail!(
@@ -228,28 +252,13 @@ fn target(
 
 #[cfg(test)]
 mod tests {
-    use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate, is_ch343};
+    use wartui_bridge::ports::is_ch343;
 
-    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
+    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, bridge, silent};
     use super::*;
 
     fn named(given: &str) -> (&str, BridgeSpec) {
         (given, spec(given))
-    }
-
-    /// A CH343 as the OS lists it, with a serial number of its own.
-    fn ch343(device: &str) -> PortCandidate {
-        candidate(device, Some(CH343_VID), Some(CH343_PID), Some(device))
-    }
-
-    /// A CH343 whose probe answered as the bridge `address`.
-    fn bridge(device: &str, address: &Mac) -> Probed {
-        Probed { candidate: ch343(device), opened: true, mac: Some(*address) }
-    }
-
-    /// A CH343 whose probe heard nothing: a blank P4, or another device.
-    fn silent(device: &str) -> Probed {
-        Probed { candidate: ch343(device), opened: true, mac: None }
     }
 
     /// Every fleet board as `discover_ports` lists it: the nodes, then each probed CH343.
@@ -411,12 +420,13 @@ mod tests {
     }
 
     #[test]
-    fn flash_bridge_refuses_run_when_only_nodes_and_silent_ch343s_are_attached() {
+    fn flash_bridge_refuses_target_when_only_nodes_and_silent_ch343s_are_attached() {
+        // `target` alone refuses; `run` hands this refusal to the setup, which takes the silent
+        // CH343.
         let probed = [silent("/dev/ttyACM1")];
         let found = listed(&[board("/dev/ttyACM0", Some(&NODE_MAC))], &probed);
         let error = target(&found, &probed, None, None).unwrap_err().to_string();
         assert!(error.contains("no P4 bridge answered"), "{error}");
-        assert!(error.contains("a CH343 that does not answer"), "{error}");
         assert!(error.contains(p4::FIRST_FLASH), "{error}");
     }
 
@@ -471,6 +481,8 @@ mod tests {
             image: None,
             firmware_dir: None,
             dry_run: false,
+            first_flash: false,
+            loader: None,
         }
     }
 

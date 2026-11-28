@@ -564,14 +564,16 @@ wartui flash-bridge --bridge 71:F4
 wartui flash-bridge --link bluetooth --bridge 44:C0
 ```
 
-| Flag                    | Default         | What it is                                                              |
-|-------------------------|-----------------|-------------------------------------------------------------------------|
-| `--bridge PATH\|MAC`    | see below       | The P4 bridge to update, which must answer; `71:F4` works too           |
-| `--link usb\|bluetooth` | `[bridge] link` | Which link carries the update; see "Over Bluetooth"                     |
-| `--config PATH`         | per-OS path     | Where to read and save the remembered bridge; see "Config file"         |
-| `--image BIN`           | —               | Send this app-only image rather than building or fetching one           |
-| `--firmware-dir DIR`    | the checkout's  | Build the image from the P4 bridge firmware here                        |
-| `--dry-run`             | off             | Report the board and the image's source; build, fetch and send no image |
+| Flag                    | Default         | What it is                                                                   |
+|-------------------------|-----------------|------------------------------------------------------------------------------|
+| `--bridge PATH\|MAC`    | see below       | The P4 bridge to update; `71:F4` works too, and a silent path is set up      |
+| `--link usb\|bluetooth` | `[bridge] link` | Which link carries the update; see "Over Bluetooth"                          |
+| `--config PATH`         | per-OS path     | Where to read and save the remembered bridge; see "Config file"              |
+| `--image BIN`           | —               | Send this app-only image rather than building or fetching one                |
+| `--firmware-dir DIR`    | the checkout's  | Build the image from the P4 bridge firmware here                             |
+| `--dry-run`             | off             | Report the board, a setup and the sources; write nothing. Resets a silent P4 |
+| `--first-flash`         | off             | Set up a blank P4 without asking; see "Setting up a new board"               |
+| `--loader BIN`          | —               | The merged P4 C6 loader for a blank P4; a rehearsal one stops after the C6   |
 
 **Over USB, the board is chosen before any image is sent.** Each attached CH343 is asked which
 bridge it is, as `wartui ports` asks, and the choice is made among those that answered, from the
@@ -588,13 +590,59 @@ The run is refused when:
 - `--bridge` matches no P4 bridge that answered, or several. Naming a node is the first of these.
 - Several P4 bridges answer and none is known. The refusal lists their addresses; pick one with
   `--bridge`.
-- No P4 bridge answers. A blank P4 is a CH343 that does not answer, and takes its first flash by
-  hand.
+- No P4 bridge answers, and no silent CH343 is left to set up ("Setting up a new board" below).
 
 A board found without `--bridge` is saved to `wartui.toml` as the bridge once updated, so `run` and
 the next `flash-bridge` open it first; with `remember bridge` off, nothing is saved. A board
 named with `--bridge` is not saved, since one flashed by name is often some other device. When the
 save fails, the update still succeeds and a line says why.
+
+**Setting up a new board.** A blank P4 is a CH343 that does not answer. When no P4 bridge
+answers, none is remembered and none is named by address, `flash-bridge` offers to set it up; a
+`--bridge` path is offered whenever its CH343 is silent. Each silent CH343 is asked
+`espflash board-info`, and only one that names an `esp32p4` is offered. Several are refused: name
+one with `--bridge PATH`. A P4 that answers is never set up; it takes the ordinary update.
+`board-info` resets the board, `--dry-run` included, and on a P4 holding the loader that reset
+reruns the loader.
+
+The prompt names the board by its path and the last two octets of its P4's address, and says the
+setup replaces both chips' firmware, takes about two minutes, clears the board's settings and
+Bluetooth bonds, and leaves the bridge known by its C6's address. A terminal is asked `[y/N]`, and
+`--first-flash` answers yes; with neither, the run is refused.
+
+1. It writes the P4 C6 loader, which pushes the C6 its own loader through ESP-Hosted. Lines
+   prefixed `C6` are the C6 loader's.
+2. It waits for the loader's verdict: up to 60 s for each line, and 300 s in all. On a C6 with no
+   ESP-Hosted, the loader listens 25 s for a C6 loader from an earlier run and relays it to its
+   verdict. A C6 with neither is passed over, since it may run the bridge's radio already. A
+   rehearsal stops here: its C6 runs ESP-Hosted again, and nothing more is written.
+3. It writes the bridge firmware's merged image whole.
+4. It waits up to 90 s for the bridge to answer with its C6's address. That address names the
+   bridge from then on, and is saved as a found board is.
+
+The loader comes from `--loader`, else a release's `wartui-p4-c6-loader-esp32p4.bin`, else
+`firmware/p4-c6-loader/build.sh`, which needs ESP-IDF v5.5.4 exported
+([`firmware/p4-c6-loader`](../../firmware/p4-c6-loader/README.md),
+[`firmware/c6-loader`](../../firmware/c6-loader/README.md)). The bridge firmware comes from
+`--firmware-dir`, else a release's, else the checkout. `--image` is refused, since it is app-only.
+
+A failed setup leaves what it reached, and saves nothing:
+
+- **The loader or its verdict fails.** The P4 keeps running the loader, and running
+  `flash-bridge` again retries. When the C6 loader itself refused or failed, a rerun does not
+  fix it. When the watch timed out, the C6 loader may still be writing: wait a minute first.
+- **The C6 never answers.** The P4 runs the bridge firmware and the C6 holds what the loader left.
+  The error says the bridge is not remembered. The P4 then answers with its own address, so
+  running `flash-bridge` again takes the ordinary update and does not retry the setup. To retry
+  it, blank the P4 with
+  `espflash erase-region --chip esp32p4 --port <P4 port> --non-interactive 0x0 0x10000`, then run
+  `flash-bridge --first-flash` when the setup found the board on its own: it offers the one silent
+  P4 and remembers it. When you named the board, run `flash-bridge --bridge PATH --first-flash`;
+  a board named that way is not remembered. To remember it, run `wartui flash-bridge` or
+  `wartui run` once without `--bridge` while it is the only bridge attached, or keep naming it.
+
+The C6's header is the fallback, per `firmware/p4-bridge/README.md` § "First flash". The bench
+record is [`docs/c6-first-flash-findings.md`](../../docs/c6-first-flash-findings.md).
 
 The image comes from the same three sources as `flash-fleet`'s, with `firmware/p4-bridge` for
 `firmware/node`; a release publishes one under the same

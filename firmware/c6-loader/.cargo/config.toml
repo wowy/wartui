@@ -1,0 +1,6 @@
+[build]
+target = "riscv32imac-unknown-none-elf"
+rustflags = [
+  # Needed for usable backtraces out of a debugger.
+  "-C", "force-frame-pointers",
+]

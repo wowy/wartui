@@ -34,6 +34,7 @@ mod boot;
 pub mod bridge;
 pub mod fleet;
 mod p4;
+mod setup;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -528,7 +529,10 @@ fn espflash<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Ran {
 #[cfg(test)]
 mod testing {
     pub(super) use wartui_app::update::testing::{C5_HEADER, C6_HEADER, P4_APP_HEADER};
-    use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate};
+    use wartui_bridge::ports::{
+        CH343_PID, CH343_VID, ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate,
+    };
+    use wartui_bridge::serial::Probed;
     use wartui_proto::mac::{self, Mac};
 
     use super::Ran;
@@ -557,6 +561,21 @@ Chip ID: 23
     pub(super) fn board(device: &str, address: Option<&Mac>) -> PortCandidate {
         let serial = address.map(|a| mac::full(a).to_string());
         candidate(device, Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), serial.as_deref())
+    }
+
+    /// A CH343 as the OS lists it, with a serial number of its own.
+    pub(super) fn ch343(device: &str) -> PortCandidate {
+        candidate(device, Some(CH343_VID), Some(CH343_PID), Some(device))
+    }
+
+    /// A CH343 whose probe answered as the bridge `address`.
+    pub(super) fn bridge(device: &str, address: &Mac) -> Probed {
+        Probed { candidate: ch343(device), opened: true, mac: Some(*address) }
+    }
+
+    /// A CH343 whose probe heard nothing: a blank P4, or another device.
+    pub(super) fn silent(device: &str) -> Probed {
+        Probed { candidate: ch343(device), opened: true, mac: None }
     }
 
     pub(super) fn c5_image() -> Vec<u8> {

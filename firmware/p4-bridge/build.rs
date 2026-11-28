@@ -3,19 +3,13 @@
 // advice you actually need, which is worth keeping verbatim so it stays easy to
 // diff against upstream.
 //
-// The script also builds the C6's image (`firmware/p4-radio`) and embeds it, so the
-// P4 carries the radio build it bridges and reflashes the C6 when that differs
-// (`src/radio.rs`). The C6 is built by its own cargo, from its own directory, so its
-// toolchain pin, target and `.cargo/config.toml` apply rather than this build's: every
-// variable the outer cargo sets for a build script is cleared first.
+// The script also embeds the C6's image (`firmware/p4-radio`), so the P4 carries the radio
+// build it bridges and reflashes the C6 when that differs (`src/radio.rs`). `radio-image`
+// builds it, so the C6 loader's build embeds the same bytes.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-
-use sha2::{Digest, Sha256};
-use wartui_proto::ota::image::appended_digest_of;
 
 fn main() {
     linker_be_nice();
@@ -24,112 +18,12 @@ fn main() {
     bundle_radio();
 }
 
-/// What the C6's build reads, relative to this crate. Its `target` directories are left
-/// out: a change there is the build's output, not its input.
-const RADIO_INPUTS: &[&str] = &[
-    "../p4-radio/src",
-    "../p4-radio/build.rs",
-    "../p4-radio/Cargo.toml",
-    "../p4-radio/Cargo.lock",
-    "../p4-radio/partitions.csv",
-    "../p4-radio/rust-toolchain.toml",
-    "../p4-radio/.cargo",
-    "../common/src",
-    "../common/Cargo.toml",
-    "../../crates/wartui-proto/src",
-    "../../crates/wartui-proto/Cargo.toml",
-];
-
-/// The C6's build-time settings (`firmware/p4-radio/src/config.rs`), passed through.
-const RADIO_ENV: &[&str] = &["WARTUI_RADIO_UP_QUEUE_BYTES", "WARTUI_RADIO_CONN_INTERVAL_MS"];
-
-/// Variables the outer cargo sets for a build script that would steer the C6's build, beside
-/// every `CARGO_*` but `CARGO_HOME`.
-const OUTER: &[&str] = &[
-    "RUSTC",
-    "RUSTC_WRAPPER",
-    "RUSTC_WORKSPACE_WRAPPER",
-    "RUSTC_LINKER",
-    "RUSTDOC",
-    "RUSTFLAGS",
-    "RUSTDOCFLAGS",
-    "RUSTUP_TOOLCHAIN",
-    "TARGET",
-    "HOST",
-    "OUT_DIR",
-    "OPT_LEVEL",
-    "PROFILE",
-    "DEBUG",
-    "NUM_JOBS",
-];
-
 /// Build the C6's app image and write `radio.rs` into `OUT_DIR`: the image, its whole-file
 /// SHA-256 (what the C6's receiver checks) and the digest espflash appended (what names it).
 fn bundle_radio() {
-    for path in RADIO_INPUTS {
-        println!("cargo:rerun-if-changed={path}");
-    }
-    for var in RADIO_ENV {
-        println!("cargo:rerun-if-env-changed={var}");
-    }
-    let here = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let radio = here.join("../p4-radio");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let target_dir = radio.join("target");
-
-    let mut build = Command::new("cargo");
-    build.current_dir(&radio).args(["build", "--release", "--locked"]);
-    build.arg("--target-dir").arg(&target_dir);
-    for (key, _) in env::vars_os() {
-        let Some(key) = key.to_str() else { continue };
-        if (key.starts_with("CARGO_") && key != "CARGO_HOME") || OUTER.contains(&key) {
-            build.env_remove(key);
-        }
-    }
-    run(
-        build,
-        "building the radio image (firmware/p4-radio) failed",
-        "`cargo` is not on the PATH",
-        &[
-            (
-                "may not be installed",
-                "the C6's target is missing: `rustup target add riscv32imac-unknown-none-elf`",
-            ),
-            (
-                "--locked was passed",
-                "firmware/p4-radio/Cargo.lock is out of date: run `cargo update --workspace` \
-                 in firmware/p4-radio",
-            ),
-        ],
-    );
-
-    let elf = target_dir.join("riscv32imac-unknown-none-elf/release/wartui-p4-radio-fw");
-    let bin = out.join("radio.bin");
-    let mut save = Command::new("espflash");
-    save.args(["save-image", "--skip-update-check", "--chip", "esp32c6"])
-        // As the wired flash's runner in `firmware/p4-radio/.cargo/config.toml` writes them:
-        // the header is under the digest, so a difference reflashes a C6 already on this build.
-        .args(["--flash-mode", "dio", "--flash-freq", "40mhz", "--flash-size", "4mb"])
-        .arg("--partition-table")
-        .arg(radio.join("partitions.csv"))
-        .arg(&elf)
-        .arg(&bin);
-    run(
-        save,
-        "saving the radio image failed",
-        "`espflash` is not installed; the P4 build needs it: `cargo install espflash --locked`",
-        &[],
-    );
-
-    let image = fs::read(&bin).expect("read the saved radio image");
-    let sha256: [u8; 32] = Sha256::digest(&image).into();
-    let Some(digest) = appended_digest_of(&image) else {
-        panic!(
-            "the radio image {} carries no appended SHA-256 digest, which is how the P4 \
-             tells whether its C6 runs it",
-            bin.display()
-        );
-    };
+    let radio = wartui_radio_image::build(&out, false);
+    let (bin, sha256, digest) = (&radio.app_path, radio.sha256, radio.digest);
     let source = format!(
         "/// The C6's app image, as `espflash save-image` writes it.\n\
          pub static RADIO_IMAGE: &[u8] = include_bytes!({bin:?});\n\
@@ -139,31 +33,6 @@ fn bundle_radio() {
          pub const RADIO_DIGEST: [u8; 32] = {digest:?};\n"
     );
     fs::write(out.join("radio.rs"), source).expect("write radio.rs");
-}
-
-/// Run `command`, failing the build with `why` and its output if it fails, and with `missing`
-/// if the program is not there. Each `(pattern, hint)` whose pattern the stderr holds adds its
-/// hint after the output.
-fn run(mut command: Command, why: &str, missing: &str, hints: &[(&str, &str)]) {
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => panic!("{missing}"),
-        Err(err) => panic!("could not run {:?}: {err}", command.get_program()),
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut message = format!(
-            "{why}\n--- stdout\n{}\n--- stderr\n{stderr}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        for (pattern, hint) in hints {
-            if stderr.contains(pattern) {
-                message.push_str("\nhint: ");
-                message.push_str(hint);
-            }
-        }
-        panic!("{message}");
-    }
 }
 
 fn linker_be_nice() {

@@ -97,6 +97,17 @@ cd firmware/p4-bridge                         # the P4 half, own target
 cargo fmt --all -- --check
 cargo clippy --release
 
+cd firmware/c6-loader                         # the C6's first flash, over ESP-Hosted
+cargo fmt --all -- --check
+cargo clippy --release
+cargo clippy --release --features rehearse
+
+cd firmware/radio-image                       # builds p4-radio for both images that carry it
+cargo fmt --all -- --check
+cargo clippy
+
+firmware/p4-c6-loader/build.sh                # ESP-IDF C, no cargo: needs ESP-IDF v5.5.4 exported
+
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check                    # then each firmware's combination:
 cargo clippy --release --features esp32c5         # node
@@ -248,6 +259,15 @@ the bottom one and a crate of its own.
   given the Bluetooth scan sniffs nothing and runs one scan after another, back to back. Same rule
   as the bridge: the logic lives in `wartui-proto`, and this crate is the conversation with the
   radio and the bus.
+- **`firmware/c6-loader`** — a one-shot app for a factory P4-WIFI6's C6, landed through the OTA
+  of ESP-Hosted, the firmware the C6 ships with. It writes what a wired flash of p4-radio writes,
+  in an order a power cut survives, and plans every write from the table it boots under
+  (`wartui_proto::first_flash`). Built with `rehearse`, it writes only into flash no table uses.
+- **`firmware/p4-c6-loader`** — the P4 half of that first flash: an ESP-IDF C app, built with
+  `build.sh` and ESP-IDF v5.5.4, that pushes the C6 loader over SDIO and relays its lines to
+  `wartui flash-bridge`'s setup of a new board (`crates/wartui/src/flash/setup.rs`).
+- **`firmware/radio-image`** — the host-side crate both the P4 bridge's and the C6 loader's build
+  scripts build p4-radio through, so both embed the same app.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), every firmware's last panic kept across the

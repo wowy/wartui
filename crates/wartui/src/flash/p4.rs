@@ -53,8 +53,8 @@ use super::bridge::Args;
 use super::{Firmware, RELEASE_TAG, Source, app, espflash_present, obtain, read, source};
 use crate::config::Link;
 
-/// The P4 bridge's app-only image, which `flash-bridge` sends it over its link. Its merged image
-/// is for the first flash by hand (`firmware/p4-bridge/README.md`), so nothing here fetches it.
+/// The P4 bridge's app-only image, which `flash-bridge` sends it over its link. A board that is
+/// set up takes the merged one, [`P4_BRIDGE`], by wire.
 const P4_BRIDGE_APP: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
     elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
@@ -68,6 +68,10 @@ const P4_BRIDGE_APP: Firmware = Firmware {
     merged: false,
     asset: release::BRIDGE_APP_ASSET,
 };
+
+/// The P4 bridge's merged image, which a setup writes once the C6 is set up (`super::setup`).
+pub(super) const P4_BRIDGE: Firmware =
+    Firmware { merged: true, asset: "wartui-p4-bridge-fw-esp32p4.bin", ..P4_BRIDGE_APP };
 
 /// The longest to wait for the P4's `Ready`. It announces once its C6 answers, or after 2 s
 /// without. The transport's first failure ends the wait sooner: a held port at once, and a silent
@@ -241,7 +245,7 @@ fn stopped_text(label: &str) -> String {
 }
 
 /// Open the P4 bridge on `path` over its CH343 and wait for its `Ready`.
-async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeCore)> {
+pub(super) async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeCore)> {
     // By path: the probe that chose it has already asked, and the reboot leaves the CH343 where
     // it is.
     let mut link = SerialTransport::with_spec(
@@ -559,6 +563,8 @@ mod tests {
             image: Some(path.clone()),
             firmware_dir: None,
             dry_run: true,
+            first_flash: false,
+            loader: None,
         };
         let bridge = BridgeSpec::Mac([0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0]);
         let target = Target::Bluetooth { bridge, memory: BridgeMemory::none() };

@@ -1837,10 +1837,10 @@ dependencies = [
  "esp-rtos",
  "esp32p4",
  "sdio",
- "sha2",
  "static_cell",
  "wartui-firmware",
  "wartui-proto",
+ "wartui-radio-image",
 ]
 
 [[package]]
@@ -1853,6 +1853,14 @@ dependencies = [
  "postcard",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "wartui-radio-image"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "wartui-proto",
 ]
 
 [[package]]

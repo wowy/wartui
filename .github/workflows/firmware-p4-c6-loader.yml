@@ -1,0 +1,76 @@
+name: Firmware - P4 C6 loader
+
+# Path-filtered: this builds only when something the P4 loader compiles changes — its own
+# sources, `firmware/c6-loader` (the C6 loader it embeds) and what that builds from:
+# `firmware/p4-radio`, `firmware/radio-image`, `firmware/common` and `crates/wartui-proto`,
+# `rustfmt.toml` (fmt resolves it from the repo root), or this file. One workflow per firmware
+# because GitHub's path filter is workflow-wide, never per-job.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - firmware/p4-c6-loader/**
+      - '!firmware/p4-c6-loader/README.md'
+      - firmware/c6-loader/**
+      - '!firmware/c6-loader/README.md'
+      - firmware/radio-image/**
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-p4-c6-loader.yml
+      - rustfmt.toml
+  pull_request:
+    paths:
+      - firmware/p4-c6-loader/**
+      - '!firmware/p4-c6-loader/README.md'
+      - firmware/c6-loader/**
+      - '!firmware/c6-loader/README.md'
+      - firmware/radio-image/**
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-p4-c6-loader.yml
+      - rustfmt.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  p4-c6-loader:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      # `build.sh` saves the C6 loader's image with espflash.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espflash@4.6.0
+
+      # The ESP-IDF container has no Rust, so the C6 loader is built here first and `build.sh p4`
+      # embeds its saved image.
+      - name: Build the C6 loader
+        run: firmware/p4-c6-loader/build.sh c6
+
+      # The container's idf-component-manager loops on "Missing kconfig option" for ESP-Hosted's
+      # `ESP_HOSTED_HOST_USB_*_MANIFEST` options, where 2.5.2 builds the same tree cleanly.
+      - name: Build the P4 loader
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32p4
+          path: firmware/p4-c6-loader
+          command: python -m pip install -q "idf-component-manager==2.5.2" && ./build.sh p4

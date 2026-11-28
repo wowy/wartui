@@ -3,9 +3,9 @@ name: Firmware - P4 bridge
 # Path-filtered: this builds only when something the P4 bridge firmware compiles
 # changes — its own sources, `firmware/p4-radio` (the C6 image its build script
 # builds and embeds), `firmware/common` and `crates/wartui-proto` (the path
-# dependencies both compile), `rustfmt.toml` (fmt resolves it from the repo
-# root), or this file. One workflow per firmware because GitHub's path filter is
-# workflow-wide, never per-job.
+# dependencies both compile), `firmware/radio-image` (the crate that builds that
+# image), `rustfmt.toml` (fmt resolves it from the repo root), or this file. One
+# workflow per firmware because GitHub's path filter is workflow-wide, never per-job.
 
 on:
   push:
@@ -16,6 +16,7 @@ on:
       - firmware/p4-radio/**
       - '!firmware/p4-radio/README.md'
       - firmware/common/**
+      - firmware/radio-image/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-p4-bridge.yml
       - rustfmt.toml
@@ -26,6 +27,7 @@ on:
       - firmware/p4-radio/**
       - '!firmware/p4-radio/README.md'
       - firmware/common/**
+      - firmware/radio-image/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-p4-bridge.yml
       - rustfmt.toml

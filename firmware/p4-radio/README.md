@@ -101,10 +101,17 @@ flash.
 
 ## First flash
 
-The C6 has no USB, and is flashed through its header once. After that, every update reaches it
-through the P4: the P4 image carries this one (see [Updates](#updates)).
+A new P4-WIFI6 needs no wiring. `wartui flash-bridge` sets it up over the Type-C cable
+(`crates/wartui/README.md` § "Flashing the bridge"). The P4 pushes the C6 a loader
+([`firmware/c6-loader`](../c6-loader/README.md)) through the ESP-Hosted OTA that the C6 ships
+with, and the loader writes this firmware, its bootloader and its table. After that, every update
+reaches the C6 through the P4: the P4 image carries this one (see [Updates](#updates)).
 
-Flash it through the 4-pin header H4 with a USB-to-TTL adapter. H4 carries IO9, GND, RXD and TXD.
+### By header H4
+
+The header is the fallback for a C6 the loader refuses, a setup that failed, and a board whose C6
+has no ESP-Hosted. The C6 is flashed through H4 with a USB-to-TTL adapter. H4 carries IO9, GND,
+RXD and TXD.
 
 1. With the board unpowered, jumper IO9 to GND, so the C6 boots into its download mode.
 2. Hold the P4's BOOT button while powering the board, so the P4 stays in download mode and
