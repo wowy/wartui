@@ -63,9 +63,12 @@
 //! on every change of stream, which moves the credit past what it held, so a new central never
 //! reads the last one's stream.
 //!
-//! **The C6 asks for the 2M PHY and data length 251 once connected, and an interval only when
-//! the build names one** ([`CONN_INTERVAL_US`]). TrouBLE reports only whether a request went out:
-//! an accepted one shows in `BleCounters`' `phy` and `interval_us`, and a refusal as no change.
+//! **The C6 asks for the 2M PHY and data length 251, and for an interval when the build names one
+//! ([`CONN_INTERVAL_US`]), once a bond resumes or a pairing completes, or once the central reads
+//! the phone's stream** ([`tune`]). A PHY update whose instant fell inside a bonded central's
+//! encryption start lost the link on an Intel BE200 (`docs/c6-ble-pairing-findings.md`,
+//! "Reconnecting on a BE200"). TrouBLE reports only whether a request went out: an accepted one
+//! shows in `BleCounters`' `phy` and `interval_us`, and a refusal as no change.
 //!
 //! **Two esp-radio bugs shape this build** (`docs/c6-ble-host-findings.md`, "Workarounds a
 //! production build needs"). The packet pool holds 186 bytes, so the C6 serves an ATT MTU of
@@ -1597,6 +1600,9 @@ struct Session {
     link_armed: Signal<NoopRawMutex, ()>,
     /// The last signal read on this connection, or `None` before one.
     rssi: Cell<Option<i8>>,
+    /// Raised once a bond resumes, a pairing completes, or the central reads the phone's stream,
+    /// for [`tune`].
+    tune: Signal<NoopRawMutex, ()>,
 }
 
 /// Whether the link is encrypted and the central holds a stored bond: what the host stream needs.
@@ -1670,6 +1676,7 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
         link_due: Cell::new(None),
         link_armed: Signal::new(),
         rssi: Cell::new(None),
+        tune: Signal::new(),
     };
     let window = if session.bondable { "open" } else { "closed" };
     let bonded = if raw.is_bonded_peer() { "bonded" } else { "not bonded" };
@@ -1681,31 +1688,15 @@ async fn serve(stack: &BleStack<'_>, conn: &Conn<'_, '_>, server: &Server<'_>, s
     if let Err(err) = raw.set_bondable(session.bondable) {
         shared.error(format_args!("Bluetooth could not set bondable: {err:?}"));
     }
-    // Each answered by an event if the central agrees; a refusal leaves the link as it is.
-    if let Err(err) = raw.set_phy(stack, PhyKind::Le2M).await {
-        shared.log(format_args!("Bluetooth 2M PHY not requested: {err:?}"));
-    }
-    let (octets, time) = DATA_LENGTH;
-    if let Err(err) = raw.update_data_length(stack, octets, time).await {
-        shared.log(format_args!("Bluetooth data length not requested: {err:?}"));
-    }
-    if let Some((min, max)) = CONN_INTERVAL_US {
-        let params = RequestedConnParams {
-            min_connection_interval: Duration::from_micros(min),
-            max_connection_interval: Duration::from_micros(max),
-            max_latency: 0,
-            supervision_timeout: SUPERVISION_TIMEOUT,
-            ..Default::default()
-        };
-        if let Err(err) = raw.update_connection_params(stack, &params).await {
-            shared.log(format_args!("Bluetooth interval {min}-{max} us not requested: {err:?}"));
-        }
-    }
     select4(
         events(conn, server, &session, shared),
         notify(conn, server, shared),
         deadline(conn, &session, shared),
-        select(revoke(conn, &session, shared), phone(stack, conn, &session, shared)),
+        select3(
+            revoke(conn, &session, shared),
+            phone(stack, conn, &session, shared),
+            tune(stack, conn, &session, shared),
+        ),
     )
     .await;
 }
@@ -1776,6 +1767,40 @@ async fn phone(stack: &BleStack<'_>, conn: &Conn<'_, '_>, session: &Session, sha
             }
         }
     }
+}
+
+/// Ask for the 2M PHY, data length 251 and the build's interval once `session.tune` is raised.
+/// A request of the C6's own whose procedure overlaps the central's encryption start loses the
+/// link (an Intel BE200 central, `docs/c6-ble-pairing-findings.md`). So the requests wait for a
+/// resumed bond's `Encrypted`, which comes once the encryption procedure has ended, or a pairing's
+/// `PairingComplete`, which comes after SMP key distribution. A phone never encrypts, so it counts
+/// once it reads TX. A central kicked on either event is never tuned. The interval request waits
+/// too: the connection update it leads to is an LL procedure as well. No timer stands in: every
+/// central served either encrypts or reads the phone's stream, and [`deadline`] drops any other.
+async fn tune(stack: &BleStack<'_>, conn: &Conn<'_, '_>, session: &Session, shared: &Shared) -> ! {
+    session.tune.wait().await;
+    let raw = conn.raw();
+    // Each answered by an event if the central agrees; a refusal leaves the link as it is.
+    if let Err(err) = raw.set_phy(stack, PhyKind::Le2M).await {
+        shared.log(format_args!("Bluetooth 2M PHY not requested: {err:?}"));
+    }
+    let (octets, time) = DATA_LENGTH;
+    if let Err(err) = raw.update_data_length(stack, octets, time).await {
+        shared.log(format_args!("Bluetooth data length not requested: {err:?}"));
+    }
+    if let Some((min, max)) = CONN_INTERVAL_US {
+        let params = RequestedConnParams {
+            min_connection_interval: Duration::from_micros(min),
+            max_connection_interval: Duration::from_micros(max),
+            max_latency: 0,
+            supervision_timeout: SUPERVISION_TIMEOUT,
+            ..Default::default()
+        };
+        if let Err(err) = raw.update_connection_params(stack, &params).await {
+            shared.log(format_args!("Bluetooth interval {min}-{max} us not requested: {err:?}"));
+        }
+    }
+    core::future::pending().await
 }
 
 /// Disconnect the central once the P4's bonds stop holding its bond, as after a `ClearBonds`, so
@@ -1906,7 +1931,9 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
             // LL_CONNECTION_PARAM_REQ itself.
             GattConnectionEvent::RequestConnectionParams(_) => {}
             GattConnectionEvent::PairingComplete { security_level, bond } => {
-                paired(conn, session, shared, security_level, bond.as_ref());
+                if paired(conn, session, shared, security_level, bond.as_ref()) {
+                    session.tune.signal(());
+                }
             }
             GattConnectionEvent::PairingFailed(err) => {
                 ble.count(|c| c.failed_pairings = c.failed_pairings.wrapping_add(1));
@@ -1923,7 +1950,9 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
                 }
             }
             // A stored bond resumed: what the host stream waits for.
-            GattConnectionEvent::Encrypted { bond: Some(bond), .. } if bond.is_bonded => {}
+            GattConnectionEvent::Encrypted { bond: Some(bond), .. } if bond.is_bonded => {
+                session.tune.signal(());
+            }
             // A fresh pairing's: its `PairingComplete` says whether it bonded.
             GattConnectionEvent::Encrypted { .. } if !session.bondable => {
                 kick(conn, session, shared, "encrypted without a bond outside the pairing window");
@@ -2009,6 +2038,11 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
         } else {
             Stream::None
         };
+        // A phone never encrypts, so its reading TX tunes the link. [`tune`] waits for the first
+        // signal only.
+        if stream == Stream::Phone {
+            session.tune.signal(());
+        }
         let mtu = raw.att_mtu();
         let was = ble.stream();
         // Ahead of the state that names the phone's stream, so the P4 holds it as the session
@@ -2052,22 +2086,24 @@ async fn events(conn: &Conn<'_, '_>, server: &Server<'_>, session: &Session, sha
 }
 
 /// A pairing completed: report a bond to the P4, or disconnect a central that bonded nothing
-/// while the window is closed.
+/// while the window is closed. Returns whether the link is kept: `false` once it kicked the
+/// central.
 fn paired(
     conn: &Conn<'_, '_>,
     session: &Session,
     shared: &Shared,
     level: SecurityLevel,
     bond: Option<&BondInformation>,
-) {
+) -> bool {
     let ms = session.connected_at.elapsed().as_millis();
     let peer = mac::short(&session.peer);
     let Some(bond) = bond else {
         shared.log(format_args!("Bluetooth paired {peer} without a bond in {ms} ms, {level:?}"));
         if !shared.ble.window_open() {
             kick(conn, session, shared, "paired without a bond outside the pairing window");
+            return false;
         }
-        return;
+        return true;
     };
     shared.ble.count(|c| c.pairings = c.pairings.wrapping_add(1));
     // A new bond, which the P4's list holds only once it echoes it back.
@@ -2082,6 +2118,7 @@ fn paired(
     shared.push(&Up::BondAdded(record));
     shared.ble.pending_bond.set(Some(PendingBond { record, sent_at: Instant::now(), sent: 1 }));
     shared.log(format_args!("Bluetooth paired and bonded {peer} in {ms} ms, {level:?}"));
+    true
 }
 
 /// Send the record carrying `len` bytes a central wrote to the P4 with `send`, waiting for room

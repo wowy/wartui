@@ -178,3 +178,104 @@ It does not settle:
   ([`ble-host-link-findings.md`](ble-host-link-findings.md#bluez-and-a-first-pairing)).
 - **The iPad's first reset,** above.
 - **A fifth bond on hardware.** Eviction ran only in the bond store's tests.
+
+## Reconnecting on a BE200 (E6:A0)
+
+Measured on 2026-11-28 on E6:A0, the carrier-10 P4 with its ten C5 nodes, from a desktop whose
+Bluetooth is an onboard Intel BE200 (`8087:0036`): BlueZ 5.88, kernel 7.3.3, Fedora 44 (#394).
+
+**Every reconnect on a stored bond failed while the C6 asked for 2M on connecting.** The pairing
+connection was served; each connection after it ended with `le-connection-abort-by-local` about
+1 s after it completed, for `wartui` and `bluetoothctl connect` alike. btmon, four of four tries:
+
+- Both ends ran at BlueZ's 45 ms interval and 420 ms supervision timeout.
+- BlueZ sent LE Start Encryption 58 ms after the connection completed.
+- The C6 asked for the 2M PHY and data length 251 as it connected. The PHY update completed
+  314 ms into the encryption procedure, which was still open.
+- Neither side was heard after the PHY instant. Encryption Change reported Connection Timeout
+  (0x08), and the C6 recorded `last_disconnect` 0x08 without restarting.
+- On the pairing connection the same switch completed during SMP, 92 ms before BlueZ started
+  encryption, and the link held on 2M.
+
+With `LE2MTX LE2MRX` deselected on the PC (`btmgmt phy`), the next reconnect was served on 1M.
+Reloading `btusb`, which selects every PHY again, brought the failure back.
+
+**The C6 now asks for 2M, the data length and any build interval only once a bond resumes or a
+pairing completes, or once a phone reads its stream** (`firmware/p4-radio/src/ble.rs`, `tune`).
+The first five rows
+ran a build that asked once the link was encrypted at all, so a fresh pairing's requests went
+out during key distribution. The last ran this one. Every PHY was selected on the PC:
+
+| Run | Result |
+| --- | --- |
+| Before the flash, `status --link bluetooth` | `le-connection-abort-by-local`, as before |
+| `status --link bluetooth`, four reconnects on the old bond | 4 of 4 served, 4–10 s each; three report 2M, one 1M |
+| `bluetooth pair --fresh` | paired and bonded |
+| `status --link bluetooth`, four reconnects after it | 4 of 4 served, 4–5 s each, all on 2M |
+| `run --link bluetooth`, 3 min, ten nodes scanning | link up throughout; 36 of 36 status rows on 2M, `resynced_bytes` 0, `dropped_writes` 0 |
+| `bluetooth pair --fresh`, then six reconnects | paired and bonded; 6 of 6 served, 4–5 s each, all on 2M |
+
+The one 1M report is most likely a status read before the deferred PHY update completed; no
+capture was taken of it.
+
+**btmon on the last build, a fresh pairing and three reconnects:**
+
+| Connection | Start Encryption | Data Length Change | Encryption Change | PHY Update Complete |
+| --- | --- | --- | --- | --- |
+| Pairing | +487 ms | +171 ms | +980 ms | +711 ms |
+| Reconnect 1 | +77 ms | +167 ms | +436 ms | +886 ms |
+| Reconnect 2 | +56 ms | +146 ms | +415 ms | +865 ms |
+| Reconnect 3 | +71 ms | +161 ms | +430 ms | +880 ms |
+
+- On each reconnect the PHY update completes 450 ms after Encryption Change, ten 45 ms events:
+  the C6's request on `Encrypted`, and its instant.
+- **On the pairing connection a PHY update overlapped encryption, and the link held.** The C6
+  cannot have asked for it: it asks after `PairingComplete`, which follows Encryption Change. The
+  PC's host sent no LE Set PHY, so one of the two controllers started it on its own, most likely
+  the BE200 as central. HCI does not show which.
+- A data length change lands inside every connection's encryption, or before it, and none lost
+  the link. Neither host asked for it at that moment, so a controller started it. The PHY update
+  is the procedure whose overlap was lost.
+
+**A P4 update over Bluetooth on 2M took 121 s and 130 s** from start to `installed and confirmed`,
+on the last build, against 184 s on 1M from this PC. The first sent a P4 image built with
+`WARTUI_P4_SD_LOG_KEEP_FREE_MB=255`, so it differed from the running one, and the second sent the
+default back. The C6's image was the same in both, so neither updated the C6. A status read after
+them showed 2M.
+
+**Wardrive Go, a WardriveESP app, worked on an Android phone** on the last build, the operator
+reports. Its model and PHY were not recorded.
+
+### macOS on this build
+
+Measured on 2026-11-28 on D0:1C, the carrier-10 P4 with its ten C5 nodes, from a Mac: macOS
+27.2.1, its built-in Apple controller (BCM4388). Host and firmware were the last build above
+(`670e55a`), sent to both chips over USB. Before the flash, on the build the bridge ran, a
+`status --link bluetooth` was served on 2M, MTU 182 and a 30 ms interval. **The Mac paired, resumed, ran and updated as it
+did on `main`, and every status read on this build reported 2M, MTU 182 and a 30 ms interval.** No
+HCI capture was taken, so the order of the PHY update and encryption was not seen.
+
+| Run | Result |
+| --- | --- |
+| `status --link bluetooth`, ten reconnects on the old bond, six inside the boot pairing window and four after it closed | 10 of 10 served, 1.6–3.5 s each |
+| `bluetooth forget --link usb`, the bridge forgotten in System Settings, `bluetooth pair`, then `status --link bluetooth` | macOS's dialog clicked; paired, bonded and served in one command, 15.1 s; `pairings 1`, `failed_pairings 0` |
+| `status --link bluetooth`, six reconnects after it | 6 of 6 served, 1.5–4.6 s each |
+| `run --link bluetooth`, 3 min, ten nodes scanning | one connection throughout; 36 of 36 status rows on 2M, `resynced_bytes` 0, `dropped_writes` 0, no batch gap |
+| `run --link bluetooth`, 5 min, with `reset --link usb` at 40 s | link down 2 s after the reset, subscribed 1.9 s later; the rows after it on 2M |
+| The same run, the Mac's Bluetooth off for a few seconds, then on | link down as the adapter powered off, subscribed 17.4 s later with no prompt; 56 of 56 rows in the run on 2M |
+| `flash-bridge --link bluetooth`, a P4 image built with `WARTUI_P4_SD_LOG_KEEP_FREE_MB=255`, then the default | both installed and confirmed, 124 s and 118 s; the second sent 1,143,104 B in 99 s (11.6 KB/s) and installed in 11 s |
+| The same update from `main` (`4b23484`), both chips on `main` | 1,145,440 B in 99 s (11.6 KB/s), installed and confirmed at 119 s |
+
+- **The update rate is `main`'s.** The 12.6 KB/s of [`ble-host-link-findings.md`](ble-host-link-findings.md#macos)
+  ran on 2026-11-20 with a smaller image. On this day the two builds sent at the same rate.
+- **The Bluetooth toggle cost 9 batches across six nodes,** found as gaps in the minute after the
+  link came back. The bridge's received records ran about 50 ahead of the frames it sent a host
+  while the Mac was away, and it queues nothing while no host holds it (`crates/wartui/README.md`, `lost N`). This was not
+  repeated on `main`.
+
+It does not settle:
+
+- **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's. A
+  PHY update the C6 asks for during a central's encryption start lost the link; one the pairing
+  connection ran during its own did not. The `0489:e10d` USB adapter above resumed 4 of 4 with the
+  old order, and macOS resumes on 2M with either order.
