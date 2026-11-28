@@ -237,6 +237,12 @@ capture was taken of it.
   the link. Neither host asked for it at that moment, so a controller started it. The PHY update
   is the procedure whose overlap was lost.
 
+**A P4 update over Bluetooth on 2M took 121 s and 130 s** from start to `installed and confirmed`,
+on the last build, against 184 s on 1M from this PC. The first sent a P4 image built with
+`WARTUI_P4_SD_LOG_KEEP_FREE_MB=255`, so it differed from the running one, and the second sent the
+default back. The C6's image was the same in both, so neither updated the C6. A status read after
+them showed 2M.
+
 It does not settle:
 
 - **Which link layer mishandles the overlap**, the C6's esp-radio controller or the BE200's. A
@@ -244,5 +250,3 @@ It does not settle:
   connection ran during its own did not. The `0489:e10d` USB adapter above resumed 4 of 4 with the
   old order, and macOS resumes on 2M.
 - **A WardriveESP phone and macOS on this build.** Neither was run.
-- **The throughput 2M buys on this PC.** `flash-bridge --link bluetooth` found the image already
-  running and sent nothing.
