@@ -83,7 +83,7 @@
 //! the image and the trial in each `Ready`, the `Status` in each `Update`. So the update runs as it
 //! does on any bridge, reading every `Ready` through `LinkEvent::ready`, with two steps left out.
 //! The scan is not stopped first, since that needs `StopScan` and `GetStatus`: the P4 stops its own
-//! scan when it takes a central's `Begin`. And the C6's update is followed only after a readable
+//! scan when it takes a `Begin`. And the C6's update is followed only after a readable
 //! `Ready`, since its lines are messages an incompatible bridge's host does not read. An image
 //! whose bridge comes back incompatible, another major installed, is judged from the core all the
 //! same.
