@@ -415,7 +415,8 @@ pub enum HostToBridge {
         pool: ChannelPool,
     },
     /// Scan Wi-Fi, and Bluetooth too when `bluetooth` ([`crate::fleet::Fleet::start`]). The P4
-    /// keeps scanning until a [`HostToBridge::StopScan`], whether or not a host is listening. No
+    /// keeps scanning until a [`HostToBridge::StopScan`], or an update `Begin` it takes for its
+    /// own image ([`HostToBridge::Update`]), whether or not a host is listening. No
     /// answer: a [`BridgeToHost::Fleet`] reports the plan once it changes.
     StartScan {
         /// Give one node the Bluetooth scan, once two nodes are members.

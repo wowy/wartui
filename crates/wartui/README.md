@@ -618,6 +618,9 @@ running the image is left alone. The board prints, by its last two octets:
 | `fault  …`, `Info  …`                             | A line the bridge sent, such as its C6's update progress |
 | `already runs this image`                         | Nothing was sent                                         |
 
+The P4 stops its scan as it takes the image, over either link. A run that fails leaves the scan
+stopped: `wartui run` or `wartui scan start` starts it again.
+
 The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
