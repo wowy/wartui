@@ -48,6 +48,9 @@ const P4_BRIDGE_APP: Firmware = Firmware {
     what: "P4 bridge",
     chip: Chip::Esp32p4,
     partition_table: "partitions.csv",
+    // The table ends at 0xFF1000, past espflash's default 4 MB. The board's flash is 32 MB, so a
+    // 16 MB header is safe on it.
+    flash_size: Some("16mb"),
     merged: false,
     asset: release::BRIDGE_APP_ASSET,
 };
@@ -368,8 +371,16 @@ mod tests {
     use wartui_app::update::image::BRIDGE_PROJECT;
     use wartui_app::update::testing::{P4_APP_HEADER, fixture_with};
 
-    use super::super::normalize;
+    use super::super::{normalize, save_image_args};
     use super::*;
+
+    #[test]
+    fn flash_p4_saves_image_for_sixteen_megabytes_when_building() {
+        // The P4's table ends at 0xFF1000, which `save-image` refuses under its 4 MB default.
+        let args = save_image_args(&P4_BRIDGE_APP, Path::new("fw"), Path::new("e"), Path::new("b"));
+        let at = args.iter().position(|arg| arg == "--flash-size").expect("no --flash-size");
+        assert_eq!(args[at + 1], "16mb");
+    }
 
     #[test]
     fn flash_p4_chooses_source_when_given_each_combination() {

@@ -131,6 +131,8 @@ writes `partitions.csv` and erases `otadata`, so the P4 boots the image just wri
 (`crates/wartui-proto/src/link/mod.rs` `//!`). The table ends at 0xFF1000 and needs a 16 MB flash;
 Waveshare lists the board's as 32 MB, and the top half stays unassigned. espflash writes the size
 it detects into the bootloader's header, and refuses this table on a board it reads as smaller.
+`espflash save-image` reads no board and assumes 4 MB, so the release's images and the one
+`flash-bridge` builds pass `--flash-size 16mb`.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
 `cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
@@ -150,8 +152,10 @@ After the first flash, `wartui flash-bridge` sends the P4 its app image over its
 same Type-C cable, or a bonded central through the C6 (§ "Bluetooth hosts"), more slowly
 (`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the update receiver
 the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on trial. The new
-image's bundled C6 image then reaches the C6 as below. A `Begin` the P4 takes stops the scan, as
-`StopScan` does, and an `Abort` drops the session it names. Every refusal is a status, and an op
+image's bundled C6 image then reaches the C6 as below. A `Begin` the P4 takes from a Bluetooth
+central stops the scan, as `StopScan` does; over USB the scan runs on. A session that ends without
+`Install` leaves the scan stopped, as a host's own `StopScan` before a Bluetooth update does. An
+`Abort` drops the session it names. Every refusal is a status, and an op
 the P4 cannot read is skipped. The P4 drops an update session when its host lets go, so a
 Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets the C6, which drops a
 Bluetooth link too, and `flash-bridge` reads the outcome across the reconnects.

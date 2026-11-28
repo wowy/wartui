@@ -2091,17 +2091,80 @@ fn code_of(line: &str) -> (&str, u8) {
     (direction, parts.next().expect("a code").parse().expect("a numeric code"))
 }
 
+/// How the samples' lines differ from the baseline's, sorted by the bump each difference needs.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drift<'a> {
+    /// A major's: a baseline line the samples no longer produce, and a sample line the baseline
+    /// lacks under a code it holds, such as a new enum value in a known message.
+    changed: std::vec::Vec<&'a str>,
+    /// A minor's: a sample line under a code the baseline does not hold.
+    added: std::vec::Vec<&'a str>,
+}
+
+/// Compare `today`'s lines, the samples as this build encodes them, with the `baseline`'s.
+fn drift<'a>(baseline: &'a [std::string::String], today: &'a [std::string::String]) -> Drift<'a> {
+    use std::collections::BTreeSet;
+    let old: BTreeSet<&str> = baseline.iter().map(std::string::String::as_str).collect();
+    let new: BTreeSet<&str> = today.iter().map(std::string::String::as_str).collect();
+    let known: BTreeSet<_> = old.iter().map(|line| code_of(line)).collect();
+    let mut drift = Drift::default();
+    drift.changed.extend(old.iter().filter(|line| !new.contains(*line)));
+    for line in new.iter().filter(|line| !old.contains(*line)) {
+        if known.contains(&code_of(line)) {
+            drift.changed.push(line);
+        } else {
+            drift.added.push(line);
+        }
+    }
+    drift
+}
+
+/// Synthetic lines, as [`baseline`] and [`sample_lines`] give them.
+fn owned(lines: &[&str]) -> std::vec::Vec<std::string::String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+#[test]
+fn link_drift_needs_nothing_when_lines_match() {
+    let lines = owned(&["host 0 00", "bridge 1 0105"]);
+    assert_eq!(drift(&lines, &lines), Drift::default());
+}
+
+#[test]
+fn link_drift_needs_major_when_a_line_changes() {
+    let (old, new) = (owned(&["host 0 00", "host 1 01"]), owned(&["host 0 00", "host 1 02"]));
+    assert_eq!(drift(&old, &new), Drift { changed: vec!["host 1 01", "host 1 02"], added: vec![] });
+}
+
+#[test]
+fn link_drift_needs_major_when_a_known_code_gains_a_line() {
+    // A new sample of a message the file holds, as a new enum value in it gives.
+    let old = owned(&["host 0 00", "bridge 1 0100"]);
+    let new = owned(&["host 0 00", "bridge 1 0100", "bridge 1 0101"]);
+    assert_eq!(drift(&old, &new), Drift { changed: vec!["bridge 1 0101"], added: vec![] });
+}
+
+#[test]
+fn link_drift_needs_minor_when_a_new_code_appears() {
+    // A code the file holds in the other direction is another message.
+    let old = owned(&["host 0 00", "bridge 1 0100"]);
+    let new = owned(&["host 0 00", "bridge 1 0100", "host 1 01", "bridge 2 02"]);
+    let added = vec!["bridge 2 02", "host 1 01"];
+    assert_eq!(drift(&old, &new), Drift { changed: vec![], added });
+}
+
 #[test]
 fn link_keeps_message_bytes_when_major_unchanged() {
-    // Within a major a message's bytes never change (`crate::link` `//!`). A line here that this
-    // build no longer encodes is such a change, and needs a major bump and a regenerated file.
+    // Within a major a message's bytes never change (`crate::link` `//!`). A baseline line this
+    // build no longer encodes is such a change, and so is a new line under a code the file
+    // holds. Either needs a major bump and a regenerated file.
     let ((major, _), lines) = baseline();
     if major != BRIDGE_VERSION.major {
         // The major moved: `link_names_every_message_when_minor_unchanged` asks for the file.
         return;
     }
-    let today: std::collections::BTreeSet<_> = sample_lines().map(|line| line.text()).collect();
-    let changed: std::vec::Vec<_> = lines.iter().filter(|line| !today.contains(*line)).collect();
+    let today: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
+    let changed = drift(&lines, &today).changed;
     assert!(changed.is_empty(), "messages changed without a major bump: {changed:#?}");
 }
 
@@ -2115,29 +2178,26 @@ fn link_names_every_message_when_minor_unchanged() {
         (BRIDGE_VERSION.major, BRIDGE_VERSION.minor),
         "BRIDGE_VERSION moved: regenerate tests/link_messages.txt"
     );
-    let known: std::collections::BTreeSet<_> = lines.iter().map(|line| code_of(line)).collect();
-    let lines: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
-    let added: std::vec::Vec<_> =
-        lines.iter().filter(|line| !known.contains(&code_of(line))).collect();
+    let today: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
+    let added = drift(&lines, &today).added;
     assert!(added.is_empty(), "messages added without a minor bump: {added:#?}");
 }
 
 /// Regenerates `tests/link_messages.txt` from the samples:
 /// `cargo test -p wartui-proto --test link -- --ignored link_regenerates_messages`.
 ///
-/// **Regenerating is the version bump.** A changed line needs a major in `BRIDGE_VERSION` and
-/// `firmware/p4-bridge/Cargo.toml`, and an added code a minor; this refuses to write a file whose
-/// version does not show the bump its lines need. A sample removed reads as a changed line.
+/// **Regenerating is the version bump.** A changed line, or a new line under a code the file
+/// holds, needs a major in `BRIDGE_VERSION` and `firmware/p4-bridge/Cargo.toml`, and an added code
+/// a minor; this refuses to write a file whose version does not show the bump its lines need. A
+/// sample removed reads as a changed line.
 #[test]
 #[ignore = "writes tests/link_messages.txt"]
 fn link_regenerates_messages_when_asked() {
     let lines: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
     if std::path::Path::new(MESSAGES).exists() {
         let ((major, minor), old) = baseline();
-        let today: std::collections::BTreeSet<_> = lines.iter().collect();
-        let changed = old.iter().any(|line| !today.contains(line));
-        let known: std::collections::BTreeSet<_> = old.iter().map(|line| code_of(line)).collect();
-        let added = lines.iter().any(|line| !known.contains(&code_of(line)));
+        let drift = drift(&old, &lines);
+        let (changed, added) = (!drift.changed.is_empty(), !drift.added.is_empty());
         let ours = (BRIDGE_VERSION.major, BRIDGE_VERSION.minor);
         let major_bumped = ours.0.cmp(&major).is_gt();
         assert!(!changed || major_bumped, "a message changed: bump the major");
