@@ -154,6 +154,12 @@ The error is the intended outcome of a rehearsal. The C6 still runs ESP-Hosted, 
 speak the bridge's link, so the run waits 90 s and fails without saving the board. Afterwards the
 P4's bridge answers with the P4's own address, not the C6's.
 
+### The write test
+
+An earlier rehearsal, with the loader's write test on, proved the write, verify and hash path on
+silicon. The test copies went to free flash at 0x310000..0x3ba000, below our trial. The radio
+image's write and hash took 1.7 s, the bootloader 0.08 s and the table 0.02 s.
+
 ## Bench practice
 
 Never hold a reader open on the CH343 while espflash runs on it. Both share the tty's bytes: the
@@ -162,5 +168,65 @@ port before or after, never during.
 
 ## End-to-end, 2026-11-28
 
-To be filled after the real run: the C6 loader without rehearsal, the bundled C6 image after it,
-and the bridge answering with its C6's address.
+### Preparation
+
+The P4 was blanked with `espflash erase-region --chip esp32p4 --port <P4> --non-interactive 0x0
+0x10000`, so it sat silent in ROM, and `flash-bridge --dry-run` offered it. The plain P4 loader
+was confirmed to embed the same p4-radio app the P4 bridge bundles (SHA-256 `55af9c36…`, 658,208
+bytes), with no rehearsal code in it.
+
+### The setup
+
+`flash-bridge --config <scratch> --loader <the plain P4 loader>` on `A9:76`, answered `y` at the
+prompt. The loader came up and the C6 ran ESP-Hosted, which named no version. The C6 loader was
+sent and ran all six steps:
+
+```
+C6     start
+C6     step write the radio image at 0x10000..0xb1000
+C6     step check the radio image at 0x10000..0xb1000
+C6     step erase trial at 0x3d0000..0x3d1000
+C6     step write the bootloader at 0x0..0x8000
+C6     step write the partition table at 0x8000..0x9000
+C6     step erase otadata at 0xd000..0xf000
+C6     done
+A9:76  the C6 is set up; writing the bridge firmware
+9D:6C  set up; the bridge is known by its C6's address
+```
+
+The bridge answered with its C6's address, `9D:6C`, and was remembered. The exit status was 0.
+
+### Afterwards
+
+- `wartui ports` lists the P4 bridge as `…:9D:6C`.
+- `wartui status` shows the radio `…:9D:6C` on firmware 0.1.0 with a clean radio link: 27 packets,
+  no CRC, magic or sequence errors, and no "updating the radio". The bundle digest matched, so the
+  P4 did not reflash the C6.
+- The only faults are the bare board's: no carrier and no GPS.
+- A second `flash-bridge` said `9D:6C already runs this image`.
+
+### The `skipped` path
+
+The P4 loader was written by hand while the C6 ran p4-radio, so the C6 had no ESP-Hosted:
+
+```
+   2.28 wartui-loader: start
+   2.28 W (4362) H_SDIO_DRV: Reset slave using GPIO[54]
+   5.74 E (7787) H_SDIO_DRV: card init failed
+  35.74 wartui-loader: skipped no ESP-Hosted on the C6
+```
+
+`card init failed` came about 3.5 s after the reset, and the P4 did not restart within 70 s. The
+`skipped` line came at 35.7 s: the 5 s transport wait plus the 25 s listen for a running C6
+loader. `flash-bridge --bridge <path> --first-flash` then printed "the C6 loader was skipped: no
+ESP-Hosted on the C6; writing the bridge firmware", and the bridge came up with C6 `9D:6C`. The
+config was left unchanged, since a board named by `--bridge` is not remembered.
+
+This answers #395's open question: `esp_hosted_connect_to_slave` neither waits long nor restarts
+the P4 against a C6 without ESP-Hosted. It returns, the transport event never comes, and card init
+fails within about 3.5 s.
+
+### Open
+
+Other boards may ship another ESP-Hosted version. Only `release/ng-v1.0.2-330-g83efce6` has been
+met.
