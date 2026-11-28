@@ -709,10 +709,10 @@ impl Said {
     /// [`Self::once_per_life`]; anything else is not a line.
     fn line(&mut self, message: &BridgeToHost, say: &mut (dyn FnMut(Progress) + Send)) {
         let line = match message {
-            // The P4 sends its C6's progress as an error so the TUI shows it in its fault footer;
-            // during an update it is progress, not a fault.
-            BridgeToHost::Error { message: text } if is_radio_update(message) => {
-                Line::Log(text.to_string())
+            // The P4 sends its C6's update progress as an error so the TUI shows it in its fault
+            // footer; here it is always shown as progress, never as a fault.
+            BridgeToHost::Error { message } if message.starts_with(RADIO_UPDATING) => {
+                Line::Log(message.to_string())
             }
             BridgeToHost::Error { message } => Line::Fault(message.to_string()),
             BridgeToHost::Log { message } => Line::Log(message.to_string()),
@@ -1068,11 +1068,15 @@ mod tests {
         let mut lines = Vec::new();
         let mut say = |progress| lines.push(progress);
         let progress = format!("{RADIO_UPDATING} to the bundled image (40%)");
+        let installing = format!("{RADIO_UPDATING}: installing the bundled image");
         said.line(&error(&progress), &mut say);
+        said.line(&error(&installing), &mut say);
         said.line(&error("no GPS receiver"), &mut say);
-        let info = Progress::Line(Line::Log(progress));
         let fault = Progress::Line(Line::Fault("no GPS receiver".to_owned()));
-        assert_eq!(lines, [info, fault]);
+        assert_eq!(
+            lines,
+            [Progress::Line(Line::Log(progress)), Progress::Line(Line::Log(installing)), fault]
+        );
     }
 
     /// An update to `NEW` over Bluetooth from `OLD`, installed at `at`.
