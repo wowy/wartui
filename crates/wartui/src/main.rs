@@ -1206,6 +1206,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_parser_accepts_flash_bridge_when_given_first_flash_and_loader() {
+        let cli = parse([
+            "wartui",
+            "flash-bridge",
+            "--bridge",
+            "/dev/ttyACM0",
+            "--first-flash",
+            "--loader",
+            "l.bin",
+        ])
+        .unwrap();
+        let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
+        assert!(args.first_flash);
+        assert_eq!(args.loader.as_deref(), Some(std::path::Path::new("l.bin")));
+        assert_eq!(args.bridge.as_deref(), Some("/dev/ttyACM0"));
+    }
+
+    #[test]
     fn cli_parser_refuses_flash_bridge_when_given_features() {
         // The P4 bridge firmware has no features to select.
         assert!(parse(["wartui", "flash-bridge", "--features", "gps"]).is_err());
