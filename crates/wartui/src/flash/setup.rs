@@ -30,7 +30,8 @@
 //! **The bridge is known by its C6's address afterwards.** The running bridge reports its C6's
 //! address, and its P4's own only while the C6 does not answer. So the setup succeeds only on a
 //! `Ready` carrying another address than `board-info` read, and the `[bridge]` memory is written
-//! from that one. A C6 that stays silent leaves nothing remembered.
+//! from that one. A C6 that stays silent leaves nothing remembered, and a P4 that answers is
+//! never set up, so a rerun updates it; retrying the setup means blanking the P4 first.
 
 use std::io::{BufRead, ErrorKind, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -267,15 +268,40 @@ enum Verdict {
     Skipped(String),
 }
 
+/// Why the watch of the loader stopped short of a verdict the setup goes on from.
+#[derive(Debug, PartialEq, Eq)]
+enum Stopped {
+    /// The loader's `failed` line: the text after `failed `.
+    Failed(String),
+    /// No loader line in this long.
+    Quiet(Duration),
+    /// No verdict in this long in all.
+    Overdue(Duration),
+    /// The port would not open, closed, or failed a read, as worded.
+    Port(String),
+}
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stopped::Failed(why) => write!(f, "the loader failed: {why}"),
+            Stopped::Quiet(quiet) => write!(f, "no line from the loader in {} s", quiet.as_secs()),
+            Stopped::Overdue(total) => {
+                write!(f, "no verdict from the loader in {} s", total.as_secs())
+            }
+            Stopped::Port(why) => f.write_str(why),
+        }
+    }
+}
+
 /// Read the loader's lines from `port` to its verdict, handing each to `say`. Gives up after
-/// `quiet` with no loader line, or `total` in all; the `Err` is why, as
-/// [`loader_failed_text`] words it.
+/// `quiet` with no loader line, or `total` in all; [`loader_failed_text`] words the `Err`.
 fn watch(
     port: &mut dyn Read,
     quiet: Duration,
     total: Duration,
     mut say: impl FnMut(&Said),
-) -> Result<Verdict, String> {
+) -> Result<Verdict, Stopped> {
     let started = Instant::now();
     let mut heard = started;
     let mut lines = LoaderWatch::new();
@@ -283,19 +309,19 @@ fn watch(
     loop {
         let now = Instant::now();
         if now >= started + total {
-            return Err(format!("no verdict from the loader in {} s", total.as_secs()));
+            return Err(Stopped::Overdue(total));
         }
         if now >= heard + quiet {
-            return Err(format!("no line from the loader in {} s", quiet.as_secs()));
+            return Err(Stopped::Quiet(quiet));
         }
         let read = match port.read(&mut buffer) {
             // A hung-up tty reads EOF at once and forever.
-            Ok(0) => return Err("its port closed".to_owned()),
+            Ok(0) => return Err(Stopped::Port("its port closed".to_owned())),
             Ok(read) => read,
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {
                 continue;
             }
-            Err(error) => return Err(format!("reading its port failed ({error})")),
+            Err(error) => return Err(Stopped::Port(format!("reading its port failed ({error})"))),
         };
         for said in lines.feed(&buffer[..read]) {
             heard = Instant::now();
@@ -303,23 +329,28 @@ fn watch(
             match said {
                 Said::Done => return Ok(Verdict::Done),
                 Said::Skipped(why) => return Ok(Verdict::Skipped(why)),
-                Said::Failed(why) => return Err(format!("the loader failed: {why}")),
+                Said::Failed(why) => return Err(Stopped::Failed(why)),
                 _ => {}
             }
         }
     }
 }
 
+/// What the C6 loader's first line is when it was built with `rehearse`.
+const REHEARSAL: &str = "start rehearsal";
+
 /// The line printed for each thing the loader says, by the P4's `label`.
 struct Lines {
     label: String,
     /// The tenth of the push last printed.
     tenth: Option<u8>,
+    /// The C6 loader said it is a rehearsal, so its `done` set nothing up.
+    rehearsal: bool,
 }
 
 impl Lines {
     fn new(label: String) -> Self {
-        Self { label, tenth: None }
+        Self { label, tenth: None, rehearsal: false }
     }
 
     /// The line to print for `said`, if any: none for `Skipped` and `Failed`, which the setup
@@ -338,7 +369,13 @@ impl Lines {
                 format!("{percent:>3}%  sending the C6 loader")
             }
             Said::Sent => "the C6 loader is sent; the C6 runs it".to_owned(),
-            Said::C6(text) => return Some(format!("{:<6} {text}", "C6")),
+            Said::C6(text) => {
+                self.rehearsal |= text == REHEARSAL;
+                return Some(format!("{:<6} {text}", "C6"));
+            }
+            Said::Done if self.rehearsal => {
+                "the C6 loader's rehearsal is done; writing the bridge firmware".to_owned()
+            }
             Said::Done => "the C6 is set up; writing the bridge firmware".to_owned(),
             Said::Failed(_) | Said::Skipped(_) => return None,
         };
@@ -407,7 +444,7 @@ pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) ->
         let (path, label) = (path.clone(), label.clone());
         tokio::task::spawn_blocking(move || {
             let mut port = wartui_desktop::serial::open_reader(&path, 115_200, READ_TIMEOUT)
-                .map_err(|error| format!("its port would not open ({error})"))?;
+                .map_err(|error| Stopped::Port(format!("its port would not open ({error})")))?;
             let mut lines = Lines::new(label);
             watch(port.as_mut(), QUIET, WATCH_FOR, |said| {
                 if let Some(line) = lines.of(said) {
@@ -424,7 +461,7 @@ pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) ->
         Ok(Verdict::Skipped(why)) => {
             println!("{path}  the C6 loader was skipped: {why}; writing the bridge firmware");
         }
-        Err(why) => bail!("{}", loader_failed_text(&path, &why)),
+        Err(stopped) => bail!("{}", loader_failed_text(&path, &stopped)),
     }
     write(&path, &image)
         .map_err(|why| anyhow::anyhow!("writing the bridge firmware to {path} failed: {why}"))?;
@@ -492,27 +529,48 @@ fn build_loader(dir: &Path) -> Result<PathBuf> {
     }
     let mut build = Command::new(dir.join("build.sh"));
     // The C6 loader's own `rust-toolchain.toml` and target directory decide where it builds, and
-    // these would override them (`super::build_image`).
-    build.current_dir(dir).env_remove("RUSTUP_TOOLCHAIN").env_remove("CARGO_TARGET_DIR");
+    // these would override them (`super::build_image`). A setup writes the real C6 loader, never
+    // a rehearsal a shell left `C6_LOADER_FEATURES` set for.
+    build
+        .current_dir(dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("C6_LOADER_FEATURES");
     let status = build.status().context("running build.sh")?;
     ensure!(status.success(), "building the P4 C6 loader in {} failed", dir.display());
     Ok(dir.join(P4_C6_LOADER.elf))
 }
 
+/// What the P4 loader's `failed` line carries when the C6 loader failed.
+const C6_FAILED: &str = "c6 loader: ";
+
 /// Why the setup of `path` stopped while the loader ran, and what to do.
-fn loader_failed_text(path: &str, why: &str) -> String {
+fn loader_failed_text(path: &str, stopped: &Stopped) -> String {
+    let next = match stopped {
+        Stopped::Failed(why) if why.starts_with(C6_FAILED) => "The C6 loader refused or failed",
+        Stopped::Quiet(_) | Stopped::Overdue(_) => {
+            "The P4 runs the loader, and running flash-bridge again retries. The C6 loader may \
+             still be writing, so wait a minute before running flash-bridge again"
+        }
+        Stopped::Failed(_) | Stopped::Port(_) => {
+            "The P4 runs the loader, and running flash-bridge again retries"
+        }
+    };
     format!(
-        "setting up {path} stopped: {why}. The P4 runs the loader, and running flash-bridge \
-         again retries. The C6's header is the fallback, per {}",
+        "setting up {path} stopped: {stopped}. {next}. The C6's header is the fallback, per {}",
         p4::FIRST_FLASH
     )
 }
 
-/// Why the setup of `path` ended without its C6 answering.
+/// Why the setup of `path` ended without its C6 answering. The P4 then answers with its own
+/// address, so a plain rerun takes the ordinary update rather than the setup.
 fn c6_silent_text(path: &str) -> String {
     format!(
         "{path} runs the bridge firmware, but its C6 is not answering, so the bridge is not \
-         remembered. The C6's header is the fallback, per {}",
+         remembered. Running flash-bridge again updates the P4 and does not retry the setup. To \
+         retry it, blank the P4 with `espflash erase-region --chip esp32p4 --port {path} 0x0 \
+         0x10000`, then run flash-bridge --bridge {path} --first-flash. The C6's header is the \
+         fallback, per {}",
         p4::FIRST_FLASH
     )
 }
@@ -669,6 +727,10 @@ mod tests {
             said("wartui-loader: c6 step writing the radio image"),
             Some(Said::C6("step writing the radio image".into()))
         );
+        assert_eq!(
+            said("wartui-loader: c6 start rehearsal\r"),
+            Some(Said::C6("start rehearsal".into()))
+        );
         assert_eq!(said("wartui-loader: done"), Some(Said::Done));
         assert_eq!(
             said("wartui-loader: failed ota_begin ESP_FAIL"),
@@ -731,17 +793,54 @@ mod tests {
 
     #[test]
     fn setup_says_rerun_and_header_when_loader_fails() {
-        let text = loader_failed_text("/dev/ttyACM0", "no verdict from the C6 loader in 120 s");
+        let stopped = Stopped::Failed("no verdict from the C6 loader in 120 s".into());
+        let text = loader_failed_text("/dev/ttyACM0", &stopped);
         assert!(
             text.contains("running flash-bridge again retries") && text.contains(p4::FIRST_FLASH),
             "{text}"
         );
+        assert!(!text.contains("wait a minute"), "{text}");
     }
 
     #[test]
-    fn setup_says_nothing_remembered_when_c6_stays_silent() {
+    fn setup_says_header_and_no_rerun_when_c6_loader_fails() {
+        let stopped = Stopped::Failed("c6 loader: no slot boots under this table".into());
+        let text = loader_failed_text("/dev/ttyACM0", &stopped);
+        assert!(text.contains("The C6 loader refused or failed"), "{text}");
+        assert!(text.contains(p4::FIRST_FLASH), "{text}");
+        assert!(!text.contains("again retries"), "{text}");
+    }
+
+    #[test]
+    fn setup_says_wait_a_minute_when_loader_falls_quiet() {
+        for stopped in [Stopped::Quiet(QUIET), Stopped::Overdue(WATCH_FOR)] {
+            let text = loader_failed_text("/dev/ttyACM0", &stopped);
+            assert!(text.contains(&stopped.to_string()), "{text}");
+            assert!(
+                text.contains("may still be writing, so wait a minute before running flash-bridge"),
+                "{text}"
+            );
+            assert!(text.contains(p4::FIRST_FLASH), "{text}");
+        }
+    }
+
+    #[test]
+    fn setup_says_rerun_and_header_when_port_closes() {
+        let text = loader_failed_text("/dev/ttyACM0", &Stopped::Port("its port closed".into()));
+        assert!(text.contains("stopped: its port closed. The P4 runs the loader"), "{text}");
+        assert!(text.contains("again retries") && !text.contains("wait a minute"), "{text}");
+    }
+
+    #[test]
+    fn setup_says_how_to_retry_when_c6_stays_silent() {
         let text = c6_silent_text("/dev/ttyACM0");
         assert!(text.contains("not remembered") && text.contains(p4::FIRST_FLASH), "{text}");
+        assert!(text.contains("does not retry the setup"), "{text}");
+        assert!(
+            text.contains("espflash erase-region --chip esp32p4 --port /dev/ttyACM0 0x0 0x10000"),
+            "{text}"
+        );
+        assert!(text.contains("--bridge /dev/ttyACM0 --first-flash"), "{text}");
     }
 
     #[test]
@@ -761,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_names_assets_release_yml_publishes() {
+    fn setup_names_assets_when_release_yml_publishes_them() {
         let workflow = include_str!("../../../../.github/workflows/release.yml");
         for asset in [P4_C6_LOADER.asset, p4::P4_BRIDGE.asset] {
             assert!(workflow.contains(asset), "{asset}");
@@ -806,14 +905,14 @@ mod tests {
     fn setup_stops_when_loader_fails() {
         let mut port: &[u8] = b"wartui-loader: failed ota_begin: ESP_FAIL\r\n";
         let why = watch(&mut port, QUIET, WATCH_FOR, |_| {}).unwrap_err();
-        assert!(why.contains("ota_begin: ESP_FAIL"), "{why}");
+        assert_eq!(why, Stopped::Failed("ota_begin: ESP_FAIL".into()));
     }
 
     #[test]
     fn setup_stops_when_port_closes_before_a_verdict() {
         let mut port: &[u8] = b"wartui-loader: start\r\nwartui-loader: sending 10\r\n";
         let why = watch(&mut port, QUIET, WATCH_FOR, |_| {}).unwrap_err();
-        assert!(why.contains("closed"), "{why}");
+        assert!(why.to_string().contains("closed"), "{why}");
     }
 
     /// A port that never has anything to read.
@@ -828,9 +927,9 @@ mod tests {
     #[test]
     fn setup_stops_when_loader_falls_quiet() {
         let why = watch(&mut Quiet, Duration::ZERO, WATCH_FOR, |_| {}).unwrap_err();
-        assert!(why.contains("no line from the loader"), "{why}");
+        assert!(why.to_string().contains("no line from the loader"), "{why}");
         let why = watch(&mut Quiet, QUIET, Duration::ZERO, |_| {}).unwrap_err();
-        assert!(why.contains("no verdict from the loader"), "{why}");
+        assert!(why.to_string().contains("no verdict from the loader"), "{why}");
     }
 
     #[test]
@@ -844,5 +943,19 @@ mod tests {
         assert!(printed[3].contains("100%"), "{printed:?}");
         let c6 = lines.of(&Said::C6("step writing the radio image".into())).unwrap();
         assert_eq!(c6, "C6     step writing the radio image");
+    }
+
+    #[test]
+    fn setup_says_rehearsal_is_done_when_c6_loader_started_a_rehearsal() {
+        let mut lines = Lines::new("44:C1".into());
+        let done = lines.of(&Said::Done).unwrap();
+        assert!(done.contains("the C6 is set up"), "{done}");
+        let mut lines = Lines::new("44:C1".into());
+        assert_eq!(
+            lines.of(&Said::C6("start rehearsal".into())).unwrap(),
+            "C6     start rehearsal"
+        );
+        let done = lines.of(&Said::Done).unwrap();
+        assert!(done.contains("rehearsal is done") && !done.contains("set up"), "{done}");
     }
 }
